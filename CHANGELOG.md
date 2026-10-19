@@ -11,6 +11,367 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.11.0] - 2026-10-19
+
+### Added
+- **dep-bump fork-branch guard**: the runtime dep-bump flow now knows sparkrun
+  runs from OUR FORK BRANCH. Canonical rule in `hscc_daemon/dep_bump_guard.py`
+  (branch `feat/proxy-least-in-flight`, remote `pom11/sparkrun`): a sparkrun
+  bump REBASES the fork branch onto the new upstream tag and keeps it checked
+  out — never `git checkout main`, never reinstall from upstream (either one
+  silently drops the proxy `router_settings` passthrough and the
+  least-in-flight balancer). The rule is injected into the CI-generated bump
+  PR body (`.github/scripts/check_runtime_deps.py`) and the dep-watcher
+  verification card (`scripts/dep_pr_watcher.py`) for sparkrun bumps only, and
+  into the runtime-bump skill (`references/runtime-bump-verification.md`).
+- **verify check `proxy_router_settings`** + `hscc_daemon/proxy_router.py`:
+  pure-read comparison of `~/.config/sparkrun/proxy.yaml` (router_settings +
+  gateways.litellm.balancing) against the live
+  `~/.cache/sparkrun/proxy/litellm_config.yaml`. WARN-only (never fails,
+  never writes, never restarts); flags divergence, a requested balancer absent
+  from litellm_settings.callbacks, non-mapping router_settings, unimplemented
+  balancing values, and the `routing_strategy: least-busy` trap (no-op on the
+  pinned LiteLLM — the working knob is `gateways.litellm.balancing:
+  least-in-flight`).
+- **proxy stream carries the drift verdict**: the daemon `proxy` stream
+  records `router_drift` / `router_drift_warn` on both the healthy and the
+  unhealthy state writes and logs a WARN while drift is live — a proxy can
+  serve every alias yet route blind after a bump dropped the fork branch.
+- **HSCCUITests target (the app's first).** Four tests drive the operator's
+  exact walks with real taps, fixture-fed (HSCC_DEBUG_FIXTURES), launched
+  straight into the drawer via the DEBUG-only HSCC_DEBUG_OPEN_DRAWER seam.
+  RED on 2.9.0 (commit A), GREEN on the fix (commit B), `xcodebuild test
+  -scheme HSCCUITests` on the iPhone 16 simulator.
+- **iOS nav-graph walker gate (`ios-app/scripts/nav_graph_check.sh` + `UITests/NavGraphUITests.swift`).** A screen that renders is not a screen you can leave. The walker walks EVERY drawer screen the way a user does and fails naming the screen + missing edge (`DEAD END [screen]: …`): drawer → every row → screen marker → back → same-row re-tap (the 2.9.0 regression) for all 17 drawer destinations; one level in where detail exists (projects → project → chat/board/settings, cards → card detail) with each back asserted against its predecessor; pull-to-refresh as a REAL gesture (a slow coordinate drag — `swipeDown()` never fires `.refreshable` on iOS 26, proven) whose receipt is the app's live served-count AX probe incrementing, with the badge pollers silenced for the walk so the increment can only be the refresh; honest EMPTY (`HSCC_DEBUG_FIXTURE_DIR=empty`) and ERROR (`HSCC_DEBUG_FIXTURE_FAIL=1`, every GET answers the API error contract) states that must still be navigable; and a disconnected pass (`HSCC_DEBUG_OFFLINE=1`) where the whole drawer must still round-trip without any fixtures. The screen list is code-derived — `scripts/nav_graph_screens.py` parses AppShell/Sidebar and a drawer row without a walk plan breaks the gate before the walker even runs (`NavGraphScreenTable.swift` is the committed generated table; `check` fails on drift). The negative self-check (`HSCC_NEGATE_BACK=1` removes the drawer's open/close affordances, passed into the test-runner process via xcodebuild's `TEST_RUNNER_` passthrough) requires the walk to go RED, and `testNegativeSeamEngages` guards that wiring from inside the suite (`SEAM INERT` names the harness, not the walker): a walker that cannot fail is not a gate. All seams are `#if DEBUG`, default-off, zero release-path change; fixtures still never touch the network (`fixtures.invalid`, RFC 6761). What the walker proves vs what it does NOT prove (pixel correctness) is written up in `docs/design/NAV_GRAPH_t_810ab152.md`. First full walk already earned its keep: it found t_706129d8 — back from a project's Chat/Board/Settings pops PAST the overview (the overview is pushed by a value-less NavigationLink while sub-pages append to the bound path), asserted as an expected failure until that card lands, plus two fixture-mode client gaps (card detail + diff) fixed here.
+- **`verify.provider_routing` guard.** While the applied template is
+  `uniform_pool` (flag now recorded in `~/.hscc/applied_template.json` at
+  apply), any fleet-node host in a `base_url`/fallback url anywhere in the
+  root `~/.hermes/config.yaml` or a profile config is a FAIL. Loopback proxy
+  URLs pass on any port; non-uniform templates skip (direct is legitimate);
+  missing state or an unresolvable fleet-node set is UNVERIFIED, never a
+  silent pass. The node set comes from sparkrun's own `resolve_hosts` under
+  sparkrun's venv python — pure-read, no template parsing, no ssh.
+- **Hermetic gate `scripts/connection_probe_check.sh`.** Compiles
+  `ConnectionMonitor.swift` verbatim + the committed live `/v1/health`
+  capture, 23 assertions (endpoint pinned to /v1/health, decode contract,
+  classification table, first-probe flip, no-pin after both failure kinds,
+  cluster-switch reset), no socket opened; `CONNECTION_PROBE_NEGATIVE_TEST=1`
+  proves it can fail. `connection_banner_check.sh` unchanged in logic
+  (APIError.swift joined its verbatim compile for the probe's typed catch).
+
+### Changed
+- **2.10.0 was re-cut from `528bad41` instead of `baf98413`.** The first
+  release branch (`release/2.10.0` @ `73da1eff`, PR #41) was cut before
+  PR #43 landed, so its materialised changelog lacked the
+  `dispatcher_wedge` benign-hold watchdog entry — the very fix 2.10.0 was
+  gated on. This branch (`release/2.10.0-v2`) re-runs
+  `scripts/changelog_fragments.py release --version 2.10.0` on the current
+  main: the released section is PR #41's 27 entries verbatim plus the
+  `t_160d306f` watchdog entry, and the consumed fragments move to
+  `changelog.d/archive/2.10.0/`. PR #41 is closed as superseded; its branch
+  is untouched (no force-push). No code changed in the re-cut — changelog,
+  VERSION, and fragment archival only.
+
+### Fixed
+- **A review card nobody could spawn restarted the gateway every 30 minutes.** `dispatcher_wedge` counted a `status=review` row as *spawnable* even when the running Hermes has no review lane to spawn it into, so the detector declared a "GENUINE STALL" that no dispatcher action could ever clear and the recovery restarted the gateway on every cooldown expiry — four gateway SIGTERMs in two hours on a card whose work had already merged. Three doors let that happen and all are now shut: the raw-SQL fallback in `_board_snapshot` counted any `status='review'` row whenever the kanban lib exposes no `has_spawnable_review`; the lib-predicate path ORed `has_spawnable_review` in unconditionally, even with `kanban.review_dispatch` off; and the per-profile room check asked whether any assignee with unclaimed *ready or review* work was under its cap, so a parked review row owned by an idle profile manufactured room for a board whose ready-holding profile was correctly at its per-profile cap. Review work now counts as spawnable — and now answers the room question — only when the runtime can actually dispatch it: the lib exposes `has_spawnable_review` **and** the dispatcher's own `review_dispatch_enabled()` gate is not off (that function is called, not reimplemented, so the answer cannot drift from the dispatcher's; `kanban.auto_review` is the review-*pairing* policy and is deliberately not consulted). Non-dispatchable review cards are reported separately as `stale_review` + `review_count` on the `dispatcher` stream with one WARNING daemon-log line per cooldown window — "N review cards not dispatchable by this runtime" — and never flip the stream red, never mutate the recovery state, never restart anything. Recovery also gained a per-incident restart latch: every restart records the stall's spawnable/roomy `signature` and whether the runtime could dispatch it, and a stall the runtime cannot dispatch is never restarted twice — a green tick in between renews the attempt budget (A1's behaviour, kept for dispatcher-fixable wedges) but no longer re-arms a restart for a stall that was already paid for. Verified RED-first: on the pre-fix source one `review` row against a lib without the helper produced `spawnable=['default']`, a red stream and 4 restarts across cooldowns with green ticks between, and a capped-profile board looked roomy because of a review row; after the fix the same boards stay green and restart zero times. Every gate was mutation-tested in isolation (11 mutants — including a removed call site and a faithful re-introduction of the old conflation): all 11 are caught by the suite, with the source restored byte-identical after each.
+- **`install_dep_watcher.sh` wrote the poller to a dir the cron job could
+  never read.** Hermes resolves a bare `--script NAME` only against the bound
+  home's `scripts/` dir (`$HERMES_HOME/scripts`; profiles never share files),
+  but the installer hard-coded the shared `~/.hermes/scripts/` while
+  `hermes cron create` bound the invoking profile's home. Installing from a
+  profile shell therefore produced a job whose script could not be found —
+  `hscc-dep-watcher` failed 17 consecutive daily runs under the
+  backend-engineer profile. The zombie job was removed with
+  `hermes cron remove`; the shared-home job (the installer's real target all
+  along) had been running green daily the whole time, so no verification card
+  was ever actually owed one: no `needs-cluster-check` PR was open at any run
+  boundary while that job was live. The installer now derives
+  `HERMES_SCRIPTS` from the same `$HERMES_HOME` the cron CLI binds, and
+  `scripts/tests/test_install_dep_watcher.py` pins the invariant
+  (install/uninstall resolve to one home; no hard-coded shared path;
+  byte-identical copy).
+- **The 5-min proxy relaunch loop could no-op for hours in silence.**
+  On 2026-10-18 `:4000` refused connections for 3h09m while the daemon ran
+  ~36 plain `sparkrun proxy start` attempts, each logging one WARN and
+  discarding the command's "already running (PID …)" output. Root cause is
+  sparkrun-side (restart SIGTERMs only the state-file wrapper PID; the real
+  litellm socket owner orphaned on the port, and the replacement wrapper
+  stayed alive without ever binding, so `is_running()` read "running"
+  forever — full evidence and upstream asks in
+  `docs/audits/PROXY_RELAUNCH_NOOP_2026-10-18.md`). hscc-side hardening:
+  every failed relaunch/repair now logs ERROR with the folded command
+  output; a durable consecutive-failure streak (`relaunch_streak` in the
+  proxy state file — survives daemon restart; cooldown/lease/breaker-deferred
+  ticks attempt nothing and never count) escalates at
+  `HSCC_PROXY_RELAUNCH_MAX_CONSECUTIVE` (default 3) stalled attempts to the
+  proven stop → cmdline-vetted reap of the HOLLOW tracked PID → plain start
+  → port-owner-verified repair (foreign-cmdline PIDs are refused, and
+  `--restart` is never invoked on the escalation path); one throttled
+  high-priority desktop notify + `proxy.relaunch.stalled` events row per
+  `HSCC_PROXY_STALL_NOTIFY_COOLDOWN_S`, never during an intentional-autodown
+  window; repair verification polls while the port is unbound instead of
+  trusting a single immediate owner check (the 01:41:42 "UNVERIFIED — port
+  owner None" line was a race with litellm's slow bind). Exit code is not
+  success: rc-0 over an empty catalogue no longer defuses the streak.
+  11 red-on-old tests in `TestProxyRelaunchStall` (11/11 fail with the fix
+  stashed), mutation-probed 7/7.
+- **`hscc cluster up --help` / `hscc cluster down --help` printed "unknown
+  argument" (rc=1) instead of help** (operator's final pass on PR #33; audit
+  rows D-rc owner=F3 in scripts/tests/cli_help_expected.json). Help now wins
+  over the F6 refusal for an explicit help token: both verbs route through the
+  `_CLUSTER_SUBCOMMAND_HELP` shape (the cb352d40 lane shape — usage line,
+  options, read-only/destructive marker) and exit 0. The refusal itself is
+  byte-identical and still fires for `up`/`down` with any NON-help unknown
+  token (`up --force`, `down --now`) — that is where the F6 incident guard
+  lives now, and the probe token moved from `--help` to `--foo` accordingly.
+  `cluster -h`/`--help` (group help) and `hscc profiles -h`/`--help` (was
+  loading the cluster engine and RENDERING PROFILES instead of printing help)
+  got the same treatment.
+- **`hscc escalate -h` and `hscc autoscale -h` RAN the read-only verb instead
+  of printing help** (operator-verbatim: "run the read-only command instead of
+  printing help"). The daemon-verb branch matched only `args[1] == "--help"`,
+  so the short flag fell through to dispatch. The branch now uses a
+  raw-tail help-token scan: any `-h`/`--help` anywhere in the verb's tail
+  prints the COMMAND_HELP entry rc=0 before dispatch. Same shape applied to
+  the advanced-command branch and the profiles handler.
+- **The audit gate probed `--help` only, so every `-h` path on the CLI was
+  unmeasured** (F5's recorded gap in docs/audits/NOTES_t_fc307a51.md; worst
+  case `start-daemon -h` LAUNCHES the daemon loop). The oracle now probes
+  `-h` alongside `--help` on every flag-kind surface, and a new **D-h**
+  check fails any surface whose `-h` output differs from its `--help` output
+  (the "did `-h` actually print help" test). Launch-class verbs (`start`,
+  `stop`, `install`, `uninstall`, `start-daemon`, `heal`) are exempt from the
+  live `-h` probe but the exemption is VISIBLE (recorded in report skips and
+  pinned by test), and their inertness is proven in-process instead:
+  `hscc_daemon/tests/test_cli_h_shortflag.py`, 122 cases, landmine-raises on
+  the daemon-loop entry, the mutating verbs, and `ClusterEngine` methods.
+  `start-daemon -h` cannot launch the loop — the landmine fires first.
+  Probe count 178 → 299 (153 paths); MIN_PROBES raised in the same commit
+  with zero slack.
+- **iOS drawer dead-end: opening the HSCC sidebar no longer traps you.** On
+  iPhone (compact width, verified on iPhone 16 / iOS 26.3) opening the drawer
+  (the "HSCC" Work/Cluster page) left NO way back — no close, no back, swipe
+  didn't dismiss, and tapping a row (even the already-selected Home row)
+  never left it. Root cause, proven with the app's new XCUITest target before
+  any fix shipped: once the system presents the compact NavigationSplitView
+  sidebar column it exposes zero dismiss affordances, row activation never
+  switches columns (`List(selection:)` doesn't even write the binding on a
+  same-value re-tap), and both documented column controls
+  (`preferredCompactColumn`, `columnVisibility`) are inert from the app side
+  in both directions on this OS. The shell now owns the drawer outright: a
+  slide-over panel over the one app-wide stack, with an explicit `Menu`
+  (sidebar.left) entry on every screen's nav bar, an X close button +
+  tap-outside scrim on the panel, and row activation that ALWAYS leaves the
+  drawer — same-row re-tap included. Home hero/tiles/dock, deep links and
+  requestedTab routing are untouched; `go()` keeps its stack/alias rules.
+- **Back from a project's Chat/Board/Settings lands on the overview again.**
+  Drawer → Projects → a project → Chat (or Board, or Settings) → the nav-bar
+  back skipped the project Overview and landed on the Projects list. The walker
+  (t_810ab152) found it; AX-verified for all three sub-pages.
+
+Cause: `ProjectsView` pushed `ProjectDetailView` with a VALUE-LESS
+`NavigationLink`, so the Overview never entered `router.projectsPath`. Every
+sub-page pushes onto that same bound path (Chat via `openSection`'s append,
+Board/Settings via their `NavigationLink(value:)` rows); when SwiftUI's
+`NavigationStack` gets an append on a bound path it rewrites the path and drops
+the off-path value-less view — so the sub-page's predecessor became the Projects
+list (the back button was even labelled "Projects").
+
+Fix: both project rows (live + stale list) now push
+`ProjectRoute.projectDetail(name:board:)` — the route `AppShell.projectRouteView`
+ALREADY registers and `DeepLinkRouter` already builds `hscc://` paths from. User
+taps and deep links take one path, so every pop lands 1:1, and
+`ProjectDetailView`'s pending-segment guard (written against `.projectDetail`
+being the path's last entry) is live for real taps for the first time.
+
+Tests: the walker's `knownBugBackThenOverview` tripwire (XCTExpectFailure + the
+`ensureOnOverview` recovery path) is deleted; chat/board/settings backs are
+plain predecessor-return assertions. RED on the old code (3 failures: the pop
+landed on the Projects list), GREEN after the fix — back label "hscc" on all
+three. Full nav-graph gate green incl. the negative self-check.
+- **`test_live_hscc_autodown_unchanged_by_suite` raced the live daemon's
+  30s autodown heartbeat.** The guard byte-hashed the real
+  `~/.hscc/autodown.json` before/after a sandboxed re-run of its module,
+  but `run_autodown_loop` (interval=30s) rewrites that file every tick via
+  `record_activity()`/`save_config()` — advancing `last_activity_iso`/
+  `wake_source` — so any tick landing inside the read window failed the
+  byte-identical assert false-positive (observed in the 2026-10-18
+  merged-tree sweep; measured: the file's md5 changes within 33s on a live
+  host). Replaced with the design the daemon-side `test_no_live_hscc_leak`
+  already documents for exactly this reason: a planted-sandbox check (the
+  module re-runs against a fake HOME holding a static seeded autodown.json —
+  deterministic, no live file involved) plus a semantic live check on only
+  the operator-decision keys (`enabled`, `idle_minutes`), which the tick can
+  never rewrite. The nested run also gets `HSCC_DIR` stripped (it outranks
+  HOME in `ensure_autodown`'s path resolution — an exported value would
+  punch through the fake HOME), and `test_main_prints_json` delvars it for
+  the same reason.
+- **A non-spawnable assignee on a ready card silenced the dispatcher watchdog
+  instead of paging.** The PR #43 L2 board gate
+  (`board_state_explains_stall()` in `hscc_daemon/dispatcher_wedge.py`) counted a
+  ready card whose assignee names no Hermes profile as an EXPLAINED hold, so the
+  watchdog suppressed the restart **and went quiet** — on exactly the silent
+  no-dispatch failure mode the fleet has been bitten by before (the dispatcher
+  drops unknown assignees and the card sits in `ready` forever). Suppressing the
+  restart was correct: `launchctl kickstart` has never once fixed a typo'd
+  profile name. Silence was not. The gate now reports those cards structurally
+  (`GateVerdict.nonspawnable` — still a `(explained, detail)` 2-tuple, so every
+  existing caller and injected fake is unchanged) and
+  `recover_dispatcher_wedge()` fires the DISTINCT operator notification for that
+  class — card id, board, assignee string, `no worker will ever run it`, and that
+  NO restart was attempted — under the existing 1/h hold-notify throttle and the
+  existing desktop channel (title `HSCC Dispatcher: unrunnable ready card`),
+  reporting `reason: nonspawnable_assignee`. A board mixing a cap-held card with
+  a typo'd one notifies about the typo'd card only, and still never restarts.
+  Non-spawnability stays defined in exactly one place
+  (`_assignee_is_nonspawnable()`, the dispatcher's own `skipped_nonspawnable`
+  bucket); a profile lookup that cannot decide still means "assume spawnable",
+  so the restart path is unchanged — fail closed.
+- **`template apply` re-infected direct node URLs into hermes config under
+  `uniform_pool`.** The top-level `model` block was correctly aimed at the
+  family proxy, yet the `custom` provider still got
+  `base_url = http://<node>:<port>/v1` and `model.default = <node>:<port>` on
+  every apply — bypassing the proxy hermes is supposed to be the only chat
+  route through, and dying with the pinned node. Under `uniform_pool` (with a
+  family proxy owning the worker port) `custom` now carries the same proxy
+  URL (`chat_url`) and the same probe-resolved alias as the model block —
+  never a second URL, never an id the endpoint does not serve; a carried
+  `host:port`-shaped default is dropped rather than kept. Non-uniform plans
+  keep the historical direct-node entry byte-for-byte.
+- **`family-*` providers got `localhost:<port>` as `model.default`** — a
+  host:port no endpoint resolves as a model. They now carry the family's
+  role alias (`worker-model`, via `_unit_alias`), the name the family proxy
+  actually answers to.
+- **PipelineWatchdog's vLLM auto-restart could race an in-flight heal and
+  launch a hollow duplicate of a cluster-up-owned unit.** The
+  2026-10-18 01:38 UTC incident (redacted timeline kept as a test fixture):
+  engine-wedge recovery held the heal lease while it stopped `orch` and
+  relaunched it via `hscc cluster up`; the proxy stream honoured the lease
+  and deferred at 01:38:34; 10s later the watchdog ignored the same lease,
+  issued a target-less stop (sparkrun: "Error: Must specify TARGET or
+  --all" — a no-op the code logged and continued past), and launched a
+  SECOND job from the bare recipe whose vllm never started (:8000 was
+  already held) — then logged `#270: success`. The hollow container sat
+  ~7h. Four gates now hold: (1) `pipeline_watchdog` consults
+  `heal_lease.read_lease()` BEFORE any attempt (the same deferral machinery
+  the proxy WARN used — no second lock) and does nothing but log + state the
+  deferral while held; `restart_vllm` re-checks for its other caller
+  (trigger.py); (2) a (node,port) registered in serving.json is
+  `hscc cluster up`'s exclusive launch surface — a watchdog-initiated
+  restart there is REFUSED with a WARN naming the unit; (3) the stop is
+  `sparkrun stop <recipe> --hosts <node>` (new `serving.vllm_stop_cmd`;
+  `--all` is never a fallback; no resolvable TARGET ⇒ abort without ever
+  issuing the broken argv) and a failed stop ABORTS before any launch;
+  (4) `ok` requires the launched unit to actually serve — the engine-wedge
+  streaming probe (`health._probe_unit_generation`) gates the lifetime
+  counter, the `#N: success` log and the load-grace window, and a streak of
+  unverified launches (`WATCHDOG_VERIFY_ALARM_AFTER`) escalates a critical
+  NOT-SERVING notification. The stop→verify window itself runs under the
+  lease as `vllm-auto-restart` so the other repair paths back off it.
+- **A parked review row could reconcile a benign-hold claim it was never part of (rebase interaction of PR #35 x PR #43).** Rebasing PR #35's review-row spawnability work onto the landed benign-hold logic surfaced a combined case neither branch tested alone: PR #43's layer-1 reconciliation asks whether the dispatcher's `Last tick held back: active_pr=N` claim is backed by `N` pending rows, and its pending counter counted `ready + review` rows unconditionally. On a runtime with **no review lane** — exactly the class of runtime PR #35 exists for — the dispatcher's own tick never even enumerates review rows (`review_dispatch_enabled()` off short-circuits `_lane_rows(conn, "review")` before the clause is built), so its hold claim can never be counting a parked review card. Yet one such card padded the pending count and reconciled a claim the dispatcher could not have made, silently exempting a live wedge from detection for up to the 900 s lookback. The pending count now follows the same capability answer the spawnable decision uses (`review_capable` from `_review_dispatch_capable`), mirroring `include_review=review_capable` in the room check: review rows count when this runtime can dispatch the lane, and never when it cannot. Fail-open direction of the capability probe is unchanged; when the lane is dispatchable, a genuinely held review card still reconciles exactly as PR #43 shipped. Also pinned the layer-2 board-state gate from the other side with regression tests: it enumerates `ready` cards via the sanctioned CLI only, consults only boards the probe declared spawnable, and can therefore never let a parked review row "explain" a genuine ready wedge. Proven RED-first (three combined-case tests fail on the pre-rebase-interaction source) and mutation-tested (9 mutants across both layers — pre-fix pending count, always-ready-only pending, inverted capability, gate listing review rows, gate consulting stale-review boards, disabled restart latch, disabled hold exemption, re-ORed review spawnable, room check ignoring capability — all 9 killed, source restored byte-identical after each).
+- **`install_escalate_watcher.sh` had the same profile/scripts-dir drift fixed
+  for the dep-watcher in t_3aadd2c0.** Hermes resolves a bare `--script NAME`
+  only against the bound home's `scripts/` dir (`$HERMES_HOME/scripts`;
+  profiles never share files), but the installer hard-coded the shared
+  `~/.hermes/scripts/` while `hermes cron create` binds the invoking profile's
+  home — running it from a profile shell would produce an
+  `hscc-escalate-watcher` job whose script can never be found. The installer
+  now derives `HERMES_SCRIPTS` from the same `$HERMES_HOME` the cron CLI binds,
+  and `scripts/tests/test_install_escalate_watcher.py` pins the invariant
+  (install/uninstall resolve to one home; no hard-coded shared path;
+  byte-identical copy). Operator-side: the live shared-home job
+  `6407ea32e1dd` had its stale `--deliver telegram` (telegram dropped
+  fleet-wide in 6ac173c6) re-pointed to `local` via `hermes cron edit`; the
+  runner already self-notifies via `hscc_daemon.desktop`, and the job's
+  schedule and script were left untouched.
+- **The drawer's connection pill no longer says "checking…" forever.** With
+  the API up, the drawer's server pill (and Home's hero) sat on
+  "checking…" / "unknown" indefinitely. `ConnectionMonitor.status` changed
+  only via `requestSucceeded()`/`requestFailed()` from completed `HSCCClient`
+  requests — and the drawer makes no request of its own, so nothing ever
+  resolved `.unknown`. (The old launch ping had been deleted for a different
+  reason — a one-shot cold-start FAILURE pinned the banner — which never
+  licensed an eternal `.unknown`.) The monitor keeps its passive contract and
+  gains the missing active half: while the drawer header is visible and the
+  app is configured, a `.task` keyed on `connectionIdentity` runs one cheap
+  authed `GET /v1/health` immediately, then re-checks every 15 s (30 s
+  back-off when the server refuses the credential), and stops with zero
+  traffic when the drawer closes (task cancellation on disappear). The first
+  real result — probe or request — flips `.unknown`; the dot then tracks the
+  most recent outcome while visible. A failed probe never pins the banner:
+  the loop keeps observing and any real success clears it (the t_4889e978
+  contract). `!isConfigured` fires nothing — first-run still reads "not
+  configured". Auth refusal (401/403/`unauthorized`) is surfaced honestly as
+  unreachable with a token-specific reason ("check it in Settings"), not a
+  Tailscale guess; any other HTTP response still proves reachability
+  (any-response contract). Full state machine documented on
+  `ConnectionMonitor`; probe logic is a pure, injected-call
+  `ConnectionProbe` enum so it is fully gate-covered.
+
+### Verified
+- Tests (red-first on base baf98413, measured in a scratch worktree under a
+  sandbox HOME + exit-97 `sparkrun`/`hermes`/`gh`/`git` PATH canaries +
+  recording/raising landmines — no real fleet, board, daemon, or notification
+  was touched; mutating verbs were never executed for real):
+  `hscc_daemon/tests/test_cli_h_shortflag.py` (NEW, 122 cases — every
+  top-level verb × `-h`/`--help` in-process with the daemon loop, mutating
+  commands, and ClusterEngine landmined; help-text parity with `--help`; rc 0;
+  no HOME writes; positive controls that the read-only verbs still RUN
+  without a help token), plus re-pinned
+  `hscc_daemon/tests/test_cluster_cli_help.py` (up/down help prints, rc 0,
+  refusal-without-help-token byte-identical), `test_cluster_group_help.py`
+  (`cluster -h` group help; `TestF6RefusalWrap` probes the unknown-token
+  refusal at `--foo` now), `test_cli_arg_safety.py` (up/down help rc 0 +
+  recording-engine inertness; parser-level refusal pins kept), and
+  `test_toplevel_cli_help_f5.py` (shares the oracle's `invocations_for`
+  model so the path/probe floors count the same probes).
+- Mutation battery on the frozen tree (backup + restore per probe, never
+  `git checkout --`): M1 intercept reverted to the `args[1]`-only shape ->
+  test_cli_h_shortflag RED (and the new D-h sensor fires in a full audit run:
+  11 D-h findings + check/notify/log/status D findings); M2 reword of the
+  intercepted help text -> parity pin RED; M3 `up`/`down` dropped from
+  `_CLUSTER_HELP_VERBS` -> 28 RED across 4 files; M4 parser accepts unknown
+  tokens silently -> 26 RED incl. the incident pins; M5 profiles intercept
+  removed -> profiles `-h` pins RED; M6 oracle stops emitting `-h`
+  invocations -> surface-floor pins RED. All restored byte-identical (md5).
+- Gate: `scripts/tests/cli_help_surface.py` green (12 passed; probe floor 299
+  / path floor 153 with zero slack; the only skips are `api start --help` and
+  the six visible launch-class `-h` exemptions — pinned by shape so an added
+  silent skip fails). Post-fix audit: 0 unexpected violations; the 2 owner=F3
+  D-rc rules this card clears are pruned from cli_help_expected.json (scripted
+  JSON edit, per-owner counts verified; MONITOR×2 untouched — their 10
+  findings are owner=MONITOR and this card's re-probing of `monitor -h`
+  mirrors them for the new `-h` surfaces so the bipartite gate stays honest).
+  Full `hscc_daemon/tests`: 1974 passed. address_guard 0 findings.
+- Red-on-old replay: the original byte-identical assert FAILED with a tick
+  forced into its window (flake reproduced deterministically); the new
+  guard PASSED under the same forced tick (31s window).
+- Mutation probes: a suite writing the planted sandbox config trips layer 1;
+  flipping the live operator keys trips layer 2. Both restored after.
+- `hscc-bootstrap` suite green with the guard in place.
+- Canonical suite `scripts/run_tests.sh` **ALL GREEN** (11/11 legs) on a frozen
+  detached tree at this commit, run as
+  `env -u CONDA_SHLVL -u CONDA_DEFAULT_ENV -u CONDA_PROMPT_MODIFIER -u CONDA_PREFIX
+  bash scripts/run_tests.sh` under `~/.hermes/hermes-agent/venv/bin/python`
+  (the interpreter where `hermes_cli` IS importable, so every new fixture pins
+  the profile probe and the live-config readers explicitly — the PR #43 lesson).
+  New coverage: all-non-spawnable incident ladder → **0 restarts AND exactly 1
+  notification**; mixed board (per-profile cap + typo'd assignee) → notification
+  names only the typo'd card; profile-store failure → restart path intact; the
+  real `_assignee_is_nonspawnable` exercised against a raising store; a
+  real-gate → real-recovery end-to-end pin (a unit test of the notify helper
+  cannot catch a removed call site); and mutation sentinels for the notify
+  branch in both directions. `scripts/address_guard.py --tracked` rc=0.
+- `hscc_daemon/tests/test_lifecycle_watchdog_race_20261018.py`: 19 cases,
+  seeded from `fixtures/vllm_auto_restart_race_20261018.log` (the real
+  01:36:25–01:39:10 UTC window, verbatim timestamps, LAN hosts redacted to
+  `10.0.0.x`). The replay is RED on pre-fix code at the behavioral
+  assertion (`restart_calls == [1]` — old code restarted despite the held
+  lease) and green on the fix; nine mutation probes (lease gate at both
+  layers, stop-abort, registry refusal, rc=0-as-success, counter gating,
+  alarm branch, lease-around-mutating-window, target-less stop fallback)
+  each turn at least one test red. Negative controls keep ordinary healing
+  alive: unregistered target still restarts, lease-free tick still attempts.
 ## [2.10.0] - 2026-10-17
 
 ### Added
