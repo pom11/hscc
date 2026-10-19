@@ -2,59 +2,81 @@
 
 Continuous monitoring daemon for the DGX Spark cluster, installed as the
 Hermes plugin `hscc_daemon`. It runs a set of periodic **health streams** and
-auto-heals a crashed **worker** vLLM unit. An **orchestrator** wedge is NOT
-auto-restarted (too disruptive): the daemon logs the alert while the active
-fallback keeps the gateway answering, and a human runs `/cluster-restart`
-(which re-applies the active template). On startup it also self-cleans dead
-`~/.hscc` cruft (`.corrupt-*` snapshots / `.stale` flags + caps each
-`<file>.bak.*` group at the newest 5).
+heals a down or wedged vLLM unit under durable guards: a down keep-alive
+**worker** unit is relaunched/recreated per-unit, and a **wedged** unit —
+orchestrator included — is restarted only by the guarded engine-wedge
+recovery (`recover.py`). It never resurrects an intentional autodown and the
+pipeline watchdog never launches `hscc cluster up`-owned units (a fleet-level
+restart stays operator scope: `/cluster-restart` re-applies the active
+template). On startup it self-cleans dead `~/.hscc` cruft (`.corrupt-*`
+snapshots / `.stale` flags + caps each `<file>.bak.*` group at the newest 5).
 
 ## Architecture (the real modules)
 
-The daemon was modularised out of the old monolithic `hscc.py`. The CLI entry
-point is `hscc_daemon.hscc.main()`; every `hscc` command is its own process
-that dispatches into one of the modules below. The human-facing `hscc` CLI
-output is rendered through `cli_theme.py` (Rich, Hermes-default palette);
-machine `--json` output stays byte-identical.
+Modularised out of the old monolithic `hscc.py`. The CLI entry point is
+`hscc_daemon.hscc.main()`; every `hscc` command is its own process that
+dispatches into one of the modules below. Human-facing output renders through
+`cli_theme.py` (Rich, Hermes-default palette); machine `--json` output stays
+byte-identical.
+
+Core modules (not exhaustive — `ls hscc_daemon/*.py` is the census):
 
 | Module | Responsibility |
 |--------|----------------|
 | `hscc.py` | CLI entry, dispatch, help, cluster/template/profiles/project/api/autodown/kanban groups |
-| `cli.py` | Daemon lifecycle commands: start/stop/status/check/watch/triggers/notify/log |
+| `cli.py` | Daemon lifecycle commands: start/stop/status/check/watch/triggers/notify/log + heal-status/heal-clear |
 | `cli_theme.py` | Rich theme foundation (single palette source for every `hscc` render) |
-| `health.py` | Check functions: dgx, gateway, local, heartbeat, nas, idle, workers, engine_wedge + worker auto-heal |
+| `health.py` | Check functions: dgx, gateway, local, heartbeat, nas, idle, workers (keep-alive supervision + debounced per-unit auto-heal), proxy, engine_wedge, dispatcher + the lease/breaker/guard wiring |
+| `heal_lease.py` | **Durable single-flight heal lease** (HEAL_CASCADE F2): file under `~/.hscc/heal-lease.json`, bounded TTL (`HSCC_HEAL_LEASE_TTL_S`, default 600s) — one repair at a time across all four repair paths; expired leases self-heal |
+| `heal_breaker.py` | **Per-node heal circuit breaker** (F5): `~/.hscc/heal-breaker.json`; after `HSCC_HEAL_BREAKER_MAX` (default 6) actions on one node in `HSCC_HEAL_BREAKER_WINDOW_S` (default 900s) the node is heal-suspended + alerted once; operator clears with `hscc heal-clear <node>` |
+| `launch_guard.py` | **One-vLLM-per-host invariant** (A2): before any launch, a vLLM workload on the host outside the unit's declared serving span ⇒ refuse + alert, never preempt. Undeclared co-location is the fault; declared co-location (e.g. orchestrator :8000 + embedding :8010) is legal |
+| `recover.py` | Guarded engine-wedge **recovery** (acting half of the E stream): N consecutive wedges (`HSCC_RECOVER_CONSECUTIVE_WEDGES`, default 3), per-unit cooldown (default 30 min), attempt cap then `gave_up` — stops ONLY the wedged unit's container, then one fleet `hscc cluster up` |
 | `serving.py` | Cluster topology (`cluster.json` / `serving.json`) resolution |
-| `lifecycle.py` | Agent reconciliation, vLLM auto-restart, pipeline watchdog |
+| `lifecycle.py` | Pipeline watchdog, vLLM auto-restart (lease-first, registered-unit refusal, verified-success only), trigger backoff |
 | `trigger.py` | Trigger engine (rule evaluation, cooldowns, event firing) |
-| `daemon_ops.py` | Daemon life-cycle: PID/log/rotation, stream watcher, main loop, startup cleanup |
+| `daemon_ops.py` | Daemon life-cycle: PID/log/rotation, supervised check threads, main loop, startup cleanup |
 | `state.py` | Thread-safe state dir reads/writes |
 | `install.py` | Service management (launchd on macOS, systemd on Linux) |
 | `desktop.py` | macOS desktop notifications + event emitter |
-| `dispatcher_wedge.py` | Dispatcher-wedge watchdog |
+| `dispatcher_wedge.py` | Dispatcher-wedge watchdog + guarded self-heal |
+| `kanban_blocked.py` / `kanban_cli.py` | `hscc kanban blocked` (why a card is blocked + recovery) / `hscc kanban stale` (board hygiene the autodown C3 interlock reads) |
+| `escalate.py` / `escalate_watcher.py` | Failure-escalation decision logic (pure) + the live watcher (reassign to strong-tier, desktop notify) |
+| `autodown.py` / `autodown_cli.py` | Idle autodown/autoup core (`~/.hscc/autodown.json`, the `classify()` decision table, the O_EXCL lock) + `hscc autodown` verbs |
+| `kill_switch.py` | Backend for stopping a runaway kanban worker (wrapped by the API + iOS app) |
+| `qr_code.py` | Pure-stdlib QR encoder for the API pairing QR (no `qrcode`/Pillow by policy) |
+| `cluster_live.py` | `hscc cluster monitor --live` renderer — **operator-owned: quote, never edit** |
 | `verify.py` / `cluster_render.py` | `hscc verify` smoke-test / cluster+template human renderers |
+
+The heal trio + `recover.py` exist because of one incident: see
+[`docs/audits/HEAL_CASCADE_2026-10-14.md`](../docs/audits/HEAL_CASCADE_2026-10-14.md).
 
 ## Installation
 
-The daemon ships in the `hscc_daemon/` package (installed to
-`~/.hermes/plugins/hscc_daemon/` by bootstrap / `install_payload.py`). It
-depends on **Rich** (for the themed CLI) plus the Python standard library —
-install it into the same Python environment as the `hscc` CLI. The daemon
-entry point is `hscc_daemon.hscc.main` (also usable as `python -m hscc_daemon`).
+Ships in the `hscc_daemon/` package (installed to
+`~/.hermes/plugins/hscc_daemon/` by bootstrap / `install_payload.py`). Needs
+**Rich** in its Python environment (top-level imports in `cli_theme.py`; PyYAML
+is lazy-imported on YAML-reading check paths) — install it into the same
+environment as the `hscc` CLI. Entry point: `hscc_daemon.hscc.main`
+(also `python -m hscc_daemon`).
 
 ## State files (`~/.hscc`)
-
-The daemon keeps its runtime state under `~/.hscc`:
 
 | File / dir | Purpose |
 |------------|---------|
 | `~/.hscc/daemon.pid` | PID file (present while running) |
+| `~/.hscc/heartbeat` | Durable liveness heartbeat — never deleted on stop, so a dead daemon's stale heartbeat is impossible to miss |
 | `~/.hscc/daemon.log` | Rolled/rotating daemon log |
-| `~/.hscc/state/<stream>.json` | One JSON file per health stream, overwritten each check (dgx, gateway, local, heartbeat, nas, watchdog, triggers, engine_wedge, dispatcher, idle, proxy, workers) |
+| `~/.hscc/state/<stream>.json` | One JSON file per stream, overwritten each check (dgx, gateway, local, heartbeat, nas, watchdog, triggers, engine_wedge, dispatcher, idle, proxy, workers) |
+| `~/.hscc/heal-lease.json` | Single-flight repair lease (F2) |
+| `~/.hscc/heal-breaker.json` | Per-node strike ledger + latch (F5) |
+| `~/.hscc/recover.json` | Engine-wedge recovery cooldowns / attempt counts / `gave_up` |
+| `~/.hscc/watchdog-block.json` | Pipeline watchdog block (failures, backoff, `intentional == "autodown"`) |
+| `~/.hscc/autodown.json` + `autodown.lock` | Autodown config/state + its O_EXCL exclusivity lock |
 
-There is no `~/.hscc/daemon/config.json` in the modular daemon — health checks
-are configured by the daemon code + environment variables (e.g.
-`HSCC_WORKER_AUTOHEAL_DEBOUNCE`, `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES`,
-`HSCC_WORKER_AUTOHEAL_LOAD_GRACE`), not by a per-handler JSON config.
+Health checks are configured by the daemon code + environment variables
+(e.g. `HSCC_WORKER_AUTOHEAL_DEBOUNCE`,
+`HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES`, `HSCC_WORKER_AUTOHEAL_LOAD_GRACE`),
+not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 
 ## Commands (`hscc`, the merged CLI)
 
@@ -62,63 +84,76 @@ are configured by the daemon code + environment variables (e.g.
 |---------|-------------|
 | `hscc start` | Start the daemon in the background (forks; PID in `~/.hscc/daemon.pid`) |
 | `hscc stop` | Graceful shutdown (SIGTERM; waits up to ~10s, then SIGKILL) |
-| `hscc status` | Daemon status + last result of every health stream |
+| `hscc status` | Daemon status + last result of every health stream (RUNNING only when pid **and** fresh heartbeat confirm) |
 | `hscc check [stream\|all]` | Run one check cycle now (does NOT persist state) |
+| `hscc check --repo <path>` | Address-guard posture for that checkout (armed / unarmed / armed-but-absent) |
 | `hscc watch [stream]` | Live-tail check results |
 | `hscc triggers` | Show trigger-engine rules + recent firings |
 | `hscc notify <msg>` | Send a manual macOS notification |
+| `hscc heal-status` | List per-node heal-breaker strikes (read-only) |
+| `hscc heal-clear <node>` | Clear one node's strikes after investigating (MUTATES the ledger) |
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
 | `hscc plist` | Print the launchd plist (no install) |
 
-Also read-only health/monitoring verbs: `verify`, `stats [days]`,
-`throughput`, `autoscale`, `escalate`, and groups `cluster`, `template`,
-`profiles`, `project`, `api`, `autodown`, `kanban`.
+Also read-only verbs: `verify`, `stats [days]`, `throughput`, `autoscale`,
+`escalate`, and the groups `cluster`, `template`, `profiles`, `project`, `api`,
+`autodown`, `kanban` (`blocked` / `stale`).
 
-`start`/`stop`/`status` are safe to run from a terminal. `start` is idempotent
-(no-op if already running). Service-supervised runs use `start-daemon` (runs
-the loop in the foreground so launchd/systemd supervises the right process);
-`start` would fork a child and exit, which launchd would mistrack.
+`start`/`stop`/`status` are safe to run from a terminal. `start` is idempotent.
+Service-supervised runs use `start-daemon` (foreground loop, so
+launchd/systemd supervises the right process).
 
 ## Health status model
 
 Each stream's `~/.hscc/state/<stream>.json` carries an `ok` / `blocked` field,
-derived by `status` into:
-
-| Display | Meaning |
-|---------|---------|
-| OK | Stream healthy |
-| FAIL | Explicit failure |
-| BLOCKED | Watchdog/trigger blocked (needs attention) |
-| — (never) | Stream has no state on disk yet |
-
-Worker vLLM units are supervised per (node, port). A crashed worker is
-relaunched; a unit that stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE`
-consecutive checks (default 3) — beyond its load-grace window and out of
-cooldown — is **force-recreated** by re-applying the currently applied template
-(`template apply <applied> --confirm --force-recreate`), which heals a unit
-whose container is "Up" in docker but whose vLLM never answers (a plain relaunch
-no-ops on it). Debounced and cooldown-guarded so it never fights a slow load.
-The orchestrator is not auto-restarted — see the intro.
+derived by `status` into: OK (healthy) · FAIL (explicit failure) · BLOCKED
+(watchdog/trigger blocked, needs attention) · — (no state on disk yet).
 
 ## Safety Guarantees
 
-1. **Max 1 restart per cycle** — prevents restart loops.
-2. **Timeout per handler** — no blocking on slow checks.
-3. **Debounced auto-heal** — a unit must stay down across
-   `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive checks before force-recreate.
-4. **Cooldown-guarded** — `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES` (default 10)
-   between force-recreates.
-5. **Handler exceptions caught** — one check crash doesn't kill the daemon.
-6. **Graceful shutdown** — current cycle finishes before exit.
-7. **Ad-hoc `hscc check` never writes shared state** — a manual failure must
+Repairs are **sequential, finite, and never blind** (the HEAL_CASCADE 2026-10-14
+lesson: uncoordinated unbounded healing destroyed the fleet):
+
+1. **Heal lease (F2)** — every repair path (`auto-heal`, worker relaunch, proxy
+   relaunch, engine-wedge recovery, watchdog restart) takes the durable
+   single-flight lease first; a held lease means *defer this tick*, and the TTL
+   guarantees a leaked lease self-heals.
+2. **Heal breaker (F5)** — per-node strikes are durable; after the limit the
+   node is heal-suspended and the operator is alerted once. `hscc heal-status`
+   to inspect, `hscc heal-clear <node>` to resume.
+3. **Launch guard (A2)** — never start a vLLM outside its declared serving
+   footprint; refuse + alert, never preempt another tenant's workload.
+4. **Debounced auto-heal** — a unit must stay down across
+   `HSCC_WORKER_AUTOHEAL_DEBOUNCE` (default 3) consecutive checks before its
+   unit is recreated — per-unit `sparkrun stop <recipe> --hosts <span>` + a
+   re-issued run for THAT unit only (since F3, never a whole-template
+   `--force-recreate`).
+5. **Cooldown + durable load grace** — `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES`
+   (default 10) between force-recreates of a unit; a container younger than
+   `HSCC_WORKER_AUTOHEAL_LOAD_GRACE` (default 1200s) that has never served is
+   loading, not dead — and that check survives daemon restarts.
+6. **Recovery is capped** — engine-wedge recovery acts only after N
+   consecutive declared wedges, per-unit cooldown, and gives up acting (keeps
+   alerting) after `HSCC_RECOVER_MAX_ATTEMPTS` (default 3).
+7. **Never fight the operator** — while an intentional autodown is in effect
+   the watchdog, worker relaunch and wedge recovery all stand down.
+8. **Handler exceptions caught** — a check crash never kills the daemon; a dead
+   check thread is respawned.
+9. **Ad-hoc `hscc check` never writes shared state** — a manual failure must
    not masquerade as a fleet failure in `hscc status`.
 
-## Troubleshooting
+## How to test / Troubleshooting
+
+Tests: `tests/` — from this dir: `python -m pytest tests/ -q` (or the full
+fleet suite via `scripts/run_tests.sh`). The heal-trio suites are
+`test_heal_lease.py` / `test_heal_breaker.py` / `test_launch_guard.py` /
+`test_recover.py`.
 
 | Problem | Solution |
 |---------|----------|
 | `hscc status` shows STOPPED | Run `hscc start` (or `hscc install` for launchd) |
-| `hscc` says unknown command | Use the real verbs: `start stop status check watch triggers notify install uninstall plist log verify stats throughput autoscale escalate` + groups `cluster template profiles project api autodown kanban` |
-| `hscc` not on PATH | It is installed in the Hermes venv (`~/.hermes/hermes-agent/venv/bin/hscc`) |
+| A node is not being healed | `hscc heal-status` — if suspended, investigate then `hscc heal-clear <node>` |
+| `hscc` says unknown command | `hscc help` / `hscc help advanced` list the real verbs |
+| `hscc` not on PATH | It is installed in the Hermes venv (`~/.hermes/hermes-agent/venv/bin/hscc`) — see [hscc-cli](../hscc-cli/README.md) |
 | Daemon log missing | `hscc status` uses `~/.hscc/state/*.json`; `hscc log` tails `~/.hscc/daemon.log` |
-| `deps not met` error | The daemon needs **Rich** in its Python env (`pip install rich` in the Hermes venv) |
+| `deps not met` error | The daemon needs **Rich** in its Python env (Hermes venv) |
