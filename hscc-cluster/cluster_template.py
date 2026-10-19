@@ -15,7 +15,9 @@ Flow:
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import sys
 import shutil
 from datetime import datetime
@@ -973,6 +975,12 @@ def validate_resolved_plan(plan: Any) -> List[str]:
     Auto-assigned ports make node:port collisions structurally impossible, so the
     real checks are: every recipe exists, and no residual (node,port) dup. Pure +
     read-only.
+
+    v4 plan-level leg (spec §5): under ``uniform_pool`` every declared endpoint
+    target must resolve to a family that HAS a proxy (``proxy_port is not
+    None``). A target family without ``proxy: true`` has no stable alias
+    endpoint — writing it would silently re-introduce the node pin the flag
+    exists to remove, so it is a hard plan error, not a warning.
     """
     errors: List[str] = []
 
@@ -999,6 +1007,31 @@ def validate_resolved_plan(plan: Any) -> List[str]:
             if key in seen:
                 errors.append(f"(node,port) collision: {u.node}:{u.port}")
             seen.add(key)
+
+    # ── v4: declared endpoint targets must land on a family WITH a proxy ──
+    # Only uniform_pool is checked: §5 scopes the requirement there, and the
+    # non-uniform exemption (§1.3) deliberately allows a no-proxy target to
+    # mean "leave it as tuned".
+    ep = getattr(plan, "endpoints", None)
+    if getattr(plan, "uniform_pool", False) and isinstance(ep, dict):
+        by_name = {f.name: f for f in plan.families}
+        targets: List[Tuple[str, Any]] = [
+            (f"endpoints.{k}", ep.get(k)) for k in ("chat", "delegation")]
+        profs = ep.get("profiles")
+        if isinstance(profs, dict):
+            targets += [(f"endpoints.profiles.{s}", t) for s, t in profs.items()]
+        for key, target in targets:
+            if not isinstance(target, str) or not target.startswith("family-"):
+                continue          # orchestrator / absent / non-symbolic: not ours
+            fam = by_name.get(target[len("family-"):])
+            if fam is None:
+                continue          # dangling name is the structural layer's call
+            if fam.proxy_port is None:
+                errors.append(
+                    f"{key} -> '{target}': family '{fam.name}' has no proxy "
+                    f"(proxy: true required) — under uniform_pool an endpoint "
+                    f"must resolve to the family proxy, and this family has "
+                    f"no stable alias endpoint")
     return errors
 
 
@@ -1242,18 +1275,81 @@ def applied_status() -> dict:
 # ── Layer 1: structural validation (offline, no cluster state, no resolver) ──
 
 # Recognised template schema versions. The engine understands v2 (topology-free,
-# parsed unchanged) and v3 (adds explicit nodes/allow_colocation/routing). Any
-# other version is a structural error — a template is not trustworthy if we
-# cannot decide what its keys mean.
-RECOGNISED_VERSIONS = (2, 3)
+# parsed unchanged), v3 (adds explicit nodes/allow_colocation/routing) and v4
+# (adds the endpoints/proxy/caps declarations —
+# docs/design/2026-10-15-template-declarations.md §1.6). Any other version is a
+# structural error — a template is not trustworthy if we cannot decide what its
+# keys mean.
+RECOGNISED_VERSIONS = (2, 3, 4)
 
 # Known keys per level. Anything else is a typo and a hard structural error
 # (spec: "unknown keys rejected"). Kept in sync with template_intent schema.
 _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
-                   "routing", "uniform_pool"}
+                   "routing", "uniform_pool", "endpoints", "proxy", "caps"}
 _KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
+
+# ── v4 declaration vocabulary (spec docs/design/2026-10-15-template-declarations.md)
+#
+# These tables are the single source of truth for what a declaration may say.
+# §8 ("Knob enforcement table") is LAW: no knob may be reported, documented or
+# summarised as working unless it appears in _ENFORCED_KNOBS, which is derived
+# from the spec's own ENFORCED rows. Everything §8 marks INERT is accepted,
+# recorded and labelled INERT — accepting a declaration is not promising it.
+
+# §2.1 — the keys v1 recognises under `proxy.families.<name>`. The ORDER is the
+# order the spec's own error text lists them in ("known: routing,
+# max_parallel_requests, weight, timeout, num_retries"), so it is a contract,
+# not a preference.
+PROXY_KNOWN_KNOBS = ("routing", "max_parallel_requests", "weight", "timeout",
+                     "num_retries")
+
+# §8 — only `routing: least-in-flight` is ENFORCED end-to-end (balancer
+# CustomLogger; 4-fake-backend 2/2/2/2 proof + slow-backend soak 224 vs 52), and
+# `routing_strategy` is enforced only as verbatim emit. The four per-deployment
+# knobs are INERT-PENDING-SPARKRUN (sparkrun crafts litellm_params itself and
+# drops any other key — §4.3 is the open hook) and `weight` is INERT even after
+# that hook under the balancer, whose pick() ignores it.
+PRO_ENFORCED_KNOBS = ("routing", "routing_strategy")
+PRO_INERT_KNOBS = ("max_parallel_requests", "timeout", "num_retries", "weight")
+
+# §2.2 — the balancer is a LiteLLM CustomLogger overlay, NOT a
+# `routing_strategy`. 1.82.6's Literal (types/router.py:62-68) admits exactly
+# these four and nothing else, so writing the balancer's name there fails at
+# proxy startup. `least-busy` is additionally broken on its own merits.
+LITELLM_ROUTING_STRATEGIES = ("simple-shuffle", "least-busy",
+                              "usage-based-routing", "latency-based-routing")
+# The balancer's own name, in the spellings an operator might reach for.
+BALANCER_NAME_SPELLINGS = ("least-in-flight", "least_in_flight",
+                           "leastinflight", "in-flight", "in_flight")
+# What `proxy.*.routing` may say: the balancer ON, or the base strategy with
+# the balancer OFF (the shipped toggle is a global on/off, §2.2).
+PROXY_ROUTING_POLICIES = ("least-in-flight", "simple-shuffle")
+
+# §1.1 / §3 — block shapes.
+ENDPOINT_MODES = ("proxy-alias", "explicit")
+KNOWN_ENDPOINT_KEYS = ("mode", "chat", "delegation", "profiles")
+KNOWN_PROXY_KEYS = ("families",)
+KNOWN_CAPS_KEYS = ("max_in_progress", "max_in_progress_per_profile",
+                   "expected_requests_per_card")
+# §3 — migration default when neither declaration nor derivation speaks: today's
+# static fill-if-absent values in hscc-bootstrap/enable_plugins.py, unchanged.
+CAPS_MIGRATION_DEFAULTS = {"max_in_progress": 30, "max_in_progress_per_profile": 10}
+
+# §1.1 — "A target is never an address." Host-shaped detection for the
+# declaration text itself: an IPv4 literal, or a dotted hostname. `family-x` /
+# `orchestrator` never match (no colon, no dot).
+_HOST_SHAPED_RE = re.compile(
+    r"(?:^|[^0-9])(?:\d{1,3}\.){3}\d{1,3}(?![0-9])"      # ipv4, optional :port
+    r"|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\.[A-Za-z]{2,}$"  # dotted hostname
+)
+
+
+def _target_is_address(target: str) -> bool:
+    """True if an `endpoints:`/`routing:` target names an address rather than a
+    symbolic unit — a colon (``host:port``) or a host-shaped string (§1.1)."""
+    return ":" in target or bool(_HOST_SHAPED_RE.search(target))
 
 
 def _cluster_node_ips() -> List[str]:
@@ -1276,6 +1372,357 @@ def _cluster_node_ips() -> List[str]:
         if isinstance(w, dict) and w.get("ip"):
             ips.append(str(w["ip"]))
     return ips
+
+
+# ── v4 declaration validation (spec §5) ─────────────────────────────────────
+#
+# Each helper takes the PARSED template plus the raw block it validates and
+# appends to shared errors/warnings lists, so the whole structural layer keeps
+# one voice and one pass. They are offline by construction: they read nothing
+# but the template itself. Nothing here can change what apply writes — this is
+# the validate layer, and the write path is C2.
+
+
+def _validate_endpoints_block(tpl: Any, errors: List[str],
+                              warnings: List[str]) -> None:
+    """§1.1/§5 — the `endpoints:` block: symbolic-only targets, known keys.
+
+    §1.3 is the exemption this must respect: an `endpoints:` block on a
+    NON-uniform template is an optional override, so an explicit
+    ``orchestrator: <ip>:<port>``-style target stays legal there (that is what
+    the v1.7 role split means). Under `uniform_pool` the same target would
+    re-introduce a node pin behind an alias, so it is refused (§5 row 1).
+    """
+    block = tpl.endpoints
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        errors.append(f"endpoints: expected a mapping, got "
+                      f"{type(block).__name__}")
+        return
+
+    for k in block:
+        if k not in KNOWN_ENDPOINT_KEYS:
+            errors.append(f"endpoints: unknown key '{k}' (known: "
+                          f"{', '.join(KNOWN_ENDPOINT_KEYS)})")
+
+    mode = block.get("mode")
+    if mode is not None and mode not in ENDPOINT_MODES:
+        errors.append(f"endpoints.mode: expected one of "
+                      f"{', '.join(ENDPOINT_MODES)}, got {mode!r}")
+
+    # `profiles:` is a selector -> target mapping (§1.1). A selector is a
+    # role-profile glob ("default", "*-orch"), so it is NOT subject to the
+    # family-name resolution check — its VALUE is.
+    profiles = block.get("profiles")
+    if profiles is not None and not isinstance(profiles, dict):
+        errors.append(f"endpoints.profiles: expected a mapping of "
+                      f"selector -> target, got {type(profiles).__name__}")
+        profiles = None
+
+    # (dotted key, target) for every declared target.
+    targets: List[Tuple[str, Any]] = [(f"endpoints.{k}", block.get(k))
+                                      for k in ("chat", "delegation")]
+    if isinstance(profiles, dict):
+        for sel, tgt in profiles.items():
+            targets.append((f"endpoints.profiles.{sel}", tgt))
+
+    defined_units = {"orchestrator"} | {f"family-{f.name}" for f in tpl.families}
+    for key, target in targets:
+        if target is None:
+            continue                      # chat/delegation omitted = untouched
+        if not isinstance(target, str) or not target:
+            errors.append(f"{key} -> {target!r}: expected a target name")
+            continue
+        # §1.1 — "A target is never an address." Under uniform_pool this is a
+        # hard error (§5); elsewhere an address target is the legitimate
+        # role-split pin §1.3 exempts, so it is not refused here.
+        if tpl.uniform_pool and _target_is_address(target):
+            errors.append(
+                f"{key} -> '{target}': uniform_pool endpoints must name a "
+                f"family (family-<name>) or 'orchestrator', never an address")
+            continue
+        if target in defined_units:
+            continue
+        if target.startswith("family-"):
+            errors.append(f"{key} -> '{target}': no such family in this "
+                          f"template")
+        elif not _target_is_address(target):
+            errors.append(f"{key} -> '{target}': must be 'orchestrator' or "
+                          f"'family-<name>'")
+
+    # §1.4 — `endpoints:` wins over `routing:` for a consumer both declare;
+    # validate warns so the redundancy is visible instead of silent.
+    for consumer in ("delegation",):
+        if block.get(consumer) is not None and (tpl.routing or {}).get(consumer):
+            warnings.append(
+                f"endpoints.{consumer} shadows routing.{consumer}: "
+                f"endpoints wins (both declared: "
+                f"{block[consumer]!r} vs {tpl.routing[consumer]!r})")
+
+
+def _validate_proxy_block(tpl: Any, errors: List[str],
+                          warnings: List[str]) -> None:
+    """§2.1/§2.2/§5 — the `proxy:` block: mapping shape, known knobs, and the
+    balancer-is-not-a-strategy rule.
+
+    §8 constrains what may be SAID about each knob, not whether it is accepted:
+    the per-deployment knobs are recorded (parse keeps them verbatim for C2 to
+    pass through) and reported INERT here. `routing_strategy` is refused
+    outright because there is no spelling of it that works.
+    """
+    block = tpl.proxy
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        errors.append(f"proxy: expected a mapping (generic pass-through dict), "
+                      f"got {type(block).__name__}")
+        return
+
+    for k in block:
+        if k not in KNOWN_PROXY_KEYS:
+            errors.append(f"proxy: unknown key '{k}' (known: "
+                          f"{', '.join(KNOWN_PROXY_KEYS)})")
+
+    fams = block.get("families")
+    if fams is None:
+        return
+    if not isinstance(fams, dict):
+        errors.append("proxy.families: expected a mapping of family -> knobs, "
+                      f"got {type(fams).__name__}")
+        return
+
+    declared_policy: Dict[str, str] = {}
+    for fam_name, knobs in fams.items():
+        label = f"proxy.families.{fam_name}"
+        if not isinstance(knobs, dict):
+            errors.append(f"{label}: expected a mapping of knobs, got "
+                          f"{type(knobs).__name__}")
+            continue
+        declared_family = {f.name for f in tpl.families}
+        if fam_name not in declared_family:
+            errors.append(f"{label}: no such family in this template")
+        for knob in knobs:
+            if knob == "routing_strategy" or knob in BALANCER_NAME_SPELLINGS:
+                # §5 rows 4-5: the balancer name in a LiteLLM-strategy slot.
+                errors.append(_balancer_not_a_strategy_error(knob))
+                continue
+            if knob not in PROXY_KNOWN_KNOBS:
+                errors.append(
+                    f"family '{fam_name}' proxy knob: unknown key '{knob}' "
+                    f"(known: {', '.join(PROXY_KNOWN_KNOBS)})")
+                continue
+            val = knobs[knob]
+            if knob == "routing":
+                if val not in PROXY_ROUTING_POLICIES:
+                    errors.append(_routing_value_error(val))
+                else:
+                    declared_policy[str(fam_name)] = str(val)
+                continue
+            if knob in PRO_INERT_KNOBS:
+                _reject_non_int(knob, val, label, errors)
+                # §8: recording it is not promising it. Name the status so a
+                # template author reading `validate` output cannot mistake
+                # acceptance for enforcement.
+                warnings.append(
+                    f"{label}.{knob}: recorded, INERT — see the §8 knob "
+                    f"enforcement table ('weight' is ignored by the balancer; "
+                    f"the per-deployment knobs need sparkrun's §4.3 "
+                    f"pass-through hook)")
+
+    # §2.2 — the shipped toggle is GLOBAL. Two policies are not expressible
+    # today and the spec refuses to invent a mechanism.
+    if len(set(declared_policy.values())) > 1:
+        disagree = ", ".join(f"'{f}': {p}"
+                             for f, p in sorted(declared_policy.items()))
+        errors.append(f"proxy: balancing is global today — families disagree "
+                      f"({disagree}); declare one value")
+
+
+def _balancer_not_a_strategy_error(knob: Any) -> str:
+    """§5 row 4 — the balancer written where a LiteLLM strategy belongs."""
+    return (f"proxy knob '{knob}': the balancer is not a LiteLLM routing "
+            f"strategy — LiteLLM 1.82.6 admits only "
+            f"{' / '.join(LITELLM_ROUTING_STRATEGIES)}, and least-busy is "
+            f"broken there (its in-flight counter is never incremented on the "
+            f"async path); use 'routing: least-in-flight'")
+
+
+def _routing_value_error(val: Any) -> str:
+    """§5 row 5 — `routing:` with a value that is not the shipped toggle."""
+    text = str(val)
+    if text in BALANCER_NAME_SPELLINGS:
+        # The name is right but the slot is wrong somewhere else in the value.
+        return _balancer_not_a_strategy_error(text)
+    if text == "least-busy":
+        # Rejected on its own merits, not just as a Literal member: 1.82.6's
+        # in-flight counter is incremented only from a sync hook
+        # Router.acompletion never calls, so every deployment reads 0 and the
+        # tie goes to the first model_list entry.
+        return ("proxy knob 'routing': 'least-busy' is broken on LiteLLM "
+                "1.82.6 (its in-flight counter is never incremented on the "
+                "async path, so every deployment reads 0 and the tie goes to "
+                "the first model_list entry); use 'routing: least-in-flight'")
+    return (f"proxy knob 'routing': expected "
+            f"{' or '.join(repr(p) for p in PROXY_ROUTING_POLICIES)}, got "
+            f"{text!r}")
+
+
+def _reject_non_int(knob: str, val: Any, label: str,
+                    errors: List[str]) -> None:
+    """A knob whose value must be an int (bool is NOT an int here: `weight:
+    true` is a typo for a weight, not a 1)."""
+    if isinstance(val, bool) or not isinstance(val, int):
+        errors.append(f"{label}.{knob}: expected an integer, got {val!r}")
+
+
+def _validate_caps_block(tpl: Any, errors: List[str],
+                         warnings: List[str]) -> None:
+    """§3/§5 — the `caps:` block: int-only values, positive divisor.
+
+    §3.1's derivation is ADVISORY (its inputs are INERT per §8), so this layer
+    computes it, warns about a shadowed derivation, and never treats it as a
+    ceiling. Derivation and shadowing are reported; explicit `caps.*` always
+    wins.
+    """
+    block = tpl.caps
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        errors.append(f"caps: expected a mapping, got {type(block).__name__}")
+        return
+
+    for k in block:
+        if k not in KNOWN_CAPS_KEYS:
+            errors.append(f"caps: unknown key '{k}' (known: "
+                          f"{', '.join(KNOWN_CAPS_KEYS)})")
+            continue
+        val = block[k]
+        if k == "expected_requests_per_card":
+            # A float divisor is legitimate (a card may hold ~1.5 requests in
+            # another workload shape); int-valued knobs are not.
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                errors.append(f"caps.{k}: expected a number, got {val!r}")
+            elif val <= 0:
+                errors.append(f"caps.{k}: must be > 0, got {val!r}")
+            continue
+        if isinstance(val, bool) or not isinstance(val, int):
+            errors.append(f"caps.{k}: expected an integer, got {val!r}")
+
+    # §3.1 — derive-and-report. Only when the cap itself was not declared and
+    # some family declared a per-backend parallelism.
+    derived = derived_max_in_progress(tpl)
+    if derived is None:
+        return
+    declared = block.get("max_in_progress") if isinstance(block, dict) else None
+    if declared is not None and isinstance(declared, int) and not isinstance(declared, bool):
+        warnings.append(
+            f"caps.max_in_progress: declared {declared} wins over derived "
+            f"{derived[0]} (derived {derived[1]}); the derivation is a "
+            f"starting point, and it is ADVISORY while "
+            f"max_parallel_requests is INERT (§8)")
+    else:
+        warnings.append(
+            f"caps.max_in_progress not declared: derived {derived[0]} "
+            f"({derived[1]}) — reported, not written (advisory while "
+            f"max_parallel_requests is INERT, §8)")
+
+
+def derived_max_in_progress(tpl: Any) -> Optional[Tuple[int, str]]:
+    """§3.1 — ``floor(sum(N over declared backends) / expected_requests_per_card)``.
+
+    Returns ``(value, human_basis)`` or None when no family declares
+    `max_parallel_requests` (then there is nothing to derive from). Pure and
+    read-only; the value is ADVISORY — §8 marks its only input INERT, so this
+    is a plan value, not a physical ceiling.
+    """
+    fams = (tpl.proxy or {}).get("families") if isinstance(tpl.proxy, dict) else None
+    if not isinstance(fams, dict):
+        return None
+    total = 0
+    backends = 0
+    for knobs in fams.values():
+        if not isinstance(knobs, dict):
+            continue
+        n = knobs.get("max_parallel_requests")
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            total += n
+            backends += 1
+    if backends == 0:
+        return None
+    divisor = 1
+    caps = tpl.caps if isinstance(tpl.caps, dict) else {}
+    raw_div = caps.get("expected_requests_per_card")
+    if isinstance(raw_div, (int, float)) and not isinstance(raw_div, bool) and raw_div > 0:
+        divisor = raw_div
+    value = int(math.floor(total / divisor))
+    # The basis names the INPUTS, never restates the result — the caller writes
+    # "derived <value> from <basis>". The spec's illustrative example line is
+    # prose ("derived 6 from 4 backends x 2"); this is the same information in a
+    # form a test can pin and a human can re-derive by hand.
+    basis = f"{backends} declared backends"
+    if divisor != 1:
+        basis += f" / {raw_div} requests per card"
+    return value, basis
+
+
+def declaration_summary(tpl: Any) -> str:
+    """§7 — the one-line `validate` summary of the declared blocks.
+
+    The spec's example line is the contract::
+
+        proxy: 2 families, balancing=least-in-flight (global); endpoints: chat
+        family-coding, delegation family-coding, profiles default->family-coding;
+        caps: max_in_progress=6 (declared; derived 6 from 4 backends x 2)
+
+    Wording notes: ``->`` and ``x`` instead of the arrows/multiplication sign
+    are deliberate, so the line is stable under a non-UTF8 locale and through
+    the ANSI-stripped render path. The INERT/ADVISORY labels (§8) belong to the
+    warnings, never here: a summary must not read as a promise.
+    """
+    parts: List[str] = []
+
+    fams = (tpl.proxy or {}).get("families") if isinstance(tpl.proxy, dict) else None
+    if isinstance(fams, dict) and fams:
+        policies = {str(v.get("routing")) for v in fams.values()
+                    if isinstance(v, dict) and v.get("routing")}
+        pol = ", ".join(sorted(policies)) or "default"
+        parts.append(f"proxy: {len(fams)} families, balancing={pol} (global)")
+
+    ep = tpl.endpoints if isinstance(tpl.endpoints, dict) else None
+    if ep:
+        seg = [f"chat {ep['chat']}" if ep.get("chat") else None,
+               f"delegation {ep['delegation']}" if ep.get("delegation") else None]
+        profs = ep.get("profiles")
+        if isinstance(profs, dict) and profs:
+            seg.append("profiles " + ", ".join(
+                f"{sel}->{tgt}" for sel, tgt in profs.items()))
+        parts.append("endpoints: " + ", ".join(s for s in seg if s))
+
+    caps = tpl.caps if isinstance(tpl.caps, dict) else None
+    derived = derived_max_in_progress(tpl)
+    if caps:
+        declared = caps.get("max_in_progress")
+        seg = []
+        if declared is not None:
+            how = "declared"
+            if derived:
+                how += f"; derived {derived[0]} from {derived[1]}"
+            seg.append(f"max_in_progress={declared} ({how})")
+        elif derived:
+            seg.append(f"max_in_progress=derived {derived[0]} ({derived[1]})")
+        per_profile = caps.get("max_in_progress_per_profile")
+        if per_profile is not None:
+            seg.append(f"max_in_progress_per_profile={per_profile}")
+        if not seg:
+            seg.append(f"declared {sorted(caps)}")
+        parts.append("caps: " + "; ".join(seg))
+    elif derived:
+        v, basis = derived
+        parts.append(f"caps: max_in_progress=derived {v} ({basis}); "
+                     f"advisory — INERT input (§8)")
+
+    return "; ".join(parts)
 
 
 def _structural_validate(raw: dict, tpl: Any,
@@ -1435,6 +1882,16 @@ def _structural_validate(raw: dict, tpl: Any,
     if tpl.routing is not None:
         defined_units = {"orchestrator"} | {f"family-{f.name}" for f in tpl.families}
         for consumer, target in tpl.routing.items():
+            # §5 row 1 extends the address rule to `routing` too: under
+            # uniform_pool a host or host:port target here is the same node pin
+            # the endpoints block forbids. Non-uniform routing keeps today's
+            # behaviour exactly (v3 templates are unaffected).
+            if tpl.uniform_pool and _target_is_address(str(target)):
+                errors.append(
+                    f"routing.{consumer} -> '{target}': uniform_pool endpoints "
+                    f"must name a family (family-<name>) or 'orchestrator', "
+                    f"never an address")
+                continue
             if target in defined_units:
                 continue
             if target.startswith("family-"):
@@ -1445,6 +1902,11 @@ def _structural_validate(raw: dict, tpl: Any,
                 errors.append(
                     f"routing.{consumer} -> '{target}': must be 'orchestrator' "
                     f"or 'family-<name>'")
+
+    # ── v4 declarations: endpoints / proxy / caps (spec §5) ───────────────
+    _validate_endpoints_block(tpl, errors, warnings)
+    _validate_proxy_block(tpl, errors, warnings)
+    _validate_caps_block(tpl, errors, warnings)
 
     return errors, warnings
 

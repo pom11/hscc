@@ -117,9 +117,20 @@ class TestStructuralErrors:
                    for e in errs)
 
     def test_version_unrecognised_fires(self):
+        d = self._base(version=5)
+        errs, _ = self._check(d, COMPUTE)
+        assert any("version 5: unrecognised" in e for e in errs)
+
+    def test_version_4_is_recognised(self):
+        """t_401e3045 / spec §1.6: RECOGNISED_VERSIONS became (2, 3, 4), so a v4
+        template that merely carries the new declaration blocks is NOT rejected
+        on version. The pre-change expectation here was 'version 4:
+        unrecognised' — that behaviour was the gap this card closes, and this
+        pin is what replaces it."""
+        assert ct.RECOGNISED_VERSIONS == (2, 3, 4)
         d = self._base(version=4)
         errs, _ = self._check(d, COMPUTE)
-        assert any("version 4: unrecognised" in e for e in errs)
+        assert not any("unrecognised" in e for e in errs)
 
 
 class TestColocationPermitted:
