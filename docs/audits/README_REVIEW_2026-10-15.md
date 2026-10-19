@@ -306,7 +306,7 @@ prose and must die. `hscc --help`'s own "(flightdeck)" blurb
 | scripts/README LAN scrub + `--deliver desktop` | t_6b51ef5b | **DONE** (verified `:76 :50-51`); model-name line `:96` newly stale | R5 generalize |
 | ios port fix (8787 default / 8788 override) | t_6b51ef5b | **DONE** and still true (live `hscc api status` shows 8788) | keep |
 | t_1c1bf5f1 `--deliver desktop` silent no-op | t_6b51ef5b child | code-side fixed per root README `:272` (direct desktop notify) | none |
-| scripts/*.sh hardcode real LAN IPs (public repo) | t_6b51ef5b | **OPEN, not README scope** — live probes; operator decision | re-surface to operator; do not fold into R-cards |
+| scripts/*.sh hardcode real LAN IPs (public repo) | t_6b51ef5b | **CLOSED 2026-10-19 (operator verdict)** — `address_guard --tracked` rc=0 on current main; no `192.168.*` anywhere in `scripts/*.sh`. Only LAN-shaped literal is `scripts/hscc_cluster_digest.sh:19` (`10.0.0.244/246/247/248`), which is the sanctioned `10.0.0.x` placeholder range — guard-clean by design | none — do not fold into R-cards |
 | operator brief claim: "templates/README EMPTY — 0 lines" | this card's brief | **NOT TRUE on this base** — `hscc-cluster/templates/README.md` = 302 lines (last touched 2026-09-25). The genuinely README-less template dirs are `hscc-project/flightdeck/templates/` (prompt md files) and `docs/template-examples/` (2 yaml examples) | R5: if R5 wants a README somewhere, write `docs/template-examples/README.md` (2 yaml files, no index); do not "write" over the existing 302-line reference |
 
 ## 5. Sequencing / collision notes
