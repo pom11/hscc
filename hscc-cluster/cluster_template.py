@@ -952,6 +952,29 @@ def preview_template(template_name: str, *, _http_get=None) -> dict:
         out["routing"] = routing_disc["routing"]
         out["routing_untouched"] = routing_disc["routing_untouched"]
 
+    # Endpoints disclosure (v4 §1.5): the same helpers `_apply_endpoints` uses,
+    # so the preview cannot advertise a route apply would not write. Only the
+    # DECLARED consumers appear — a defaulted or omitted one is not a change the
+    # operator is about to make. Read-only: probing /v1/models is a GET.
+    ep_rows = _preview_endpoints(resolved, _endpoints_decision(resolved),
+                                 _http_get=_http_get)
+    if ep_rows:
+        out["endpoints"] = ep_rows
+
+    # Balancer disclosure: what proxy.yaml region apply would write through
+    # sparkrun, and whether that would require the operator restart unit. The
+    # preview NEVER writes and NEVER restarts.
+    bal_policy, bal_source = balancing_declaration(tpl, resolved)
+    if bal_policy is not None:
+        out["proxy_balancing"] = {
+            "policy": bal_policy, "source": bal_source,
+            "region": ".".join(BALANCING_REGION) + ".balancing",
+            "note": ("written through sparkrun's own ProxyConfig write path; a "
+                     "changed policy needs the operator proxy restart unit "
+                     "(docs/audits/sparkrun_proxy_venv_cutover.sh) — apply "
+                     "never restarts the proxy"),
+        }
+
     # Unit-level delta — the concrete "what will actually change" the operator
     # cannot see from file summaries alone. Diff the LIVE serving.json units
     # against the resolved NEW serving units so the preview names which units
@@ -1097,6 +1120,13 @@ def apply_template(template_name: str, confirm: bool = False,
         raise TemplateValidationError(problems)
 
     result = {"template": tpl.name, "steps": [], "success": True}
+    # The v4 declaration results, initialised so the applied-state write below
+    # can always name them (an exception path never reaches that write, but the
+    # names must be bound for the code to read cleanly).
+    ep_decision: Optional[dict] = None
+    ep: dict = {}
+    px: dict = {}
+    cp: dict = {}
 
     # Snapshot the live state BEFORE any write, so a half-completed apply can be
     # rolled back atomically (G4/5e — we corrupted a live cluster once this way).
@@ -1123,11 +1153,44 @@ def apply_template(template_name: str, confirm: bool = False,
         write_json(MODELS_JSON, models, backup=True)
         result["steps"].append({"step": "models.json", "status": "ok", "models": len(models["models"])})
 
-        # Step 3: Update Hermes config.yaml
+        # Step 3: Update Hermes config.yaml. The v4 `endpoints:` decision is
+        # computed ONCE here (spec §1.2 "one computation point") from the
+        # resolved plan and threaded to every consumer on the apply path, so no
+        # routing decision is computed outside the declared block. None = the
+        # §1.3 exemption (no block, non-uniform) — every consumer then takes its
+        # historical path byte-for-byte (§7).
+        ep_decision = _endpoints_decision(plan)
         _, config_changed = atomic_yaml_update(
-            CONFIG_YAML, lambda d: _update_hermes_config(d, plan, _http_get=_http_get))
+            CONFIG_YAML, lambda d: _update_hermes_config(
+                d, plan, _http_get=_http_get, decision=ep_decision))
         result["steps"].append({"step": "config.yaml", "status": "ok",
                                 "changed": config_changed})
+
+        # Step 3b: Write the declared proxy regions (§2.3) through sparkrun's own
+        # write path, BEFORE the proxies start so a freshly started proxy reads
+        # the declared policy. Never hand-crafts proxy.yaml / litellm_config.yaml,
+        # and never restarts anything (§2.3 restart rule + addendum item 4).
+        #
+        # A FAILED WRITE is only fatal for a DECLARED policy: a template that
+        # states balancer intent must not have that intent dropped in silence.
+        # The uniform_pool DEFAULT is an operator-blessed preference the template
+        # never mentioned, so when the write path is unreachable it is reported
+        # and the apply still succeeds — an untouched old template must not
+        # newly fail to apply because a preference could not be written.
+        px = _apply_proxy_declaration(tpl, plan)
+        proxy_step = {
+            "step": "proxy-declaration",
+            "status": ("warn" if px["error"] and px["source"] == "declared"
+                       else "ok"),
+            "balancing": px["policy"],
+            "source": px["source"],
+            "written": px["written"],
+            "changed": px["changed"],
+            "restart_required": px["restart_required"],
+            "inert_recorded": px["inert_recorded"],
+            "note": px["note"] if not px["error"] else px["error"],
+        }
+        result["steps"].append(proxy_step)
 
         # Step 4: Start native sparkrun proxy (per resolved family)
         # The native proxy auto-discovers running endpoints and generates its own
@@ -1154,12 +1217,22 @@ def apply_template(template_name: str, confirm: bool = False,
         # fallback_providers; worker role profiles' model.default) to the family
         # model. A worker-tier switch otherwise leaves stale model ids behind,
         # so every worker hits the strict proxy with an invalid model name.
-        # When the template carries a routing: block, that block is the SOLE
-        # authority for the delegation consumer, so Step 5's delegation/fallback
-        # rewrite is skipped (routing handles present; omission means untouched).
-        # Profiles still rewritten — routing has no 'profiles' consumer.
-        wm = _update_worker_model_ids(plan, skip_delegation=(tpl.routing is not None),
-                                      _http_get=_http_get)
+        #
+        # Who owns the delegation consumer (§1.5 — this REPLACES the old
+        # "routing block present" heuristic): when the template declares
+        # `endpoints:`, that block decides per consumer. A DECLARED delegation is
+        # written by Step 5c (which runs last, so `endpoints:` wins over
+        # `routing:` per §1.4); an OMITTED one is left untouched by every step.
+        # With no `endpoints:` block the rule is exactly what it was: a routing
+        # block owns the consumer, otherwise this legacy re-aim does.
+        delegation_entry = (ep_decision or {}).get("delegation")
+        endpoints_owns_delegation = ep_decision is not None and (
+            delegation_entry is None
+            or delegation_entry.get("source") == "declared")
+        wm = _update_worker_model_ids(
+            plan, skip_delegation=(endpoints_owns_delegation
+                                   or tpl.routing is not None),
+            _http_get=_http_get)
         result["steps"].append({
             "step": "worker-model-ids",
             "status": "ok",
@@ -1185,6 +1258,40 @@ def apply_template(template_name: str, confirm: bool = False,
             "keys_written": ro["keys_written"],
             "config_changed": ro["changed"],
             "notes": ro["notes"],
+        })
+
+        # Step 5c: Apply the DECLARED endpoint consumers (§1.2 rows 5 + 7). Runs
+        # AFTER routing so `endpoints:` wins for a consumer both blocks name
+        # (§1.4 — validate already warned about the shadowing). Writes only what
+        # the template DECLARED; default/legacy entries are no-ops here, which is
+        # what keeps an untouched template byte-identical (§7).
+        ep = _apply_endpoints(plan, ep_decision, _http_get=_http_get)
+        if ep["changed"]:
+            config_changed = True
+        result["steps"].append({
+            "step": "endpoints",
+            "status": "ok",
+            "keys_written": ep["keys_written"],
+            "config_changed": ep["changed"],
+            "notes": ep["notes"],
+            # §1.5: the report shows which family each consumer was pointed at
+            # and the probe status that gated each write.
+            "resolved": ep["resolved"],
+        })
+
+        # Step 5d: Write DECLARED kanban caps (§3). Explicit values only — the
+        # §3.1 derivation is derive-and-REPORT (advisory; its input is INERT),
+        # so a derived cap is printed, never written.
+        cp = _apply_caps_declaration(tpl)
+        result["steps"].append({
+            "step": "caps",
+            "status": "ok",
+            "written": cp["written"],
+            "changed": cp["changed"],
+            "keys": cp["keys"],
+            "declared": cp["declared"],
+            "derived": cp["derived"],
+            "note": cp["note"],
         })
 
         # Step 6: Provision models via sparkrun
@@ -1255,11 +1362,70 @@ def apply_template(template_name: str, confirm: bool = False,
                 # applies; a state written before this field existed reads as
                 # False there (non-uniform = check skipped, documented).
                 "uniform_pool": bool(getattr(plan, "uniform_pool", False)),
+                # §7: "applied_template.json records the resolved declarations
+                # (targets + knob values) alongside uniform_pool, so doctor's
+                # 'applied template's declared X' always reads ONE file." Only
+                # present when the template declared something — a pre-v4 apply
+                # writes the same keys it always did (byte-identity).
+                **_applied_declaration_record(tpl, plan, ep_decision, ep, px, cp),
             }, backup=False)
         except Exception:
             pass
 
     return result
+
+
+def _applied_declaration_record(tpl: Any, plan: Any, decision: Optional[dict],
+                                endpoints_result: dict, proxy_result: dict,
+                                caps_result: dict) -> dict:
+    """The v4 declaration block for ``applied_template.json`` (§7).
+
+    Doctor's contract is "the applied template's declared X" read from ONE file,
+    so what apply RESOLVED is recorded next to what the template declared —
+    including the probe status that gated each write, so a consumer that was
+    refused is visible in the record instead of silently absent.
+
+    Returns ``{}`` when the template declared nothing new: an old template's
+    applied state must stay exactly the keys it has always had (§7 byte-
+    identity — `uniform_pool` is recorded separately and unchanged).
+    """
+    declared_endpoints = isinstance(getattr(tpl, "endpoints", None), dict)
+    declared_proxy = isinstance(getattr(tpl, "proxy", None), dict)
+    declared_caps = isinstance(getattr(tpl, "caps", None), dict)
+    if not (declared_endpoints or declared_proxy or declared_caps):
+        # An untouched uniform_pool template still gains balancer/caps intent
+        # from the DEFAULTS, and doctor must be able to tell the applied state
+        # apart — but recording anything here would change the shape of an old
+        # template's record, so the default-only case stays empty and the C3
+        # doctor reads `uniform_pool` for that case.
+        return {}
+
+    record: dict = {}
+    if declared_endpoints:
+        record["endpoints"] = {
+            "declared": tpl.endpoints,
+            "mode": (decision or {}).get("mode"),
+            "resolved": (endpoints_result or {}).get("resolved", {}),
+        }
+    if declared_proxy:
+        record["proxy"] = {
+            "declared": tpl.proxy,
+            "balancing": (proxy_result or {}).get("policy"),
+            "balancing_source": (proxy_result or {}).get("source"),
+            "written": (proxy_result or {}).get("written", False),
+            "restart_required": (proxy_result or {}).get("restart_required",
+                                                         False),
+            # §2.3 item 3 — recorded so the §4.3 hook (and doctor) can see the
+            # intent without proxy.yaml carrying keys sparkrun would drop.
+            "inert": (proxy_result or {}).get("inert_recorded", []),
+        }
+    if declared_caps:
+        record["caps"] = {
+            "declared": tpl.caps,
+            "written_keys": (caps_result or {}).get("keys", []),
+            "derived": (caps_result or {}).get("derived"),
+        }
+    return record
 
 
 def applied_status() -> dict:
@@ -2073,7 +2239,210 @@ def _carry_serve_cmds(serving: dict) -> int:
     return carried
 
 
-def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
+# ── v4 `endpoints:` — the ONE computation point (spec §1.2/§1.3/§1.5) ───────
+#
+# §1.2's invariant is that no routing decision is computed outside the declared
+# block: "chat_url and the probe-resolved alias are decided ONCE from endpoints:
+# at the top of _update_hermes_config; both consumers read that single value".
+# Everything below exists to make that true, and it computes DECISIONS (target +
+# URL + model candidate) only — the probe-before-write gate stays where it has
+# always been, at the write.
+#
+# §1.3 is the exemption that keeps old templates byte-identical (§7): a template
+# that is NOT uniform_pool and declares NO `endpoints:` gets ``None`` from
+# ``_endpoints_decision``, and every consumer then takes its historical path.
+# Under uniform_pool the ABSENT block resolves to the §1.3 default (every
+# consumer → the family that owns the worker proxy), which is behaviour-
+# preserving: it is precisely what t_ac795424 made apply compute.
+
+# The two §1.2 consumers `endpoints:` addresses directly (plus `profiles:`).
+ENDPOINT_CONSUMERS = ("chat", "delegation")
+
+
+def _profile_name_from_path(pfile: Any) -> str:
+    """The role-profile name for ``<profiles>/<name>/config.yaml``."""
+    return Path(pfile).parent.name
+
+
+def _proxy_front_for_target(target: str, plan: Any) -> Optional[Tuple[str, str]]:
+    """``(base_url, model_candidate)`` for the PROXY of a symbolic target.
+
+    ``proxy-alias`` doctrine (§1.2): a target resolves to its family's proxy URL
+    and the alias that proxy answers to — never a node address. ``orchestrator``
+    under uniform_pool is the POOL, so it resolves to the same proxy front the
+    chat consumer uses (every pool unit advertises both aliases), which is what
+    §1.3's "all consumers → the worker-proxy-owning family" means.
+    """
+    if target == "orchestrator":
+        front = _owned_worker_family(plan) or next(
+            (f for f in plan.families if f.proxy_port is not None and f.units), None)
+        if front is None:
+            return None
+        return (f"http://localhost:{front.proxy_port}/v1",
+                _unit_alias(plan.orchestrator, plan))
+    if target.startswith("family-"):
+        fam = next((f for f in plan.families
+                    if f.name == target[len("family-"):]), None)
+        if fam is None or fam.proxy_port is None or not fam.units:
+            return None
+        return (f"http://localhost:{fam.proxy_port}/v1",
+                _family_provider_alias(fam, plan))
+    return None
+
+
+def _endpoint_resolution(target: str, plan: Any, *, proxy_alias: bool) -> dict:
+    """Resolve one declared target to what apply would write for it.
+
+    ``proxy_alias`` mode routes through the family proxy only (§1.2). ``explicit``
+    mode (a non-uniform template that DID declare the block) keeps the historical
+    target semantics of `routing:` — an address/orchestrator target is legitimate
+    there (§1.3: "omitting an endpoint means leave it as tuned, not route it") —
+    by reusing ``_routing_target_endpoint``, the same resolver `routing:` uses, so
+    the two blocks can never disagree about what a target means.
+    """
+    if proxy_alias:
+        resolved = _proxy_front_for_target(target, plan)
+        if resolved is None:
+            return {"target": target, "url": None, "candidate": None,
+                    "reason": "no proxy for target"}
+        url, candidate = resolved
+        return {"target": target, "url": url, "candidate": candidate,
+                "reason": None}
+    try:
+        url, candidate = _routing_target_endpoint(target, plan)
+    except _ti().TemplateIntentError as exc:
+        return {"target": target, "url": None, "candidate": None,
+                "reason": str(exc)}
+    return {"target": target, "url": url, "candidate": candidate, "reason": None}
+
+
+def _endpoints_decision(plan: Any) -> Optional[dict]:
+    """The declared routing decisions for this plan, or None = legacy behavior.
+
+    Reads the declaration off the RESOLVED plan (C1 put ``endpoints`` there for
+    exactly this reason: the writer must not re-read the template file from
+    disk). Returns ``None`` ONLY for the §1.3 exemption (no `endpoints:` block on
+    a non-uniform template) — that is the byte-identity door §7 pins, so nothing
+    may widen it. Otherwise a dict::
+
+        {"mode": "proxy-alias" | "explicit",
+         "chat":       {"source": "declared"|"default", ...resolution},
+         "delegation": ditto, or None when OMITTED (leave untouched),
+         "profiles":   {profile_name: ditto},
+         "untouched":  [consumer whose declaration is omitted]}
+
+    ``source`` is what the apply report and `applied_template.json` show, so
+    "declared" vs "defaulted" is visible instead of folklore. A ``default`` entry
+    is deliberately pinned to what apply computed BEFORE this feature existed
+    (including the orchestrator-alias model candidate for ``chat``), so an
+    untouched uniform_pool template renders exactly as it does today.
+    """
+    block = getattr(plan, "endpoints", None)
+    block = block if isinstance(block, dict) else None
+    uniform = bool(getattr(plan, "uniform_pool", False))
+    if block is None and not uniform:
+        return None                              # §1.3 exemption — legacy path
+
+    proxy_alias = (block or {}).get("mode") != "explicit"
+    # §1.3 default target under uniform_pool: the family that owns the proxy.
+    default_fam = _owned_worker_family(plan) if uniform else None
+    default_target = (f"family-{default_fam.name}" if default_fam is not None
+                      else "orchestrator")
+
+    decision: dict = {"mode": "proxy-alias" if proxy_alias else "explicit",
+                      "chat": None, "delegation": None, "profiles": {},
+                      "untouched": []}
+
+    for consumer in ENDPOINT_CONSUMERS:
+        declared = block.get(consumer) if block else None
+        if declared is None:
+            if not uniform:
+                if consumer == "delegation":
+                    # §1.5: with a declared block, an OMITTED delegation means
+                    # untouched — apply's legacy re-aim must not write it.
+                    decision["untouched"].append(consumer)
+                    continue
+                # chat has no "untouched" state: the model block is always
+                # written by the writer below (it always has been). Recording it
+                # as legacy keeps the disclosure honest instead of implying
+                # apply left the model block alone.
+                decision["chat"] = {"source": "legacy", "target": None,
+                                    "url": None, "candidate": None,
+                                    "reason": None}
+                continue
+            source, target = "default", default_target
+        else:
+            source, target = "declared", declared
+        entry = dict(_endpoint_resolution(target, plan,
+                                          proxy_alias=proxy_alias), source=source)
+        if source == "default" and consumer == "chat" and entry["url"]:
+            # The pre-declaration writer probed the ORCHESTRATOR alias at the
+            # pool proxy (every pool unit advertises both aliases). Keep that
+            # candidate so an untouched uniform_pool template writes the same
+            # model id it writes today.
+            entry["candidate"] = _unit_alias(plan.orchestrator, plan)
+        decision[consumer] = entry
+
+    profiles = (block or {}).get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {}
+    for name in _declared_profile_names(plan):
+        selector, target = _match_profile_selector(profiles, name)
+        if target is None:
+            # Nothing in the declaration names this profile: the historical
+            # intent-based heuristics stay in charge (§1.3 — "omitting an
+            # endpoint means leave it as tuned, not route it"; under
+            # uniform_pool that is the worker/orch role re-aim t_ac795424
+            # established, and reproducing it exactly is what keeps an
+            # untouched uniform_pool template byte-identical).
+            decision["profiles"][name] = {"source": "legacy", "target": None,
+                                          "url": None, "candidate": None,
+                                          "reason": None}
+            continue
+        entry = dict(_endpoint_resolution(target, plan,
+                                          proxy_alias=proxy_alias),
+                     source="declared", selector=selector)
+        decision["profiles"][name] = entry
+    return decision
+
+
+def _declared_profile_names(plan: Any) -> List[str]:
+    """Role-profile names apply may target: ``default`` plus every unit role.
+
+    Same vocabulary the historical profile heuristics keyed on (a profile's role
+    is its directory name; ``*-orch`` profiles are the orchestrator role).
+    """
+    names = ["default"]
+    for u in getattr(plan, "all_units", []) or []:
+        role = getattr(u, "role", None)
+        if role and role not in names:
+            names.append(role)
+    return names
+
+
+def _match_profile_selector(profiles: Dict[str, Any],
+                            name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Find the selector governing role-profile ``name``.
+
+    An exact selector wins; otherwise the first glob that matches (fnmatch, the
+    same vocabulary the schema documents: ``"*-orch"``). ``default`` is the
+    fallback for any profile whose role is not listed (§1.1) and never matches a
+    profile literally named ``default`` by glob accident.
+    """
+    import fnmatch
+    if name in profiles:
+        return name, profiles[name]
+    for sel, target in profiles.items():
+        if sel == "default" or not isinstance(sel, str):
+            continue
+        if fnmatch.fnmatchcase(name, sel):
+            return sel, target
+    default = profiles.get("default")
+    return (None, default)
+
+
+def _update_hermes_config(config: dict, plan: Any, *, _http_get=None,
+                          decision: Optional[dict] = None) -> dict:
     """Update Hermes config.yaml providers from a resolved plan.
 
     Idempotent: providers keyed by name and rebuilt, so re-running apply never
@@ -2096,10 +2465,17 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     carries its units' alias as ``model.default`` — a model id, never a
     host:port. The pool's proxy is hermes' only chat route; a direct node URL
     here bypasses routing and dies with the node. Non-uniform plans keep the
-    historical direct-node ``custom`` entry byte-for-byte."""
+    historical direct-node ``custom`` entry byte-for-byte.
+
+    ``decision`` (from ``_endpoints_decision``) is the v4 single computation
+    point: when present, ``model.base_url`` / ``custom.base_url`` / the probe
+    candidate come from the DECLARED chat target and nothing computes a chat
+    route here. ``None`` is the §1.3 exemption and takes the historical path
+    below verbatim — that is the byte-identity §7 pins."""
     o = plan.orchestrator
     orch_url = f"http://{o.node}:{o.port}/v1"
 
+    # ── The chat decision (spec §1.2: computed ONCE, read by both consumers) ──
     # Under a uniform_pool template EVERY unit advertises the orchestrator
     # alias, so pinning chat to the one nominal orchestrator node wastes the
     # pool and leaves chat with no redundancy: that node dying takes chat with
@@ -2107,28 +2483,55 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     # proxy instead, which load-balances the same alias across all of them.
     # Non-uniform templates keep the pinned orchestrator endpoint exactly as
     # before — the role split is real there.
-    chat_url = orch_url
-    _pool_fam = None
-    if getattr(plan, "uniform_pool", False):
-        _pool_fam = _owned_worker_family(plan)
-        if _pool_fam is not None:
-            chat_url = f"http://localhost:{_pool_fam.proxy_port}/v1"
+    chat_candidate = _unit_alias(o, plan)
+    # §7/§1.3 byte-identity rule: the decision OVERRIDES a consumer only when
+    # the template DECLARED it (source "declared"). A source-"default" entry
+    # exists to REPORT what apply computes by default (what §1.3 calls
+    # "naming what apply already did") — the computation itself stays on the
+    # historical path, so an old template cannot render a different byte even
+    # in a degenerate corner (e.g. uniform_pool with no proxy-owning family).
+    chat = (decision or {}).get("chat") or {}
+    chat_declared = decision is not None and chat.get("source") == "declared"
+    if not chat_declared:
+        chat_url = orch_url
+        _pool_fam = None
+        if getattr(plan, "uniform_pool", False):
+            _pool_fam = _owned_worker_family(plan)
+            if _pool_fam is not None:
+                chat_url = f"http://localhost:{_pool_fam.proxy_port}/v1"
+        chat_refused = None
+        alias_custom = _pool_fam is not None
+    else:
+        chat_url = chat.get("url")
+        chat_refused = chat.get("reason") if chat_url is None else None
+        if chat.get("candidate"):
+            chat_candidate = chat["candidate"]
+        # proxy-alias mode is what makes the custom entry alias-valued;
+        # `explicit` mode means the operator accepted a concrete endpoint.
+        alias_custom = (decision or {}).get("mode") == "proxy-alias"
 
     # ── Top-level model block ────────────────────────────────────────
     model_cfg = config.setdefault("model", {})
-    model_cfg["base_url"] = chat_url
+    # A chat target that cannot resolve to a proxy front is REFUSED (§1.2
+    # probe-before-write doctrine, one level up): write nothing rather than
+    # re-introduce the node pin the declaration exists to remove.
+    if chat_refused is None:
+        model_cfg["base_url"] = chat_url
     # Preserve existing provider; default to "custom" if absent
     if "provider" not in model_cfg:
         model_cfg["provider"] = "custom"
 
     # PROBE-BEFORE-WRITE for model.default (same guard as the routing and worker
-    # paths). Candidate = the orchestrator's stable alias; write the alias when
-    # the orchestrator endpoint advertises it, else the single concrete id it
+    # paths). Candidate = the declared chat target's stable alias; write the
+    # alias when the endpoint advertises it, else the single concrete id it
     # serves, else leave model.default untouched — never write an id the
     # endpoint cannot resolve.
-    status, served = _probe_served_models(chat_url, _http_get=_http_get)
+    if chat_refused is None:
+        status, served = _probe_served_models(chat_url, _http_get=_http_get)
+    else:
+        status, served = "refused", []
     resolved = _resolve_worker_model_id(
-        _unit_alias(o, plan), served if status == "ok" else [])
+        chat_candidate, served if status == "ok" else [])
     if resolved is not None:
         model_cfg["default"] = resolved
 
@@ -2151,7 +2554,14 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     # existing entry's default rather than invent an id the endpoint does not
     # serve). Writing the node URL here re-infected a config the model block
     # had just been corrected (operator report 2026-10-15).
-    if getattr(plan, "uniform_pool", False) and _pool_fam is not None:
+    #
+    # With a v4 decision the SAME single value rule holds for whatever target
+    # `endpoints.chat` declared (§1.2 row 2: "literally the same value, not a
+    # second crafted URL") — only the alias-vs-direct SHAPE of the legacy
+    # fallback changes; the probe-before-write result does not.
+    if chat_refused is not None:
+        pass  # declared chat target has no endpoint — leave the entry untouched
+    elif decision is not None or alias_custom:
         custom: dict = {"name": "custom", "base_url": chat_url}
         default = resolved
         if default is None and isinstance(by_name.get("custom"), dict):
@@ -2458,9 +2868,54 @@ def _set_orchestrator_profile_to_pool(config: dict, pool_url: str,
     return config
 
 
+def _declared_profile_write(config: dict, model_id: str,
+                            url: str) -> dict:
+    """Point one role profile's model block at its declared endpoint.
+
+    Both keys move together — ``model.base_url`` to the declared URL and
+    ``model.default`` to the id probe-confirmed at that URL — because a profile
+    aimed at a proxy with the previous family's model id 404s every call (the
+    worker-tier switch footgun this file documents).
+
+    The historical intent guard (``_set_worker_model_in_profile`` refusing
+    ORCH-role profiles, and the base_url gate on every one) is deliberately NOT
+    applied here: it exists because URL matching could not tell an orchestrator
+    profile from a worker one. In declared mode the OPERATOR named this
+    profile's target, which is exactly the intent that guard was approximating.
+    A profile the declaration does not name keeps the guarded legacy path.
+    """
+    model_cfg = config.get("model")
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+        config["model"] = model_cfg
+    if model_cfg.get("base_url") != url:
+        model_cfg["base_url"] = url
+    if model_cfg.get("default") != model_id:
+        model_cfg["default"] = model_id
+    return config
+
+
+def _declared_endpoint_model(url: str, candidate: str, *, _http_get=None,
+                             cache: Optional[dict] = None):
+    """Probe-confirmed model id to write at ``url`` (memoised per apply).
+
+    Same gate as every other write in this file — ``_routing_model_to_write`` —
+    just shared between the delegation and profile consumers of one declared
+    target so a template that points five profiles at one proxy probes it once.
+    """
+    key = (url, candidate)
+    if cache is not None and key in cache:
+        return cache[key]
+    out = _routing_model_to_write(candidate, url, _http_get=_http_get)
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
 def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
                              config_yaml: Optional[Path] = None,
-                             _http_get=None, skip_delegation: bool = False) -> dict:
+                             _http_get=None, skip_delegation: bool = False,
+                             decision: Optional[dict] = None) -> dict:
     """Rewire worker-facing routing to the resolved worker/family model.
 
     Called from ``apply_template`` after config.yaml is written. Two concerns:
@@ -2483,12 +2938,18 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
     is found, nothing is written (the id would 404 every delegated call).
     ``_http_get`` is injectable for tests; default is a real network probe.
 
-    ``skip_delegation=True`` (set by apply_template when the template carries a
-    ``routing:`` block): the config.yaml delegation/fallback rewrite is SKIPPED,
-    because the routing block is then the sole authority for the ``delegation``
-    consumer (a present key routes it; an OMITTED key must leave it untouched —
-    the routing hard requirement). The worker role profiles rewrite still runs:
-    routing has no ``profiles`` consumer, so it cannot express that concern.
+    ``skip_delegation=True`` (set by apply_template when the ``delegation``
+    consumer is governed elsewhere): the config.yaml delegation/fallback rewrite
+    is SKIPPED. Pre-v4 that meant "the template carries a ``routing:`` block",
+    because routing is then the sole authority for the consumer (a present key
+    routes it; an OMITTED key must leave it untouched). v4 extends the same rule
+    to ``endpoints:`` (§1.5): when a block is present and delegation is either
+    DECLARED or deliberately omitted, this legacy heuristic write is skipped and
+    ``_apply_endpoints`` owns the consumer. A source-"default" delegation entry
+    (uniform_pool, nothing declared) still takes this path, which is precisely
+    what apply did before the block existed. The worker role profiles rewrite
+    still runs: routing has no ``profiles`` consumer, and declared profiles are
+    applied after this step so the declaration always wins.
 
     All writes use atomic_yaml_update (backup + tmp + os.replace) and are
     idempotent: re-running apply with an already-correct state changes nothing.
@@ -2724,6 +3185,358 @@ def _apply_routing(tpl: Any, plan: Any, *, config_yaml: Optional[Path] = None,
         if ":refused:" in w or ":error:" in w:
             notes.append(w)
     return {"keys_written": written, "changed": changed, "notes": notes}
+
+
+def _apply_endpoints(plan: Any, decision: Optional[dict], *,
+                     config_yaml: Optional[Path] = None,
+                     profiles_dir: Optional[Path] = None,
+                     _http_get=None) -> dict:
+    """Write the DECLARED endpoint consumers (spec §1.2 rows 5 + 7).
+
+    Runs AFTER the routing step (precedence §1.4: "a key in both — endpoints
+    wins") and after the worker-model re-aim, so the declaration always lands
+    last on the consumers it names. Writes NOTHING for a consumer whose entry
+    has source "default" or "legacy" — those are the §1.3 "leave it as tuned"
+    and "naming what apply already did" cases, and writing them here would be
+    exactly the overreach §7 forbids.
+
+    The model id is probe-confirmed at the target URL by the same gate every
+    other write in this file uses; a target that cannot confirm an id is
+    REFUSED (nothing written) rather than pointed at an endpoint that would 404.
+
+    Returns ``{"keys_written": [...], "changed": bool, "notes": [...],
+    "resolved": {...}}`` — ``resolved`` is the per-consumer disclosure §1.5 asks
+    apply to print ("which family each consumer was pointed at, and the probe
+    status that gated each write").
+    """
+    empty = {"keys_written": [], "changed": False, "notes": [], "resolved": {}}
+    if not decision:
+        return empty
+
+    probe_cache: dict = {}
+    resolved: Dict[str, dict] = {}
+    written: list = []
+    notes: list = []
+    changed_any = False
+
+    delegation = decision.get("delegation")
+    if delegation and delegation.get("source") == "declared":
+        url, candidate = delegation.get("url"), delegation.get("candidate")
+        entry = {"target": delegation.get("target"), "url": url}
+        if url is None:
+            entry.update(model=None, probe="refused",
+                         note=delegation.get("reason"))
+            notes.append(f"delegation:refused:({delegation.get('reason')})")
+        else:
+            model, status, _served = _declared_endpoint_model(
+                url, candidate or "", _http_get=_http_get, cache=probe_cache)
+            entry.update(model=model, probe=status)
+            if model is None:
+                notes.append(f"delegation:refused:({status})")
+            else:
+                conf = config_yaml or CONFIG_YAML
+                _, ch = atomic_yaml_update(
+                    conf, lambda d, m=model, u=url: _set_worker_model_in_config(
+                        d, m, u))
+                changed_any = changed_any or ch
+                written.extend(["delegation.base_url", "delegation.model",
+                                "fallback_providers[].base_url",
+                                "fallback_providers[].model"])
+        resolved["delegation"] = entry
+
+    declared_profiles = {name: prof for name, prof in
+                         (decision.get("profiles") or {}).items()
+                         if prof.get("source") == "declared"}
+    if declared_profiles:
+        pd = profiles_dir or PROFILES_DIR
+        for pfile in sorted(pd.glob("*/config.yaml")):
+            if not pfile.is_file():
+                continue
+            name = _profile_name_from_path(pfile)
+            prof = declared_profiles.get(name)
+            if prof is None:
+                continue
+            url, candidate = prof.get("url"), prof.get("candidate")
+            entry = {"target": prof.get("target"), "url": url,
+                     "selector": prof.get("selector")}
+            if url is None:
+                entry.update(model=None, probe="refused",
+                             note=prof.get("reason"))
+                notes.append(f"profile {name}:refused:({prof.get('reason')})")
+                resolved[f"profiles.{name}"] = entry
+                continue
+            model, status, _served = _declared_endpoint_model(
+                url, candidate or "", _http_get=_http_get, cache=probe_cache)
+            entry.update(model=model, probe=status)
+            if model is None:
+                notes.append(f"profile {name}:refused:({status})")
+            else:
+                _, ch = atomic_yaml_update(
+                    pfile, lambda d, m=model, u=url: _declared_profile_write(
+                        d, m, u))
+                changed_any = changed_any or ch
+                written.append(f"profiles/{name}/config.yaml:model")
+            resolved[f"profiles.{name}"] = entry
+
+    for consumer in decision.get("untouched") or []:
+        resolved[consumer] = {"target": None, "url": None, "model": None,
+                              "probe": "omitted",
+                              "note": "not declared — left untouched"}
+    return {"keys_written": written, "changed": changed_any, "notes": notes,
+            "resolved": resolved}
+
+
+def _preview_endpoints(plan: Any, decision: Optional[dict], *,
+                       _http_get=None) -> list:
+    """Preview disclosure for the DECLARED endpoint consumers (READ-ONLY).
+
+    Uses the same resolution + probe helpers ``_apply_endpoints`` uses, so the
+    preview can never claim a route apply would not write (the doctrine
+    ``_preview_routing`` established). Probing ``/v1/models`` is a read-only GET;
+    nothing here writes.
+    """
+    if not decision:
+        return []
+    cache: dict = {}
+    rows = []
+    for consumer in ENDPOINT_CONSUMERS:
+        entry = decision.get(consumer)
+        if not entry or entry.get("source") != "declared":
+            continue
+        row = {"consumer": consumer, "target": entry.get("target"),
+               "url": entry.get("url")}
+        model, status, _ = _declared_endpoint_model(
+            entry.get("url") or "", entry.get("candidate") or "",
+            _http_get=_http_get, cache=cache)
+        row["model"] = model
+        if model is None:
+            row["note"] = (entry.get("reason")
+                           or f"refused:({status})")
+        rows.append(row)
+    for name, entry in sorted((decision.get("profiles") or {}).items()):
+        if entry.get("source") != "declared":
+            continue
+        row = {"consumer": f"profiles.{name}", "target": entry.get("target"),
+               "url": entry.get("url"), "selector": entry.get("selector")}
+        model, status, _ = _declared_endpoint_model(
+            entry.get("url") or "", entry.get("candidate") or "",
+            _http_get=_http_get, cache=cache)
+        row["model"] = model
+        if model is None:
+            row["note"] = entry.get("reason") or f"refused:({status})"
+        rows.append(row)
+    return rows
+
+
+# ── v4 `proxy:` + `caps:` apply legs (spec §2.3 / §3) ───────────────────────
+#
+# §2.3 gives apply ownership of exactly two proxy.yaml regions and NO MORE:
+#   1. `router_settings:`        — from declared knobs that map to LiteLLM
+#                                  router_settings. v1: NONE by default (§2.1
+#                                  keeps `routing_strategy` out of the template
+#                                  vocabulary; §5 refuses it), so this region
+#                                  is intentionally not written here.
+#   2. `gateways.litellm.balancing:` — from `proxy.*.routing` (§2.2), with the
+#                                  blessed default `least-in-flight` under
+#                                  uniform_pool (2026-10-19 addendum item 3).
+#   3. per-deployment extras     — recorded and validated by C1, passed through
+#                                  in the shape §4.3 consumes LATER. Writing
+#                                  them today is a no-op the spec calls INERT
+#                                  (§8), so apply records them into
+#                                  applied_template.json and does NOT write
+#                                  them into proxy.yaml: a key sparkrun drops
+#                                  would read as enforced intent.
+#
+# Both writes go through ONE function — `sparkrun_bridge.proxy_config_write` —
+# which drives sparkrun's own ProxyConfig under sparkrun's venv python. hscc
+# never opens proxy.yaml and never touches the regenerated
+# ~/.cache/sparkrun/proxy/litellm_config.yaml (§4.4 / §9).
+
+#: The proxy.yaml section + key the balancing toggle lives in — NESTED, per the
+#: 2026-10-19 addendum (sparkrun 0.4.0 reads ``gateways.litellm.router_settings``
+#: / ``...balancing`` via ``ProxyConfig.gateway_settings("litellm")``; the
+#: top-level key is honored only by the 0.3.10 rollback line).
+BALANCING_REGION = ("gateways", "litellm")
+
+#: The §2.2 default: a uniform_pool apply balances least-in-flight unless the
+#: template says otherwise. NOT applied to non-uniform templates (§7 — that
+#: would be a behavior change on an untouched template).
+BALANCING_DEFAULT = "least-in-flight"
+
+#: Bound for monkeypatch visibility only (tests/conftest.py replaces
+#: ``_sparkrun_proxy_write`` and records calls here); the code never reads it.
+_SPARKRUN_WRITE_CALLS: list = []
+
+
+def balancing_declaration(tpl: Any, plan: Any) -> Tuple[Optional[str], str]:
+    """The balancing policy apply must write, and WHY it chose it.
+
+    Returns ``(policy, source)`` where ``source`` is one of ``declared``,
+    ``uniform_pool-default``, ``none``. ``declared`` wins verbatim; the default
+    fires ONLY under uniform_pool (§7 pins that scope — a v3 non-uniform
+    template must not gain a proxy.yaml key).
+    """
+    fams = (tpl.proxy or {}).get("families") if isinstance(tpl.proxy, dict) else None
+    policies = []
+    if isinstance(fams, dict):
+        for knobs in fams.values():
+            if isinstance(knobs, dict) and knobs.get("routing"):
+                pol = str(knobs["routing"])
+                if pol not in policies:
+                    policies.append(pol)
+    if len(policies) > 1:
+        # §2.2/§5: two policies are not expressible today. The structural layer
+        # refuses this template, so apply should never see it — but decide
+        # deterministically rather than let dict order pick a winner.
+        return None, f"conflicting:{sorted(policies)}"
+    if policies:
+        return policies[0], "declared"
+    if getattr(plan, "uniform_pool", False):
+        return BALANCING_DEFAULT, "uniform_pool-default"
+    return None, "none"
+
+
+def _apply_proxy_declaration(tpl: Any, plan: Any, *, _write=None) -> dict:
+    """Write the declared proxy regions through sparkrun's own write path.
+
+    §2.3's restart rule: "write, and restart the proxy only when the region
+    actually changed". This card NEVER restarts the proxy — the operator moved
+    restarts to the detached cutover unit (2026-10-19 addendum item 4), and the
+    spec's own §9 keeps that in operator/orchestrator territory. A change
+    therefore reports ``restart_required`` plus the unit to run.
+
+    ``_write(regions)`` is injectable for tests (t_ac795424 doctrine); the
+    default is ``sparkrun_bridge.proxy_config_write``. Fail-closed: when the
+    write path reports failure, the step is ``warn`` (apply is then not a
+    success) and NOTHING is written by hand as a fallback.
+    """
+    policy, source = balancing_declaration(tpl, plan)
+    result: dict = {"policy": policy, "source": source, "written": False,
+                    "changed": False, "restart_required": False,
+                    "inert_recorded": [], "error": None, "note": ""}
+    if source.startswith("conflicting"):
+        result["error"] = (f"proxy: balancing is global today — families disagree "
+                           f"({source.split(':', 1)[1]}); declare one value")
+        return result
+    if policy is None:
+        # Nothing to write: non-uniform template with no `proxy:` routing
+        # declaration. Byte-identity (§7) requires the write path stay COLD here.
+        result["note"] = "no balancing declared — proxy.yaml untouched"
+        return result
+
+    regions = {BALANCING_REGION[0]: {BALANCING_REGION[1]: {"balancing": policy}}}
+    write = _write or _sparkrun_proxy_write
+    outcome = write(regions)
+    if not outcome.get("ok"):
+        result["error"] = outcome.get("error") or "sparkrun write path failed"
+        result["note"] = ("declared balancing NOT written (sparkrun write path "
+                          "failed); nothing was hand-written")
+        return result
+    result["written"] = True
+    result["changed"] = bool(outcome.get("changed"))
+    result["restart_required"] = bool(outcome.get("changed"))
+    result["mode"] = outcome.get("mode")
+    if result["changed"]:
+        result["note"] = (
+            f"gateways.litellm.balancing -> {policy} ({source}); LiteLLM reads "
+            f"router settings only at startup, so the proxy must be restarted "
+            f"by the operator cutover unit "
+            f"docs/audits/sparkrun_proxy_venv_cutover.sh — apply never "
+            f"restarts it")
+    else:
+        result["note"] = (f"gateways.litellm.balancing already {policy} — "
+                          f"no change, no restart needed")
+
+    # §2.3 item 3: pass the per-deployment knobs through in the shape §4.3
+    # consumes later. Recorded, never written, and labelled INERT (§8).
+    fams = (tpl.proxy or {}).get("families") if isinstance(tpl.proxy, dict) else None
+    if isinstance(fams, dict):
+        for name, knobs in fams.items():
+            if not isinstance(knobs, dict):
+                continue
+            inert = {k: v for k, v in knobs.items() if k in PRO_INERT_KNOBS}
+            if inert:
+                result["inert_recorded"].append(
+                    {"family": name, "knobs": inert,
+                     "status": "INERT-PENDING-SPARKRUN (§4.3/§8)"})
+    return result
+
+
+def _sparkrun_proxy_write(regions: dict) -> dict:
+    """Indirection point for sparkrun's proxy.yaml write (test seam)."""
+    try:
+        from . import sparkrun_bridge  # package-relative (deployed as hscc-cluster)
+    except ImportError:
+        import sparkrun_bridge
+    return sparkrun_bridge.proxy_config_write(regions)
+
+
+def _apply_caps_declaration(tpl: Any, *, config_yaml: Optional[Path] = None,
+                            _report_only: bool = True) -> dict:
+    """Write declared kanban caps into hermes config.yaml (§3).
+
+    Precedence (§3.1): explicit ``caps.*`` wins over derived, and the
+    DERIVATION IS ADVISORY — §8 marks its only input (``max_parallel_requests``)
+    INERT, so ``derived_max_in_progress`` is a plan value, not a physical
+    ceiling. Per §3.1's own instruction, the first implementation card DERIVES
+    AND REPORTS and never derives-and-writes, so only an EXPLICIT value is
+    written here.
+
+    When nothing is declared and no ``proxy:`` block exists, this writes
+    NOTHING: the migration default is "30/10 fill-if-absent, exactly
+    ``enable_plugins.py`` today" (§3.1/§7), and that fill-if-absent belongs to
+    bootstrap, not to apply — writing the same numbers from here would give two
+    owners of one key.
+
+    Idempotent (the update fn only assigns when the value differs) and
+    probe-free.
+    """
+    caps = tpl.caps if isinstance(tpl.caps, dict) else {}
+    result: dict = {"written": False, "changed": False, "keys": [],
+                    "declared": {}, "derived": None, "note": ""}
+
+    writes = {}
+    for key in ("max_in_progress", "max_in_progress_per_profile"):
+        val = caps.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            writes[key] = val
+    result["declared"] = dict(writes)
+
+    derived = derived_max_in_progress(tpl)
+    if derived is not None:
+        result["derived"] = {"value": derived[0], "basis": derived[1],
+                             "advisory": "input INERT (§8) — derive-and-report"}
+        if "max_in_progress" in writes:
+            result["note"] = (f"derived cap {derived[0]}; declared "
+                              f"{writes['max_in_progress']}; declared wins "
+                              f"(§3.1)")
+        else:
+            result["note"] = (f"derived cap {derived[0]} from {derived[1]}; "
+                              f"NOT written — derivation is advisory until its "
+                              f"inputs are enforced (§3.1/§8)")
+
+    if not writes:
+        if not result["note"]:
+            result["note"] = ("no caps declared — migration default stands "
+                              "(30/10 fill-if-absent, enable_plugins.py)")
+        return result
+
+    def _upd(d: dict) -> dict:
+        kanban = d.get("kanban")
+        if not isinstance(kanban, dict):
+            kanban = {}
+            d["kanban"] = kanban
+        for key, val in writes.items():
+            if kanban.get(key) != val:
+                kanban[key] = val
+        return d
+
+    conf = config_yaml or CONFIG_YAML
+    _, changed = atomic_yaml_update(conf, _upd)
+    result["written"] = True
+    result["changed"] = bool(changed)
+    result["keys"] = [f"kanban.{k}" for k in sorted(writes)]
+    return result
 
 
 def _preview_routing(tpl: Any, plan: Any, *, _http_get=None) -> dict:
