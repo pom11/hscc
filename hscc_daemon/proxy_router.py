@@ -5,11 +5,15 @@ The sparkrun LiteLLM proxy regenerates
 ``~/.config/sparkrun/proxy.yaml`` on every (re)start. Three settings decide
 how requests are spread across fleet backends:
 
-* ``router_settings:`` (proxy.yaml, top level) — emitted verbatim into
-  ``litellm_config.yaml``'s top-level ``router_settings`` (sparkrun
-  ``proxy/config.py::ProxyConfig.router_settings`` +
-  ``proxy/engine.py::build_litellm_config``). Anything not a mapping is
-  ignored by sparkrun, so it must be ignored here too.
+* ``router_settings:`` — since sparkrun 0.4.0 read from
+  ``gateways.litellm.router_settings`` in proxy.yaml and emitted verbatim
+  into ``litellm_config.yaml``'s top-level ``router_settings`` (sparkrun
+  ``proxy/config.py::ProxyConfig.gateway_settings`` +
+  ``plugins/litellm/engine.py::build_litellm_config``). The top-level
+  proxy.yaml key is kept only for the 0.3.10 rollback line (0.4.0 ignores
+  it; 0.3.10 reads only it), so this check mirrors the live read order:
+  nested first, top level only when the nested key is absent. Anything not
+  a mapping is ignored by sparkrun, so it must be ignored here too.
 * ``gateways: {litellm: {balancing: <value>}}`` — only ``least-in-flight`` is
   implemented (``BALANCING_CALLBACKS``); it makes sparkrun emit
   ``litellm_settings.callbacks: [sparkrun_balancer.handler]`` and copy the
@@ -77,25 +81,59 @@ def _load_yaml(path):
     return (doc if isinstance(doc, dict) else {}), None
 
 
+#: proxy.yaml key paths ``router_settings`` can live at, in the order sparkrun
+#: reads them. Nested is what sparkrun 0.4.0 reads
+#: (``plugins/litellm/engine.py::_configured_router_settings`` ->
+#: ``ProxyConfig.gateway_settings("litellm")``); the top-level path is what
+#: 0.3.10 read (``ProxyConfig.router_settings``) and is kept in the live
+#: proxy.yaml only as the rollback duplicate — 0.4.0 ignores it.
+ROUTER_SETTINGS_SOURCES = ("gateways.litellm.router_settings", "router_settings")
+
+
+def _litellm_gateway(proxy_doc):
+    """``gateways.litellm`` as a mapping, or {} when absent / not a mapping."""
+    gateways = proxy_doc.get("gateways")
+    litellm = gateways.get("litellm") if isinstance(gateways, dict) else None
+    return litellm if isinstance(litellm, dict) else {}
+
+
+def router_settings_source(proxy_doc):
+    """Return ``(raw_value, key_path)`` following sparkrun's own read order.
+
+    Nested ``gateways.litellm.router_settings`` wins whenever the key is
+    present (0.4.0 behaviour); the top-level ``router_settings`` is consulted
+    only when the nested key is absent, which is all a 0.3.10 rollback leaves
+    behind. A nested key that is present-but-null reads as absent in YAML, and
+    sparkrun treats it as unset too, so the fallback applies there as well.
+    Never validates the value — the caller applies sparkrun's non-mapping rule.
+    """
+    nested = _litellm_gateway(proxy_doc).get("router_settings")
+    if nested is not None:
+        return nested, ROUTER_SETTINGS_SOURCES[0]
+    return proxy_doc.get("router_settings"), ROUTER_SETTINGS_SOURCES[1]
+
+
 def configured_intent(proxy_doc):
     """The (router_settings, balancing) sparkrun WOULD emit from a proxy.yaml doc.
 
-    Mirrors sparkrun exactly: router_settings only when the top-level value is
-    a mapping; balancing only when it is a value sparkrun implements —
+    Mirrors sparkrun exactly: router_settings taken from the key sparkrun's
+    live version reads (:func:`router_settings_source`) and only when that
+    value is a mapping; balancing only when it is a value sparkrun implements —
     anything else sparkrun warns-and-ignores, so it must not be demanded
-    here. ``balancing_requested`` keeps the raw value for the warn text.
+    here. ``raw_router_settings`` keeps the unvalidated value for the warn
+    text, and ``router_settings_source`` names the key the value came from so
+    a divergence report says WHICH key drifted.
     """
-    raw = proxy_doc.get("router_settings")
-    # sparkrun (ProxyConfig.router_settings) ignores a non-mapping value
-    # entirely — mirror that here, but KEEP the raw value so the caller can
-    # warn that an expressed intent was silently dropped.
+    raw, source = router_settings_source(proxy_doc)
+    # sparkrun ignores a non-mapping value entirely — mirror that here, but
+    # KEEP the raw value so the caller can warn that an expressed intent was
+    # silently dropped.
     rs = dict(raw) if isinstance(raw, dict) else {}
-    gateways = proxy_doc.get("gateways")
-    litellm = gateways.get("litellm") if isinstance(gateways, dict) else None
-    balancing = litellm.get("balancing") if isinstance(litellm, dict) else None
+    balancing = _litellm_gateway(proxy_doc).get("balancing")
     return {
         "router_settings": rs,
         "raw_router_settings": raw,
+        "router_settings_source": source,
         "balancing_requested": balancing,
         "callback": BALANCING_CALLBACKS.get(balancing or ""),
     }
@@ -146,9 +184,9 @@ def router_drift(proxy_config=None, litellm_config=None):
     want = configured_intent(proxy_doc)
     got = emitted_state(litellm_doc)
 
-    # A top-level router_settings that is not a mapping (e.g. the bare string
-    # "least-busy") is silently dropped by sparkrun — expressed intent nobody
-    # acts on, which is exactly the drift class this check exists for.
+    # The router_settings value we resolved is not a mapping (e.g. the bare
+    # string "least-busy") — silently dropped by sparkrun, expressed intent
+    # nobody acts on, which is exactly the drift class this check exists for.
     raw_rs = want["raw_router_settings"]
     non_mapping_rs = raw_rs is not None and not isinstance(raw_rs, dict)
 
@@ -164,11 +202,13 @@ def router_drift(proxy_config=None, litellm_config=None):
     problems = []
     if non_mapping_rs:
         problems.append(
-            f"router_settings in {proxy_path} is {raw_rs!r}, not a mapping — "
+            f"router_settings ({want['router_settings_source']}) in "
+            f"{proxy_path} is {raw_rs!r}, not a mapping — "
             f"sparkrun ignores it and emits nothing into {litellm_path}")
     if want["router_settings"] != got["router_settings"]:
         problems.append(
-            f"router_settings diverged: {proxy_path} wants {want['router_settings']!r}, "
+            f"router_settings diverged: {proxy_path} wants "
+            f"{want['router_settings']!r} (from `{want['router_settings_source']}`), "
             f"{litellm_path} carries {got['router_settings']!r}")
     if want["callback"] and want["callback"] not in got["callbacks"]:
         problems.append(

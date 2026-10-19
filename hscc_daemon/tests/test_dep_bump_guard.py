@@ -24,6 +24,31 @@ from hscc_daemon import proxy_router
 
 PROXY_OK = """\
 aliases: {}
+gateways:
+  litellm:
+    balancing: least-in-flight
+    router_settings:
+      routing_strategy: simple-shuffle
+# 0.4.0 ignores this duplicate; it stays in the live file for the 0.3.10
+# rollback line (see docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md).
+router_settings:
+  routing_strategy: simple-shuffle
+"""
+
+#: Nested key only — what a post-rollback-cleanup proxy.yaml looks like, and
+#: the shape that made the old top-level-only read FALSE-WARN (t_70d0cffa).
+PROXY_NESTED_ONLY = """\
+aliases: {}
+gateways:
+  litellm:
+    balancing: least-in-flight
+    router_settings:
+      routing_strategy: simple-shuffle
+"""
+
+#: Top-level key only — the 0.3.10 rollback shape (still must be honoured).
+PROXY_TOP_LEVEL_ONLY = """\
+aliases: {}
 router_settings:
   routing_strategy: simple-shuffle
 gateways:
@@ -42,6 +67,19 @@ litellm_settings:
   - sparkrun_balancer.handler
 router_settings:
   routing_strategy: simple-shuffle
+"""
+
+#: Same, with no emitted router_settings at all — what sparkrun generates when
+#: the configured value was not a mapping (it drops it and emits nothing).
+LITELLM_NO_ROUTER = """\
+model_list:
+- model_name: worker-model
+  litellm_params:
+    api_base: http://10.0.0.1:8000/v1
+litellm_settings:
+  drop_params: true
+  callbacks:
+  - sparkrun_balancer.handler
 """
 
 
@@ -154,6 +192,139 @@ class TestRouterDrift:
                      litellm=LITELLM_OK)
         assert res["warn"] is True
         assert "not a mapping" in res["detail"]
+
+    # ── nested vs top-level read order (t_70d0cffa) ────────────────────────
+    # sparkrun 0.4.0 reads gateways.litellm.router_settings
+    # (plugins/litellm/engine.py::_configured_router_settings); the top-level
+    # key is only what the 0.3.10 rollback line reads. The check must resolve
+    # the SAME key sparkrun resolves, or it false-warns the moment the
+    # top-level duplicate is cleaned out of proxy.yaml.
+
+    def test_nested_only_expects_nested(self, tmp_path):
+        """(a) The rollback-cleanup shape: nested key alone. This is the case
+        the old top-level-only read false-warned on."""
+        res = _drift(tmp_path, proxy=PROXY_NESTED_ONLY, litellm=LITELLM_OK)
+        assert res["status"] == "ok" and res["warn"] is False
+        assert "simple-shuffle" in res["detail"]
+
+    def test_nested_wins_over_differing_top_level(self, tmp_path):
+        """(b) Both keys present and DISAGREEING: 0.4.0 wins, so the nested
+        value is what must be expected of the generated config."""
+        proxy = PROXY_OK.replace(
+            "router_settings:\n  routing_strategy: simple-shuffle\n",
+            "router_settings:\n  routing_strategy: least-busy\n")
+        # Nested says simple-shuffle, top level says least-busy; the emitted
+        # file carries the nested value -> ok, and NOT the least-busy trap warn
+        # (which would fire if the check had read the top-level key).
+        res = _drift(tmp_path, proxy=proxy, litellm=LITELLM_OK)
+        assert res["status"] == "ok" and res["warn"] is False
+        assert "least-busy" not in res["detail"]
+
+    def test_nested_wins_divergence_names_nested_key(self, tmp_path):
+        """Same precedence, opposite direction: when the generated config
+        disagrees with the nested value the report names the nested key, not
+        the top-level duplicate nobody reads any more."""
+        proxy = PROXY_NESTED_ONLY.replace("simple-shuffle", "lowest-latency")
+        res = _drift(tmp_path, proxy=proxy, litellm=LITELLM_OK)
+        assert res["warn"] is True and "diverged" in res["detail"]
+        assert "gateways.litellm.router_settings" in res["detail"]
+
+    def test_top_level_only_still_expected(self, tmp_path):
+        """(c) 0.3.10 rollback shape (top level only) must still be honoured —
+        otherwise a rollback would blind the very check that guards it."""
+        res = _drift(tmp_path, proxy=PROXY_TOP_LEVEL_ONLY, litellm=LITELLM_OK)
+        assert res["status"] == "ok" and res["warn"] is False
+        assert "simple-shuffle" in res["detail"]
+
+    def test_top_level_only_divergence_names_top_level_key(self, tmp_path):
+        proxy = PROXY_TOP_LEVEL_ONLY.replace("simple-shuffle", "lowest-latency")
+        res = _drift(tmp_path, proxy=proxy, litellm=LITELLM_OK)
+        assert res["warn"] is True and "diverged" in res["detail"]
+        # The top-level source is named exactly, and does not claim to be the
+        # nested key.
+        assert "router_settings" in res["detail"]
+        assert "gateways.litellm.router_settings" not in res["detail"]
+
+    def test_non_mapping_nested_ignored_like_top_level(self, tmp_path):
+        """(d) A non-mapping NESTED value is dropped by sparkrun exactly as a
+        non-mapping top-level one: same warn text semantics, and the check
+        demands no router_settings from the generated file."""
+        res = _drift(tmp_path,
+                     proxy="gateways:\n  litellm:\n"
+                           "    balancing: least-in-flight\n"
+                           "    router_settings: least-busy\n",
+                     litellm=LITELLM_NO_ROUTER)
+        assert res["warn"] is True
+        assert "not a mapping" in res["detail"]
+        assert "least-busy" in res["detail"]
+        # names WHERE the ignored value lives
+        assert "gateways.litellm.router_settings" in res["detail"]
+        # and no bogus second complaint about the (absent) emission
+        assert "diverged" not in res["detail"]
+
+    def test_non_mapping_nested_does_not_fall_back_to_top_level(self, tmp_path):
+        """A present-but-non-mapping nested key is still `present`: 0.4.0 sees
+        it and drops it, so a stale top-level duplicate must NOT resurrect as
+        the expectation (that would invent an intent sparkrun never reads)."""
+        proxy = PROXY_OK.replace(
+            "    router_settings:\n      routing_strategy: simple-shuffle",
+            "    router_settings: least-busy")
+        res = _drift(tmp_path, proxy=proxy, litellm=LITELLM_OK)
+        assert res["warn"] is True
+        assert "not a mapping" in res["detail"]
+        assert "gateways.litellm.router_settings" in res["detail"]
+
+    def test_nested_null_falls_back_to_top_level(self, tmp_path):
+        """`router_settings:` with no value parses to None — sparkrun treats it
+        as unset (`if value is None: return {}`), so the top-level fallback
+        applies rather than the key being considered present."""
+        proxy = PROXY_OK.replace(
+            "    router_settings:\n      routing_strategy: simple-shuffle",
+            "    router_settings:")
+        res = _drift(tmp_path, proxy=proxy, litellm=LITELLM_OK)
+        assert res["status"] == "ok" and res["warn"] is False
+
+    def test_non_mapping_gateways_never_raises(self, tmp_path):
+        """`gateways:` holding a scalar (or a list) must not raise — the same
+        defensive shape the balancing read already had."""
+        for bad in ("gateways: nope\nrouter_settings:\n  routing_strategy: simple-shuffle\n",
+                    "gateways:\n- nope\nrouter_settings:\n  routing_strategy: simple-shuffle\n"):
+            res = _drift(tmp_path, proxy=bad, litellm=LITELLM_OK)
+            assert res["status"] == "ok" and res["warn"] is False
+
+    def test_router_settings_source_read_order(self):
+        """Unit pin of the helper itself (the drift cases above could pass on
+        a coincidental equality; this pins which key resolves)."""
+        nested = {"gateways": {"litellm": {"router_settings": {"a": 1}}}}
+        both = {"gateways": {"litellm": {"router_settings": {"a": 1}}},
+                "router_settings": {"b": 2}}
+        top = {"router_settings": {"b": 2}}
+        assert proxy_router.router_settings_source(nested) == (
+            {"a": 1}, "gateways.litellm.router_settings")
+        assert proxy_router.router_settings_source(both) == (
+            {"a": 1}, "gateways.litellm.router_settings")
+        assert proxy_router.router_settings_source(top) == (
+            {"b": 2}, "router_settings")
+        assert proxy_router.router_settings_source({}) == (None, "router_settings")
+        # present-but-null nested -> sparkrun sees unset, fallback applies
+        assert proxy_router.router_settings_source(
+            {"gateways": {"litellm": {"router_settings": None}},
+             "router_settings": {"b": 2}}) == ({"b": 2}, "router_settings")
+        # a non-mapping nested value is still PRESENT (no fallback)
+        assert proxy_router.router_settings_source(
+            {"gateways": {"litellm": {"router_settings": "least-busy"}},
+             "router_settings": {"b": 2}}) == ("least-busy",
+                                               "gateways.litellm.router_settings")
+
+    def test_configured_intent_reports_resolved_source(self):
+        intent = proxy_router.configured_intent(
+            {"gateways": {"litellm": {"router_settings": {"a": 1}}},
+             "router_settings": {"b": 2}})
+        assert intent["router_settings"] == {"a": 1}
+        assert intent["router_settings_source"] == "gateways.litellm.router_settings"
+        intent = proxy_router.configured_intent({"router_settings": {"b": 2}})
+        assert intent["router_settings"] == {"b": 2}
+        assert intent["router_settings_source"] == "router_settings"
 
     def test_nothing_configured_nothing_emitted_skips(self, tmp_path):
         res = _drift(tmp_path, proxy="aliases: {}\n",
