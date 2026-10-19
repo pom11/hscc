@@ -62,16 +62,22 @@ def _drift(tmp_path, proxy=PROXY_OK, litellm=LITELLM_OK):
 class TestDepBumpGuard:
     def test_rule_names_the_live_fork_branch(self):
         from hscc_daemon import dep_bump_guard as g
-        assert g.FORK_BRANCH == "feat/proxy-least-in-flight"
+        assert g.FORK_BRANCH == "feat/proxy-least-in-flight-040"
         assert g.FORK_REMOTE == "pom11/sparkrun"
+        assert g.SPARKRUN_CHECKOUT == "~/dev/sparkrun-live"
         text = "\n".join(g.FORK_RULE_LINES)
         # The failure this guard exists to prevent, stated in the rule itself:
-        assert "feat/proxy-least-in-flight" in text
+        assert "feat/proxy-least-in-flight-040" in text
         assert "checkout main" in text and "never" in text.lower()
         assert "rebase" in text
         assert "rev-parse --abbrev-ref HEAD" in text
         assert "router_settings" in text
-        # The SUPERSEDED name must not survive anywhere in the canonical text.
+        # simple-shuffle in the generated router config is EXPECTED with the
+        # balancer live (2026-10-19 cutover) — the rule must keep saying so,
+        # or the next verifier mis-flags a healthy proxy as drift.
+        assert "simple-shuffle" in text and "EXPECTED" in text
+        assert "sparkrun_balancer.handler" in text
+        # The SUPERSEDED names must not survive anywhere in the canonical text.
         assert "feat/proxy-router-settings" not in text
 
     def test_rule_only_for_sparkrun(self):
