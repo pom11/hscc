@@ -88,6 +88,36 @@ sits at 0 running while another queues).
 
 ---
 
+## 2026-10-19 addendum — sparkrun 0.4.0 (operator-approved merge notes)
+
+The spec above is approved as written and stays as the historical record; two
+things moved since 2026-10-15, and defaults are now blessed:
+
+1. **`router_settings` is read NESTED, not top-level.** sparkrun 0.4.0 reads
+   `gateways.litellm.router_settings` from `proxy.yaml`
+   (`plugins/litellm/engine.py::_configured_router_settings` ->
+   `ProxyConfig.gateway_settings("litellm")`); the top-level key is honored
+   only by the 0.3.10 rollback line. hscc's drift check was fixed to mirror
+   this read order in PR #54 (`proxy_router.router_settings_source()`,
+   nested-first with top-level fallback) — §2.3's "what apply writes" and
+   §6.2's doctor leg must write/read the nested location.
+2. **§2.3 / §4 file:line refs moved.** The engine cited as
+   `proxy/engine.py:...` now lives at **`src/sparkrun/plugins/litellm/engine.py`**
+   (`build_litellm_config` :102, `model_list` crafting :148-200,
+   `BALANCING_CALLBACKS` :63); `proxy/config.py` keeps `save` :112 and
+   `set_proxy` :270. Line numbers above are pre-move; cite the new path.
+3. **Defaults blessed:** `routing: least-in-flight` ON under `uniform_pool`
+   (emitted as `gateways.litellm.balancing`, with `router_settings.
+   routing_strategy: simple-shuffle` as the expected base strategy the
+   balancer callback overrides — not drift); per-deployment knobs
+   (§2.1) are **recorded and validated but INERT** until the §4.3 sparkrun
+   hook exists; `routing` is a **global toggle only** — families disagreeing
+   is a validate error, as §5 specifies.
+4. **Restart doctrine updated.** Wherever this spec says apply restarts the
+   proxy (§2.3), the restart runs as the detached
+   `docs/audits/sparkrun_proxy_venv_cutover.sh` stop→swap/start→verify unit
+   (auto-rollback), never inline from a session that rides :4000.
+
 ## 1. `endpoints:` — where hermes talks
 
 ### 1.1 Schema
