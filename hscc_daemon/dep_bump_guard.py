@@ -4,8 +4,9 @@ A runtime dependency bump (the ``check-runtime-deps`` workflow plus
 ``scripts/dep_pr_watcher.py``) rewrites ``runtime-versions.json`` and asks a
 worker to verify the bump live. For **sparkrun** that is not a plain version
 swap: the cluster does not run upstream ``main``. It runs OUR FORK BRANCH,
-installed editable at ``~/sparkrun`` (``~/.local/bin/sparkrun`` ->
-``~/sparkrun/.venv-sparkrun-uv312/bin/sparkrun``).
+installed editable (``~/.local/bin/sparkrun`` ->
+``~/sparkrun/.venv-sparkrun-040/bin/sparkrun`` -> worktree
+``~/dev/sparkrun-live/src``).
 
 A bump must therefore REBASE the fork branch onto the new upstream tag and
 keep it checked out. ``git checkout main`` in ``~/sparkrun`` — or reinstalling
@@ -17,13 +18,17 @@ by both the CI generator and the cluster poller, and pinned by tests) instead
 of being prose duplicated in two places.
 
 The branch name is verified against the live checkout at implementation time
-(2026-10-16) — ``feat/proxy-least-in-flight``, fork remote ``pom11/sparkrun``.
-It supersedes the earlier ``feat/proxy-router-settings`` name.
+(2026-10-19, sparkrun 0.4.0 cutover) — ``feat/proxy-least-in-flight-040``,
+fork remote ``pom11/sparkrun``. It supersedes the earlier
+``feat/proxy-router-settings`` and ``feat/proxy-least-in-flight`` (0.3.10-era)
+names; the 0.4.0 branch rebases both fork features onto upstream v0.4.0,
+which absorbed them (only a macOS-spawn test fix rides on top).
 """
 
 FORK_REMOTE = "pom11/sparkrun"
-FORK_BRANCH = "feat/proxy-least-in-flight"
+FORK_BRANCH = "feat/proxy-least-in-flight-040"
 SPARKRUN_CHECKOUT = "~/sparkrun"
+SPARKRUN_WORKTREE = "~/dev/sparkrun-live"
 SPARKRUN_REMOTE_NAME = "fork"
 
 #: Lines appended to a generated sparkrun bump PR body / verification card.
@@ -31,19 +36,22 @@ SPARKRUN_REMOTE_NAME = "fork"
 FORK_RULE_LINES = (
     f"**sparkrun is deployed from our fork branch `{FORK_BRANCH}`** "
     f"(`{SPARKRUN_REMOTE_NAME}` = {FORK_REMOTE}), installed editable at "
-    f"`{SPARKRUN_CHECKOUT}` — **not** from upstream `main`.",
+    f"`{SPARKRUN_CHECKOUT}` (worktree `{SPARKRUN_WORKTREE}`) — **not** from "
+    "upstream `main`.",
     f"A sparkrun bump must `git -C {SPARKRUN_CHECKOUT} fetch origin <new-tag>` "
-    f"and **rebase `{FORK_BRANCH}` onto that tag**, and must leave "
+    f"and **rebase `{FORK_BRANCH}` onto that tag** (in `{SPARKRUN_WORKTREE}`, "
+    f"where the branch is checked out), and must leave "
     f"`{FORK_BRANCH}` checked out afterwards.",
     f"**Never `git checkout main` in `{SPARKRUN_CHECKOUT}`, never reinstall "
     "from upstream.** That silently drops the proxy `router_settings` "
     "passthrough and the least-in-flight balancer on the next proxy restart "
     "— no error, routing just reverts to `simple-shuffle`.",
     f"Verify after the bump: "
-    f"`git -C {SPARKRUN_CHECKOUT} rev-parse --abbrev-ref HEAD` == "
-    f"`{FORK_BRANCH}`, and `router_settings` is still read in "
-    "`src/sparkrun/proxy/config.py` plus emitted in "
-    "`src/sparkrun/proxy/engine.py`.",
+    f"`git -C {SPARKRUN_WORKTREE} rev-parse --abbrev-ref HEAD` == "
+    f"`{FORK_BRANCH}`, and `router_settings` is still read via "
+    "`ProxyConfig.gateway_settings` in `src/sparkrun/proxy/config.py` plus "
+    "emitted in `src/sparkrun/plugins/litellm/engine.py` "
+    "(`build_litellm_config`).",
     "Then restart the proxy and confirm `router_settings` appears in "
     "`~/.cache/sparkrun/proxy/litellm_config.yaml` "
     "(`hscc verify` check `proxy_router_settings` must go quiet).",

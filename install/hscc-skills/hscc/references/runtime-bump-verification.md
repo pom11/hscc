@@ -10,31 +10,48 @@ verification card to the hscc kanban board).
 ## sparkrun runs from OUR FORK BRANCH — the bump is a rebase, not an install
 
 The cluster does not run upstream sparkrun `main`. Live state (operator-verified
-2026-10-16): `~/sparkrun` (editable install behind `~/.local/bin/sparkrun` ->
-`~/sparkrun/.venv-sparkrun-uv312/bin/sparkrun`) is checked out on
-**`feat/proxy-least-in-flight`** (remote `fork` = pom11/sparkrun; `origin` =
-spark-arena/sparkrun). The branch carries the proxy `router_settings`
-passthrough and the least-in-flight balancer.
+2026-10-19, post 0.4.0 cutover): `~/.local/bin/sparkrun` ->
+`~/sparkrun/.venv-sparkrun-040/bin/sparkrun`, an editable install of worktree
+`~/dev/sparkrun-live` checked out on **`feat/proxy-least-in-flight-040`**
+(remote `fork` = pom11/sparkrun; `origin` = spark-arena/sparkrun). v0.4.0
+absorbed both fork features upstream (the `router_settings` passthrough and
+the least-in-flight balancer), so the branch carries only a macOS-spawn test
+fix on top of the tag — but it is still a fork branch, and the rules below
+still apply (a future bump may re-introduce divergence, and `git checkout
+main` in a stale checkout still drops whatever the branch carries).
+The 0.3.10-era branch `feat/proxy-least-in-flight` (tip `609351e0`) is kept
+in the `~/sparkrun` worktree as the rollback point, tagged
+`pre-rebase-v040-safety`.
 
 Rules for a sparkrun bump (canonical text: `hscc_daemon/dep_bump_guard.py`,
 pinned by tests; the bump PR body and the watcher card both carry it):
 
 1. `git -C ~/sparkrun fetch origin <new-tag>`, then **rebase
-   `feat/proxy-least-in-flight` onto that tag** and LEAVE THE BRANCH CHECKED
-   OUT.
+   `feat/proxy-least-in-flight-040` onto that tag** (the rebase happens in
+   `~/dev/sparkrun-live`, where the branch is checked out) and LEAVE THE
+   BRANCH CHECKED OUT.
 2. **Never `git checkout main`, never reinstall from upstream.** Either one
    silently drops the balancer on the next proxy restart — the proxy keeps
    serving, routing quietly reverts to `simple-shuffle`, nothing errors.
 3. Verify after the bump:
-   `git -C ~/sparkrun rev-parse --abbrev-ref HEAD` == `feat/proxy-least-in-flight`,
-   and `router_settings` is still read in `src/sparkrun/proxy/config.py` and
-   emitted in `src/sparkrun/proxy/engine.py`.
+   `git -C ~/dev/sparkrun-live rev-parse --abbrev-ref HEAD` ==
+   `feat/proxy-least-in-flight-040`, and `router_settings` is still read via
+   `ProxyConfig.gateway_settings` in `src/sparkrun/proxy/config.py` and
+   emitted in `src/sparkrun/plugins/litellm/engine.py`
+   (`build_litellm_config`).
 4. Restart the proxy, then confirm `~/.cache/sparkrun/proxy/litellm_config.yaml`
    carries the `router_settings` from `~/.config/sparkrun/proxy.yaml` — the
    `hscc verify` check `proxy_router_settings` (and the `proxy` daemon
    stream's `router_drift` field) must be quiet. `routing_strategy:
    least-busy` in router_settings is a trap on the pinned LiteLLM (no-op);
    the working knob is `gateways.litellm.balancing: least-in-flight`.
+   NOTE (0.4.0): the balancer makes sparkrun FORCE `routing_strategy:
+   simple-shuffle` in the emitted config (`BALANCING_ROUTING_STRATEGY`) so
+   LiteLLM keeps calling the callback — `simple-shuffle` in
+   `litellm_config.yaml` is the HEALTHY emitted value when the balancer is
+   live, not a regression. Since 0.4.0, `router_settings` is read from
+   `gateways.litellm.router_settings`; the top-level proxy.yaml key is kept
+   only for 0.3.10 rollback and 0.4.0 ignores it.
 
 ## Golden rule: recovery point FIRST, before touching anything live
 

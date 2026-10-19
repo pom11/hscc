@@ -160,7 +160,7 @@ def _gh_view_payload(data):
 
 def test_sparkrun_bump_body_carries_fork_rule(tmp_path, monkeypatch):
     """A bump that touches sparkrun MUST carry the fork-branch rule: the
-    deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight and a
+    deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight-040 and a
     worker who `git checkout main`s silently drops the proxy balancer."""
     lock = _lock(tmp_path)
     body = tmp_path / "body.md"
@@ -172,7 +172,7 @@ def test_sparkrun_bump_body_carries_fork_rule(tmp_path, monkeypatch):
                                       "spark-arena/sparkrun": "v0.2.41"}[repo])
     assert c.main() == 0
     text = body.read_text()
-    assert "feat/proxy-least-in-flight" in text
+    assert "feat/proxy-least-in-flight-040" in text
     assert "pom11/sparkrun" in text
     assert "checkout main" in text
     assert "rebase" in text

@@ -113,10 +113,10 @@ def _pr_named(num, title, reviewer="pom11"):
 def test_card_body_carries_fork_rule_for_sparkrun():
     """The bump card is the text a bump worker reads; when sparkrun is in the
     title it MUST carry the fork-branch rule inline (the deployed runtime is
-    pom11/sparkrun@feat/proxy-least-in-flight, and 'reinstall sparkrun' /
+    pom11/sparkrun@feat/proxy-least-in-flight-040, and 'reinstall sparkrun' /
     'git checkout main' silently drops the proxy balancer)."""
     body = w._card_body(_pr_named(5, "chore(deps): runtime bump — sparkrun v0.2.40 -> v0.2.41"))
-    assert "feat/proxy-least-in-flight" in body
+    assert "feat/proxy-least-in-flight-040" in body
     assert "pom11/sparkrun" in body
     assert "checkout main" in body
     assert "rebase" in body

@@ -5,11 +5,13 @@ The sparkrun LiteLLM proxy regenerates
 ``~/.config/sparkrun/proxy.yaml`` on every (re)start. Three settings decide
 how requests are spread across fleet backends:
 
-* ``router_settings:`` (proxy.yaml, top level) — emitted verbatim into
+* ``router_settings:`` — read from ``gateways.litellm.router_settings`` in
+  proxy.yaml (since sparkrun 0.4.0; the top-level key is kept for 0.3.10
+  rollback but 0.4.0 ignores it) and emitted verbatim into
   ``litellm_config.yaml``'s top-level ``router_settings`` (sparkrun
-  ``proxy/config.py::ProxyConfig.router_settings`` +
-  ``proxy/engine.py::build_litellm_config``). Anything not a mapping is
-  ignored by sparkrun, so it must be ignored here too.
+  ``proxy/config.py::ProxyConfig.gateway_settings`` +
+  ``plugins/litellm/engine.py::build_litellm_config``). Anything not a mapping
+  is ignored by sparkrun, so it must be ignored here too.
 * ``gateways: {litellm: {balancing: <value>}}`` — only ``least-in-flight`` is
   implemented (``BALANCING_CALLBACKS``); it makes sparkrun emit
   ``litellm_settings.callbacks: [sparkrun_balancer.handler]`` and copy the

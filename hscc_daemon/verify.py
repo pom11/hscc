@@ -444,7 +444,7 @@ def check_proxy_router_settings(proxy_config=None, litellm_config=None):
 
     This is the post-bump tripwire for the fork-branch failure (see
     :mod:`hscc_daemon.dep_bump_guard`): a sparkrun bump that checks out
-    upstream main instead of rebasing ``feat/proxy-least-in-flight`` drops
+    upstream main instead of rebasing ``feat/proxy-least-in-flight-040`` drops
     the ``router_settings`` passthrough and the least-in-flight balancer
     with NO error anywhere. The proxy keeps serving; routing silently
     reverts. This check is what makes that visible.

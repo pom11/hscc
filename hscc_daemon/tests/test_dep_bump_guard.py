@@ -62,17 +62,18 @@ def _drift(tmp_path, proxy=PROXY_OK, litellm=LITELLM_OK):
 class TestDepBumpGuard:
     def test_rule_names_the_live_fork_branch(self):
         from hscc_daemon import dep_bump_guard as g
-        assert g.FORK_BRANCH == "feat/proxy-least-in-flight"
+        assert g.FORK_BRANCH == "feat/proxy-least-in-flight-040"
         assert g.FORK_REMOTE == "pom11/sparkrun"
         text = "\n".join(g.FORK_RULE_LINES)
         # The failure this guard exists to prevent, stated in the rule itself:
-        assert "feat/proxy-least-in-flight" in text
+        assert "feat/proxy-least-in-flight-040" in text
         assert "checkout main" in text and "never" in text.lower()
         assert "rebase" in text
         assert "rev-parse --abbrev-ref HEAD" in text
         assert "router_settings" in text
-        # The SUPERSEDED name must not survive anywhere in the canonical text.
+        # The SUPERSEDED names must not survive anywhere in the canonical text.
         assert "feat/proxy-router-settings" not in text
+        assert "feat/proxy-least-in-flight`" not in text  # 0.3.10-era name
 
     def test_rule_only_for_sparkrun(self):
         from hscc_daemon import dep_bump_guard as g
