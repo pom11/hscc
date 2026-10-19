@@ -20,7 +20,9 @@ upstream v0.4.0 already absorbed both features** (config reads
 `gateways.litellm.router_settings`, balancer ships in
 `src/sparkrun/plugins/litellm/`). The fork branch at this tag is upstream
 `v0.4.0` plus one macOS test fix — the rebase rule is kept anyway because it
-is tag-independent.
+is tag-independent. The LiteLLM pin is unchanged by the bump
+(`litellm[proxy]==1.82.6` via uvx), so the least-busy trap and the balancer
+rationale carry over untouched.
 
 ## Live verification (all at cutover time)
 
@@ -108,3 +110,17 @@ ignores the top-level duplicate), so it stays for the 0.3.10 rollback path.
 tag and will open the next bump PR when upstream moves again (v0.4.1-line
 tags are already shipping). The dep-bump guard now names the correct live
 branch/checkout for that flow.
+
+## Follow-ups
+
+- ~~If a future bump re-diverges the two proxy.yaml `router_settings` keys,
+  teach `proxy_router.configured_intent` to prefer
+  `gateways.litellm.router_settings` when present.~~ **Done (t_70d0cffa):**
+  `proxy_router.router_settings_source()` now mirrors sparkrun's read order
+  (nested first, top-level only when nested is absent/null, keeping the
+  0.3.10 rollback line covered) — the drift check no longer false-warns when
+  the top-level duplicate is cleaned out of proxy.yaml. WARN-never-fails
+  semantics unchanged.
+- The old `feat/proxy-least-in-flight` branch + `.venv-sparkrun-uv312` may
+  be retired once 0.4.0 has survived a release cycle; until then they ARE
+  the rollback path — do not prune.
