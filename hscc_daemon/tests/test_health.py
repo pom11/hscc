@@ -2310,6 +2310,335 @@ class TestCheckProxy:
         assert out["ok"] is False and "refused" in out["error"]
 
 
+class TestProxyRelaunchStall:
+    """t_43b6e245 — the relaunch loop must never no-op silently for hours.
+
+    Incident (docs/audits/PROXY_RELAUNCH_NOOP_2026-10-18.md): sparkrun's own
+    restart SIGTERMs only the state-file wrapper PID, orphaning the real
+    litellm socket owner; the replacement wrapper stayed alive without ever
+    binding :4000. `is_running()` (state-file PID + os.kill) then read
+    "running" forever and every plain `sparkrun proxy start` refused —
+    "Error: proxy is already running (PID ...) Use --restart" — while
+    `check_proxy` logged only `relaunching with [...]` and discarded the
+    output. ~36 attempts, 3h09m, zero ERROR lines, zero notifications.
+
+    RED ON OLD: with the pre-fix health.py the loop below emits N
+    `relaunching with…` lines and NOTHING else — no ERROR, no notify, no
+    recovery — which is exactly what the incident log shows.
+    """
+
+    _SERVING = {"version": 2, "units": [
+        {"id": "w1", "role": "worker", "keepalive": True,
+         "nodes": ["10.0.0.2"], "port": 8001},
+    ]}
+    REFUSAL = ("Discovering inference endpoints...\n"
+               "Error: Proxy is already running (PID 12477) on port 4000. "
+               "Use --restart to apply new settings, or 'sparkrun proxy stop' first.")
+
+    def _incident_setup(self, tmp_hfcc_dir, monkeypatch, *, repair_ok=True):
+        """Sandboxed replay of the incident steady state: probe refused, a
+        hollow tracked PID alive, every plain `proxy start` refused, the repair
+        path available. Nothing here touches the live fleet."""
+        from hscc_daemon import health
+        from hscc_daemon import serving
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"10.0.0.2"})
+        monkeypatch.setattr(serving, "load_serving", lambda *a, **k: self._SERVING)
+        monkeypatch.setattr(health, "_proxy_models_probe",
+                            lambda url, timeout=5: {"ok": False, "models": [],
+                                                    "error": "Connection refused"})
+        monkeypatch.setattr(health, "_proxy_backend_probe",
+                            lambda url=None, timeout=5: {"ok": False, "backends": set(),
+                                                          "error": "refused"})
+        calls = []
+        # Plain `proxy start` is REFUSED while the hollow tracked PID lives —
+        # the incident's refusal verbatim.
+        def fake_run(args, **k):
+            calls.append(list(args))
+            return {"ok": False, "output": self.REFUSAL, "stderr": self.REFUSAL}
+        monkeypatch.setattr(health, "run_cmd", fake_run)
+        # The escalation repair: succeeds (recovers) or fails per repair_ok.
+        repairs = []
+        def fake_repair(hosts):
+            repairs.append(list(hosts))
+            return ({"ok": True, "verified": True, "output": "repaired"}
+                    if repair_ok else
+                    {"ok": False, "verified": False, "output": self.REFUSAL})
+        monkeypatch.setattr(health, "_proxy_repair_orphan", fake_repair)
+        # Hollow tracked PID: alive, cmdline vetted (os.kill/ps stubbed —
+        # never the operator's real process table). raising=False so the
+        # RED-ON-OLD run reaches the behavioural assertions instead of dying
+        # on a missing attribute the old module never had.
+        kills = []
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 12477)
+        monkeypatch.setattr(health, "_proc_cmdline",
+                            lambda pid: "/x/bin/python /x/bin/litellm --config c.yaml",
+                            raising=False)
+        # The hollow PID DIES on the first real signal (no 0-signal probes are
+        # recorded, and the death is immediate so no test sleeps on the
+        # SIGTERM->SIGKILL ladder).
+        alive = {"v": True}
+        def fake_kill(pid, sig):
+            if not sig:
+                if not alive["v"]:
+                    raise ProcessLookupError()
+                return
+            kills.append((pid, sig))
+            alive["v"] = False
+            raise ProcessLookupError()          # dies right now
+        monkeypatch.setattr(health.os, "kill", fake_kill)
+        # Alert sinks: record, never notify the operator's desktop.
+        notes, events = [], []
+        monkeypatch.setattr(health, "send_macos_notification",
+                            lambda title, body, priority="normal", **kw:
+                                notes.append((title, body, priority)) or True)
+        monkeypatch.setattr(health, "emit_event",
+                            lambda t, p, severity="info", **kw:
+                                events.append((t, p, severity)) or True)
+        return health, calls, repairs, kills, notes, events
+
+    def _state(self, tmp_hfcc_dir):
+        return json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+
+    def _force_attempt(self, tmp_hfcc_dir):
+        """Backdate the durable cooldown stamp so the NEXT check_proxy tick
+        actually attempts (the 300 s cooldown is correct production behaviour
+        — a test loop must not be suppressed by it)."""
+        import datetime
+        from hscc_daemon import health
+        p = tmp_hfcc_dir / "state" / "proxy.json"
+        st = json.loads(p.read_text())
+        st["last_relaunch"] = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
+        ).isoformat()
+        p.write_text(json.dumps(st))
+
+    def _attempts(self, tmp_hfcc_dir, n):
+        """Run N check_proxy ticks with the cooldown forced open (the incident
+        cadence: one real attempt every PROXY_RELAUNCH_COOLDOWN_S)."""
+        from hscc_daemon import health
+        for _ in range(n):
+            health.check_proxy()
+            self._force_attempt(tmp_hfcc_dir)
+
+    def test_old_loop_would_log_forever_new_alarms_after_n(self, tmp_hfcc_dir, monkeypatch):
+        """THE card's red-on-old: N consecutive refused relaunches. OLD code:
+        every attempt is a bare `relaunching with…` WARN, no ERROR, no notify.
+        NEW: each failure logs ERROR with the refusal text, and at the
+        threshold exactly one throttled notify + a durable event fire."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+        errs = []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, lvl="INFO": errs.append((lvl, msg)))
+        self._attempts(tmp_hfcc_dir, health.PROXY_RELAUNCH_MAX_CONSECUTIVE)
+        # Loud: every failed attempt surfaced the command output as ERROR.
+        fail_lines = [m for lvl, m in errs if lvl == "ERROR"
+                      and "proxy repair on" in m and "FAILED" in m]
+        assert len(fail_lines) >= health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        assert "already running" in fail_lines[0]
+        # Durable streak in the state file (survives a daemon restart).
+        assert self._state(tmp_hfcc_dir)["relaunch_streak"] == \
+            health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        # Alert fired exactly once, loud, with a durable event.
+        assert len(notes) == 1 and notes[0][2] == "high"
+        assert "already running" in notes[0][1]
+        assert len(events) == 1 and events[0][0] == "proxy.relaunch.stalled"
+        assert self._state(tmp_hfcc_dir).get("stall_alerted_at")
+
+    def test_alert_is_throttled_across_ticks(self, tmp_hfcc_dir, monkeypatch):
+        """One notify per notify-cooldown, not one per 5-min attempt: the 3h
+        incident is ~36 attempts and must not become 36 desktop notifications
+        (the 2026-10-08 NAS 178-notification lesson)."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+        self._attempts(tmp_hfcc_dir, 2 * health.PROXY_RELAUNCH_MAX_CONSECUTIVE)
+        # Every tick attempted something: MAX-1 plain starts, then escalated
+        # repairs (the plain-start refusal is never re-issued while pinned).
+        assert len(calls) >= health.PROXY_RELAUNCH_MAX_CONSECUTIVE - 1
+        assert len(repairs) >= health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        # Exactly one alert: the throttle stamp is CARRIED FORWARD on later
+        # unhealthy writes, so a throttled tick can never re-arm the notify.
+        assert len(notes) == 1
+        assert len(events) == 1
+        streak = self._state(tmp_hfcc_dir)["relaunch_streak"]
+        assert streak >= 2 * health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+
+    def test_third_attempt_escalates_to_the_repair_path(self, tmp_hfcc_dir, monkeypatch):
+        """Asymmetry killer: once the streak hits the threshold the relaunch
+        stops issuing the command sparkrun provably refuses and runs the
+        stop -> reap -> verified-start repair instead — under the same heal
+        lease. A plain `proxy start` may not be invoked while pinned."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch)
+        self._attempts(tmp_hfcc_dir, health.PROXY_RELAUNCH_MAX_CONSECUTIVE)
+        # Attempts 1..MAX-1 were plain starts; attempt MAX escalated.
+        starts = [c for c in calls if c[1:3] == ["proxy", "start"] and "--restart" not in c]
+        assert len(starts) == health.PROXY_RELAUNCH_MAX_CONSECUTIVE - 1
+        assert len(repairs) == 1 and repairs[0] == ["10.0.0.2"]
+        # The hollow tracked PID was retired first (vetted cmdline stubbed).
+        assert kills and kills[0][0] == 12477
+        assert self._state(tmp_hfcc_dir)["relaunched"] is True
+
+    def test_escalation_never_uses_restart_and_respects_the_guards(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The escalation must refuse a non-litellm tracked PID (PID reuse)
+        and must not invent a plain `--restart` invocation as a side door."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+        monkeypatch.setattr(health, "_proc_cmdline", lambda pid: "/sbin/launchd")
+        self._attempts(tmp_hfcc_dir, health.PROXY_RELAUNCH_MAX_CONSECUTIVE)
+        assert kills == []                       # foreign cmdline: refused
+        for c in calls:
+            assert "--restart" not in c, f"--restart side door used: {c}"
+        assert len(repairs) == 1                 # repair still attempted
+        assert health.check_proxy() is not True
+
+    def test_healthy_check_clears_the_streak(self, tmp_hfcc_dir, monkeypatch):
+        """Recovery defuses the alarm: once the probes pass, the state rewrite
+        drops streak + alert stamp, so a LATER outage alerts afresh."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch)
+        for _ in range(health.PROXY_RELAUNCH_MAX_CONSECUTIVE):
+            health.check_proxy()
+        assert self._state(tmp_hfcc_dir).get("relaunch_streak")
+        monkeypatch.setattr(health, "_proxy_models_probe",
+                            lambda url, timeout=5: {"ok": True,
+                                                    "models": ["worker-model"],
+                                                    "error": ""})
+        assert health.check_proxy() is True
+        st = self._state(tmp_hfcc_dir)
+        assert "relaunch_streak" not in st
+        assert "stall_alerted_at" not in st
+        assert health._proxy_relaunch_streak() == 0
+
+    def test_rc0_over_dead_proxy_does_not_defuse_the_streak(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Exit code is not success: sparkrun can exit 0 while litellm never
+        comes up (the 10-11 shape). The streak must keep climbing to the
+        threshold — an rc-0 relaunch must not reset the alarm — and the
+        stall alert must fire anyway."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+
+        def fake_run(args, **k):
+            calls.append(list(args))
+            return {"ok": True, "output": "Proxy started", "stderr": ""}
+        monkeypatch.setattr(health, "run_cmd", fake_run)
+        for _ in range(health.PROXY_RELAUNCH_MAX_CONSECUTIVE):
+            health.check_proxy()
+            p = tmp_hfcc_dir / "state" / "proxy.json"
+            st = json.loads(p.read_text())
+            import datetime
+            st["last_relaunch"] = (datetime.datetime.now(
+                datetime.timezone.utc)
+                - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
+            ).isoformat()
+            p.write_text(json.dumps(st))
+        assert self._state(tmp_hfcc_dir)["relaunch_streak"] == \
+            health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        assert len(notes) == 1                   # rc-0-then-die still alarms
+
+    def test_suppressed_and_deferred_ticks_never_count(self, tmp_hfcc_dir, monkeypatch):
+        """Cooldown-suppressed and lease-deferred ticks attempt nothing and
+        must not raise a streak that could fire a false alarm (same rule as
+        `relaunch_failed`)."""
+        from hscc_daemon import heal_lease
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch)
+        assert health.check_proxy() is False     # attempt 1, streak 1
+        assert health.check_proxy() is False     # suppressed (cooldown)
+        st = self._state(tmp_hfcc_dir)
+        assert st["relaunch_streak"] == 1        # suppressed did NOT count
+        assert "last_relaunch" in st and "stall_alerted_at" not in st
+        # Lease-deferred tick.
+        p = tmp_hfcc_dir / "state" / "proxy.json"
+        st = json.loads(p.read_text())
+        import datetime
+        st["last_relaunch"] = (datetime.datetime.now(
+            datetime.timezone.utc)
+            - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
+        ).isoformat()
+        p.write_text(json.dumps(st))
+        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+        assert health.check_proxy() is False
+        assert self._state(tmp_hfcc_dir)["relaunch_streak"] == 1
+        assert notes == []
+
+    def test_streak_survives_daemon_restart(self, tmp_hfcc_dir, monkeypatch):
+        """Durability: the alert threshold must be reachable across a restart
+        (the incident's counters were file-based; an in-memory streak would
+        reset exactly when a crash-looping daemon needs it most)."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+        self._attempts(tmp_hfcc_dir, health.PROXY_RELAUNCH_MAX_CONSECUTIVE - 1)
+        # Simulated restart: module state gone, state file kept.
+        assert health._proxy_relaunch_streak() == \
+            health.PROXY_RELAUNCH_MAX_CONSECUTIVE - 1
+        assert notes == []
+        health.check_proxy()                     # attempt MAX after "restart"
+        assert len(notes) == 1
+
+    def test_repair_verification_waits_for_the_port_to_bind(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The 01:41:42 `repair UNVERIFIED — port owner None` was a RACE:
+        `proxy start` returns after sparkrun's 2 s grace and litellm binds
+        seconds later. Verification must poll while the port is unbound."""
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 999)
+        monkeypatch.setattr(health, "_reap_orphan_proxy_listener", lambda t: True)
+        monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
+        ticks = {"n": 0}
+        def flaky_listener():
+            ticks["n"] += 1
+            if ticks["n"] <= 3:
+                return None, None                # not bound yet
+            return 999, "litellm --config c.yaml"
+        monkeypatch.setattr(health, "_proxy_listener", flaky_listener)
+        monkeypatch.setattr(health.time, "sleep", lambda s: None)
+        res = health._proxy_repair_orphan(["10.0.0.2"])
+        assert res["verified"] is True and res["ok"] is True
+
+    def test_kill_hollow_refuses_foreign_and_dead_pids(self, tmp_hfcc_dir, monkeypatch):
+        """Blast-radius contract: only a living, litellm-cmdline tracked PID
+        may be signalled."""
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        kills = []
+        # sig 0 is the liveness probe, not a signal — record only real ones.
+        monkeypatch.setattr(
+            health.os, "kill",
+            lambda pid, sig: kills.append((pid, sig)) if sig else None)
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: None)
+        assert health._proxy_kill_hollow_tracked("test") is False and kills == []
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 555)
+        monkeypatch.setattr(health, "_proc_cmdline", lambda pid: "/usr/sbin/httpd")
+        assert health._proxy_kill_hollow_tracked("test") is False and kills == []
+        monkeypatch.setattr(health, "_proc_cmdline",
+                            lambda pid: "litellm --config c.yaml")
+        # os.kill(pid, 0) raises -> already gone, no signal needed.
+        def gone(pid, sig):
+            raise ProcessLookupError()
+        monkeypatch.setattr(health.os, "kill", gone)
+        assert health._proxy_kill_hollow_tracked("test") is True
+
+    def test_intentional_autodown_window_never_alerts(self, tmp_hfcc_dir, monkeypatch):
+        """Fleet deliberately down (autodown window): the streak may build but
+        no operator alert may fire — same suppression verify.py expects."""
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch)
+        monkeypatch.setattr(health, "_intentional_window", lambda: True)
+        for _ in range(health.PROXY_RELAUNCH_MAX_CONSECUTIVE):
+            health.check_proxy()
+        assert notes == [] and events == []
+
+
 
 class TestCheckMultiplexProfiles:
     """_check_multiplex_profiles() verifies that all Hermes profiles are served

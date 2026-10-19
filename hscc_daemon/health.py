@@ -656,6 +656,58 @@ def _proxy_relaunch_stamp():
     return stamp or None
 
 
+# LOUD + ESCALATING RELAUNCH (t_43b6e245, docs/audits/PROXY_RELAUNCH_NOOP_2026-10-18.md).
+# On 2026-10-18 ~36 plain `sparkrun proxy start` attempts over 3h09m did nothing
+# because a hollow tracked PID (alive per sparkrun's state file, serving nothing)
+# made every start refuse — "Error: proxy already running ... Use --restart" —
+# and hscc discarded the command output that said exactly that. After N
+# consecutive failed attempts the stream must stop being polite: (a) alert once
+# per notify-cooldown (desktop notify + events.jsonl row), and (b) escalate from
+# the refused plain start to the stop -> reap -> verified-start repair that
+# clears the hollow PID. 3 sits above a one-off transient (one refused tick heals
+# by itself on the next cooldown window) and well below the incident's ~15 min
+# of silent no-ops.
+PROXY_RELAUNCH_MAX_CONSECUTIVE = int(
+    os.environ.get("HSCC_PROXY_RELAUNCH_MAX_CONSECUTIVE", "3"))
+PROXY_STALL_NOTIFY_COOLDOWN_S = float(
+    os.environ.get("HSCC_PROXY_STALL_NOTIFY_COOLDOWN_S", "1800"))
+# `sparkrun proxy start` returns after sparkrun's own 2s startup grace; litellm
+# needs several more seconds to bind the port. A single owner check right after
+# start returns is therefore NOT a verdict — the 2026-10-18 01:41:42
+# "repair UNVERIFIED — port owner None" line was this race, not a dead repair.
+# Verification polls while the port is still unbound (never while a disagreeing
+# owner is already visible — that is an immediate verdict).
+PROXY_REPAIR_VERIFY_WAIT_S = float(
+    os.environ.get("HSCC_PROXY_REPAIR_VERIFY_WAIT_S", "20"))
+
+
+def _proxy_relaunch_streak():
+    """Consecutive failed relaunch attempts, read DURABLY from the stream state.
+
+    Same durability rule as the cooldown stamp and the F5 breaker ledger: the
+    incident's counters were state-file based and survived — a stall counter
+    that reset on daemon restart could never alert during a crash-looping
+    outage. Cleared only by the healthy branch (an exit code is not success)."""
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict):
+        return 0
+    try:
+        return max(0, int(prev.get("relaunch_streak") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _proxy_stall_stamp():
+    """Raw `stall_alerted_at` stamp from the proxy state file, or None."""
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict):
+        return None
+    stamp = prev.get("stall_alerted_at")
+    return stamp or None
+
+
 def _seconds_since_stamp(stamp):
     """Seconds elapsed since an ISO stamp; None if missing/unparsable."""
     if not stamp:
@@ -874,6 +926,21 @@ def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports):
                   f"backend(s)")
 
 
+def _proc_cmdline(pid):
+    """The command line of `pid` (stripped), or None if unreadable.
+
+    Seam for the proxy heal paths: any signal we send must be vetted against
+    what the process actually IS, not against a PID number.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5).stdout
+        return out.strip() or None
+    except Exception:
+        return None
+
+
 def _proxy_listener():
     """(pid, cmdline) of the process LISTENING on PROXY_PORT, or (None, None).
 
@@ -887,10 +954,7 @@ def _proxy_listener():
         pids = [int(p) for p in out.split() if p.strip().isdigit()]
         if not pids:
             return None, None
-        cmd = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pids[0])],
-            capture_output=True, text=True, timeout=5).stdout
-        return pids[0], (cmd.strip() or None)
+        return pids[0], _proc_cmdline(pids[0])
     except Exception:
         return None, None
 
@@ -989,7 +1053,16 @@ def _proxy_repair_orphan(relaunch_hosts):
     res = run_cmd(sparkrun_bin.argv(*args), timeout=90)
     # VERIFY, do not trust exit code: exit 0 over a proxy that bound a
     # different port is exactly how this incident stayed invisible.
+    # BOUNDED WAIT first: `proxy start` returns after sparkrun's own 2 s
+    # startup grace, and litellm binds the port seconds later — the 2026-10-18
+    # 01:41:42 "repair UNVERIFIED — port owner None" line was this race. Poll
+    # only while the port is unbound; a visible owner that disagrees is an
+    # immediate verdict, not something to wait on.
+    deadline = time.time() + max(0.0, PROXY_REPAIR_VERIFY_WAIT_S)
     owner, owner_cmd = _proxy_listener()
+    while owner is None and time.time() < deadline:
+        time.sleep(1.0)
+        owner, owner_cmd = _proxy_listener()
     tracked_after = _proxy_tracked_pid()
     verified = (owner is not None and tracked_after is not None
                 and owner == tracked_after)
@@ -1001,6 +1074,127 @@ def _proxy_repair_orphan(relaunch_hosts):
     return {"ok": bool(res.get("ok")) and verified,
             "port_owner": owner, "tracked_pid": tracked_after,
             "verified": verified, "output": res.get("output", "")}
+
+
+def _proxy_kill_hollow_tracked(reason):
+    """SIGTERM (then SIGKILL) a tracked proxy PID that is alive but not serving.
+
+    THE HOLLOW-PID DEFECT (t_43b6e245): sparkrun restarts signal only the
+    tracked PID, which for ``uvx litellm`` is a *wrapper* — the real socket
+    owner is a child. A SIGTERM'd wrapper can leave the child orphaned on the
+    port, and the replacement wrapper can stay alive without ever binding
+    (EADDRINUSE). ``is_running()`` (state-file PID + ``os.kill(pid, 0)``) then
+    reads "running" forever and every plain ``proxy start`` refuses. The only
+    hscc-side way out is to retire the hollow PID itself, so sparkrun's state
+    stops pinning the stream.
+
+    Guards, same contract as :func:`_reap_orphan_proxy_listener`:
+      1. no tracked PID -> nothing to do.
+      2. the process must exist (a dead PID is sparkrun's own stale-state case,
+         not ours to signal).
+      3. the cmdline must mention litellm — we kill only the thing we mean;
+         PID reuse by a foreign process is refused and reported.
+
+    Returns True when the PID is gone (killed or already exited).
+    """
+    pid = _proxy_tracked_pid()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        log(f"proxy escalation: could not inspect tracked PID {pid}: {e}",
+            "ERROR")
+        return False
+    cmd = _proc_cmdline(pid) or ""
+    if "litellm" not in cmd.lower():
+        log(f"proxy escalation: tracked PID {pid} is alive but its cmdline is "
+            f"not litellm ({cmd!r}) — refusing to kill an unrecognised "
+            "process", "ERROR")
+        return False
+    log(f"proxy escalation: killing HOLLOW tracked proxy PID {pid} "
+        f"({reason}): {cmd[:120]}", "WARN")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        log(f"proxy escalation: could not SIGTERM tracked PID {pid}: {e}",
+            "ERROR")
+        return False
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.25)
+    log(f"proxy escalation: hollow tracked PID {pid} survived SIGTERM — "
+        "escalating to SIGKILL", "WARN")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        log(f"proxy escalation: could not SIGKILL tracked PID {pid}: {e}",
+            "ERROR")
+        return False
+    time.sleep(0.5)
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+
+
+def _proxy_escalated_repair(relaunch_hosts, streak, last_error, reason):
+    """The post-threshold repair: retire the hollow PID, then the proven path.
+
+    Runs only after PROXY_RELAUNCH_MAX_CONSECUTIVE consecutive failed
+    attempts, still under the heal lease and breaker gate. Order matters:
+    killing the hollow tracked PID FIRST (so sparkrun's state stops refusing
+    starts) -> `proxy stop` inside _proxy_repair_orphan clears that stale
+    state -> reap of any orphaned listener holding the port -> plain start ->
+    port-owner verification. Never `--restart`: it SIGTERMs the same wrapper
+    that is the problem.
+    """
+    log(f"proxy relaunch STALLED after {streak} consecutive failures — "
+        f"escalating to orphan repair on :{PROXY_PORT} "
+        f"(last error: {(last_error or reason or '')[:200]})", "ERROR")
+    _proxy_kill_hollow_tracked(f"{streak} consecutive failed relaunches")
+    return _proxy_repair_orphan(relaunch_hosts)
+
+
+def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason):
+    """Loud operator alert for a stalled relaunch loop — throttled.
+
+    Desktop notify (priority high) + a durable events.jsonl row, exactly the
+    F5 breaker's alerting shape: a direct notify rather than a trigger rule,
+    because the live ~/.hscc/triggers.json only gains a rule on a fresh
+    bootstrap and a critical alert that silently depends on a missing rule is
+    the 2026-10-08 NAS class of failure. Throttle lives in the stream state
+    (`stall_alerted_at`), so it survives a daemon restart: the 3h incident
+    alerts every PROXY_STALL_NOTIFY_COOLDOWN_S, never once per 5-min tick.
+    """
+    since = _seconds_since_stamp(_proxy_stall_stamp())
+    if since is not None and since < PROXY_STALL_NOTIFY_COOLDOWN_S:
+        return False, None
+    msg = (f"Proxy :{PROXY_PORT} down and {streak} relaunches failed — "
+           f"escalated repair in progress. Reason: {reason}. "
+           f"Last error: {(last_error or 'none')[:300]}. "
+           f"If this repeats, sparkrun's tracked PID is hollow: "
+           f"`sparkrun proxy stop` then `sparkrun proxy start --hosts "
+           f"{','.join(relaunch_hosts or [])} --port {PROXY_PORT}`.")
+    send_macos_notification("HSCC: proxy relaunch stalled", msg,
+                            priority="high")
+    emit_event("proxy.relaunch.stalled", {
+        "port": PROXY_PORT, "streak": streak, "reason": reason,
+        "last_error": (last_error or "")[:400],
+        "hosts": list(relaunch_hosts or []),
+    }, severity="error")
+    return True, now_iso()
 
 
 def check_proxy():
@@ -1093,6 +1287,7 @@ def check_proxy():
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
     deferred = False
+    attempted = False
     if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
         suppressed = True
         wait = int(PROXY_RELAUNCH_COOLDOWN_S - since)
@@ -1131,6 +1326,25 @@ def check_proxy():
                 message = note
                 log(f"proxy relaunch {note}", "WARN")
             else:
+                # LOUD + ESCALATING (t_43b6e245): the 2026-10-18 incident ran
+                # ~36 plain `sparkrun proxy start` attempts across 3h09m while
+                # a hollow tracked PID made every one refuse, and the ONLY
+                # trace was `relaunching with [...]` — the command's stderr
+                # ("already running ... Use --restart") was discarded.
+                # The streak counts CONSECUTIVE TICKS THAT ATTEMPTED A REPAIR
+                # WITHOUT RESTORING SERVICE (this branch only runs when the
+                # probes already failed) and lives in the state file, so it —
+                # like the alert throttle and the F5 ledger — survives a daemon
+                # restart. Only the healthy branch clears it: an exit code is
+                # not success (rc-0-over-still-empty-discovery is the
+                # 2026-10-11 shape).
+                attempted = True
+                prev_streak = _proxy_relaunch_streak()
+                # This tick is attempt number prev_streak+1. The MAX-th
+                # consecutive stalled attempt escalates (two polite plain
+                # starts, then the repair that clears the hollow PID) and the
+                # same tick raises the stall alarm.
+                escalated = (prev_streak + 1) >= PROXY_RELAUNCH_MAX_CONSECUTIVE
                 try:
                     if backend_drift:
                         # F4: the catalogue is fine but the live router disagrees with
@@ -1145,9 +1359,23 @@ def check_proxy():
                         r = _proxy_repair_orphan(relaunch_hosts)
                         message = ("repaired" if r.get("ok")
                                    else "repair incomplete (unverified)")
+                    elif escalated:
+                        # Carry the PREVIOUS attempt's surfaced error into the
+                        # escalation banner — the streak that triggered this
+                        # repair came from those attempts, not from this one.
+                        from .state import read_state as _rs
+                        _prev = _rs("proxy") or {}
+                        r = _proxy_escalated_repair(
+                            relaunch_hosts, prev_streak,
+                            _prev.get("relaunch_error") if isinstance(_prev, dict) else "",
+                            reason)
+                        message = ("escalated repair" if r.get("ok")
+                                   else "escalated repair incomplete (unverified)")
                     else:
                         log(f"relaunching with {relaunch_hosts}"
-                            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+                            f"{' (--restart: running proxy serves nothing)' if restart else ''}"
+                            f" (attempt {prev_streak + 1} of "
+                            f"{PROXY_RELAUNCH_MAX_CONSECUTIVE} before stall alarm)", "WARN")
                         args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
                                 "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
                         if restart:
@@ -1157,6 +1385,29 @@ def check_proxy():
                 finally:
                     heal_lease.release("proxy-relaunch")
     ok = bool(r.get("ok"))
+    # A relaunch/repair that came back failed must SURFACE the underlying
+    # command output — every failure of this path in the 2026-10-18 window was
+    # logged as bare text without the reason ("already running" etc.), and
+    # nothing downstream could alarm on it.
+    if not ok and not suppressed and not deferred:
+        log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
+            f"{(r.get('output') or r.get('stderr') or 'no command output')[:400]}",
+            "ERROR")
+    new_streak = _proxy_relaunch_streak() + (1 if attempted else 0)
+    alert_stamp = None
+    # Alert when a repair attempt FAILED and the stream has now been
+    # unrecoverable for MAX consecutive attempts. `attempted` keeps
+    # cooldown/lease/breaker-deferred ticks (which did nothing) out of the
+    # count and out of the alarm; `not ok` keeps the moment an escalated
+    # repair SUCCEEDS from raising a false alarm on its own tick. The
+    # intentional-autodown window never alerts.
+    if attempted and not ok and new_streak >= PROXY_RELAUNCH_MAX_CONSECUTIVE \
+            and not _intentional_window():
+        alerted, alert_stamp = _proxy_stall_alert(
+            relaunch_hosts, new_streak, r.get("output") or "", reason)
+        if alerted:
+            message = (message + f" — STALLED after {new_streak} attempts, "
+                                 "operator notified")
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
                   "reason": reason,
@@ -1169,6 +1420,13 @@ def check_proxy():
                   "relaunch_failed": (not ok and not suppressed and not deferred),
                   "deferred": deferred,
                   "message": message}
+    if not ok and not suppressed and not deferred:
+        proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]
+    if new_streak:
+        # NOT cleared by a merely-successful exit code: only the healthy
+        # branch (probes pass) clears the streak. `sparkrun proxy start`
+        # exiting 0 over a dead/empty proxy is a documented shape (10-11).
+        proxy_data["relaunch_streak"] = new_streak
     if suppressed or deferred:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
         # suppressed/deferred tick would push the window out every tick and make
@@ -1176,6 +1434,11 @@ def check_proxy():
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
+        # Same rule for the stall-alert throttle: re-stamping it on a tick that
+        # alerted nothing would push the notify window out forever and the
+        # operator would never hear about a 3-hour outage.
+        if not alert_stamp:
+            alert_stamp = _proxy_stall_stamp()
     else:
         # EVERY attempt stamps the cooldown — success or failure (PR #22
         # round 2). `sparkrun proxy start` exiting 0 does NOT mean the fleet
@@ -1186,6 +1449,17 @@ def check_proxy():
         # WITHOUT the stamp, so a genuinely recovered proxy clears the
         # cooldown on its own and stays fast to recover later.
         proxy_data["last_relaunch"] = now_iso()
+    if alert_stamp:
+        proxy_data["stall_alerted_at"] = alert_stamp
+    elif not ok:
+        # Throttled or suppressed-by-intentional-window alert: carry the
+        # EXISTING stamp forward on every unhealthy write. Dropping it on a
+        # throttled attempt tick would disarm the throttle entirely — the
+        # next 5-min tick would notify again (the 2026-10-08 NAS 178-notification
+        # storm is that exact class).
+        prev_alert = _proxy_stall_stamp()
+        if prev_alert:
+            proxy_data["stall_alerted_at"] = prev_alert
     if ok is False and _intentional_window():
         # Fleet in an intentional-autodown window (down by design or waking) —
         # the worker proxy is not serving models while the layer is stopped or
