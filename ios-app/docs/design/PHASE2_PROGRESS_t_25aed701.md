@@ -372,6 +372,21 @@ Pro simulator) BUILD SUCCEEDED, installed and launched** at `644286f6` (the
 running process was confirmed via `launchctl list` on the device, so the
 converted screens are not merely compiling, they boot).
 
+### Nav-graph walker vs this capture harness (t_810ab152)
+
+`capture_screens.sh` (above) proves a screen **RENDERS**: fixture-fed launches,
+manifest receipts, vision-checked PNGs. It does NOT prove a screen is USABLE —
+the 2.9.0 drawer dead end shipped with every screen rendering beautifully.
+`scripts/nav_graph_check.sh` closes that gap: an XCUITest walker (real taps, no
+human) that enters EVERY code-derived drawer screen through the drawer, asserts
+its marker, returns to the drawer, re-taps the SAME row (the exact 2.9.0
+regression), pulls-to-refresh with a real coordinate drag (receipt: the app's
+live served-count AX probe), and re-runs everything under honest EMPTY, ERROR
+and DISCONNECTED launches — failing with `DEAD END [screen]: <missing edge>`.
+Neither gate proves **pixel correctness** (layout, color, typography) — that
+remains the screenshot set + the vision pass. Full breakdown:
+`docs/design/NAV_GRAPH_t_810ab152.md`.
+
 Earlier runs: gates green at every commit in C3, C3b and C3c; the device build
 was also run at `c8df2177` and `df396a20`.
 

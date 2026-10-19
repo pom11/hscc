@@ -75,9 +75,16 @@ struct ProjectsView: View {
                     }
                 }
                 ForEach(response.projects) { project in
-                    NavigationLink {
-                        ProjectDetailView(client: client, project: project)
-                    } label: {
+                    // Value-registered push (t_706129d8): the overview must
+                    // LIVE on router.projectsPath. A value-less link pushed
+                    // it off-path, so the first sub-page append (Chat via
+                    // openSection, or Board/Settings via their value links)
+                    // made NavigationStack rewrite the path without it — and
+                    // popping a sub-page landed on the Projects list, not on
+                    // the overview. Same value AppShell.projectRouteView
+                    // already renders for deep links: one push, one path.
+                    NavigationLink(value: ProjectRoute.projectDetail(name: project.name,
+                                                                      board: project.board)) {
                         projectRow(project)
                     }
                 }
@@ -104,9 +111,11 @@ struct ProjectsView: View {
                 }
             }
             ForEach(response.projects) { project in
-                NavigationLink {
-                    ProjectDetailView(client: client, project: project)
-                } label: {
+                // Value-registered push (t_706129d8) — same as the live list;
+                // the overview must be ON the path, or a sub-page append pops
+                // it off and back-from-sub-page lands here, not on the overview.
+                NavigationLink(value: ProjectRoute.projectDetail(name: project.name,
+                                                                  board: project.board)) {
                     projectRow(project)
                 }
             }

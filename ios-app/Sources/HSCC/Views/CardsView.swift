@@ -128,6 +128,21 @@ struct CardDetailView: View {
     /// hasn't set a usable host/port/token yet. Both the detail fetch and the
     /// card actions use this so they share one source of truth.
     private func makeClient() -> HSCCClient? {
+        #if DEBUG
+        // Fixture-mode parity with AppShell.makeClient (t_810ab152): the
+        // headless harness cannot write the Keychain (OSStatus -34018), so a
+        // launch with HSCC_DEBUG_FIXTURES=1 has NO token and this local
+        // client would honestly return nil — leaving the detail stuck on its
+        // connect gate and the nav-graph walker unable to walk cards ->
+        // detail -> back. The walker PROVED this: the fixture manifest for
+        // that launch served exactly /v1/cards and never /v1/cards/<id>.
+        // Same bypass, same quarantine: #if DEBUG + fixturesEnabled, zero
+        // release-path change.
+        if DebugHarness.fixturesEnabled {
+            return HSCCClient(host: "fixtures.invalid", port: 8788,
+                              token: "debug-fixture-token")
+        }
+        #endif
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }
