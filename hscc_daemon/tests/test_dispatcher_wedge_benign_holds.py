@@ -621,3 +621,222 @@ class TestGateWiredIntoRecovery:
         assert rec.calls == 1, (
             "unverifiable board state must NOT silence the restart path")
         assert results[-1]["result"] == "recovered"
+
+
+# ---------------------------------------------------------------------------
+# COMBINED CASE — parked review row vs the benign-hold layers (t_dc04732e)
+# ---------------------------------------------------------------------------
+# Neither branch tested this pairing alone: #35 owns "a review row a runtime
+# cannot dispatch is not spawnable work", #43 owns "a claimed benign hold is
+# not a wedge". Rebase review found the interaction: main's reconciliation
+# counter (``pending >= claimed``) counted ``ready+review`` rows
+# UNCONDITIONALLY, so on a runtime WITHOUT a review lane one parked review
+# row padded the count and reconciled a claim the dispatcher could not have
+# made (its own tick never enumerates review rows when
+# ``review_dispatch_enabled()`` is off). A bogus claim then silently exempted
+# a live wedge for up to the lookback window. The fix threads #35's same
+# capability answer (``review_capable``) through the pending lane set.
+#
+# The L2 half is a NEGATIVE pin: the board-state gate must never let a parked
+# review row count as part of "every ready card explainably held".
+
+REVIEW_ROW = ("review", "architect")
+
+
+def _hold_log(tmp_path, now, clause="active_pr=3"):
+    """A gateway log whose single stuck warning is stamped at ``now`` with
+    ``clause`` — always inside the lookback of the tick that reads it, so
+    LAYER-1 classification (fresh + benign) is held constant while the
+    reconciliation is what is under test."""
+    p = tmp_path / "gateway.log"
+    stamp = datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+    p.write_text(
+        f"{stamp},000 WARNING gateway.run: kanban dispatcher stuck: ready "
+        "queue non-empty for 11 consecutive ticks but 0 workers spawned. "
+        f"Last tick held back: {clause}. Check profile health (venv, PATH, "
+        "credentials) and `hermes kanban list --status ready`.\n")
+    return str(p)
+
+
+class TestCombinedCaseReviewRowVsBenignHold:
+    """The case no branch covered alone (rebase t_dc04732e)."""
+
+    @pytest.mark.parametrize("review_capable,expected", [
+        (False, 1),  # parked review row must NOT pad the reconciliation
+        (True, 2),   # dispatchable lane: a held review card may legitimately
+                     # sit in the dispatcher's hold count
+    ])
+    def test_pending_lane_set_follows_review_capability(self, review_capable,
+                                                        expected):
+        """RED-GREEN pin for the pending-lane fix (t_dc04732e).
+
+        Before the fix both parameterisations returned 2 (the count ignored
+        the capability answer entirely), so the non-capable case could not
+        fail-close its exemption.
+        """
+        kb = FakeKanban({"default": [READY, REVIEW_ROW]})
+        cap = dw._capture_kanban(kanban_db=kb, max_in_progress=4,
+                                 max_per_profile=1_000_000,
+                                 review_capable=review_capable)
+        assert cap["total_pending"] == expected
+
+    def test_parked_review_row_cannot_reconcile_a_claimed_hold(self):
+        """Non-capable runtime: board has 1 dispatchable pending row, the
+        clause claims 3 held. Reconciling 3 against 1+1-parked-review is the
+        bug; the tick must be judged exactly as an unreconcilable claim."""
+        kb = FakeKanban({"default": [READY, REVIEW_ROW, REVIEW_ROW]})
+        cap = dw._capture_kanban(kanban_db=kb, max_in_progress=4,
+                                 max_per_profile=1_000_000,
+                                 review_capable=False)
+        assert cap["total_pending"] == 1 and cap["stale_review"] is True
+        det = {"stall_ticks": 0, "last_running_total": None,
+               "declared": False, "declared_since": None,
+               "peak_stall_ticks": 0}
+        dw.evaluate_stall_tick(
+            cap, det, 1000.0,
+            hold_info={"classified": True, "benign": True,
+                       "reasons": [("active_pr", "3")], "age_s": 30})
+        assert det["last_hold_explained"] is False, (
+            "a parked review row on a runtime with no review lane must not "
+            "reconcile the dispatcher's hold claim")
+
+    def test_held_review_card_reconciles_when_lane_is_spawnable(self):
+        """The paired positive: when this runtime CAN dispatch review, a
+        review card can legitimately sit in the dispatcher's hold count, so
+        1 ready + 2 review reconcile a claim of 3 (today's #43 semantics
+        keep working — the fix is capability-scoped, not a blanket ban)."""
+        kb = FakeKanban({"default": [READY, REVIEW_ROW, REVIEW_ROW]})
+        cap = dw._capture_kanban(kanban_db=kb, max_in_progress=4,
+                                 max_per_profile=1_000_000,
+                                 review_capable=True)
+        assert cap["total_pending"] == 3 and cap["stale_review"] is False
+        det = {"stall_ticks": 0, "last_running_total": None,
+               "declared": False, "declared_since": None,
+               "peak_stall_ticks": 0}
+        dw.evaluate_stall_tick(
+            cap, det, 1000.0,
+            hold_info={"classified": True, "benign": True,
+                       "reasons": [("active_pr", "3")], "age_s": 30})
+        assert det["last_hold_explained"] is True
+
+    def test_full_probe_padded_hold_still_declares_and_restarts(self,
+                                                                 tmp_path):
+        """End-to-end for the exact combined state: ready work + a parked
+        review row + a fresh benign clause that only balances if the parked
+        row counts. The stall must DECLARE (the bug suppressed it for the
+        whole lookback) and recovery must restart EXACTLY once — the #43
+        benign-hold exemption must not shield it, the #35 restart latch must
+        not shield it (the stall is dispatcher-fixable: proven ready rows)."""
+        t0 = datetime.datetime(2026, 10, 18, 9, 0, 0).timestamp()
+        kb = FakeKanban({"default": [READY, REVIEW_ROW]})
+        rec = Recorder()
+        streams, results = [], []
+        for k in range(8):
+            now = t0 + k * 60.0
+            log_path = _hold_log(tmp_path, now, clause="active_pr=2")
+            captured = {}
+            dw.check_dispatcher_wedge(
+                kanban_db=kb, max_in_progress=4, now=now,
+                write_state_fn=lambda n, d: captured.__setitem__(n, d),
+                max_per_profile=1_000_000, review_capable=False,
+                hold_fn=_hold_fn(log_path))
+            stream = captured["dispatcher"]
+            streams.append(stream)
+            results.append(dw.recover_dispatcher_wedge(
+                stream_state=stream, restart_fn=rec, now=now,
+                notify_fn=lambda m: None))
+        assert [s["ok"] for s in streams][-3:] == [False, False, False], (
+            f"stream must go red: {[s['ok'] for s in streams]}")
+        assert rec.calls == 1, (
+            f"a live wedge padded by a parked review row must still "
+            f"escalate exactly once; results={results}")
+        assert streams[-1]["stale_review"] is True, (
+            "the parked row is still REPORTED on the red stream")
+
+    def test_same_board_stays_green_when_review_is_spawnable(self, tmp_path):
+        """Counterpart with the review lane dispatchable and a claim that
+        reconciles honestly (3 dispatchable pending rows, claim 3): the #43
+        benign hold must suppress — this file's core promise survives #35."""
+        t0 = datetime.datetime(2026, 10, 18, 9, 0, 0).timestamp()
+        kb = FakeKanban({"default": [READY, REVIEW_ROW, REVIEW_ROW]})
+        rec = Recorder()
+        streams = []
+        for k in range(8):
+            now = t0 + k * 60.0
+            log_path = _hold_log(tmp_path, now, clause="active_pr=3")
+            captured = {}
+            dw.check_dispatcher_wedge(
+                kanban_db=kb, max_in_progress=4, now=now,
+                write_state_fn=lambda n, d: captured.__setitem__(n, d),
+                max_per_profile=1_000_000, review_capable=True,
+                hold_fn=_hold_fn(log_path))
+            streams.append(captured["dispatcher"])
+            dw.recover_dispatcher_wedge(
+                stream_state=captured["dispatcher"], restart_fn=rec,
+                now=now, notify_fn=lambda m: None)
+        assert all(s["ok"] is True for s in streams), (
+            "a genuinely reconciled benign hold stays green when review is "
+            f"spawnable: {[s['ok'] for s in streams]}")
+        assert rec.calls == 0
+        assert any(s.get("hold_explained") for s in streams)
+
+    def test_board_gate_never_explains_with_a_parked_review_row(
+            self, cli_available):
+        """L2 negative pin: the sanctioned CLI gate enumerates READY cards
+        only. Even with a parked review row carrying a fresh benign hold
+        event on the same board, a plain unheld ready card stays
+        unexplained — a parked review row can never be the evidence that a
+        genuine wedge is 'just the dispatcher holding'."""
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY, REVIEW_ROW]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_plain")],
+            ("show", "t_plain"): {"task": {"id": "t_plain"}, "events": [],
+                                  "runs": [], "comments": []},
+            ("show", "t_rev"): _show_with_guard("t_rev", "active_pr", 60,
+                                                now),
+        })
+        # The stream from the probe: the board is spawnable because of the
+        # READY row (review-capable runtime), so the gate DOES consult it.
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is False, (
+            f"parked review row must not explain the ready wedge: {why}")
+        assert "unexplained" in why
+        # And the gate only ever asked for READY cards:
+        assert all("review" not in c for c in cli.calls), \
+            "the gate must not enumerate review rows as hold evidence"
+
+    def test_review_only_board_is_never_asked_by_the_gate(
+            self, cli_available, monkeypatch):
+        """The stronger L2 pin on the #35 side: on a runtime that cannot
+        dispatch review, a board whose ONLY work is a parked review row is
+        not in the probe's ``spawnable`` list at all, so the gate must not
+        even be consulted for it — and a red stream naming no spawnable
+        board fails closed toward the restart (the gate cannot be silenced
+        by parked review rows)."""
+        kb = FakeKanban({"default": [REVIEW_ROW]})
+        cap = dw._capture_kanban(kanban_db=kb, max_in_progress=4,
+                                 max_per_profile=1_000_000,
+                                 review_capable=False)
+        assert cap["spawnable"] == [] and cap["stale_review"] is True
+        asked = []
+
+        def spy_gate_fn(board):
+            asked.append(board)
+            return (True, "unreachable in this test")
+
+        monkeypatch.setattr(dw, "_board_ready_facts", spy_gate_fn)
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": cap["spawnable"],
+             "total_running": 0,
+             "stale_review": True, "stale_review_boards": ["default"],
+             "review_count": 1},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=FakeCli({}), now=1.0)
+        assert asked == [], "gate must not consult a non-spawnable board"
+        assert explained is False, (
+            "a red stream naming no spawnable board must fail closed")
+

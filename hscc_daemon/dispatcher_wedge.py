@@ -68,10 +68,31 @@ engine-wedge watchdog) and reuses the exact same seams:
     buildable/configurable and the actual subprocess call is injectable so
     tests run with a fake and never touch the real gateway.
 
+Review work is spawnable ONLY if this runtime can actually dispatch it. A card
+parked in ``review`` on a runtime whose dispatcher has no review lane (or with
+``kanban.review_dispatch: false``) is NOT waiting on the dispatcher — it is
+waiting on a human. Counting it as spawnable made the detector declare a stall
+that nothing could ever clear, and the recovery restarted the gateway every
+cooldown window (operator incident 2026-10-15: four gateway SIGTERMs in two
+hours on ``t_25aed701``, a merged PR sitting in ``review``). So:
+
+  * ``spawnable`` counts review rows only when the lib exposes
+    ``has_spawnable_review`` AND ``review_dispatch_enabled()`` is true — the
+    exact gate hermes' own ``dispatch_once`` uses for the review lane. Neither
+    holds → the board's review rows are reported as ``stale_review`` (a warning
+    line + stream fields), the stream stays GREEN, nothing is restarted, no
+    wedge state is written. The same capability also decides the per-profile
+    ROOM question (``_any_assignee_under_cap``): an assignee that is only
+    waiting on undispatchable review work must not make a capped board look
+    roomy, or the phantom stall returns through the other door.
+  * a declared stall the runtime cannot dispatch (``stall_dispatchable: False``)
+    restarts AT MOST ONCE per incident, and an incident is identified by its
+    spawnable/roomy signature — see ``recover_dispatcher_wedge``.
+
 Everything that touches the outside world is injectable (kanban read,
-``max_in_progress`` config read, restart runner, clock, state writer), so the
-suite runs against fakes with ZERO external calls and never touches live
-operator state.
+``max_in_progress`` config read, restart runner, clock, state writer, review
+capability), so the suite runs against fakes with ZERO external calls and never
+touches live operator state.
 """
 
 import json
@@ -178,6 +199,25 @@ DISPATCHER_RECOVER_CHECK_INTERVAL = int(
 DISPATCHER_RECOVER_STATE_FILE = os.path.expanduser(
     "~/.hscc/dispatcher_recover.json")
 
+# The stale-review warning carries this reason when the caller pinned
+# ``review_capable=False`` without a specific diagnosis (tests, and any future
+# caller that already knows the answer).
+REVIEW_NOT_DISPATCHABLE_REASON = (
+    "review feature not dispatchable by this runtime")
+
+# In-memory rate-limit for the stale-review warning line. A parked review card
+# is a steady state, not an event: without a cooldown this would write one
+# WARNING to the daemon log every probe tick (60s) forever, which is log noise
+# that buries the real signal. Bounded per-process on purpose — same convention
+# as the detector streaks above: a daemon restart is allowed to warn once more.
+_stale_review_warn = {"last_at": None}
+
+
+def _reset_stale_review_warning():
+    """Forget the stale-review warning cooldown (tests / daemon restart)."""
+    _stale_review_warn["last_at"] = None
+
+
 
 def _recover_state_path():
     """The recover-state file, resolved at CALL time via expanduser.
@@ -250,19 +290,30 @@ def _enum_board_names(kanban_db):
     return autodown._enum_board_names(kanban_db)
 
 
-def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile):
-    """True iff some assignee with unclaimed ready/review work is under its cap.
+def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile,
+                            include_review=True):
+    """True iff some assignee with unclaimed SPAWNABLE work is under its cap.
+
+    ``include_review`` must be False when this runtime cannot dispatch the
+    review lane: a review row is not work the dispatcher could spawn this tick,
+    so its assignee must not answer the room question. Letting it do so
+    re-created the same phantom stall on the OTHER side of the detector — with
+    the ready-holding profile legitimately AT its per-profile cap, an unclaimed
+    review row owned by an idle assignee made the board look roomy, the ready
+    row kept it spawnable, and recovery restarted the gateway for a stall that
+    was just correct throttling.
 
     Read-only. On any error, return True (fail toward "there is room"), which
     keeps this helper from silencing a real stall — the stall path still has
     its own cooldown and attempt cap.
     """
+    lanes = "'ready', 'review'" if include_review else "'ready'"
     try:
         with kanban_db.connect_closing(board=board) if multi \
                 else kanban_db.connect_closing() as conn:
             waiting = [r[0] for r in conn.execute(
                 "SELECT DISTINCT assignee FROM tasks "
-                "WHERE status IN ('ready', 'review') "
+                f"WHERE status IN ({lanes}) "
                 "AND assignee IS NOT NULL AND claim_lock IS NULL"
             ).fetchall()]
             if not waiting:
@@ -293,55 +344,170 @@ def _read_max_per_profile():
         return None
 
 
+# ── Can THIS runtime dispatch the review lane? ─────────────────────────────
+def _review_dispatch_config_state():
+    """``kanban.review_dispatch`` as hermes' dispatcher sees it.
+
+    Returns ``True`` / ``False`` / ``None`` (None = unknown: the dispatch module
+    or its accessor is not importable on this interpreter, or it raised).
+
+    Deliberately reuses ``hermes_cli.kanban_db_dispatch.review_dispatch_enabled``
+    instead of re-reading the config here: that function IS the gate hermes' own
+    ``dispatch_once`` applies before it enumerates ANY review row
+    (``review_rows = _lane_rows(conn, "review") if review_dispatch_enabled()
+    else []``), so our answer is byte-for-byte the dispatcher's. A second
+    implementation would be free to disagree with the dispatcher — which is the
+    exact bug class this function exists to close. Note ``kanban.auto_review``
+    (``kanban_decompose._review_policy``) is the *pairing* policy that decides
+    who reviews a newly created card, not whether the review lane dispatches, so
+    it is NOT the signal to consult here.
+    """
+    try:
+        from hermes_cli import kanban_db_dispatch
+    except Exception:  # noqa: BLE001 - no dispatch module: unknown, not "off"
+        return None
+    fn = getattr(kanban_db_dispatch, "review_dispatch_enabled", None)
+    if fn is None:
+        return None
+    try:
+        return bool(fn())
+    except Exception:  # noqa: BLE001 - a raising accessor is unknown too
+        return None
+
+
+def _review_dispatch_capable(kanban_db):
+    """``(capable, reason)`` — can this runtime spawn a ``review`` card at all?
+
+    ``capable`` is what gates review rows out of ``spawnable``; ``reason`` is the
+    non-empty human string used in the warning when it is False.
+
+    Two independent ways the answer is False, and BOTH were live on 2026-10-15
+    in the sense that each one alone would have produced the phantom stall:
+      * the kanban lib in use exposes no ``has_spawnable_review`` — no review
+        lane to spawn into. That is the condition that makes ``_board_snapshot``
+        fall back to raw SQL, and the raw-SQL predicate counting
+        ``status='review'`` was the door the operator's diagnosis pointed at
+        (measured 2026-10-16: on THIS box the bind in
+        ``_bind_spawnable_helpers`` does succeed, so the reachable door here is
+        the second one — but the fallback is one unimportable
+        ``kanban_db_dispatch`` away, e.g. a daemon started with a
+        ``HERMES_AGENT_PATH`` that has no dispatch module, and it must not be
+        allowed to lie again).
+      * ``kanban.review_dispatch`` is off (the dispatcher's own gate): review
+        work is parked for a human by configuration, so no dispatcher state can
+        ever clear it. This box currently has it ON.
+
+    When the lib DOES advertise ``has_spawnable_review`` but the config gate is
+    unreadable (``None``), we report CAPABLE — the same fail-toward-today's-
+    semantics direction the lib's own ``review_dispatch_enabled`` takes (its
+    ``except`` returns True). Narrowing on a read failure would silently disable
+    review-stall detection on a runtime that can dispatch review.
+    """
+    if not hasattr(kanban_db, "has_spawnable_review"):
+        return False, ("review feature not available in this runtime "
+                       "(no has_spawnable_review in the kanban lib)")
+    if _review_dispatch_config_state() is False:
+        return False, "kanban.review_dispatch is off (review is human-only)"
+    return True, ""
+
+
+def _count_review_rows(conn):
+    """Assigned, unclaimed ``review`` rows on one board (warning-only count).
+
+    A plain count for the operator-facing warning. It is deliberately NOT a
+    spawnable predicate — we never reimplement ``has_spawnable_review`` here.
+    """
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status = 'review' "
+        "AND assignee IS NOT NULL AND claim_lock IS NULL"
+    ).fetchone()[0])
+
+
 def _board_snapshot(kanban_db, board, multi, max_in_progress,
-                    max_per_profile=None):
+                    max_per_profile=None, review_capable=True,
+                    review_reason=""):
     """Gather one board's dispatcher-relevant state.
 
     Returns a dict with:
-      * ``spawnable`` — True iff the board has spawnable ready OR review work
-        (an assigned, unclaimed task whose assignee is a real Hermes profile).
+      * ``spawnable`` — True iff the board has spawnable work this runtime can
+        actually dispatch: ready work (an assigned, unclaimed task whose
+        assignee is a real Hermes profile), PLUS review work only when
+        ``review_capable``. Review rows that this runtime cannot spawn are NOT
+        spawnable — see ``_review_dispatch_capable``.
       * ``in_progress`` — count of ``status='running'`` tasks.
       * ``roomy`` — True iff this board could still spawn (in_progress below
         the global cap, or no cap is configured).
+      * ``stale_review`` / ``review_count`` — review work IS present but this
+        runtime cannot dispatch it, and how many rows. Reported, never stalled.
+      * ``spawnable_proven`` — False when the spawnable answer came from the
+        raw-SQL fallback rather than the dispatcher's own predicate, i.e. we
+        could not prove the assignee maps to a real profile. Used to mark the
+        resulting stall as not proven dispatcher-fixable.
       * ``error`` — unreadable board (never crashes the whole scan).
 
     Where the real kanban lib exposes its ``has_spawnable_ready`` /
     ``has_spawnable_review`` we reuse them so our notion of "spawnable" is
     byte-for-byte the dispatcher's. Fall back to the same SQL predicate if the
-    lib is a minimal injected stub without them.
+    lib is a minimal injected stub without them — and count review work as
+    spawnable there only if ``review_capable`` says this runtime has a review
+    lane to spawn into.
     """
     try:
         with kanban_db.connect_closing(board=board) if multi \
                 else kanban_db.connect_closing() as conn:
+            proven = True
             if hasattr(kanban_db, "has_spawnable_ready"):
-                spawnable = (kanban_db.has_spawnable_ready(conn)
-                             or kanban_db.has_spawnable_review(conn))
+                ready = kanban_db.has_spawnable_ready(conn)
+                review = (review_capable
+                          and kanban_db.has_spawnable_review(conn))
+                spawnable = bool(ready or review)
             else:
+                # Raw-SQL fallback: we can see assigned+unclaimed rows but we
+                # CANNOT check them against the profile registry, which is what
+                # the dispatcher's own predicate does. So the answer is a guess
+                # (``spawnable_proven`` False), and review rows are counted only
+                # when this runtime actually has a review lane.
+                proven = False
                 rows = conn.execute(
                     "SELECT 1 FROM tasks WHERE status = 'ready' "
                     "AND assignee IS NOT NULL AND claim_lock IS NULL LIMIT 1"
                 ).fetchone()
-                rows_review = conn.execute(
-                    "SELECT 1 FROM tasks WHERE status = 'review' "
-                    "AND assignee IS NOT NULL AND claim_lock IS NULL LIMIT 1"
-                ).fetchone()
-                spawnable = bool(rows or rows_review)
+                spawnable = bool(rows)
+                review_pending = False
+            review_count = _count_review_rows(conn)
             in_progress = int(conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0])
-            # Pending ready+review work for reconciliation of the dispatcher's
-            # hold counts (t_160d306f). Deliberately counts EVERY
-            # assigned+unclaimed row (control-plane lanes included):
-            # over-counting pending makes a benign-hold EXEMPTION harder,
-            # never easier — fail closed.
+            # Pending work for reconciliation of the dispatcher's hold counts
+            # (t_160d306f). The lane set follows the SAME capability answer
+            # the spawnable decision above used (t_dc04732e, the combined
+            # case): when this runtime cannot dispatch the review lane, the
+            # dispatcher's own tick never even enumerates review rows
+            # (``review_rows = _lane_rows(conn, "review") if
+            # review_dispatch_enabled() else []``), so its "Last tick held
+            # back" clause can never be counting a parked review card —
+            # letting such a row pad the reconciliation would exonerate a
+            # live wedge (pending >= claimed) for up to the lookback window.
+            # When the lane IS dispatchable a review card may legitimately
+            # sit held by a respawn guard, so it counts there. Deliberately
+            # counts EVERY assigned+unclaimed row in the dispatchable lanes
+            # (control-plane lanes included): over-counting pending makes a
+            # benign-hold EXEMPTION harder, never easier — fail closed.
+            pending_lanes = "'ready', 'review'" if review_capable \
+                else "'ready'"
             pending = int(conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status IN ('ready', "
-                "'review') AND assignee IS NOT NULL AND claim_lock IS NULL"
+                "SELECT COUNT(*) FROM tasks WHERE status IN ("
+                f"{pending_lanes}) AND assignee IS NOT NULL "
+                "AND claim_lock IS NULL"
             ).fetchone()[0])
     except Exception as e:  # noqa: BLE001
         label = "default" if not board else board
         return {"board": label, "spawnable": False, "in_progress": 0,
-                "pending": 0, "roomy": False, "error": str(e)}
+                "pending": 0, "roomy": False, "error": str(e),
+                "stale_review": False,
+                "review_count": 0, "review_reason": review_reason,
+                "spawnable_proven": True}
+    stale_review = bool(review_count) and not review_capable
     roomy = (max_in_progress is None
              or in_progress < max_in_progress)
     # A board with global room can still be unable to spawn ANYTHING when every
@@ -352,10 +518,14 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
     # so the detector declared a "GENUINE STALL" every 5s against a healthy
     # dispatcher.
     if roomy and spawnable and max_per_profile is not None:
-        roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile)
+        roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile,
+                                        include_review=review_capable)
     return {"board": "default" if not board else board,
             "spawnable": spawnable, "in_progress": in_progress,
-            "pending": pending, "roomy": roomy, "error": None}
+            "pending": pending, "roomy": roomy, "error": None,
+            "stale_review": stale_review, "review_count": review_count,
+            "review_reason": review_reason if stale_review else "",
+            "spawnable_proven": proven}
 
 
 def _read_max_in_progress():
@@ -441,14 +611,18 @@ _hold_notify_at = None
 
 
 def _capture_kanban(kanban_db=None, max_in_progress=None,
-                    max_per_profile=None):
+                    max_per_profile=None, review_capable=None):
     """Read dispatcher-relevant state across every board (read-only).
 
     Returns a dict that is the input to the stall decision:
       ``{boards: [...], spawnable: [...], roomy_spawnable: [...],
       at_capacity: [...], total_running: int, max_in_progress: int|None,
-      errors: [...]}``.
+      errors: [...], stale_review: bool, review_count: int,
+      review_reason: str, stall_dispatchable: bool}``.
     ``max_in_progress`` is read from config when not passed (injectable).
+    ``review_capable`` overrides the runtime-capability probe (injectable, for
+    tests); when None it is resolved ONCE per pass via
+    ``_review_dispatch_capable`` so every board sees the same answer.
     If the kanban lib cannot be reached at all, returns ``{"unreachable":...}``
     so the caller can decide (fail safe: write ok True, do NOT false-alarm).
     """
@@ -465,7 +639,13 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
         return {"unreachable": _kanban_unreachable_reason(),
                 "boards": [], "spawnable": [], "roomy_spawnable": [],
                 "at_capacity": [], "total_running": 0,
-                "max_in_progress": None, "errors": []}
+                "max_in_progress": None, "errors": [],
+                "stale_review": False, "review_count": 0,
+                "review_reason": "", "stall_dispatchable": True}
+    if review_capable is None:
+        review_capable, review_reason = _review_dispatch_capable(kanban_db)
+    else:
+        review_reason = "" if review_capable else REVIEW_NOT_DISPATCHABLE_REASON
     if max_in_progress is None:
         max_in_progress = _read_max_in_progress()
     if max_per_profile is None:
@@ -476,14 +656,17 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
         return {"unreachable": f"could not enumerate boards: {e}",
                 "boards": [], "spawnable": [], "roomy_spawnable": [],
                 "at_capacity": [], "total_running": 0,
-                "max_in_progress": max_in_progress, "errors": []}
+                "max_in_progress": max_in_progress, "errors": [],
+                "stale_review": False, "review_count": 0,
+                "review_reason": "", "stall_dispatchable": True}
     # Pass 1: every board's state. total_running must be COMPLETE before any
     # board's roominess is judged, because the cap is fleet-wide (see below),
     # so the roomy/at_capacity split happens in pass 2.
     snaps, errors = [], []
     for board in boards:
         snap = _board_snapshot(kanban_db, board, multi, max_in_progress,
-                               max_per_profile)
+                               max_per_profile, review_capable=review_capable,
+                               review_reason=review_reason)
         if snap["error"]:
             errors.append(f"{snap['board']}: {snap['error']}")
             continue
@@ -517,6 +700,18 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
             # A board blocked by the fleet-wide cap genuinely cannot spawn,
             # so it belongs in at_capacity; `global_at_capacity` says WHY.
             at_capacity.append(snap["board"])
+    # Is a stall on these boards something a gateway restart could fix? Only if
+    # at least one board we call spawnable was PROVEN so by the dispatcher's own
+    # predicate. When every spawnable answer came from the raw-SQL fallback we
+    # cannot rule out that the waiting assignees are not real profiles at all —
+    # the dispatcher is then correctly idle, and restarting it changes nothing.
+    # That is the "stall not dispatcher-fixable" class the restart latch keys on.
+    stall_dispatchable = True
+    if roomy_spawnable:
+        stall_dispatchable = any(
+            s["spawnable_proven"] for s in snaps
+            if s["board"] in roomy_spawnable)
+    stale_boards = [s["board"] for s in snaps if s["stale_review"]]
     return {
         "boards": ["default" if b is None else b for b in boards],
         "spawnable": spawnable, "roomy_spawnable": roomy_spawnable,
@@ -524,7 +719,17 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
         "total_pending": total_pending,
         "max_in_progress": max_in_progress, "errors": errors,
         "global_at_capacity": global_at_capacity,
+        # Review work this runtime cannot dispatch: reported separately so an
+        # operator sees "N review cards parked" without it ever reading as a
+        # stall (it is waiting on a human, not on the dispatcher).
+        "stale_review": bool(stale_boards),
+        "stale_review_boards": stale_boards,
+        "review_count": sum(s["review_count"] for s in snaps
+                            if s["stale_review"]),
+        "review_reason": review_reason,
+        "stall_dispatchable": stall_dispatchable,
     }
+
 
 
 def _kanban_unreachable_reason():
@@ -752,9 +957,50 @@ def evaluate_stall_tick(capture, detector_state, now, hold_info=None):
     return 0, False
 
 
+def _stall_signature(capture):
+    """Stable identity of a stall: the boards that have spawnable work + room.
+
+    Two ticks share a signature iff the dispatcher faces the same situation, so
+    "we already restarted for this" is answerable without trusting that the
+    stream stayed red across the interval. Sorted so board enumeration order
+    cannot make the same incident look new.
+    """
+    return "|".join(sorted(
+        set(capture.get("spawnable") or [])
+        | {f"roomy:{b}" for b in (capture.get("roomy_spawnable") or [])}))
+
+
+def _maybe_warn_stale_review(capture, now):
+    """One warning per cooldown window for review work this runtime cannot spawn.
+
+    A card parked in ``review`` on a runtime with no review lane (or with
+    ``kanban.review_dispatch: false``) is waiting on a HUMAN. That is worth
+    telling the operator about, and worth having on the stream so ``hscc
+    status`` can show it — but it is NOT a dispatcher stall: no dispatcher state
+    and no gateway restart can clear it, and treating it as one cost four
+    gateway restarts on 2026-10-15. So this path writes a log line and stream
+    fields ONLY — never ``ok: False``, never the wedge/recovery state file,
+    never a restart. Rate-limited because a parked card is a steady state.
+    """
+    if not capture.get("stale_review"):
+        return False
+    last = _stale_review_warn.get("last_at")
+    if last is not None and (now - last) < DISPATCHER_RECOVER_COOLDOWN_SECONDS:
+        return False
+    _stale_review_warn["last_at"] = now
+    boards = capture.get("stale_review_boards") or []
+    log(f"Dispatcher-wedge check: {capture.get('review_count', 0)} review "
+        f"card(s) not dispatchable by this runtime — review feature not "
+        f"enabled ({capture.get('review_reason') or 'unknown reason'}) on "
+        f"board(s) {boards}. NOT a dispatcher stall: nothing to spawn, nothing "
+        f"to restart. Close/approve the cards, or enable the review lane.",
+        "WARNING")
+    return True
+
+
 def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
                            write_state_fn=None, max_per_profile=None,
-                           hold_fn=None):
+                           review_capable=None, hold_fn=None):
     """The dispatcher-wedge probe (the ``dispatcher`` CHECK STREAM).
 
     Runs on the daemon's periodic cadence (see ``PERIODIC_INTERVALS``). Reads
@@ -767,8 +1013,10 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
 
     Injectable: ``kanban_db`` (fake lib), ``max_in_progress`` (avoids reading
     the operator's real config in tests), ``now`` (clock), ``write_state_fn``
-    (avoids touching the real state dir), ``hold_fn`` (layer-1 hold evidence;
-    defaults to ``classify_dispatcher_hold`` reading the gateway log).
+    (avoids touching the real state dir), ``review_capable`` (pins the
+    runtime's review-dispatch capability instead of probing it), ``hold_fn``
+    (layer-1 hold evidence; defaults to ``classify_dispatcher_hold`` reading
+    the gateway log).
     """
     from .state import now_iso, write_state
     write_state_fn = write_state_fn or write_state
@@ -777,7 +1025,8 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
 
     capture = _capture_kanban(kanban_db=kanban_db,
                               max_per_profile=max_per_profile,
-                              max_in_progress=max_in_progress)
+                              max_in_progress=max_in_progress,
+                              review_capable=review_capable)
 
     if capture.get("unreachable"):
         # Cannot read the board DBs — fail SAFE (do not page on our own
@@ -790,6 +1039,11 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         log(f"Dispatcher-wedge check: kanban unreadable "
             f"({capture['unreachable']}) — not declaring a stall")
         return True
+
+    # Review cards this runtime cannot spawn are reported here, and ONLY here:
+    # before the stall decision, so they never influence it, and with no state
+    # mutation beyond the rate-limit timestamp.
+    warned = _maybe_warn_stale_review(capture, now)
 
     # Layer 1 (t_160d306f): ask the dispatcher itself, from its own log,
     # whether the last zero-spawn tick was a benign hold (active_pr,
@@ -817,6 +1071,16 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         "hold_explained": _detector.get("last_hold_explained", False),
         "hold_reasons": [f"{n}={v}" for n, v in
                          (hold_info or {}).get("reasons", [])],
+        # Review work present but NOT dispatchable by this runtime: reported so
+        # it is visible, deliberately kept out of `spawnable` so it can never
+        # declare a stall. `stall_dispatchable` tells the recovery whether a
+        # restart could plausibly help at all (see recover_dispatcher_wedge).
+        "stale_review": capture.get("stale_review", False),
+        "stale_review_boards": capture.get("stale_review_boards", []),
+        "review_count": capture.get("review_count", 0),
+        "review_reason": capture.get("review_reason", ""),
+        "stall_dispatchable": capture.get("stall_dispatchable", True),
+        "stall_signature": _stall_signature(capture),
     }
 
     if change == -1:
@@ -826,11 +1090,16 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
             "boards at capacity / benign dispatcher hold) — stream back to OK")
 
     if not declared:
+        msg = ("dispatcher healthy — no genuine stall (%s)"
+               % _healthy_reason(capture, details))
+        if warned:
+            msg += (" — %s review card(s) not dispatchable by this runtime "
+                    "(review feature not enabled)"
+                    % capture.get("review_count", 0))
         write_state_fn(DISPATCHER_STREAM, {
             "ok": True, **details,
             "last_check": now_iso(),
-            "message": "dispatcher healthy — no genuine stall "
-                       "(%s)" % _healthy_reason(capture, details),
+            "message": msg,
         })
         if details["hold_explained"]:
             log(f"Dispatcher-wedge check: OK — zero spawns explained by "
@@ -854,11 +1123,17 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         "last_check": now_iso(),
         "message": "GENUINE STALL: spawnable ready work with free worker "
                    "slots, but 0 workers spawned for "
-                   ">= %ss — dispatcher is wedged" % DISPATCHER_DETECT_TICKS,
+                   ">= %ss — dispatcher is wedged%s" % (
+                       DISPATCHER_DETECT_TICKS,
+                       "" if capture.get("stall_dispatchable", True) else
+                       " (NOT proven dispatcher-fixable: the spawnable answer "
+                       "came from the raw-SQL fallback, so a gateway restart "
+                       "may not help)"),
     })
     log(f"Dispatcher-wedge check: GENUINE STALL detected — spawnable="
         f"{capture['spawnable']}, roomy={capture['roomy_spawnable']}, "
-        f"total_running={capture['total_running']}", "ERROR")
+        f"total_running={capture['total_running']}, "
+        f"dispatchable={capture.get('stall_dispatchable', True)}", "ERROR")
     return False
 
 
@@ -1198,15 +1473,47 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
         — the dispatcher is holding, not wedging — the restart is suppressed
         and the operator is notified with the reason instead. The gate fails
         CLOSED: a gate that cannot verify the boards lets the restart through.
+      * the stall has not already been paid for (the per-incident latch below).
 
     Once the cap is hit we STOP acting and keep alerting, exactly like
     ``recover.py``. The restart is injectable (``restart_fn``); production
     defaults to ``_run_restart`` (the real ``launchctl kickstart``), tests pass
     a fake so no live gateway is ever touched.
 
+    PER-INCIDENT RESTART LATCH (2026-10-15 gateway restart loop)
+      The cooldown + attempt cap bound restarts *within a run of red ticks*, and
+      the green-clear below renews that budget. Together they let a stall the
+      runtime CANNOT fix restart the gateway forever: the cooldown expired, a
+      tick went green (the fleet briefly spawned something else) and renewed the
+      budget, the next red re-armed it — so one merged PR parked in ``review``
+      that nothing could ever spawn restarted the gateway 4 times in 2 hours.
+      Fix: every restart records ``last_incident = {"signature", "at",
+      "dispatchable"}`` in the recover state, where ``signature`` is the stall's
+      spawnable/roomy board set (``_stall_signature``). Semantics chosen:
+
+      1. Applies ONLY to a stall the runtime cannot dispatch
+         (``stall_dispatchable: False``) — i.e. we know no dispatcher action can
+         clear it. A restart is allowed ONCE (the first one, in case a restart is
+         what registers a missing lane), and after that the signature is
+         remembered and never restarted again.
+      2. Same ``signature`` as ``last_incident`` → never restart again, EVEN IF
+         the stream went green in between. A green tick means "something else
+         spawned", not "this stall is resolved"; that re-arming is precisely what
+         looped the gateway. A DIFFERENT non-dispatchable signature is likewise
+         refused: a restart cannot fix a stall this runtime cannot dispatch.
+      3. A stall the runtime CAN dispatch is NOT latched at all: today's
+         cooldown + max-attempt semantics apply byte-for-byte, so a real wedge
+         keeps the recovery behaviour libV4 has always had (A1's green-renewal
+         included). ``last_incident`` is still overwritten on each restart, as
+         bookkeeping.
+      4. A green tick clears ``gave_up``/``attempts`` (A1's renewal, kept for
+         both classes) but deliberately does NOT clear ``last_incident`` — that
+         is the whole point of items 1-2.
+
     Returns ``{"result": ...}`` where result is one of ``skipped``
     (intentional), ``none-wedged`` (no declared stall / below M), ``suppressed``
-    (declared but held by cooldown/cap/benign-hold gate), ``recovered``
+    (declared but held by cooldown/cap/benign-hold gate/incident latch),
+    ``recovered``
     (restarted), or ``gave-up`` (attempt cap reached).
     """
     global _recovery_detection_streak
@@ -1221,13 +1528,17 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
     # The probe's verdict: only a DECLARED genuine stall (ok: False) counts.
     if stream.get("ok") is not False:
         _recovery_detection_streak = 0
-        # A CONFIRMED-HEALTHY stream clears the latch (A1, 2026-10-14). Once
-        # the attempt cap set ``gave_up`` it persisted forever: the very next
-        # wedge — possibly weeks later, after the operator fixed the real
+        # A CONFIRMED-HEALTHY stream clears the attempt budget (A1, 2026-10-14).
+        # Once the attempt cap set ``gave_up`` it persisted forever: the very
+        # next wedge — possibly weeks later, after the operator fixed the real
         # problem — could never self-heal, and un-sticking it meant hand-editing
-        # ``~/.hscc/dispatcher_recover.json``. ``gave_up`` bounds restarts
-        # WITHIN one incident; "the stream is green again" means that incident
-        # is over, so the budget is renewed.
+        # ``~/.hscc/dispatcher_recover.json``. ``gave_up`` bounds restarts WITHIN
+        # one incident; "the stream is green again" means that incident is over,
+        # so the budget is renewed.
+        #
+        # What the green does NOT renew is ``last_incident`` — see the latch
+        # semantics in this docstring. The green cleared the *attempt budget*,
+        # not the memory that we already restarted for this signature.
         #
         # Only a REAL green clears it. The unreachable-kanban path writes
         # ``ok: True`` as a fail-safe (we did not observe health, we just
@@ -1238,12 +1549,13 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
             if state.get("gave_up") or state.get("attempts"):
                 # Keep `last_recovery_at`: the cooldown protects a restart that
                 # just happened, and the probe's green is not proof it worked.
+                # Keep `last_incident` too: it is the restart latch.
                 state.pop("gave_up", None)
                 state.pop("attempts", None)
                 state["resolved_at"] = now
                 _save_recover_state(state, state_file)
                 log("Dispatcher-wedge recovery: stream green — wedge "
-                    "resolved, latch cleared (attempt budget renewed)")
+                    "resolved, attempt budget renewed (incident latch kept)")
         return {"result": "none-wedged",
                 "message": "dispatcher stream not red — nothing to recover",
                 "actions": []}
@@ -1264,6 +1576,31 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
         return {"result": "gave-up",
                 "message": "attempt cap reached — keeping alerting, not acting",
                 "actions": []}
+
+    # -- Per-incident restart latch ------------------------------------------
+    # See the latch semantics in this docstring (items 1-3). This check runs
+    # BEFORE the cooldown so a latched incident reports the real reason it is
+    # not acting rather than a cooldown that is not what is holding it.
+    #
+    # A DISPATCHABLE stall is never latched (item 3): the loop below is exactly
+    # today's cooldown + max-attempt behaviour.
+    signature = stream.get("stall_signature")
+    dispatchable = stream.get("stall_dispatchable", True)
+    last_incident = state.get("last_incident") or {}
+    if not dispatchable:
+        paid_for = (last_incident.get("signature") == signature
+                    if signature else False)
+        # A restart that was itself spent on an unfixable stall proved it did
+        # not fix the class, so no further unfixable stall gets one.
+        spent_on_unfixable = bool(last_incident) and \
+            not last_incident.get("dispatchable", True)
+        if paid_for or spent_on_unfixable:
+            log("Dispatcher-wedge recovery: stall is NOT dispatcher-fixable "
+                f"({stream.get('review_reason') or 'see stream'}) and a restart "
+                f"was already spent ({last_incident.get('at')}) — NOT "
+                "restarting again; keeping alerting")
+            return {"result": "suppressed", "reason": "not_dispatcher_fixable",
+                    "signature": signature, "actions": []}
 
     last = state.get("last_recovery_at") or 0.0
     if last and (now - last) < DISPATCHER_RECOVER_COOLDOWN_SECONDS:
@@ -1324,6 +1661,11 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
     attempts += 1
     state["attempts"] = attempts
     state["last_recovery_at"] = now
+    # The incident latch: remember WHOSE fault we restarted for, so neither a
+    # cooldown expiry nor a green tick can make us restart for the same stall
+    # again (latch semantics 1-3 in this docstring).
+    state["last_incident"] = {"signature": signature or "unknown",
+                              "at": now, "dispatchable": bool(dispatchable)}
     _save_recover_state(state, state_file)
     # Reset the M-debounce so a restart requires M fresh red ticks again; the
     # cooldown then prevents a same-stall second restart.
@@ -1337,5 +1679,7 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
         action["output"] = outcome["output"]
     ok = bool(outcome.get("success"))
     log(f"Dispatcher-wedge recovery: restart invoked (attempt {attempts}, "
-        f"success={ok})")
+        f"success={ok}) for stall signature {signature!r} "
+        f"(dispatchable={dispatchable})")
     return {"result": "recovered", "restart_ok": ok, "actions": [action]}
+
