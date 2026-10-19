@@ -1,16 +1,15 @@
-![FlightDeck — Project Control. Manage projects in Hermes.](docs/assets/banner.png)
+![hscc project — project and kanban control for a Hermes agent fleet.](docs/assets/banner.png)
 
-# Flightdeck (hscc project)
+# hscc project — project/kanban control
 
 > **What you're reading.** This tool is the project/kanban orchestration
-> domain of HSCC. It started life as a standalone tool named *flightdeck*;
-> during the flightdeck→hscc port it moved into the repo under `hscc-project/`
-> and is now reached through the hscc CLI as **`hscc project …`**. The
-> standalone `flightdeck` / `flightdeck-mcp` console scripts are no longer how
-> you use it — type `hscc project <command>` instead (e.g.
-> `hscc project standup`, `hscc project review <card>`). The full command
-> reference is [`docs/COMMANDS.md`](docs/COMMANDS.md); the
-> `flightdeck X` ↔ `hscc project X` mapping and naming-collision notes live in
+> domain of HSCC, reached through the hscc CLI as **`hscc project …`**. It
+> began life as a standalone tool under its original name; during the port into
+> this repo it moved under `hscc-project/`, and the old standalone console
+> scripts are no longer how you use it — type `hscc project <command>` instead
+> (e.g. `hscc project standup`, `hscc project review <card>`). The full command
+> reference is [`docs/COMMANDS.md`](docs/COMMANDS.md); the old-command ↔
+> `hscc project X` mapping and naming-collision notes live in
 > [`../docs/PROJECT-COMMANDS.md`](../docs/PROJECT-COMMANDS.md).
 
 This tool answers the one question you have every morning when a fleet of AI
@@ -48,7 +47,7 @@ install hscc normally, then bootstrap the project registry and read your first
 digest. Each command is followed by *why you'd run it*:
 
 ```sh
-# Create ~/.flightdeck (config + registry + templates) and check your
+# Create the hscc-project home (config + registry + templates) and check your
 # environment. Dry-run by default — nothing is written until you add --apply.
 hscc project init
 
@@ -65,9 +64,12 @@ and checks the environment before writing anything. (This is true of every
 mutating command: the plan always comes first, and nothing changes until you
 pass `--apply`.)
 
+Real output from a clean machine (trimmed to the plan and the environment
+block; the panel closes with the same next steps shown below):
+
 ```text
 $ hscc project init
-flightdeck home: ~/.flightdeck (dry run — use --apply to write)
+hscc-project home: ~/.flightdeck (dry run — use --apply to write)
 Would create:
   would create ~/.flightdeck/config.yaml
   would create ~/.flightdeck/registry.yaml
@@ -78,15 +80,13 @@ Environment check:
   mcp-sdk          [ok] mcp SDK present (v?): MCPServer (2.0 layout)
   git              [ok] git on PATH: /usr/bin/git
   hermes-kanban    [ok] Hermes kanban DB reachable and readable at ~/.hermes/kanban.db
-
-Next steps:
-  1. Run `hscc project sync --apply` to adopt your existing repos
-     into the registry.
-  2. Register the MCP server with your MCP client so an agent can drive it
-     (see "MCP — let an agent drive it" below).
 ```
 
-`init` creates `~/.flightdeck`, seeds `config.yaml` and `registry.yaml` from
+The home directory keeps its original on-disk name (`~/.flightdeck`, or
+`$HERMES_HOME` when that is set) — renaming it would move real user state, so
+the product name changed and the directory did not.
+
+`init` creates that home, seeds `config.yaml` and `registry.yaml` from
 the shipped examples (never overwriting anything that already exists), copies
 the prompt templates, and prints your exact next steps.
 
@@ -232,7 +232,7 @@ questions that used to cost a morning:
 - **A board that stops lying** — `reconcile` and `hygiene` close cards whose
   work already landed and surface the decay.
 - **An MCP server** — an agent can drive the whole surface through the Model
-  Context Protocol (`flightdeck-mcp`).
+  Context Protocol (see [MCP](#mcp--let-an-agent-drive-it)).
 
 ---
 
@@ -243,13 +243,13 @@ is a genuine handoff, and every one ships its own `--apply` (dry-run by
 default):
 
 ```sh
-hscc project ingest <project>            # draft ROADMAP.draft.md from existing context
-hscc project roadmap adopt <project>     # promote the reviewed draft into ROADMAP.md
-hscc project decompose <project> --milestone <id>   # break a milestone into atomic cards
-hscc project start <project> --milestone <id>       # release the cards to the fleet
-hscc project qa [--watch]                # what you actually have to test by hand
+hscc project ingest hscc                 # draft ROADMAP.draft.md from existing context
+hscc project roadmap adopt hscc          # promote the reviewed draft into ROADMAP.md
+hscc project decompose hscc --milestone 0.6.0   # break a milestone into atomic cards
+hscc project start hscc --milestone 0.6.0       # release the cards to the fleet
+hscc project qa                          # what you actually have to test by hand
 hscc project review <card>               # review, merge, close
-hscc project report <project>            # post a learnable summary; Hermes learns
+hscc project report hscc --all           # post a learnable summary; Hermes learns
 ```
 
 `report` is the step that lets the fleet itself learn — the orchestrator
@@ -283,13 +283,13 @@ an absent board never breaks it.
 
 ## MCP — let an agent drive it
 
-`flightdeck-mcp` (the console script behind `hscc project`'s MCP server)
-exposes **24 tools** covering the whole surface: standup, qa, doctor, roadmap
-show/progress/adopt, lint-cards, reconcile + preview, legacy-cards, list
-projects, why, metrics, review, reconcile, decompose, start, ingest, release,
-migrate-card, message send/dispatch, report, incident, and hygiene. Every
-mutating tool shares the CLI's safety rule and defaults to `apply=False` — it
-reports what *would* happen and mutates nothing until you pass `apply=True`.
+The MCP server exposes **24 tools** covering the whole surface: standup, qa,
+doctor, roadmap show/progress/adopt, lint-cards, reconcile + reconcile
+preview, legacy-cards, list projects, why, metrics, review, decompose, start,
+ingest, release, migrate-card, message send/dispatch, report, incident, and
+hygiene. Every mutating tool shares the CLI's safety rule and defaults to
+`apply=False` — it reports what *would* happen and mutates nothing until you
+pass `apply=True`.
 
 Register it with your MCP client (Hermes takes the same shape under its
 `mcp:` config key):
@@ -297,6 +297,17 @@ Register it with your MCP client (Hermes takes the same shape under its
 ```json
 "flightdeck": { "command": "flightdeck-mcp", "args": [] }
 ```
+
+> **Why this one line still carries the old name.** `flightdeck-mcp` is the
+> packaged console-script entry point declared in
+> [`pyproject.toml`](pyproject.toml) `[project.scripts]` — the identifier an
+> MCP client uses to launch the process, not prose. Renaming it would break
+> existing client configs, so it stays as a technical necessity. Note also
+> that hscc's bootstrap installs only the `hscc` CLI, so this script is not on
+> your PATH by default: it exists for a source/pip install of `hscc-project`
+> rather than as a daily driver (the mapping page in
+> [`../docs/PROJECT-COMMANDS.md`](../docs/PROJECT-COMMANDS.md) covers the same
+> ground).
 
 ---
 
@@ -306,23 +317,18 @@ Register it with your MCP client (Hermes takes the same shape under its
 - [`CONFIGURATION.md`](docs/CONFIGURATION.md) — config + registry, field by field
 - [`CONCEPTS.md`](docs/CONCEPTS.md) — the mental model (project, card, milestone)
 - [`INCIDENTS.md`](docs/INCIDENTS.md) — real failures and the lessons they taught
-- [`../docs/PROJECT-COMMANDS.md`](../docs/PROJECT-COMMANDS.md) — the `flightdeck X` ↔ `hscc project X` mapping + naming notes
+- [`../docs/PROJECT-COMMANDS.md`](../docs/PROJECT-COMMANDS.md) — the old-command ↔ `hscc project X` mapping + naming notes
 
 ---
 
 ## Why this exists
 
-The board used to lie. On 2026-08-09, 28 cards showed as *blocked / awaiting
-review*; **zero actually needed attention** — 14 had branches already merged
-into `main`, 11 never started or were cancelled, and the 3 "real" ones were
-duplicates of shipped work. An 89–100% false signal.
-
-Root cause: no transition closes a card when its code lands. Work flowed
-card → branch → *blocked-for-review* → human merges → **the card stayed
-blocked forever**. Nothing reconciled the board against git.
-
-This tool makes the signal true. It reads the board and git, and only ever
-tells you a card *needs you* when its work is genuinely **unmerged**.
+In August 2026 the board was lying: dozens of cards showed *blocked / awaiting
+review* and none of them needed anyone — the work had merged, and no
+transition closes a card when its code lands. This tool reads the board and
+git and only ever tells you a card *needs you* when its work is genuinely
+**unmerged**. The full incident, with the numbers, is in
+[`docs/INCIDENTS.md`](docs/INCIDENTS.md).
 
 ---
 
