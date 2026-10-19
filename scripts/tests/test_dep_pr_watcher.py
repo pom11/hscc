@@ -100,3 +100,44 @@ def test_reports_created_card(monkeypatch):
     with redirect_stdout(out):
         w.main()
     assert "PR #7" in out.getvalue() and "t_x" in out.getvalue()
+
+
+# ── sparkrun fork-branch rule in the generated card body (t_39d7c915) ──────
+
+def _pr_named(num, title, reviewer="pom11"):
+    return {"number": num, "title": title,
+            "url": f"https://github.com/pom11/hscc/pull/{num}",
+            "reviewRequests": [{"login": reviewer}]}
+
+
+def test_card_body_carries_fork_rule_for_sparkrun():
+    """The bump card is the text a bump worker reads; when sparkrun is in the
+    title it MUST carry the fork-branch rule inline (the deployed runtime is
+    pom11/sparkrun@feat/proxy-least-in-flight, and 'reinstall sparkrun' /
+    'git checkout main' silently drops the proxy balancer)."""
+    body = w._card_body(_pr_named(5, "chore(deps): runtime bump — sparkrun v0.2.40 -> v0.2.41"))
+    assert "feat/proxy-least-in-flight" in body
+    assert "pom11/sparkrun" in body
+    assert "checkout main" in body
+    assert "rebase" in body
+    assert "rev-parse --abbrev-ref HEAD" in body
+    assert "fork-branch rule" in body
+
+
+def test_card_body_quiet_for_hermes_only_bump():
+    body = w._card_body(_pr_named(6, "chore(deps): runtime bump — hermes-agent v2026.9.1 -> v2026.9.2"))
+    assert "fork-branch rule" not in body
+    assert "feat/proxy-least-in-flight" not in body
+    # the original 6 steps still ship
+    assert "6. Report what worked" in body
+
+
+def test_card_body_loader_failure_is_loud(tmp_path, monkeypatch):
+    """No reachable dep_bump_guard.py -> the card says SO instead of shipping
+    a rule-less sparkrun bump card."""
+    real_isfile = __import__("os").path.isfile
+    monkeypatch.setattr(
+        __import__("os").path, "isfile",
+        lambda p: False if "dep_bump_guard.py" in str(p) else real_isfile(p))
+    body = w._card_body(_pr_named(7, "bump sparkrun"))
+    assert "GUARD UNAVAILABLE" in body

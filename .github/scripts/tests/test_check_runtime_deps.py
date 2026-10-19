@@ -154,3 +154,53 @@ def _gh_view_payload(data):
     def _run(*args, **kwargs):
         return _Result(0, json.dumps(data), "")
     return _run
+
+
+# ── sparkrun fork-branch rule in the generated PR body (t_39d7c915) ────────
+
+def test_sparkrun_bump_body_carries_fork_rule(tmp_path, monkeypatch):
+    """A bump that touches sparkrun MUST carry the fork-branch rule: the
+    deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight and a
+    worker who `git checkout main`s silently drops the proxy balancer."""
+    lock = _lock(tmp_path)
+    body = tmp_path / "body.md"
+    monkeypatch.setattr(c, "LOCK_PATH", str(lock))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setenv("DEP_PR_BODY_FILE", str(body))
+    monkeypatch.setattr(c, "_latest_release_tag",
+                        lambda repo: {"NousResearch/hermes-agent": "v2026.7.20",
+                                      "spark-arena/sparkrun": "v0.2.41"}[repo])
+    assert c.main() == 0
+    text = body.read_text()
+    assert "feat/proxy-least-in-flight" in text
+    assert "pom11/sparkrun" in text
+    assert "checkout main" in text
+    assert "rebase" in text
+    assert "rev-parse --abbrev-ref HEAD" in text
+    assert "fork-branch rule" in text
+
+
+def test_hermes_only_bump_body_has_no_fork_rule(tmp_path, monkeypatch):
+    """hermes-agent-only bumps must NOT carry the sparkrun rule (noise trains
+    readers to skim it)."""
+    lock = _lock(tmp_path)
+    body = tmp_path / "body.md"
+    monkeypatch.setattr(c, "LOCK_PATH", str(lock))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setenv("DEP_PR_BODY_FILE", str(body))
+    monkeypatch.setattr(c, "_latest_release_tag",
+                        lambda repo: {"NousResearch/hermes-agent": "v2026.9.99",
+                                      "spark-arena/sparkrun": "v0.2.40"}[repo])
+    assert c.main() == 0
+    text = body.read_text()
+    assert "fork-branch rule" not in text
+    assert "feat/proxy-least-in-flight" not in text
+
+
+def test_fork_rule_loader_failure_is_loud_not_silent(tmp_path, monkeypatch):
+    """If the canonical guard module cannot load, the body must say so loudly
+    (a silently rule-less bump PR is how the fork branch gets dropped)."""
+    monkeypatch.setattr(c, "_REPO_ROOT", str(tmp_path / "nowhere"))
+    lines = c._fork_rule_lines(["sparkrun"])
+    assert len(lines) == 1
+    assert "GUARD UNAVAILABLE" in lines[0]
