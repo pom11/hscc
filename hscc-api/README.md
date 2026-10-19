@@ -58,6 +58,8 @@ actions (A4), the `hscc api` CLI verb (A5), conversational orchestrator chat
 hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]  start in the background
 hscc api stop                                                      stop it
 hscc api status [--no-qr]                                          running/stopped + bound host:port
+hscc api install-service                                           OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
+hscc api uninstall-service                                         remove the launchd unit written by install-service
 ```
 
 `start`/`status` print a scannable connection QR (suppressed by `--no-qr`).
@@ -108,10 +110,10 @@ Every non-tmux outcome is labelled honestly in the same frames:
 | which pane is the REPL is unprovable | `tmux_ambiguous` — refused, never guessed |
 | **no** tmux REPL exists (serve fallback) | `working` `via="serve"` + `details.notice`: *"Your terminal REPL isn't in tmux, so this went to a background session…"* — **the app should surface `notice` verbatim**; it is the operator's only clue the terminal stayed dark |
 
-`hscc doctor` (tmux/REPL section) and bootstrap print the same in-tmux /
-outside-tmux / idle split up front, so the fallback should be rare:
-`hscc project chat <project>` always opens the chat where the app can see
-it.
+`hscc project doctor` (its "iOS chat reachability (tmux/REPL)" panel) and
+bootstrap print the same in-tmux / outside-tmux / idle split up front, so the
+fallback should be rare: `hscc project chat <project>` always opens the chat
+where the app can see it.
 
 ## Error contract
 

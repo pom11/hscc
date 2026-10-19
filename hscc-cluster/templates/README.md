@@ -183,9 +183,15 @@ from "broken resolver".
 
 ## Shipped library — verified against real `sparkrun show` VRAM
 
-Per-GPU cost of the local-fixed recipes (DGX Spark ≈110 GB usable):
-A3B-NVFP4 orch **31.82 GB** · A3B-FP8 **44.89 GB** · 27B-FP8 **60.75 GB** ·
-nemotron-550b **64 GB (tp=4, needs 4 nodes)**.
+Per-GPU cost of the local-fixed recipes (DGX Spark ≈110 GB usable), as
+estimated by `sparkrun show` 0.4.0 (re-measured 2026-10-19; these numbers track
+the recipe files, so re-run `sparkrun show ~/.sparkrun-local/recipes/local-fixed/<recipe>.yaml`
+after any recipe edit):
+A3B-NVFP4 orch **24.38 GiB** · A3B-FP8 **37.45 GiB** · 27B-FP8 (qwen3.6/3.8, tp=1)
+**36.89 GiB** · nemotron-3-super-120B-A12B orch **19.36 GiB** ·
+North-Mini-Code **26.22 GiB** ·
+nemotron-550b **64.5 GiB (tp=4, needs 4 nodes)** — recipe exists in
+`local-fixed/` but no shipped template references it.
 
 | Dir | Template | Layout |
 |-----|----------|--------|
@@ -194,13 +200,13 @@ nemotron-550b **64 GB (tp=4, needs 4 nodes)**.
 | `3node/` | coding | orch + 2× 27B-FP8 |
 | `4node/` | coding | orch + 3× 27B-FP8 |
 | `4node/` | coding-plus-fast | coding (2× 27B) + fast (1× A3B-FP8), separate proxies |
-| `4node/` | colocated-dual | 3 workers each running **2× A3B-FP8** (89.8 GB/GPU) |
+| `4node/` | colocated-dual | 3 workers each running **2× A3B-FP8** at `gpu_memory_utilization: 0.4` per unit — the template header works the budget as 0.4 × 121 GB ≈ 48.4 GB per unit against one model's per-GPU need |
 | `4node/` | deepseek-v4-orchestrator · dsv4-plus-coding · dual-dsv4 | DSV4 spans — see the speed warning below |
 | `8node/` | coding · coding-plus-fast | orch + 7 workers (single- or two-family) |
 
 Plus the flat top-level: `single-family`, `colocated-two-models`, `hscc-live`.
 
-### 2026-09 generation — registry-sourced, single-node strong tier
+### 2026-09/10 generation — registry-sourced, single-node strong tier
 
 The DSV4 templates above decode at **9–14 tok/s**, and that is a property of
 the layout, not of tuning: `@atlas/deepseek-v4-flash-nvfp4-ep2` records
@@ -231,12 +237,15 @@ want — it is just not how these seven are wired.
 | `4node/` | review-heavy | Nemotron-3-Super 120B-A12B | 1 coder + 2× Nemotron-3-Nano (88–100 tok/s) | sized for `auto_review` |
 | `3node/` | balanced | Nemotron-3-Super 120B-A12B | 1 coder + 1 fast | degraded fleet / idle-autodown |
 | `2node/` | fast | A3B-NVFP4, 116 tok/s | 1× North-Mini-Code NVFP4 | minimum viable pair |
+| `4node/` | flash-next-all *(added 2026-10-05)* | Qwen3.8-Flash-Next NVFP4 (solo recipe) | 3× the **same** recipe, `uniform_pool: true` | one model + 262k context everywhere; pool weights must be on local NVMe — see the template header |
 
 **Container images are per-node local disk, not NAS — and none of these images
-are on the fleet yet.** All seven templates run on
+are on the fleet yet.** The seven 2026-09 templates run on
 `ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest`, so they cost one pull per
 node; `4node/quality` additionally builds `vllm-node-b12x` locally for its
-orchestrator via the eugr recipe's `build_args: --exp-b12x`. No template uses
+orchestrator via the eugr recipe's `build_args: --exp-b12x`, and
+`4node/flash-next-all` runs that same b12x recipe on **all four** of its nodes.
+No template uses
 the atlas runtime. Watch disk: the gateway node was at **95% (44 GB free)** when
 these were written.
 
