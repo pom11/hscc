@@ -4,6 +4,13 @@ Operator slash commands for cluster incident response. Handlers run **directly
 in the gateway** (not through the LLM), so they work even when the orchestrator
 model is wedged. Registered via `register(ctx)`.
 
+## When you touch it
+
+A new incident-response command, or a change to confirm-first semantics.
+Model lifecycle stays tool-only + confirm-gated on purpose — there is no
+`/provision` or `/stop` slash, so the dangerous ops are never one keystroke
+away.
+
 ## Commands
 
 Mutations are **confirm-first**: a bare command shows a preview; re-run with
@@ -25,13 +32,8 @@ the word `confirm` (or `yes`/`y`) in the args to execute. Read-only commands
 | `/cluster-reboot [confirm]` | Reboot all nodes — workers in parallel, orchestrator last. |
 | `/cluster-prune [confirm]` | Macro: `/cluster-down` → `/cluster-docker-prune` → `/cluster-apt-upgrade` → `/cluster-restart`. |
 
-No `/provision` or `/stop` slash — model lifecycle stays tool-only + confirm-gated
-(the dangerous ops aren't one keystroke away).
-
 `cmdlib.py` holds the gateway-side logic (kept import-light for
 wedge-resilience).
-
-Tests: `tests/` — `python -m pytest tests/ -q`.
 
 ## Node enumeration
 
@@ -45,3 +47,9 @@ units** and target each unit's primary node — with `tp>1` the primary's restar
 covers the whole unit (span), so no compute node is skipped. No command
 hardcodes node addresses; topology always comes from `cluster.json` /
 serving.json / live discovery.
+
+## How to test / Links
+
+`tests/` — from this dir: `python -m pytest tests/ -q`.
+Links: [hscc-cluster (the tools these wrap)](../hscc-cluster/README.md) ·
+[hscc_daemon (what heals between incidents)](../hscc_daemon/README.md)
