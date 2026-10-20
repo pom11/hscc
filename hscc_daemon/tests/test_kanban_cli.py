@@ -89,6 +89,77 @@ class _ConnCM:
 
 
 # ---------------------------------------------------------------------------
+# Hermetic PR/CI + interlock-state hygiene (t_0db812de)
+# ---------------------------------------------------------------------------
+#
+# ``cmd_autodown(["status", ...])`` evaluates the PR/CI interlock for real:
+# ``_has_active_pr_ci()`` falls through to ``_screen_prci()``, which shells
+# out to ``gh`` per tracked repo. Before this fixture existed this file had NO
+# PR/CI stub (test_autodown_cli.py and test_autodown.py both have one), so
+# ``test_status_json_names_blocking_tasks`` greened only when gh was present,
+# authenticated and fast; when gh was missing/unreachable the fail-safe WARN
+# ("Autodown PR/CI interlock unevaluable…") was emitted by the interlock and
+# the test's ``json.loads(capsys stdout)`` choked on the WARN prefix — the
+# env-dependent flake this card fixes (deterministic repro: run the test with
+# PATH=/usr/bin:/bin).
+#
+# Stubbing the SCREEN SOURCE (not ``_has_active_pr_ci``) is the seam the
+# autodown.py docstring sanctions and the pattern test_autodown.py:40-55
+# already uses: every test stays off the real repo/remote/network, while the
+# real ``_has_active_pr_ci`` logic stays intact for tests that inject their
+# own checker.
+
+#: The real (import-time) screen, kept so one test can restore it deliberately.
+_REAL_SCREEN_PRCI = ad._screen_prci
+
+#: Pristine interlock module state (module globals like _KANBAN_WORK — they
+#: survive test boundaries otherwise, and test_autodown.py legitimately dirties
+#: them; without a reset a dirtied value could leak INTO this file's tests).
+_PRCI_LOAD_INIT = {"blocking": None, "ok": None, "reason": "", "warned": False}
+_KANBAN_LOAD_INIT = {"ok": None, "reason": "", "warned": False}
+_KANBAN_WORK_INIT = {"blocking": None}
+_PRCI_CACHE_INIT = {"at": 0.0, "key": None, "result": None}
+
+
+@pytest.fixture(autouse=True)
+def _no_prci_network(monkeypatch):
+    """Default: PR/CI interlock CLEAR, so status tests are hermetic.
+
+    ``_cmd_status`` evaluates ``_has_active_pr_ci()`` → the real ``gh`` screen.
+    Stubbing the screen to a positively-clear result keeps every test here off
+    GitHub and deterministic (mirrors test_autodown.py::_no_prci_network).
+    Tests that want a different PR/CI outcome override this with their own
+    monkeypatch (LIFO teardown → the test's patch wins).
+    """
+    monkeypatch.setattr(ad, "_screen_prci",
+                        lambda *a, **k: {"open_prs": 0, "active_runs": 0,
+                                         "repos": []})
+
+
+@pytest.fixture(autouse=True)
+def _interlock_state_reset(monkeypatch):
+    """Reset + restore the interlock module-globals around every test here.
+
+    ``_PRCI_LOAD`` / ``_KANBAN_LOAD`` / ``_KANBAN_WORK`` / ``_prci_cache`` are
+    process-wide dicts (like ``_KANBAN_WORK`` always was): one test's
+    fail-safe evaluation would otherwise be visible to the next — and to
+    tests in THIS file by earlier files in the same pytest process
+    (test_autodown.py calls ``_has_active_pr_ci`` for real and leaves the
+    state dirty). Reset at entry makes each test start from pristine state;
+    restore at exit leaves the process as we found it.
+    """
+    monkeypatch.setattr(ad, "_PRCI_LOAD", dict(_PRCI_LOAD_INIT))
+    monkeypatch.setattr(ad, "_KANBAN_LOAD", dict(_KANBAN_LOAD_INIT))
+    monkeypatch.setattr(ad, "_KANBAN_WORK", dict(_KANBAN_WORK_INIT))
+    monkeypatch.setattr(ad, "_prci_cache", dict(_PRCI_CACHE_INIT))
+    # Restore needs NO post-yield code: monkeypatch's own undo (which runs
+    # after this fixture, LIFO) puts the ORIGINAL dict objects back — and
+    # because we replaced the identities, the test's mutations went to throw-
+    # away dicts, so the originals are untouched.
+    yield
+
+
+# ---------------------------------------------------------------------------
 # _parse_older_than — validation unit
 # ---------------------------------------------------------------------------
 
@@ -389,3 +460,102 @@ class TestStatusNamesBlockingTasks:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert "t-a (forgotten A)" in data["blocked_by"]
+
+
+# ---------------------------------------------------------------------------
+# PR/CI fail-safe WARN vs the --json contract (t_0db812de)
+# ---------------------------------------------------------------------------
+#
+# The flake this card kills: ``status --json`` evaluated the REAL gh screen;
+# when gh was missing/unreachable the fail-safe WARN was emitted while the
+# dump was being produced. These tests drive the REAL interlock through the
+# supported checker seam (no fake needed — ``run`` is injected, so zero
+# network even with gh installed) and pin the contract that was violated:
+# diagnostics belong on stderr, stdout carries ONLY the JSON document.
+
+def _boom_run(*a, **k):
+    """subprocess.run stand-in: gh is simply not there (simulates the flake)."""
+    raise FileNotFoundError(2, "No such file or directory", "gh")
+
+
+class TestStatusJsonStreamContract:
+    def test_unreachable_prci_warn_never_touches_stdout(self, capsys,
+                                                        monkeypatch):
+        """UNREACHABLE PR/CI during ``status --json``: the fail-safe WARN is
+        emitted (operator visibility kept) but stdout stays a parseable JSON
+        document — the WARN rides stderr, never the payload stream."""
+        from hscc_daemon import autodown_cli
+
+        monkeypatch.setattr(ad, "_has_active_work", lambda *a, **k: False)
+        # The supported seam: a zero-arg checker built from the REAL screen
+        # with an injected failing `run` (the exact gh-missing path
+        # _screen_prci_uncached takes when it returns _PRCI_UNREACHABLE).
+        monkeypatch.setattr(
+            ad, "_screen_prci",
+            lambda: _REAL_SCREEN_PRCI(repos=["fake/repo"], run=_boom_run))
+
+        rc = autodown_cli.cmd_autodown(["status", "--json"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        # The contract: stdout is the JSON payload and NOTHING else.
+        data = json.loads(captured.out)
+        assert captured.out.strip().startswith("{")
+        # Fail-safe semantics intact: unreachable ⇒ active ⇒ blocks teardown,
+        # and status surfaces a blocker rather than a bare ``state: up``.
+        assert data["prci_active"] is True
+        assert data["blocked_by"]
+        # Operator visibility kept — the WARN exists, on the other stream.
+        assert "Autodown PR/CI interlock unevaluable" in captured.err
+        assert "WARN" in captured.err
+        # NOTE: the exact blocked_by WORDING and prci_ok are deliberately not
+        # pinned — the current code lets _note_prci_active() clobber the
+        # ok=False/reason recorded by _note_prci_unavailable() moments
+        # earlier (autodown.py:1113-1118), so status today misreports the
+        # sentinel as "open PR / active CI run". That state-reporting defect
+        # is a separate filed card; pinning the buggy wording here would
+        # saddle that fix with a test change. This card owns only the stream
+        # separation + the fail-safe ACTIVE direction asserted above.
+
+    def test_clear_prci_produces_no_warn_line(self, capsys, monkeypatch):
+        """Positively-clear PR/CI ⇒ clean JSON and a clean stderr (autouse
+        hermetic stub), and no stale WARN state from earlier tests."""
+        from hscc_daemon import autodown_cli
+
+        monkeypatch.setattr(ad, "_has_active_work", lambda *a, **k: False)
+        rc = autodown_cli.cmd_autodown(["status", "--json"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["prci_active"] is False
+        assert data["blocked_by"] is None
+        assert "interlock unevaluable" not in captured.err
+
+
+class TestInterlockStateDoesNotLeak:
+    """_PRCI_LOAD / _KANBAN_WORK are module-globals — like _KANBAN_WORK they
+    survive test boundaries unless reset. These two tests are an ORDERED pair
+    (definition order = execution order): the first dirties the state on
+    purpose, the second must arrive at pristine state. If the reset fixture
+    ever stops working, the second test fails.
+    """
+
+    def test_dirty_then_pristine__dirty(self, monkeypatch):
+        # Arrive pristine (the reset fixture guarantees it).
+        assert dict(ad._PRCI_LOAD) == _PRCI_LOAD_INIT
+        assert ad._KANBAN_WORK["blocking"] is None
+        # Dirty the PR/CI bookkeeping via the REAL interlock (unreachable
+        # screen ⇒ _note_prci_unavailable + _note_prci_active both ran).
+        assert ad._has_active_pr_ci(
+            lambda: _REAL_SCREEN_PRCI(repos=["fake/repo"],
+                                      run=_boom_run)) is True
+        assert ad._PRCI_LOAD["blocking"] is not None  # dirtied on purpose
+        ad._note_blocking("leak-probe-board")
+        assert ad._KANBAN_WORK["blocking"] == "leak-probe-board"
+
+    def test_dirty_then_pristine__arrives_pristine(self):
+        # The PREVIOUS test dirtied both dicts; the reset fixture must hand
+        # this test pristine state (and hand the process back its originals).
+        assert dict(ad._PRCI_LOAD) == _PRCI_LOAD_INIT
+        assert dict(ad._KANBAN_LOAD) == _KANBAN_LOAD_INIT
+        assert ad._KANBAN_WORK["blocking"] is None
+        assert ad._prci_cache == _PRCI_CACHE_INIT

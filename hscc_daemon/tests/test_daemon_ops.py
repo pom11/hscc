@@ -558,13 +558,55 @@ class TestLog:
         monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
         log_file = tmp_hfcc_dir / "log"
         monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
-        # No PID file -> foreground mode, also prints
+        # No PID file -> foreground mode, also prints (on stderr — see
+        # test_foreground_echo_goes_to_stderr_not_stdout)
         daemon_ops.log("test message")
         content = log_file.read_text()
         assert "test message" in content
         assert "INFO" in content
         # Has timestamp
         assert "[" in content and "T" in content
+
+    def test_foreground_echo_goes_to_stderr_not_stdout(
+            self, tmp_hfcc_dir, monkeypatch, capsys):
+        """The foreground echo must NEVER touch stdout (t_0db812de).
+
+        Foreground mode is not only the launchd daemon: every CLI process has
+        no PID file either, so a stdout echo let an interlock WARN land in
+        front of the raw ``json.dumps`` dump of ``hscc autodown status
+        --json`` and corrupt the machine-readable contract (json.loads / jq
+        choked on the WARN prefix). File write + stderr echo; stdout stays
+        empty so a command's --json payload is the only thing there.
+        """
+        from hscc_daemon import daemon_ops
+        pid_file = tmp_hfcc_dir / "pid"
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
+        log_file = tmp_hfcc_dir / "log"
+        monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
+        daemon_ops.log("interlock unevaluable", "WARN")
+        captured = capsys.readouterr()
+        assert captured.out == "", \
+            f"log() echoed to stdout — corrupts --json payloads: {captured.out!r}"
+        assert "interlock unevaluable" in captured.err
+        assert "WARN" in captured.err
+        # The file still gets the line (one log convention, not two streams
+        # of truth): operator-visible log unchanged in the service path, where
+        # launchd routes stdout AND stderr to the same file.
+        assert "interlock unevaluable" in log_file.read_text()
+
+    def test_daemon_mode_no_echo(self, tmp_hfcc_dir, monkeypatch, capsys):
+        """PID file present (daemonised) -> no echo on EITHER stream; only the
+        log file gets the line."""
+        from hscc_daemon import daemon_ops
+        pid_file = tmp_hfcc_dir / "pid"
+        pid_file.write_text(str(os.getpid()))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
+        log_file = tmp_hfcc_dir / "log"
+        monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
+        daemon_ops.log("daemon-side line")
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == ""
+        assert "daemon-side line" in log_file.read_text()
 
     def test_log_level(self, tmp_hfcc_dir, monkeypatch):
         from hscc_daemon import daemon_ops

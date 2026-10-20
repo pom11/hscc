@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import datetime
@@ -412,15 +413,28 @@ def log(msg, level="INFO", log_file=None, pid_file=None):
 
     Writes go through a stdlib RotatingFileHandler (see append_rotating) with
     gzip compression, so the log is size-capped and cannot grow unbounded.
+
+    The foreground echo goes to STDERR, never stdout (t_0db812de). Foreground
+    mode is not only the launchd daemon — it is also every CLI process (no
+    PID file present), so a stdout echo let a WARN from an interlock
+    (e.g. ``Autodown PR/CI interlock unevaluable…``) land in front of the
+    raw ``json.dumps`` dump of ``hscc autodown status --json`` and corrupt
+    the machine-readable contract for every ``jq``/``json.loads`` consumer.
+    Diagnostics-to-stderr is the repo convention (api_cli warnings,
+    ``_serving_warn``, the bootstrap ``[WARN]`` lines); and in the service
+    path stdout AND stderr both route to the same daemon log file (the
+    launchd plists point StandardOutPath/StandardErrorPath at one file), so
+    the operator-visible log is unchanged.
     """
     log_file = log_file or LOG_FILE
     pid_file = pid_file or PID_FILE
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [{level:>5s}] {msg}"
     append_rotating(log_file, line)
-    # Also print if daemon is running in foreground mode
+    # Also print if daemon is running in foreground mode — on stderr, so a
+    # log line can never mix into a command's stdout payload (t_0db812de).
     if not os.path.exists(pid_file):
-        print(line)
+        print(line, file=sys.stderr)
 
 
 def _run_periodic(stop_event, check_fn, interval, stream_name):
