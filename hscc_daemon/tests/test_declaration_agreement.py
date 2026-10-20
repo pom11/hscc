@@ -518,7 +518,9 @@ class TestRunDeclarationAgreement:
         one leg None alone => None; never does a None leg hide a False one."""
         p = _applied(tmp_path, uniform=True)
         px = _proxy_yaml(tmp_path, balancing="simple-shuffle")  # drift -> leg2 False
-        res = da.run_declaration_agreement(applied_state_path=p,
+        cfg = _root_config(tmp_path)   # hermetic: never the operator's real one
+        res = da.run_declaration_agreement(applied_state_path=p, config=cfg,
+                                           profiles_dir=str(tmp_path / "profiles"),
                                            proxy_config=px,
                                            litellm_config=str(tmp_path / "x.yaml"),
                                            balancer_module=str(tmp_path / "y.py"))
@@ -526,10 +528,36 @@ class TestRunDeclarationAgreement:
         assert oks["proxy_declaration"] is False
         assert res["ok"] is False
 
+    def test_false_beats_none_when_both_present(self, tmp_path):
+        """The fail-closed ORDER, not just the set: with a leg that DISAGREES
+        and another leg that is UNREADABLE in the same run, the overall verdict
+        is False — an unverified leg must never soften a known disagreement
+        into 'unknown' (an operator triaging 'unknown' waits; 'False' acts)."""
+        decl = _decl(endpoints={
+            "declared": {"delegation": "family-coding"},
+            "mode": "proxy-alias",
+            "resolved": dict(WRITTEN_DELEG)})   # leg 4 will try to fetch it
+        p = _applied(tmp_path, declarations=decl)
+        px = _proxy_yaml(tmp_path, balancing="simple-shuffle")  # leg 2 False
+        cfg = _root_config(tmp_path)
+        res = da.run_declaration_agreement(
+            applied_state_path=p, config=cfg,
+            profiles_dir=str(tmp_path / "profiles"),
+            proxy_config=px,
+            litellm_config=str(tmp_path / "x.yaml"),
+            balancer_module=str(tmp_path / "y.py"),
+            _http_get=_fake_http({}))          # leg 4 unreachable -> None
+        oks = {l["name"].split(".")[-1]: l["ok"] for l in res["legs"]}
+        assert oks["proxy_declaration"] is False
+        assert oks["live_model_info"] is None
+        assert res["ok"] is False
+
     def test_next_step_names_load_instrument_on_failure(self, tmp_path):
         p = _applied(tmp_path, uniform=True)
         px = _proxy_yaml(tmp_path, balancing="simple-shuffle")
-        res = da.run_declaration_agreement(applied_state_path=p,
+        cfg = _root_config(tmp_path)
+        res = da.run_declaration_agreement(applied_state_path=p, config=cfg,
+                                           profiles_dir=str(tmp_path / "profiles"),
                                            proxy_config=px,
                                            litellm_config=str(tmp_path / "x.yaml"),
                                            balancer_module=str(tmp_path / "y.py"))
