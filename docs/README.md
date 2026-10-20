@@ -38,7 +38,10 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/API.md` — `hscc api` HTTP surface: endpoints, auth, payloads, CLI. Referenced from the root README. **live**
 - `docs/DESIGN-api.md` — design spec for the external-app HTTP API (stdlib, Tailscale-bound, token-auth, `speak` field); the reasoning behind `API.md`. **live**
 - `docs/DESIGN-template-explicit-placement.md` — schema-v3 template design: explicit `nodes:` placement + `routing:` blocks; shipped in v1.7.x and the basis of every template since. **live**
+- `docs/DESIGN-probe-before-write.md` — delegation routing + the probe-before-write guard: why `delegation.model` is written from what the worker proxy actually serves (`/v1/models` probe) instead of the routing alias, the two-registries 404 trap, and the one probe contract for the whole fleet. Extracted out of `hscc-cluster/README.md` (R4). **live**
 - `docs/PROJECT-COMMANDS.md` — old↔new command mapping (`flightdeck …` → `hscc project …`) and naming notes; the sanctioned survival list for the legacy name. **live**
+- `docs/FLEET.md` — how the fleet is organised: role specs and the profile generator (layered SOUL), the review loop, the autonomy flag, failure escalation, and the launchctl ops lore. Linked from the root README. **live**
+- `docs/WHY.md` — why HSCC exists: the gaps stock Hermes leaves open (cluster control, role roster, review dispatch, autonomy, bootstrap) against what HSCC adds, plus a worked end-to-end example. Linked from the root README. **live**
 - `docs/COMPAT-7.30.md` — compat audit of hermes-agent upstream v2026.7.30 (v0.19.1) vs the HSCC fork+patches (patches 0001–0006). **superseded** by `docs/audits/NOTES_t_507108a7.md` (patches re-carried onto v2026.9.11); the live pins live in `hscc-bootstrap/runtime-versions.json`. **record**
 - `docs/hermes-017-new-features.md` — feature digest of hermes-agent 0.17.0 (kanban lifecycle hooks etc.) as adopted by HSCC. **superseded** by later runtime bumps (pin is v2026.9.24 per `hscc-bootstrap/runtime-versions.json`). **record**
 
