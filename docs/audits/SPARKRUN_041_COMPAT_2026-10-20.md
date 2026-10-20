@@ -33,10 +33,46 @@ via the detached `sparkrun_proxy_venv_cutover.sh` (operator-run).
 
 ## Test evidence
 
-- **sparkrun 0.4.1 proxy/balancer tests (operator, live-adjacent run):**
-  563 pass, 1 fail — `test_record_from_a_previous_boot_names_no_process`
-  (`tests/test_proxy_foreground_supervision.py`), which **fails identically
-  on 0.4.0**: pre-existing, not a 0.4.1 regression.
+- **sparkrun proxy/balancer tests — the reproducible pair (selection +
+  tally), verify run `t_ebdb02a5`, 2026-10-20:**
+
+  ```
+  cd <checkout> && <venv>/bin/python -m pytest -q -p no:cacheprovider \
+      tests/test_litellm_balancer.py tests/test_proxy*.py        # 24 files
+  ```
+
+  | checkout @ head | venv | tally |
+  |---|---|---|
+  | `~/dev/sparkrun-041-verify` @ `1aaa6479` (0.4.1) | `.venv-sparkrun-041` | **1 failed, 497 passed** (498 collected) |
+  | `~/dev/sparkrun-live` @ `b5c60edd` (0.4.0) | `.venv-sparkrun-040` | **1 failed, 497 passed** |
+
+  Identical selection, identical tally on both tags, RC=1 both. The single
+  failure is the same node id, assertion and line on each:
+  `tests/test_proxy_foreground_supervision.py::test_record_from_a_previous_boot_names_no_process`
+  (`assert engine.current_pid() is None`).
+
+  Pre-existing, not a 0.4.1 regression — proven more strongly than by any
+  rerun: the whole `src/sparkrun/proxy` package **and that test file** are
+  byte-identical across `v0.4.0..v0.4.1`, so no behaviour change can explain
+  it. Mechanism: `_boot_id()` reads `/proc/sys/kernel/random/boot_id`, which
+  does not exist on macOS, so `_from_previous_boot()` can never be true on
+  this host. Carry as a known host-dependent failure; the Linux/DGX
+  classification is still owed before raw failure counts are treated as
+  signal.
+- **Superseded figure — historical note, NOT reproducible (do not reuse):**
+  this record previously cited the operator's live-adjacent run as "563 pass,
+  1 fail". No selection named as "the proxy/balancer test set" reproduces
+  that. The verify run enumerated the plausible surfaces — the 24 files above
+  collect **498** (re-checked here with `--collect-only`, no test bodies run),
+  `+ tests/test_litellm_query_contract.py` = 522, `-k "proxy or balancer"`
+  over `tests/` = 527, whole tree = 13476 — and counted 106,991 file-subset
+  solutions for the remaining 66-test gap, so the number cannot be
+  reconstructed: a pass count not tied to a selection is not gate evidence.
+  Recorded here only as the figure that was reported at cutover time.
+  Corroboration of the *single-failure* claim (independent of any tally): the
+  operator's own `.pytest_cache/v/cache/lastfailed` in both checkouts holds
+  exactly one entry inside this set — that same test. Full accounting in PR
+  #55 comment `6286046217` (verify run `t_ebdb02a5`).
 - **Prior side-by-side verification (2026-10-19, parked #55 comments):**
   targeted gate 151/151 identical to 0.4.0; full suite `333 failed / 13048
   passed / 95 skipped` vs `270 / 12724 / 95` baseline — delta fully
