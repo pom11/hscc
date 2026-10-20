@@ -39,6 +39,27 @@ class TemplateIntentError(ValueError):
     """Invalid intent template (bad shape) or unresolvable against the cluster."""
 
 
+# The v4-only declaration blocks (docs/design/2026-10-15-template-declarations.md
+# §1.6). Listed ONCE here so the legacy-key refusal below and any future
+# consumer agree on exactly which keys arrived with version 4.
+_V4_DECLARATION_KEYS = ("endpoints", "proxy", "caps")
+
+
+def _deep_copy(value: Any) -> Any:
+    """Copy a declaration block out of the parsed template.
+
+    ``to_dict()`` hands the caller a value it may mutate (a preview render, a
+    JSON dump, a test fixture). A nested dict/list parsed straight out of the
+    source YAML must never be shared, or a caller editing the "copy" edits the
+    template object and the next render silently differs.
+    """
+    if isinstance(value, dict):
+        return {k: _deep_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy(v) for v in value]
+    return value
+
+
 # ── Intent schema (what the user authors) ───────────────────────────────────
 
 @dataclass
@@ -188,6 +209,32 @@ class ClusterTemplate:
     # Default False: omission preserves the role-split behaviour exactly.
     uniform_pool: bool = False
 
+    # ── v4 declarations (docs/design/2026-10-15-template-declarations.md) ──
+    #
+    # All three are OPTIONAL and default None = whole block absent. They are
+    # carried as parsed-verbatim structure (the spec's "generic pass-through"
+    # posture for ``proxy:``), NOT flattened into typed fields: what they MEAN
+    # at apply time is C2's contract (§4), and what is legal in them is the
+    # structural validator's (§5). Parsing here only guarantees shape — the
+    # semantic rejections live in cluster_template._structural_validate.
+    #
+    # endpoints: {mode, chat, delegation, profiles: {selector: target}} — the
+    #   declaration of where hermes talks (§1). Targets are symbolic only.
+    # proxy: {families: {<name>: {routing, max_parallel_requests, ...}}} —
+    #   balancer + per-deployment knobs (§2). Several knobs are INERT (§8);
+    #   carrying them is recording them, never promising they work.
+    # caps: {max_in_progress, max_in_progress_per_profile,
+    #        expected_requests_per_card} — kanban concurrency (§3).
+    #
+    # Byte-identity note: v4 keys are REFUSED below for version < 4, so a v3
+    # template can never reach to_dict() with any of these set. to_dict()
+    # therefore emits them only when non-None — a v2/v3 template still
+    # round-trips byte-identically (the same pattern `routing`/`uniform_pool`
+    # use, and pinned by the golden snapshots).
+    endpoints: Optional[Dict[str, Any]] = None
+    proxy: Optional[Dict[str, Any]] = None
+    caps: Optional[Dict[str, Any]] = None
+
     @staticmethod
     def from_dict(d: dict) -> "ClusterTemplate":
         if not isinstance(d, dict) or not d.get("name"):
@@ -213,6 +260,15 @@ class ClusterTemplate:
                     legacy.append(f"families.{fam.get('name','?')}.nodes")
             if isinstance(orch, dict) and "nodes" in orch:
                 legacy.append("orchestrator.nodes")
+        # The v4 declaration blocks are refused below v4 for the same reason
+        # §1.6 asks for: they are not topology pins, but they are keys this
+        # engine version cannot honour, and silently dropping them would let a
+        # template claim routing/balancer/caps intent the apply path never
+        # reads. v4 parses them instead.
+        if version < 4:
+            for k in _V4_DECLARATION_KEYS:
+                if k in d:
+                    legacy.append(k)
         if legacy:
             raise TemplateIntentError(
                 "v2 templates are topology-free — remove pinned keys: "
@@ -229,6 +285,15 @@ class ClusterTemplate:
             description=d.get("description", ""),
             routing=routing,
             uniform_pool=bool(d.get("uniform_pool", False)),
+            # Parsed verbatim (dict/list/scalar as authored) — see the field
+            # docs. A non-mapping here is deliberately NOT raised at parse time:
+            # §5 wants the structural layer's own words for it ("proxy: expected
+            # a mapping (generic pass-through dict), got list"), which needs the
+            # raw value. The same pattern that lets unknown-key detection see
+            # keys parsing discarded.
+            endpoints=d.get("endpoints"),
+            proxy=d.get("proxy"),
+            caps=d.get("caps"),
         )
 
     def to_dict(self) -> dict:
@@ -244,6 +309,15 @@ class ClusterTemplate:
             out["routing"] = dict(self.routing)
         if self.uniform_pool:
             out["uniform_pool"] = True
+        # v4 declarations. Reachable only from a version-4 template (parse
+        # refuses them below v4), so a v2/v3 template's output is untouched by
+        # these lines — the byte-identity the v3 goldens pin.
+        if self.endpoints is not None:
+            out["endpoints"] = _deep_copy(self.endpoints)
+        if self.proxy is not None:
+            out["proxy"] = _deep_copy(self.proxy)
+        if self.caps is not None:
+            out["caps"] = _deep_copy(self.caps)
         return out
 
 
@@ -292,6 +366,16 @@ class ResolvedPlan:
     # Mirrors ClusterTemplate.uniform_pool so the apply path can see it without
     # re-reading the template.
     uniform_pool: bool = False
+    # v4: mirrors ClusterTemplate.endpoints for the same reason — §5's plan-level
+    # leg ("every declared endpoint target must resolve to a family that HAS a
+    # proxy") needs the declaration alongside the concrete proxy_port, and
+    # re-reading the template file from a plan validator would make the check
+    # depend on disk state it otherwise never touches.
+    #
+    # NOT emitted into serving.json (to_serving_json ignores it) — a plan built
+    # without it, or a template without the block, keeps serving.json
+    # byte-identical.
+    endpoints: Optional[Dict[str, Any]] = None
 
     @property
     def all_units(self) -> List[ResolvedUnit]:
@@ -524,7 +608,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
 
     plan = ResolvedPlan(template=tpl.name, orchestrator=orchestrator,
                         families=resolved_families,
-                        uniform_pool=tpl.uniform_pool)
+                        uniform_pool=tpl.uniform_pool,
+                        endpoints=getattr(tpl, "endpoints", None))
 
     if tpl.uniform_pool:
         # DISTINCT port per unit, assigned here rather than in the three

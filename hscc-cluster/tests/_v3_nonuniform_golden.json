@@ -1,0 +1,151 @@
+{
+  "template_to_dict": {
+    "name": "v3-nonuniform-guard",
+    "version": 3,
+    "description": "overreach-guard fixture",
+    "orchestrator": {
+      "recipe": "orch.yaml"
+    },
+    "families": [
+      {
+        "name": "coding",
+        "models": [
+          {
+            "recipe": "work.yaml"
+          }
+        ],
+        "workers": 1
+      },
+      {
+        "name": "reasoning",
+        "models": [
+          {
+            "recipe": "work.yaml"
+          }
+        ],
+        "workers": "remaining",
+        "proxy": false
+      }
+    ],
+    "routing": {
+      "delegation": "family-coding",
+      "compaction": "orchestrator",
+      "auxiliaries": "family-reasoning"
+    }
+  },
+  "serving_json": {
+    "version": 2,
+    "units": [
+      {
+        "id": "orch",
+        "role": "orchestrator",
+        "model": "orch",
+        "recipe": "orch.yaml",
+        "nodes": [
+          "10.0.0.1"
+        ],
+        "port": 8000
+      },
+      {
+        "id": "family-coding-work-2-8000",
+        "role": "worker",
+        "keepalive": true,
+        "model": "work",
+        "recipe": "work.yaml",
+        "nodes": [
+          "10.0.0.2"
+        ],
+        "port": 8000,
+        "tp": 1,
+        "pp": 1,
+        "family": "coding"
+      },
+      {
+        "id": "family-reasoning-work-3-8000",
+        "role": "worker",
+        "keepalive": true,
+        "model": "work",
+        "recipe": "work.yaml",
+        "nodes": [
+          "10.0.0.3"
+        ],
+        "port": 8000,
+        "tp": 1,
+        "pp": 1,
+        "family": "reasoning"
+      }
+    ]
+  },
+  "hermes_config": {
+    "model": {
+      "base_url": "http://10.0.0.1:8000/v1",
+      "provider": "custom",
+      "default": "orchestrator-model"
+    },
+    "providers": [
+      {
+        "name": "custom",
+        "model": {
+          "default": "10.0.0.1:8000"
+        },
+        "base_url": "http://10.0.0.1:8000/v1"
+      },
+      {
+        "name": "family-coding",
+        "model": {
+          "default": "worker-model"
+        },
+        "base_url": "http://localhost:4000/v1"
+      }
+    ]
+  },
+  "routing_preview": {
+    "routing": [
+      {
+        "consumer": "delegation",
+        "target": "family-coding",
+        "base_url": "http://localhost:4000/v1",
+        "model": "worker-model",
+        "keys": [
+          "delegation.base_url",
+          "delegation.model"
+        ]
+      },
+      {
+        "consumer": "compaction",
+        "target": "orchestrator",
+        "base_url": "http://10.0.0.1:8000/v1",
+        "model": "orchestrator-model",
+        "keys": [
+          "auxiliary.compression.base_url",
+          "auxiliary.compression.model"
+        ]
+      },
+      {
+        "consumer": "auxiliaries",
+        "target": "family-reasoning",
+        "base_url": "http://10.0.0.3:8000/v1",
+        "model": "worker-model",
+        "keys": [
+          "auxiliary.kanban_decomposer.base_url",
+          "auxiliary.kanban_decomposer.model",
+          "auxiliary.triage_specifier.base_url",
+          "auxiliary.triage_specifier.model",
+          "auxiliary.profile_describer.base_url",
+          "auxiliary.profile_describer.model",
+          "auxiliary.curator.base_url",
+          "auxiliary.curator.model",
+          "auxiliary.title_generation.base_url",
+          "auxiliary.title_generation.model",
+          "auxiliary.skills_hub.base_url",
+          "auxiliary.skills_hub.model",
+          "auxiliary.approval.base_url",
+          "auxiliary.approval.model",
+          "auxiliary.mcp.base_url",
+          "auxiliary.mcp.model"
+        ]
+      }
+    ],
+    "routing_untouched": []
+  }
+}
