@@ -956,8 +956,10 @@ def preview_template(template_name: str, *, _http_get=None) -> dict:
     # so the preview cannot advertise a route apply would not write. Only the
     # DECLARED consumers appear — a defaulted or omitted one is not a change the
     # operator is about to make. Read-only: probing /v1/models is a GET.
-    ep_rows = _preview_endpoints(resolved, _endpoints_decision(resolved),
-                                 _http_get=_http_get)
+    # same profiles_dir apply passes, so preview's disclosure is built against
+    # the profiles that actually exist (§1.5: preview must not drift).
+    ep_rows = _preview_endpoints(resolved, _endpoints_decision(
+        resolved, profiles_dir=PROFILES_DIR), _http_get=_http_get)
     if ep_rows:
         out["endpoints"] = ep_rows
 
@@ -1159,7 +1161,7 @@ def apply_template(template_name: str, confirm: bool = False,
         # routing decision is computed outside the declared block. None = the
         # §1.3 exemption (no block, non-uniform) — every consumer then takes its
         # historical path byte-for-byte (§7).
-        ep_decision = _endpoints_decision(plan)
+        ep_decision = _endpoints_decision(plan, profiles_dir=PROFILES_DIR)
         _, config_changed = atomic_yaml_update(
             CONFIG_YAML, lambda d: _update_hermes_config(
                 d, plan, _http_get=_http_get, decision=ep_decision))
@@ -1364,6 +1366,8 @@ def apply_template(template_name: str, confirm: bool = False,
 
     # Record which template is now live (so `status` can answer "what's applied?")
     if result["success"]:
+        decl_record = _applied_declaration_record(tpl, plan, ep_decision,
+                                                  ep, px, cp)
         try:
             write_json(APPLIED_STATE, {
                 "template": tpl.name,
@@ -1379,10 +1383,13 @@ def apply_template(template_name: str, confirm: bool = False,
                 "uniform_pool": bool(getattr(plan, "uniform_pool", False)),
                 # §7: "applied_template.json records the resolved declarations
                 # (targets + knob values) alongside uniform_pool, so doctor's
-                # 'applied template's declared X' always reads ONE file." Only
-                # present when the template declared something — a pre-v4 apply
-                # writes the same keys it always did (byte-identity).
-                **_applied_declaration_record(tpl, plan, ep_decision, ep, px, cp),
+                # 'applied template's declared X' always reads ONE file." Nested
+                # under ONE key so a reader can tell "this apply declared
+                # nothing" (key absent) from "it declared and resolved empty"
+                # (key present) — flat keys would make those two states
+                # indistinguishable. Absent entirely for a pre-v4 apply, which
+                # keeps an old record byte-identical (§7).
+                **({"declarations": decl_record} if decl_record else {}),
             }, backup=False)
         except Exception:
             pass
@@ -2331,8 +2338,15 @@ def _endpoint_resolution(target: str, plan: Any, *, proxy_alias: bool) -> dict:
     return {"target": target, "url": url, "candidate": candidate, "reason": None}
 
 
-def _endpoints_decision(plan: Any) -> Optional[dict]:
+def _endpoints_decision(plan: Any, *,
+                        profiles_dir: Optional[Path] = None) -> Optional[dict]:
     """The declared routing decisions for this plan, or None = legacy behavior.
+
+    ``profiles_dir`` scopes WHICH profiles the declaration can select — apply
+    passes the directory it is about to write so a selector is matched against
+    the profiles that actually exist (see ``_declared_profile_names``); preview
+    omits it and falls back to the role vocabulary, which costs it only the
+    disclosure of profiles it cannot see.
 
     Reads the declaration off the RESOLVED plan (C1 put ``endpoints`` there for
     exactly this reason: the writer must not re-read the template file from
@@ -2401,7 +2415,7 @@ def _endpoints_decision(plan: Any) -> Optional[dict]:
     profiles = (block or {}).get("profiles")
     if not isinstance(profiles, dict):
         profiles = {}
-    for name in _declared_profile_names(plan):
+    for name in _declared_profile_names(plan, profiles_dir=profiles_dir):
         selector, target = _match_profile_selector(profiles, name)
         if target is None:
             # Nothing in the declaration names this profile: the historical
@@ -2421,12 +2435,47 @@ def _endpoints_decision(plan: Any) -> Optional[dict]:
     return decision
 
 
-def _declared_profile_names(plan: Any) -> List[str]:
-    """Role-profile names apply may target: ``default`` plus every unit role.
+def _declared_profile_names(plan: Any,
+                            profiles_dir: Optional[Path] = None) -> List[str]:
+    """Profile names the declaration may select: every directory under
+    ``profiles/``, else (no readable dir) the unit roles.
 
-    Same vocabulary the historical profile heuristics keyed on (a profile's role
-    is its directory name; ``*-orch`` profiles are the orchestrator role).
+    §1.1 makes ``endpoints.profiles`` keys PROFILE-NAME selectors — "a selector
+    matching the directory name under ``profiles/``" — so the candidates must be
+    the real directory names. Enumerating ROLES instead was a real bug: the
+    spec's own ``"*-orch"`` example matches no role (roles are ``worker`` /
+    ``orchestrator``; the ``-orch`` suffix is a directory convention), so an
+    orchestrator-role profile declared by the spec's own example silently got
+    the legacy path — the expensive failure mode, since a declaration that
+    matches nothing writes nothing and reports nothing.
+
+    The role vocabulary is the fallback for callers with no filesystem view
+    (preview on a plan built offline, unit tests), which keeps every existing
+    caller working; the WRITE leg always passes the directory it is about to
+    iterate, so what apply routes is what apply can actually see.
     """
+    names: List[str] = []
+    # NO implicit PROFILES_DIR here: a decision computed without a caller-
+    # supplied directory must not read the operator's real ~/.hscc/profiles (a
+    # preview/test would then depend on whatever is on this host). Callers that
+    # intend the live directory pass it — apply and preview both do.
+    if profiles_dir is not None:
+        try:
+            pd = Path(profiles_dir)
+            if pd.is_dir():
+                # Trust the directory absolutely, INCLUDING when it is empty:
+                # if the write leg will iterate this dir and find nothing, a
+                # role-named candidate here would make PREVIEW disclose a route
+                # apply will not write (§1.5 — preview must not drift).
+                return sorted({c.parent.name for c in pd.glob("*/config.yaml")})
+        except (OSError, TypeError):
+            return []
+        return []
+    # No filesystem view (a plan built offline, or a unit test): the role
+    # vocabulary plus `default`, which is how this code named the hermes
+    # default profile before directory enumeration. Whatever the vocabulary,
+    # an entry the write leg cannot match falls through to the legacy path, so
+    # the cost of a mismatch is a missing disclosure, never a wrong write.
     names = ["default"]
     for u in getattr(plan, "all_units", []) or []:
         role = getattr(u, "role", None)
@@ -2453,7 +2502,10 @@ def _match_profile_selector(profiles: Dict[str, Any],
         if fnmatch.fnmatchcase(name, sel):
             return sel, target
     default = profiles.get("default")
-    return (None, default)
+    # Report the selector that GOVERNED, not None: the apply report and the
+    # applied record show why a profile got the target it got, and "the
+    # `default` selector did" is the answer.
+    return ("default" if default is not None else None), default
 
 
 def _update_hermes_config(config: dict, plan: Any, *, _http_get=None,
