@@ -87,6 +87,36 @@ hook treats `2` as a block too — a guard that cannot run must not wave a commi
 through). Do not `git commit --no-verify` past it on a docs file: that is exactly
 how the 2026-10-08 leak shipped.
 
+## README lint (`readme_lint.py`) — R7 gate (audit §3)
+
+`readme_lint.py` enforces the two rules `docs/audits/README_REVIEW_2026-10-15.md`
+§3 defines for this repo's README set:
+
+1. **badge == VERSION** — every shields.io badge whose label asserts a
+   version (`version`/`v`/`release`) must carry the repo version (root
+   `pyproject.toml` `[project] version` if present, else the `VERSION` file
+   — what `hscc --help` prints). The audit's motivating bug was exactly
+   this drift.
+2. **quoted commands exist** — every backticked command in a README must
+   exist on the real surface: `hscc …` verbs parse through the CLI-help
+   audit's own `ExampleParser` oracle (no second enumeration to stale),
+   external CLIs are allow-listed strings, repo scripts must exist.
+
+Fenced blocks are out of scope (covered by the CLI-help audit's (C) pass);
+every skip reason is counted in the report, so the check surface cannot
+quietly shrink. Like the CLI-help audit, it NEVER executes a quoted command.
+
+```bash
+python3 scripts/readme_lint.py --strict          # the pytest gate's contract
+python3 scripts/readme_lint.py --json out.json   # machine report
+```
+
+Exit codes match `address_guard.py`: `0` clean, `1` a finding, `2` could
+not run (never a silent pass). The pytest gate is
+`scripts/tests/test_readme_lint.py` (runs in the `scripts` leg of
+`run_tests.sh`); `scripts/tests/fixtures/readme_lint/{clean,broken}/` pin
+both directions — a wrong badge and a fake command MUST fail the lint.
+
 ## Customization
 
 Each script is self-contained shell + hardcoded host IPs / model ids. Cluster topology assumptions live at the top of each script — edit there if your cluster differs.

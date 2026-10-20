@@ -187,7 +187,11 @@ _PLACEHOLDER = re.compile(r"^<[^>]*>$")
 _ENVASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _CONFIG_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\s*=")
 _LINE_REF = re.compile(r"(?::\d+|::[\w.]+)$")
-_META = re.compile(r"[><;&\$()]")
+# shell-pipe/substitution metacharacters mark a PROSE expression. NOT `<`
+# or `>`: those appear inside legitimate quoted commands as <placeholder>
+# and comparisons (`tp > 1` classifies as prose downstream anyway — a
+# blanket `<`/`>` kill here once skipped every placeholder-bearing command).
+_META = re.compile(r"[;&\$`]")
 
 #: external CLIs per audit §3 ("allow-listed strings, not parsed by the hscc
 #: oracle") plus the plain Unix verbs READMEs quote inline. Entries were
@@ -546,12 +550,19 @@ def classify_token(tok: str, readme: Path, repo: Path, names: set,
     """(verdict, payload) — verdict in {"pass","skip","fail"}.
 
     fail payload: (kind, detail); skip payload: reason string.
+
+    A `|` whose every occurrence sits inside [...] / <...> belongs to a
+    documented ARGUMENT alternative (`hscc check [stream|all]` — the
+    audit-sanctioned spelling), so the token proceeds and the verb path is
+    validated normally. A bare `a | b` alternative list stays unresolvable:
+    skip.
     """
-    if "|" in tok:
-        # `a | b` alternatives / <a|b> sets / [a|b] optionals — documentation
-        # form no parser can resolve (and `hscc check [stream|all]` is the
-        # audit-sanctioned spelling, not a typo)
+    if "|" in tok and not re.fullmatch(r"[^|]*\[[^|\]]*\|[^|\]]*\][^|]*"
+                                       r"([^|]*\[[^|\]]*\|[^|\]]*\][^|]*)*",
+                                       tok):
         return "skip", "alternatives"
+    if "->" in tok or tok.startswith(("(", "[")):
+        return "skip", "expression"             # code signature, not a CLI call
     if _META.search(tok):
         return "skip", "expression"             # `tp > 1`, `$(…)` prose
     if _CONFIG_ASSIGN.match(tok):
@@ -592,8 +603,6 @@ def classify_token(tok: str, readme: Path, repo: Path, names: set,
         if _is_skeleton_body(rest):
             return "skip", "skeleton"
         args = _hscc_args(rest)
-        if any("/" in a and _verb_slash_list(a) for a in args):
-            return "skip", "alternatives"       # `cluster up/down`
         while args and args[0].startswith("-"):
             args.pop(0)
         if not args:
