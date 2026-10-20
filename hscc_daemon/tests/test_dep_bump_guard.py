@@ -3,6 +3,11 @@
 Covers t_39d7c915:
   * hscc_daemon.dep_bump_guard — the canonical fork-branch rule (branch name,
     the never-checkout-main prohibition, the post-bump verification).
+  * TestRunbookAgreesWithGuard (t_6956da89) — the OPERATOR RUNBOOK that
+    duplicates those rules must keep agreeing with the canonical tuple. The
+    runbook is the only surviving prose duplicate of FORK_RULE_LINES, and it
+    carried the same false read-site claim as the guard until t_669b8df7 fixed
+    both by hand; before this class nothing in the suite opened the file.
   * hscc_daemon.proxy_router — the pure-read drift comparator: matching /
     missing / divergent / no-proxy-config / least-busy-trap / balancer-missing
     cases, WARN-never-fails semantics, and pure-read (input hashes unchanged).
@@ -16,6 +21,10 @@ nothing here reads ~/.config/sparkrun or ~/.cache/sparkrun.
 
 import hashlib
 import json
+import re
+from pathlib import Path
+
+import pytest
 
 from hscc_daemon import proxy_router
 
@@ -145,6 +154,220 @@ class TestDepBumpGuard:
         assert g.fork_rule_block([]) == []
         assert len(g.fork_rule_block(["sparkrun"])) == len(g.FORK_RULE_LINES)
         assert g.fork_rule_block(["hermes-agent", "sparkrun"]) == list(g.FORK_RULE_LINES)
+
+
+# ── the OPERATOR RUNBOOK must keep agreeing with the canonical rule ────────
+
+RUNBOOK = (Path(__file__).resolve().parents[2] / "install" / "hscc-skills"
+           / "hscc" / "references" / "runtime-bump-verification.md")
+
+#: Sentence splitter for markdown. `(?<=[.!?])\s+` on its own is not enough:
+#: this runbook hard-wraps at ~80 columns, so a path or identifier is always
+#: followed by a newline and the whole file collapses into a handful of "sent
+#: per line" fragments — an earlier draft of this pin scoped the read-site
+#: assertion to the fragment `feat/proxy-…-040, and \`router_settings\` is
+#: still read in` and every mutant passed on it. Normalise whitespace FIRST,
+#: then split on a blank line (paragraph/list item) or sentence punctuation.
+_SENT_SPLIT = re.compile(r"\n+|(?<=[.!?])\s+")
+
+#: Backtick-quoted identifier: a path (contains `/`) or a bare code name. Not
+#: shell snippets or prose — those carry spaces and are not obligations.
+_CODE_TOKEN = re.compile(r"`([^`]+)`")
+
+#: Branch-name shape used by the sparkrun fork (greedy, so the `-040` suffix
+#: is part of one token and never reads as the shorter historical name).
+_BRANCH_TOKEN = re.compile(r"feat/proxy[-0-9a-z]*")
+
+#: Words a runbook may use to say "this base strategy is not drift". The
+#: canonical line says EXPECTED; the runbook says HEALTHY / "not a regression".
+#: An accepted-vocabulary list, NOT a restatement of the canonical string — the
+#: canonical side of this pair is pinned against itself below, so renaming the
+#: guard's wording fails the test instead of silently widening it.
+_NOT_DRIFT_MARKERS = ("EXPECTED", "HEALTHY", "not a regression", "not drift")
+
+
+def _runbook_text():
+    if not RUNBOOK.exists():
+        pytest.fail(
+            f"operator runbook vanished or moved: {RUNBOOK}\n"
+            "This pin exists because that file duplicates FORK_RULE_LINES for "
+            "a human reader; a rename must update this path, never drop the pin."
+        )
+    return RUNBOOK.read_text()
+
+
+def _sentences(text):
+    return [s.strip() for s in _SENT_SPLIT.split(re.sub(r"\s+", " ", text))
+            if s.strip()]
+
+
+def _code_tokens(line):
+    return [t for t in _CODE_TOKEN.findall(line)
+            if "/" in t or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", t)]
+
+
+def _one(sents, what, text):
+    """Exactly-one helper: zero or many obligations are both a RED here, since
+    'which sentence states the read site' must be unambiguous to be checkable."""
+    if len(sents) != 1:
+        pytest.fail(f"expected exactly one {what} in {RUNBOOK.name}, "
+                    f"found {len(sents)}:\n" + "\n".join(sents) + "\n\n"
+                    f"--- {RUNBOOK.name} ---\n{text}")
+    return sents[0]
+
+
+def _negated_file():
+    """The path the guard explicitly negates, taken from the guard itself."""
+    from hscc_daemon import dep_bump_guard as g
+    lines = [ln for ln in g.FORK_RULE_LINES if "Do NOT grep" in ln]
+    assert len(lines) == 1, (
+        "dep_bump_guard must carry exactly one 'Do NOT grep' negation line — "
+        f"found {len(lines)}; the runbook pin scopes its negation to it.")
+    paths = [t for t in _code_tokens(lines[0]) if "/" in t and t.endswith(".py")]
+    assert len(paths) == 1, f"ambiguous negated file in {lines[0]!r}"
+    return paths[0]
+
+
+class TestRunbookAgreesWithGuard:
+    """The runbook is the surviving prose duplicate of FORK_RULE_LINES.
+
+    `dep_bump_guard`'s module docstring says these strings live in code
+    "instead of being prose duplicated in two places" — but
+    `install/hscc-skills/hscc/references/runtime-bump-verification.md` step 3
+    IS that prose, written for the operator who runs the bump by hand. It
+    carried the same false `router_settings`-read-site claim as the guard and
+    stayed that way until a human verified PR #55 by hand (t_669b8df7 fixed
+    both copies; nothing in the suite had ever opened the file, so no test
+    could have caught it).
+
+    Everything asserted here is DERIVED from the canonical tuple, so a future
+    fork re-cut or rewording moves the obligation instead of splitting it in
+    two. The runbook is allowed to say MORE than the guard (it is operator
+    prose); it is not allowed to contradict the guard on an obligation the
+    guard states.
+    """
+
+    def test_pin_is_not_vacuous(self):
+        """Anti-vacuity for the derivation itself: if a future edit to
+        FORK_RULE_LINES made the obligations empty, every agreement test below
+        would pass on nothing. Pin that the canonical line still has teeth."""
+        from hscc_daemon import dep_bump_guard as g
+        read = next(ln for ln in g.FORK_RULE_LINES if "still read" in ln)
+        assert len(_code_tokens(read)) >= 4
+        assert [ln for ln in g.FORK_RULE_LINES if "proxy/config.py" in ln]
+        assert _BRANCH_TOKEN.findall(g.__doc__ or "")
+
+    def test_runbook_states_the_same_read_site_as_the_guard(self):
+        """Per-line discipline, mirrored onto the runbook.
+
+        The canonical read-site line is the ONLY place in the guard that
+        asserts where `router_settings` is read, and it names engine.py; a
+        separate line negates proxy/config.py. A whole-file substring check on
+        the runbook would be satisfied by that negation (it names the wrong
+        path too), so the positive claim is scoped to the ONE sentence that
+        makes it, and every code identifier the canonical line names must be
+        in it.
+        """
+        from hscc_daemon import dep_bump_guard as g
+        canonical = next(ln for ln in g.FORK_RULE_LINES if "still read" in ln)
+        runbook = _one([s for s in _sentences(_runbook_text()) if "still read" in s],
+                       "read-site sentence", _runbook_text())
+        missing = [t for t in _code_tokens(canonical) if t not in runbook]
+        assert not missing, (
+            "runbook read-site sentence no longer carries the canonical "
+            f"identifiers {missing}:\n  guard:   {canonical}\n  runbook: {runbook}")
+        # And the sentence that states the read site must NOT name the file the
+        # guard explicitly negates — that is the exact regression (t_669b8df7).
+        negated = _negated_file()
+        assert negated not in runbook, (
+            f"runbook read-site sentence names {negated} — since v0.4.0 that "
+            "file has no `router_settings`, so the runbook is back to sending "
+            f"the operator to grep an empty file:\n  {runbook}")
+
+    def test_runbook_keeps_the_explicit_negation(self):
+        """The runbook must still tell the operator NOT to grep the negated
+        file and NOT to read a no-match as drift, in exactly one place."""
+        from hscc_daemon import dep_bump_guard as g
+        negated = _negated_file()
+        canonical = next(ln for ln in g.FORK_RULE_LINES if negated in ln)
+        # Canonical side first, so the two markers below cannot silently drift
+        # away from the guard's own wording.
+        assert "Do NOT grep" in canonical and "no-match" in canonical
+        sentences_naming_it = [s for s in _sentences(_runbook_text())
+                               if negated in s]
+        assert sentences_naming_it, (
+            f"runbook dropped its `Do NOT grep {negated}` caveat: an operator "
+            "who greps there and finds nothing will false-alarm that the "
+            "fork's balancer work is gone.")
+        for s in sentences_naming_it:
+            assert "Do NOT grep" in s and "no-match" in s, (
+                f"runbook names {negated} in a sentence that does not negate "
+                f"it as a read site — a positive claim is exactly the drift "
+                f"this pin exists to catch:\n  {s}")
+
+    def test_runbook_branch_name_matches_the_guard(self):
+        """FORK_BRANCH agreement, so a re-cut cannot update one and not the
+        other. The live-state sentence and each numbered rule may name only the
+        canonical branch; any other `feat/proxy-*` name is allowed ONLY as
+        history, i.e. in a sentence that says rollback/supersede AND a name the
+        guard's own docstring documents as historical."""
+        from hscc_daemon import dep_bump_guard as g
+        text = _runbook_text()
+        historical = set(_BRANCH_TOKEN.findall(g.__doc__ or "")) - {g.FORK_BRANCH}
+        assert g.FORK_BRANCH in text, (
+            f"runbook never names FORK_BRANCH={g.FORK_BRANCH!r}")
+        # The sentence that reports what is checked out, and the rules that
+        # rebase/verify it, must name the canonical branch and nothing else.
+        for needle, what in (("checked out on", "live-state sentence"),
+                             ("**rebase", "rebase rule"),
+                             ("rev-parse --abbrev-ref HEAD", "post-bump check")):
+            sent = _one([s for s in _sentences(text) if needle in s], what, text)
+            found = set(_BRANCH_TOKEN.findall(sent))
+            assert found == {g.FORK_BRANCH}, (
+                f"{what} must name exactly FORK_BRANCH={g.FORK_BRANCH!r}, "
+                f"found {sorted(found)}:\n  {sent}")
+        # Everywhere else: historical names only, and only as history.
+        for s in _sentences(text):
+            for name in _BRANCH_TOKEN.findall(s):
+                if name == g.FORK_BRANCH:
+                    continue
+                assert name in historical, (
+                    f"runbook names branch {name!r}, which the guard does not "
+                    "document as historical (superseded names: "
+                    f"{sorted(historical)}): {s}")
+                assert "rollback" in s or "supersede" in s, (
+                    f"branch {name!r} appears as a live instruction rather "
+                    f"than a documented rollback/superseded note: {s}")
+
+    def test_runbook_keeps_the_expected_base_strategy_caveat(self):
+        """`routing_strategy: simple-shuffle` in the generated config is the
+        HEALTHY value while the balancer is live, not drift. Drop that caveat
+        and the next verifier mis-flags a healthy proxy and 'fixes' it."""
+        from hscc_daemon import dep_bump_guard as g
+        canonical = next(ln for ln in g.FORK_RULE_LINES
+                         if "simple-shuffle" in ln and "EXPECTED" in ln)
+        assert "sparkrun_balancer.handler" in canonical   # canonical side
+        caveat = [s for s in _sentences(_runbook_text())
+                  if "simple-shuffle" in s and "balancer" in s
+                  and any(m in s for m in _NOT_DRIFT_MARKERS)]
+        assert caveat, (
+            "runbook no longer states that `simple-shuffle` in "
+            "litellm_config.yaml is expected/healthy with the balancer live "
+            f"(accepted markers: {_NOT_DRIFT_MARKERS}). Without it the next "
+            "operator treats a healthy proxy as drift.")
+
+    def test_runbook_keeps_the_never_checkout_main_prohibition(self):
+        """The failure this whole guard exists to prevent, stated in both
+        copies: never checkout main / never reinstall from upstream; the bump
+        is a rebase that leaves the fork branch checked out."""
+        from hscc_daemon import dep_bump_guard as g
+        # Backticks stripped so markers can be written as plain prose.
+        text = _runbook_text().replace("`", "").lower()
+        canonical = "\n".join(g.FORK_RULE_LINES).replace("`", "").lower()
+        for marker in ("never git checkout main", "never reinstall",
+                       "rebase", "checked out"):
+            assert marker in canonical, f"guard lost the {marker!r} rule"  # canonical side
+            assert marker in text, f"runbook lost the {marker!r} instruction"
 
 
 # ── proxy_router.router_drift — the four required fake cases + extras ──────
