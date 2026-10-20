@@ -62,10 +62,12 @@ via the detached `sparkrun_proxy_venv_cutover.sh` (operator-run).
 - **Superseded figure — historical note, NOT reproducible (do not reuse):**
   this record previously cited the operator's live-adjacent run as "563 pass,
   1 fail". No selection named as "the proxy/balancer test set" reproduces
-  that: the 24 files above collect 498, `+ tests/test_litellm_query_contract.py`
-  = 522, `-k "proxy or balancer"` over `tests/` = 527, whole tree = 13476.
-  The gap has 106,991 possible file-subset solutions, so the number cannot be
-  reconstructed — a pass count not tied to a selection is not gate evidence.
+  that. The verify run enumerated the plausible surfaces — the 24 files above
+  collect **498** (re-checked here with `--collect-only`, no test bodies run),
+  `+ tests/test_litellm_query_contract.py` = 522, `-k "proxy or balancer"`
+  over `tests/` = 527, whole tree = 13476 — and counted 106,991 file-subset
+  solutions for the remaining 66-test gap, so the number cannot be
+  reconstructed: a pass count not tied to a selection is not gate evidence.
   Recorded here only as the figure that was reported at cutover time.
   Corroboration of the *single-failure* claim (independent of any tally): the
   operator's own `.pytest_cache/v/cache/lastfailed` in both checkouts holds
