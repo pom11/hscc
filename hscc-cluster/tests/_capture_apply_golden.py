@@ -77,13 +77,24 @@ def _serving(*ids):
     return get
 
 
-def _wire_fakes(root, template_dict):
+def _wire_fakes(root, template_dict, mp=None):
     """Point every state path at `root` and stub every external boundary.
 
     Shared with the guard test on purpose: the golden and the live comparison
     must run IDENTICAL setup, or a difference could come from the harness
     instead of from the code.
+
+    `mp` (a pytest MonkeyPatch) is used for the patches when given: these
+    patches replace module attributes and even `Path.is_file`, and a pytest
+    session must not inherit them. Standalone capture (mp=None) runs in a
+    process that exits immediately, where plain setattr is fine.
     """
+    def setobj(target, name, value):
+        if mp is not None:
+            mp.setattr(target, name, value, raising=False)
+        else:
+            setattr(target, name, value)
+
     tdir = os.path.join(root, "templates")
     os.makedirs(tdir, exist_ok=True)
     import yaml
@@ -109,51 +120,52 @@ def _wire_fakes(root, template_dict):
             yaml.safe_dump({"model": {"base_url": base_url,
                                       "default": default}}, fh)
 
-    ct.TEMPLATE_DIR = ct.Path(tdir)
-    ct.CLUSTER_JSON = ct.Path(cluster_json)
-    ct.HSCC_DIR = ct.Path(hscc)
-    ct.SERVING_JSON = ct.Path(hscc) / "serving.json"
-    ct.MODELS_JSON = ct.Path(hscc) / "models.json"
-    ct.CONFIG_YAML = ct.Path(hscc) / "config.yaml"
-    ct.PROFILES_DIR = ct.Path(profiles)
-    ct.PROXY_DIR = ct.Path(hscc) / "proxies"
-    ct.APPLIED_STATE = ct.Path(hscc) / "applied_template.json"
-    ct.ROLLBACK_DIR = ct.Path(hscc) / "rollback"
+    setobj(ct, "TEMPLATE_DIR", ct.Path(tdir))
+    setobj(ct, "CLUSTER_JSON", ct.Path(cluster_json))
+    setobj(ct, "HSCC_DIR", ct.Path(hscc))
+    setobj(ct, "SERVING_JSON", ct.Path(hscc) / "serving.json")
+    setobj(ct, "MODELS_JSON", ct.Path(hscc) / "models.json")
+    setobj(ct, "CONFIG_YAML", ct.Path(hscc) / "config.yaml")
+    setobj(ct, "PROFILES_DIR", ct.Path(profiles))
+    setobj(ct, "PROXY_DIR", ct.Path(hscc) / "proxies")
+    setobj(ct, "APPLIED_STATE", ct.Path(hscc) / "applied_template.json")
+    setobj(ct, "ROLLBACK_DIR", ct.Path(hscc) / "rollback")
 
-    ct._discover = lambda probe=False: FakeTopo(FakeNode(ORCH),
-                                                [FakeNode(w) for w in W])
+    setobj(ct, "_discover",
+           lambda probe=False: FakeTopo(FakeNode(ORCH),
+                                        [FakeNode(w) for w in W]))
     # Every probe resolves the aliases — the post-config-refresh norm, and the
     # only way the probe-before-write gates write deterministically.
-    ct._http_get_default = _serving("orchestrator-model", "worker-model")
-    ti._rc.recipe_cost = lambda r: rc.RecipeCost(r, per_gpu_total_gb=30,
-                                                 fits=True)
-    ct.Path.is_file = lambda self: True   # recipes "exist"
+    setobj(ct, "_http_get_default",
+           _serving("orchestrator-model", "worker-model"))
+    setobj(ti._rc, "recipe_cost",
+           lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
+    setobj(ct.Path, "is_file", lambda self: True)   # recipes "exist"
 
-    # External boundaries: no sparkrun subprocess, no provisioning. The write
-    # path is recorded so the guard can assert it stayed COLD.
-    proxy_writes = []
-
-    def _fake_subprocess_run(*a, **k):
-        class R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return R()
-
+    # External boundaries: no sparkrun subprocess, no provisioning.
     import subprocess
-    subprocess.run = _fake_subprocess_run
-    ct._provision_models = lambda plan, **k: {"status": "ok",
-                                              "provisioned": [],
-                                              "note": "capture"}
+    setobj(subprocess, "run", _fake_run)
+    setobj(ct, "_provision_models",
+           lambda plan, **k: {"status": "ok", "provisioned": [],
+                              "note": "capture"})
     # The apply path's gateway restart must not run either.
     import gateway_restart
-    gateway_restart.restart_gateway = lambda: {"success": True, "note": "stub"}
-    return ct, hscc, proxy_writes
+    setobj(gateway_restart, "restart_gateway",
+           lambda: {"success": True, "note": "stub"})
+    return ct, hscc
 
 
-def capture_apply_render(template_dict, root):
+def _fake_run(*a, **k):
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    return R()
+
+
+def capture_apply_render(template_dict, root, mp=None):
     """Run one full apply with fakes and return every artifact it produced."""
-    ct, hscc, _ = _wire_fakes(root, template_dict)
+    ct, hscc = _wire_fakes(root, template_dict, mp)
     result = ct.apply_template(template_dict["name"], confirm=True,
                                _http_get=_serving("orchestrator-model",
                                                   "worker-model"))

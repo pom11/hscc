@@ -1178,6 +1178,14 @@ def apply_template(template_name: str, confirm: bool = False,
         # and the apply still succeeds — an untouched old template must not
         # newly fail to apply because a preference could not be written.
         px = _apply_proxy_declaration(tpl, plan)
+        # A step is a CLAIM about this apply. A template that declared no
+        # `proxy:` block AND is not uniform_pool (so the §2.2 default does not
+        # even apply) has nothing to claim, and reporting a no-op step would
+        # change the step sequence of an untouched v3 template — which §7
+        # forbids ("must not change a single byte"). The leg still RUNS (that
+        # is cheap and it is what proves it is inert); only the report is gated.
+        px_declared = isinstance(getattr(tpl, "proxy", None), dict) or bool(
+            getattr(plan, "uniform_pool", False))
         proxy_step = {
             "step": "proxy-declaration",
             "status": ("warn" if px["error"] and px["source"] == "declared"
@@ -1190,7 +1198,8 @@ def apply_template(template_name: str, confirm: bool = False,
             "inert_recorded": px["inert_recorded"],
             "note": px["note"] if not px["error"] else px["error"],
         }
-        result["steps"].append(proxy_step)
+        if px_declared:
+            result["steps"].append(proxy_step)
 
         # Step 4: Start native sparkrun proxy (per resolved family)
         # The native proxy auto-discovers running endpoints and generates its own
@@ -1268,7 +1277,7 @@ def apply_template(template_name: str, confirm: bool = False,
         ep = _apply_endpoints(plan, ep_decision, _http_get=_http_get)
         if ep["changed"]:
             config_changed = True
-        result["steps"].append({
+        ep_step = {
             "step": "endpoints",
             "status": "ok",
             "keys_written": ep["keys_written"],
@@ -1277,13 +1286,17 @@ def apply_template(template_name: str, confirm: bool = False,
             # §1.5: the report shows which family each consumer was pointed at
             # and the probe status that gated each write.
             "resolved": ep["resolved"],
-        })
+        }
+        # Reported only when the template actually declared `endpoints:` — the
+        # same no-phantom-claim rule as Step 3b (§7 byte-identity).
+        if isinstance(getattr(tpl, "endpoints", None), dict):
+            result["steps"].append(ep_step)
 
         # Step 5d: Write DECLARED kanban caps (§3). Explicit values only — the
         # §3.1 derivation is derive-and-REPORT (advisory; its input is INERT),
         # so a derived cap is printed, never written.
         cp = _apply_caps_declaration(tpl)
-        result["steps"].append({
+        caps_step = {
             "step": "caps",
             "status": "ok",
             "written": cp["written"],
@@ -1292,7 +1305,9 @@ def apply_template(template_name: str, confirm: bool = False,
             "declared": cp["declared"],
             "derived": cp["derived"],
             "note": cp["note"],
-        })
+        }
+        if isinstance(getattr(tpl, "caps", None), dict):
+            result["steps"].append(caps_step)
 
         # Step 6: Provision models via sparkrun
         provision_result = _provision_models(plan, recreate=recreate)

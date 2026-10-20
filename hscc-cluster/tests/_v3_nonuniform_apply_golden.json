@@ -1,0 +1,96 @@
+{
+  "success": true,
+  "config_yaml": "model:\n  base_url: http://10.0.0.1:8000/v1\n  provider: custom\n  default: orchestrator-model\nproviders:\n- name: custom\n  model:\n    default: 10.0.0.1:8000\n  base_url: http://10.0.0.1:8000/v1\n- name: family-coding\n  model:\n    default: worker-model\n  base_url: http://localhost:4000/v1\ndelegation:\n  base_url: http://localhost:4000/v1\n  model: worker-model\nauxiliary:\n  compression:\n    base_url: http://10.0.0.1:8000/v1\n    model: orchestrator-model\n  kanban_decomposer:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  triage_specifier:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  profile_describer:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  curator:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  title_generation:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  skills_hub:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  approval:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n  mcp:\n    base_url: http://10.0.0.3:8000/v1\n    model: worker-model\n",
+  "serving_json": "{\n  \"version\": 2,\n  \"units\": [\n    {\n      \"id\": \"orch\",\n      \"role\": \"orchestrator\",\n      \"model\": \"orch\",\n      \"recipe\": \"orch.yaml\",\n      \"nodes\": [\n        \"10.0.0.1\"\n      ],\n      \"port\": 8000\n    },\n    {\n      \"id\": \"family-coding-work-2-8000\",\n      \"role\": \"worker\",\n      \"keepalive\": true,\n      \"model\": \"work\",\n      \"recipe\": \"work.yaml\",\n      \"nodes\": [\n        \"10.0.0.2\"\n      ],\n      \"port\": 8000,\n      \"tp\": 1,\n      \"pp\": 1,\n      \"family\": \"coding\"\n    },\n    {\n      \"id\": \"family-reasoning-work-3-8000\",\n      \"role\": \"worker\",\n      \"keepalive\": true,\n      \"model\": \"work\",\n      \"recipe\": \"work.yaml\",\n      \"nodes\": [\n        \"10.0.0.3\"\n      ],\n      \"port\": 8000,\n      \"tp\": 1,\n      \"pp\": 1,\n      \"family\": \"reasoning\"\n    }\n  ]\n}\n",
+  "models_json": "{\n  \"primary_model\": \"orch\",\n  \"provider\": \"custom\",\n  \"base_url\": \"http://10.0.0.1:8000/v1\",\n  \"models\": [\n    {\n      \"name\": \"orch\",\n      \"type\": \"llm\",\n      \"status\": \"serving\",\n      \"location\": \"vLLM\",\n      \"tp\": 1,\n      \"pp\": 1,\n      \"family\": \"orchestrator\"\n    },\n    {\n      \"name\": \"work\",\n      \"type\": \"llm\",\n      \"status\": \"serving\",\n      \"location\": \"vLLM\",\n      \"tp\": 1,\n      \"pp\": 1,\n      \"family\": \"coding\"\n    },\n    {\n      \"name\": \"work\",\n      \"type\": \"llm\",\n      \"status\": \"serving\",\n      \"location\": \"vLLM\",\n      \"tp\": 1,\n      \"pp\": 1,\n      \"family\": \"reasoning\"\n    }\n  ]\n}\n",
+  "applied_template_json": "{\n  \"template\": \"v3-nonuniform-apply-guard\",\n  \"orchestrator_node\": \"10.0.0.1\",\n  \"families\": [\n    \"coding\",\n    \"reasoning\"\n  ],\n  \"units\": 3,\n  \"uniform_pool\": false\n}",
+  "steps": [
+    {
+      "step": "serving.json",
+      "status": "ok"
+    },
+    {
+      "step": "models.json",
+      "status": "ok"
+    },
+    {
+      "step": "config.yaml",
+      "status": "ok"
+    },
+    {
+      "step": "proxies/",
+      "status": "ok"
+    },
+    {
+      "step": "worker-model-ids",
+      "status": "ok"
+    },
+    {
+      "step": "routing",
+      "status": "ok"
+    },
+    {
+      "step": "provision",
+      "status": "ok"
+    },
+    {
+      "step": "gateway-restart",
+      "status": "ok"
+    }
+  ],
+  "step_detail": [
+    {
+      "step": "serving.json"
+    },
+    {
+      "step": "models.json"
+    },
+    {
+      "step": "config.yaml",
+      "changed": true
+    },
+    {
+      "step": "proxies/"
+    },
+    {
+      "step": "worker-model-ids",
+      "model_id": "worker-model",
+      "config_changed": false,
+      "profiles_changed": 0,
+      "orch_profiles_changed": 0
+    },
+    {
+      "step": "routing",
+      "keys_written": [
+        "delegation.base_url",
+        "delegation.model",
+        "auxiliary.compression.base_url",
+        "auxiliary.compression.model",
+        "auxiliary.kanban_decomposer.base_url",
+        "auxiliary.kanban_decomposer.model",
+        "auxiliary.triage_specifier.base_url",
+        "auxiliary.triage_specifier.model",
+        "auxiliary.profile_describer.base_url",
+        "auxiliary.profile_describer.model",
+        "auxiliary.curator.base_url",
+        "auxiliary.curator.model",
+        "auxiliary.title_generation.base_url",
+        "auxiliary.title_generation.model",
+        "auxiliary.skills_hub.base_url",
+        "auxiliary.skills_hub.model",
+        "auxiliary.approval.base_url",
+        "auxiliary.approval.model",
+        "auxiliary.mcp.base_url",
+        "auxiliary.mcp.model"
+      ],
+      "config_changed": true,
+      "notes": []
+    },
+    {
+      "step": "provision"
+    },
+    {
+      "step": "gateway-restart"
+    }
+  ]
+}
