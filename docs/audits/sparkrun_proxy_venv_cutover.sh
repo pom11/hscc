@@ -14,6 +14,23 @@
 #      positively identify as a sparkrun/litellm descendant of the OLD venv —
 #      it never kills by name-guess.
 #
+# 2026-10-20 08:37 RUN REGRESSIONS (both cost ~1.5 min of avoidable outage
+# during the live 0.4.0 -> 0.4.1 cutover; fixed here):
+#   a. STEP 2 false-positive: the existence test (`lsof ... -sTCP:LISTEN`) and
+#      a SEPARATE `lsof -t` owner lookup raced — the listener closed between
+#      the two calls, owner came back EMPTY, the `*)` case treated an empty
+#      owner as an "UNIDENTIFIED process" and rolled back a healthy stop.
+#      Fix: ONE lsof call per iteration; empty owner = port free (continue /
+#      re-loop); only a non-empty, non-litellm/sparkrun owner aborts.
+#   b. rollback could not restart while the old proxy was DRAINING: the
+#      litellm child (of the uvx wrapper) stays alive ~20s finishing
+#      ESTABLISHED streaming conns, so `proxy start` reported "already
+#      running (PID ...)" and the rollback verification curl got connection
+#      refused. Fix: snapshot_proxy_pids BEFORE stop, then wait_proxy_down —
+#      bounded wait for the recorded proxy PIDs + children to exit before ANY
+#      start — used in BOTH the forward path and fail_rollback; identified
+#      snapshot PIDs get SIGTERM if still up when the bounded wait expires.
+#
 # EDIT THE CONFIG BLOCK for the target tag, then read every gate before running.
 set -u
 export CONDA_NO_PLUGINS=true
@@ -30,13 +47,63 @@ LINK="$HOME/.local/bin/sparkrun"
 MODELS=(worker-model orchestrator-model)
 LAUNCHD_LABEL="gui/$(id -u)/com.hermes.hscc_daemon"
 EXPECTED_NEW="0.4.1"
+DRAIN_WAIT_SECS=60                                  # bounded drain wait (regression b)
 # ──────────────────────────────────────────────────────────────────────────
 
 log(){ echo "[$(date '+%H:%M:%S')] $*"; }
+
+# Snapshot the PIDs a `proxy stop` may leave draining: the :4000 listener
+# lineage (uvx wrapper parent + python child via ppid) plus whatever PID the
+# CLI itself reports. MUST run BEFORE `proxy stop` — afterwards the lineage
+# is gone and there is nothing to wait for.
+snapshot_proxy_pids(){
+  PROXY_PIDS=""
+  local lp p sp
+  for lp in $(lsof -nP -iTCP:4000 -sTCP:LISTEN -t 2>/dev/null); do
+    PROXY_PIDS="$PROXY_PIDS $lp"
+    p=$(ps -o ppid= -p "$lp" 2>/dev/null | tr -d ' ')
+    [ -n "$p" ] && [ "$p" != "1" ] && PROXY_PIDS="$PROXY_PIDS $p"
+  done
+  sp=$("$LINK" proxy status 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  [ -n "$sp" ] && PROXY_PIDS="$PROXY_PIDS $sp"
+  PROXY_PIDS=$(echo "$PROXY_PIDS" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ')
+  log "  snapshot proxy pids:$PROXY_PIDS"
+}
+
+# Bounded drain wait (regression b): stop returns before litellm finishes
+# serving ESTABLISHED streaming conns; starting a proxy while the recorded
+# PIDs are alive yields "already running (PID ...)" + refused conns.
+# Wait up to $1 (default $DRAIN_WAIT_SECS), then SIGTERM the identified
+# snapshot set once (no name-guessing beyond the snapshot) and wait 10s more.
+wait_proxy_down(){
+  local deadline=$(( SECONDS + ${1:-$DRAIN_WAIT_SECS} )) alive p
+  while :; do
+    alive=""
+    for p in $PROXY_PIDS; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -z "$alive" ] && { log "  recorded proxy pids exited (drained)"; return 0; }
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 2
+  done
+  log "  still alive after ${1:-$DRAIN_WAIT_SECS}s:$alive — SIGTERM identified snapshot pids"
+  for p in $PROXY_PIDS; do kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null; done
+  deadline=$(( SECONDS + 10 ))
+  while :; do
+    alive=""
+    for p in $PROXY_PIDS; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -z "$alive" ] && { log "  identified pids exited after SIGTERM"; return 0; }
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 2
+  done
+  log "  WARN: pids still alive:$alive — proceeding (port check below still guards)"
+  return 0
+}
+
 fail_rollback(){
   log "FAIL: $1 — rolling back to $OLD_VENV"
   ln -sfn "$OLD_VENV/bin/sparkrun" "$LINK"
-  "$OLD_VENV/bin/sparkrun" proxy stop   || true
+  snapshot_proxy_pids
+  "$OLD_VENV/bin/sparkrun" proxy stop   || log "rollback stop nonzero — draining anyway"
+  wait_proxy_down
   "$OLD_VENV/bin/sparkrun" proxy start  || true
   sleep 20
   if curl -fsS -m 30 -o /dev/null "http://127.0.0.1:4000/v1/models"; then
@@ -56,13 +123,17 @@ curl -fsS -m 30 -o /dev/null "http://127.0.0.1:4000/v1/models" || fail_rollback 
 # hermes kanban list --status running 2>/dev/null | grep -q . && fail_rollback "kanban card running"
 
 log "STEP 1: stop proxy ($("$LINK" --version 2>/dev/null))"
+snapshot_proxy_pids
 "$LINK" proxy stop || log "stop returned nonzero — proceeding to port check anyway"
+wait_proxy_down   # drain guard (regression b): no start may race these pids
 
 log "STEP 2: verify :4000 actually free (zombie-PID guard)"
 for i in 1 2 3 4 5 6; do
-  lsof -nP -iTCP:4000 -sTCP:LISTEN >/dev/null 2>&1 || break
-  owner=$(lsof -nP -iTCP:4000 -sTCP:LISTEN -t 2>/dev/null | head -1)
+  owners=$(lsof -nP -iTCP:4000 -sTCP:LISTEN -t 2>/dev/null)   # ONE lsof call (regression a)
+  [ -z "$owners" ] && break        # empty owner = port free (was: false-positive rollback)
+  owner=$(echo "$owners" | head -1)
   cmd=$(ps -o command= -p "$owner" 2>/dev/null)
+  if [ -z "$cmd" ]; then log "  pid $owner already vanished (listener closing) — re-loop"; sleep 2; continue; fi
   log "  :4000 still held by pid $owner: ${cmd:0:90}"
   case "$cmd" in
     *litellm*|*sparkrun*) log "  port owner is sparkrun/litellm lineage — SIGTERM $owner (identified, not name-guessed)"; kill "$owner" 2>/dev/null ;;
