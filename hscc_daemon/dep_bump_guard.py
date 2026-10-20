@@ -4,8 +4,8 @@ A runtime dependency bump (the ``check-runtime-deps`` workflow plus
 ``scripts/dep_pr_watcher.py``) rewrites ``runtime-versions.json`` and asks a
 worker to verify the bump live. For **sparkrun** that is not a plain version
 swap: the cluster does not run upstream ``main``. It runs OUR FORK BRANCH,
-installed editable at ``~/dev/sparkrun-live`` (``~/.local/bin/sparkrun`` ->
-``~/sparkrun/.venv-sparkrun-040/bin/sparkrun``).
+installed editable at ``~/dev/sparkrun-041-verify`` (``~/.local/bin/sparkrun``
+-> ``~/sparkrun/.venv-sparkrun-041/bin/sparkrun``).
 
 A bump must therefore REBASE the fork branch onto the new upstream tag and
 keep it checked out. ``git checkout main`` in the live checkout — or
@@ -15,19 +15,20 @@ just quietly reverts. That is the failure these strings exist to prevent, so
 they live in code (imported by both the CI generator and the cluster poller,
 and pinned by tests) instead of being prose duplicated in two places.
 
-Verified at implementation time (2026-10-19): the deployed branch is
-``feat/proxy-least-in-flight-040`` (fork remote ``pom11/sparkrun``), cut off
-upstream tag ``v0.4.0`` — upstream v0.4.0 absorbed the ``router_settings``
-gateway handling and the least-in-flight balancer, so the fork diff at this
-tag is minimal, but the rebase rule is tag-independent and stays mandatory.
-The ``-040`` branch supersedes ``feat/proxy-least-in-flight`` (the v0.3.10
-deployment, kept as the rollback line) and the earlier
-``feat/proxy-router-settings`` name.
+Verified at the 2026-10-20 08:37 live cutover: the deployed branch is
+``feat/proxy-least-in-flight-041`` (fork remote ``pom11/sparkrun``, head
+``1aaa6479`` = upstream tag ``v0.4.1`` + the macOS-spawn test fix), cut off
+upstream tag ``v0.4.1`` — the v0.4.1 proxy/balancer surfaces are byte-identical
+to v0.4.0 for hscc's path (engine.py/proxy config unchanged; 0.4.1 test delta
+is upstream churn plus one pre-existing boot-record test that fails on both
+tags). The ``-041`` branch supersedes ``feat/proxy-least-in-flight-040`` (the
+v0.4.0 deployment, kept as the rollback line at checkout
+``~/dev/sparkrun-live`` / venv ``.venv-sparkrun-040``).
 """
 
 FORK_REMOTE = "pom11/sparkrun"
-FORK_BRANCH = "feat/proxy-least-in-flight-040"
-SPARKRUN_CHECKOUT = "~/dev/sparkrun-live"
+FORK_BRANCH = "feat/proxy-least-in-flight-041"
+SPARKRUN_CHECKOUT = "~/dev/sparkrun-041-verify"
 SPARKRUN_REMOTE_NAME = "fork"
 
 #: Lines appended to a generated sparkrun bump PR body / verification card.
@@ -41,7 +42,7 @@ FORK_RULE_LINES = (
     f"`{FORK_BRANCH}` checked out afterwards.",
     f"**Never `git checkout main` in `{SPARKRUN_CHECKOUT}`, never reinstall "
     "from upstream.** That silently drops whatever proxy work only the fork "
-    "branch carries (at v0.4.0 that is at minimum the fork's test/runbook "
+    "branch carries (at v0.4.1 that is at minimum the fork's test/runbook "
     "lineage; upstream may also move or rename the balancer again) on the "
     "next proxy restart — no error.",
     f"Verify after the bump: "
