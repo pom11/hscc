@@ -24,8 +24,10 @@ setup.json
 *secret*
 *.token
 
-# Version tracking
-VERSION
+# Version tracking (root only — anchored: an unanchored 'VERSION' also
+# shadowed scripts/tests/fixtures/readme_lint/*/VERSION, silently dropping
+# them from git and making test_readme_lint fail on any clean checkout)
+/VERSION
 
 # Python bytecode
 __pycache__/
