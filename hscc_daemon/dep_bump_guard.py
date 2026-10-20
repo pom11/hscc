@@ -47,8 +47,16 @@ FORK_RULE_LINES = (
     f"Verify after the bump: "
     f"`git -C {SPARKRUN_CHECKOUT} rev-parse --abbrev-ref HEAD` == "
     f"`{FORK_BRANCH}`, and `router_settings` is still read in "
-    "`src/sparkrun/proxy/config.py` plus emitted in "
-    "`src/sparkrun/plugins/litellm/engine.py`.",
+    "`src/sparkrun/plugins/litellm/engine.py` "
+    "(`_configured_router_settings`, which pulls "
+    "`gateways.litellm.router_settings` via `ProxyConfig.gateway_settings`) "
+    "and emitted into the generated litellm config there "
+    "(`build_litellm_config`).",
+    "Do NOT grep `src/sparkrun/proxy/config.py` for `router_settings` and "
+    "read a no-match as drift: since v0.4.0 that file keeps only the "
+    "generic `gateways.<name>` accessor and has no `router_settings` at "
+    "all — the engine.py read above is the only one (checked against "
+    "v0.4.0 and v0.4.1).",
     "Then restart the proxy and confirm the balancer is live in "
     "`~/.cache/sparkrun/proxy/litellm_config.yaml`: "
     "`litellm_settings.callbacks` contains `sparkrun_balancer.handler` and "

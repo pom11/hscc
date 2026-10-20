@@ -110,6 +110,27 @@ class TestDepBumpGuard:
         assert "rebase" in text
         assert "rev-parse --abbrev-ref HEAD" in text
         assert "router_settings" in text
+        # The post-bump read-site sentence must point at the REAL site. Since
+        # v0.4.0 the literal `router_settings` token appears in exactly ONE
+        # sparkrun source file — plugins/litellm/engine.py — and grep finds
+        # NOTHING in proxy/config.py (re-verified 2026-10-20 against tags
+        # v0.4.0 and v0.4.1). A rule that pins the old proxy/config.py read
+        # site makes the next bump worker grep the wrong file, come up empty,
+        # and false-alarm that the fork's balancer work vanished. Pinned
+        # PER-LINE (the tuple design): a whole-blob substring check would be
+        # satisfied by the negation line naming the wrong file.
+        read_site = next(ln for ln in g.FORK_RULE_LINES
+                         if "still read" in ln)
+        assert "src/sparkrun/plugins/litellm/engine.py" in read_site
+        assert "_configured_router_settings" in read_site
+        assert "build_litellm_config" in read_site
+        assert "src/sparkrun/proxy/config.py" not in read_site
+        # And a separate line keeps the wrong path from being grep'd at all,
+        # so a worker can never read the rule as "grep proxy/config.py".
+        negate = [ln for ln in g.FORK_RULE_LINES
+                  if "proxy/config.py" in ln]
+        assert len(negate) == 1
+        assert "Do NOT grep" in negate[0] and "no-match" in negate[0]
         # simple-shuffle in the generated router config is EXPECTED with the
         # balancer live (2026-10-19 cutover) — the rule must keep saying so,
         # or the next verifier mis-flags a healthy proxy as drift.
