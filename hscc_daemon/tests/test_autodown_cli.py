@@ -29,6 +29,14 @@ from hscc_daemon.autodown_cli import (cmd_autodown, _parse_idle_minutes,
 # Tests that want the production active/inactive filtering restore this.
 _REAL_LIST_ACTIVE_CRON_JOBS = ad.list_active_cron_jobs
 
+# The REAL PR/CI predicate + state readers, captured at import (before the
+# autouse _no_active_prci fixture stubs them per test). The t_4f42fb87
+# contract test restores these to drive the REAL bookkeeping through the
+# supported _screen_prci seam.
+_REAL_HAS_ACTIVE_PRCI = ad._has_active_pr_ci
+_REAL_PRCI_CHECK_STATE = ad.prci_check_state
+_REAL_PRCI_BLOCKING_SIGNAL = ad.prci_blocking_signal
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -311,6 +319,58 @@ class TestStatus:
         assert data["prci_active"] is True
         assert "unreachable" in data["blocked_by"]
         assert data["prci_ok"] is False
+
+    def test_status_prci_unreachable_real_predicate_end_to_end(
+            self, capsys, autodown_file, block_file, monkeypatch):
+        """REAL predicate + REAL readers: an unreachable screen reaches --json
+        as UNEVALUABLE, not as a healthy 'open PR / active CI run'.
+
+        The test above stubs the readers to hand it the right answer; this one
+        restores the import-captured REAL ``_has_active_pr_ci`` /
+        ``prci_check_state`` / ``prci_blocking_signal`` and feeds only the
+        supported ``_screen_prci`` seam the unreachable sentinel — so a
+        regression in the bookkeeping (e.g. _note_prci_active clobbering
+        ok/reason/warned after _note_prci_unavailable, t_4f42fb87) turns this
+        red. The WARN log is stubbed onto a list: in foreground mode
+        daemon_ops.log echoes to stdout, which would corrupt the JSON payload
+        (t_0db812de's flake surface) — pinning the WARN itself is
+        test_autodown.py's job.
+        """
+        from hscc_daemon import autodown
+
+        # Hermetic: the kanban lane is pinned clear (this test isolates the
+        # PR/CI lane; a real board read would make it env-dependent — the
+        # exact t_0db812de flake surface).
+        monkeypatch.setattr(autodown, "_has_active_work",
+                            lambda *a, **k: False)
+        monkeypatch.setattr(autodown, "_has_active_pr_ci",
+                            _REAL_HAS_ACTIVE_PRCI)
+        monkeypatch.setattr(autodown, "prci_check_state",
+                            _REAL_PRCI_CHECK_STATE)
+        monkeypatch.setattr(autodown, "prci_blocking_signal",
+                            _REAL_PRCI_BLOCKING_SIGNAL)
+        monkeypatch.setattr(autodown, "_screen_prci",
+                            lambda *a, **k: autodown._PRCI_UNREACHABLE)
+        monkeypatch.setattr(autodown, "log", lambda *a, **k: None)
+        # The bookkeeping is module-global — start and end hermetic.
+        saved = dict(autodown._PRCI_LOAD)
+        autodown._PRCI_LOAD.update({"blocking": None, "ok": None,
+                                    "reason": "", "warned": False})
+        try:
+            autodown_file.write_text(json.dumps({
+                "enabled": True, "idle_minutes": 10, "state": "up",
+                "last_activity_iso": "2026-08-25T09:19:51+00:00",
+            }))
+            rc = cmd_autodown(["status", "--json"])
+            assert rc == 0
+            data = json.loads(capsys.readouterr().out)
+            assert data["prci_active"] is True
+            assert "unreachable" in data["blocked_by"]
+            assert data["prci_ok"] is False
+            assert "unreachable" in data["prci_reason"]
+        finally:
+            autodown._PRCI_LOAD.clear()
+            autodown._PRCI_LOAD.update(saved)
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):

@@ -505,6 +505,21 @@ class TestHasActivePrCi:
     True — identical direction to the kanban interlock.
     """
 
+    @pytest.fixture(autouse=True)
+    def _reset_prci_load(self):
+        """Snapshot/restore the module-global ``_PRCI_LOAD`` around each test.
+
+        The interlock bookkeeping is process-global (like ``_KANBAN_LOAD``),
+        so these pins must neither depend on nor leak ``warned`` /
+        ``blocking`` / ``ok`` from sibling tests (t_4f42fb87).
+        """
+        saved = dict(ad._PRCI_LOAD)
+        ad._PRCI_LOAD.update({"blocking": None, "ok": None, "reason": "",
+                              "warned": False})
+        yield
+        ad._PRCI_LOAD.clear()
+        ad._PRCI_LOAD.update(saved)
+
     def test_open_pr_is_active(self):
         assert ad._has_active_pr_ci(_PrciOpenPr()) is True
 
@@ -530,6 +545,96 @@ class TestHasActivePrCi:
         assert ad._has_active_pr_ci(_PrciClear()) is False
         assert ad._has_active_pr_ci(_PrciOpenPr()) is True
         assert ad._has_active_pr_ci(_PrciClear()) is False
+
+    # --- UNEVALUABLE bookkeeping must survive the active-note (t_4f42fb87) --
+    # PRE-fix these four failed: _has_active_pr_ci called _note_prci_active()
+    # AFTER _note_prci_unavailable(), rewriting ok/reason/warned back to the
+    # healthy-active values. The fail-safe return (True) was never affected —
+    # these pin what ``hscc autodown status`` reads, not the polarity.
+
+    def test_unreachable_leaves_unevaluable_state(self):
+        """Unreachable source ⇒ state says UNEVALUABLE, not 'open PR/active CI'.
+
+        ``prci_check_state()`` must report ok=False with a reason naming the
+        unreachability, and ``prci_blocking_signal()`` must be the
+        ``_PRCI_UNREACHABLE`` sentinel — that is what makes _cmd_status render
+        'PR/CI source unreachable — treating as active (fail-safe)' (and the
+        panel [error]UNEVALUABLE) instead of naming the wrong reason for why
+        teardown holds.
+        """
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True  # polarity
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert "unreachable" in state["reason"]
+        assert ad.prci_blocking_signal() == ad._PRCI_UNREACHABLE
+
+    def test_unreachable_warns_once_across_ticks(self, monkeypatch):
+        """Repeated calls (the daemon's 30s tick) emit the WARN exactly ONCE.
+
+        The old active-note reset ``warned`` to False on every call, so the
+        WARN re-emitted every tick — the one thing _note_prci_unavailable's
+        docstring promises against.
+        """
+        warns = []
+        monkeypatch.setattr(ad, "log",
+                            lambda msg, level="INFO": warns.append((level,
+                                                                    msg)))
+        for _ in range(5):  # five daemon ticks, gh still unreachable
+            assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert len(warns) == 1
+        assert warns[0][0] == "WARN"
+        assert "unreachable" in warns[0][1]
+
+    def test_raising_checker_records_unevaluable_state(self):
+        """A raising checker must ALSO leave the sentinel + reason recorded.
+
+        It never took the active-note (so ok/reason survived pre-fix) but
+        ``blocking`` stayed None, which made _cmd_status name it as an open
+        PR / active CI run too.
+        """
+        assert ad._has_active_pr_ci(_PrciRaises()) is True  # polarity
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert "raised" in state["reason"]
+        assert ad.prci_blocking_signal() == ad._PRCI_UNREACHABLE
+
+    def test_active_after_unreachable_reports_active(self):
+        """A positively-active screen after an unreachable spell is ACTIVE.
+
+        The exclusive-note fix must not suppress the healthy-active report:
+        ok flips back to True, reason clears, signal is 'PR/CI'.
+        """
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert ad._has_active_pr_ci(_PrciOpenPr()) is True
+        assert ad.prci_check_state() == {"ok": True, "reason": "",
+                                         "blocking": "PR/CI"}
+        assert ad.prci_blocking_signal() == "PR/CI"
+
+    def test_clear_after_unreachable_clears_stale_reason(self):
+        """Recovery leaves no stale unreachable state behind a clear signal.
+
+        The clear path records the full resolution (ok True / reason cleared),
+        so --json can't report the source unreachable while the panel says ok.
+        """
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+        assert ad.prci_check_state() == {"ok": True, "reason": "",
+                                         "blocking": None}
+        assert ad.prci_blocking_signal() is None
+
+    def test_rearm_warns_afresh_after_recovery(self, monkeypatch):
+        """clear ⇒ re-unreachable is a real state change ⇒ WARN fires again.
+
+        The clear/active notes reset ``warned`` deliberately: once-per-spell,
+        not once-per-process-forever (a flapping source must not go silent).
+        """
+        warns = []
+        monkeypatch.setattr(ad, "log", lambda msg, level="INFO":
+                            warns.append(msg))
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert len(warns) == 2
 
 
 class TestPrciScreenActive:
