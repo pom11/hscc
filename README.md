@@ -8,341 +8,136 @@
 
 Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, decomposes, codes, reviews, and lands it — across multiple GPU nodes, hands-off.
 
-[![v2.1.1](https://img.shields.io/badge/version-2.1.1-blue.svg)](CHANGELOG.md)
+[![v2.11.0](https://img.shields.io/badge/version-2.11.0-blue.svg)](CHANGELOG.md)
 [![MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![pure-stdlib](https://img.shields.io/badge/python-pure--stdlib-orange.svg)](README.md)
-[![1000+ tests](https://img.shields.io/badge/tests-1000%2B-brightgreen.svg)](https://github.com/pom11/hscc)
+[![3 pinned deps](https://img.shields.io/badge/python-3%20pinned%20deps-orange.svg)](requirements.txt)
+[![5,000+ tests](https://img.shields.io/badge/tests-5%2C000%2B-brightgreen.svg)](scripts/README.md)
 
-HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a set of pure-stdlib Python plugins — no pip dependencies. You develop in a work repo (`~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
+HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a pure-Python plugin set with three pinned dependencies (PyYAML, rich, psutil — see `requirements.txt`). You develop in a work repo (`~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
 
-The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher and git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships, adding the thin physical layer (cluster control, monitoring, model lifecycle), a role framework for specialized workers, and a review gate on the dispatch path.
+The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher and git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships, adding the thin physical layer (cluster control, monitoring, model lifecycle), a role framework for specialized workers, and a review gate on the dispatch path. Why this shape (what stock Hermes lacks and HSCC adds): [docs/WHY.md](docs/WHY.md).
 
 ## In plain words (ELI5)
 
 You have a few powerful computers and a team of AI helpers. **HSCC is the manager that runs them for you.** You say what you want built; it splits the work across the computers, hands each piece to the right specialist — one plans, one writes the code, one checks it — and keeps the whole thing running: it restarts anything that crashes, and only pings you when it's genuinely stuck. One command gives you a whole working team, instead of babysitting a single chatbot.
 
-## What it does
+## The stack at a glance
 
-- **A whole org, not one bot** — 22+ role profiles (architect, coder, reviewer, QA, engineers, analysts), each with its own identity, skills, and disposition. New roles are minted on demand.
-- **Autonomous quality gates** — code is reviewed by a dedicated agent (diff + tests + spec) before it lands on an integration branch. Main stays human-gated.
-- **Spreads across your GPUs and self-heals** — work dispatches to worker nodes kept alive and health-monitored by the daemon. Crashed models relaunch automatically.
-- **Failure escalation** — a cron watcher reassigns repeatedly-failing tasks to stronger models and notifies you (desktop) when even that doesn't fix it. Silent when nothing is stuck.
-- **One-command install** — `git clone` + `bootstrap.sh` detects your cluster from sparkrun, asks two questions (or `--yes` for zero), and installs everything.
-
-## How it looks in practice
-
-You type in chat: *"Build a REST API for the project tracker in ~/dev/tracker."*
-
-1. The **orchestrator** brainstorms a spec with the **architect**, then decomposes it into a dependency-ordered task graph on the kanban board.
-2. Tasks dispatch to role-specialized workers — **backend-engineer** scaffolds the API, **qa** writes tests, **coder** fills in the routes — each in its own git worktree on a GPU worker node.
-3. When the coder finishes, it submits its work to **review**. The **reviewer** agent checks the diff, runs the tests, confirms the work matches the spec, and merges to the integration branch.
-4. The whole chain runs hands-off. If a worker model crashes, the daemon relaunches it. If a task fails repeatedly, the escalation watcher reassigns it — and notifies you (desktop) if it gets stuck.
-
-This runs on a DGX Spark cluster with Hermes agents and sparkrun — not a turnkey product for arbitrary hardware, but a proven pattern if you already have (or are building) that stack.
-
-## Why we built this
-
-Hermes is an excellent *single* agent: one brain, one chat, one model, with a built-in kanban dispatcher and git-worktree execution. But the moment you have a **GPU cluster and want a team of agents**, you hit gaps Hermes doesn't fill on its own — it knows how to *think* and dispatch work, not how to run the physical cluster underneath it or behave like a specialized organization.
-
-HSCC exists to close that gap without forking or fighting Hermes. It leans on Hermes' engine and wraps it in the operational shell a real fleet needs.
-
-### What Hermes was missing (and HSCC adds)
-
-| Gap in stock Hermes | What HSCC adds |
-|---|---|
-| No physical cluster control — can't provision / stop / heal vLLM models, no NAS or node-health awareness | A sparkrun-backed cluster toolset (orchestrator-only) + a self-heal daemon that keeps worker models alive and relaunches crashed ones |
-| Profiles exist, but no way to define a *roster* of specialists — every worker is generic | A role framework: each role is a spec file, generated into a Hermes profile with a layered SOUL (shared base + role disposition); 22+ roles ship, new ones minted on demand |
-| The review-status dispatch path is present in core but inert — no producer, no reviewer skill | A `kanban_submit_review` producer + an `sdlc-review` skill, so code is gated (diff + tests + spec) and merged to an integration branch before it counts as done |
-| No "run hands-off" control | An autonomy flag (`~/.hscc/autonomy`) + a "do it autonomously" trigger that lets the orchestrator run idea→shipped without pausing for approval |
-| No cluster-aware setup | One bootstrap command that detects the cluster from sparkrun and installs everything — no hardcoded topology |
-
-The result: Hermes goes from *one smart agent* to a *self-running, specialized fleet* spread across your GPU nodes — with quality gates and an off switch.
+```
+DGX Spark nodes (GB10) ── vLLM units ── sparkrun ── worker proxy :4000
+     ▲  self-heal (lease+breaker+guard), monitor --live      │
+     │                                                       ▼
+hscc daemon (launchd) ── Hermes kanban dispatcher ── role workers (worktrees)
+     │                                                       ▲
+hscc api :8787/8788 (bearer token, tailnet) ── iOS app (QR pair)
+```
 
 ## Requirements
 
 - A configured [sparkrun](https://sparkrun.dev/) DGX Spark cluster (one or more GB10 nodes)
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
-- A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3 (stdlib only)
-- Optional: a NAS for the offline model cache
-- tmux — REQUIRED for the iOS chat path (see below)
-
-### iOS chat needs tmux
-
-The iOS app delivers a chat message by typing it into the project's REPL
-**pane** — the `hermes -p <profile> chat` process that lives in a tmux pane
-on your terminal (discovery via `hscc-api/repl_inject.py`). It is the one
-REPL you both see: your messages, the phone's messages, and any `/goal`
-work all land in the same place.
-
-A REPL started outside tmux is invisible to the app. Messages then go to a
-hidden background session the API hosts — your terminal stays dark, and
-the reply comes back to the phone only (the app shows a visible notice
-when this happens). This is exactly the silent split the launch door
-prevents: **`hscc project chat <project>` always opens the chat inside
-tmux** (in your current tmux session if you're in one, else the named
-session `hscc-<project>`; if tmux is unusable it stops and asks you
-explicitly before ever opening a chat the phone can't see).
-
-Check what the phone can reach right now: `hscc doctor` reports each
-project's REPL as in-tmux / outside-tmux / idle, and bootstrap prints the
-same split at install time.
-
----
+- A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3
+- Python deps: three pinned packages (PyYAML, rich, psutil), installed by bootstrap
+- tmux — REQUIRED for the iOS chat path: the app delivers chat by typing into the project's REPL pane; a REPL outside tmux is invisible to it. Delivery matrix: [hscc-api/README.md](hscc-api/README.md)
 
 ## Quick start
 
 ```
 git clone https://github.com/pom11/hscc ~/dev/hscc
-~/dev/hscc/hscc-bootstrap/bootstrap.sh
+~/dev/hscc/hscc-bootstrap/bootstrap.sh --yes
 ```
 
-Bootstrap copies the plugin tree into `~/.hermes/plugins/`, checks prerequisites (sparkrun cluster + Hermes), detects your cluster topology, asks a couple of questions, then installs everything — skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models; bring those up explicitly when ready. Use `--yes` for a fully non-interactive run.
-
-To pick up later changes, `git pull` in your work repo and re-run bootstrap — it backs up the previous runtime copy before overwriting. Pass `--no-backup` to skip backups.
-
-### First things after install
-
-All fleet operations go through one unified `hscc` command:
+Bootstrap detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview; after a `git pull` re-run it to pick up changes (it backs up the previous runtime copy; `--no-backup` skips). Then, in order:
 
 ```
-hscc status                               # daemon health + all streams at a glance
-hscc verify                               # full smoke-test of the entire stack
-hscc cluster status                       # running workloads + idle hosts
-hscc stats                                # fleet completions & tool activity (last 7 days)
-hscc throughput                           # vLLM token throughput + per-node queue depth
-hscc autoscale                            # scaling advice from current queue depth (read-only)
-hscc template list                        # see shipped cluster layouts (1-8 nodes)
-hscc template preview 4node-coding        # dry-run against the live cluster
-hscc template apply 4node-coding --confirm  # apply the layout
-hscc project standup                      # fleet-wide project/kanban digest
-hscc project review <card>                # review + merge a card
-hscc project --help                       # full flightdeck command list under the project verb
-hscc api start                            # HTTP API for external apps (iOS client)
-hscc api status                           # show API running/stopped + bound host:port
-```
-
-`hscc project …` is the project/kanban orchestration domain (formerly the
-standalone `flightdeck` tool, physically relocated into `hscc-project/` and
-reached through the `project` verb group). Use `hscc project standup` for your
-daily fleet digest (NEEDS YOU / FAILING / STALE / RUNNING / DRIFT), `hscc
-project review <card>` to review and merge a finished card, and `hscc project
---help` for the full flightdeck command surface. The complete reference lives
-in [`hscc-project/docs/COMMANDS.md`](hscc-project/docs/COMMANDS.md), and the
-`flightdeck X` ↔ `hscc project X` mapping plus the naming-collision notes are
-in [`docs/PROJECT-COMMANDS.md`](docs/PROJECT-COMMANDS.md).
-
-`hscc api …` runs the **HSCC HTTP API** (`hscc-api/`), a
-bearer-token-authenticated JSON interface on loopback that external apps —
-chiefly the private iOS companion — use to read fleet/kanban state and drive
-confirm-gated actions. Start it with `hscc api start`, expose it on the
-tailnet with `hscc api start --tailscale`, and see the full operator/client
-reference in [`docs/API.md`](docs/API.md).
-
-`hscc --help` shows the full grouped command reference with examples. The orchestrator agent also has parity — it can call these same capabilities (verify, stats, throughput, autoscale, templates) directly as tools, not just the operator CLI.
-
----
-
-## Cluster topology
-
-Topology is detected from `sparkrun cluster list` — HSCC makes no assumptions about IPs, node count, or whether a NAS is present. A reference layout:
-
-| Node | Role |
-|---|---|
-| Gateway / orchestrator | Always-on vLLM serving the Hermes orchestrator + chat. Never reaped. |
-| Worker(s) | Per-node vLLM, kept alive + health-monitored by the daemon. |
-| NAS (optional) | HF model cache, NFS-mounted to every node. Containers serve from this offline cache (`HF_HUB_OFFLINE=1`). |
-
-Worker models are declared in `~/.hscc/serving.json` as keep-alive units; the daemon health-checks them and relaunches a crashed one with the node's own recipe.
-
-## Model serving
-
-Models are served via sparkrun recipes against the (optional) NAS-backed cache:
-
-```
-sparkrun run <recipe>.yaml --cluster <name> --hosts <node-ip> --port 8000 --ensure
-```
-
-The model name is read from the recipe's `model:` field and recorded in `serving.json`.
-
-### Cluster templates
-
-Instead of provisioning by hand, apply a template that describes intent (which recipes, how many workers) and resolves to the live cluster at apply — auto-assigning nodes + ports, and refusing layouts that don't fit (checked against `sparkrun show` VRAM). A node-count library ships for 1–8 nodes, including multi-family and 2-models-per-node layouts. See [hscc-cluster/templates/](hscc-cluster/templates/README.md).
-
-Templates are **topology-free by default** (schema v2): no IPs, no ports — placement is inferred against the live cluster at apply. Since **v1.7.0** (schema v3) a template may also state placement and routing *explicitly*:
-
-- **`nodes:`** per unit — optional. When present the resolver's inference is bypassed and the list is used verbatim; `nodes[0]` is the span primary (exposes the endpoint), the rest are tp peers. Explicit nodes make placement deterministic but hardcode a specific cluster, so the **shipped templates deliberately omit them** and stay portable.
-- **`allow_colocation:`** — default `false`. Two units naming the same node is a hard error unless *both* opt in, in which case apply warns about VRAM contention.
-- **`routing:`** — maps a consumer (`delegation`, `compaction`, `auxiliaries`) to a symbolic unit (`orchestrator` or `family-<name>`), resolved to that unit's live endpoint at apply time. `auxiliaries` covers the 8 **text** tasks only — never `vision`/`web_extract` — and an id is never written to an endpoint that doesn't advertise it (probe-before-write).
-
-**Key semantic:** *omission means do-not-touch.* An omitted `routing` key means apply does not write that config key at all — the live value survives. Apply never silently re-routes something tuned by hand.
-
-```yaml
-routing:
-  delegation: family-reasoning
-  compaction: orchestrator
-  auxiliaries: orchestrator
-```
-
-`hscc template validate` is now two layers — **structural** (offline: no cluster state, no resolver) and **placement** (live) — and reports them separately. `--structural-only` skips the live layer (usable in CI), and a non-zero exit means either layer failed. `apply` runs the same validation as its pre-flight gate and blocks before touching anything. Full schema detail: [docs/DESIGN-template-explicit-placement.md](docs/DESIGN-template-explicit-placement.md) and [hscc-cluster/templates/README.md](hscc-cluster/templates/README.md).
-
-The next step on that schema is declared routing end-to-end — an
-`endpoints:` block (under `uniform_pool`, every hermes consumer points at the
-family proxy by alias), a `proxy:` block (LiteLLM balancing + per-deployment
-knobs, written into sparkrun's proxy config through sparkrun), and kanban
-caps as template fields: [docs/design/2026-10-15-template-declarations.md](docs/design/2026-10-15-template-declarations.md).
-
-```
-hscc template list                          # see the shipped layouts
+hscc status                                 # daemon health + all streams at a glance
+hscc template list                          # declared fleet layouts for 1–8 nodes (22 today)
 hscc template preview 4node-coding          # dry-run against the live cluster
-hscc template apply 4node-coding --confirm  # = the live setup
-hscc template validate 4node-coding --structural-only  # offline, CI-friendly
+hscc template apply 4node-coding --confirm  # bring up the serving layer
+hscc project standup                        # fleet digest: NEEDS YOU / FAILING / STALE / RUNNING
+hscc api start --tailscale                  # HTTP API for external apps (prints pairing QR)
 ```
 
----
+Then open the iOS app and scan the QR (`hscc api status` reprints it) — [ios-app/README.md](ios-app/README.md).
+
+## Common tasks
+
+| I want to … | Run |
+|---|---|
+| see the daily fleet digest | `hscc project standup` |
+| check health at a glance | `hscc status` · full smoke test: `hscc verify` |
+| watch per-node / per-model live load | `hscc cluster monitor --live` |
+| see throughput + queue depth, get scaling advice | `hscc throughput` · `hscc autoscale` |
+| review + merge a finished card | `hscc project review <card>` |
+| see why a card is stuck / un-stick it | `hscc kanban blocked [--recover <id>]` |
+| preview what would be escalated | `hscc escalate` (dry-run) |
+| shut idle GPUs down | `hscc autodown enable` — OFF by default, see below |
+| run / stop the external API | `hscc api start [--tailscale]` · `hscc api stop` |
+| the full command surface | `hscc --help` · `hscc help advanced` · `hscc project --help` |
+
+## Cluster templates
+
+Instead of provisioning by hand, apply a template that declares intent (which recipes, how many workers) and resolves against the live cluster at apply — auto-assigning nodes + ports and refusing layouts that don't fit (checked against `sparkrun show` VRAM). The library ships for 1–8 nodes — 22 templates as of 2026-10-19 (`hscc template list`) — and is topology-free by default (no IPs, no ports); a template may state placement/routing explicitly, but **omission means do-not-touch**: apply never silently re-routes something tuned by hand. `hscc template validate <name> --structural-only` runs offline (CI-friendly).
+
+Deep reference: [hscc-cluster/templates/README.md](hscc-cluster/templates/README.md) · explicit-placement schema: [docs/DESIGN-template-explicit-placement.md](docs/DESIGN-template-explicit-placement.md)
 
 ## Idle autodown
 
-When your cluster is just sitting there idle — no kanban work moving, no agent busy, nobody talking to it — the **GPU serving layer** (the vLLM containers that power your models) is still drawing power for nothing. **Idle autodown** watches for that. After the cluster has been quiet for X minutes, it shuts the serving layer down to save power, and brings it back up automatically the moment anything comes in — an HTTP API request, a new kanban card, or you running `hscc autodown wake`.
-
-**It is OFF by default.** Nothing tears anything down until you arm it deliberately — that's the single most important thing to know. You opt in:
+After the cluster has been quiet for X minutes the daemon can tear the whole **GPU serving layer** down to save power and bring it back up automatically on the next API/kanban activity or `hscc autodown wake`:
 
 ```
-hscc autodown status [--json]            # armed? what state? idle window? last activity?
-hscc autodown enable [--idle-minutes N]  # arm it (default: 10 minutes of quiet)
-hscc autodown enable --force             # arm despite active Hermes scheduled jobs
-hscc autodown wake                       # bring the serving layer back up now
-hscc autodown cancel                     # abort a teardown that is in progress
-hscc autodown disable                    # disarm it — stop the automation
+hscc autodown status [--json]              # read-only: armed? state? idle window?
+hscc autodown enable [--idle-minutes N]    # arm it — OFF by default until you do
+hscc autodown wake · cancel · disable      # wake now / abort teardown / disarm
 ```
 
-`status` is read-only (pass `--json` for machine-readable output). `enable` only arms the timer — it never shuts the layer down immediately, and if the layer is already down it won't start it either. `disable` just disarms the automation and hands supervision back to the watchdog; it doesn't restart anything, so if the layer is down and you want it up, run `hscc autodown wake`.
-
-**Scheduled Hermes cron jobs.** Autodown and scheduled jobs are in direct conflict only when the job needs the GPU serving layer: autodown may power that layer down exactly when a job is due. So `enable` classifies each active Hermes cron job (read from `~/.hermes/cron/jobs.json`, Hermes' own source of truth) and **aborts** — non-zero, listing the job's name, schedule, and next run — when any active job is **model-requiring** (it has a `model`, or `no_agent` is false/absent, i.e. it runs an agent). A job whose nature can't be determined is also treated as model-requiring and aborts. If the cron config is unreadable or absent, `enable` also aborts, treating it as "cannot determine" — autodown never arms on a signal it can't verify. `enable --force` arms anyway, records that it was force-armed in `autodown.json`, and `status` shows `force-armed: YES` plus the overridden jobs so you can always see why it's armed despite them.
-
-**CPU-only watchdogs** (e.g. `hscc-dep-watcher`, `hscc-escalate-watcher`): these active jobs are `no_agent: true` + `model: null` — pure-CPU script watchdogs that never touch the GPU serving layer, so they run fine while the cluster is down. They do **not** block arming — `enable` arms and simply notes them, and autodown does **not** wake the cluster for them (waking a ~9-min model load for a no-model script job would waste GPU and, for the every-15-min watcher, defeat idle teardown entirely).
-
-### Messages arriving while the cluster is down
-
-Telegram is no longer a wake source — the daemon wakes only on HTTP API activity, kanban activity, or PRCI messages viewed on the cluster. A message sent through another channel while the serving layer is down is not processed or replayed; when the cluster comes back up, the daemon posts a desktop "cluster is back up" notice. Autodown deliberately does **not** auto-replay any dropped message — re-executing an instruction you sent minutes later without confirmation isn't safe, so send it again once the cluster is up.
-
-### What it will never do
-
-Autodown is deliberately conservative. It will **never** tear the layer down:
-
-- while any kanban work is **running**, **ready** to dispatch, or sitting in **review**;
-- while any agent is **busy** (working or failed) — only an all-idle fleet counts;
-- if any signal can't be verified — it stays **up** rather than guessing.
-
-**Whole-fleet down:** autodown takes the *entire* serving layer down — the orchestrator **and** all worker units, **including keepalive units**. Powering everything down is the point of the feature, so keepalive units are no longer exempt. It does this with a single `sparkrun stop --all` (`hscc cluster down` / `serving.fleet_down_cmd()`), and a wake brings every unit back up (`hscc cluster up` / `serving.fleet_up_plan()`), orchestrator first. The one remaining guard is an **interlock**, not an exemption: if a keepalive unit is *sick* when a teardown is about to run, autodown aborts rather than shut the fleet down mid-problem.
-
-When it does tear down, it tells the watchdog to back off first, so your health-check daemon doesn't fight it and resurrect the layer mid-teardown. Autodown has since been exercised end to end on this cluster — full teardown, idle hold with no resurrection, and wake back to a serving fleet — and several bugs only a real cycle could expose were fixed as a result (a `sparkrun stop` invocation that needed an explicit target, an unexpanded `~` in the wake plan, a 30s subprocess timeout that killed vLLM start, and a wake path that dropped `--served-model-name` so the model aliases came back missing). Readiness, not process exit, is the success signal it waits on.
-
-For the full design — idle definition, teardown/wake sequencing, watchdog coordination, failure modes — see [docs/design/idle-autodown.md](docs/design/idle-autodown.md).
-
----
+It never tears down while kanban work is running/ready/in-review, while an agent is busy, or if any signal can't be verified. Cron-conflict classification, messages-while-down behaviour, and the full never-do list: [docs/design/idle-autodown.md](docs/design/idle-autodown.md).
 
 ## The fleet
 
-Agent work flows through native Hermes kanban — HSCC adds a pre-dispatch hook (cluster-aware host routing) and the review gate, but the dispatch loop is Hermes'. An idea is brainstormed into a spec, decomposed into a dependency-ordered task graph, and each task dispatches to a **role-specialized worker** running in its own git worktree.
+Work flows through native Hermes kanban: the orchestrator decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (25 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
 
-### Roles
+## Components
 
-A role is a single spec file (`hscc-roles/roles/<name>.yaml`). A generator builds it into a Hermes profile with a **layered SOUL** (shared base character + role disposition + thin operational facts) and the full Hermes toolset **minus cluster control** — only the orchestrator can change the cluster.
+| Component | What it is |
+|---|---|
+| [hscc-cluster](hscc-cluster/README.md) | cluster-control toolset (orchestrator-only) + template engine ([templates/](hscc-cluster/templates/README.md)) |
+| [hscc-roles](hscc-roles/README.md) | role framework: author + generate profiles; autonomy flag |
+| [hscc_daemon](hscc_daemon/README.md) | monitoring + self-heal daemon (launchd / systemd --user) |
+| [hscc-commands](hscc-commands/README.md) | operator slash commands (`/cluster`, `/status`, `/heal`, `/template`, …) |
+| [hscc-cli](hscc-cli/README.md) | the `hscc` console-script entry point |
+| [hscc-project](hscc-project/README.md) | `hscc project` — project/kanban portfolio control ([commands](hscc-project/docs/COMMANDS.md)) |
+| [hscc-api](hscc-api/README.md) | bearer-token HTTP API backing the iOS client ([docs/API.md](docs/API.md)) |
+| [ios-app](ios-app/README.md) | iOS companion app (QR pairing, gates, sideload) |
+| [sparkrun-hermes](sparkrun-hermes/README.md) | guarded sparkrun passthrough Hermes plugin |
+| [hscc-bootstrap](hscc-bootstrap/README.md) | preflight-gated, topology-detecting installer |
+| [hscc-skills](hscc-skills/README.md) | bundled skill installer (sources in [install/](install/README.md)) |
+| [memori / memori_byodb](memori_byodb/README.md) | memory-provider plugins (HSCC runs the BYODB variant) |
 
-```
-python3 ~/.hermes/plugins/hscc-roles/hscc.py generate          # build all profiles from specs
-python3 ~/.hermes/plugins/hscc-roles/hscc.py create <name> "…" # author a new role on demand
-python3 ~/.hermes/plugins/hscc-roles/hscc.py list              # roles + whether profile exists
-```
-
-The roster ships with a full org — orchestrator, architect, coder, reviewer, qa; backend/frontend/devops/security/data engineers; ml-engineer, ml-researcher, data-scientist; product-manager, technical-writer, ux-designer; financial-analyst, business-analyst, market-researcher; content-writer, social-media-manager, project-manager. New roles are minted (by a human or the orchestrator) with `create`, so the roster is data, not code.
-
-### Review loop
-
-Code tasks are gated. When a coder finishes, it submits its task to `review` status; the dispatcher spawns a review agent loading the `sdlc-review` skill, which checks the diff, runs the tests, and confirms the work matches the spec. Approved work merges to an **integration branch** (main stays human-gated); rejected work is sent back with change requests.
-
-### Autonomy
-
-A master flag at `~/.hscc/autonomy` (default off) governs whether the orchestrator pauses for approval:
-
-```
-python3 ~/.hermes/plugins/hscc-roles/hscc.py autonomy        # show
-python3 ~/.hermes/plugins/hscc-roles/hscc.py autonomy on     # hands-off
-python3 ~/.hermes/plugins/hscc-roles/hscc.py autonomy off    # ask-first
-```
-
-Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgment spec without back-and-forth and lets the fleet run. Autonomy never bypasses the reviewer gate or merges to main.
-
-### Failure escalation
-
-A Hermes-cron watcher (`scripts/escalate_watcher_run.py`) runs every 15 minutes and reassigns repeatedly-failing tasks to the strong model tier. When even the strong tier fails, it posts a human-attention alert as a **native desktop notification** — sent directly by the script via `hscc_daemon.desktop.send_desktop_notification()` (Hermes' `--deliver desktop` is not a valid delivery target and is silently dropped, so the script notifies on its own) — deduped so a stuck task is not re-announced every tick, and silent when nothing is stuck. This is an opt-in *acting* automation; the `hscc escalate` CLI command provides a dry-run view of what would be escalated.
-
-A daily, human-gated dependency-update loop keeps the cluster's Hermes and sparkrun runtime dependencies current via automated PRs and kanban verification cards.
-
----
-
-## Plugins
-
-Each plugin has its own README with details — linked below.
-
-| Plugin | Role |
-|--------|------|
-| [**hscc-cluster**](hscc-cluster/README.md) | Cluster-control toolset (orchestrator-only): live **discovery** (`discovery_status`, power-draw idle, auto-adopt), status/health, model lifecycle (`provision_model`/`stop_model`/`restart_model`), self-heal, the **topology-free template engine** ([templates/](hscc-cluster/templates/README.md)), and the resume/work-flow helpers. |
-| [**hscc-roles**](hscc-roles/README.md) | Role framework: author + generate role-specialized profiles (incl. `reviewer`); autonomy flag CLI. |
-| [**hscc_daemon**](hscc_daemon/README.md) | Monitoring + self-heal daemon (launchd / systemd --user): vLLM/gateway/NAS health, **unit-keyed worker keep-alive** (multi-model-per-node), trigger engine, Operations notifications, startup cruft self-clean. |
-| [**hscc-commands**](hscc-commands/README.md) | Operator slash commands (run in the gateway, not the LLM): `/cluster`, `/status`, `/orch-restart`, `/cluster-restart` (template re-apply), `/heal`, `/template`. |
-| [**sparkrun-hermes**](sparkrun-hermes/README.md) | Official Hermes plugin for sparkrun: a guarded `sparkrun_exec` CLI passthrough + run/setup/registry skills. |
-| [**hscc-bootstrap**](hscc-bootstrap/README.md) | Preflight-gated, topology-detecting installer (doctor -> copy -> patches -> wire -> daemon). |
-| [**hscc-skills**](hscc-skills/README.md) | Idempotent installer for bundled skills + templates (sources in [install/](install/README.md)). |
-| [**memori** / **memori_byodb**](memori_byodb/README.md) | Memory-provider plugins (HSCC runs the BYODB variant: NAS-backed store + offline augmentation). |
-
-Also: [`patches/`](patches/MANIFEST.md) — curated hermes/sparkrun upstream patches
-(run official + reapply the delta); [`docs/`](docs/README.md) — design specs +
-per-workstream plans; [`scripts/`](scripts/README.md) — pure-shell `--no-agent`
-operator watchdogs (proxy / workers / cluster / NAS) registered as Hermes cron
-jobs, installed by bootstrap into `~/.hermes/scripts/`.
-
----
+Also: [changelog.d/](changelog.d/README.md) — per-card changelog fragments (never edit `CHANGELOG.md` directly); [patches/](patches/MANIFEST.md) — curated upstream patches; [docs/](docs/README.md) — full index of the docs tree; [scripts/](scripts/README.md) — operator watchdogs + repo tooling (address guard, changelog fragments).
 
 ## Layout
 
-The repo (you edit here) is separate from the Hermes runtime (bootstrap copies
-into it):
-
 ```
 ~/dev/hscc/                 # the work repo — what you clone + edit
-├── hscc-cluster/           # cluster toolset + discovery + template engine   -> README
-│   └── templates/          #   topology-free node-count template library     -> README
-├── hscc-roles/             # role framework                                  -> README
-├── hscc_daemon/            # monitoring + self-heal daemon                   -> README
-├── hscc-commands/          # operator slash commands                         -> README
-├── hscc-bootstrap/         # the installer                                   -> README
-├── hscc-skills/            # skill installer                                 -> README
-├── sparkrun-hermes/        # sparkrun passthrough plugin                     -> README
-├── memori/ · memori_byodb/ # memory providers                               -> README
-├── install/                # vendored skill sources                         -> README
-├── patches/                # curated hermes/sparkrun upstream patches        -> MANIFEST
-├── docs/                   # design specs + plans                           -> README
-├── scripts/                # operator watchdog shell scripts                 -> README
+├── hscc-cluster/ hscc-roles/ hscc_daemon/ hscc-commands/   # plugins → README each
+├── hscc-cli/ hscc-project/ hscc-api/ hscc-bootstrap/ hscc-skills/
+├── sparkrun-hermes/ memori/ memori_byodb/                  # plugins → README each
+├── ios-app/                # iOS companion app → README
+├── changelog.d/            # per-card changelog fragments → README
+├── install/  patches/  docs/  scripts/                     # → README / MANIFEST
 └── _archive/               # superseded code (moved, never deleted)
 
 # Hermes runtime (bootstrap targets — not edited directly):
-~/.hermes/plugins/          # installed copy of the plugins above
-~/.hermes/profiles/         # generated role profiles (build artifacts)
-~/.hermes/skills/           # installed skills
-~/.hermes/scripts/          # installed operator watchdog scripts
-~/.hscc/                    # runtime state (serving.json, applied_template.json,
-                            #   cluster.json, autonomy, rollback/, state/)
-~/.sparkrun-local/recipes/  # vLLM serving recipes
+~/.hermes/plugins/ · profiles/ · skills/ · scripts/ · ~/.hscc/ · ~/.sparkrun-local/recipes/
 ```
 
 ## Conventions
 
-- Pure-stdlib Python; no external plugin dependencies.
-- Cluster control is orchestrator-only; worker roles never touch the cluster.
+- Pure-Python with the three pinned deps above; cluster control is orchestrator-only.
 - State is read from live sources (`sparkrun status`, `serving.json`), never stale caches.
 - "Strip/archive" means move to `_archive/<date>/`, never delete.
-- Restart the gateway after prompt/plugin/config edits: `launchctl kickstart -k gui/$UID/ai.hermes.gateway`.
+- Restart the gateway after prompt/plugin/config edits — command in [docs/FLEET.md](docs/FLEET.md).
 
 ## License
 

@@ -1018,3 +1018,57 @@ go unhealthy during a transition and are excused in the window. The infra
 streams (heartbeat/local/nas/idle) are independent of the serving layer and are
 NOT excused — a genuine infra fault during a wake still fails, as intended
 (negative control).
+
+---
+
+## Operator-facing summary (moved from the root README, 2026-10-20, t_1864f7a6)
+
+The root README carried ~38 lines of operator-facing autodown behaviour that this
+design doc already specifies in implementation terms. The condensed operator view
+lives here so the README can stay an entry point (audit
+`docs/audits/README_REVIEW_2026-10-15.md` §2.1 item 6 — nothing lost):
+
+**Cron classification on `enable`.** `hscc autodown enable` classifies each
+active Hermes cron job (read from `~/.hermes/cron/jobs.json`, Hermes's own
+source of truth) and **aborts non-zero** — listing job name, schedule, next run
+— when any active job is **model-requiring** (has a `model`, or `no_agent` is
+false/absent, i.e. it runs an agent). Undeterminable jobs are treated as
+model-requiring; an unreadable or absent cron config aborts too ("cannot
+determine" — autodown never arms on a signal it cannot verify).
+`enable --force` arms anyway, records the override in `autodown.json`, and
+`status` shows `force-armed: YES` plus the overridden jobs.
+
+**CPU-only watchdogs** (`hscc-dep-watcher`, `hscc-escalate-watcher`:
+`no_agent: true` + `model: null`) never touch the GPU serving layer, do **not**
+block arming, and do **not** wake the cluster — waking a ~9-min model load for a
+no-model script job would waste GPU and defeat idle teardown entirely.
+
+**Messages arriving while the cluster is down.** Telegram is no longer a wake
+source — the daemon wakes only on HTTP API activity, kanban activity, or PRCI
+messages viewed on the cluster. A message sent through another channel while
+the serving layer is down is not processed or replayed; when the cluster comes
+back up, the daemon posts a desktop "cluster is back up" notice. Autodown
+deliberately does **not** auto-replay any dropped message — re-executing an
+instruction you sent minutes later without confirmation is not safe, so send it
+again once the cluster is up.
+
+**Never-do list.** Autodown will **never** tear the layer down: while any kanban
+work is **running**, **ready** to dispatch, or sitting in **review**; while any
+agent is **busy** (working or failed) — only an all-idle fleet counts; or if any
+signal cannot be verified — it stays **up** rather than guessing.
+
+**Whole-fleet down.** The teardown takes the *entire* serving layer down —
+orchestrator **and** all worker units, **including keepalive units** (see the
+C4-reversal decision above) — via a single `sparkrun stop --all`
+(`serving.fleet_down_cmd()`); a wake brings every unit back up
+(`serving.fleet_up_plan()`), orchestrator first. The remaining keepalive guard
+is an interlock, not an exemption: a *sick* keepalive unit aborts the teardown.
+Teardown tells the watchdog to back off first (latched block) so the health
+daemon does not resurrect the layer mid-teardown.
+
+**Exercised end to end** on the live cluster — full teardown, idle hold with no
+resurrection, and wake back to a serving fleet — which exposed and fixed a
+`sparkrun stop` invocation needing an explicit target, an unexpanded `~` in the
+wake plan, a 30s subprocess timeout that killed vLLM start, and a wake path that
+dropped `--served-model-name` (aliases came back missing). Readiness, not
+process exit, is the success signal the wake waits on.
