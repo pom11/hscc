@@ -3,7 +3,8 @@
 Covers t_39d7c915:
   * hscc_daemon.dep_bump_guard — the canonical fork-branch rule (branch name,
     the never-checkout-main prohibition, the post-bump verification).
-  * TestRunbookAgreesWithGuard (t_6956da89) — the OPERATOR RUNBOOK that
+  * TestRunbookAgreesWithGuard (t_6956da89, extended by t_be32424a) — the
+    OPERATOR RUNBOOK that
     duplicates those rules must keep agreeing with the canonical tuple. The
     runbook is the only surviving prose duplicate of FORK_RULE_LINES, and it
     carried the same false read-site claim as the guard until t_669b8df7 fixed
@@ -288,12 +289,14 @@ class TestRunbookAgreesWithGuard:
 
     `dep_bump_guard`'s module docstring says these strings live in code
     "instead of being prose duplicated in two places" — but
-    `install/hscc-skills/hscc/references/runtime-bump-verification.md` step 3
-    IS that prose, written for the operator who runs the bump by hand. It
-    carried the same false `router_settings`-read-site claim as the guard and
-    stayed that way until a human verified PR #55 by hand (t_669b8df7 fixed
-    both copies; nothing in the suite had ever opened the file, so no test
-    could have caught it).
+    `install/hscc-skills/hscc/references/runtime-bump-verification.md` steps 3
+    and 4 ARE that prose, written for the operator who runs the bump by hand.
+    It carried the same false `router_settings`-read-site claim as the guard
+    and stayed that way until a human verified PR #55 by hand (t_669b8df7
+    fixed both copies; nothing in the suite had ever opened the file, so no
+    test could have caught it). Step 4's balancer-signal omission (t_be32424a)
+    was the same class of gap in the other direction: the guard said more and
+    nothing forced the runbook to.
 
     Everything asserted here is DERIVED from the canonical tuple, so a future
     fork re-cut or rewording moves the obligation instead of splitting it in
