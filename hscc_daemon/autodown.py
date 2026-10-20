@@ -1110,33 +1110,63 @@ def _has_active_pr_ci(prci_checker=None):
         _note_prci_unavailable(f"PR/CI checker raised: {e}")
         return True
     if _prci_screen_active(result):
-        # Note WHY (PR vs CI vs unreachable) for ``hscc autodown status``.
+        # Note WHY (positively-active PR/CI vs unreachable) for ``hscc autodown
+        # status``. The two notes are EXCLUSIVE: an unreachable screen must NOT
+        # then take the active-note, which would rewrite ``ok``/``reason``/
+        # ``warned`` back to the healthy-active values and (a) make status
+        # misreport UNEVALUABLE as "open PR / active CI run" and (b) reset the
+        # WARN-once guarantee so the daemon's 30s tick re-emits the WARN while
+        # gh stays unreachable. Fail-safe direction is unchanged either way:
+        # both paths return True (active ⇒ never tear down).
         if result is _PRCI_UNREACHABLE:
             _note_prci_unavailable("PR/CI source unreachable — treating as "
                                    "active (fail-safe)")
-        _note_prci_active()
+        else:
+            _note_prci_active()
         return True
-    _note_prci_blocking(None)
+    _note_prci_clear()
     return False
 
 
 # In-memory bookkeeping so ``hscc autodown status`` can name WHY PR/CI keeps
 # the interlock active (mirrors the kanban interlock's ``_KANBAN_WORK`` /
-# ``_KANBAN_LOAD`` pattern). ``blocking`` is None when clear, otherwise
-# "PR/CI"; ``ok``+``reason`` describe the last PR/CI source resolution for the
+# ``_KANBAN_LOAD`` pattern). ``blocking`` is None when clear, "PR/CI" when an
+# open PR / active run holds the interlock, or the ``_PRCI_UNREACHABLE``
+# sentinel when the source could not be evaluated (fail-safe active);
+# ``ok``+``reason`` describe the last PR/CI source resolution for the
 # unverifiable/unevaluable case.
 _PRCI_LOAD = {"blocking": None, "ok": None, "reason": "", "warned": False}
 
 
 def _note_prci_active():
+    """Record a POSITIVELY-confirmed open PR / active CI run.
+
+    Only for a screen that positively reported work. The unreachable path in
+    ``_has_active_pr_ci`` must call ``_note_prci_unavailable`` INSTEAD of this
+    (never both): this note rewrites ``ok``/``reason``/``warned`` to the
+    healthy-active values, which would hide the unevaluable state from
+    ``hscc autodown status`` and re-arm the once-per-process WARN.
+    """
     _PRCI_LOAD["blocking"] = "PR/CI"
     _PRCI_LOAD["ok"] = True
     _PRCI_LOAD["reason"] = ""
     _PRCI_LOAD["warned"] = False
 
 
-def _note_prci_blocking(blocking):
-    _PRCI_LOAD["blocking"] = blocking
+def _note_prci_clear():
+    """Record a POSITIVELY-clear PR/CI screen (no open PR, no active run).
+
+    Records the full resolution — not just ``blocking=None`` — so a previously
+    unreachable source that has recovered cannot leave a stale ``ok``False +
+    unreachable ``reason`` behind the clear signal (which would have
+    ``status``'s panel say "ok" while its ``--json`` still reported the source
+    unreachable). The ``warned`` reset re-arms the once-per-process WARN, so a
+    LATER transition back to unreachable warns afresh (a real state change).
+    """
+    _PRCI_LOAD["blocking"] = None
+    _PRCI_LOAD["ok"] = True
+    _PRCI_LOAD["reason"] = ""
+    _PRCI_LOAD["warned"] = False
 
 
 def _note_prci_unavailable(reason):
@@ -1146,7 +1176,17 @@ def _note_prci_unavailable(reason):
     show the truth, and emits a single WARN log line (not one per daemon tick)
     via ``daemon_ops.log``. Does not raise — the caller still fails safe (the
     interlock stays active).
+
+    Records ``blocking`` as the ``_PRCI_UNREACHABLE`` sentinel (the kanban
+    interlock's analogue records ``_UNREADABLE_BOARD``) so
+    ``prci_blocking_signal()`` distinguishes "unevaluable" from a real open
+    PR / active run — otherwise ``hscc autodown status`` would name the wrong
+    reason for why teardown holds. The caller must NOT follow this note with
+    ``_note_prci_active()``: only that exclusivity keeps ``warned`` set (and
+    ok/reason truthful) across daemon ticks while the source stays
+    unreachable.
     """
+    _PRCI_LOAD["blocking"] = _PRCI_UNREACHABLE
     _PRCI_LOAD["ok"] = False
     _PRCI_LOAD["reason"] = reason
     if not _PRCI_LOAD["warned"]:
