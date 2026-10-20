@@ -42,10 +42,14 @@ pinned by tests; the bump PR body and the watcher card both carry it):
    serving, routing quietly reverts to `simple-shuffle`, nothing errors.
 3. Verify after the bump:
    `git -C ~/dev/sparkrun-041-verify rev-parse --abbrev-ref HEAD` ==
-   `feat/proxy-least-in-flight-041`, and `router_settings` is still read via
-   `ProxyConfig.gateway_settings` in `src/sparkrun/proxy/config.py` and
-   emitted in `src/sparkrun/plugins/litellm/engine.py`
-   (`build_litellm_config`).
+   `feat/proxy-least-in-flight-041`, and `router_settings` is still read in
+   `src/sparkrun/plugins/litellm/engine.py`
+   (`_configured_router_settings`, which pulls `gateways.litellm.router_settings`
+   via `ProxyConfig.gateway_settings`) and emitted into the generated litellm
+   config there (`build_litellm_config`). Do NOT grep `src/sparkrun/proxy/config.py`
+   for `router_settings` and read a no-match as drift: since v0.4.0 that file
+   keeps only the generic `gateways.<name>` accessor and has no `router_settings`
+   at all (verified against tags v0.4.0 and v0.4.1).
 4. Restart the proxy, then confirm `~/.cache/sparkrun/proxy/litellm_config.yaml`
    carries the `router_settings` from `~/.config/sparkrun/proxy.yaml` — the
    `hscc verify` check `proxy_router_settings` (and the `proxy` daemon
