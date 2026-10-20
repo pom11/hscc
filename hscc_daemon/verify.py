@@ -445,7 +445,7 @@ def check_proxy_router_settings(proxy_config=None, litellm_config=None):
 
     This is the post-bump tripwire for the fork-branch failure (see
     :mod:`hscc_daemon.dep_bump_guard`): a sparkrun bump that checks out
-    upstream main instead of rebasing ``feat/proxy-least-in-flight-040`` drops
+    upstream main instead of rebasing ``feat/proxy-least-in-flight-041`` drops
     the ``router_settings`` passthrough and the least-in-flight balancer
     with NO error anywhere. The proxy keeps serving; routing silently
     reverts. This check is what makes that visible.
@@ -1484,6 +1484,52 @@ def _sweep_failures(out):
             for r in rows if not r.get("ok")]
 
 
+def check_declaration_agreement(applied_state_path=None, config=None,
+                                profiles_dir=None, proxy_config=None,
+                                litellm_config=None, balancer_module=None,
+                                _http_get=None):
+    """Declaration<->live agreement for the v4 template declarations (spec §6).
+
+    PURE-READ (never repairs, never restarts): the applied template's
+    ``declarations`` record (``~/.hscc/applied_template.json``, spec §7 —
+    written by C2 / t_70814001) is compared, across four legs, against live
+    state:
+
+      1. hermes_endpoints  — each declared endpoint consumer carries the
+         declared target's URL/alias in the root config and each matched
+         profile (the §6.1 fleet-node scan stays in check_provider_routing,
+         unchanged — this is its positive half);
+      2. proxy_declaration — ``~/.config/sparkrun/proxy.yaml`` agrees with the
+         applied ``proxy:`` block, reading ``router_settings`` NESTED FIRST
+         per the 2026-10-19 addendum (the ONE implementation,
+         :func:`hscc_daemon.proxy_router.router_settings_source`);
+      3. balancer_pair     — proxy.yaml asking for ``balancing`` requires the
+         generated config's ``litellm_settings.callbacks`` AND the
+         ``sparkrun_balancer.py`` module next to it; drift is WARN, never
+         fail, never repaired (cross-ref t_39d7c915 — ONE implementation
+         referenced, not duplicated);
+      4. live_model_info   — each routed target's ``/v1/model/info`` model set
+         covers the ids the applied ``endpoints:`` routes hermes to.
+
+    Fail-closed doctrine (t_ac795424): any leg that cannot be read (no
+    applied state, no proxy.yaml, unreachable proxy) is UNVERIFIED (ok=None),
+    never a silent pass. Remediation text names ``hscc cluster monitor
+    --live`` as the load-instrument (spec §3.2). All logic lives in
+    :mod:`hscc_daemon.declaration_agreement`; every external surface is
+    injectable so tests use fakes only.
+    """
+    from . import declaration_agreement as _da
+    res = _da.run_declaration_agreement(
+        applied_state_path=applied_state_path, config=config,
+        profiles_dir=profiles_dir, proxy_config=proxy_config,
+        litellm_config=litellm_config, balancer_module=balancer_module,
+        _http_get=_http_get)
+    out = {"name": res["name"], "ok": res["ok"], "detail": res["detail"]}
+    if res.get("next_step"):
+        out["next_step"] = res["next_step"]
+    return out
+
+
 def run_all(**overrides):
     """Run all checks, returning aggregated results.
 
@@ -1499,6 +1545,7 @@ def run_all(**overrides):
         check_config_wiring,
         check_profile_endpoints,
         check_provider_routing,
+        check_declaration_agreement,
         check_api_routes,
         check_chat_roundtrip,
         check_plugin_payload,

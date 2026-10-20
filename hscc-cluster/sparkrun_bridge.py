@@ -121,9 +121,10 @@ def ssh_cmd(host: str, command: str, timeout: int = 30) -> Dict[str, Any]:
 # regenerated ``~/.cache/sparkrun/proxy/litellm_config.yaml``. What it may do is
 # hand sparkrun the regions its template declares and let sparkrun merge them.
 #
-# Two findings from reading sparkrun 0.4.0 (the live build: `sparkrun` ->
-# ``.venv-sparkrun-040`` -> editable ``~/dev/sparkrun-live`` on
-# ``feat/proxy-least-in-flight-040``) shape this:
+# Two findings from reading sparkrun 0.4.0 (still byte-identical on the live
+# build as of the 2026-10-20 cutover: `sparkrun` -> ``.venv-sparkrun-041`` ->
+# editable ``~/dev/sparkrun-041-verify`` on ``feat/proxy-least-in-flight-041``;
+# proxy/config.py and plugins/litellm/engine.py unchanged vs 0.4.0) shape this:
 #
 #   * ``ProxyConfig.save`` (``src/sparkrun/proxy/config.py:112``) is exactly the
 #     sanctioned merge-save §4.4 asks for — a writer lock, a re-read of the

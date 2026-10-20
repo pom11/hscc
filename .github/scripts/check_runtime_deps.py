@@ -217,7 +217,7 @@ def main():
         "(`hermes update` / rebase-bump sparkrun) with a recovery point",
     ]
     # sparkrun bumps carry the fork-branch rule (see _fork_rule_lines): the
-    # deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight-040, and
+    # deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight-041, and
     # a bump that checks out upstream main silently drops the proxy balancer.
     rule = _fork_rule_lines([name for name, _, _, _ in changes])
     if rule:

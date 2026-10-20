@@ -4,8 +4,8 @@ A runtime dependency bump (the ``check-runtime-deps`` workflow plus
 ``scripts/dep_pr_watcher.py``) rewrites ``runtime-versions.json`` and asks a
 worker to verify the bump live. For **sparkrun** that is not a plain version
 swap: the cluster does not run upstream ``main``. It runs OUR FORK BRANCH,
-installed editable at ``~/dev/sparkrun-live`` (``~/.local/bin/sparkrun`` ->
-``~/sparkrun/.venv-sparkrun-040/bin/sparkrun``).
+installed editable at ``~/dev/sparkrun-041-verify`` (``~/.local/bin/sparkrun``
+-> ``~/sparkrun/.venv-sparkrun-041/bin/sparkrun``).
 
 A bump must therefore REBASE the fork branch onto the new upstream tag and
 keep it checked out. ``git checkout main`` in the live checkout — or
@@ -15,19 +15,23 @@ just quietly reverts. That is the failure these strings exist to prevent, so
 they live in code (imported by both the CI generator and the cluster poller,
 and pinned by tests) instead of being prose duplicated in two places.
 
-Verified at implementation time (2026-10-19): the deployed branch is
-``feat/proxy-least-in-flight-040`` (fork remote ``pom11/sparkrun``), cut off
-upstream tag ``v0.4.0`` — upstream v0.4.0 absorbed the ``router_settings``
-gateway handling and the least-in-flight balancer, so the fork diff at this
-tag is minimal, but the rebase rule is tag-independent and stays mandatory.
-The ``-040`` branch supersedes ``feat/proxy-least-in-flight`` (the v0.3.10
-deployment, kept as the rollback line) and the earlier
-``feat/proxy-router-settings`` name.
+Verified at the 2026-10-20 08:37 live cutover: the deployed branch is
+``feat/proxy-least-in-flight-041`` (fork remote ``pom11/sparkrun``, head
+``1aaa6479`` = upstream tag ``v0.4.1`` + the macOS-spawn test fix), cut off
+upstream tag ``v0.4.1`` — the v0.4.1 proxy/balancer surfaces are byte-identical
+to v0.4.0 for hscc's path (engine.py/proxy config unchanged; 0.4.1 test delta
+is upstream churn plus one pre-existing boot-record test that fails on both
+tags). The ``-041`` branch supersedes ``feat/proxy-least-in-flight-040`` (the
+v0.4.0 deployment, kept as the rollback line at checkout
+``~/dev/sparkrun-live`` / venv ``.venv-sparkrun-040``). ``-040`` in turn
+supersedes ``feat/proxy-least-in-flight`` (the v0.3.10 deployment, kept in
+the ``~/sparkrun`` worktree as the deeper rollback point, tagged
+``pre-rebase-v040-safety``).
 """
 
 FORK_REMOTE = "pom11/sparkrun"
-FORK_BRANCH = "feat/proxy-least-in-flight-040"
-SPARKRUN_CHECKOUT = "~/dev/sparkrun-live"
+FORK_BRANCH = "feat/proxy-least-in-flight-041"
+SPARKRUN_CHECKOUT = "~/dev/sparkrun-041-verify"
 SPARKRUN_REMOTE_NAME = "fork"
 
 #: Lines appended to a generated sparkrun bump PR body / verification card.
@@ -41,14 +45,22 @@ FORK_RULE_LINES = (
     f"`{FORK_BRANCH}` checked out afterwards.",
     f"**Never `git checkout main` in `{SPARKRUN_CHECKOUT}`, never reinstall "
     "from upstream.** That silently drops whatever proxy work only the fork "
-    "branch carries (at v0.4.0 that is at minimum the fork's test/runbook "
+    "branch carries (at v0.4.1 that is at minimum the fork's test/runbook "
     "lineage; upstream may also move or rename the balancer again) on the "
     "next proxy restart — no error.",
     f"Verify after the bump: "
     f"`git -C {SPARKRUN_CHECKOUT} rev-parse --abbrev-ref HEAD` == "
     f"`{FORK_BRANCH}`, and `router_settings` is still read in "
-    "`src/sparkrun/proxy/config.py` plus emitted in "
-    "`src/sparkrun/plugins/litellm/engine.py`.",
+    "`src/sparkrun/plugins/litellm/engine.py` "
+    "(`_configured_router_settings`, which pulls "
+    "`gateways.litellm.router_settings` via `ProxyConfig.gateway_settings`) "
+    "and emitted into the generated litellm config there "
+    "(`build_litellm_config`).",
+    "Do NOT grep `src/sparkrun/proxy/config.py` for `router_settings` and "
+    "read a no-match as drift: since v0.4.0 that file keeps only the "
+    "generic `gateways.<name>` accessor and has no `router_settings` at "
+    "all — the engine.py read above is the only one (checked against "
+    "v0.4.0 and v0.4.1).",
     "Then restart the proxy and confirm the balancer is live in "
     "`~/.cache/sparkrun/proxy/litellm_config.yaml`: "
     "`litellm_settings.callbacks` contains `sparkrun_balancer.handler` and "

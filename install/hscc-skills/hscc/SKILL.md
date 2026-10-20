@@ -87,6 +87,6 @@ Clients query vLLM by exact model name; a stale name = 404 even when the server 
 - `references/multi-node-provisioning-troubleshooting.md` — multi-node vLLM provisioning failure modes
 - `references/session-continuity-multi-repo.md` — finding uncommitted work across repos
 - `references/version-update-procedure.md` — Hermes version update workflow
-- `references/runtime-bump-verification.md` — runtime dep bump (hermes/sparkrun): recovery point first, sparkrun = rebase the fork branch feat/proxy-least-in-flight-040, never checkout main
+- `references/runtime-bump-verification.md` — runtime dep bump (hermes/sparkrun): recovery point first, sparkrun = rebase the fork branch feat/proxy-least-in-flight-041 (live checkout ~/dev/sparkrun-041-verify; ~/dev/sparkrun-live on -040 is the rollback line), never checkout main
 
 > Dead-pipeline reference docs (orchestrator-tick-flow, task-creation-workflow, agents-data-model, permissions-reference, integration-assign-task-provision, kanban-sync-fix, stale-agent-cleanup, idle-monitor-integration, event-types, hscc-13-plugins-audit) were archived 2026-06-08 to `_archive/2026-06-08/hscc-references/` — they describe the removed agent pipeline.

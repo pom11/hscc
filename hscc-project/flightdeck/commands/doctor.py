@@ -727,6 +727,74 @@ def _learning_has_problem(learning: list[dict]) -> bool:
     return any(c["status"] != "ok" for c in learning)
 
 
+def _declaration_checks(applied_state_path=None, config=None,
+                        profiles_dir=None, proxy_config=None,
+                        litellm_config=None, balancer_module=None,
+                        _http_get=None, _run_agreement=None) -> list[dict]:
+    """Template declaration <-> live agreement (spec §6, four legs).
+
+    ``hscc project doctor`` is the operator's "is this setup trustworthy"
+    surface, and the v4 template declarations (docs/design/2026-10-15-
+    template-declarations.md) are part of what must be trustworthy: what the
+    applied template DECLARED must agree with what hermes configs,
+    ``proxy.yaml``, the generated litellm config and the live proxy ACTUALLY
+    are. The logic itself is ONE implementation in
+    ``hscc_daemon.declaration_agreement`` (C3 / t_3306cd3c) — this function is
+    the presentation adapter: leg ok True/False/None -> status
+    ok/problem/unverified, and the leg's remediation (which names
+    ``hscc cluster monitor --live`` as the load-instrument, spec §3.2) is
+    surfaced in the detail.
+
+    PURE READ on both sides: doctor never repairs and never restarts anything
+    here (same hard rule as the command itself).
+
+    Statuses (the hard rule: an unverifiable answer is never silently ok):
+      ok          — every leg reads and agrees (or is a documented not-applicable).
+      problem     — a leg disagrees (the consequence is named in the detail).
+      unverified  — the module or a leg's inputs cannot be read (no applied
+                    state, no proxy.yaml, unreachable proxy) — fail-closed,
+                    the provider_routing doctrine.
+
+    ``_run_agreement`` is the injectable seam (tests inject a fake, or plant
+    tmp state files and let the real module run); the default resolves
+    ``hscc_daemon.declaration_agreement`` the way ``_theme``/``message``
+    resolve the peer plugin — a standalone flightdeck install without
+    hscc_daemon reports UNVERIFIED rather than crashing or claiming health.
+    """
+    run_agreement = _run_agreement
+    if run_agreement is None:
+        try:
+            from hscc_daemon import declaration_agreement as _da
+        except Exception:  # ImportError or a broken peer package
+            return [{"check": "declaration_agreement",
+                     "status": "unverified",
+                     "detail": "hscc_daemon.declaration_agreement unavailable — "
+                               "the four spec §6 legs cannot be consulted "
+                               "(a false all-clear is the worst output this "
+                               "command can produce)"}]
+        run_agreement = _da.run_declaration_agreement
+    try:
+        res = run_agreement(
+            "all", applied_state_path=applied_state_path, config=config,
+            profiles_dir=profiles_dir, proxy_config=proxy_config,
+            litellm_config=litellm_config, balancer_module=balancer_module,
+            _http_get=_http_get)
+    except Exception as exc:  # never let a check crash the whole doctor
+        return [{"check": "declaration_agreement", "status": "unverified",
+                 "detail": f"the agreement run raised ({exc}) — unverified, "
+                           "never assumed ok"}]
+    status_map = {True: "ok", False: "problem", None: "unverified"}
+    out: list[dict] = []
+    for leg in res.get("legs", []):
+        status = status_map.get(leg.get("ok"), "unverified")
+        detail = leg.get("detail", "")
+        if status != "ok" and leg.get("remediation"):
+            detail = f"{detail} — remediation: {leg['remediation']}"
+        out.append({"check": leg.get("name", "leg"),
+                    "status": status, "detail": detail})
+    return out
+
+
 _NOT_PROVIDED = object()
 
 
@@ -903,6 +971,22 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
             _chat_procs=getattr(args, "chat_procs", None),
         )
 
+    # Template declaration <-> live agreement (spec §6, C3 / t_3306cd3c). Same
+    # opt-in sentinel; production (`run`) always includes it. Pure-read — this
+    # section never repairs and never restarts.
+    declaration = None
+    if getattr(args, "declaration", _NOT_PROVIDED) is not _NOT_PROVIDED:
+        declaration = _declaration_checks(
+            applied_state_path=getattr(args, "applied_state_path", None),
+            config=getattr(args, "config", None),
+            profiles_dir=getattr(args, "profiles_dir", None),
+            proxy_config=getattr(args, "proxy_config", None),
+            litellm_config=getattr(args, "litellm_config", None),
+            balancer_module=getattr(args, "balancer_module", None),
+            _http_get=getattr(args, "http_get", None),
+            _run_agreement=getattr(args, "run_agreement", None),
+        )
+
     if args.json:
         payload = _render_json(report)
         if learning is not None:
@@ -914,6 +998,11 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
             payload["_tmux_repl"] = {
                 c["check"]: {"status": c["status"], "detail": c["detail"]}
                 for c in tmux_repl
+            }
+        if declaration is not None:
+            payload["_declaration"] = {
+                c["check"]: {"status": c["status"], "detail": c["detail"]}
+                for c in declaration
             }
         print(json.dumps(payload))
     else:
@@ -942,6 +1031,16 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
                     f"{escape(c['detail'])}"
                 )
             lines.append("")
+        if declaration is not None:
+            lines.append("template declaration <-> live agreement (spec §6):")
+            for c in declaration:
+                mark = _STATUS_MARK.get(c["status"], c["status"])
+                mark_str = str(mark)
+                lines.append(
+                    f"  {escape(c['check'])} {escape('[' + mark_str + ']')} "
+                    f"{escape(c['detail'])}"
+                )
+            lines.append("")
         make_console().print(panel("doctor", "\n".join(lines)))
 
     problems = _any_problem(report) or (
@@ -949,6 +1048,9 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
     ) or (
         tmux_repl is not None and any(
             c["status"] in ("problem", "unverified") for c in tmux_repl)
+    ) or (
+        declaration is not None and any(
+            c["status"] in ("problem", "unverified") for c in declaration)
     )
     all_clear = _all_clear_count(report)
     passes = f"{all_clear} of {len(report)} projects passed the triangle check"
@@ -980,5 +1082,19 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args.which = getattr(args, "which", None)
     args.pane_ttys = getattr(args, "pane_ttys", None)
     args.chat_procs = getattr(args, "chat_procs", None)
+    # Declaration<->live agreement section (template-declarations spec §6,
+    # C3): production always includes it — "what the template declared vs
+    # what the fleet actually runs" is part of "is this trustworthy".
+    # Sentinel-gated like the other two so the pre-existing doctor tests
+    # (which inject a world without it) stay untouched. Pure-read.
+    args.declaration = True
+    args.applied_state_path = getattr(args, "applied_state_path", None)
+    args.config = getattr(args, "config", None)
+    args.profiles_dir = getattr(args, "profiles_dir", None)
+    args.proxy_config = getattr(args, "proxy_config", None)
+    args.litellm_config = getattr(args, "litellm_config", None)
+    args.balancer_module = getattr(args, "balancer_module", None)
+    args.http_get = getattr(args, "http_get", None)
+    args.run_agreement = getattr(args, "run_agreement", None)
     projects = registry.load_registry(registry_path)
     return cmd_doctor(args, projects)

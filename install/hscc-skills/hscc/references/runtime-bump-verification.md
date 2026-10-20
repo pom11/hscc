@@ -10,35 +10,46 @@ verification card to the hscc kanban board).
 ## sparkrun runs from OUR FORK BRANCH — the bump is a rebase, not an install
 
 The cluster does not run upstream sparkrun `main`. Live state (operator-verified
-2026-10-19, post 0.4.0 cutover): `~/.local/bin/sparkrun` ->
-`~/sparkrun/.venv-sparkrun-040/bin/sparkrun`, an editable install of worktree
-`~/dev/sparkrun-live` checked out on **`feat/proxy-least-in-flight-040`**
-(remote `fork` = pom11/sparkrun; `origin` = spark-arena/sparkrun). v0.4.0
-absorbed both fork features upstream (the `router_settings` passthrough and
-the least-in-flight balancer), so the branch carries only a macOS-spawn test
-fix on top of the tag — but it is still a fork branch, and the rules below
-still apply (a future bump may re-introduce divergence, and `git checkout
-main` in a stale checkout still drops whatever the branch carries).
-The 0.3.10-era branch `feat/proxy-least-in-flight` (tip `609351e0`) is kept
-in the `~/sparkrun` worktree as the rollback point, tagged
+2026-10-20 08:37, post 0.4.1 cutover): `~/.local/bin/sparkrun` ->
+`~/sparkrun/.venv-sparkrun-041/bin/sparkrun`, an editable install
+(`__editable__.sparkrun-0.4.1.pth` -> `~/dev/sparkrun-041-verify/src`) of
+worktree `~/dev/sparkrun-041-verify` checked out on
+**`feat/proxy-least-in-flight-041`** @ `1aaa6479` (remote `fork` =
+pom11/sparkrun; `origin` = spark-arena/sparkrun).
+v0.4.1 absorbed both fork features upstream (the `router_settings` passthrough
+and the least-in-flight balancer), so the branch carries only a macOS-spawn test
+fix on top of the tag — but it is still a fork branch, and the rules below still
+apply (a future bump may re-introduce divergence, and `git checkout main` in a
+stale checkout still drops whatever the branch carries).
+
+**Rollback line — do NOT rebase or bump these:** the v0.4.0 deployment is kept
+intact at worktree `~/dev/sparkrun-live` on `feat/proxy-least-in-flight-040` @
+`b5c60edd`, editable via `~/sparkrun/.venv-sparkrun-040`. Rolling back the proxy
+means repointing `~/.local/bin/sparkrun` at that venv, not editing the `-040`
+branch. The 0.3.10-era branch `feat/proxy-least-in-flight` (tip `609351e0`) is
+kept in the `~/sparkrun` worktree as the deeper rollback point, tagged
 `pre-rebase-v040-safety`.
 
 Rules for a sparkrun bump (canonical text: `hscc_daemon/dep_bump_guard.py`,
 pinned by tests; the bump PR body and the watcher card both carry it):
 
-1. `git -C ~/dev/sparkrun-live fetch origin <new-tag>`, then **rebase
-   `feat/proxy-least-in-flight-040` onto that tag** (the rebase happens in
-   `~/dev/sparkrun-live`, where the branch is checked out) and LEAVE THE
+1. `git -C ~/dev/sparkrun-041-verify fetch origin <new-tag>`, then **rebase
+   `feat/proxy-least-in-flight-041` onto that tag** (the rebase happens in
+   `~/dev/sparkrun-041-verify`, where the branch is checked out) and LEAVE THE
    BRANCH CHECKED OUT.
 2. **Never `git checkout main`, never reinstall from upstream.** Either one
    silently drops the balancer on the next proxy restart — the proxy keeps
    serving, routing quietly reverts to `simple-shuffle`, nothing errors.
 3. Verify after the bump:
-   `git -C ~/dev/sparkrun-live rev-parse --abbrev-ref HEAD` ==
-   `feat/proxy-least-in-flight-040`, and `router_settings` is still read via
-   `ProxyConfig.gateway_settings` in `src/sparkrun/proxy/config.py` and
-   emitted in `src/sparkrun/plugins/litellm/engine.py`
-   (`build_litellm_config`).
+   `git -C ~/dev/sparkrun-041-verify rev-parse --abbrev-ref HEAD` ==
+   `feat/proxy-least-in-flight-041`, and `router_settings` is still read in
+   `src/sparkrun/plugins/litellm/engine.py`
+   (`_configured_router_settings`, which pulls `gateways.litellm.router_settings`
+   via `ProxyConfig.gateway_settings`) and emitted into the generated litellm
+   config there (`build_litellm_config`). Do NOT grep `src/sparkrun/proxy/config.py`
+   for `router_settings` and read a no-match as drift: since v0.4.0 that file
+   keeps only the generic `gateways.<name>` accessor and has no `router_settings`
+   at all (verified against tags v0.4.0 and v0.4.1).
 4. Restart the proxy, then confirm `~/.cache/sparkrun/proxy/litellm_config.yaml`
    carries the `router_settings` from `~/.config/sparkrun/proxy.yaml` — the
    `hscc verify` check `proxy_router_settings` (and the `proxy` daemon
@@ -71,7 +82,7 @@ mid-upgrade) — do not repeat. Establish all three:
    jobs up, proxy answers, real `/v1/chat/completions` returns. This is the
    baseline future rollbacks must restore to.
 
-For sparkrun specifically, also snapshot the fork branch tip (`git -C ~/dev/sparkrun-live
+For sparkrun specifically, also snapshot the live fork branch tip (`git -C ~/dev/sparkrun-041-verify
 rev-parse HEAD` into the manifest) — it is the thing a bad bump destroys.
 
 ## Technique: read the ACTUAL commit range, not just release notes
