@@ -114,7 +114,7 @@ absent block) means apply does **not write that config key at all** — the live
 value in `~/.hermes/config.yaml` survives untouched. This is stricter than the
 old fill-empty behaviour (fill-empty wrote when a value was blank; an omitted
 routing key is never written even if blank). Apply never silently re-routes
-something tuned by hand — `hscc doctor` is where drift should be surfaced.
+something tuned by hand — `hscc check` is where drift should be surfaced.
 
 ```yaml
 name: 4node-dual-dsv4
