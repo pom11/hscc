@@ -216,6 +216,61 @@ def _one(sents, what, text):
     return sents[0]
 
 
+def _balancer_line():
+    """The canonical 'confirm the balancer is live' line, selected by SHAPE.
+
+    It is the only FORK_RULE_LINES entry that names both a generated ``.yaml``
+    file and a ``.py`` file (the config you open, and the module that must sit
+    next to it). A shape, not a literal match on its prose: a rewording keeps
+    being selected, and the exactly-one assert means the obligation cannot be
+    split across two lines or quietly deleted without going RED here.
+    """
+    from hscc_daemon import dep_bump_guard as g
+    lines = [ln for ln in g.FORK_RULE_LINES
+             if any(t.endswith(".yaml") for t in _code_tokens(ln))
+             and any(t.endswith(".py") for t in _code_tokens(ln))]
+    assert len(lines) == 1, (
+        "dep_bump_guard must carry exactly one line naming both the generated "
+        f"litellm config and the balancer file beside it — found {len(lines)}; "
+        "the runbook's balancer-signal leg scopes itself to that line.")
+    return lines[0]
+
+
+def _balancer_signal_ids():
+    """The identifiers that ARE the balancer-live signal, read off the guard.
+
+    Shape rule: a dotted attribute/callback path (``litellm_settings.callbacks``,
+    ``sparkrun_balancer.handler``) or a module file (``sparkrun_balancer.py``).
+    Deliberately excludes the config path itself (that is where you look, not
+    what you look for) and the ``hscc verify`` check name (a no-underscore,
+    no-dot name — the drift check, not the signal the canonical line calls
+    decisive). Nothing here restates the guard's literals.
+    """
+    return [t for t in _code_tokens(_balancer_line())
+            if t.endswith(".py") or ("." in t and "/" not in t)]
+
+
+def _generated_config_name():
+    """Basename of the generated config the guard tells the operator to open."""
+    return next(t.rsplit("/", 1)[-1] for t in _code_tokens(_balancer_line())
+                if t.endswith(".yaml"))
+
+
+def _base_strategy_value():
+    """The base routing strategy the canonical line calls EXPECTED.
+
+    Read off the colon-bearing code token in the balancer line
+    (``router_settings.routing_strategy: simple-shuffle`` -> ``simple-shuffle``)
+    instead of being spelled out again in this test file, so a guard change of
+    that value moves the runbook obligation with it.
+    """
+    keyed = [t for t in _CODE_TOKEN.findall(_balancer_line()) if ": " in t]
+    assert len(keyed) == 1, (
+        "the canonical balancer line must carry exactly one `key: value` code "
+        f"token (the base strategy) — found {keyed}")
+    return keyed[0].split(": ", 1)[1].strip()
+
+
 def _negated_file():
     """The path the guard explicitly negates, taken from the guard itself."""
     from hscc_daemon import dep_bump_guard as g
@@ -355,6 +410,68 @@ class TestRunbookAgreesWithGuard:
             "litellm_config.yaml is expected/healthy with the balancer live "
             f"(accepted markers: {_NOT_DRIFT_MARKERS}). Without it the next "
             "operator treats a healthy proxy as drift.")
+
+    def test_runbook_states_the_balancer_live_signal_the_guard_calls_decisive(self):
+        """The guard calls the balancer callback *the* live signal; step 4 must
+        say so, not just that `router_settings` propagates.
+
+        `litellm_settings.callbacks` containing `sparkrun_balancer.handler`,
+        with `sparkrun_balancer.py` next to the config, is the one check that
+        catches a balancer which stopped being emitted while `router_settings`
+        still propagated (balancer file missing beside the config, callback
+        renamed). Every other step-4 signal stays green in that scenario, which
+        is why the canonical line calls the callback the live signal. This leg
+        is the "runbook says LESS than the guard" half of the same split:
+        `test_runbook_states_the_same_read_site_as_the_guard` pins the
+        positive read-site claim, this pins the positive balancer-live claim.
+
+        Identifiers are DERIVED from the canonical line by shape
+        (`_balancer_signal_ids`), and the obligation is scoped per-sentence so
+        a runbook cannot satisfy it by naming the callback once in an unrelated
+        paragraph and telling the operator to check only `router_settings` in
+        step 4.
+        """
+        text = _runbook_text()
+        ids = _balancer_signal_ids()
+        cfg = _generated_config_name()
+        strategy = _base_strategy_value()
+        # Canonical-side floor, same discipline as `test_pin_is_not_vacuous`:
+        # if a future edit to the guard line shrank the derived signal to one
+        # or two tokens, `missing` below could hardly ever be non-empty and
+        # this leg would pass on a runbook that says nothing. The line must
+        # still name a dotted callback/attribute path AND the module file that
+        # has to sit beside the config.
+        dotted = [t for t in ids if "." in t and "/" not in t and not t.endswith(".py")]
+        assert len(ids) >= 3 and dotted and any(t.endswith(".py") for t in ids), (
+            "the canonical balancer line no longer names a dotted callback path "
+            f"plus the module file beside the config (derived: {ids}) — step 4's "
+            "obligation cannot be derived from it any more:\n  "
+            f"{_balancer_line()}")
+
+        # Every runbook sentence that points the operator at the generated
+        # config, or at the base strategy the guard says is expected, must
+        # carry the whole balancer-live signal.
+        pointing = [s for s in _sentences(text)
+                    if cfg in s or strategy in s]
+        assert pointing, (
+            f"runbook never mentions the generated config {cfg!r} or the base "
+            f"strategy {strategy!r} — step 4's balancer check has nothing to "
+            "scope against.")
+        for s in pointing:
+            missing = [t for t in ids if t not in s]
+            assert not missing, (
+                f"runbook sentence names {cfg!r}/{strategy!r} but omits the "
+                f"balancer-live identifiers {missing} that the canonical "
+                "FORK_RULE_LINES line calls the live signal — an operator "
+                "following it would pass step 4 green on a proxy whose "
+                "balancer stopped being emitted:\n  guard:   "
+                f"{_balancer_line()}\n  runbook: {s}")
+        # And step 4 must still state the check as a check on the generated
+        # file, not merely as the base-strategy reassurance.
+        step4 = _one([s for s in _sentences(text) if "Restart the proxy" in s],
+                     "step-4 restart-and-confirm sentence", text)
+        assert cfg in step4, (
+            f"step 4 no longer tells the operator to open {cfg}: {step4}")
 
     def test_runbook_keeps_the_never_checkout_main_prohibition(self):
         """The failure this whole guard exists to prevent, stated in both
