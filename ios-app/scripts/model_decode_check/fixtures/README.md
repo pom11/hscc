@@ -1,6 +1,8 @@
 # Decode fixtures
 
-Live HSCC API responses captured 2026-08-27, **sanitized** for a public repo.
+Live HSCC API responses — initial capture 2026-08-27, extended since (the
+Phase 3/4 additions below, incl. the t_ca133e7d captures of 2026-09-27) —
+**sanitized** for a public repo.
 
 These feed `scripts/model_decode_check.sh`, which compiles the REAL model
 sources (`Sources/HSCC/Models.swift`, `Sources/Shared/SharedModels.swift`,
@@ -37,7 +39,8 @@ the real captures: the Card model reads only `id/title/status/assignee/board`
 (unknown fields are ignored by Decodable), so the bulky card `body` prose —
 which contained a tailnet IP and a token-file path — was dropped and the real
 key structure preserved. The decode contract is therefore exercised identically.
-All 26 files autovalidate as JSON (verified). If ever in doubt, re-encode a
+All 54 JSON fixtures in this directory autovalidate as JSON (verified 2026-10-19
+by `ls *.json | wc -l` + re-encode). If ever in doubt, re-encode a
 fresh capture and diff the key structure.
 
 ## Coverage

@@ -93,7 +93,7 @@ Each script is self-contained shell + hardcoded host IPs / model ids. Cluster to
 
 ## Why `--no-agent`
 
-These are pure probes; no semantic interpretation needed. Routing through the LLM would burn orchestrator tokens (currently Qwen3.6-35B-A3B-NVFP4 on the orchestrator head) every tick for no added value. Operator slash commands like `/cluster` and `/orch-restart` remain agent-mediated since they're interactive and need confirmation flows.
+These are pure probes; no semantic interpretation needed. Routing through the LLM would burn orchestrator tokens (whatever model currently fronts the orchestrator head) every tick for no added value. Operator slash commands like `/cluster` and `/orch-restart` remain agent-mediated since they're interactive and need confirmation flows.
 
 ## Runtime-dependency update loop
 
