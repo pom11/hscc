@@ -115,7 +115,7 @@ is not the learning mechanism; the session is.
 ## Migration
 
 **Phase 0 — done.** Flightdeck is the instrument panel with guardrails, and the
-MCP server exists: 25 tools, 11 mutating ones defaulting to `apply=False`,
+MCP server exists: 24 tools, 12 mutating ones defaulting to `apply=False`,
 verified by inspecting the signatures.
 
 **Phase 1 — give Hermes the hands.** Register the server in `~/.hermes/config.yaml`
