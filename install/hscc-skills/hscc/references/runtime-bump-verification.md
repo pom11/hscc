@@ -39,7 +39,9 @@ pinned by tests; the bump PR body and the watcher card both carry it):
    BRANCH CHECKED OUT.
 2. **Never `git checkout main`, never reinstall from upstream.** Either one
    silently drops the balancer on the next proxy restart — the proxy keeps
-   serving, routing quietly reverts to `simple-shuffle`, nothing errors.
+   serving, routing quietly reverts to `simple-shuffle` and
+   `litellm_settings.callbacks` stops carrying `sparkrun_balancer.handler`
+   (the `sparkrun_balancer.py` beside the config is gone), nothing errors.
 3. Verify after the bump:
    `git -C ~/dev/sparkrun-041-verify rev-parse --abbrev-ref HEAD` ==
    `feat/proxy-least-in-flight-041`, and `router_settings` is still read in
@@ -51,16 +53,25 @@ pinned by tests; the bump PR body and the watcher card both carry it):
    keeps only the generic `gateways.<name>` accessor and has no `router_settings`
    at all (verified against tags v0.4.0 and v0.4.1).
 4. Restart the proxy, then confirm `~/.cache/sparkrun/proxy/litellm_config.yaml`
-   carries the `router_settings` from `~/.config/sparkrun/proxy.yaml` — the
-   `hscc verify` check `proxy_router_settings` (and the `proxy` daemon
-   stream's `router_drift` field) must be quiet. `routing_strategy:
+   carries the `router_settings` from `~/.config/sparkrun/proxy.yaml` AND that
+   the balancer is live in it: `litellm_settings.callbacks` contains
+   `sparkrun_balancer.handler` and `sparkrun_balancer.py` sits next to the
+   config — that callback line is the decisive live signal, not the
+   `router_settings` block, because a balancer that silently stopped being
+   emitted while `router_settings` still propagates is exactly the failure
+   nobody sees (for example the balancer file is not next to the config, so
+   the callback never loads). The `hscc verify` check
+   `proxy_router_settings` (and the `proxy` daemon stream's `router_drift`
+   field) must be quiet. `routing_strategy:
    least-busy` in router_settings is a trap on the pinned LiteLLM (no-op);
    the working knob is `gateways.litellm.balancing: least-in-flight`.
    NOTE (0.4.0): the balancer makes sparkrun FORCE `routing_strategy:
    simple-shuffle` in the emitted config (`BALANCING_ROUTING_STRATEGY`) so
    LiteLLM keeps calling the callback — `simple-shuffle` in
    `litellm_config.yaml` is the HEALTHY emitted value when the balancer is
-   live, not a regression. Since 0.4.0, `router_settings` is read from
+   live, meaning `litellm_settings.callbacks` lists `sparkrun_balancer.handler`
+   and `sparkrun_balancer.py` sits next to the config — not a regression.
+   Since 0.4.0, `router_settings` is read from
    `gateways.litellm.router_settings`; the top-level proxy.yaml key is kept
    only for 0.3.10 rollback and 0.4.0 ignores it (the drift check mirrors
    that read order — see `proxy_router.router_settings_source`).
