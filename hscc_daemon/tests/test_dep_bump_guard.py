@@ -100,12 +100,12 @@ def _drift(tmp_path, proxy=PROXY_OK, litellm=LITELLM_OK):
 class TestDepBumpGuard:
     def test_rule_names_the_live_fork_branch(self):
         from hscc_daemon import dep_bump_guard as g
-        assert g.FORK_BRANCH == "feat/proxy-least-in-flight-040"
+        assert g.FORK_BRANCH == "feat/proxy-least-in-flight-041"
         assert g.FORK_REMOTE == "pom11/sparkrun"
-        assert g.SPARKRUN_CHECKOUT == "~/dev/sparkrun-live"
+        assert g.SPARKRUN_CHECKOUT == "~/dev/sparkrun-041-verify"
         text = "\n".join(g.FORK_RULE_LINES)
         # The failure this guard exists to prevent, stated in the rule itself:
-        assert "feat/proxy-least-in-flight-040" in text
+        assert "feat/proxy-least-in-flight-041" in text
         assert "checkout main" in text and "never" in text.lower()
         assert "rebase" in text
         assert "rev-parse --abbrev-ref HEAD" in text
