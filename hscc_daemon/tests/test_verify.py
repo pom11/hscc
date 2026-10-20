@@ -84,6 +84,15 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "model_list: []\nlitellm_settings:\n  drop_params: true\n"
         "router_settings:\n  routing_strategy: simple-shuffle\n")
 
+    # declaration_agreement (spec §6, C3) — the hermetic applied state above is
+    # NON-uniform with no `declarations` record, so all four legs resolve to
+    # "not applicable / no expectation" (ok True) without reading the live
+    # proxy pair or the network. The balancer_module pointer keeps leg 3 off
+    # the operator's ~/.cache/sparkrun should proxy.yaml ever request a
+    # balancer; a stub file next to the stub litellm config is the honest
+    # "module present" answer.
+    (tmp_path / "sparkrun_balancer.py").write_text("# stub balancer module\n")
+
     return {
         "script": str(sweep),
         "python": sys.executable,
@@ -94,6 +103,7 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "applied_state_path": str(applied),
         "proxy_config": str(proxy_yaml),
         "litellm_config": str(litellm_yaml),
+        "balancer_module": str(tmp_path / "sparkrun_balancer.py"),
     }
 
 
@@ -820,9 +830,11 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        # 12 = main's 11 (incl. provider_routing from #36) + proxy_router_settings
-        # from the dep-bump guard. Union of both check sets, not either alone.
-        assert len(result["checks"]) == 12
+        # 13 = the 12 pinned by the dep-bump guard (main's 11 incl.
+        # provider_routing from #36, + proxy_router_settings) +
+        # declaration_agreement from the template-declarations C3 doctor
+        # (spec §6). Union of all check sets, not any one alone.
+        assert len(result["checks"]) == 13
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -852,7 +864,7 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 12
+        assert len(result["checks"]) == 13
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -880,7 +892,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 12
+        assert len(result["checks"]) == 13
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
