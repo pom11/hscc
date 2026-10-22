@@ -26,6 +26,91 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Sparkrun argv fence (t_be4b94ca — live proxy SIGTERM incident)
+# ---------------------------------------------------------------------------
+#
+# The existing `_hermetic_sparkrun_resolution` fixture (further down) pins
+# HSCC_SPARKRUN_BIN so every path that resolves through hscc_daemon.sparkrun_bin
+# execs a per-test fake. It cannot see literal-argv calls — and this package has
+# two: cluster_live.HostStream runs `["sparkrun", "cluster", "monitor", ...]`
+# via subprocess.Popen, and serving's command constants are plain argv lists.
+# The shared fence wrapper (same helper the hscc-cluster suite fences with, and
+# the module whose absence must fail collection loudly) closes exactly that gap:
+# a sparkrun argv that resolves to the operator's LIVE CLI raises instead of
+# exec'ing; the HSCC_SPARKRUN_BIN fake resolves under tmp_path and passes.
+
+def _load_sparkrun_fence():
+    import importlib.util
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        # repo layout: <repo>/hscc_daemon/tests -> <repo>/hscc-cluster/tests
+        os.path.join(_here, os.pardir, os.pardir, "hscc-cluster", "tests",
+                     "sparkrun_fence.py"),
+        # deployed layout: ~/.hermes/plugins/hscc_daemon/tests -> ...
+        os.path.join(os.path.expanduser("~"), ".hermes", "plugins",
+                     "hscc-cluster", "tests", "sparkrun_fence.py"),
+    ]
+    for path in candidates:
+        path = os.path.abspath(path)
+        if os.path.exists(path):
+            spec = importlib.util.spec_from_file_location("sparkrun_fence", path)
+            assert spec is not None and spec.loader is not None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["sparkrun_fence"] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    raise RuntimeError(
+        "sparkrun fence module not found (looked in: "
+        + ", ".join(candidates)
+        + ") — refusing to run this suite unfenced (t_be4b94ca)."
+    )
+
+
+_sparkrun_fence = _load_sparkrun_fence()
+
+
+@pytest.fixture(autouse=True)
+def _fence_sparkrun_argv(monkeypatch):
+    """Block any test that would exec the operator's real sparkrun CLI."""
+    _sparkrun_fence.install(monkeypatch)
+
+
+_fence_reported = set()
+
+
+@pytest.fixture(autouse=True)
+def _fence_guard():
+    """Fail the test (or fixture) that tried to reach the live sparkrun argv.
+
+    See hscc-cluster/tests/conftest.py::_record_sparkrun_calls for why this
+    enforcement lives in a fixture teardown and not in a session-finish hook.
+    """
+    yield
+    fresh = []
+    for e in _sparkrun_fence.unexpected_blocked():
+        key = (tuple(e["argv"]), e["why"])
+        if key not in _fence_reported:
+            _fence_reported.add(key)
+            fresh.append(e)
+    if fresh:
+        raise AssertionError(
+            "SPARKRUN FENCE GUARD: a test/fixture tried to exec the operator's "
+            f"live sparkrun CLI: {[e['argv'] for e in fresh]}. Resolve through "
+            "sparkrun_bin (pinned hermetic by _hermetic_sparkrun_resolution) or "
+            "patch the seam — t_be4b94ca."
+        )
+
+
+def pytest_terminal_summary(terminalreporter):
+    """The fence's session report is part of the visible output, every run."""
+    lines = _sparkrun_fence.report().splitlines()
+    terminalreporter.write_sep("=", lines[0])
+    for line in lines[1:]:
+        terminalreporter.write_line(line)
+
+
+# ---------------------------------------------------------------------------
 # Autouse ~/.hscc isolation (RELEASE BLOCKER regression)
 # ---------------------------------------------------------------------------
 

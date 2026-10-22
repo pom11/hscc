@@ -1,5 +1,7 @@
 """Tests for template_intent.py — topology-free intent schema + resolve (D16/D17)."""
 
+import os
+import shutil
 from dataclasses import dataclass
 
 import pytest
@@ -169,6 +171,17 @@ class TestServingJson:
 
 # ── shipped node-count templates REALLY fit (real recipe_cost, real files) ───
 
+#: Opt-in gate for the ONE test in this suite that must exec the operator's real
+#: `sparkrun show` (its VRAM estimator is the only source of real per-GPU costs).
+#: t_be4b94ca: the suite must never reach the live CLI — the sparkrun fence blocks
+#: it — so this leg is opt-in (`HSCC_LIVE_SPARKRUN_TESTS=1`) and the hermetic
+#: variant below is what runs by default.
+_LIVE_SPARKRUN = os.environ.get("HSCC_LIVE_SPARKRUN_TESTS") == "1" and shutil.which("sparkrun")
+
+
+@pytest.mark.skipif(not _LIVE_SPARKRUN,
+                    reason="execs the operator's real `sparkrun show` VRAM estimator; "
+                           "opt in with HSCC_LIVE_SPARKRUN_TESTS=1 (t_be4b94ca fence)")
 def test_all_shipped_templates_resolve_and_fit():
     """Every templates/Nnode/*.yaml must resolve against an N-node cluster using
     the REAL sparkrun-show VRAM cost (recipe files exist) — proving they can
@@ -186,6 +199,37 @@ def test_all_shipped_templates_resolve_and_fit():
                         [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo)              # real recipe_cost (files on disk)
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
+
+
+def test_all_shipped_templates_resolve_and_fit_hermetically(monkeypatch):
+    """Default-run twin of the leg above: same files, same N-node topologies,
+    same placement/validate math — but with VRAM cost and recipe existence
+    supplied by fakes, so no live `sparkrun show` is exec'd (t_be4b94ca fence).
+
+    What it still proves: every shipped node-count template PARSES, RESOLVES
+    onto its N-node topology without a placement error, and produces a plan with
+    no (node,port) collision and a proxy-bearing endpoint family.
+    What it does NOT prove (the opt-in leg's job): that the REAL per-GPU VRAM
+    cost of those recipes fits on a GB10.
+    """
+    import glob, os, yaml
+    import cluster_template as ct
+    files = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "..",
+                                          "templates", "*node", "*.yaml")))
+    assert files, "no node-count templates found"
+    # Existence without a subprocess: every shipped recipe token is a path.
+    monkeypatch.setattr("recipe_cost.Path.is_file", lambda self: True)
+    for f in files:
+        nnode = int(os.path.basename(os.path.dirname(f)).replace("node", ""))
+        name = yaml.safe_load(open(f))["name"]
+        tpl = ct._load_intent(name)
+        topo = FakeTopo(FakeNode("10.0.0.1"),
+                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+        plan = ti.resolve(tpl, topo, _coster=_coster(per_gpu=30.0))
+        assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
+        # every unit landed on a node of THIS topology, none invented
+        nodes = {u.node for fam in plan.families for u in fam.units}
+        assert nodes <= {f"10.0.0.{1 + i}" for i in range(nnode)}, f"{name}: stray node"
 
 
 # ── multi-node tp spanning ───────────────────────────────────────────────────
