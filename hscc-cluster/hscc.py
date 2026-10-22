@@ -38,7 +38,13 @@ CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def run_cmd(args, timeout=30, as_json=False):
-    """Run a command and return structured output."""
+    """Run a command and return structured output.
+
+    Timeout maps to returncode 124 (the `timeout(1)` convention clusterlib
+    .run_cmd also uses) and carries whatever partial output the child had
+    written — a per-unit launch report needs that tail as evidence, not an
+    empty dict (t_be4b94ca).
+    """
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout
@@ -55,8 +61,15 @@ def run_cmd(args, timeout=30, as_json=False):
             except json.JSONDecodeError:
                 pass
         return resp
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"command timed out after {timeout}s", "command": args}
+    except subprocess.TimeoutExpired as e:
+        partial = (e.output or b"").decode("utf-8", "replace") if isinstance(e.output, bytes) else (e.output or "")
+        partial_err = (e.stderr or b"").decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        resp = {"success": False, "returncode": 124,
+                "error": f"command timed out after {timeout}s",
+                "output": partial.strip(), "command": args}
+        if partial_err.strip():
+            resp["error"] = f"{resp['error']}\n{partial_err.strip()}"
+        return resp
     except FileNotFoundError:
         return {"success": False, "error": f"command not found: {args[0]}", "command": args}
 
@@ -309,12 +322,122 @@ def _fleet_op_timeout_seconds():
     (lifecycle.VLLM_LOAD_GRACE_MINUTES, default 20 ⇒ 1200s) — reusing that
     natural knob rather than inventing a new one. Falls back to 1200s if the
     daemon can't be imported (standalone mode).
+
+    This is the budget for WHOLE-FLEET operations (`cluster down`). The
+    per-unit LAUNCH phase of `cluster up` uses _launch_phase_timeout_seconds()
+    instead — a `--no-follow --ensure` launch must RETURN in seconds, and
+    reusing this 1200s window is what made the 2026-10-22 hung launch look
+    "forever" (t_be4b94ca).
     """
     try:
         from hscc_daemon import lifecycle
         return getattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20) * 60
     except Exception:
         return 1200
+
+
+# t_be4b94ca (2026-10-22 cooldown): `sparkrun run ... --no-follow --ensure`
+# must RETURN once the containers are up — the model load happens afterwards
+# and is watched by the daemon, not by this CLI. The operator observed a
+# launch stuck 19 min / 8 min on a unit that ALREADY answered /v1/models 200.
+# A dedicated launch-phase budget, sized to the slowest honest launch
+# (operator's hand-run parallel launches returned in ~3 min worst case), keeps
+# one hung unit from eating the fleet window. Overridable for slow fleets.
+LAUNCH_PHASE_TIMEOUT_DEFAULT_S = 180
+
+
+def _launch_phase_timeout_seconds():
+    """Per-unit budget for the LAUNCH phase of `cluster up` (t_be4b94ca).
+
+    Deliberately NOT the model-load grace: this covers the `sparkrun run
+    --no-follow --ensure` call returning, not the weights loading. Env
+    HSCC_CLUSTER_UP_LAUNCH_TIMEOUT overrides (garbage falls back to the
+    default rather than disabling the bound).
+    """
+    raw = os.environ.get("HSCC_CLUSTER_UP_LAUNCH_TIMEOUT", "")
+    try:
+        value = int(raw) if raw else LAUNCH_PHASE_TIMEOUT_DEFAULT_S
+    except ValueError:
+        value = LAUNCH_PHASE_TIMEOUT_DEFAULT_S
+    return value if value > 0 else LAUNCH_PHASE_TIMEOUT_DEFAULT_S
+
+
+def models_probe_fn(url, timeout=2):
+    """GET + parse one unit's own /v1/models (t_be4b94ca, fix 2).
+
+    Delegates to the daemon's proven body-parsing probe (health
+    ._proxy_models_probe — "a bare reachability check is not health").
+    Returns {"ok", "models", "error"}; NEVER raises. Tests monkeypatch this
+    module-level name (the seam), exactly like _launch_guard_status_fn.
+    """
+    try:
+        from hscc_daemon import health as _h
+        return _h._proxy_models_probe(url, timeout=timeout)
+    except Exception as e:  # daemon unimportable / probe blew up: not serving
+        return {"ok": False, "models": [], "error": str(e)}
+
+
+# Per-node probe budget for the already-serving skip. A live vLLM answers in
+# milliseconds; the point is a FAST pre-flight, not a health verdict — on any
+# error we launch anyway (fail-open: --ensure makes the launch itself safe).
+_UNIT_PROBE_TIMEOUT_S = 2
+
+
+def _unit_already_serving(entry):
+    """(True, served_models) iff EVERY node in the unit's span answers its own
+    /v1/models with a parseable NON-EMPTY catalogue; else (False, []).
+
+    Every span node, not just the head: a TP group only serves on the head
+    once ALL peers joined — a lone responder is mid-formation, not serving.
+    Non-empty body: HTTP 200 + {"data": []} is the hollow-catalogue shape
+    (2026-10-11) — reachable and serving nothing is NOT already-up.
+    """
+    served = []
+    for node in entry["nodes"]:
+        url = f"http://{node}:{entry['port']}/v1/models"
+        try:
+            res = models_probe_fn(url, timeout=_UNIT_PROBE_TIMEOUT_S)
+        except Exception:
+            return False, []
+        if not res.get("ok") or not (res.get("models") or []):
+            return False, []
+        served.extend(res.get("models") or [])
+    return True, sorted(set(served))
+
+
+def _launch_unit(entry, dry_run, guard_status, launch_timeout, daemon_health):
+    """One plan entry -> its issued-report dict (guard, skip decision made by
+    the caller; this function REFUSES or LAUNCHES, never both).
+
+    A2 launch guard first (same single prefetched status for every unit),
+    then the launch under the launch-phase timeout. The report ALWAYS names
+    its unit and carries the combined output tail — a timeout (run_cmd ->
+    returncode 124) is reported as a failed unit, not a swallowed one.
+    """
+    unit_id = entry["unit_id"]
+    cmd = entry["cmd"]
+    if not dry_run:
+        for host in entry["nodes"]:
+            if not daemon_health._guard_launch_or_refuse(
+                    host, entry["port"], entry["nodes"],
+                    "cluster-up", unit_id, status=guard_status):
+                out = (f"launch guard refused {unit_id} on {host} "
+                       f"(see daemon log; alert sent)")
+                return {"success": False, "refused": True, "unit_id": unit_id,
+                        "cmd": cmd, "command": cmd, "output": out}
+    res = _run_or_print(cmd, dry_run, timeout=launch_timeout)
+    if dry_run:
+        return res
+    res["unit_id"] = unit_id
+    res.setdefault("command", cmd)
+    if res.get("returncode") == 124:
+        res["timed_out"] = True
+    # One report tail covering BOTH streams (run_cmd captured them separately):
+    # what an operator pastes into the incident channel.
+    combined = "\n".join(p for p in (res.get("output", ""), res.get("error", ""))
+                         if p)
+    res["output"] = combined[-2000:]
+    return res
 
 
 def _run_or_print(cmd, dry_run, timeout=None):
@@ -368,6 +491,22 @@ def cmd_cluster_up(dry_run=False):
     ``serving.fleet_up_plan()`` (reusing the existing ``VLLM_START_CMD`` form
     / ``orchestrator_recipe``) and runs them. autodown.autoup() uses this same
     builder.
+
+    Hardened per t_be4b94ca (2026-10-22: an already-serving unit's launch hung
+    ~19 min under the 1200s model-load grace, and the SERIAL loop starved the
+    remaining units while it hung):
+
+      1. each launch is bounded by the LAUNCH-PHASE timeout (seconds-to-
+         minutes, HSCC_CLUSTER_UP_LAUNCH_TIMEOUT) — not the model-load grace;
+         a timeout reports that unit failed with the output tail;
+      2. a unit whose every span node already answers a parseable non-empty
+         /v1/models is reported already-up and sparkrun is NOT invoked;
+      3. launches run CONCURRENTLY (units are independent hosts) while the
+         per-unit report stays plan-ordered; one hung/failed unit cannot
+         prevent the others.
+
+    The A2 launch guard keeps its SINGLE status fetch for the whole plan
+    (prefetched here, passed into every unit worker).
     """
     serving = _load_daemon_serving()
     if serving is None:
@@ -384,23 +523,54 @@ def cmd_cluster_up(dry_run=False):
     from hscc_daemon import health as _daemon_health  # deferred: CLI stays light
     guard_status = (None if dry_run
                     else _daemon_health._launch_guard_status_fn())
-    issued = []
-    for entry in plan:
-        if not dry_run:
-            refused = None
-            for host in entry["nodes"]:
-                if not _daemon_health._guard_launch_or_refuse(
-                        host, entry["port"], entry["nodes"],
-                        "cluster-up", entry["unit_id"], status=guard_status):
-                    refused = host
-                    break
-            if refused is not None:
-                issued.append({"success": False, "refused": True,
-                               "cmd": entry["cmd"],
-                               "output": f"launch guard refused {entry['unit_id']} "
-                                         f"on {refused} (see daemon log; alert sent)"})
-                continue
-        issued.append(_run_or_print(entry["cmd"], dry_run))
+
+    if dry_run:
+        # Nothing is launched and nothing is probed — print the plan serially
+        # so the output stays readable (this is the form operators copy).
+        issued = [_run_or_print(e["cmd"], True) for e in plan]
+    else:
+        launch_timeout = _launch_phase_timeout_seconds()
+        issued: list = [None] * len(plan)
+        to_launch = []
+        # Fix 2: cheap pre-flight FIRST. Sequential on purpose: every probe
+        # is bounded at _UNIT_PROBE_TIMEOUT_S and connection failures return
+        # in milliseconds; the expensive phase (the launches) is what runs
+        # concurrently.
+        for i, entry in enumerate(plan):
+            serving_now, models = _unit_already_serving(entry)
+            if serving_now:
+                print(f"Unit {entry['unit_id']} already serving on "
+                      f"{','.join(entry['nodes'])}:{entry['port']} "
+                      f"({len(models)} model id(s)) — skipping launch")
+                issued[i] = {"success": True, "skipped": "already_serving",
+                             "unit_id": entry["unit_id"],
+                             "command": entry["cmd"],
+                             "served_models": models}
+            else:
+                to_launch.append(i)
+        # Fix 3: concurrent launches. Threads because the work is a blocking
+        # subprocess per unit; results are stored by PLAN INDEX so the report
+        # order is deterministic regardless of completion order.
+        if to_launch:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(
+                    max_workers=min(8, len(to_launch))) as pool:
+                futures = {
+                    pool.submit(_launch_unit, plan[i], False, guard_status,
+                                launch_timeout, _daemon_health): i
+                    for i in to_launch}
+                for fut in as_completed(futures):
+                    i = futures[fut]
+                    try:
+                        issued[i] = fut.result()
+                    except Exception as exc:
+                        # A raising worker must not sink the fleet report.
+                        issued[i] = {
+                            "success": False, "unit_id": plan[i]["unit_id"],
+                            "command": plan[i]["cmd"],
+                            "output": f"launcher raised "
+                                      f"{type(exc).__name__}: {exc}"}
+        issued = [r for r in issued if r is not None]
     return {
         "success": not dry_run and all(i.get("success") for i in issued),
         "dry_run": bool(dry_run),
