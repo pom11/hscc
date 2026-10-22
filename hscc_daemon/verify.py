@@ -1492,8 +1492,8 @@ def check_declaration_agreement(applied_state_path=None, config=None,
 
     PURE-READ (never repairs, never restarts): the applied template's
     ``declarations`` record (``~/.hscc/applied_template.json``, spec §7 —
-    written by C2 / t_70814001) is compared, across four legs, against live
-    state:
+    written by C2 / t_70814001) is compared, across the four spec §6 legs
+    plus the t_be4b94ca per-unit alias-coverage leg, against live state:
 
       1. hermes_endpoints  — each declared endpoint consumer carries the
          declared target's URL/alias in the root config and each matched

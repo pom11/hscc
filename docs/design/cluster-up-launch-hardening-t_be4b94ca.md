@@ -48,13 +48,61 @@ interleaving would garble the printed plan; nothing is executed there).
 Failure of one unit never cancels another; a raising worker is converted to
 a failed result rather than propagating.
 
-## Decision 4 — sparkrun-side root cause (fix 4)
+## Decision 4 — sparkrun-side root cause (fix 4) — RESOLVED by source read
 
-Read `sparkrun/engine.py` launch path for the `ssh ... bash -s` invocation.
-Attribution ONLY — no edits, no workarounds. If the missing-EOF is inside
-sparkrun: report on the card (filing an issue on the operator-owned private
-repo from a worker is not possible from this session — the operator files
-from the finding recorded here).
+**Verdict: the hang is sparkrun's readiness wait, NOT a missing stdin EOF.**
+Attribution is against the tree the live `sparkrun` actually runs from
+(v0.4.1, editable install `/Users/desac/dev/sparkrun-041-verify@1aaa6479` —
+the `.pth` under `.venv-sparkrun-041` points there; the `~/dev/sparkrun`
+checkout is a *newer* tree whose CLI already gates the wait behind
+`--no-ready-wait`).
+
+Chain, with file:line in the v0.4.1 tree:
+- `src/sparkrun/cli/_run.py:157` — the `--ensure` help says it outright:
+  *"Reuse an existing job when present; **still wait for readiness**"*.
+- `src/sparkrun/cli/_run.py:160` — the flag that skips the wait is
+  **`--no-ready-wait`**, which hscc does not pass; `--no-follow` only
+  controls the log stream (`show_logs=not no_follow`, `_run_lifecycle.py:21`).
+- `src/sparkrun/cli/_run_lifecycle.py:24-35` — `wait_for_run` echoes
+  `Waiting for server readiness...` then BLOCKS on `watcher.done` — it
+  returns only when the readiness observer has a verdict.
+- The observer (`launcher.wait_for_serve_ready` ->
+  `orchestration/startup.run_probe`) needs a first non-empty inference
+  **token**, not an HTTP 200 on `/v1/models` — so a unit whose model loads
+  far past the port-bind keeps the local call open for ~port+health+
+  inference deadline (~3950s observed) while `/v1/models` already answered
+  200 within minutes (the operator's exact observation).
+- Operator evidence matching the chain (redacted): both hand-run logs end
+  `Waiting for server readiness... Inference readiness observation failed:
+  startup observation exceeded its deadline` / `ERROR: endpoint did not
+  become ready ...` / `Launch timings (total 3947.3s)` — 65.8 min; the
+  19-min first observation was the same wait cut short by the operator's
+  kill.
+
+The `ssh ... bash -s` idle-with-no-child the operator saw is that wait's
+*own* ssh usage (every probe/poll goes over `run_remote_script`), and the
+missing-EOF hypothesis is **ruled out with source evidence**: every
+`bash -s` site in sparkrun provably closes its local stdin —
+`orchestration/ssh.py` `_run_subprocess` passes `input=` (subprocess.run
+closes stdin after writing; `run_remote_script` :520,
+`run_remote_script_streaming` :596, `run_remote_scripts_parallel` routes
+through both), `core/monitoring.py` `_start_host` writes the script then
+`proc.stdin.close()` (:421), `orchestration/startup.run_probe` uses
+`communicate(pending)`, and the `networking.py`/`sudo.py` local paths all
+pass `input=`. An idle `bash -s` with no child is what the poll loop looks
+like BETWEEN polls; it is not an unreaped payload.
+
+Filing upstream: `pom11/sparkrun` has GitHub issues DISABLED
+(`gh issue list` refuses), and the live tree's flag design (`--ensure` +
+`--no-ready-wait`) shows the wait-on-ensure behavior is *intended* — the
+defect from hscc's point of view is the composition hscc chose
+(`--no-follow --ensure` without `--no-ready-wait`), which this card's fixes
+1-3 bound from the hscc side instead. An `--ensure` that skips the wait (or
+honors `--no-follow` for the wait too) is the upstream ask, recorded here
+for the operator to file from an issues-enabled repo. hscc deliberately
+does NOT pass `--no-ready-wait`: the launch-phase timeout bounds the whole
+call, which also covers a genuinely wedged transport, while the daemon's
+existing workers check owns post-launch readiness.
 
 ## Decision 5 — per-unit alias detection (operator addendum)
 
@@ -92,6 +140,21 @@ reachable and already-serving) a bounded live probe, never from the lost log.
 artifact uses the sanctioned 10.0.0.x placeholder range and 192.0.2.x for
 test fixtures (matching the existing test convention); `address_guard
 --tracked` runs before every commit.
+
+## Decision 6 — heal.py: the pre-serve skip does NOT apply (checked, no change)
+
+`hscc-cluster/heal.py` `restart_model(..., ensure=True)` issues the same
+`sparkrun run --no-follow --ensure` form via `cl.run_cmd(run, timeout=900)`.
+The already-serving skip must NOT be copied there: heal only fires on a unit
+its caller already judged unhealthy, and the daemon deliberately STRIPS
+`--ensure` on the wedged-container path (health.py: "``--ensure`` no-ops on
+a container that is Up-but-wedged") — skipping a unit because
+`/v1/models` answers 200 would re-open exactly the wedge hole that stripping
+closes. The 900s bound is the right scale there for now: it is a single-unit
+repair, already bounded (unlike the serial fleet loop this card fixes), and
+a readiness-wait expiry it produces is evidence for the heal verdict, not a
+fleet starvation. If the operator later adds `--no-ready-wait` upstream,
+heal.py should adopt it — recorded, out of scope here.
 
 ## File map
 

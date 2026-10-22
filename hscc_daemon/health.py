@@ -598,6 +598,116 @@ def _proxy_models_healthy(probe, expected_aliases):
     return True, f"expected aliases {sorted(expected_aliases)} all served"
 
 
+# ── per-unit alias coverage (t_be4b94ca operator addendum, 2026-10-22) ──────
+#
+# WHY this lives at UNIT granularity when the proxy check above exists: the
+# 15:10 hand-launch came up with `--served-model-name` = base name only on
+# two of three units (an unquoted dry-run command line). check_proxy stayed
+# GREEN all afternoon — the MERGED proxy catalogue still contained both
+# aliases because the one correctly-launched unit served them — while every
+# aliased request silently funneled to that single node (11 queued there, 0
+# on the other two) and the engine-wedge judge said "busy, not wedged". A
+# proxy-level alias check CANNOT see a per-unit gap by construction; only
+# asking each unit's own /v1/models can. Same lesson as _proxy_backend_drift
+# (F4): "the catalogue lists the ids" is not "the backend serves them".
+
+def unit_expected_aliases(serving_data, unit):
+    """Alias ids the unit's OWN vLLM must advertise (served-model-name set).
+
+    uniform_pool: BOTH role aliases — the pool's premise is that every unit
+    runs the same recipe and may serve either role (see
+    _proxy_expected_aliases / _proxy_relaunch_hosts), so a unit missing
+    either alias silently halves the fleet's routable capacity.
+    Otherwise: the unit's own role alias (a non-uniform worker legitimately
+    does not serve the orchestrator alias — demanding it would warn on every
+    healthy fleet).
+    """
+    if serving.is_uniform_pool(serving_data):
+        return {"worker-model", "orchestrator-model"}
+    return {serving._role_alias(unit.get("role"))}
+
+
+def check_unit_serving_aliases(serving_data=None, probe=None, timeout=5):
+    """Per-unit /v1/models alias check (pure read; never launches/restarts).
+
+    For every serving.json unit, probe each of its nodes' own
+    ``http://<node>:<port>/v1/models`` and compare against
+    :func:`unit_expected_aliases`.
+
+    Returns ``{"ok", "findings", "unverified", "message"}``:
+      ok=False — at least one unit answered with a parseable catalogue that
+      LACKS an expected alias (findings name the unit and the missing ids);
+      ok=None  — no mismatch seen but at least one unit could not be asked
+      (fail-closed: 'could not check' is never 'serves the aliases');
+      ok=True  — every probed unit serves its expected aliases, none
+      unverified.
+
+    A unit with no node/port yields no probe (nothing to ask), and units that
+    are merely DOWN are the unverified case, not a finding — check_workers
+    owns the down verdict. ``probe`` defaults to the same body-parsing GET
+    the proxy catalogue check uses (:func:`_proxy_models_probe`); tests patch
+    the seam, never a socket.
+    """
+    if probe is None:
+        probe = _proxy_models_probe
+    if serving_data is None:
+        serving_data = serving.load_serving()
+    units = serving_data.get("units") if isinstance(serving_data, dict) else None
+    findings, unverified = [], []
+    probed = 0
+    for u in (units or []):
+        if not isinstance(u, dict):
+            continue
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        port = u.get("port")
+        unit_id = u.get("id") or ",".join(nodes)
+        if not nodes or not port:
+            continue
+        expected = unit_expected_aliases(serving_data, u)
+        models, unit_unverified, answered = set(), [], 0
+        for node in nodes:
+            url = f"http://{node}:{port}/v1/models"
+            try:
+                res = probe(url, timeout=timeout)
+            except Exception as e:  # probe must not raise the check down
+                res = {"ok": False, "models": [], "error": str(e)}
+            if not res.get("ok"):
+                unit_unverified.append(f"{node}: {res.get('error') or 'no response'}")
+            else:
+                models.update(res.get("models") or [])
+                answered += 1
+                probed += 1
+        if unit_unverified:
+            unverified.append(f"unit {unit_id!r} ({','.join(nodes)}:{port}) — "
+                              f"probe failed: {'; '.join(unit_unverified)}")
+        # A MISMATCH needs an ANSWER. A unit no node replied to has an empty
+        # model set for the same reason it is unverified — we never asked it —
+        # so calling that a missing-alias finding would report every DOWN unit
+        # as misconfigured (and 'down' is check_workers' verdict, not ours).
+        # A unit that DID answer with an empty catalogue still counts: an
+        # answered-but-empty /v1/models is a real gap, not a missing probe.
+        missing = expected - models
+        if missing and answered:
+            findings.append(
+                f"unit {unit_id!r} ({','.join(nodes)}:{port}) missing expected "
+                f"alias(es) {sorted(missing)}; served: {sorted(models)}")
+    if findings:
+        message = f"{len(findings)} unit(s) serve a model set without the expected aliases"
+        return {"ok": False, "findings": findings, "unverified": unverified,
+                "message": message}
+    if unverified:
+        return {"ok": None, "findings": [], "unverified": unverified,
+                "message": f"{len(unverified)} unit(s) could not be probed "
+                           f"(no alias verdict available)"}
+    return {"ok": True, "findings": [], "unverified": [],
+            "message": f"all {probed} probed endpoint(s) serve the expected aliases"}
+
+
+# Tests monkeypatch this name (the seam) rather than urllib, mirroring the
+# _launch_guard_status_fn pattern.
+_unit_alias_check_fn = check_unit_serving_aliases
+
+
 def _proxy_needs_restart(probe):
     """True when the relaunch must pass ``--restart``.
 
@@ -1264,6 +1374,25 @@ def check_proxy():
     probe = _proxy_models_probe(url, timeout=5)
     expected = _proxy_expected_aliases(serving_data, relaunch_hosts)
     healthy, reason = _proxy_models_healthy(probe, expected)
+    # PER-UNIT ALIAS COVERAGE (t_be4b94ca addendum). The catalogue verdict
+    # above is proxy-level: one correctly-launched unit masks its siblings'
+    # missing --served-model-name aliases (2026-10-22: two units served only
+    # the base name; the proxy stayed "healthy" and all aliased traffic
+    # funneled to the third node for ~2h). Ask each unit DIRECTLY, then
+    # report — do NOT flip proxy health: the proxy really is healthy in that
+    # shape, and a relaunch fixes nothing. Pure-read + never raises; the
+    # WARN names each unit and its missing aliases.
+    try:
+        unit_alias = _unit_alias_check_fn(serving_data=serving_data)
+    except Exception as exc:  # pragma: no cover - defensive, check never raises
+        unit_alias = {"ok": None, "findings": [], "unverified": [],
+                      "message": f"unit alias check raised {type(exc).__name__}"}
+    unit_alias_warn = bool(unit_alias.get("findings"))
+    if unit_alias_warn:
+        for f in unit_alias["findings"]:
+            log(f"unit alias coverage: {f}", "WARN")
+    elif unit_alias.get("unverified"):
+        log(f"unit alias coverage: {unit_alias['message']}", "WARN")
     # LIVE-vs-HEALTHY (F4). A catalogue that serves every expected alias can
     # still be routing ALL of it through ONE backend — the incident shape — and
     # the alias check above cannot see that, because /v1/models lists ids and
@@ -1296,6 +1425,7 @@ def check_proxy():
                               "last_check": now_iso(), "message": reason,
                               "router_drift": drift["detail"],
                               "router_drift_warn": bool(drift["warn"]),
+                              "unit_alias_warn": unit_alias_warn,
                               "models": sorted(probe.get("models") or [])})
         if drift["warn"]:
             log(f"proxy router drift ({drift['detail']})", "WARN")
@@ -1449,6 +1579,7 @@ def check_proxy():
                   "deferred": deferred,
                   "router_drift": drift["detail"],
                   "router_drift_warn": bool(drift["warn"]),
+                  "unit_alias_warn": unit_alias_warn,
                   "message": message}
     if not ok and not suppressed and not deferred:
         proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]

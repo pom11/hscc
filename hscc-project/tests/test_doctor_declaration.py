@@ -168,16 +168,24 @@ def test_adapter_maps_remediation_into_detail_only_for_bad_legs():
     assert "remediation:" in bad["detail"]
 
 
-def test_default_seam_runs_real_module_against_planted_state(tmp_path):
+def test_default_seam_runs_real_module_against_planted_state(tmp_path,
+                                                             monkeypatch):
     """The production wiring (no injected run_agreement) against planted tmp
     files: an applied record with NO declarations and no uniform_pool => all
-    four legs resolve to documented not-applicable => every status ok."""
+    five legs resolve to documented not-applicable => every status ok.
+
+    Hermetic inputs for EVERY leg, including the fifth (t_be4b94ca):
+    ``serving.SERVING_JSON`` points at a path that does not exist, so the
+    unit-alias leg reports "serving.json declares no units" instead of
+    reading (and probing!) the operator's live serving.json."""
     import json as _json
+    from hscc_daemon import serving as _serving
     applied = tmp_path / "applied.json"
     applied.write_text(_json.dumps({"template": "x", "uniform_pool": False}))
+    monkeypatch.setattr(_serving, "SERVING_JSON", str(tmp_path / "no-serving.json"))
     legs = cmd._declaration_checks(
         applied_state_path=str(applied),
         proxy_config=str(tmp_path / "absent.yaml"),
         litellm_config=str(tmp_path / "absent2.yaml"),
         balancer_module=str(tmp_path / "absent3.py"))
-    assert [l["status"] for l in legs] == ["ok"] * 4
+    assert [l["status"] for l in legs] == ["ok"] * 5

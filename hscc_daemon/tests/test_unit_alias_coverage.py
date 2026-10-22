@@ -205,6 +205,13 @@ class TestCheckProxyWiring:
     def _wire(self, monkeypatch, alias_result):
         logs = []
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", {HOST_WK1, HOST_WK2})
+        # ORCH_NODES is the topology set _fleet_unit_backends walks for the
+        # uniform-pool orchestrator endpoint. Left at its default it is a
+        # placeholder node the stubbed live router has no backend for, and the
+        # MISSING-drift leg would flip the proxy unhealthy for a reason this
+        # test is not about (same patch every proxy test in test_health.py
+        # makes — 10.0.0.x placeholder range).
+        monkeypatch.setattr(serving, "ORCH_NODES", {HOST_ORCH})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: _serving())
         # Proxy itself healthy: merged catalogue serves both aliases.
         monkeypatch.setattr(
@@ -291,6 +298,12 @@ class TestDeclarationFifthLeg:
         assert da.LEGS[-1] == "unit_alias_coverage"
         res = da.run_declaration_agreement(
             applied_state_path=applied, serving=srv,
+            # Hermetic inputs for the OTHER legs (no ambient ~/.hermes /
+            # ~/.config reads; this test pins only the NEW leg).
+            config=str(tmp_path / "absent-config.yaml"),
+            profiles_dir=str(tmp_path / "profiles"),
+            proxy_config=str(tmp_path / "absent-proxy.yaml"),
+            litellm_config=str(tmp_path / "absent-litellm.yaml"),
             _http_get=lambda url, timeout=5: json.dumps(
                 {"data": [{"id": BASE}, {"id": "worker-model"},
                           {"id": "orchestrator-model"}]}).encode())
@@ -346,6 +359,10 @@ class TestDeclarationFifthLeg:
             return json.dumps({"data": [{"id": BASE}, {"id": "worker-model"},
                                         {"id": "orchestrator-model"}]}).encode()
 
-        res = da.run_declaration_agreement(applied_state_path=applied,
-                                           serving=srv, _http_get=http_get)
+        res = da.run_declaration_agreement(
+            applied_state_path=applied, serving=srv, _http_get=http_get,
+            config=str(tmp_path / "absent-config.yaml"),
+            profiles_dir=str(tmp_path / "profiles"),
+            proxy_config=str(tmp_path / "absent-proxy.yaml"),
+            litellm_config=str(tmp_path / "absent-litellm.yaml"))
         assert res["ok"] is False, "the new leg must count in the aggregate"

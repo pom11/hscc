@@ -731,7 +731,8 @@ def _declaration_checks(applied_state_path=None, config=None,
                         profiles_dir=None, proxy_config=None,
                         litellm_config=None, balancer_module=None,
                         _http_get=None, _run_agreement=None) -> list[dict]:
-    """Template declaration <-> live agreement (spec §6, four legs).
+    """Template declaration <-> live agreement (spec §6 legs + the t_be4b94ca
+    per-unit alias-coverage leg).
 
     ``hscc project doctor`` is the operator's "is this setup trustworthy"
     surface, and the v4 template declarations (docs/design/2026-10-15-

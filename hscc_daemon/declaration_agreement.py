@@ -12,8 +12,9 @@ anything:
   doctrine (t_ac795424). "Could not check" is never a silent pass, and never
   a hard failure either.
 
-The four legs, named exactly as docs/design/2026-10-15-template-declarations.md
-§6 numbers them (each is a function returning the standard
+The legs, named exactly as docs/design/2026-10-15-template-declarations.md
+§6 numbers the first four of them (a fifth — ``unit_alias_coverage``,
+t_be4b94ca — postdates that spec). Each is a function returning the standard
 ``{"name", "ok", "detail"}`` shape, plus ``remediation`` where there is an
 action to name, and ``next_step`` for the verify table's hint contract):
 
@@ -149,7 +150,7 @@ def _is_loopback(url):
 
 def load_applied_state(applied_state_path=None, _read_json=None):
     """(state_dict_or_None, error_or_None). The ONE applied-state reader the
-    four legs share; missing/unreadable is the §6 "no applied state" case —
+    legs share; missing/unreadable is the §6 "no applied state" case —
     every leg turns that into ok=None, never a pass.
     """
     path = os.path.expanduser(applied_state_path or _APPLIED_STATE_REL)
@@ -708,21 +709,86 @@ def check_live_model_info(applied_state_path=None, _read_json=None,
                       + "; ".join(notes)}
 
 
-# ── the four legs, as one call ──────────────────────────────────────────────
+# ── leg 5: per-unit alias coverage (t_be4b94ca operator addendum) ───────────
+
+def check_unit_alias_coverage(applied_state_path=None, serving=None,
+                              _http_get=None, _read_json=None, timeout=5):
+    """Leg 5: every unit's OWN /v1/models serves the aliases serving.json says.
+
+    Why a fifth leg when leg 4 reads live model info: leg 4 checks that the
+    ROUTED targets cover the ids hermes configs use, and the proxy-level
+    alias check merges every backend's catalogue. Both stay green when one
+    uniform_pool unit comes up with the base model name only (an unquoted
+    hand-launch on 2026-10-22): the correctly-launched unit advertises the
+    aliases for the whole fleet, so the merge covers every route while two
+    nodes silently serve only the base name and receive no aliased traffic.
+    The gap is per-unit, so the probe is per-unit: each unit's own
+    ``http://<node>:<port>/v1/models`` must contain BOTH role aliases under
+    a uniform pool (or its own role alias otherwise).
+
+    Fail-closed like every other leg: no applied state, or a unit that
+    cannot be asked, is UNVERIFIED (ok=None) — never a silent pass. The
+    verdict logic itself is ONE implementation
+    (:func:`hscc_daemon.health.check_unit_serving_aliases`); this leg wires
+    it to the leg-runner's ``_http_get`` seam. Pure read — never launches.
+    """
+    res_name = "declaration_agreement.unit_alias_coverage"
+    state, err = load_applied_state(applied_state_path, _read_json=_read_json)
+    if err:
+        return {"name": res_name, "ok": None, "detail": err,
+                "remediation": "apply a template first, or point "
+                               "applied_state_path at the applied record"}
+    if serving is None:
+        from . import serving as _serving_mod
+        serving = _serving_mod.load_serving()
+    if not isinstance(serving, dict) or not (serving.get("units") or []):
+        return {"name": res_name, "ok": True,
+                "detail": "not applicable: serving.json declares no units"}
+    get = _http_get or _default_http_get
+
+    def probe(url, timeout=timeout):
+        """_http_get (raw body) -> the models-probe shape health expects."""
+        try:
+            body = get(url, timeout=timeout)
+            data = json.loads(body.decode("utf-8", "replace")
+                              if isinstance(body, bytes) else body)
+            models = [m.get("id", "") for m in (data.get("data") or [])
+                      if m.get("id")]
+            return {"ok": True, "models": models, "error": ""}
+        except Exception as exc:
+            return {"ok": False, "models": [], "error": str(exc)}
+
+    from .health import check_unit_serving_aliases
+    res = check_unit_serving_aliases(serving_data=serving, probe=probe)
+    if res["ok"] is False:
+        return {"name": res_name, "ok": False,
+                "detail": "unit model sets miss expected aliases: "
+                          + "; ".join(res["findings"]),
+                "remediation": "relaunch the named unit(s) through hscc "
+                               "(cluster up / template apply) so the quoted "
+                               "--served-model-name alias list reaches vLLM; "
+                               "read the live spread with " + LOAD_INSTRUMENT}
+    if res["ok"] is None:
+        return {"name": res_name, "ok": None,
+                "detail": "unverified: " + "; ".join(res["unverified"])}
+    return {"name": res_name, "ok": True, "detail": res["message"]}
+
+
+# ── the five legs, as one call ──────────────────────────────────────────────
 
 LEGS = ("hermes_endpoints", "proxy_declaration", "balancer_pair",
-        "live_model_info")
+        "live_model_info", "unit_alias_coverage")
 
 
 def run_declaration_agreement(leg="all", **inputs):
-    """Run the four §6 legs and aggregate.
+    """Run the five §6 legs and aggregate.
 
     ``leg`` names ONE leg (for tests / targeted debugging); the default runs
-    all four. Aggregation for the combined verdict: any False -> False, any
+    all five. Aggregation for the combined verdict: any False -> False, any
     None -> None, else True — fail-closed ordering (a leg we could not read
     never hides a leg we could). Each per-leg dict is returned verbatim under
     ``legs`` so callers (the verify table, `hscc project doctor`) render the
-    four names individually.
+    leg names individually.
     """
     kw = dict(inputs)
     runners = {
@@ -730,6 +796,7 @@ def run_declaration_agreement(leg="all", **inputs):
         "proxy_declaration": check_proxy_declaration,
         "balancer_pair": check_balancer_pair,
         "live_model_info": check_live_model_info,
+        "unit_alias_coverage": check_unit_alias_coverage,
     }
     if leg != "all" and leg not in runners:
         return {"name": "declaration_agreement", "ok": None,
