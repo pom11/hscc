@@ -29,6 +29,44 @@ task: t_be4b94ca
   `--no-ready-wait` is the sparkrun-side flag that skips the wait; hscc
   deliberately does NOT pass it (the hscc launch timeout bounds the whole
   call instead, which also covers a genuinely wedged ssh).
+- **`hscc_daemon.serving.resolve_cluster_config()`'s fallback could exec the
+  operator's live sparkrun CLI — and on this host it DID, three times per
+  daemon suite run.** The call was
+  `subprocess.run("timeout 2 sparkrun cluster list --json", shell=True, ...)`:
+  a shell string cannot be argv-rewritten by `sparkrun_bin.exec_argv`, so the
+  `HSCC_SPARKRUN_BIN` hermetic pin never covered it (the daemon conftest's own
+  docstring recorded exactly this gap). Now a LIST argv built by
+  `sparkrun_bin.argv` — the repo's single execution chokepoint — with
+  `shell=True` dropped and `timeout=3` replacing the PATH-dependent
+  `timeout 2` wrapper (macOS keeps `timeout` in Homebrew). Pinned by
+  `hscc_daemon/tests/test_serving_fallback_no_live_cli.py` against a fake CLI
+  on a PATH-less HOME.
+
+---
+kind: Security
+task: t_be4b94ca
+
+- **sparkrun argv FENCE at the conftest level (stop-work order; live `:4000`
+  proxy SIGTERM incident).** One shared harness,
+  `hscc-cluster/tests/sparkrun_fence.py`, wired into the four suites that can
+  reach the CLI (`hscc-cluster`, `hscc-commands`, `hscc_daemon`,
+  `sparkrun-hermes`): it wraps every subprocess entrypoint, resolves each
+  argv element against PATH, and BLOCKS + FAILS the test whose call resolves
+  to the operator's real sparkrun CLI (bare `sparkrun`, an absolute CLI path
+  outside a pytest per-test tmp dir, a CLI at any LATER argv element, or the
+  CLI name embedded in a `shell=True` string). Recipe paths named
+  `sparkrun.yaml` are pinned as NOT CLI tokens (false-positive guard), and the
+  sanctioned escape hatches are a `tmp_path` fake or an explicit
+  expect-block — the fence reports blocked-vs-unexpected in the terminal
+  summary every run. First run of the fence caught **six** real leak sites
+  that had been silently exec'ing the operator's CLI in CI-shaped runs:
+  `_pin_topology`'s `monkeypatch.setattr` reading lazy `clusterlib.HEAD/NODES/
+  NAS_HOST` (→ live `sparkrun cluster list --json` for EVERY cluster test),
+  a live discovery-cache WRITE from `test_discovery`, real `sparkrun show`
+  per shipped recipe in `test_template_intent` (now opt-in gated), and the
+  three `resolve_cluster_config` fallback shells above. Conftests now pin
+  canned discovery output instead; no normal test run touches the fleet.
+
 ---
 kind: Added
 task: t_be4b94ca
@@ -48,6 +86,7 @@ task: t_be4b94ca
   as FIFTH declaration-agreement leg `unit_alias_coverage` so
   `hscc project doctor` / `hscc daemon verify` report the same finding
   fail-closed (unreachable unit = unverified, never ok).
+
 ---
 kind: Verified
 order: 1
@@ -62,3 +101,10 @@ order: 1
   (the doctor default-seam test now pins `serving.SERVING_JSON` so the new
   leg cannot read — or probe — the operator's live serving.json).
   Canonical runner `scripts/run_tests.sh` green on the branch tip.
+- Fence self-tests: `hscc-cluster/tests/test_sparkrun_fence.py` — the live
+  CLI as argv[0], as a later argv element, inside a shell string, as an
+  absolute path outside a pytest tmp dir, and as a recipe-name false-positive
+  — plus blocked-vs-expected accounting. `hscc-cluster` 666 passed + 1
+  skipped (the gated recipe-fit test), `hscc_daemon` 2217 passed,
+  `hscc-commands` 69 passed with the fence line visible in the terminal
+  summary, `sparkrun-hermes` 12 passed. address_guard --tracked rc=0.
