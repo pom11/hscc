@@ -55,3 +55,36 @@ def _fence_sparkrun_argv(monkeypatch):
     (t_be4b94ca — the live proxy :4000 SIGTERM incident).
     """
     sparkrun_fence.install(monkeypatch)
+
+
+_fence_reported = set()
+
+
+@pytest.fixture(autouse=True)
+def _fence_guard():
+    """Fail the test that tried to reach the live sparkrun argv.
+
+    install() alone only BLOCKS — without this the blocked call returns a fake
+    empty result and the test goes on passing while the leak stays invisible.
+    Same enforcement + report as hscc-cluster/tests/conftest.py.
+    """
+    yield
+    fresh = []
+    for e in sparkrun_fence.unexpected_blocked():
+        key = (tuple(e["argv"]), e["why"])
+        if key not in _fence_reported:
+            _fence_reported.add(key)
+            fresh.append(e)
+    if fresh:
+        raise AssertionError(
+            "SPARKRUN FENCE GUARD: a test/fixture tried to exec the operator's "
+            f"live sparkrun CLI: {[e['argv'] for e in fresh]}. Fake "
+            "cmdlib.subprocess.run instead — t_be4b94ca.")
+
+
+def pytest_terminal_summary(terminalreporter):
+    """The fence's session report is part of the visible output, every run."""
+    lines = sparkrun_fence.report().splitlines()
+    terminalreporter.write_sep("=", lines[0])
+    for line in lines[1:]:
+        terminalreporter.write_line(line)
