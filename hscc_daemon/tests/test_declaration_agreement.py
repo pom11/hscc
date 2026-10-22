@@ -1,4 +1,5 @@
-"""Tests for hscc_daemon.declaration_agreement — the four spec §6 legs.
+"""Tests for hscc_daemon.declaration_agreement — the spec §6 legs (+ the
+t_be4b94ca fifth leg, unit_alias_coverage).
 
 Fakes only (t_ac795424 doctrine): every applied state, config, proxy.yaml,
 litellm config and HTTP surface is planted under tmp_path or injected. Nothing
@@ -490,17 +491,19 @@ class TestLiveModelInfoLeg:
         assert res["ok"] is None
 
 
-# ── the four legs as one call ────────────────────────────────────────────────
+# ── the five legs as one call ────────────────────────────────────────────────
 
 class TestRunDeclarationAgreement:
-    def test_four_legs_named_as_spec(self, tmp_path):
+    def test_five_legs_named_as_spec(self, tmp_path):
         p = _applied(tmp_path, uniform=False)
         res = da.run_declaration_agreement(applied_state_path=p)
         assert [l["name"] for l in res["legs"]] == [
             "declaration_agreement.hermes_endpoints",
             "declaration_agreement.proxy_declaration",
             "declaration_agreement.balancer_pair",
-            "declaration_agreement.live_model_info"]
+            "declaration_agreement.live_model_info",
+            # Fifth leg (t_be4b94ca addendum): per-unit alias coverage.
+            "declaration_agreement.unit_alias_coverage"]
         assert res["ok"] is True    # all legs resolve to not-applicable
 
     def test_single_leg_selection(self, tmp_path):

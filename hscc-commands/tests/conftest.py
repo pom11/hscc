@@ -9,3 +9,82 @@ if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
+
+import pytest
+
+# One shared fence module, one home: hscc-cluster/tests/sparkrun_fence.py (where
+# the leak lived). Loaded here by absolute path because each plugin suite runs in
+# its OWN pytest process (scripts/run_tests.sh) with its own sys.path, and a
+# second copy of a safety fixture is exactly how the two copies drift apart.
+# An absent module is a loud collection error, never a silently unfenced suite.
+def _load_sparkrun_fence():
+    import importlib.util
+
+    candidates = [os.path.join(_PARENT, "hscc-cluster", "tests", "sparkrun_fence.py"),
+                  os.path.join(os.path.expanduser("~"), ".hermes", "plugins",
+                               "hscc-cluster", "tests", "sparkrun_fence.py")]
+    for path in candidates:
+        if os.path.exists(path):
+            spec = importlib.util.spec_from_file_location("sparkrun_fence", path)
+            assert spec is not None and spec.loader is not None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["sparkrun_fence"] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    raise RuntimeError(
+        "sparkrun fence module not found (looked in: "
+        + ", ".join(candidates)
+        + ") — refusing to run this suite unfenced (t_be4b94ca: literal-argv "
+          "`sparkrun proxy stop` SIGTERM'd the operator's live :4000 proxy)."
+    )
+
+
+sparkrun_fence = _load_sparkrun_fence()
+
+
+@pytest.fixture(autouse=True)
+def _fence_sparkrun_argv(monkeypatch):
+    """Fence literal-argv sparkrun calls for EVERY test in this suite.
+
+    ``cmdlib`` is self-contained by design and shells out to ``sparkrun`` with
+    literal argv (``SPARKRUN = "sparkrun"``, ``_run([SPARKRUN, "stop", ...])``,
+    ``restart_one``'s ``sparkrun run --no-follow --ensure``) — invisible to the
+    daemon's ``HSCC_SPARKRUN_BIN`` fence. On this host the real CLI is on PATH,
+    so an unpatched call here would stop/restart live fleet containers. Same
+    doctrine and same shared helper as hscc-cluster/tests/conftest.py
+    (t_be4b94ca — the live proxy :4000 SIGTERM incident).
+    """
+    sparkrun_fence.install(monkeypatch)
+
+
+_fence_reported = set()
+
+
+@pytest.fixture(autouse=True)
+def _fence_guard():
+    """Fail the test that tried to reach the live sparkrun argv.
+
+    install() alone only BLOCKS — without this the blocked call returns a fake
+    empty result and the test goes on passing while the leak stays invisible.
+    Same enforcement + report as hscc-cluster/tests/conftest.py.
+    """
+    yield
+    fresh = []
+    for e in sparkrun_fence.unexpected_blocked():
+        key = (tuple(e["argv"]), e["why"])
+        if key not in _fence_reported:
+            _fence_reported.add(key)
+            fresh.append(e)
+    if fresh:
+        raise AssertionError(
+            "SPARKRUN FENCE GUARD: a test/fixture tried to exec the operator's "
+            f"live sparkrun CLI: {[e['argv'] for e in fresh]}. Fake "
+            "cmdlib.subprocess.run instead — t_be4b94ca.")
+
+
+def pytest_terminal_summary(terminalreporter):
+    """The fence's session report is part of the visible output, every run."""
+    lines = sparkrun_fence.report().splitlines()
+    terminalreporter.write_sep("=", lines[0])
+    for line in lines[1:]:
+        terminalreporter.write_line(line)
