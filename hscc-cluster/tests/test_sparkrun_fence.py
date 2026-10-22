@@ -90,6 +90,48 @@ class TestDetectionIsExact:
         assert sf.check(None) is None
         assert sf.check([]) is None
 
+    def test_absent_path_named_sparkrun_is_allowed(self):
+        # A `sparkrun` token that resolves to nothing cannot exec the live CLI
+        # (the loud [Errno 2] the code promises). Not a path, so not caught by
+        # the outside-temp rule either.
+        assert sf.check(["/definitely/not/here/sparkrun", "status"]) is None
+
+    def test_recipe_file_named_sparkrun_is_not_a_cli(self, tmp_path):
+        # False-positive guard: `sparkrun show -- <recipe>` carries recipe paths
+        # as LATER argv elements. A recipe named `sparkrun.yaml` (or under a
+        # `sparkrun/` dir) must not be mistaken for the CLI, or every honest
+        # recipe probe would be blocked.
+        recipe = tmp_path / "sparkrun.yaml"
+        recipe.write_text("name: x\n")
+        assert sf._sparkrun_candidates(["sparkrun", "show", "--", str(recipe)],
+                                      shell=False) == ["sparkrun"]
+        assert sf.check([str(recipe)]) is None  # a yaml file is not a CLI token
+        nested = tmp_path / "sparkrun" / "model.yaml"
+        nested.parent.mkdir()
+        nested.write_text("name: y\n")
+        assert sf._sparkrun_candidates([sys.executable, "-c", "x", str(nested)],
+                                       shell=False) == []
+
+    def test_cli_anywhere_in_argv_is_blocked_not_just_argv0(self, expect_block,
+                                                            tmp_path):
+        # sparkrun_bin.argv() rewrites argv[0] to the RESOLVED path, and a
+        # `timeout N <cli>` shell string puts the CLI at index 2 — so every
+        # element named sparkrun must be inspected, not only the first.
+        if not sf.live_sparkrun():
+            pytest.skip("no sparkrun on PATH")
+        assert sf.check(["timeout", "2", sf.live_sparkrun(),
+                         "cluster", "list", "--json"])
+        # A sparkrun-named absolute path OUTSIDE a temp dir is the machine's
+        # own CLI even when PATH resolution cannot confirm it (fail-closed).
+        outside = tmp_path.parent / "machine-sparkrun"
+        outside.mkdir(exist_ok=True)
+        (outside / "sparkrun").write_text("#!/bin/sh\nexit 0\n")
+        assert sf.check([str(outside / "sparkrun"), "proxy", "stop"])
+        # …while the same shape INSIDE a temp dir is the sanctioned fake.
+        fake = tmp_path / "sparkrun"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        assert sf.check([str(fake), "proxy", "stop"]) is None
+
     def test_inline_sparkrun_payload_is_violation(self, expect_block):
         # The sparkrun_bridge shape: argv[0] is a python interpreter, so the
         # name test misses it — the payload markers catch it.

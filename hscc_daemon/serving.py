@@ -707,10 +707,26 @@ def _resolve_cluster_config_body():
                       f"sparkrun fallback")
 
     # Fallback: resolve the default cluster's primary host from sparkrun.
+    #
+    # t_be4b94ca: this used to be ``subprocess.run("timeout 2 sparkrun cluster
+    # list --json", shell=True, ...)``. A shell string cannot be argv-rewritten
+    # by sparkrun_bin.exec_argv, so the HSCC_SPARKRUN_BIN hermetic pin (and the
+    # suite's sparkrun argv fence) were invisible to it — three tests that
+    # deliberately hit this fallback exec'd the operator's LIVE CLI. It is now
+    # a LIST argv built by sparkrun_bin.argv (the repo's single execution
+    # chokepoint: PATH-first absolute resolution + the override), and the
+    # `timeout` wrapper is the subprocess' own timeout= instead of the shell
+    # binary (which is not even on every PATH — macOS keeps it in Homebrew).
+    # timeout=3 keeps the old `timeout 2` fast-fail shape: topology resolution
+    # runs on first USE of a daemon name and must not stall a health check.
+    try:
+        from .sparkrun_bin import argv as _sparkrun_argv
+    except ImportError:  # standalone import context
+        from sparkrun_bin import argv as _sparkrun_argv
     try:
         result = subprocess.run(
-            "timeout 2 sparkrun cluster list --json",
-            shell=True, capture_output=True, text=True, timeout=5
+            _sparkrun_argv("cluster", "list", "--json"),
+            capture_output=True, text=True, timeout=3
         )
         if result.returncode == 0 and result.stdout.strip():
             clusters = json.loads(result.stdout.strip())

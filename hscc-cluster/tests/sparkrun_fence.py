@@ -104,29 +104,78 @@ def live_sparkrun() -> str | None:
     return _LIVE
 
 
-def _program_of(args, shell: bool = False) -> list:
-    """Candidate program names in argv.
-
-    List form: argv[0] only (that is what gets exec'd). String form with
-    shell=True: the shell interprets the whole string, so EVERY token can be a
-    program (`timeout 3 sparkrun ...` is a real shape in hscc.py cmd_monitor);
-    string form without shell=True: the whole string is one program name.
-    """
-    if args is None:
-        return []
-    if isinstance(args, (list, tuple)):
-        first = args[0] if args else None
-        return [first] if isinstance(first, str) else []
-    if isinstance(args, (bytes, bytearray)):
-        args = args.decode("utf-8", "replace")
-    if isinstance(args, str):
-        return args.split() if shell else [args]
-    return []
+_EXECUTABLE_SUFFIXES = (".exe", ".bat", ".cmd")
 
 
 def _is_sparkrun_name(program: str) -> bool:
+    """True for a token that IS the sparkrun executable, not a recipe named
+    `sparkrun.yaml`.
+
+    Stripping any extension (the first attempt) matched recipe paths like
+    `~/recipes/sparkrun.yaml` — a false positive that would block a legitimate
+    `sparkrun show -- <recipe>`. Only Windows executable suffixes are stripped;
+    on POSIX the name must be exactly `sparkrun`.
+    """
     name = os.path.basename(program).lower()
-    return os.path.splitext(name)[0] == "sparkrun"
+    if name == "sparkrun":
+        return True
+    base, ext = os.path.splitext(name)
+    return base == "sparkrun" and ext in _EXECUTABLE_SUFFIXES
+
+
+def _under_pytest_tmp(program: str) -> bool:
+    """True only when the candidate sits inside a pytest PER-TEST tmp dir.
+
+    Requires BOTH markers in the path: a ``pytest-of-<user>`` ancestor AND a
+    ``test_<name><n>`` component. The second one is what makes this narrow — a
+    file written into the shared ``pytest-of-<user>/pytest-<n>`` root (not a
+    test's own dir) is still treated as the machine's CLI.
+    """
+    try:
+        real = os.path.realpath(program)
+    except OSError:
+        return False
+    parts = real.split(os.sep)
+    return (any(p.startswith("pytest-of-") for p in parts)
+            and any(p.startswith("test_") for p in parts))
+
+
+def _sparkrun_candidates(args, shell: bool) -> list:
+    """Every element of argv that could BE the sparkrun CLI.
+
+    argv[0] alone is not enough: `sparkrun_bin.argv()` rewrites argv[0] to the
+    resolved absolute CLI path, and a `timeout N <cli> ...` shell string puts
+    the CLI at index 2. A recipe path (`/Users/x/recipes/a.yaml`) is never a
+    sparkrun executable, so scanning every element costs no false positives —
+    only elements NAMED sparkrun are candidates.
+    """
+    raw = []
+    if isinstance(args, (list, tuple)):
+        raw = [a for a in args if isinstance(a, str)]
+    elif isinstance(args, (bytes, bytearray)):
+        raw = [args.decode("utf-8", "replace")]
+    elif isinstance(args, str):
+        raw = args.split() if shell else [args]
+    return [e for e in raw if e and _is_sparkrun_name(e)]
+
+
+def _violates(candidate: str) -> str | None:
+    """Why this candidate must not exec, or None when it may."""
+    resolved = _resolves_to_live(candidate)
+    if resolved:
+        return (f"an argv element {candidate!r} resolves to the operator's REAL "
+                f"sparkrun CLI at {resolved}")
+    is_path = os.sep in candidate or (os.altsep and os.altsep in candidate)
+    if is_path and os.path.exists(candidate) and not _under_pytest_tmp(candidate):
+        # A sparkrun-named executable we cannot attribute to a per-test fake is
+        # the machine's own CLI, even when a hermetic override means PATH
+        # resolution does not match it. Fail closed. A path that does not exist
+        # cannot exec anything (the loud [Errno 2] the code promises), so it is
+        # not a violation.
+        return (f"an argv element is the sparkrun executable {candidate!r}, "
+                f"which exists outside a test temp dir (so it is not a per-test "
+                f"fake) — the live CLI")
+    return None
 
 
 def _payload_in(args) -> str | None:
@@ -196,16 +245,14 @@ def check(args, shell: bool = False, *, record: bool = True) -> str | None:
                 f"({payload!r}) — that drives sparkrun's own API against the live "
                 f"fleet/config; patch sparkrun_bridge.remote_cmd / "
                 f"sparkrun_bridge.proxy_config_write instead")
-    for program in _program_of(args, shell=shell):
-        if not _is_sparkrun_name(program):
-            continue
-        resolved = _resolves_to_live(program)
+    for candidate in _sparkrun_candidates(args, shell=shell):
+        reason = _violates(candidate)
+        resolved = _resolves_to_live(candidate)
         if record:
             _record({"argv": _argv_snapshot(args), "resolved": resolved,
-                     "blocked": resolved is not None, "why": "sparkrun argv"})
-        if resolved:
-            return (f"argv invokes {program!r} which resolves to the operator's "
-                    f"REAL sparkrun CLI at {resolved}")
+                     "blocked": reason is not None, "why": "sparkrun argv"})
+        if reason:
+            return reason
     return None
 
 

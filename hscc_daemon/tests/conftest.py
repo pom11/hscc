@@ -312,12 +312,14 @@ def _hermetic_topology():
     (``monkeypatch.setattr(serving, "VLLM_HEALTH_URL", ...)``) and let a check
     read another (``serving.PRIMARY_NODE``) would otherwise trigger a REAL
     resolution inside the test — including the ``sparkrun cluster list --json``
-    fallback shell-out, which the ``HSCC_SPARKRUN_BIN`` override does NOT cover
-    (it is a ``shell=True`` command string). Materialising the defaults here
-    costs no I/O, keeps ``setattr``-style patches (raising=True) working, and
-    teardown hands the names back to the lazy mechanism so every test starts
-    unresolved. Tests that want resolution call ``resolve_cluster_config()``
-    themselves (or delete these globals explicitly).
+    fallback shell-out (since t_be4b94ca a list argv built by
+    ``sparkrun_bin.argv``, so ``HSCC_SPARKRUN_BIN`` DOES cover it now, but a
+    test that never intended to resolve topology must still not reach even the
+    hermetic fake). Materialising the defaults here costs no I/O, keeps
+    ``setattr``-style patches (raising=True) working, and teardown hands the
+    names back to the lazy mechanism so every test starts unresolved. Tests
+    that want resolution call ``resolve_cluster_config()`` themselves (or
+    delete these globals explicitly).
     """
     from hscc_daemon import serving
 
