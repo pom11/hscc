@@ -783,6 +783,79 @@ def test_flow_leaves_no_stray_file_in_the_tap(tap, served, monkeypatch):
 
 # ── 5. structural guarantees ─────────────────────────────────────────────────
 
+WORKFLOWS = REPO / ".github" / "workflows"
+OPTIONAL_WF = WORKFLOWS / "bump-homebrew-tap.yml.disabled"
+
+
+def test_the_optional_workflow_is_inert_on_github():
+    """Transport (b) is checked in but MUST be inert: a workflow GitHub loads would
+    fire on every `release: published` and go red on a missing secret, which is how
+    release noise trains people to ignore red. `gh` never reads a `.disabled` file."""
+    live = sorted(p.name for p in WORKFLOWS.glob("*.yml")) + \
+        sorted(p.name for p in WORKFLOWS.glob("*.yaml"))
+    for name in live:
+        body = (WORKFLOWS / name).read_text(encoding="utf-8")
+        assert "homebrew" not in body.lower(), \
+            f"{name} is a LOADED workflow that touches the tap — that is the " \
+            f"needs-secret transport and it must ship as .disabled"
+        assert "release:" not in body or name != "bump-homebrew-tap.yml"
+    assert OPTIONAL_WF.is_file()
+
+
+def test_the_optional_workflow_documents_its_own_gates():
+    """Both switches must be spelled out: the secret the operator creates and the
+    repo variable that flips the job on (plus why the secret cannot be the gate)."""
+    body = OPTIONAL_WF.read_text(encoding="utf-8")
+    assert "on:" in body and "release:" in body and "published" in body
+    assert "HSCC_TAP_PUSH_TOKEN" in body              # the secret it needs
+    assert "TAP_BUMP_ENABLED" in body                 # the variable that gates it
+    assert "if: vars.TAP_BUMP_ENABLED" in body        # skip, never red
+    assert "scripts/bump_formula.py" in body          # it runs the SAME script
+    assert "gh auth login --with-token" in body       # token never on a URL/argv
+    for phrase in ("DO NOT CREATE THE SECRET", "needs-secret", "fine-grained PAT"):
+        assert phrase.lower() in body.lower(), phrase
+
+
+def test_the_optional_workflow_is_valid_yaml_once_enabled():
+    """The file must need no editing to be enabled beyond the rename + secret, so
+    it has to parse today. Skipped if PyYAML is absent (stdlib has no YAML)."""
+    import importlib.util
+    if importlib.util.find_spec("yaml") is None:
+        pytest.skip("PyYAML not importable in this interpreter")
+    import yaml
+    doc = yaml.safe_load(OPTIONAL_WF.read_text(encoding="utf-8"))
+    # PyYAML resolves the bare `on:` key to True (YAML 1.1 bool), which is why this
+    # reads both spellings rather than asserting doc["on"].
+    trig = doc.get("on", doc.get(True))
+    assert trig["release"]["types"] == ["published"]
+    job = doc["jobs"]["bump"]
+    assert job["if"] == "vars.TAP_BUMP_ENABLED == 'true'"
+    assert doc["permissions"]["contents"] == "read"
+    steps = job["steps"]
+    assert any("bump_formula.py" in str(s.get("run", "")) for s in steps)
+    # The token reaches the shell only through an `env:` mapping: a `${{ }}` inline
+    # in a `run:` block is a value GitHub substitutes BEFORE the shell sees it, so
+    # it would land in the step script (and in `ps` for the shell process).
+    for s in steps:
+        assert "secrets." not in str(s.get("run", "")), \
+            f"step {s.get('name')!r} inlines a secret into the shell script"
+    auth = [s for s in steps if "with-token" in str(s.get("run", ""))][0]
+    assert auth["env"]["GH_TOKEN"].startswith("${{ secrets.")
+
+
+def test_bump_formula_is_not_part_of_the_deployed_plugin_payload():
+    """scripts/ is the repo's own tooling (absent from install_payload's default
+    payload); a new script there must not quietly become something bootstrap ships."""
+    import importlib.util
+    payload_py = REPO / "hscc-bootstrap" / "install_payload.py"
+    spec = importlib.util.spec_from_file_location("install_payload_for_bump_test",
+                                                  payload_py)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "scripts" not in mod.DEFAULT_PAYLOAD
+
+
 def test_the_script_carries_no_address_pattern_of_its_own():
     """Same idiom as test_ledger_scrub.py: detection lives in the guard. This script
     imports the guard's find_in_text and shells out to the guard file — it must not

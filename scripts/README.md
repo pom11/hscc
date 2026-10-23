@@ -87,6 +87,67 @@ hook treats `2` as a block too — a guard that cannot run must not wave a commi
 through). Do not `git commit --no-verify` past it on a docs file: that is exactly
 how the 2026-10-08 leak shipped.
 
+## Tap bump (`bump_formula.py`) — the release step that edits Homebrew
+
+`pom11/homebrew-hscc` installs hscc from the GitHub **release tarball**, so its
+`Formula/hscc.rb` pins three facts about a release: the archive `url`, its
+`sha256`, and (implicitly) the version. Until t_a946834f all three were
+hand-edited at release time — the step that gets forgotten, after which the tap
+keeps serving the previous release while `CHANGELOG.md` and GitHub's `latest`
+say otherwise, and the only symptom is a user silently installing an old build.
+
+```bash
+python3 scripts/bump_formula.py --tag v2.13.0 --dry-run   # read-path only
+python3 scripts/bump_formula.py --tag v2.13.0             # commit + push the tap
+```
+
+Run it from the release card / orchestrator gate, right after the tag is pushed.
+Nothing is typed in and nothing is trusted:
+
+| computed | how |
+|---|---|
+| `url` | `https://github.com/pom11/hscc/archive/refs/tags/<tag>.tar.gz` |
+| `sha256` | downloaded and hashed, in a temp file, every run |
+| version | tag minus `v`, cross-checked against the `VERSION` **inside** the tarball |
+
+There is deliberately no `--sha256` flag: Homebrew's only integrity check for the
+tarball *is* that digest, so a value copied from a release body or typed from
+memory is a value that can be wrong. The `VERSION` cross-check is not belt-and-
+braces either — the tap's `test do` block asserts the installed CLI prints the
+formula's version, while `hscc --version` prints the file, so a tag cut without
+bumping `VERSION` installs fine and then fails `brew test hscc` on every machine.
+This catches it where the bytes are.
+
+Two gates run before any tap commit, and either one restores the formula
+byte-for-byte: a Ruby syntax check on the rewritten formula (a formula that does
+not parse breaks `brew tap` for every user of the tap, not just for hscc), and the
+tap's **vendored** `address_guard.py --tracked` — the same file the tap's own CI
+runs, imported or executed rather than reimplemented, so this script carries no
+address pattern of its own.
+
+Only the release-pinned lines move. The formula's `resource` blocks pin PyPI
+(PyYAML, rich, psutil and rich's transitives), not hscc, so they are not this
+release's facts; the rewrite asserts every changed line sits before the first
+`resource "` and that the number of `sha256` lines did not change. It also never
+*adds* a `version` line: the tap's formula has none (Homebrew infers it from the
+url) and `brew audit --strict` treats a redundant one as noise.
+
+Idempotent by design — re-running for the version already pinned writes nothing
+and exits `0` with `up to date`, after re-hashing the archive (so a right version
+with a stale digest is still corrected rather than waved through). Exit codes
+match `address_guard.py`: `0` bumped or up to date, `1` a gate or git step
+rejected it, `2` malformed tag / unreachable tarball / no ruby / no guard — never
+a silent pass. Env overrides for a release host that differs from the operator's:
+`HSCC_TAP_DIR`, `HSCC_TAP_CACHE_DIR`, `HSCC_RELEASE_REPO`, `HSCC_TAP_REPO`,
+`HSCC_ADDRESS_GUARD_PY`, `HSCC_RUBY_BIN`.
+
+`.github/workflows/bump-homebrew-tap.yml.disabled` is the *future* transport: the
+same script on `on: release: published`, which needs a cross-repo write token the
+operator must create. It ships inert (`.disabled` extension, plus a
+`TAP_BUMP_ENABLED` repo-variable gate) — do not create the secret and do not
+rename the file while the release card still runs the script locally, or every
+release grows a red X.
+
 ## README lint (`readme_lint.py`) — R7 gate (audit §3)
 
 `readme_lint.py` enforces the two rules `docs/audits/README_REVIEW_2026-10-15.md`
