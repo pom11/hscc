@@ -15,7 +15,11 @@ task: t_bc5a3fee
   `*/libexec/hscc-*` path shapes), the CLI-shim stage is SKIPPED with the
   reason printed — brew already owns `hscc` on PATH, and a shim into the
   Hermes venv would shadow it with a second, brew-invisible entry point.
-  Non-brew trees keep the previous behaviour byte-for-byte.
+  Non-brew trees keep the previous behaviour byte-for-byte. `hscc_cli`'s own
+  `hscc_daemon` lookup gained a brew-libexec leg (ancestor `libexec/hscc-*`
+  dirs, newest first, checked before `~/.hermes/plugins`) so a brew-installed
+  `hscc` is self-contained: its venv lives inside `libexec/`, where the old
+  sibling/repo candidates never saw the payload.
 ---
 kind: Verified
 order: 1
@@ -32,6 +36,12 @@ order: 1
   and the e2e `hscc bootstrap --dry-run` whose *running* CLI lives inside
   `libexec/venv/lib/python3.11/site-packages`; plus the real-mode pair:
   brew tree skips the shim and completes, non-brew tree still attempts it.
+- `hscc_daemon/tests/test_hscc_cli_libexec_resolution.py`: 4 new cases — the
+  SHIPPED `hscc_cli/__init__.py` source loaded from fabricated brew layouts
+  (libexec/venv site-packages → newest `libexec/hscc-*` payload wins; dirs
+  without `hscc_daemon` skipped; deployed sibling-plugins layout unchanged),
+  with `hscc_daemon*` purged from `sys.modules` around each probe so "which
+  tree won" is measured, not assumed.
 - `hscc_daemon/tests/test_bootstrap_verb.py` + `hscc-bootstrap/tests/` + the
   scripts help-surface/readme-lint gates green on the final tip via
   `scripts/run_tests.sh` (canonical Hermes venv, frozen tree);

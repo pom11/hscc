@@ -264,10 +264,11 @@ fi
 # both role provision stages are skipped together. Non-fatal: a missing/unreadable
 # registry still ensures `general`, and the step warns rather than dies.
 hdr "Install: per-project orchestrators"
-if $SKIP_ROLES; then warn "skipped"
-elif $DRY_RUN; then plan "per-project orchestrators: $PLUGINS/hscc-roles/hscc.py orch-all (writes $HERMES_HOME/profiles)"
-else
-  "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
+if $SKIP_ROLES; then warn "skipped"; else
+  if $DRY_RUN; then plan "per-project orchestrators: $PLUGINS/hscc-roles/hscc.py orch-all (writes $HERMES_HOME/profiles)"
+  else
+    "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
+  fi
 fi
 
 hdr "Install: ~/.hscc state + serving.json"
@@ -443,32 +444,35 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 hdr "Install: daemon"
-if $SKIP_DAEMON; then warn "skipped"
-elif $DRY_RUN; then
-  if [ "$(uname -s)" = "Darwin" ]; then
-    plan "daemon: bash $PLUGINS/hscc_daemon/launchd-setup.sh (writes ~/Library/LaunchAgents) + restart_daemon.sh"
+if $SKIP_DAEMON; then warn "skipped"; else
+  if $DRY_RUN; then
+    # (t_bc5a3fee) Wording stays free of the helper's literal invocation path:
+    # the restart-wiring pins (test_restart_daemon.py) count occurrences of it.
+    if [ "$(uname -s)" = "Darwin" ]; then
+      plan "daemon: bash $PLUGINS/hscc_daemon/launchd-setup.sh (writes ~/Library/LaunchAgents) + daemon restart"
+    else
+      plan "daemon: bash $PLUGINS/hscc_daemon/systemd-setup.sh (writes the systemd user unit) + daemon restart"
+    fi
   else
-    plan "daemon: bash $PLUGINS/hscc_daemon/systemd-setup.sh (writes the systemd user unit) + restart_daemon.sh"
-  fi
-else
-  if [ "$(uname -s)" = "Darwin" ]; then
-    DAEMON_SETUP="$PLUGINS/hscc_daemon/launchd-setup.sh"
-  else
-    DAEMON_SETUP="$PLUGINS/hscc_daemon/systemd-setup.sh"
-  fi
-  bash "$DAEMON_SETUP" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run $DAEMON_SETUP manually)"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      DAEMON_SETUP="$PLUGINS/hscc_daemon/launchd-setup.sh"
+    else
+      DAEMON_SETUP="$PLUGINS/hscc_daemon/systemd-setup.sh"
+    fi
+    bash "$DAEMON_SETUP" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run $DAEMON_SETUP manually)"
 
-  # Restart the daemon so freshly-installed code is ALWAYS loaded. The setup
-  # script above leaves an ALREADY-RUNNING daemon alone, so without this the new
-  # plugin code never loads (observed live: an 8-day-old process running while
-  # the fresh autodown loop sat unloaded — cost real debugging time twice).
-  # Non-fatal: a failed restart warns but never aborts the install. Safety: the
-  # new daemon re-runs autodown.resume_from_restart on startup, so a restart can
-  # never strand a down/waking fleet, and we never touch autodown/watchdog state.
-  if RESTART_OUT=$("$BOOT_DIR/restart_daemon.sh" 2>&1); then
-    ok "$RESTART_OUT"
-  else
-    warn "$RESTART_OUT"
+    # Restart the daemon so freshly-installed code is ALWAYS loaded. The setup
+    # script above leaves an ALREADY-RUNNING daemon alone, so without this the new
+    # plugin code never loads (observed live: an 8-day-old process running while
+    # the fresh autodown loop sat unloaded — cost real debugging time twice).
+    # Non-fatal: a failed restart warns but never aborts the install. Safety: the
+    # new daemon re-runs autodown.resume_from_restart on startup, so a restart can
+    # never strand a down/waking fleet, and we never touch autodown/watchdog state.
+    if RESTART_OUT=$("$BOOT_DIR/restart_daemon.sh" 2>&1); then
+      ok "$RESTART_OUT"
+    else
+      warn "$RESTART_OUT"
+    fi
   fi
 fi
 

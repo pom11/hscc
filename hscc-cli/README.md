@@ -37,14 +37,22 @@ drift. Skip it during bootstrap with `--skip-cli`.
 ## How it works
 
 `hscc_cli/__init__.py` locates the `hscc_daemon` package from the standard
-locations (side-by-side installed plugins, `~/.hermes/plugins`, a repo
-checkout, or `~/dev/hscc` as a fallback), adds that directory to `sys.path`,
-and re-exports `hscc_daemon.hscc.main`. `pyproject.toml` declares
+locations (side-by-side installed plugins, a brew libexec payload root —
+`<prefix>/libexec/hscc-<ver>/hscc_daemon`, newest version first; t_bc5a3fee —
+then `~/.hermes/plugins`, a repo checkout, or `~/dev/hscc` as a fallback),
+adds that directory to `sys.path`, and re-exports `hscc_daemon.hscc.main`.
+The libexec leg is what makes a brew install self-contained: the tap installs
+this package into a venv inside `libexec/`, where neither the sibling nor the
+repo walk-up can see the payload. `pyproject.toml` declares
 `hscc = "hscc_cli:main"` as the console-script entry point.
 
 ## How to test / Links
 
 The package has no suite of its own; the installer that ships it does —
-`python3 -m pytest hscc-bootstrap/tests/test_install_cli.py -q`.
+`python3 -m pytest hscc-bootstrap/tests/test_install_cli.py -q` — and the
+candidate-resolution logic above is pinned by
+`hscc_daemon/tests/test_hscc_cli_libexec_resolution.py` (fabricated brew
+layouts; the shipped module source is loaded from a fake location so its
+own `__file__`-relative resolution runs for real).
 Links: [hscc_daemon](../hscc_daemon/README.md) ·
 [bootstrap](../hscc-bootstrap/README.md)
