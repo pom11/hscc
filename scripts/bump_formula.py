@@ -614,37 +614,65 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
         return {"status": "dry-run", "version": version, "sha256": digest,
                 "url": url, "changes": changes, "pushed": False, "committed": False}
 
-    # Write path from here on. Every exit restores `original`.
+    # State checks BEFORE the tree is touched: `require_clean` can only mean
+    # "the operator's own dirt" while the formula still matches HEAD, and syncing
+    # first means the bump commit lands on top of origin, never beside it.
     require_clean(tap)
     branch = branch_of(tap)
     sync_tap(tap)
+
+    # A fast-forward can carry someone ELSE's formula edit. Recompute against the
+    # synced bytes rather than writing a rewrite derived from the pre-sync file —
+    # otherwise the bump would silently revert their commit while claiming to only
+    # move three lines. If the synced formula already pins this release, their push
+    # did the job and this run has nothing to do.
+    if formula.read_text(encoding="utf-8") != original:
+        original = formula.read_text(encoding="utf-8")
+        current = formula_version(original)
+        new_text, changes = rewrite_formula(original, version, digest, url=url)
+        guard = load_guard(tap)
+        check_text(guard, new_text, f"proposed {FORMULA_REL} (after sync)")
+        if not changes:
+            print(f"up to date after sync: origin already pins v{version}")
+            return {"status": "up-to-date", "version": version, "sha256": digest,
+                    "url": url, "changes": [], "pushed": False, "committed": False}
+
+    # `wrote` makes the restore exact: once the commit has landed the formula
+    # content IS the released state, so a later failure must not roll the tap back
+    # to the old pin and leave a commit on top of it describing a file that file no
+    # longer is.
+    wrote = False
     try:
         formula.write_text(new_text, encoding="utf-8")
         ruby_check(formula)
         guard_tracked(tap)
-    except BumpError:
-        formula.write_text(original, encoding="utf-8")
+        _git(tap, ["add", "--", FORMULA_REL])
+        # The message carries no paths, no usernames, no hosts: it lands in a public
+        # repo. `--no-verify` is never needed here because the same content has just
+        # passed the tap's own vendored guard.
+        subject = f"hscc.rb: bump to {version} for release {tag}"
+        body = (f"Automated by scripts/bump_formula.py from the {tag} release tarball.\n"
+                "sha256 computed from the archive at publish time; the tap's ruby "
+                "syntax check and address guard both ran on the committed tree.")
+        _git(tap, ["commit", "-m", subject, "-m", body])
+        wrote = True
+    except BaseException:
+        if not wrote:
+            formula.write_text(original, encoding="utf-8")
         raise
-    except Exception:
-        formula.write_text(original, encoding="utf-8")
-        raise
-
-    # The message carries no paths, no usernames, no hosts: it lands in a public
-    # repo. `--no-verify` is never needed here because this repo's own commit-time
-    # guard is what just passed over the same content.
-    subject = f"hscc.rb: bump to {version} for release {tag}"
-    body = (f"Automated by scripts/bump_formula.py from the {tag} release tarball.\n"
-            f"sha256 computed from the archive at publish time; ruby -c and the "
-            f"tap's address guard both ran on the committed tree.")
-    _git(tap, ["add", "--", FORMULA_REL])
-    _git(tap, ["commit", "-m", subject, "-m", body])
 
     pushed = False
-    if push:
-        _git(tap, ["push", "origin", f"HEAD:refs/heads/{branch}"])
-        pushed = True
-    print(("pushed " if pushed else "committed (not pushed; --no-push) ")
-          + f"{FORMULA_REL} -> {version}")
+    try:
+        if push:
+            _git(tap, ["push", "origin", f"HEAD:refs/heads/{branch}"])
+            pushed = True
+    except BumpError as exc:
+        raise BumpError(f"{exc}\n  The bump commit is in the tap checkout but was NOT "
+                        "pushed — fix the remote (auth, or a non-fast-forward) and "
+                        "re-run: the commit is already there, so re-running will only "
+                        "push it.") from exc
+    print(f"{'pushed' if pushed else 'committed (not pushed; --no-push)'} "
+          f"{FORMULA_REL} -> {version} (tap: {tap})")
     return {"status": "bumped", "version": version, "sha256": digest, "url": url,
             "changes": changes, "pushed": pushed, "committed": True}
 

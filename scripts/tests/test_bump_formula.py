@@ -570,6 +570,48 @@ def test_a_non_ff_divergence_is_refused_and_leaves_the_tree_alone(tap, served,
         formula_text("2.11.0", OLD_SHA)
 
 
+def test_a_formula_edit_on_origin_during_sync_is_not_reverted(tap, served, monkeypatch):
+    """The race the sync introduces: origin moves between the read and the write and
+    carries SOMEONE ELSE'S formula edit. The bump must land on top of their work,
+    not silently revert it while claiming to move only three lines."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    peer = peer_clone(tap, "peer3")
+    edit = formula_text("2.12.0", OLD_SHA).replace('  license "MIT"',
+                                                   '  license "MIT"  # re-audited')
+    (peer / "Formula" / "hscc.rb").write_text(edit, encoding="utf-8")
+    _git(peer, ["commit", "--quiet", "-am", "re-audit the licence"])
+    _git(peer, ["push", "--quiet", "origin", "HEAD:refs/heads/main"])
+
+    res = bf.bump("v2.13.0", tap_dir=str(tap))
+    assert res["status"] == "bumped"
+    text = (tap / "Formula" / "hscc.rb").read_text(encoding="utf-8")
+    assert "# re-audited" in text, "the bump reverted the commit it fast-forwarded"
+    assert "v2.13.0.tar.gz" in text and res["sha256"] in text
+    assert len(text.split("\n")) == len(edit.split("\n"))   # in-place, no new lines
+
+
+def test_origin_already_pinning_the_version_after_sync_is_a_noop(tap, served,
+                                                                 monkeypatch, capsys):
+    """Another push did the bump between our read and our write: nothing to do."""
+    env_for(monkeypatch)
+    path = served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    peer = peer_clone(tap, "peer4")
+    (peer / "Formula" / "hscc.rb").write_text(formula_text("2.13.0", sha256_of(path)),
+                                              encoding="utf-8")
+    _git(peer, ["commit", "--quiet", "-am", "hscc.rb: bump to 2.13.0 for release v2.13.0"])
+    _git(peer, ["push", "--quiet", "origin", "HEAD:refs/heads/main"])
+    peer_tip = _git(peer, ["rev-parse", "HEAD"])
+
+    res = bf.bump("v2.13.0", tap_dir=str(tap))
+    assert res["status"] == "up-to-date" and res["committed"] is False
+    assert "up to date after sync" in capsys.readouterr().out
+    # origin/main is still exactly the commit that did the bump — this run added none
+    assert _git(tap, ["rev-parse", "origin/main"]) == peer_tip
+
+
 def test_a_broken_formula_is_restored_and_never_committed(tap, served, monkeypatch):
     """ruby -c is a gate: force it to reject the rewrite and the tap must be
     byte-identical afterwards with no commit."""
