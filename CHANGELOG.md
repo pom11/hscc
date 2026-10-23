@@ -11,6 +11,228 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.13.0] - 2026-10-24
+
+### Added
+- **`hscc update --check` — the version check that never touches the
+  install.** New read-only verb: queries the GitHub releases API for the
+  latest tag (5 s timeout; authenticated `gh` when present, plain
+  anonymous HTTPS otherwise, so public CI works), compares it to the
+  `VERSION` file through the same `_get_version()` `hscc --version` uses,
+  and prints the exact upgrade command for the detected install mode —
+  `brew upgrade hscc` under Homebrew, `git -C <repo> pull` +
+  `hscc bootstrap --yes` (script fallback named too) in a dev checkout,
+  both commands when the layout is unrecognisable. NO auto-upgrade
+  anywhere: the only write is the 24 h cache at
+  `~/.hscc/update-check.json`. Install-mode detection prefers the
+  `.hscc-brew-libexec` marker the tap drops (path-shape fallback), then a
+  `.git` checkout — brew first, because a brew tree has no `.git` and
+  would otherwise be told to `git pull` in a directory that is not a
+  repo.
+- **Cached once-a-day notices, loud/quiet per surface.** `hscc status`
+  reads the cache ONLY (never fetches, can never fail) and appends one
+  INFO line when the cache says newer and is ≤ 24 h old. The daemon
+  piggybacks the daily check on the existing `run_heartbeat_loop` body —
+  no new `PERIODIC_INTERVALS` stream — logs one WARN
+  (`HSCC vX.Y.Z available (installed vA.B.C); upgrade: <cmd>`), never
+  ERRORs, never raises. A failed check does not poison the cache: the
+  last good answer survives on disk and the next run retries. The
+  explicit verb is the only loud surface — offline or rate-limited it
+  prints one short stderr line and exits 1.
+- **`scripts/bump_formula.py` — the release step that bumps the Homebrew tap
+  formula, so a tag lands in `pom11/homebrew-hscc` with no hand edits.**
+  `Formula/hscc.rb` pins three facts about a release (archive `url`, its
+  `sha256`, and the version Homebrew infers from the url) and all three used to
+  be edited by hand at release time — the step that gets forgotten, after which
+  the tap keeps serving the previous release while `CHANGELOG.md` and GitHub's
+  `latest` say otherwise, with no symptom but a user silently installing an old
+  build. `python3 scripts/bump_formula.py --tag v2.13.0` computes all three from
+  the archive itself: **there is no `--sha256` flag**, because that digest is
+  Homebrew's only integrity check for the tarball and a value copied from a
+  release body is a value that can be wrong. The tag's version is cross-checked
+  against the `VERSION` file **inside** the tarball — load-bearing, not
+  belt-and-braces: the tap's `test do` asserts `hscc #{version}` against the tag
+  while `hscc --version` prints the file, so a tag cut without bumping `VERSION`
+  installs cleanly and then fails `brew test hscc` on every machine, and this is
+  the one place that has the bytes to catch it.
+  Only the release-pinned lines move: the formula's `resource` blocks pin PyPI,
+  not hscc, so the rewrite asserts every changed line sits before the first
+  `resource "` and that the number of `sha256` lines did not change (a formula
+  shape that would swallow a PyPI digest fails loudly instead). It never *adds* a
+  `version` line — the tap has none and `brew audit --strict` treats a redundant
+  one as noise. `ruby -c` and the tap's vendored `address_guard.py --tracked`
+  both run before the commit and restore the formula byte-for-byte if either
+  rejects it; the guard is imported/shelled out to, never reimplemented, so this
+  script carries no address pattern of its own. Idempotent: a current version
+  exits `0` "up to date" (after re-hashing, so a stale digest is still
+  corrected). Exit codes match `address_guard.py` (`2` = could not run: malformed
+  tag, unreachable tarball, no ruby, no guard — never a silent pass).
+  `.github/workflows/bump-homebrew-tap.yml.disabled` is the optional
+  `on: release: published` transport, checked in inert: enabling it needs a
+  cross-repo write token the operator creates, and it also gates on a
+  `TAP_BUMP_ENABLED` repo variable so it can never paint every release red before
+  that exists. No secret was created and none is enabled here.
+- **`hscc bootstrap` verb + `--dry-run` + brew-libexec-aware CLI-shim skip.**
+  `hscc bootstrap [flags]` locates `bootstrap.sh` relative to the resolved
+  source root — repo checkout, deployed `$HERMES_HOME/plugins` copy, or a brew
+  libexec tree (`<prefix>/Cellar/hscc/<ver>/libexec/hscc/`, version-stable as
+  the shipped tap installs it; a versioned `libexec/hscc-<ver>/` is honoured
+  too) — and execs it with every remaining argv token passed through
+  (`--yes`, `--dry-run`, `--skip-*`); `HSCC_BOOTSTRAP_SH` overrides the lookup
+  outright. `bootstrap.sh --dry-run` prints every planned write (plugin
+  payload, CLI shim, watchdog scripts, git hooks, skills, role profiles,
+  per-project orchestrators, `~/.hscc` state + serving.json, patches, config
+  wiring, SOUL, review feature, trigger rules, daemon) and performs none.
+  When the installer runs from a brew libexec root (marker file
+  `.hscc-brew-libexec` if a tap writes one, or the `*/Cellar/*` /
+  `*/libexec/hscc-*` path shapes — the shipped formula drops no marker, so
+  `*/Cellar/*` is what fires on a real keg), the CLI-shim stage is SKIPPED
+  with the reason printed — brew already owns `hscc` on PATH, and a shim
+  into the Hermes venv would shadow it with a second, brew-invisible entry
+  point.
+  Non-brew trees keep the previous behaviour byte-for-byte. `hscc_cli`'s own
+  `hscc_daemon` lookup gained a brew-libexec leg (ancestor `libexec/hscc` and
+  `libexec/hscc-*` dirs, newest first, checked before `~/.hermes/plugins`) so
+  a brew-installed `hscc` is self-contained: its venv lives inside
+  `libexec/`, where the old sibling/repo candidates never saw the payload.
+
+### Changed
+- **README install story is brew-first.** `brew tap pom11/hscc && brew
+  install hscc` followed by `hscc bootstrap --yes` is now THE quick start;
+  the `git clone` + `bootstrap.sh` flow is relabelled "Install from source
+  (development)" and is where a contributor goes, not where a user goes. The
+  division of labour is stated where a reader will hit it: `brew install`
+  stays inside its own keg and writes nothing into `~/.hermes` or `~/.hscc`,
+  and `hscc bootstrap` is the step that does (with the CLI-shim stage skipped
+  on a keg, because brew owns `hscc` on PATH), including the fallback the
+  formula's own caveats print for a keg that predates the `bootstrap` verb.
+  New **Upgrade** table — `brew upgrade hscc` + re-bootstrap vs `git pull` +
+  re-bootstrap — and a new **Check whether you are behind** section
+  documenting `hscc update --check` from the merged implementation: the quiet
+  up-to-date one-liner, the `installed:` / `latest:` / `upgrade:` block, the
+  one-line stderr + exit 1 offline behaviour, the 24 h cache at
+  `~/.hscc/update-check.json` that `hscc status` reads without ever fetching,
+  and the daemon's once-a-day WARN line. Every quoted command and every
+  quoted output line was copied from the merged tree / merged tap formula,
+  not written from memory. Docs only — no code changed.
+
+### Verified
+- Documented surface re-verified against merged reality before writing: the
+  tap's `Formula/hscc.rb` at `pom11/homebrew-hscc@main` (keg layout,
+  `hscc --version` works pre-bootstrap, its own caveats text names
+  `hscc bootstrap --yes` as the next step and the script form as the
+  fallback); `hscc_daemon/hscc.py` `COMMAND_HELP["bootstrap"]` /
+  `COMMAND_HELP["update"]`; `hscc_daemon/update_check.py`
+  `format_check_result` + `upgrade_command` + `daemon_tick` and
+  `hscc_daemon/cli.py::_print_update_notice` — the quoted output lines are the
+  strings pinned string-for-string in `hscc_daemon/tests/test_update_check.py`.
+- `python3 scripts/readme_lint.py README.md` 0 findings,
+  `python3 scripts/address_guard.py --tracked` rc=0,
+  `python3 scripts/changelog_fragments.py check` rc=0, and
+  `scripts/run_tests.sh` green (canonical venv, frozen tree).
+- `hscc_daemon/tests/test_update_check.py`: 65 new cases, zero live
+  network (injected fetch stubs + a fencing `urlopen` that fails the
+  test if a real socket opens): newer/older/equal tags; brew/dev/unknown
+  upgrade-command strings incl. the "brew tree has no .git" order pin;
+  offline -> status unchanged + no daemon error-level line; the
+  `checked_at` TTL boundary (24 h == fresh, 24 h + 1 s stale, future
+  stamps never usable); malformed cache JSON; unwritable cache; failed
+  check leaves the good cache byte-identical.
+- `~/.hscc` leak guard extended: conftest redirects
+  `update_check.CACHE_FILE` (kept as a `~`-template so the runtime
+  `expanduser` redirect covers it) and the sandbox plants an
+  `update-check.json` so both leak shapes — new file and overwrite —
+  trip the manifest diff. Full suite green (canonical venv, frozen
+  tree); `address_guard --tracked` and `changelog_fragments check` rc=0.
+- **Real dry run against the live tap for the current version**:
+  `python3 scripts/bump_formula.py --tag v2.12.0 --dry-run --tap <tap checkout>`
+  → `up to date: Formula/hscc.rb already pins v2.12.0 (sha256 f17b764350c2…
+  re-hashed from the live tarball and it matches)`, rc=0 in 2.3 s — the digest
+  this run computed from the real v2.12.0 archive equals the one the tap pins and
+  equals the one the tap-creation card recorded. Tap left untouched (`git status`
+  clean), no tap commit, no push. Read-path proven against the real formula; the
+  write-path gets exercised by the v2.13.0 release, which is the orchestrator's
+  step, not this card's.
+- **Write-path rehearsal WITHOUT touching the real tap**: cloned the tap (and a
+  bare remote) into the scratch dir, built a v2.13.0-shaped tarball with a real
+  `VERSION` inside, ran the script with `--tarball` against that clone: rc=0,
+  exactly 2 lines changed in the real formula (`Formula/hscc.rb | 4 ++--`), all
+  six PyPI resource digests byte-identical, commit message trailer-free, pushed
+  into the scratch remote, `ruby -c` on the result prints `Syntax OK`, and a
+  re-run says `up to date` rc=0 — idempotency proven against the tap's REAL
+  formula layout, not just the test fixture. The real tap checkout is untouched:
+  HEAD still `3992b9c`, `git status --porcelain --untracked-files=all` empty.
+  (The v2.13.0 release tag itself will exercise the live push, per the card: this
+  card must NOT push a tap change for 2.12.0.)
+- `scripts/tests/test_bump_formula.py`: **80** cases (the `scripts` leg of
+  `run_tests.sh`). The flow tests run against a fabricated tap in `tmp_path` — a
+  real git repo with a real local bare `origin` named `homebrew-hscc`, the REAL
+  vendored guard copied in, the REAL `ruby` — and monkeypatch ONLY the network
+  fetch, so the hash, the `VERSION` read, the rewrite, `ruby -c`, the guard and
+  every git step (including the push, into a local bare repo) are the real code.
+  Card-named cases, each pinned: url/sha/version rewritten and nothing else
+  (resource digests asserted unchanged, line count unchanged); non-semver tags
+  rejected (12 forms); already-current = no-op with no commit; hash failure and
+  `VERSION` mismatch leave the tree byte-identical with no commit; and the guard
+  as part of the flow — a tap tree carrying a real-LAN line fails the bump rc=1
+  with **no commit and no push**, and a leak inside the formula is caught before
+  anything is written. Structural gates in the `test_ledger_scrub.py` idiom: the
+  script carries no address pattern and no `--sha256` option (asserted by the CLI
+  rejecting one, not by grepping prose), and the optional workflow is not a file
+  GitHub would load.
+- Cases beyond the card's list, each one a way the tool could have lied about a
+  release: `up to date` is treated as a claim about the PUBLIC tap, so it is only
+  made after the checkout has been synced onto origin and found to carry no
+  unpushed commit — an unpushed bump commit is *published* (`status: bumped`,
+  `recovered_push: true`) instead of being reported as fine, and with `--no-push`
+  the run refuses rather than green-lighting a release the tap does not serve; the
+  recovery push runs `ruby -c` and the guard over the committed tree first, because
+  that commit was written by someone else and has never been through them; a
+  pin that exists only as an uncommitted hand edit is refused, not committed as
+  the tool's own work; a checkout that has diverged is refused, never rebased
+  into public history; unpushed commits touching files besides the formula stop a
+  push, because publishing an operator's private tap work to a public repo is a
+  disclosure decision, not a release step; and a `git`/`ruby`/guard step that
+  hangs surfaces as `CannotRun` (rc=2) naming the hung step, not a traceback.
+- `hscc_daemon/tests/test_bootstrap_verb.py`: 20 new cases — locator across
+  the three roots (repo sibling, deployed plugins, brew libexec incl. the
+  `libexec/venv` site-packages walk-up + newest-version glob), env override,
+  argv pass-through, exit-code propagation, exec-bit fallback, and the
+  raw-argv `-h`/`--help` intercept that must never exec the installer.
+- `hscc-bootstrap/tests/test_bootstrap_dry_run.py`: 8 new cases on fabricated
+  trees only — a fake brew prefix under tmp_path with the real venv symlinked
+  as a directory and a stub `sparkrun`; snapshot-diff asserts zero writes
+  under `HERMES_HOME`/`HSCC_DIR` across dry-run, skip-flag, preflight-failure
+  and the e2e `hscc bootstrap --dry-run` whose *running* CLI lives inside
+  `libexec/venv/lib/python3.11/site-packages`; plus the real-mode pair:
+  brew tree skips the shim and completes, non-brew tree still attempts it.
+- `hscc_daemon/tests/test_hscc_cli_libexec_resolution.py`: 4 new cases — the
+  SHIPPED `hscc_cli/__init__.py` source loaded from fabricated brew layouts
+  (libexec/venv site-packages → newest `libexec/hscc-*` payload wins; dirs
+  without `hscc_daemon` skipped; deployed sibling-plugins layout unchanged),
+  with `hscc_daemon*` purged from `sys.modules` around each probe so "which
+  tree won" is measured, not assumed.
+- Shipped-tap layout pins (t_0f5616fd, +11 cases): the merged
+  `pom11/homebrew-hscc` formula installs at the version-STABLE
+  `Cellar/hscc/<ver>/libexec/hscc` and drops no marker, so every tree above
+  fabricated a shape `brew install` never produces. New fabricated-keg cases:
+  `hscc_cli` resolves the payload through the formula's relative
+  `site-packages/plugins -> ../../../../hscc` symlink (a `~/.hermes/plugins`
+  decoy must NOT win); `_resolve_bootstrap_script()` finds the installer from
+  both real roots — through that symlink, and from a venv site-packages copy
+  — with no `hscc-*` dir and no marker, ahead of the `$HERMES_HOME/plugins`
+  copy; the shim skip fires from the `*/Cellar/*` shape in dry-run (prints
+  the reason) and in real mode (completes, rc 0); plus an e2e
+  `hscc bootstrap --dry-run` whose dispatcher is imported through the
+  symlink. The stable `libexec/hscc` name is a real fix, not a test-only
+  tweak: `_resolve_bootstrap_script()` gained the stable candidate (removing
+  it fails exactly the two new locator cases — mutation-checked) and
+  `hscc_cli._libexec_daemon_dirs()` gained it too, so a keg whose
+  `plugins` symlink is missing still resolves the keg's own daemon.
+- `hscc_daemon/tests/test_bootstrap_verb.py` + `hscc-bootstrap/tests/` + the
+  scripts help-surface/readme-lint gates green on the final tip via
+  `scripts/run_tests.sh` (canonical Hermes venv, frozen tree);
+  `python3 scripts/address_guard.py --tracked` rc=0.
 ## [2.12.0] - 2026-10-23
 
 ### Added
