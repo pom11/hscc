@@ -11,6 +11,593 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.12.0] - 2026-10-23
+
+### Added
+- **Declaration <-> live agreement (template-declarations spec §6, pure-read)**:
+  `hscc project doctor` gains a fourth section and `hscc verify` gains the
+  `declaration_agreement` check — the C3 half of
+  `docs/design/2026-10-15-template-declarations.md`, reading the nested
+  `declarations` record C2 writes into
+  `~/.hscc/applied_template.json` (§7) and comparing it, across the four legs
+  exactly as §6 numbers them, against live state:
+  **hermes_endpoints** (each declared endpoint consumer carries the declared
+  target's URL/alias in root config and each matched profile — the
+  provider_routing fleet-node scan stays untouched; this is the positive
+  half, incl. the §1.2 "model.base_url and custom.base_url are literally the
+  same value" invariant),
+  **proxy_declaration** (`~/.config/sparkrun/proxy.yaml` vs the applied
+  `proxy:` block — `router_settings` read NESTED FIRST per the 2026-10-19
+  addendum via proxy_router's one implementation, and the §2.2 blessed
+  `least-in-flight` default expected under `uniform_pool`),
+  **balancer_pair** (cross-ref t_39d7c915 — ONE implementation referenced not
+  duplicated: proxy.yaml asking for `balancing` requires the generated
+  config's `litellm_settings.callbacks` AND `sparkrun_balancer.py` next to it;
+  drift is WARN, never fail, never repaired),
+  and **live_model_info** (each routed target's `/v1/model/info` model set
+  covers the ids the applied `endpoints:` routes to).
+- **Fail-closed doctrine (spec §6 / provider_routing / t_ac795424)**: PURE
+  READ — never repairs, never restarts; any leg that cannot be read (no
+  applied state, no proxy.yaml, unreachable proxy) is UNVERIFIED (`ok=None`),
+  never a silent pass, and in `hscc project doctor` an unverified leg exits
+  non-zero exactly like a disagreement. Remediation text names
+  `hscc cluster monitor --live` as the load-instrument (§3.2) and the
+  operator cutover unit for any restart (§2.3 + addendum item 4). Node
+  addresses are never resolved here: the fleet-node half stays with
+  `provider_routing`'s sparkrun `resolve_hosts` path — this module reads only
+  loopback URLs from the applied record and the configs.
+- **Test surface**: fakes only (injectable applied state / configs /
+  proxy.yaml / litellm config / `_http_get`), placeholders `10.0.0.x` /
+  `100.64.0.1` only. New `hscc_daemon/tests/test_declaration_agreement.py`
+  (43 tests: every leg in ok / problem / unverified / not-applicable, the
+  nested-vs-top-level router_settings read, the WARN-never-fail balancer
+  doctrine, one fetch per distinct target URL at `/v1/model/info`, and the
+  fail-closed aggregation ORDER — a False leg beats a None leg when both
+  are present) and `hscc-project/tests/test_doctor_declaration.py` (9
+  tests: section renders, unverified exits non-zero, missing peer module is
+  UNVERIFIED not a crash). A 10-mutation battery was run against the suite:
+  9/10 CAUGHT first pass; m7 (aggregation precedence softened a disagreement
+  into unverified) SURVIVED and is now pinned by
+  `test_false_beats_none_when_both_present` — re-run 10/10 CAUGHT. The
+  `verify.run_all()` check list grows 12 -> 13 (pins updated).
+- **Template declarations C1 — the `endpoints:` / `proxy:` / `caps:`
+  validate layer (spec `docs/design/2026-10-15-template-declarations.md`
+  §1/§2/§3/§5).** `hscc-cluster/cluster_template.py` now parses and
+  structurally validates the three new declaration blocks under schema
+  `version: 4` (`RECOGNISED_VERSIONS` → `(2, 3, 4)`): symbolic-only endpoint
+  targets (an address under `uniform_pool` is refused), the generic
+  `proxy.families` pass-through dict with known-key / balancer-as-strategy /
+  `least-busy` / global-policy-disagreement rejections, and int-only
+  `caps` with a positive `expected_requests_per_card`. Per §8 every knob the
+  enforcement table marks INERT stays INERT: it validates, it is recorded, and
+  nothing here claims it works. v2/v3 templates carrying the new keys hit the
+  existing legacy-key refusal. `validate_resolved_plan` gains the plan-level
+  leg — under `uniform_pool` an endpoint target must resolve to a family that
+  has a proxy. Overreach guard: `endpoints:` and `proxy:` never reach
+  `ClusterTemplate.to_dict()` or `to_serving_json()`, so a v3 non-uniform
+  template still renders byte-identical (pinned in
+  `hscc-cluster/tests/test_template_declarations.py`). Apply-writes and doctor
+  are separate serial cards.
+- **R7 README lint shipped** (`scripts/readme_lint.py`, gate
+  `scripts/tests/test_readme_lint.py`) per
+  `docs/audits/README_REVIEW_2026-10-15.md` §3: (1) every version-asserting
+  shields.io badge must equal the repo version (root pyproject
+  `[project] version`, else the `VERSION` file — the value `hscc --help`
+  prints; the audit's motivating drift was exactly this); (2) every
+  backticked command quoted in a README must exist on the real CLI surface —
+  `hscc …` tokens go through the CLI-help audit's own `ExampleParser` oracle
+  (reuse, not a second enumeration: deleting a real verb turns the gate red
+  by itself), external CLIs are allow-listed strings per §3, repo scripts
+  must exist in the tree. Verb-EXISTENCE semantics (READMEs quote verbs with
+  required args elided); fenced blocks out of scope (CLI-help (C) pass
+  territory); every skip reason counted in the report; nothing quoted is
+  ever executed. rc convention matches `address_guard.py` (0/1/2, never a
+  silent pass). Anti-vacuity: `scripts/tests/fixtures/readme_lint/{clean,
+  broken}/` — `test_clean_fixture_passes_every_rule` (zero findings on real
+  forms) and `test_broken_fixture_fails_every_rule` (a wrong badge, a fake
+  verb and a dead script each fire, while the matching badge and the fenced
+  fake must not); repo-level mutation probes re-verified at this base.
+  Fixes one README quote found by the gate itself:
+  `hscc-cluster/templates/README.md` quoted the dead `hscc doctor` (audit X
+  column) → `hscc check`.
+- **`docs/audits/README_REVIEW_2026-10-15.md`** — repo-wide README audit
+  (docs lane, step 1 of the cleanup requested on 2.9.0). Per-file
+  keep/rewrite/merge/delete verdicts with file:line evidence for all 22
+  user-facing READMEs + 3 prior audit reports; target-state spec for the
+  R1–R7 rewrite fan-out (root <150 lines with ASCII stack diagram and chunk
+  destinations, plugin template, ios quickstart-on-top, docs/ index);
+  per-file command inventory feeding the R7 lint card (real template +
+  registry names measured live); flightdeck-survival ledger; prior-audit
+  reconciliation (t_0ae232a4 / t_d90de5b6 / t_6b51ef5b) incl. the version
+  badge regression and the two `hscc doctor` ghosts; sequencing notes.
+- **`hscc template apply` now writes the v4 declarations** (`endpoints:`,
+  `proxy:`, `caps:`) instead of deciding routing by heuristic
+  (docs/design/2026-10-15-template-declarations.md §4 apply behavior + §7
+  migration). `endpoints:` is the single computation point for the hermes-facing
+  consumers (spec §1.2 table): `chat_url` + the probe-resolved alias are decided
+  once from the declaration at the top of `_update_hermes_config` and both
+  consumers (model block, `custom` provider) read that one value;
+  `delegation`/`fallback_providers` and role profiles follow the declared
+  targets, and an OMITTED consumer is left untouched (same doctrine `routing:`
+  already had — step 5's `skip_delegation = routing is not None` heuristic is
+  gone). `proxy:` lands `gateways.litellm.balancing` in `proxy.yaml` EXCLUSIVELY
+  through sparkrun's own write path (sparkrun's `ProxyConfig` read-modify-write +
+  lock + atomic save, driven under sparkrun's venv python the way
+  `hscc_daemon/health.py` drives its status script) — hscc never opens the file
+  and never hand-crafts `proxy.yaml`/`litellm_config.yaml`. `caps.max_in_progress`
+  / `max_in_progress_per_profile` are written when declared; the §3.1 derivation
+  is DERIVED AND REPORTED only (advisory — its input is INERT per §8).
+  `applied_template.json` records the resolved declarations (nested under one
+  `declarations` key, so "declared nothing" and "declared, resolved empty" stay
+  distinguishable) and the C3 doctor reads one file (§7).
+- **§1.1 selector semantics corrected while writing the positive-path tests**:
+  `endpoints.profiles` keys select by PROFILE DIRECTORY name, not by unit role —
+  so the spec's own `"*-orch"` example now resolves. Enumerating roles made a
+  declared orchestrator-profile route silently no-op while apply reported
+  success; `_declared_profile_names` now lists `profiles/*/config.yaml`
+  directories when given one (and no caller reads the live `~/.hscc/profiles`
+  implicitly any more).
+- **Migration rule §7 is pinned by an overreach guard at the APPLY level**: the
+  full render of a v3 NON-uniform template (config.yaml, serving.json,
+  models.json, applied_template.json, step sequence and per-step report) is
+  byte-identical to a golden captured from the pre-change tree (commit
+  42924ce8, via a re-runnable capture script — provenance re-derivable, not
+  asserted in prose), and the sparkrun proxy write path is asserted to be
+  invoked ZERO times for it. Every new apply leg is reported ONLY when the
+  template declared that block: a no-op step entry would change an untouched
+  template's step sequence, which §7 forbids. The only intended behavior change
+  anywhere is the §2.2 balancing default, which fires under `uniform_pool` only.
+- **No proxy restart from this change.** A changed proxy region reports
+  `restart_required` and names the operator cutover unit
+  (`docs/audits/sparkrun_proxy_venv_cutover.sh`) instead of restarting inline.
+- **Per-unit alias coverage — the blind spot the 15:10 hand-launch exposed.**
+  Two units came up with `--served-model-name` = base name only (an unquoted
+  copy of the `--dry-run` line) and the daemon stayed GREEN for ~2 h: the
+  existing alias check is PROXY-level, so the merged catalogue at `:4000`
+  still contained `worker-model`/`orchestrator-model` (served by the one
+  correctly-launched unit) while every aliased request funneled to it alone.
+  New in `hscc_daemon/health.py`: `unit_expected_aliases` +
+  `check_unit_serving_aliases` — probe each unit's OWN
+  `http://<node>:<port>/v1/models` (uniform_pool: BOTH role aliases per
+  unit; otherwise the unit's own role alias) — surfaced by `check_proxy` as
+  a named WARN + `unit_alias_warn` in the proxy state WITHOUT flipping proxy
+  health (the proxy IS healthy in that shape; a restart fixes nothing), and
+  as FIFTH declaration-agreement leg `unit_alias_coverage` so
+  `hscc project doctor` / `hscc daemon verify` report the same finding
+  fail-closed (unreachable unit = unverified, never ok).
+
+### Changed
+- **`ios-app/README.md` rewritten** (audit R2, `docs/audits/README_REVIEW_2026-10-15.md`).
+  The stale "UNBUILT, UNTESTED AT RUNTIME / never been run" banner is gone — the
+  app now has real green gates (full per-target compile via `build_check.sh`,
+  the XCUITest nav-graph walk of all 17 drawer rows on an iPhone-16-class
+  simulator + 12×2 `capture_screens` set, decode 62/62 against the 54 committed
+  fixtures) and the banner says exactly that, keeping the honest-limits list
+  for what still needs a signed device build (Siri / widget / Live Activities).
+  The IA section now describes the AppShell drawer (17 rows in 4 groups +
+  Home-only 5-verb dock), not the retired three-tab layout; project count is
+  the live registry count (14, 2026-10-19) instead of "twelve"; fixture/decode
+  counts fixed; a quickstart (generate.sh + QR pairing from `hscc api status`)
+  and a "Running the gates" section were added per the audit's target-state
+  spec. History sections (E2E table, B3–C6 strikethroughs) dropped per §2.4 —
+  the E2E table relocation to a dated doc follows up on a separate card.
+- **Root `README.md` rewritten as a <150-line entry point** (144 lines; audit
+  `docs/audits/README_REVIEW_2026-10-15.md` §1.1 + §2.1, card R1 — the LAST
+  R-series rewrite, linking the per-area READMEs in their post-R2–R6 state).
+  Badge fixed to the current `VERSION` (was v2.1.1 vs VERSION 2.11.0 — the
+  third regression of exactly this badge); the false "pure-stdlib / no pip
+  dependencies" claim and badge replaced with the truth from
+  `requirements.txt` (3 pinned deps: PyYAML, rich, psutil); tests badge
+  restated as "5,000+ tests"; `hscc doctor` (a verb that does not exist) gone;
+  dead `flightdeck` prose gone. The topology/serving/template deep-dive and the
+  ~38-line autodown chapter are DELETED from the root (content already lives
+  in `hscc-cluster/templates/README.md` and `docs/design/idle-autodown.md`, to
+  which the root now links); the "Why we built this" gap table moved to new
+  `docs/WHY.md`; the roles/review/autonomy/escalation detail plus the
+  `launchctl kickstart` ops-lore line moved to new `docs/FLEET.md`; the
+  operator-facing autodown sections (cron classification, messages-while-down,
+  never-do list, whole-fleet decision) appended to
+  `docs/design/idle-autodown.md` per §2.1 item 6 — nothing lost. Quickstart
+  reordered into an explicit first-run path (bootstrap `--yes` → `hscc status`
+  → template list/preview/apply → `hscc project standup` → `hscc api start
+  --tailscale` → QR-pair the iOS app) and every quoted command re-verified
+  against the live `--help` surface at this base; counts stated (22 templates,
+  25 role specs, 14 registry projects) measured on disk, not copied from the
+  audit.
+- **`docs/README.md` index closed for the three docs the R-wave added after
+  it was written (docs-only).** R6 rewrote this index as a full enumeration of
+  `docs/`, but it could only enumerate what existed at its own head — R1
+  (#65) then added `docs/FLEET.md` + `docs/WHY.md` and R4 (#61) added
+  `docs/DESIGN-probe-before-write.md`, leaving three files unindexed. Added
+  the three missing one-line Reference-group entries in R6's existing style
+  (what it is + status), all marked **live**, and re-verified the
+  invariant mechanically: `find docs -type f` = 169, git-tracked under
+  `docs/` = 169, unique backticked index entries = 169 (zero missing, zero
+  extra, zero duplicates, no unresolvable entry). The index's own
+  `docs/design/screens/` line is a directory heading, not a file entry, and
+  is excluded from the file count on both sides.
+- **Relocated the 2026-08-27 E2E view → endpoint → model table** out of
+  `ios-app/README.md` history into `ios-app/docs/E2E-API-REVIEW-2026-08-27.md`
+  (the disposition `docs/audits/README_REVIEW_2026-10-15.md` §2.4 asked for but
+  the README-rewrite card could not perform — its diff was restricted to
+  `ios-app/README.md`). The table and "the two fixes this pass made" section are
+  recovered verbatim from pre-rewrite README history; the fixture-count claim is
+  updated (26 → **54 JSONs / 62 decode checks**) and two dispositions are marked
+  HISTORICAL: the `ClusterHostsResponse`/`KanbanStaleResponse` rows document a
+  closed one-time fix, and the `Project → Chat` rows name `OrchestratorChatView`,
+  retired in `ec6a94f0` (the endpoints/models stay live via `AppShell` + Siri
+  intents). `ios-app/README.md` gains a "Further reading" link to the dated doc.
+- **`docs/README.md` rewritten as a full enumeration index.** The old
+  version indexed 3 of 166 files under `docs/`; the new one lists every
+  tracked file exactly once — one line each: what it is + status
+  (live / record / superseded, with the superseder named inline, e.g.
+  `COMPAT-7.30.md` and the README-review triad superseded by
+  `docs/audits/README_REVIEW_2026-10-15.md`, `ROADMAP.draft.md` by
+  `ROADMAP.md`, the v1 iOS design by `IOS_REDESIGN_2026-10-14.md`, the
+  0.3.10-era dep-bump statements by `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`).
+  The verified claims are kept: the `docs/superpowers/` gitignore pointer
+  and the `changelog.d/` authoring rule (the untrue "this deployed copy of
+  docs/ does not carry changelog.d/" aside is gone — the repo root does).
+- **sparkrun runtime bump v0.3.10 -> v0.4.0** (operator-authorized cutover,
+  2026-10-19): `runtime-versions.json` now pins `v0.4.0`. Upstream v0.4.0
+  absorbed both fork proxy features (`router_settings` gateway handling and
+  the least-in-flight balancer), so the deployed fork branch was re-cut as
+  `feat/proxy-least-in-flight-040` off the `v0.4.0` tag (old
+  `feat/proxy-least-in-flight` kept untouched as the rollback line, plus tag
+  `pre-rebase-v040-safety`). `dep_bump_guard` constants and rules updated to
+  the live topology: branch `feat/proxy-least-in-flight-040`, editable
+  checkout `~/dev/sparkrun-live`, venv `.venv-sparkrun-040`, engine path
+  `src/sparkrun/plugins/litellm/engine.py`. Rule text now states that
+  `router_settings.routing_strategy: simple-shuffle` in the generated
+  `litellm_config.yaml` is EXPECTED while the balancer is live (the balancer
+  `callbacks` line is the live signal, not the strategy line) — so the next
+  verifier does not mis-flag a healthy proxy as drift.
+  Verification: `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`.
+- **`docs/audits/SPARKRUN_041_COMPAT_2026-10-20.md` test-evidence section
+  rewritten to the reproducible form.** The record's headline figure ("563
+  pass, 1 fail") could not be reproduced from any selection named as "the
+  proxy/balancer test set" (the 24 files `tests/test_litellm_balancer.py` +
+  `tests/test_proxy*.py` collect 498; `+ test_litellm_query_contract.py` =
+  522; `-k "proxy or balancer"` over `tests/` = 527; whole tree = 13476), and
+  gate evidence needs a selection + tally pair. It now carries the verify-run
+  pair instead — the identical 24-file selection run in `.venv-sparkrun-041`
+  against `~/dev/sparkrun-041-verify @ 1aaa6479` and in `.venv-sparkrun-040`
+  against `~/dev/sparkrun-live @ b5c60edd`: **1 failed, 497 passed on BOTH
+  tags**, same node id
+  `tests/test_proxy_foreground_supervision.py::test_record_from_a_previous_boot_names_no_process`
+  (`assert engine.current_pid() is None`; `/proc/sys/kernel/random/boot_id`
+  absent on macOS, so host-dependent — Linux/DGX classification still owed).
+  The byte-identity argument (whole `src/sparkrun/proxy` package identical
+  across the tags) is kept as the stronger pre-existence proof, and the 563/1
+  figure survives only as a labelled unreproducible historical note pointing
+  at PR #55 comment `6286046217`. Docs-only; no code or test change.
+- **sparkrun runtime bump v0.4.0 -> v0.4.1** (operator-run live cutover,
+  2026-10-20 08:37, via the detached #56 script): `runtime-versions.json`
+  now pins `v0.4.1`. Live fork branch re-cut as
+  `feat/proxy-least-in-flight-041` @ `1aaa6479` (upstream `v0.4.1` + the
+  macOS-spawn test fix), editable at `~/dev/sparkrun-041-verify`, venv
+  `.venv-sparkrun-041`; `-040` kept as the rollback line. The 0.4.1
+  proxy/balancer surfaces hscc rides are byte-identical to 0.4.0 (empty
+  diff over `proxy/config.py`, `plugins/litellm/engine.py`, `serving/`);
+  proxy/balancer tests 563 pass + 1 pre-existing-on-both-tags failure.
+  `dep_bump_guard` constants and the `sparkrun_bridge` live-build comment
+  re-pointed to the new topology. Compatibility record:
+  `docs/audits/SPARKRUN_041_COMPAT_2026-10-20.md`.
+- **Plugin README set refreshed to the audit §2.2 template (R4,
+  docs-only).** All five share the short shape — what it is / when you touch
+  it / how to test / links — and no changelog-style history.
+  `hscc-cli/README.md`: KEEP+polish (template conformance; no stale claim).
+  `hscc-cluster/README.md`: the bare operator-node id `.247` is gone (the
+  moved doc uses the sanctioned `10.0.0.x` placeholder); the
+  Delegation-routing / probe-before-write essay moved out of the plugin front
+  page to `docs/DESIGN-probe-before-write.md` (cited from the README),
+  where its claims were re-verified against `cluster_template.py` and its
+  `test_apply.py` pins. `hscc_daemon/README.md`: KEEP+REFRESH — the core
+  module table now names the HEAL_CASCADE trio (`heal_lease.py`,
+  `heal_breaker.py`, `launch_guard.py`), `recover.py`,
+  `kanban_blocked.py`/`kanban_cli.py`, `escalate*.py`, `autodown*.py`,
+  `kill_switch.py`, `qr_code.py` (and says "core modules", not completeness);
+  the safety section covers lease/breaker/guard, the per-unit F3 remedy
+  (whole-template `--force-recreate` is gone), durable load grace and capped
+  engine-wedge recovery; `cluster_live.py` is quoted only, never edited.
+  `hscc-commands/README.md`: template conformance. `hscc-roles/README.md`:
+  roster now lists `ios-engineer`, `ecofire-bc-engineer` and `worker`
+  (census `ls roles/` = 25), CLI block adds `provision-check`, and the
+  `~/.flightdeck/registry.yaml` paths stay as technical necessity reworded
+  into the post-F1 "hscc-project home" convention (F1 is on main).
+
+### Fixed
+- **Finished the sparkrun `-040` -> `-041` fork-branch retarget that 7513d43e
+  left half-done.** The guard commit moved `dep_bump_guard.FORK_BRANCH` to
+  `feat/proxy-least-in-flight-041` but updated only `test_dep_bump_guard`, so
+  the two suites that pin the branch string outright —
+  `scripts/tests/test_dep_pr_watcher.py` and
+  `.github/scripts/tests/test_check_runtime_deps.py` — failed on the PR #55
+  head (runner rc=1, 4805 passed / 2 failed). Retargeted both to `-041`; they
+  are deliberately LITERAL (not the guard constant) so they stay the tripwire
+  that fires if `FORK_BRANCH` ever regresses to a superseded branch. Also
+  updated the four non-test mentions no test covers
+  (`check_runtime_deps.py` comment, `verify.py` docstring, the operator
+  runbook `references/runtime-bump-verification.md` and its `SKILL.md`
+  summary line): the runbook told the next bump-worker to rebase `-040` at
+  `~/dev/sparkrun-live` — the rollback line, not the live one. It now names
+  the verified live topology (`~/dev/sparkrun-041-verify` @ `1aaa6479`, venv
+  `.venv-sparkrun-041`) and keeps `~/dev/sparkrun-live` / `-040` documented as
+  the rollback line. History records (`docs/audits/*COMPAT*`, `changelog.d/`)
+  keep the old name on purpose.
+  Deviation from the card's enumerated list, flagged for the reviewer: the
+  same grep also caught `docs/README.md`'s audits index, which still labelled
+  the 040 record the **live** topology pointer and did not index the 041
+  record at all — an operator-facing pointer of the same class as the
+  `SKILL.md` line in scope. The audit docs themselves are untouched; drop that
+  hunk if the reviewer reads the card's exclusion to cover the index too.
+- **`init` dry-run line still said `flightdeck home:`** — the F1 branding
+  reword (t_5005a067) covered every rendered *help* string (`--help`,
+  `hscc help`) but missed the runtime dry-run line in
+  `hscc-project/flightdeck/commands/init.py` (`cmd_init`, dry-run branch),
+  the single line the `README_REVIEW_2026-10-15.md` R3 row cites as "post-F1
+  reality". It now renders `hscc-project home: <path> (dry run — use --apply
+  to write)`; the on-disk `~/.flightdeck` directory is unchanged (branding,
+  not behaviour). `test_init.py::TestNoAnsiInit::test_dry_run` pins both
+  directions so the reword cannot silently regress. Lands the R3 precondition
+  (the hscc-project README rewrite can now truthfully quote the init output).
+- **`dep_bump_guard`'s post-bump verification line pointed at the wrong
+  sparkrun file** (pre-existing on `main`, not introduced by PR #55):
+  `FORK_RULE_LINES` told the next sparkrun bump worker to verify that
+  `router_settings` "is still read in `src/sparkrun/proxy/config.py` plus
+  emitted in `src/sparkrun/plugins/litellm/engine.py`". The first half has
+  been FALSE since v0.4.0 — re-verified 2026-10-20 against upstream tags
+  `v0.4.0` and `v0.4.1`: `grep -rn router_settings src/` matches ONLY
+  `src/sparkrun/plugins/litellm/engine.py` (`_configured_router_settings`
+  reads `gateways.litellm.router_settings` via `ProxyConfig().gateway_settings(...)`;
+  `build_litellm_config` emits it), and `grep -n router_settings
+  src/sparkrun/proxy/config.py` has NO matches. A worker following the rule
+  literally greps the wrong file, finds nothing, and either fails a healthy
+  runtime or concludes the fork's balancer work went missing — the exact
+  false alarm this guard exists to prevent. Re-pointed the sentence at the
+  real read site and added an explicit negation ("a no-match grep in
+  `proxy/config.py` is EXPECTED, not drift") so the rule cannot be re-broken
+  silently. Same wrong path in
+  `install/hscc-skills/hscc/references/runtime-bump-verification.md` step 3
+  corrected the same way. Pinned by a strengthened
+  `hscc_daemon/tests/test_dep_bump_guard.py` assertion: the read-site line
+  must name `plugins/litellm/engine.py` + `_configured_router_settings` and
+  must NOT name `proxy/config.py` (a per-line assertion, so a bare
+  whole-blob substring could not satisfy it). The RUNTIME was never affected:
+  live `litellm_config.yaml` carries `callbacks: [sparkrun_balancer.handler]`
+  with the expected base `routing_strategy: simple-shuffle` (read-only check
+  — the proxy was not restarted).
+- **The operator runbook that duplicates `dep_bump_guard`'s fork rule was
+  pinned by nothing.** `FORK_RULE_LINES` is the canonical sparkrun-bump rule
+  (branch name, read site, the `simple-shuffle`-is-expected caveat), but
+  `install/hscc-skills/hscc/references/runtime-bump-verification.md` step 3
+  repeats the same obligations in prose for the human who runs the bump by
+  hand — and it carried the identical false "`router_settings` is read in
+  `src/sparkrun/proxy/config.py`" claim the guard carried until t_669b8df7
+  fixed both copies by hand. `grep -rn runtime-bump-verification --include=*.py`
+  returned nothing: no test imported, read, or compared that file, so the
+  runbook half could revert to the wrong path with the suite fully green.
+  Added `TestRunbookAgreesWithGuard` to `hscc_daemon/tests/test_dep_bump_guard.py`:
+  it opens the runbook and asserts agreement with the canonical tuple — every
+  code identifier the canonical read-site line names must appear in the
+  runbook's ONE read-site sentence (scoped per-sentence, because a whole-file
+  substring check is satisfiable by the negation sentence that names the wrong
+  path on purpose), that sentence must not name the file the guard negates, the
+  branch names in the live-state/rebase/post-bump-check sentences must equal
+  `g.FORK_BRANCH` (historical `feat/proxy-*` names allowed only in a
+  rollback/supersede sentence that the guard's docstring also documents), and
+  the negation + expected-base-strategy + never-checkout-main caveats must
+  survive. Obligations are DERIVED from `FORK_RULE_LINES`/`FORK_BRANCH`, not
+  restated as literals, so a re-cut moves both copies together. Proven to bite:
+  14 mutants (11 runbook, 3 guard-side), each RED on the expected leg —
+  including the full step-3 revert to the pre-fix text and a guard-side
+  FORK_BRANCH rename that left the runbook stale; the anti-vacuity leg
+  (`test_pin_is_not_vacuous`) catches the canonical side losing its own
+  identifiers.
+- **`proxy_router_settings` would false-warn the moment the top-level
+  `router_settings` duplicate is cleaned out of proxy.yaml.** The drift
+  comparator read only `proxy_doc["router_settings"]`, but sparkrun 0.4.0
+  reads `gateways.litellm.router_settings`
+  (`plugins/litellm/engine.py::_configured_router_settings`). It passed on
+  the live host only because `~/.config/sparkrun/proxy.yaml` carries BOTH
+  keys with identical content: with the nested key alone (the shape a
+  rollback cleanup leaves), the check expected NO `router_settings`
+  emission while 0.4.0 emits the nested one -> a WARN against a healthy
+  proxy. New `router_settings_source()` mirrors sparkrun's own read order
+  (nested first, top level only when nested is absent or null, so the
+  0.3.10 rollback line stays covered) and both warn texts now name WHICH
+  key the intent resolved from. 11 hermetic cases added
+  (nested-only / nested-wins-over-differing-top-level / top-level-only /
+  non-mapping nested / nested-null fallback / scalar gateways + a direct
+  read-order pin), mutation-probed against the old read (7 kills) and
+  against a precedence swap (4 kills).
+- **Fork-branch assertions were vacuous.** `test_check_runtime_deps.py` and
+  `test_dep_pr_watcher.py` asserted the bare substring
+  `feat/proxy-least-in-flight`, which the superseded 0.3.10 rollback branch
+  name also satisfies — a rule that regressed to the old branch would still
+  pass. Both now assert the exact `-040` name and that every mention of the
+  branch carries the suffix.
+- **Bump runbook re-pinned to the live 0.4.0 topology** (verified
+  read-only before adoption): `~/.local/bin/sparkrun` ->
+  `.venv-sparkrun-040`, editable checkout `~/dev/sparkrun-live` on
+  `feat/proxy-least-in-flight-040` @ `b5c60edd` (one macOS-spawn test fix
+  on the `v0.4.0` tag), engine `src/sparkrun/plugins/litellm/engine.py`;
+  plus the 0.4.0 notes on the nested read order and why `simple-shuffle`
+  is the healthy emitted value. `verify.py` prose re-pinned to the `-040`
+  branch. Residual adoption from the superseded PR #53 (`1f0ecba7`); its
+  `docs/COMPAT-sparkrun-0.4.0.md` was NOT adopted —
+  `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md` stays the single compat
+  record (fact-by-fact comparison: the audits doc is a strict superset).
+- **`hscc-project/README.md` + `docs/README.md` rewritten to the post-F1
+  branding state** (audit `README_REVIEW_2026-10-15.md` R3, docs-only). The
+  front page still quoted the pre-F1 `init` transcript (`flightdeck home:`)
+  and titled itself after the old tool name 16 times; it now quotes the
+  render captured live off main (`hscc-project home: … (dry run — use --apply
+  to write)`), re-titles to "hscc project — project/kanban control", and cuts
+  the 2026-08-09 anecdote to 3 lines pointing at `docs/INCIDENTS.md`. 16
+  `flightdeck` mentions -> 7, and the survivors are the technical-necessity
+  ones only: the `~/.flightdeck/*` on-disk paths (`init.py:64` `DEFAULT_HOME`)
+  and the packaged console-script identifier in the MCP registration snippet
+  (`pyproject.toml` `[project.scripts]`), each with a one-line explanation
+  rather than a silent keep. `docs/assets/README.md` (a 6-liner about one
+  image, "FlightDeck banner") is folded into `docs/README.md` as an `assets/`
+  section and deleted; `banner.png` stays at `docs/assets/banner.png`.
+- **Audit arithmetic corrected: the MCP server has 24 tools, not 25.** The R3
+  row reads "`:287` \"24 tools\" — code has 25", and §2.5 repeats "MCP
+  section: 25 tools". Verified against `hscc-project/flightdeck/mcp_server.py`
+  on main: exactly 24 `@mcp.tool()` decorator sites (`:142`…`:458`) each
+  binding one `def`, and no other registration path anywhere in the repo
+  (`.tool(` appears nowhere else). The README's existing "24 tools" was
+  already right, so the row is kept at 24 and the tool list was corrected to
+  match the code (it double-listed `reconcile` and omitted `reconcile
+  preview`). `docs/APPROACH.md:118` ("25 tools, 11 mutating ones") carries the
+  same wrong total — and 12 tools take an `apply` param, not 11 — but it is
+  not an R3 file, so it is untouched here and filed as a follow-up card.
+- **R5 README fixes, six files, every claim re-verified on main @ `892a7554`
+  before writing.** `hscc-bootstrap/README.md`: test count 266 -> **455**
+  (verified `pytest --collect-only -q`, both interpreters; the audit's 451 was
+  itself stale). `memori/README.md` + `memori_byodb/README.md`: grew the
+  5-line stubs from code — provider registration lines re-verified
+  (`memori/__init__.py:450`, `memori_byodb/__init__.py:486`), config/env
+  tables taken from `_load_config`/`get_config_schema`, and the **unverified
+  "NAS-backed store" framing deleted**: the BYODB provider resolves a local
+  SQLite DB (`~/.hermes/memori_byodb.db`, shared across profiles) with
+  offline local-LLM augmentation over the worker proxy — no NAS in code.
+  `hscc-cluster/templates/README.md`: per-GPU VRAM line re-measured against
+  `sparkrun show` 0.4.0 (A3B-NVFP4 31.82->24.38 GiB, A3B-FP8 44.89->37.45,
+  27B-FP8 60.75->36.89, nemotron-550b 64->64.5), colocated-dual's stale
+  "89.8 GB/GPU" replaced with the template's own 0.4-utilisation budget, and
+  the library tables reconciled against the live 22-name `hscc template list`
+  — the one missing entry `4node-flash-next-all` (added 2026-10-05) now has a
+  row and the container-images paragraph names it.
+  `hscc-api/README.md`: `hscc doctor` -> `hscc project doctor` (the bare verb
+  verified broken live: "Unknown command: doctor"; the tmux/REPL panel lives
+  in project doctor) and the CLI table gained `api install-service` +
+  `api uninstall-service`, both present in `hscc api --help` at writing time.
+  `scripts/README.md`: dropped the volatile "currently
+  Qwen3.6-35B-A3B-NVFP4" fact -> model-agnostic.
+  `ios-app/scripts/model_decode_check/fixtures/README.md`: "All 26 files" ->
+  **54** (verified `ls *.json | wc -l`; all 54 re-parsed with json.load, 0
+  bad) and the capture-date line reframed to acknowledge the post-2026-08-27
+  Phase 3/4 (t_ca133e7d) additions the same file describes.
+- **`hscc-project/docs/APPROACH.md:118` tool counts corrected** (docs-only). The
+  "Phase 0 — done" status claim read "25 tools, 11 mutating ones defaulting to
+  `apply=False`"; both numbers are wrong on main. Verified against
+  `hscc-project/flightdeck/mcp_server.py`: exactly **24** `@mcp.tool()` decorator
+  sites (`:142`…`:458`, each binding one `def` — the naive `grep -c '@mcp.tool()'`
+  returns 25 only because line 25 is a docstring mention of the decorator, likely
+  the same off-by-one that produced the stale count), and **12** tools expose an
+  `apply: bool = False` param (review, reconcile, decompose, start, ingest,
+  release, roadmap_adopt, migrate_card, message_dispatch, report, incident,
+  hygiene). Sentence shape kept — only the counts changed. Same arithmetic
+  already recorded in the R3 fragment `changelog.d/t_8fccf0cd.md`, which filed
+  this as the follow-up card.
+- **`hscc cluster up` hung "forever" on an already-serving unit and starved
+  the rest of the fleet.** The 2026-10-22 cooldown repro: a unit that already
+  answered `/v1/models` 200 kept its `sparkrun run --no-follow --ensure` call
+  open for 19 min (then 8 min on retry) while the SERIAL plan loop waited, so
+  the other two units never launched. Three fixes in `cmd_cluster_up`:
+  (1) each launch is bounded by a dedicated LAUNCH-PHASE timeout —
+  `HSCC_CLUSTER_UP_LAUNCH_TIMEOUT`, default **180s**, deliberately NOT the
+  1200s model-load grace — and an expiry is reported as that unit failing
+  with the captured output tail, not swallowed; (2) a unit whose every span
+  node already answers `/v1/models` with a parseable NON-EMPTY catalogue is
+  reported already-up and sparkrun is never invoked (fail-open probe: any
+  error = launch anyway, `--ensure` makes that safe); (3) launches run
+  CONCURRENTLY over the independent hosts (ThreadPoolExecutor) while the
+  per-unit report stays plan-ordered, and the A2 guard keeps its single
+  prefetched status fetch. Sparkrun-side attribution (fix 4, source-read
+  only, no hscc workaround): the hang is sparkrun's OWN readiness wait — in
+  v0.4.1 `--ensure` "still wait[s] for readiness" and `--no-follow` only
+  stops the log stream; `wait_for_run` blocks until the startup probe sees a
+  first non-empty inference TOKEN, which a model that loads far past the
+  port-bind can take ~66 min to deliver while `/v1/models` already answers
+  200 — the operator's own hand-run log shows exactly that shape
+  (`Waiting for server readiness... startup observation exceeded its
+  deadline ... total 3947.3s`). The local `ssh ... bash -s` observation is
+  that wait's per-poll SSH probe, not a missing-EOF bug: every `bash -s`
+  site in sparkrun provably closes its stdin (`input=` or `communicate`).
+  `--no-ready-wait` is the sparkrun-side flag that skips the wait; hscc
+  deliberately does NOT pass it (the hscc launch timeout bounds the whole
+  call instead, which also covers a genuinely wedged ssh).
+- **`hscc_daemon.serving.resolve_cluster_config()`'s fallback could exec the
+  operator's live sparkrun CLI — and on this host it DID, three times per
+  daemon suite run.** The call was
+  `subprocess.run("timeout 2 sparkrun cluster list --json", shell=True, ...)`:
+  a shell string cannot be argv-rewritten by `sparkrun_bin.exec_argv`, so the
+  `HSCC_SPARKRUN_BIN` hermetic pin never covered it (the daemon conftest's own
+  docstring recorded exactly this gap). Now a LIST argv built by
+  `sparkrun_bin.argv` — the repo's single execution chokepoint — with
+  `shell=True` dropped and `timeout=3` replacing the PATH-dependent
+  `timeout 2` wrapper (macOS keeps `timeout` in Homebrew). Pinned by
+  `hscc_daemon/tests/test_serving_fallback_no_live_cli.py` against a fake CLI
+  on a PATH-less HOME.
+
+### Security
+- **sparkrun argv FENCE at the conftest level (stop-work order; live `:4000`
+  proxy SIGTERM incident).** One shared harness,
+  `hscc-cluster/tests/sparkrun_fence.py`, wired into the four suites that can
+  reach the CLI (`hscc-cluster`, `hscc-commands`, `hscc_daemon`,
+  `sparkrun-hermes`): it wraps every subprocess entrypoint, resolves each
+  argv element against PATH, and BLOCKS + FAILS the test whose call resolves
+  to the operator's real sparkrun CLI (bare `sparkrun`, an absolute CLI path
+  outside a pytest per-test tmp dir, a CLI at any LATER argv element, or the
+  CLI name embedded in a `shell=True` string). Recipe paths named
+  `sparkrun.yaml` are pinned as NOT CLI tokens (false-positive guard), and the
+  sanctioned escape hatches are a `tmp_path` fake or an explicit
+  expect-block — the fence reports blocked-vs-unexpected in the terminal
+  summary every run. First run of the fence caught **six** real leak sites
+  that had been silently exec'ing the operator's CLI in CI-shaped runs:
+  `_pin_topology`'s `monkeypatch.setattr` reading lazy `clusterlib.HEAD/NODES/
+  NAS_HOST` (→ live `sparkrun cluster list --json` for EVERY cluster test),
+  a live discovery-cache WRITE from `test_discovery`, real `sparkrun show`
+  per shipped recipe in `test_template_intent` (now opt-in gated), and the
+  three `resolve_cluster_config` fallback shells above. Conftests now pin
+  canned discovery output instead; no normal test run touches the fleet.
+
+### Verified
+- Live topology re-verified against the host before it was written into the
+  runbook (not copied from the card): `~/.local/bin/sparkrun` ->
+  `.venv-sparkrun-041/bin/sparkrun`, whose
+  `__editable__.sparkrun-0.4.1.pth` resolves to `~/dev/sparkrun-041-verify/src`;
+  that checkout is on `feat/proxy-least-in-flight-041` @ `1aaa6479`
+  (`git describe` = `v0.4.1-1-g1aaa6479`); the rollback line is still
+  `~/dev/sparkrun-live` on `-040` @ `b5c60edd`. The runbook's `router_settings`
+  read path was re-checked in the live tree too —
+  `ProxyConfig.gateway_settings("litellm").get("router_settings")` at
+  `src/sparkrun/plugins/litellm/engine.py:906`.
+- Full `scripts/run_tests.sh` on the retargeted head (`85cd2dde` +
+  `b2a6d977` + `56c27912`) **ALL GREEN**, rc=0, 11/11 legs, 6125 passed / 2
+  skipped / 0 failed (the 2 that failed on `85cd2dde` are the retargeted ones).
+  `scripts/address_guard.py --tracked` rc=0,
+  `scripts/changelog_fragments.py check` rc=0, `scripts/readme_lint.py` 0
+  findings.
+- `bash ios-app/scripts/model_decode_check.sh` re-run at relocation time:
+  `ALL DECODE CHECKS PASSED — 62/62 fixtures decoded against the real models`
+  (54 committed JSON fixtures), so the doc's updated count claim is measured,
+  not copied. Docs-only change; `scripts/address_guard.py --tracked` rc=0.
+- Index coverage verified mechanically: `find docs -type f | wc -l` = 166,
+  git-tracked under `docs/` = 166, backticked index entries = 166 unique
+  (zero missing, zero extra, zero duplicates, self-entry present). All
+  relative links in `docs/README.md` resolve. `scripts/address_guard.py
+  --tracked` rc=0.
+- `hscc-cluster/tests/test_cluster_up_launch.py`: barrier-proved concurrency,
+  skip/refuse/timeout matrix, dry-run unchanged (fixes 1-3).
+  `hscc_daemon/tests/test_unit_alias_coverage.py`: the base-name-only unit
+  fixture names the unit AND the missing aliases through health AND the
+  fifth leg (the addendum's "proxy-level check alone does not count").
+  `hscc_daemon/tests/test_declaration_agreement.py` +
+  `hscc-project/tests/test_doctor_declaration.py` updated for the fifth leg
+  (the doctor default-seam test now pins `serving.SERVING_JSON` so the new
+  leg cannot read — or probe — the operator's live serving.json).
+  Canonical runner `scripts/run_tests.sh` green on the branch tip.
+- Fence self-tests: `hscc-cluster/tests/test_sparkrun_fence.py` — the live
+  CLI as argv[0], as a later argv element, inside a shell string, as an
+  absolute path outside a pytest tmp dir, and as a recipe-name false-positive
+  — plus blocked-vs-expected accounting. `hscc-cluster` 666 passed + 1
+  skipped (the gated recipe-fit test), `hscc_daemon` 2217 passed,
+  `hscc-commands` 69 passed with the fence line visible in the terminal
+  summary, `sparkrun-hermes` 12 passed. address_guard --tracked rc=0.
 ## [2.11.0] - 2026-10-19
 
 ### Added
