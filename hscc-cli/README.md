@@ -37,9 +37,13 @@ drift. Skip it during bootstrap with `--skip-cli`.
 ## How it works
 
 `hscc_cli/__init__.py` locates the `hscc_daemon` package from the standard
-locations (side-by-side installed plugins, a brew libexec payload root —
-`<prefix>/libexec/hscc-<ver>/hscc_daemon`, newest version first; t_bc5a3fee —
-then `~/.hermes/plugins`, a repo checkout, or `~/dev/hscc` as a fallback),
+locations (side-by-side installed plugins — which on a brew keg IS the
+`site-packages/plugins -> ../../../../hscc` symlink the tap installs, so the
+version-stable payload root `<prefix>/Cellar/hscc/<ver>/libexec/hscc/hscc_daemon`
+resolves first; then any brew libexec payload root —
+`<prefix>/libexec/hscc/hscc_daemon`, or `libexec/hscc-<ver>/hscc_daemon` newest
+version first; t_bc5a3fee, real-layout pins t_0f5616fd — then
+`~/.hermes/plugins`, a repo checkout, or `~/dev/hscc` as a fallback),
 adds that directory to `sys.path`, and re-exports `hscc_daemon.hscc.main`.
 The libexec leg is what makes a brew install self-contained: the tap installs
 this package into a venv inside `libexec/`, where neither the sibling nor the

@@ -832,11 +832,13 @@ def _bootstrap_script_candidates(source_root=None):
          (the sibling layout; also matches a brew tarball extracted flat);
       2. deployed plugins — ``$HERMES_HOME/plugins/hscc-bootstrap``
          (bootstrap.sh copied there by install_payload);
-      3. brew libexec — walking up from the source root for an
-         ``libexec/hscc-*/hscc-bootstrap`` (the tap extracts the tarball
-         under ``<prefix>/libexec/hscc-<ver>/`` and installs the CLI into a
-         venv INSIDE libexec, so site-packages lookups never see the
-         sibling);
+      3. brew libexec — walking up from the source root for the tap's payload
+         tree under ``libexec/`` (the tap installs the CLI into a venv INSIDE
+         libexec, so site-packages lookups never see the sibling). Two names
+         are offered, in this order: the version-STABLE ``libexec/hscc`` the
+         MERGED tap uses (homebrew-hscc Formula: ``tree = libexec/"hscc"``)
+         then every ``libexec/hscc-*`` newest-first (a versioned tree, which
+         no shipped formula produces today but the resolver still honours);
       4. ``HSCC_BOOTSTRAP_SH`` env override (checked first; tests + custom
          layouts).
 
@@ -858,10 +860,14 @@ def _bootstrap_script_candidates(source_root=None):
 
     # 3. ancestor walk: a libexec/venv layout puts the script under one of
     #    the parent prefixes (covers a brew tree extracted under Cellar/).
+    #    The stable name first: the merged tap's payload tree is
+    #    `libexec/hscc` (version-stable), so a real keg never depends on the
+    #    versioned glob below matching.
     for anc in list(root.parents)[:6]:
         cands.append(anc / "hscc-bootstrap" / "bootstrap.sh")
         libexec = anc / "libexec"
         if libexec.is_dir():
+            cands.append(libexec / "hscc" / "hscc-bootstrap" / "bootstrap.sh")
             try:
                 for ver in sorted(libexec.glob("hscc-*"),
                                   key=_hscc_version_key, reverse=True):

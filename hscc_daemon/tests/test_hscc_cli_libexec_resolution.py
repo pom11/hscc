@@ -112,6 +112,79 @@ def test_wrapper_ignores_libexec_dirs_without_daemon(tmp_path, probe):
     assert str((prefix / "libexec" / "hscc-empty").resolve()) not in sys.path
 
 
+# ── the layout the SHIPPED tap actually produces (card t_0f5616fd) ───────────
+#
+# pom11/homebrew-hscc@main installs the payload at the version-STABLE path
+# ``<prefix>/Cellar/hscc/<ver>/libexec/hscc/`` (Formula: ``tree = libexec/"hscc"``),
+# drops NO ``.hscc-brew-libexec`` marker, and makes ``import hscc_daemon`` work
+# through a RELATIVE symlink ``site-packages/plugins -> ../../../../hscc`` so
+# candidate #1 hits unconditionally. Everything above fabricates
+# ``libexec/hscc-<ver>/`` — a layout no shipped tap produces — so the real
+# keg shape is pinned here too (the ``hscc-*`` glob stays as future-proofing).
+
+def _fabricate_shipped_keg(prefix: Path):
+    """Fabricate exactly what ``brew install hscc`` leaves on disk.
+
+    Returns ``(payload, site_packages)``. The symlink target is the formula's
+    own relative string (``../../../../hscc``, relative to site-packages) — a
+    fabricated absolute link would pass even if the relative shape broke.
+    """
+    keg = prefix / "Cellar" / "hscc" / "2.12.0" / "libexec"
+    payload = keg / "hscc"                      # version-STABLE, no -<ver>
+    (payload / "hscc_daemon").mkdir(parents=True)
+    (payload / "hscc_daemon" / "__init__.py").write_text("")
+    (payload / "hscc_daemon" / "hscc.py").write_text(
+        "def main():\n    return 'keg'\n")
+    site = keg / "venv" / "lib" / "python3.11" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "plugins").symlink_to("../../../../hscc")
+    return payload, site
+
+
+def test_shipped_keg_has_no_versioned_dir_and_no_marker(tmp_path):
+    """Guard on the fixture itself: if this fabrication ever grows an
+    ``hscc-*`` dir or the marker, the tests below stop proving the shipped
+    layout (they would silently fall back to the glob/marker legs)."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt")
+    libexec = payload.parent
+    assert payload.name == "hscc"
+    assert list(libexec.glob("hscc-*")) == []
+    assert not (libexec / ".hscc-brew-libexec").exists()
+    assert not (payload / ".hscc-brew-libexec").exists()
+    assert (site / "plugins").is_symlink()
+    assert (site / "plugins").readlink() == Path("../../../../hscc")
+    assert (site / "plugins" / "hscc_daemon").is_dir()
+
+
+def test_wrapper_resolves_payload_through_the_shipped_plugins_symlink(
+        tmp_path, probe):
+    """The shipped keg: hscc_cli in libexec/venv/.../site-packages, payload at
+    the version-stable ``libexec/hscc``, reachable ONLY through candidate #1
+    (``site-packages/plugins``). The ``hscc-*`` glob matches nothing here."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt" / "homebrew")
+    mod = probe(site / "hscc_cli")
+    assert mod.main() == "keg"
+    hits = [p for p in sys.path if p.endswith("site-packages/plugins")
+            and Path(p).resolve() == payload.resolve()]
+    assert hits, f"candidate-1 symlink leg did not win; sys.path={sys.path[:4]}"
+
+
+def test_shipped_keg_beats_the_hermes_plugins_decoy(tmp_path, probe):
+    """Candidate-1 must beat ``~/.hermes/plugins``: on an operator machine that
+    dir holds a bootstrapped (possibly stale, possibly different-version)
+    daemon, and the formula's comment says outright that candidate 2 winning is
+    the bug it is avoiding. The decoy carries a distinguishable ``main``."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt" / "homebrew")
+    decoy = tmp_path / "home" / ".hermes" / "plugins" / "hscc_daemon"
+    decoy.mkdir(parents=True)
+    (decoy / "__init__.py").write_text("")
+    (decoy / "hscc.py").write_text("def main():\n    return 'decoy'\n")
+    mod = probe(site / "hscc_cli")
+    assert mod.main() != "decoy", "~/.hermes/plugins beat the keg payload"
+    assert mod.main() == "keg"
+    assert str(decoy.parent) not in sys.path
+
+
 def test_wrapper_non_brew_layout_unchanged(tmp_path, probe):
     """Deployed sibling-plugins layout still resolves via candidate #1 — the
     brew support is a pure no-op there. Candidate #1 is `<pkg-parent>/plugins`

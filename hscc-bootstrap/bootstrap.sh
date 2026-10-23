@@ -6,7 +6,8 @@
 #   4. Install: skills, role profiles, ~/.hscc + serving.json, daemon.
 # No vLLM model provisioning. Idempotent.
 # Works from ANY source root: a git checkout, the deployed plugins copy, or a
-# brew libexec tree (<prefix>/libexec/hscc-<ver>/, the homebrew-hscc tap).
+# brew libexec tree (the homebrew-hscc tap installs it at
+# <prefix>/Cellar/hscc/<ver>/libexec/hscc — version-stable, no marker file).
 # From a brew tree the CLI-shim stage is SKIPPED (brew owns `hscc` on PATH);
 # `--dry-run` prints every planned write and performs none. Reachable as
 # `hscc bootstrap [flags]` — flags pass through (t_bc5a3fee).

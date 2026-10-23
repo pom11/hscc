@@ -100,6 +100,91 @@ def test_libexec_glob_uses_numeric_version_order(tmp_path):
     assert got == high / "hscc-bootstrap" / "bootstrap.sh"
 
 
+# ── the layout the SHIPPED tap actually produces (card t_0f5616fd) ───────────
+#
+# The merged tap (pom11/homebrew-hscc@main, Formula/hscc.rb) installs the full
+# tree at the version-STABLE path ``<prefix>/Cellar/hscc/<ver>/libexec/hscc/``
+# (``tree = libexec/"hscc"``), drops NO ``.hscc-brew-libexec`` marker, and links
+# only ``site-packages/plugins -> ../../../../hscc``. So the ``libexec/hscc-*``
+# glob above matches NOTHING on a real keg. These cases pin the real shape; the
+# glob and its ordering tests stay as future-proofing.
+
+def _fabricate_shipped_keg(prefix: Path):
+    """Fabricate what ``brew install hscc`` actually leaves on disk.
+
+    Returns ``(payload, site_packages)`` where ``payload`` is the version-stable
+    ``libexec/hscc`` carrying a ``hscc-bootstrap/bootstrap.sh``. No ``hscc-*``
+    dir and no marker file anywhere — asserted by
+    ``test_shipped_keg_fixture_has_no_versioned_dir_and_no_marker``.
+    """
+    keg = prefix / "Cellar" / "hscc" / "2.12.0" / "libexec"
+    payload = keg / "hscc"
+    boot = payload / "hscc-bootstrap" / "bootstrap.sh"
+    boot.parent.mkdir(parents=True)
+    boot.write_text("#!/bin/bash\necho shipped-keg\n")
+    (payload / "hscc_daemon").mkdir()
+    site = keg / "venv" / "lib" / "python3.11" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "plugins").symlink_to("../../../../hscc")   # the formula's own link
+    return payload, site
+
+
+def test_shipped_keg_fixture_has_no_versioned_dir_and_no_marker(tmp_path):
+    """Guard on the fixture: if it ever grows an ``hscc-*`` dir or the marker,
+    the cases below stop pinning the shipped layout (they would silently be
+    served by the glob/marker legs instead)."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt")
+    libexec = payload.parent
+    assert payload.name == "hscc"
+    assert list(libexec.glob("hscc-*")) == []
+    assert not (libexec / ".hscc-brew-libexec").exists()
+    assert not (payload / ".hscc-brew-libexec").exists()
+    assert (site / "plugins").readlink() == Path("../../../../hscc")
+
+
+def test_finds_bootstrap_sh_in_the_shipped_keg_through_the_plugins_symlink(
+        tmp_path):
+    """The real keg's import path: ``hscc_daemon`` is imported through
+    ``site-packages/plugins``, and ``hscc.py``'s own ``Path(__file__).resolve()``
+    follows that symlink to ``libexec/hscc/hscc_daemon``. The resolver must land
+    on the installer INSIDE the stable tree — not report 'not found'."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt")
+    imported_via = (site / "plugins" / "hscc_daemon").resolve()
+    assert imported_via == payload / "hscc_daemon"
+    got = h._resolve_bootstrap_script(imported_via)
+    assert got == payload / "hscc-bootstrap" / "bootstrap.sh"
+
+
+def test_finds_bootstrap_sh_from_a_venv_site_packages_root_in_the_shipped_keg(
+        tmp_path):
+    """Same keg, dispatcher NOT reached through the symlink (a copied /
+    wheel-installed ``hscc_daemon`` directly in ``libexec/venv/.../site-packages``
+    — the layout the existing venv-glob tests use). The libexec leg must know
+    the version-STABLE ``libexec/hscc`` name too, not only ``hscc-*``."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt")
+    (site / "hscc_daemon").mkdir()
+    got = h._resolve_bootstrap_script(site / "hscc_daemon")
+    assert got == payload / "hscc-bootstrap" / "bootstrap.sh", (
+        "shipped tap layout unsupported: the resolver only globs libexec/hscc-*")
+
+
+def test_shipped_keg_stable_tree_beats_the_plugins_home_fallback(tmp_path,
+                                                                 monkeypatch):
+    """Ordering pin: on an operator machine ``$HERMES_HOME/plugins`` also holds
+    a bootstrap.sh (bootstrapped earlier). The keg's own copy must win, or the
+    verb would run a stale installer against a freshly upgraded keg."""
+    payload, site = _fabricate_shipped_keg(tmp_path / "opt")
+    (site / "hscc_daemon").mkdir()
+    home = tmp_path / "hh"
+    stale = home / "plugins" / "hscc-bootstrap" / "bootstrap.sh"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("#!/bin/bash\necho stale\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert h._resolve_bootstrap_script(site / "hscc_daemon") != stale
+    assert h._resolve_bootstrap_script(site / "hscc_daemon") == \
+        payload / "hscc-bootstrap" / "bootstrap.sh"
+
+
 def test_env_override_wins_over_everything(tmp_path, monkeypatch):
     real = tmp_path / "somewhere-else" / "bootstrap.sh"
     real.parent.mkdir()

@@ -43,12 +43,18 @@ FAKE_CLUSTER = json.dumps([
      "cache_dir": "", "default": True}])
 
 
-def _make_tree(tmp_path, *, brew: bool, with_cli_pkg: bool = True) -> Path:
-    """Fabricated source root: copy the repo dirs into libexec/hscc-<ver>/.
+def _make_tree(tmp_path, *, brew: bool, with_cli_pkg: bool = True,
+               shipped: bool = False) -> Path:
+    """Fabricated source root: copy the repo dirs into the tap's payload dir.
 
     brew=True also drops the marker file the tap writes at the tree root.
     Non-brew trees sit OUTSIDE any libexec/Cellar path shape so the fallback
     heuristic cannot fire on them.
+
+    shipped=True puts the tree where the MERGED tap actually puts it —
+    ``<prefix>/Cellar/hscc/<ver>/libexec/hscc`` (version-STABLE, no ``-<ver>``)
+    — and pairs with brew=False: the shipped formula drops NO marker, so the
+    shim skip has to come from the ``*/Cellar/*`` path shape alone.
 
     with_cli_pkg=False drops hscc-cli from the copy: the real-mode shim-skip
     test needs the tree to carry NO installable package, so even a regression
@@ -56,7 +62,10 @@ def _make_tree(tmp_path, *, brew: bool, with_cli_pkg: bool = True) -> Path:
     source dir) instead of writing a console script into the sandboxed —
     symlinked — real Hermes venv.
     """
-    if brew:
+    if shipped:
+        root = (tmp_path / "opt" / "homebrew" / "Cellar" / "hscc" / "9.9.9"
+                / "libexec" / "hscc")
+    elif brew:
         root = tmp_path / "opt" / "libexec" / "hscc-9.9.9"
     else:
         root = tmp_path / "checkout"
@@ -204,6 +213,57 @@ def test_dry_run_path_heuristic_fires_without_the_marker(tmp_path):
     assert "CLI shim: SKIPPED — brew libexec install" in out, out[-2000:]
 
 
+# ── the layout the SHIPPED tap actually produces (card t_0f5616fd) ───────────
+#
+# The merged tap (pom11/homebrew-hscc@main, Formula/hscc.rb) puts the payload at
+# ``<prefix>/Cellar/hscc/<ver>/libexec/hscc`` — version-STABLE, so the
+# ``*/libexec/hscc-*`` shape can NEVER match — and it writes no
+# ``.hscc-brew-libexec`` marker at all. On a real keg the shim skip therefore
+# rests entirely on the ``*/Cellar/*`` branch of the fallback. Both cases below
+# run the COPY inside that tree, so REPO_ROOT is the real shape.
+
+
+@needs_runtime
+def test_dry_run_skips_shim_from_the_shipped_keg_path_shape(tmp_path):
+    """REPO_ROOT = ``.../Cellar/hscc/9.9.9/libexec/hscc`` (no ``hscc-*`` dir, no
+    marker): the installer must still detect brew mode and plan the skip, and
+    must name the reason rather than staying silent."""
+    tree = _make_tree(tmp_path, brew=False, shipped=True)
+    assert "/Cellar/hscc/9.9.9/libexec/hscc" in str(tree)
+    assert list(tree.parent.glob("hscc-*")) == []
+    assert not (tree / ".hscc-brew-libexec").exists()
+    sandbox = _make_home(tmp_path)
+    before_h = _snapshot(sandbox["hermes"])
+    before_s = _snapshot(sandbox["hscc"])
+
+    r = _run_dry(tree, sandbox)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, f"dry run failed:\n{out[-3000:]}"
+    assert "CLI shim: SKIPPED — brew libexec install" in out, out[-3000:]
+    # The detection banner names the tree it found, so an operator can see WHY.
+    assert "brew libexec tree detected" in out and str(tree) in out, out[:2000]
+    assert "CLI shim: install hscc-cli" not in out
+    assert _snapshot(sandbox["hermes"]) == before_h
+    assert _snapshot(sandbox["hscc"]) == before_s
+
+
+@needs_runtime
+def test_real_run_skips_shim_from_the_shipped_keg_path_shape(tmp_path):
+    """Non-dry counterpart on the shipped shape: the stage prints the skip
+    reason and the installer COMPLETES (rc 0) — brew owns `hscc` on PATH, so no
+    shim is written into the Hermes venv."""
+    tree = _make_tree(tmp_path, brew=False, with_cli_pkg=False, shipped=True)
+    assert not (tree / ".hscc-brew-libexec").exists()
+    sandbox = _make_home(tmp_path)
+    r = _run_real(tree, sandbox)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, f"shipped-keg install run failed:\n{out[-3000:]}"
+    assert "CLI shim skipped — brew libexec install" in out, out[-3000:]
+    assert str(tree) in out, "skip reason must name the detected tree"
+    assert "hscc CLI install FAILED" not in out
+    assert (sandbox["hermes"] / "plugins" / "hscc_daemon").is_dir()
+
+
 @needs_runtime
 def test_dry_run_respects_skip_flags_and_stays_idempotent(tmp_path):
     """--dry-run composes with the existing flags and is safe to re-run."""
@@ -304,6 +364,62 @@ def test_non_brew_tree_still_runs_the_shim_stage(tmp_path):
 
 
 # ── e2e: `hscc bootstrap --dry-run` where hscc runs from libexec/venv ───────
+
+@needs_runtime
+def test_hscc_bootstrap_verb_from_the_shipped_keg(tmp_path):
+    """The SAME headline scenario on the layout the merged tap actually ships:
+
+      * payload at ``<prefix>/Cellar/hscc/<ver>/libexec/hscc`` — version-STABLE,
+        so the ``libexec/hscc-*`` glob matches nothing;
+      * ``import hscc_daemon`` works the way the formula arranges it: a
+        RELATIVE ``site-packages/plugins -> ../../../../hscc`` symlink, which
+        the test puts on PYTHONPATH, so the dispatcher's own ``__file__`` is
+        inside the symlinked tree and ``Path(__file__).resolve()`` lands on
+        ``libexec/hscc/hscc_daemon``;
+      * NO marker file anywhere.
+
+    ``hscc bootstrap --dry-run`` must resolve the installer inside the stable
+    tree, pass the flag through, skip the shim stage, and write nothing.
+    """
+    tree = _make_tree(tmp_path, brew=False, shipped=True)
+    assert not (tree / ".hscc-brew-libexec").exists()
+    sandbox = _make_home(tmp_path)
+    site = tree.parent / "venv" / "lib" / "python3.11" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "plugins").symlink_to("../../../../hscc")
+
+    before_h = _snapshot(sandbox["hermes"])
+    before_s = _snapshot(sandbox["hscc"])
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS",
+                        "RECIPES_DIR", "HERMES_KANBAN_TASK",
+                        "HERMES_KANBAN_WORKSPACE",
+                        "HERMES_DELEGATED_CHILD_CONTEXT", "HSCC_BOOTSTRAP_SH",
+                        "PYTHONPATH")}
+    env.update({
+        "HERMES_HOME": str(sandbox["hermes"]),
+        "HSCC_DIR": str(sandbox["hscc"]),
+        "HERMES_SCRIPTS": str(sandbox["home"] / "scripts"),
+        "RECIPES_DIR": str(sandbox["home"] / "recipes"),
+        "PATH": f'{sandbox["bin"]}:/usr/bin:/bin',
+        "PYTHONPATH": str(site / "plugins"),
+        "NO_COLOR": "1", "TERM": "dumb",
+    })
+    r = subprocess.run(
+        [str(REAL_VENV_PY), "-m", "hscc_daemon.hscc", "bootstrap", "--dry-run"],
+        capture_output=True, text=True, env=env, timeout=300,
+        cwd=str(sandbox["home"]))
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, f"hscc bootstrap --dry-run failed:\n{out[-3000:]}"
+    # Proved the verb ran the copy INSIDE the shipped stable tree, not the repo's
+    # and not a ~/.hermes/plugins copy.
+    assert str(tree) in out, "verb resolved a bootstrap.sh outside the keg tree"
+    assert "DRY RUN complete" in out
+    assert "CLI shim: SKIPPED — brew libexec install" in out
+    assert _snapshot(sandbox["hermes"]) == before_h
+    assert _snapshot(sandbox["hscc"]) == before_s
+
 
 @needs_runtime
 def test_hscc_bootstrap_verb_from_libexec_venv(tmp_path):
