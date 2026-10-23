@@ -53,6 +53,12 @@ hscc bootstrap --yes
 
 `brew install` keeps everything inside its own keg — the release tree plus a brew-managed Python venv — and deliberately writes nothing into `~/.hermes` or `~/.hscc`. `hscc bootstrap --yes` is the step that does: it detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview, and `--dry-run` prints every planned write while performing none. `hscc --version` and `hscc --help` already work before bootstrap.
 
+If your keg predates the `bootstrap` verb (v2.12.0 and earlier), run the installer from the installed tree instead — `brew install` prints this as its next step and `brew info hscc` reprints it:
+
+```
+$(brew --prefix hscc)/libexec/hscc/hscc-bootstrap/bootstrap.sh --yes
+```
+
 Then, in order:
 
 ```
@@ -84,7 +90,7 @@ Same installer, same flags — from a checkout `hscc bootstrap [flags]` finds th
 | Homebrew | `brew upgrade hscc`, then `hscc bootstrap --yes` |
 | source checkout | `git pull`, then `hscc bootstrap --yes` (or `bootstrap.sh --yes` on a build that predates the verb) |
 
-Re-running bootstrap is not optional bookkeeping: `~/.hermes/plugins` is the copy Hermes actually loads, so a new release is inert until it is refreshed there. The tap serves the latest published release only, and its formula is bumped automatically per release — nothing else to remember. From a brew keg the CLI-shim stage skips itself with the reason printed: brew owns `hscc` on PATH, and a shim into the Hermes venv would shadow it with a second, brew-invisible entry point.
+Re-running bootstrap is not optional bookkeeping: `~/.hermes/plugins` is the copy Hermes actually loads, so a new release is inert until it is refreshed there. The tap serves the latest published release only, and its formula is bumped automatically per release — nothing else to remember (`brew install` prints the bootstrap next step itself, and names the bundled `bootstrap.sh` path as the fallback for a build that predates the verb). From a brew keg the CLI-shim stage skips itself with the reason printed: brew owns `hscc` on PATH, and a shim into the Hermes venv would shadow it with a second, brew-invisible entry point.
 
 ## Check whether you are behind
 
