@@ -216,7 +216,13 @@ def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
     update_interval = (update_interval if update_interval is not None
                        else UPDATE_CHECK_INTERVAL)
     if update_check_fn is None:
-        from .update_check import daemon_tick as update_check_fn
+        # The liveness loop must survive even a broken update-check module
+        # (import-time failure == feature disabled, heartbeat keeps running).
+        try:
+            from .update_check import daemon_tick as update_check_fn
+        except Exception as e:                      # pragma: no cover
+            log(f"update check disabled: {e}", "WARN")
+            update_check_fn = lambda: None          # noqa: E731
     last = 0.0
     # The update tick deliberately does NOT fire on the first iteration (the
     # heartbeat does, because a starting daemon must be durably alive at
