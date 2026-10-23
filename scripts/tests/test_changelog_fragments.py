@@ -14,6 +14,7 @@ proves the fix rather than asserting a happy path.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -126,6 +127,141 @@ def test_bad_order_value_raises(frags):
 def test_readme_fragment_is_ignored(frags):
     (frags / "README.md").write_text("# prose, kind: not an entry\n", encoding="utf-8")
     assert cf.load_entries(frags) == []
+
+
+# ------------------------------------------- missing separator (t_f57b9d82)
+#
+# A second ``kind:`` block written WITHOUT the ``---`` line the format requires
+# used to glue into the previous entry: its header lines were absorbed as body
+# text, so the block silently became part of the entry above it. Measured twice
+# on this repo —
+#   * the 2.12.0 cut base (``changelog.d/t_591e6bd9.md``): ``release`` reported
+#     28 entries for 29 real blocks and CHANGELOG [2.12.0] shipped bare
+#     ``kind: Verified`` / ``task: t_591e6bd9`` lines verbatim;
+#   * the same shape already shipped in [2.7.0]
+#     (``archive/2.7.0/t_tmux_chat_20261013.md`` — ``kind: Verified`` +
+#     ``order: 1`` are still visible in the committed CHANGELOG.md).
+# ``check`` could not see either one: it only compares [Unreleased] against the
+# parsed entries, and the glued parse and the generated block agreed with each
+# other. So the gate belongs in the parser, where every command goes through.
+
+# The glued shape, reproduced from the cut base (header, body, then a second
+# header run with no separator between them).
+GLUED_FRAGMENT = (
+    "kind: Fixed\ntask: t_591e6bd9\n\n"
+    "- **first block.** fixed the thing.\n"
+    "kind: Verified\ntask: t_591e6bd9\n\n"
+    "- suite green on both interpreters.\n"
+)
+SEPARATED_FRAGMENT = GLUED_FRAGMENT.replace(
+    "kind: Verified\ntask: t_591e6bd9",
+    "---\nkind: Verified\ntask: t_591e6bd9",
+)
+
+#: test-side oracle, deliberately independent of the implementation regex
+_HEADERISH = re.compile(r"^(kind|task|order):", re.IGNORECASE)
+
+
+def test_glued_second_block_raises(frags):
+    """NEGATIVE leg: the exact shape that reached the 2.12.0 cut base."""
+    (frags / "t_591e6bd9.md").write_text(GLUED_FRAGMENT, encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    msg = str(exc.value)
+    assert "t_591e6bd9.md" in msg, f"must name the fragment, got {msg!r}"
+    assert "kind: Verified" in msg, f"must name the offending line, got {msg!r}"
+    assert "line 5" in msg, f"must give the file line number, got {msg!r}"
+    assert "---" in msg, f"must point at the missing separator, got {msg!r}"
+
+
+def test_separated_form_parses_two_clean_entries(frags):
+    """POSITIVE leg (anti-vacuity): identical text plus the mandated separator
+    parses into two entries, neither body carrying a header line. Without this
+    leg the raising test above would also pass on a parser that rejected
+    everything."""
+    (frags / "t_591e6bd9.md").write_text(SEPARATED_FRAGMENT, encoding="utf-8")
+    entries = cf.load_entries(frags)
+    assert [e.kind for e in entries] == ["Fixed", "Verified"]
+    for e in entries:
+        leaked = [l for l in e.body if _HEADERISH.match(l)]
+        assert leaked == [], f"{e.kind} body carries header lines: {leaked}"
+
+
+def test_glued_block_reports_the_right_line(frags):
+    """The reported line number must be the real file line, not an index into
+    the (blank-trimmed) chunk — a wrong number sends the author to the wrong
+    line of a 47-line fragment."""
+    (frags / "t_7777aaaa.md").write_text(
+        "kind: Added\ntask: t_7777aaaa\n\n- **a thing.**\n"
+        "kind: Verified\norder: 1\n\n- evidence\n", encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    assert "line 5" in str(exc.value), str(exc.value)
+
+
+def test_glued_order_key_line_also_fails(frags):
+    """A leaked ``order:`` line is the same defect (it is what shipped in
+    [2.7.0] alongside the ``kind:`` line) — the gate covers the whole header
+    vocabulary, not just ``kind``."""
+    (frags / "t_7777bbbb.md").write_text(
+        "kind: Fixed\n\n- **a thing.**\norder: 1\n\n- more prose\n",
+        encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    assert "order: 1" in str(exc.value), str(exc.value)
+    assert "line 4" in str(exc.value), str(exc.value)
+
+
+def test_indented_header_like_body_line_is_not_glue(frags):
+    """A body may QUOTE the format as long as the line is not at column 0 —
+    that is exactly the boundary `_HEADER_RE` uses, so the gate must not be
+    tighter than the header parser (a fragment describing this very bug has to
+    be writable)."""
+    (frags / "t_8888aaaa.md").write_text(
+        "kind: Fixed\n\n- **the changelog leaked headers.** The fragment\n"
+        "  kind: Verified\n"
+        "  line sat in the body because the separator was missing.\n",
+        encoding="utf-8")
+    entries = cf.load_entries(frags)
+    assert len(entries) == 1
+    assert entries[0].body[1] == "  kind: Verified"
+
+
+def test_check_fails_closed_on_a_glued_fragment(frags, changelog, capsys):
+    """The card's headline defect: `check` stayed rc=0 on the glued fragment.
+    Malformed fragment is rc=2 by this tool's own convention (0 ok / 1 drift /
+    2 usage-or-malformed), and it must name the file."""
+    (frags / "t_591e6bd9.md").write_text(GLUED_FRAGMENT, encoding="utf-8")
+    rc = cf.main(["check", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    err = capsys.readouterr().err
+    assert rc == 2, f"check must not stay green on a glued fragment (rc={rc})"
+    assert "malformed fragment" in err and "t_591e6bd9.md" in err, err
+
+
+def test_release_refuses_a_glued_fragment(frags, changelog):
+    """The step that actually shipped the leak must refuse, and refuse without
+    side effects: CHANGELOG.md untouched, fragments not archived."""
+    (frags / "t_591e6bd9.md").write_text(GLUED_FRAGMENT, encoding="utf-8")
+    before = changelog.read_text()
+    rc = cf.main(["release", "--version", "1.2.3", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2
+    assert changelog.read_text() == before, "a refused release touched CHANGELOG.md"
+    assert (frags / "t_591e6bd9.md").is_file(), "a refused release archived fragments"
+
+
+def test_glue_gate_is_what_fires(monkeypatch, frags):
+    """ANTI-VACUITY (mutation): neuter the header-signature regex — i.e. delete
+    the check — and the glued fragment parses into exactly ONE entry whose body
+    holds `kind: Verified` as text: the historical leak, reproduced. So every
+    raising test above is red iff the gate is removed, and red for the right
+    reason."""
+    (frags / "t_591e6bd9.md").write_text(GLUED_FRAGMENT, encoding="utf-8")
+    monkeypatch.setattr(cf, "_GLUED_HEADER_RE", re.compile(r"(?!)"))
+    entries = cf.load_entries(frags)
+    assert len(entries) == 1, "without the gate the two blocks glue again"
+    assert "kind: Verified" in entries[0].body, entries[0].body
 
 
 # ---------------------------------------------------------------- render/sync

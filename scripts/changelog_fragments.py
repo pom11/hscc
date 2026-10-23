@@ -114,6 +114,15 @@ _HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$")
 _SEPARATOR = "---"
 _ALLOWED_HEADERS = {"kind", "task", "order"}
 TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
+# Signature of a missing separator: a body line at column 0 that the header
+# parser would itself have read as a header — `kind: Verified`, `task: t_…`,
+# `order: 1`. A second block written without the mandated `---` line used to
+# glue silently into the entry above it, and its header lines then shipped
+# verbatim into CHANGELOG (measured on the 2.12.0 cut base, and once before
+# that in [2.7.0] via an `order:` line). Prose has no reason to open with one
+# of our own header keys at column 0; quoting the format stays fine as long as
+# the line is indented, which is exactly the boundary _HEADER_RE uses.
+_GLUED_HEADER_RE = re.compile(r"^(%s):" % "|".join(sorted(_ALLOWED_HEADERS)))
 
 
 class FragmentError(Exception):
@@ -144,17 +153,22 @@ def parse_fragment(path: Path):
     entries = []
     default_task = path.stem
     blocks = text.split("\n")
-    # split on standalone separator lines
-    chunks, cur = [], []
-    for line in blocks:
+    # split on standalone separator lines, keeping each chunk's first file line
+    # so a parse error can quote a real line number (a 47-line fragment is not
+    # something an author should have to count through)
+    chunks, cur, chunk_start = [], [], 1
+    for lineno, line in enumerate(blocks, start=1):
         if line.strip() == _SEPARATOR:
-            chunks.append(cur)
-            cur = []
+            chunks.append((chunk_start, cur))
+            cur, chunk_start = [], lineno + 1
         else:
             cur.append(line)
-    chunks.append(cur)
+    chunks.append((chunk_start, cur))
 
-    for chunk in chunks:
+    for chunk_start, chunk in chunks:
+        # first non-blank line's file position, before the chunk is trimmed
+        first_content = next((chunk_start + i for i, l in enumerate(chunk)
+                              if l.strip()), chunk_start)
         # drop leading/trailing blank lines only
         while chunk and not chunk[0].strip():
             chunk.pop(0)
@@ -202,6 +216,9 @@ def parse_fragment(path: Path):
         body = chunk[body_start:]
         # leading and trailing blank lines inside the body are noise — the
         # heading/blank-line layout is the assembler's job, not the author's
+        lead = 0
+        while lead < len(body) and not body[lead].strip():
+            lead += 1
         while body and not body[-1].strip():
             body.pop()
         while body and not body[0].strip():
@@ -210,6 +227,22 @@ def parse_fragment(path: Path):
             raise FragmentError(f"{path.name}: kind '{kind}' has an empty body")
         if not any(l.strip() for l in body if not l.lstrip().startswith("#")):
             raise FragmentError(f"{path.name}: kind '{kind}' has only comments")
+
+        # A column-0 header key inside a body is not prose — it is the next
+        # block whose `---` separator was never written. Gluing it silently
+        # lost whole entries at release and leaked bare `kind:`/`task:` lines
+        # into CHANGELOG, with `check` green (it cannot see a block boundary),
+        # so this fails the parse rather than warning. `first_content +
+        # body_start` is where the body begins in the file; the hit is its
+        # offset inside that body.
+        for off, line in enumerate(body):
+            if _GLUED_HEADER_RE.match(line):
+                raise FragmentError(
+                    f"{path.name}: body line "
+                    f"{first_content + body_start + lead + off} "
+                    f"({line.strip()!r}) looks like a block header inside the "
+                    f"'{kind}' entry — the `---` separator before it is "
+                    f"missing, so this block would glue into the entry above")
 
         entries.append(
             Entry(kind=kind, task=task, order=order, index=len(entries),
