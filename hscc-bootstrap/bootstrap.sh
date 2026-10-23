@@ -16,10 +16,11 @@ REPO_ROOT="$(cd "$BOOT_DIR/.." && pwd)"
 PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
-ASSUME_YES=false; FORCE=false; NO_BACKUP=false
+ASSUME_YES=false; FORCE=false; NO_BACKUP=false; DRY_RUN=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false; SKIP_CLI=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
+  --dry-run) DRY_RUN=true ;;
   --force) FORCE=true ;;
   --no-backup) NO_BACKUP=true ;;
   --skip-skills) SKIP_SKILLS=true ;;
@@ -27,7 +28,7 @@ for a in "$@"; do case "$a" in
   --skip-daemon) SKIP_DAEMON=true ;;
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli]"; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, daemon, CLI shim) and perform NONE."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -36,6 +37,30 @@ ok()   { echo "  ✓ $1"; }
 warn() { echo "  ⚠ $1"; }
 die()  { echo "  ✗ $1" >&2; exit 1; }
 hdr()  { echo; echo "━━━ $1 ━━━"; }
+plan() { echo "  → plan: $1"; }
+
+# ── brew libexec detection (t_bc5a3fee) ─────────────────────────────────────
+# The brew tap (homebrew-hscc) extracts the release tarball under
+# <prefix>/libexec/hscc-<ver>/ and puts `hscc` on PATH through brew itself.
+# Primary signal: the marker file the tap writes at the extracted tree root
+# (explicit, survives any prefix relocation). Fallback: the path shapes the
+# tap uses (Cellar/…, or a libexec/hscc-* dir) for taps that ship without
+# the marker. Effect: the CLI-shim stage below is SKIPPED — brew already
+# owns `hscc` on PATH, and writing a shim into the Hermes venv would shadow
+# it with a second, surprising entry point. Non-brew trees are unaffected.
+HSCC_BREW_LIBEXEC=""
+if [ -f "$REPO_ROOT/.hscc-brew-libexec" ]; then
+  HSCC_BREW_LIBEXEC="$REPO_ROOT"
+else
+  case "$REPO_ROOT" in
+    */Cellar/*|*/libexec/hscc-*) HSCC_BREW_LIBEXEC="$REPO_ROOT" ;;
+  esac
+fi
+
+if $DRY_RUN; then
+  echo "DRY RUN — every planned write is printed with a '→ plan:' marker; NONE is performed."
+  [ -n "$HSCC_BREW_LIBEXEC" ] && say "brew libexec tree detected: $HSCC_BREW_LIBEXEC (CLI shim stage will be skipped)"
+fi
 
 # ── Stage 1: prerequisites (preflight doctor, hard gate) ────────────────────
 hdr "Prerequisites (doctor)"
@@ -102,7 +127,9 @@ hdr "Install: plugin files"
 # (backup-then-overwrite; --no-backup overwrites in place). Skipped
 # automatically when the repo IS the runtime dir (old in-place layout). All
 # later stages run from $PLUGINS/... so this must come first.
-if [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
+if $DRY_RUN; then
+  plan "copy plugin payload: $REPO_ROOT → $PLUGINS (install_payload.py; backup-then-overwrite$($NO_BACKUP && echo ', no backup'))"
+elif [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
   warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
 else
   COPY_FLAG=""; $NO_BACKUP && COPY_FLAG="--no-backup"
@@ -130,7 +157,21 @@ hdr "Install: hscc CLI entry point (into the Hermes venv)"
 # is idempotent and REPORTS what it changed — no silent rewrites here. This is a
 # foundation step: a wrong-shebang CLI is exactly the silent degradation this
 # exists to prevent, so failure HARD-STOPS rather than degrading to a warning.
-if $SKIP_CLI; then warn "skipped"; else
+if $DRY_RUN; then
+  if $SKIP_CLI; then
+    plan "CLI shim: skipped (--skip-cli)"
+  elif [ -n "$HSCC_BREW_LIBEXEC" ]; then
+    plan "CLI shim: SKIPPED — brew libexec install already provides 'hscc' on PATH"
+  else
+    plan "CLI shim: install hscc-cli into the Hermes venv ($PYBIN) from $REPO_ROOT/hscc-cli (install_cli.py)"
+  fi
+elif [ -n "$HSCC_BREW_LIBEXEC" ]; then
+  # t_bc5a3fee: a brew install owns `hscc` on PATH already. Writing a shim
+  # into the Hermes venv would drop a SECOND entry point that shadows (or is
+  # shadowed by) brew's, outside brew's control — surprising and unverifiable
+  # by `brew`. Skip the stage; non-brew installs keep the behavior exactly.
+  warn "CLI shim skipped — brew libexec install ($HSCC_BREW_LIBEXEC): 'hscc' already on PATH via brew"
+elif $SKIP_CLI; then warn "skipped"; else
 CLI_JSON=$("$PYBIN" "$BOOT_DIR/install_cli.py" "$PYBIN" "$REPO_ROOT/hscc-cli" 2>/dev/null)
 if [ -z "$CLI_JSON" ]; then
   "$PYBIN" "$BOOT_DIR/install_cli.py" "$PYBIN" "$REPO_ROOT/hscc-cli" >&2
@@ -158,7 +199,9 @@ hdr "Install: operator watchdog scripts"
 # the install can still complete. User scripts in the runtime dir are
 # preserved (only hscc_*.sh names are touched).
 SCRIPTS_RUNTIME="${HERMES_SCRIPTS:-$HOME/.hermes/scripts}"
-if SCOPY=$(REPO_ROOT="$REPO_ROOT" SCRIPTS="$SCRIPTS_RUNTIME" "$PYBIN" "$BOOT_DIR/install_scripts.py" $COPY_FLAG); then
+if $DRY_RUN; then
+  plan "watchdog scripts: copy $REPO_ROOT/scripts/hscc_*.sh → $SCRIPTS_RUNTIME (install_scripts.py)"
+elif SCOPY=$(REPO_ROOT="$REPO_ROOT" SCRIPTS="$SCRIPTS_RUNTIME" "$PYBIN" "$BOOT_DIR/install_scripts.py" $COPY_FLAG); then
   ok "watchdog scripts copied → $SCRIPTS_RUNTIME$($NO_BACKUP && echo ' (no backup)')"
 else
   echo "$SCOPY" >&2
@@ -191,12 +234,16 @@ else
 fi
 
 hdr "Install: skills"
-if $SKIP_SKILLS; then warn "skipped"; else
+if $SKIP_SKILLS; then warn "skipped"
+elif $DRY_RUN; then plan "skills: $PLUGINS/hscc-skills/hscc.py install-skills (writes $HERMES_HOME/skills)"
+else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"
 fi
 
 hdr "Install: role profiles"
-if $SKIP_ROLES; then warn "skipped"; else
+if $SKIP_ROLES; then warn "skipped"
+elif $DRY_RUN; then plan "role profiles: $PLUGINS/hscc-roles/hscc.py generate (writes $HERMES_HOME/profiles)"
+else
   "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" generate >/dev/null 2>&1 && ok "role profiles generated" || warn "role generate reported issues"
 fi
 
@@ -210,11 +257,23 @@ fi
 # both role provision stages are skipped together. Non-fatal: a missing/unreadable
 # registry still ensures `general`, and the step warns rather than dies.
 hdr "Install: per-project orchestrators"
-if $SKIP_ROLES; then warn "skipped"; else
+if $SKIP_ROLES; then warn "skipped"
+elif $DRY_RUN; then plan "per-project orchestrators: $PLUGINS/hscc-roles/hscc.py orch-all (writes $HERMES_HOME/profiles)"
+else
   "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
 fi
 
 hdr "Install: ~/.hscc state + serving.json"
+if $DRY_RUN; then
+  [ -d "$HSCC_DIR" ] || plan "mkdir $HSCC_DIR"
+  [ -f "$HSCC_DIR/autonomy" ] || plan "seed $HSCC_DIR/autonomy (off)"
+  [ -f "$HSCC_DIR/autodown.json" ] || plan "seed $HSCC_DIR/autodown.json (disabled — preserve_autodown.py)"
+  if [ -f "$HSCC_DIR/serving.json" ] && ! $FORCE; then
+    plan "serving.json exists — would keep it (use --force to regenerate)"
+  else
+    plan "write $HSCC_DIR/serving.json (orch=$ORCH recipe=${RECIPE:-<none>} model=${MODEL:-<unknown>})"
+  fi
+else
 mkdir -p "$HSCC_DIR"
 [ -f "$HSCC_DIR/autonomy" ] || { echo off > "$HSCC_DIR/autonomy"; ok "autonomy flag seeded (off)"; }
 hdr "Install: autodown.json (operator state — preserve, never clobber)"
@@ -250,6 +309,7 @@ s = serving_gen.build_serving(cl, orchestrator=os.environ['ORCH'],
                               port=8000, keepalive=True)
 open(os.environ['SERVING'], 'w').write(json.dumps(s, indent=2) + '\n')
 " && ok "serving.json written ($SERVING)" || warn "serving.json generation failed"
+fi
 fi
 
 hdr "Install: hermes/sparkrun patches"
@@ -364,7 +424,14 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 hdr "Install: daemon"
-if $SKIP_DAEMON; then warn "skipped"; else
+if $SKIP_DAEMON; then warn "skipped"
+elif $DRY_RUN; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    plan "daemon: bash $PLUGINS/hscc_daemon/launchd-setup.sh (writes ~/Library/LaunchAgents) + restart_daemon.sh"
+  else
+    plan "daemon: bash $PLUGINS/hscc_daemon/systemd-setup.sh (writes the systemd user unit) + restart_daemon.sh"
+  fi
+else
   if [ "$(uname -s)" = "Darwin" ]; then
     DAEMON_SETUP="$PLUGINS/hscc_daemon/launchd-setup.sh"
   else
@@ -388,9 +455,14 @@ fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
 hdr "Done"
+if $DRY_RUN; then
+  ok "DRY RUN complete — NOTHING was installed (every planned write is above, marked '→ plan:')."
+  say "Re-run without --dry-run to perform these writes."
+else
 ok "HSCC installed. Models are NOT running yet."
 say "Bring a model up:  sparkrun run $RECIPE --cluster $CLUSTER_NAME --hosts $ORCH --port 8000 --ensure"
 say "Start the Hermes gateway if not running, then message it to dispatch work."
 say "Worker load-balancer: once worker models are up, the daemon starts the"
 say "  sparkrun LiteLLM proxy on :4000 (role workers + subagents balance across"
 say "  worker GPUs through it). Role profiles already point at it."
+fi
