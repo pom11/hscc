@@ -21,6 +21,7 @@ import os
 import re
 import json
 import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -409,6 +410,10 @@ def _get_help_text():
 
     util = _section("Utility", [
         *_entry("notify <message>", "Send a desktop notification"),
+        *_entry("bootstrap [flags]",
+                "Run the HSCC installer from any layout (repo, plugins, brew)",
+                ["flags pass through: --yes --dry-run --force --no-backup",
+                 "--skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)"]),
     ])
 
     examples = _section("Examples", [
@@ -468,6 +473,17 @@ COMMAND_HELP = {
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
+    # bootstrap (card t_bc5a3fee): installer verb. Every line authored <=76 so
+    # the (B) gate's 78 budget holds at both mandated widths (only the FIRST
+    # line receives _handle_help's 2-space prefix).
+    "bootstrap": "Run the HSCC installer (bootstrap.sh), whatever layout this\n"
+                 "  hscc lives in: repo checkout, deployed plugins, or a brew\n"
+                 "  libexec tree. Flags pass through to the installer:\n"
+                 "  [--yes] [--dry-run] [--force] [--no-backup]\n"
+                 "  [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|\n"
+                 "  --skip-cli]. --dry-run prints every planned write, does\n"
+                 "  none. HSCC_BOOTSTRAP_SH overrides the script lookup.\n"
+                 "  Usage: hscc bootstrap [flags]",
     # Multi-line value: _handle_help prints `  {value}`, so only the FIRST
     # line gets the 2-space prefix — every line is authored to stay <=76 so
     # the rendered block fits the (B) gate's 78 budget (t_90082309: the old
@@ -795,6 +811,116 @@ def _resolve_project_dir():
     ``flightdeck/`` package is imported by :func:`_handle_project`.
     """
     return Path(__file__).resolve().parent.parent / "hscc-project"
+
+
+def _hscc_version_key(path):
+    """Sort key for a ``hscc-<ver>`` payload dir: numeric version tuple first,
+    name as tie-breaker. Plain lexicographic order would rank ``hscc-2.9.0``
+    above ``hscc-2.10.0`` (``9`` > ``1``); digits compare as integers (the
+    repo's own version scheme is numeric dotted, see VERSION)."""
+    digits = re.findall(r"\d+", Path(path).name)
+    return ([int(d) for d in digits], Path(path).name)
+
+
+def _bootstrap_script_candidates(source_root=None):
+    """Ordered candidate paths for ``bootstrap.sh``, derived from where THIS
+    running CLI resolved its code (card t_bc5a3fee).
+
+    The three roots a shipped ``hscc`` can live under, plus two escapes:
+
+      1. repo checkout / in-tree copy — ``<source_root>/../hscc-bootstrap``
+         (the sibling layout; also matches a brew tarball extracted flat);
+      2. deployed plugins — ``$HERMES_HOME/plugins/hscc-bootstrap``
+         (bootstrap.sh copied there by install_payload);
+      3. brew libexec — walking up from the source root for the tap's payload
+         tree under ``libexec/`` (the tap installs the CLI into a venv INSIDE
+         libexec, so site-packages lookups never see the sibling). Two names
+         are offered, in this order: the version-STABLE ``libexec/hscc`` the
+         MERGED tap uses (homebrew-hscc Formula: ``tree = libexec/"hscc"``)
+         then every ``libexec/hscc-*`` newest-first (a versioned tree, which
+         no shipped formula produces today but the resolver still honours);
+      4. ``HSCC_BOOTSTRAP_SH`` env override (checked first; tests + custom
+         layouts).
+
+    A versioned libexec tree with several installs resolves the NEWEST (see
+    ``_hscc_version_key``) — the same posture brew takes for the active
+    formula version.
+    """
+    root = Path(source_root) if source_root else Path(__file__).resolve().parent
+    cands = []
+
+    # 4. explicit override wins outright (a bogus value still falls through
+    #    to the real candidates rather than silently exec-ing nothing).
+    env = os.environ.get("HSCC_BOOTSTRAP_SH")
+    if env:
+        cands.append(Path(env))
+
+    # 1. sibling of the resolved package dir (repo checkout, in-tree copy).
+    cands.append(root.parent / "hscc-bootstrap" / "bootstrap.sh")
+
+    # 3. ancestor walk: a libexec/venv layout puts the script under one of
+    #    the parent prefixes (covers a brew tree extracted under Cellar/).
+    #    The stable name first: the merged tap's payload tree is
+    #    `libexec/hscc` (version-stable), so a real keg never depends on the
+    #    versioned glob below matching.
+    for anc in list(root.parents)[:6]:
+        cands.append(anc / "hscc-bootstrap" / "bootstrap.sh")
+        libexec = anc / "libexec"
+        if libexec.is_dir():
+            cands.append(libexec / "hscc" / "hscc-bootstrap" / "bootstrap.sh")
+            try:
+                for ver in sorted(libexec.glob("hscc-*"),
+                                  key=_hscc_version_key, reverse=True):
+                    cands.append(ver / "hscc-bootstrap" / "bootstrap.sh")
+            except OSError:
+                pass
+
+    # 2. deployed plugins dir (works even when the source tree has no copy —
+    #    a wheel-style install).
+    hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    cands.append(Path(hermes_home) / "plugins" / "hscc-bootstrap" / "bootstrap.sh")
+    return cands
+
+
+def _resolve_bootstrap_script(source_root=None):
+    """First existing candidate ``bootstrap.sh``, or None. A set-but-bogus
+    ``HSCC_BOOTSTRAP_SH`` does not mask the real candidates (it is simply not
+    'existing'), so a typo cannot make the verb report success for a script
+    that is not there."""
+    for cand in _bootstrap_script_candidates(source_root):
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _handle_bootstrap():
+    """``hscc bootstrap [flags...]`` — locate bootstrap.sh relative to the
+    resolved source root and exec it, passing the remaining argv through.
+
+    Deliberately a transparent hop (card t_bc5a3fee): the installer stays the
+    single source of truth for the install sequence; this verb only makes it
+    reachable as ``hscc bootstrap --dry-run`` from ANY layout (repo checkout,
+    deployed plugins, brew libexec). The installer's exit code is the verb's
+    exit code; stdout/stderr are inherited so the operator sees the stage
+    output live.
+    """
+    script = _resolve_bootstrap_script()
+    if script is None:
+        print("Error: bootstrap.sh not found relative to this install "
+              f"({Path(__file__).resolve().parent}). Searched the repo "
+              "sibling, libexec/hscc-*/, and $HERMES_HOME/plugins — or set "
+              "HSCC_BOOTSTRAP_SH.", file=sys.stderr)
+        return 1
+    tail = [a for a in sys.argv[2:]]
+    argv = [str(script)] + tail
+    if not os.access(script, os.X_OK):
+        # A copied tree can lose the exec bit; bash runs it either way.
+        argv = ["bash"] + argv
+    # env inherited verbatim: HERMES_HOME/HSCC_DIR sandboxing must survive.
+    return subprocess.run(argv, env=os.environ).returncode
 
 
 def _load_cluster_engine():
@@ -1542,7 +1668,7 @@ def _handle_project():
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
     "log", "check", "watch", "triggers", "notify", "verify", "stats",
-    "throughput", "autoscale", "escalate",
+    "throughput", "autoscale", "escalate", "bootstrap",
 }
 
 
@@ -1627,6 +1753,14 @@ def main():
         print(f"hscc {cmd.lower()}")
         print(f"  {help_text}")
         sys.exit(0)
+
+    # 'bootstrap' verb — locate + exec the installer (card t_bc5a3fee). MUST
+    # sit after the DAEMON_COMMANDS help intercept above: `hscc bootstrap
+    # --help` (or `-h` anywhere in the tail) prints COMMAND_HELP and never
+    # execs the installer; reaching here means a real run.
+    if cmd == "bootstrap":
+        rc = _handle_bootstrap()
+        sys.exit(rc)
 
     # 'verify'
     if cmd == "verify":
@@ -1734,7 +1868,7 @@ def main():
         cmd_heal(status_only=True)
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, bootstrap, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
         sys.exit(1)
 
 

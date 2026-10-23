@@ -60,11 +60,39 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | `restart_daemon.sh` | restart the daemon via `hscc stop`/`hscc start` + verify PID turned over |
 
 ## Flags
-`--yes` non-interactive · `--force` regenerate serving.json · `--no-backup` ·
+`--yes` non-interactive · `--dry-run` print every planned write, perform none ·
+`--force` regenerate serving.json · `--no-backup` ·
 `--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli`.
 
+## Running from a brew libexec tree (t_bc5a3fee, real layout pinned t_0f5616fd)
+
+The homebrew-hscc tap installs the release tree at the version-STABLE path
+`<prefix>/Cellar/hscc/<ver>/libexec/hscc/` and puts `hscc` on PATH through brew
+itself. `bootstrap.sh` is location-relative (`BOOT_DIR`/`REPO_ROOT` from
+`BASH_SOURCE`), so the payload stages work unchanged from that tree. Two
+behaviours differ there:
+
+* **CLI shim stage is skipped.** `install_cli.py` would write a second `hscc`
+  console script into the Hermes venv, shadowing (or being shadowed by) the
+  brew-owned one — surprising and invisible to `brew`. The skip prints why.
+* **Detection** is a marker file `.hscc-brew-libexec` at the extracted tree
+  root when one exists, with a path-shape fallback (`*/Cellar/*` or
+  `*/libexec/hscc-*`) for taps that ship without it. The SHIPPED formula drops
+  no marker and its payload dir is not named `hscc-*`, so on a real keg the skip
+  rests on `*/Cellar/*` — pinned by the shipped-keg cases in
+  `tests/test_bootstrap_dry_run.py`.
+
+`hscc bootstrap [flags]` reaches the same script from any layout: the verb
+resolves `bootstrap.sh` as a sibling of the resolved package dir (repo
+checkout / in-tree copy), else under `$HERMES_HOME/plugins`, else by walking
+ancestors for `libexec/hscc/` (the shipped tap) or `libexec/hscc-*/` (a
+versioned tree; the brew venv case). `HSCC_BOOTSTRAP_SH`
+overrides the lookup outright.
+
 ## Tests
-`tests/` — 455 tests collected (verified 2026-10-19 against this tree; re-count
+`tests/` — 467 tests collected (verified 2026-10-23 against this tree; re-count
 with `python -m pytest tests/ --collect-only -q`) incl. an end-to-end
-stage-sequence test and the daemon-restart helper tests.
+stage-sequence test, the daemon-restart helper tests, and
+`tests/test_bootstrap_dry_run.py` — fabricated brew-libexec trees proving `--dry-run`
+writes nothing and the brew shim-skip fires (marker + path heuristic).
 `python -m pytest tests/ -q`.
