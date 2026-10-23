@@ -1,0 +1,111 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# STATUS: NEEDS-SECRET — optional transport, DISABLED BY DEFAULT.
+#         DO NOT CREATE THE SECRET FOR THIS FILE (the operator decides if/when).
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The release flow's PRIMARY transport is the script this workflow calls:
+#
+#     scripts/bump_formula.py            (t_a946834f)
+#
+# which the release card / orchestrator gate runs from the operator's machine,
+# where `gh` is already authed as pom11 and can push to pom11/homebrew-hscc. That
+# path needs no new credential. THIS file is the *future* transport, checked in
+# so it exists when the release flow moves server-side, and inert until then:
+#
+#   1. It needs a secret the operator must create — a cross-repo write token for
+#      pom11/homebrew-hscc (fine-grained PAT scoped to that single repo with
+#      Contents: Read and write, or a GitHub App installation token). Nothing in
+#      this repo can or will create it; `gh secret set` is an operator action.
+#   2. Even once the secret exists, the job is skipped unless the operator also
+#      sets the repository VARIABLE `TAP_BUMP_ENABLED=true`
+#      (Settings → Secrets and variables → Actions → Repository variables).
+#
+# Why a variable AND a secret, and why not `on:`-level gating:
+#
+#   * A workflow that triggers on `release: published` runs on EVERY release the
+#     moment it lands on the default branch. If it failed because a secret was
+#     missing, every release would carry a red X — and a red X nobody acts on is
+#     how real release failures start being ignored. `jobs.<id>.if` on a repo
+#     variable makes the job *skip* (grey, not red) while the feature is off.
+#   * `secrets` is not available in a job-level `if` expression, so the secret
+#     itself cannot be the gate. `vars` is — hence the variable is the switch and
+#     the secret's presence is asserted inside the job, where a missing one is a
+#     clear error rather than a silent no-op.
+#   * Gating at `on:` instead (`on: workflow_dispatch`) would mean the file looks
+#     like a manual tool and nobody would notice it is not wired to releases.
+#
+# To enable (operator, when and if the release flow should run server-side):
+#
+#     gh secret set HSCC_TAP_PUSH_TOKEN --repo pom11/hscc --body '<fine-grained PAT>'
+#     gh variable set TAP_BUMP_ENABLED --repo pom11/hscc --body true
+#
+# To leave it off (the default, and the state this card ships in): do nothing.
+#
+# What the job does when enabled: clones the tap, runs the SAME script with the
+# SAME gates (ruby -c + the tap's vendored address guard), and pushes the bump
+# commit. `brew audit --strict` and `brew style` stay with the tap's own CI,
+# which is where Homebrew wants them evaluated.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: bump-homebrew-tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read          # this job reads hscc only; the tap write is the token
+
+concurrency:
+  group: bump-homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Skipped (not failed) while the feature is off. See the header.
+    if: vars.TAP_BUMP_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to run without the cross-repo token
+        env:
+          TOKEN: ${{ secrets.HSCC_TAP_PUSH_TOKEN }}
+        run: |
+          # The gate that lets the job be enabled is a variable, so this is where
+          # "you flipped the switch but never added the credential" gets caught —
+          # fail loudly here rather than pushing nothing and looking green.
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::TAP_BUMP_ENABLED is true but the HSCC_TAP_PUSH_TOKEN secret is not set."
+            echo "Either create the token (fine-grained PAT, pom11/homebrew-hscc, Contents: Read and write)"
+            echo "or unset the TAP_BUMP_ENABLED variable and keep running scripts/bump_formula.py from the release card."
+            exit 1
+          fi
+
+      - name: Authenticate the push (token never touches the command line)
+        env:
+          GH_TOKEN: '${{ secrets.HSCC_TAP_PUSH_TOKEN }}'
+        run: |
+          # `gh auth setup-git` installs gh's credential helper, so the script's
+          # plain `git push origin` authenticates without the token appearing in a
+          # remote URL, a git config value, or a process argv (all of which are
+          # readable from the job log or `ps`).
+          printf '%s' "$GH_TOKEN" | gh auth login --with-token
+          gh auth setup-git
+
+      - name: Bump the tap formula to this release
+        env:
+          # From the release event; the script re-derives the version, the url and
+          # the sha256 from the archive itself, so a tag that is not vX.Y.Z, whose
+          # tarball is unreachable, or whose VERSION file disagrees with the tag
+          # fails the job with the tap untouched.
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/bump_formula.py --tag "$TAG"
+
+      - name: What landed
+        run: |
+          # The tap's own CI (which runs its vendored address guard) is the proof;
+          # this is just the log line that names the commit for the release notes.
+          git -C ~/.cache/hscc/taps/homebrew-hscc log -1 --oneline
