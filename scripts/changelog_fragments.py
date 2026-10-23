@@ -36,6 +36,11 @@ Optional headers before the body: ``task: t_<id>`` (defaults to the file stem)
 and ``order: <int>`` (defaults 0; breaks ties inside one file). Blank ``kind``
 values, unknown header names and empty bodies are errors — a malformed
 fragment must fail loudly in ``check`` rather than silently vanish at release.
+So is a body line at column 0 that opens with one of those header keys: it is
+the next block whose ``---`` was never written, and gluing it in used to drop a
+whole entry at release while leaking bare ``kind:``/``task:`` lines into
+CHANGELOG.md with ``check`` green (t_f57b9d82). Indent such a line to quote the
+format inside a body.
 
 ORDERING (deterministic, so re-running `sync` is a no-op)
 --------------------------------------------------------
