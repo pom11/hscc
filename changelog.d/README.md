@@ -67,8 +67,16 @@ both-interpreter runs, audit-doc paths), exactly as before.
 
 A malformed fragment (missing `kind`, empty body, non-integer `order`) fails
 loudly in `check` rather than silently vanishing at release. A fragment whose
-file name is not a kanban task id also fails `check` — the name IS the
-ownership rule; `misc.md` would put two cards back into one shared file.
+file name is not a kanban task id fails the same way — rc=2, `malformed
+fragment: <file>: …` on stderr — because the name IS the ownership rule;
+`misc.md` would put two cards back into one shared file. The rule is enforced
+on the live directory only: `archive/<version>/` keeps its pre-scheme names
+(`t_tmux_chat_20261013.md` and friends) and must stay parseable for audit. Only
+`*.md` is read, in any letter case, and a file *named* like a card with another
+suffix (`t_9c79b937.txt`) is refused rather than skipped — both are the silent
+vanish this section is about. (The sentence above was a promise, not a gate,
+until t_9c79b937: `TASK_ID_RE` was consulted only by `add`/`rescue`, so a
+hand-authored `misc.md` was counted, rendered and released with `check` rc=0.)
 
 ## Ordering
 

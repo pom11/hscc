@@ -186,8 +186,10 @@ The rule:
   --task <id> --kind Fixed --body "- **…** prose…"`.
 - Verify with `python3 scripts/changelog_fragments.py check` (also asserts the
   committed `[Unreleased]` block was not hand-edited). A fragment named
-  anything but a task id fails the check — a shared name like `misc.md` would
-  reintroduce the collision.
+  anything but a task id is a malformed fragment — `check` exits 2 with
+  `malformed fragment: <file>: …`, because a shared name like `misc.md` would
+  reintroduce the collision. (Only live fragments: `changelog.d/archive/**`
+  keeps pre-scheme names for audit.)
 - `CHANGELOG.md` in your diff is a review finding. The release step
   (`… changelog_fragments.py release --version X`) is what writes it.
 

@@ -37,6 +37,11 @@ and ``order: <int>`` (defaults 0; breaks ties inside one file). Blank ``kind``
 values, unknown header names and empty bodies are errors — a malformed
 fragment must fail loudly in ``check`` rather than silently vanish at release.
 
+The file NAME is part of the format too: a live fragment must be named
+``t_<8 hex>.md`` after the card that owns it, and a shared or hand-picked name
+(``misc.md``, ``chore.md``) is itself a malformed fragment — rc=2 like the
+rest. ``check_fragment_name`` holds the ruling and the ``archive/`` exemption.
+
 ORDERING (deterministic, so re-running `sync` is a no-op)
 --------------------------------------------------------
 Kinds in Keep a Changelog order with HSCC's ``Verified`` last; unknown kinds
@@ -114,10 +119,99 @@ _HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$")
 _SEPARATOR = "---"
 _ALLOWED_HEADERS = {"kind", "task", "order"}
 TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
+#: The one file name that is exempt from the task-id rule: the format doc that
+#: lives beside the fragments. Matched case-insensitively because the selector
+#: is (see `fragment_files`).
+_README_STEM = "readme"
 
 
 class FragmentError(Exception):
-    """A fragment file cannot be parsed."""
+    """A fragment file cannot be parsed, or is not allowed to be one."""
+
+
+def check_fragment_name(path: Path) -> None:
+    """Fail closed on a live fragment whose name is not a kanban task id.
+
+    THE RULE. A file in the fragments directory is exactly one card's fragment
+    and the file name IS the ownership rule: two cards cannot name the same
+    path, which is the whole reason ``CHANGELOG.md`` left worker diffs. A
+    shared or hand-picked name — ``misc.md``, ``chore.md`` — puts two cards
+    back into one file and reintroduces the merge conflict this scheme exists
+    to remove, so the stem is validated, not merely recommended.
+
+    Until t_9c79b937 this gate did not exist: ``TASK_ID_RE`` was consulted only
+    by ``add`` and ``rescue``, i.e. by the commands validating the id they were
+    *given*, never by the path that reads the files that are *present*. A
+    hand-authored ``misc.md`` was counted by ``list``, rendered into the block,
+    materialised by ``release`` and left ``check`` rc=0.
+
+    It raises ``FragmentError`` — the malformed-fragment shape (`malformed
+    fragment: <file>: …` on stderr, rc=2) — rather than reporting drift, so an
+    author can tell "you broke the format" apart from "CHANGELOG.md disagrees
+    with the fragments" (rc=1). Same convention as the missing-separator gate
+    from t_f57b9d82.
+
+    LIVE DIRECTORY ONLY, deliberately. ``changelog.d/archive/<version>/`` keeps
+    pre-scheme names that must stay parseable for audit —
+    ``archive/2.7.0/t_tmux_chat_20261013.md`` fails this very regex, and the
+    ``[2.7.0]`` section it produced is committed in CHANGELOG.md. The rule is a
+    property of the directory being loaded, not of the parser, which is why it
+    is applied from ``load_entries``' selection and NOT inside
+    ``parse_fragment``: an archived fragment still has to parse for audit.
+    """
+    if path.name.lower().startswith(_README_STEM):
+        return
+    if not TASK_ID_RE.match(path.stem):
+        raise FragmentError(
+            f"{path.name}: file name {path.stem!r} is not a kanban task id "
+            f"(expected t_<8 hex>, e.g. t_9c79b937.md) — one fragment per card "
+            f"is what keeps worker diffs disjoint, so a shared name like "
+            f"misc.md is not allowed here"
+        )
+
+
+def fragment_files(fragments_dir: Path):
+    """The fragment files of a directory, in deterministic order.
+
+    One selector for `load_entries` and for `release`' archive move, so the
+    set that gets counted is exactly the set that gets consumed — a file that
+    `release` counts but does not archive would be counted again at the next
+    release.
+
+    Suffix matching is case-INsensitive on purpose. ``Path.glob("*.md")`` is a
+    case-sensitive pattern even on macOS's case-insensitive APFS (measured), so
+    a ``misc.MD`` was invisible to the old selector: it silently contributed
+    nothing to ``check`` and nothing to ``release``, i.e. it could hold a whole
+    entry that vanished at release with every gate green. A name rule is
+    worthless if the file list it applies to is not the real one.
+
+    The mirror case is refused rather than ignored: a file *named* like a card
+    (``t_9c79b937.txt``, ``t_9c79b937.markdown``) is an explicit claim of
+    fragment ownership, and a selector that skipped it on suffix alone would
+    drop that card's entry in silence. Anything else in the directory
+    (``notes.txt``, ``.swp`` scratch) is not a claim and stays ignored.
+    """
+    if not fragments_dir.is_dir():
+        return []
+    files = []
+    for path in sorted(fragments_dir.iterdir()):
+        # `archive/` and any other subdirectory is not a fragment: releases
+        # live there and must keep parsing under the old names.
+        if not path.is_file():
+            continue
+        if path.name.lower().startswith(_README_STEM):
+            continue
+        if path.suffix.lower() == ".md":
+            files.append(path)
+            continue
+        if TASK_ID_RE.match(path.stem):
+            raise FragmentError(
+                f"{path.name}: named like a fragment but with a "
+                f"{path.suffix!r} suffix — only *.md is read, so this entry "
+                f"would be silently dropped at release; rename it to "
+                f"{path.stem}.md"
+            )
+    return files
 
 
 class Entry:
@@ -219,12 +313,17 @@ def parse_fragment(path: Path):
 
 
 def load_entries(fragments_dir: Path = FRAGMENTS_DIR):
+    """Parse every live fragment in ``fragments_dir``.
+
+    Every command goes through here, which is why the filename gate lives here
+    too rather than being duplicated per command (same reason the separator
+    gate lives in ``parse_fragment``). ``archive/`` is not part of this
+    directory listing, so archived pre-scheme names are out of scope by
+    construction — see ``check_fragment_name``.
+    """
     entries = []
-    if not fragments_dir.is_dir():
-        return entries
-    for path in sorted(fragments_dir.glob("*.md")):
-        if path.name.lower().startswith("readme"):
-            continue
+    for path in fragment_files(fragments_dir):
+        check_fragment_name(path)
         entries.extend(parse_fragment(path))
     return entries
 
@@ -366,9 +465,10 @@ def release(version: str, fragments_dir: Path = FRAGMENTS_DIR,
 
     archive = fragments_dir / "archive" / version
     archive.mkdir(parents=True, exist_ok=True)
-    for path in sorted(fragments_dir.glob("*.md")):
-        if path.name.lower().startswith("readme"):
-            continue
+    # Same selector `load_entries` used for the count above: the files that
+    # were counted are exactly the files that get consumed, and both sides of
+    # the ownership rule stay case-insensitive.
+    for path in fragment_files(fragments_dir):
         os.replace(path, archive / path.name)
     return len(entries)
 

@@ -89,16 +89,28 @@ def test_multiple_entries_one_file(frags):
 
 
 def test_deterministic_ordering_by_task_id(frags):
-    for t in ("t_zzzzzzzz", "t_aaaaaaaa", "t_mmmmmmmm"):
+    # task ids are spread far apart and written out of order; the names are all
+    # legal task ids because the filename gate (t_9c79b937) rejects the old
+    # `t_zzzzzzzz`-style placeholders
+    for t in ("t_ffffffff", "t_aaaaaaaa", "t_dddddddd"):
         write_fragment(frags, t, "Fixed", f"- entry {t}\n")
     order = [e.task for e in cf.load_entries(frags)]
     assert order == sorted(order)
+    # and the assembled block agrees with it, not with file write order
+    block = cf.render_block(fragments_dir=frags, marker="")
+    positions = [block.index(f"entry {t}") for t in
+                 ("t_aaaaaaaa", "t_dddddddd", "t_ffffffff")]
+    assert positions == sorted(positions), block
 
 
 def test_kind_order_keepachangelog_then_verified(frags):
+    # one legal task id per kind: the live-directory filename gate means a
+    # `k-Added.md`-style helper name is now a parse error (t_9c79b937)
+    names = {"Added": "t_a1000000", "Removed": "t_b2000000",
+             "Fixed": "t_c3000000", "Verified": "t_d4000000"}
     for kind in ("Verified", "Fixed", "Added", "Removed"):
-        (frags / f"k-{kind}.md").write_text(
-            f"kind: {kind}\ntask: t_11111111\n\n- {kind}\n", encoding="utf-8")
+        (frags / f"{names[kind]}.md").write_text(
+            f"kind: {kind}\ntask: {names[kind]}\n\n- {kind}\n", encoding="utf-8")
     out = cf.render_block(fragments_dir=frags)
     positions = {k: out.index(f"### {k}") for k in ("Added", "Removed", "Fixed", "Verified")}
     assert positions["Added"] < positions["Removed"] < positions["Fixed"] < positions["Verified"]
@@ -126,6 +138,192 @@ def test_bad_order_value_raises(frags):
 def test_readme_fragment_is_ignored(frags):
     (frags / "README.md").write_text("# prose, kind: not an entry\n", encoding="utf-8")
     assert cf.load_entries(frags) == []
+
+
+# ------------------------------------------- filename ownership (t_9c79b937)
+#
+# `changelog.d/README.md` has claimed since t_95f1d6e1 that "a fragment whose
+# file name is not a kanban task id also fails `check`". It never did:
+# TASK_ID_RE was consulted only by `add`/`rescue` — the commands validating the
+# id they were *given* — never by the path reading the files that are *present*.
+# Measured on the pointer-form CHANGELOG before this fix:
+#
+#   cp changelog.d/*.md $D && printf 'kind: Fixed\n\n- …\n' > $D/misc.md \
+#      && printf 'kind: Fixed\n\n- …\n' > $D/chore.md
+#   python3 scripts/changelog_fragments.py check --fragments-dir $D ...
+#   => "OK — [Unreleased] is pointer, … consistent"   rc=0
+#
+# Both foreign entries were counted and would have been materialised into the
+# next release. The name IS the ownership rule that keeps worker diffs
+# disjoint, so the gate now lives in `load_entries` (every command funnels
+# through it) and fail-closes as a malformed fragment: rc=2, same convention as
+# the missing-separator gate from t_f57b9d82. `archive/` stays exempt — those
+# files must keep parsing for audit under their pre-scheme names.
+
+MISC_FRAGMENT = "kind: Fixed\n\n- entry authored in a shared misc file\n"
+CHORE_FRAGMENT = "kind: Fixed\n\n- entry authored by a card named wrong\n"
+
+
+def test_misc_named_fragment_fails_check(frags, changelog, capsys):
+    """The card's headline defect: `check` stayed rc=0 on `misc.md`."""
+    (frags / "misc.md").write_text(MISC_FRAGMENT, encoding="utf-8")
+    rc = cf.main(["check", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    err = capsys.readouterr().err
+    assert rc == 2, f"check must not stay green on a shared name (rc={rc})"
+    assert "malformed fragment" in err and "misc.md" in err, err
+    assert "task id" in err, err
+
+
+def test_non_hex_stem_raises(frags):
+    """A name that merely *looks* task-shaped is still not a task id: the hex
+    constraint is what ties the file to a real kanban card."""
+    (frags / "t_zzzzzzzz.md").write_text(MISC_FRAGMENT, encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    assert "t_zzzzzzzz" in str(exc.value), str(exc.value)
+
+
+def test_valid_task_id_fragment_passes_check(frags, changelog, capsys):
+    """ANTI-VACUITY positive leg: identical content under a legal name passes.
+    Without this leg the two failing tests above would also pass on a loader
+    that rejected every file."""
+    (frags / "t_9c79b937.md").write_text(MISC_FRAGMENT, encoding="utf-8")
+    # pointer form = the committed state between releases (see
+    # test_check_accepts_pointer_and_synced for why this is set up first)
+    pre, _, post = cf.split_changelog(changelog.read_text())
+    changelog.write_text(cf.assemble(pre, cf.pointer_block(), post), encoding="utf-8")
+    rc = cf.main(["check", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    out = capsys.readouterr()
+    assert rc == 0, out.err + out.out
+    assert "1 fragment entries consistent" in out.out, out.out
+
+
+def test_uppercase_md_suffix_is_caught_not_skipped(frags):
+    """`Path.glob('*.md')` is case-sensitive even on macOS's case-insensitive
+    APFS (measured): `misc.MD` was invisible to the old selector — it bypassed
+    every gate AND silently vanished at release. The selector is now
+    case-insensitive, so such a file must fail, not hide."""
+    (frags / "misc.MD").write_text(MISC_FRAGMENT, encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    assert "misc.MD" in str(exc.value), str(exc.value)
+    # and the README exemption is likewise case-insensitive
+    (frags / "README.MD").write_text("# prose, kind: not an entry\n",
+                                     encoding="utf-8")
+    (frags / "misc.MD").unlink()
+    assert cf.load_entries(frags) == []
+
+
+def test_release_refuses_a_foreign_name_without_side_effects(frags, changelog):
+    """The step that would materialise the shared entry into a release must
+    refuse rc=2 and change nothing on disk (same shape as the glue gate)."""
+    (frags / "misc.md").write_text(MISC_FRAGMENT, encoding="utf-8")
+    (frags / "t_aaaaaaa1.md").write_text("kind: Fixed\n\n- legit\n",
+                                         encoding="utf-8")
+    before = changelog.read_text()
+    rc = cf.main(["release", "--version", "1.2.3", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2
+    assert changelog.read_text() == before, "a refused release touched CHANGELOG.md"
+    assert (frags / "t_aaaaaaa1.md").is_file(), "a refused release archived fragments"
+    assert not (frags / "archive").exists()
+
+
+def test_archive_is_not_scanned(frags):
+    """`archive/<version>/` keeps pre-scheme names that must stay parseable for
+    audit — the gate is a property of the live directory, not of the parser.
+    The real corpus pins it: archive/2.7.0/t_tmux_chat_20261013.md fails
+    TASK_ID_RE and still parses when loaded directly."""
+    legacy = "kind: Fixed\n\n- archived entry under a legacy name\n"
+    archived = frags / "archive" / "2.7.0"
+    archived.mkdir(parents=True)
+    (archived / "t_tmux_chat_20261013.md").write_text(legacy, encoding="utf-8")
+    # live dir holds only the README: the archived legacy name must not leak
+    # into the live load at all...
+    assert cf.load_entries(frags) == []
+    # ...while audit access to the legacy file itself still works
+    assert [e.body for e in cf.parse_fragment(
+        archived / "t_tmux_chat_20261013.md")] == [["- archived entry under a legacy name"]]
+    # and a release that *created* an archive keeps check green afterwards
+    (frags / "t_aaaaaaa2.md").write_text("kind: Fixed\n\n- x\n", encoding="utf-8")
+    cl = frags.parent / "CHANGELOG.md"
+    make_changelog(cl)
+    assert cf.main(["release", "--version", "9.9.9", "--fragments-dir", str(frags),
+                    "--changelog", str(cl)]) == 0
+    assert (archived.parent / "9.9.9" / "t_aaaaaaa2.md").is_file()
+    assert cf.main(["check", "--fragments-dir", str(frags),
+                    "--changelog", str(cl)]) == 0
+
+
+def test_release_consumes_an_uppercase_suffix_fragment(frags):
+    """The count and the consumption must use ONE selector. A legal stem with a
+    `.MD` suffix is loaded (so `release` counts it); if the archive move kept
+    the old case-sensitive glob, the file would stay behind and be counted
+    again at the next release — the entry shipping twice with every gate
+    green, because `check` accepts the pointer form whatever it counts."""
+    (frags / "t_aaaaaaa3.MD").write_text("kind: Fixed\n\n- shouty suffix\n",
+                                         encoding="utf-8")
+    assert [e.source for e in cf.load_entries(frags)] == ["t_aaaaaaa3.MD"]
+    cl = frags.parent / "CHANGELOG.md"
+    make_changelog(cl)
+    assert cf.main(["release", "--version", "9.9.8", "--fragments-dir", str(frags),
+                    "--changelog", str(cl)]) == 0
+    assert (frags / "archive" / "9.9.8" / "t_aaaaaaa3.MD").is_file()
+    assert cf.load_entries(frags) == [], "release left a counted fragment behind"
+
+
+def test_check_fragment_name_unit_contract():
+    """`check_fragment_name` is also a unit-level contract (it is the function
+    a landing step or a reviewer script calls on one path), so its own
+    exemptions must not depend on `fragment_files` having pre-filtered them:
+    a readme is allowed in any case, a legal stem is allowed, anything else
+    raises. Without this leg the readme exemption here is dead code — the
+    selector hides it — and a later edit that case-tightens it would go
+    unnoticed. Note the division of labour: this function judges the STEM only;
+    which files count as fragments at all is `fragment_files`' job (see
+    test_task_named_non_md_file_is_refused)."""
+    cf.check_fragment_name(Path("t_9c79b937.md"))          # legal: no raise
+    cf.check_fragment_name(Path("t_95f1d6e1.mdx"))         # legal stem, odd suffix
+    cf.check_fragment_name(Path("README.md"))              # exempt
+    cf.check_fragment_name(Path("readme.md"))              # exempt, lowercase
+    cf.check_fragment_name(Path("README.MD"))              # exempt, either case
+    for bad in ("misc.md", "t_zzzzzzzz.md", "misc.MD", "chore.md",
+                "t_9c79b93z.md", "t_tmux_chat_20261013.md"):
+        with pytest.raises(cf.FragmentError):
+            cf.check_fragment_name(Path(bad))
+
+
+def test_task_named_non_md_file_is_refused(frags):
+    """The mirror of the `.MD` case: a file *named* like a card but with a
+    non-`.md` suffix is an explicit ownership claim that the reader will never
+    open, so it must fail loudly instead of being skipped on suffix alone —
+    that is the same silent-vanish shape, approached from the other side.
+    Non-claiming files (`notes.txt`, dotfiles) stay ignored."""
+    (frags / "t_9c79b937.txt").write_text("kind: Fixed\n\n- wrong suffix\n",
+                                          encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    assert "t_9c79b937.txt" in str(exc.value), str(exc.value)
+    assert "silently dropped" in str(exc.value), str(exc.value)
+    (frags / "t_9c79b937.txt").unlink()
+    (frags / "notes.txt").write_text("scratch, not a fragment\n", encoding="utf-8")
+    (frags / ".t_9c79b937.md.swp").write_text("vim junk\n", encoding="utf-8")
+    assert cf.load_entries(frags) == []
+
+
+def test_filename_gate_is_what_fires(monkeypatch, frags):
+    """ANTI-VACUITY (mutation): neuter the gate — i.e. delete the check — and
+    the shared-name files parse into exactly the two foreign entries that the
+    pre-fix tool counted and would have released. So every failing test above
+    is red iff the gate is removed, and red for the right reason."""
+    (frags / "misc.md").write_text(MISC_FRAGMENT, encoding="utf-8")
+    (frags / "chore.md").write_text(CHORE_FRAGMENT, encoding="utf-8")
+    monkeypatch.setattr(cf, "check_fragment_name", lambda path: None)
+    entries = cf.load_entries(frags)
+    assert [e.source for e in entries] == ["chore.md", "misc.md"], entries
+    assert "shared misc file" in entries[1].body[0], entries[1].body
 
 
 # ---------------------------------------------------------------- render/sync

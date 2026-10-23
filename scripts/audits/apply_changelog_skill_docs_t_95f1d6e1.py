@@ -5,6 +5,13 @@ Used instead of a fuzzy patcher because a `patch` call on install/hscc-skills/**
 reported success without changing the file (silent revert), and a silently
 missing contributor-doc edit is exactly the failure mode this card exists to
 prevent. Every edit here is asserted on disk before and after.
+
+Revised by t_9c79b937: WORKER_BLOCK now carries the wording the filename gate
+actually produces (a wrong name is a malformed fragment, `check` exits 2) and
+the `archive/` exemption, so a re-apply on a fresh tree reproduces the CURRENT
+rule rather than the 2.5.5 wording. The `edit()` marker guard has been a no-op
+on this repo since the block landed, which is why this script's text could
+drift from the skill files unnoticed in the first place.
 """
 import sys
 from pathlib import Path
@@ -36,8 +43,10 @@ The rule:
   --task <id> --kind Fixed --body "- **…** prose…"`.
 - Verify with `python3 scripts/changelog_fragments.py check` (also asserts the
   committed `[Unreleased]` block was not hand-edited). A fragment named
-  anything but a task id fails the check — a shared name like `misc.md` would
-  reintroduce the collision.
+  anything but a task id is a malformed fragment — `check` exits 2 with
+  `malformed fragment: <file>: …`, because a shared name like `misc.md` would
+  reintroduce the collision. (Only live fragments: `changelog.d/archive/**`
+  keeps pre-scheme names for audit.)
 - `CHANGELOG.md` in your diff is a review finding. The release step
   (`… changelog_fragments.py release --version X`) is what writes it.
 
