@@ -164,7 +164,26 @@ def daemon_liveness(pid_file=None, heartbeat_file=None):
     }
 
 
-def run_heartbeat_loop(stop_event, interval=None):
+#: How often the daemon's liveness loop may CONSIDER the update check (card
+#: t_a4055572). The real "at most once/day" throttle is the cache itself
+#: (``update_check.check_due`` refuses a fetch while the cached answer is
+#: inside its 24h window) — that guard survives daemon restarts, which a
+#: monotonic-clock counter cannot. This interval only bounds how often the
+#: cache is re-consulted, and the first tick waits a full interval after
+#: startup so a crash-looping daemon (restarting every minute) can never
+#: turn the daily check into a per-restart one.
+UPDATE_CHECK_INTERVAL = 3600
+
+#: Grace before the FIRST update tick after the daemon starts (seconds). A
+#: daemon in a launchd crash-loop restarts every few seconds; without a grace
+#: period each restart would attempt a fetch the moment its (empty or
+#: failed) cache is consulted. 120 s is far longer than any healthy restart
+#: and far shorter than the 24h cadence being measured.
+UPDATE_CHECK_STARTUP_DELAY = 120
+
+
+def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
+                       update_interval=None):
     """Durable-liveness heartbeat writer — the daemon's main loop body.
 
     Calls ``touch_heartbeat()`` once per ``interval`` (default
@@ -177,14 +196,50 @@ def run_heartbeat_loop(stop_event, interval=None):
 
     Extracted as a named function so the throttled-touch behaviour is directly
     testable without booting the monolithic ``run_daemon_loop``.
+
+    The daily update notice (card t_a4055572) rides in HERE rather than as a
+    new ``PERIODIC_INTERVALS`` stream, deliberately: ``PERIODIC_INTERVALS`` is
+    the source of truth for *health streams* — each entry gets a ``check_*``
+    function, a state file under ``~/.hscc/state`` and a row in
+    ``hscc status``. An update check is none of those things (it is not
+    health, and a row that says "OK: up to date" every 60 s would be noise),
+    so the body's instruction "do NOT add a new interval stream" is honoured
+    by borrowing this loop, which already wakes in the main thread on a slow
+    cadence. The fetch itself is throttled twice: by ``update_interval``
+    (default UPDATE_CHECK_INTERVAL, 24h) and by the cache's own freshness
+    window, so a restarted daemon still cannot hammer the GitHub API.
+    ``update_check_fn`` is injectable (tests); its exceptions are swallowed
+    by ``update_check.daemon_tick`` itself, so the heartbeat can never be
+    held hostage by a network failure.
     """
     interval = interval if interval is not None else HEARTBEAT_INTERVAL
+    update_interval = (update_interval if update_interval is not None
+                       else UPDATE_CHECK_INTERVAL)
+    if update_check_fn is None:
+        from .update_check import daemon_tick as update_check_fn
     last = 0.0
+    # The update tick deliberately does NOT fire on the first iteration (the
+    # heartbeat does, because a starting daemon must be durably alive at
+    # once). A short startup grace first: a daemon in a crash-loop —
+    # restarting every few seconds under launchd — would otherwise issue one
+    # GitHub request per restart whenever its cache is empty or failed, which
+    # is exactly the API-hammering a "once a day" check must never become.
+    # The cache guard (``check_due``) is still what enforces the 24h cadence
+    # across restarts; this only bounds the attempt rate.
+    next_update = time.monotonic() + UPDATE_CHECK_STARTUP_DELAY
     while not stop_event.is_set():
         now = time.monotonic()
         if now - last >= interval:
             touch_heartbeat()
             last = now
+        if now >= next_update:
+            next_update = now + update_interval
+            # daemon_tick swallows everything; this guard is for the import
+            # and for a patched-in fn that raises — the heartbeat must go on.
+            try:
+                update_check_fn()
+            except Exception as e:
+                log(f"update check tick error: {e}", "WARN")
         stop_event.wait(1)
 
 

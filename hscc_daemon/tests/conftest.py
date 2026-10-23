@@ -176,7 +176,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
         from hscc_daemon import (
             autodown, daemon_ops, desktop, health, heal_breaker, heal_lease,
             hscc, lifecycle,
-            serving, state, trigger, usage,
+            serving, state, trigger, update_check, usage,
         )
         def p(sub):
             return os.path.join(base, sub)
@@ -246,6 +246,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # write strikes into the operator's real ~/.hscc and could suspend
             # healing a LIVE node from the test run.
             (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
+            # update_check.py (t_a4055572) — the 24h GitHub-release cache. It
+            # is the ONE file this module may ever write, and both ambient
+            # surfaces (the status notice and the daemon's daily tick) reach
+            # it, so an unredirected path would litter the operator's real
+            # ~/.hscc from every test that renders status. The constant is
+            # kept as a "~"-template precisely so the (a) expanduser redirect
+            # above covers it too; rebinding here is the belt-and-braces half.
+            (update_check, "CACHE_FILE", p("update-check.json")),
             # launch guard (A2) — every launch path consults
             # health._launch_guard_status_fn() before starting a container.
             # Default it to "we looked, nothing foreign is running" ({}), so

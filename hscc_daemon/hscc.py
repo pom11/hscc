@@ -409,6 +409,8 @@ def _get_help_text():
 
     util = _section("Utility", [
         *_entry("notify <message>", "Send a desktop notification"),
+        *_entry("update --check",
+                "Check GitHub releases for a newer version (read-only)"),
     ])
 
     examples = _section("Examples", [
@@ -468,6 +470,18 @@ COMMAND_HELP = {
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
+    # update (card t_a4055572): the version-check verb. Every line authored
+    # <=76 for the same (B)-gate reason as the multi-line entries above
+    # (_handle_help adds only a 2-space prefix to the FIRST line).
+    "update": "Check for a newer HSCC release. Read-only: prints the\n"
+              "  comparison and the upgrade command for YOUR install mode;\n"
+              "  never downloads, installs or upgrades anything.\n"
+              "  Usage: hscc update --check\n"
+              "  Reads GitHub's releases API (5s timeout; authenticated gh\n"
+              "  is used when available, plain HTTPS otherwise). A newer\n"
+              "  release is cached for 24h under ~/.hscc/update-check.json,\n"
+              "  which is what `hscc status` notices once a day. Offline or\n"
+              "  rate-limited: one line on stderr, exit 1.",
     # Multi-line value: _handle_help prints `  {value}`, so only the FIRST
     # line gets the 2-space prefix — every line is authored to stay <=76 so
     # the rendered block fits the (B) gate's 78 budget (t_90082309: the old
@@ -1407,6 +1421,75 @@ def _handle_escalate():
     sys.exit(0)
 
 
+def _handle_update():
+    """``hscc update --check`` — compare installed VERSION to the latest release.
+
+    Read-only verb (card t_a4055572): the ONLY write it may ever perform is
+    the 24h cache at ``~/.hscc/update-check.json``. It never downloads,
+    installs, upgrades or starts anything — it prints the exact command for
+    the detected install mode and the operator runs it.
+
+    Loudness contract (documented per surface in test_update_check.py): the
+    explicit verb is the LOUD surface — a failed check prints one short line
+    to stderr and exits 1 (the card's ruling: "rc of the check verb itself
+    on hard failure = 1 is fine"). The ambient surfaces (status notice,
+    daemon log line) are the QUIET ones.
+
+    Exit codes: 0 up to date / newer-than-latest / newer available; 1 only
+    when the check itself could not run (offline, quota, malformed payload).
+    A newer release is NOT an error — scripts chaining on rc must read the
+    text, and cron-style callers get 0 for "worked, here is the answer".
+    """
+    from hscc_daemon import update_check
+
+    argv, theme_name = _strip_theme_arg(sys.argv[2:])
+    # F6 (same rule `cluster up/down` learned the hard way): an argument this
+    # verb does not understand is a refusal, never an implicit "go ahead".
+    if "--check" not in argv:
+        print("Error: 'hscc update' needs --check.\n\n"
+              "Usage: hscc update --check [--json]", file=sys.stderr)
+        return 1
+    json_mode = "--json" in argv
+    leftover = [a for a in argv if a not in ("--check", "--json")]
+    if leftover:
+        print(f"Error: unknown argument for 'hscc update': {leftover[0]}\n\n"
+              "Usage: hscc update --check [--json]", file=sys.stderr)
+        return 1
+
+    result = update_check.run_check()
+
+    if json_mode:
+        print(json.dumps({k: v for k, v in result.items() if k != "entry"},
+                         sort_keys=True))
+        return 0 if result.get("ok") else 1
+
+    console = theme.make_console(theme_name)
+    if not result.get("ok"):
+        # One short line on stderr (spec) — the LOUD surface by design. A
+        # failure on STDOUT would be swallowed by `hscc update --check 2>/dev/null`
+        # pipelines and break `... || echo current`: the failure belongs on the
+        # error channel the shell routes it to.
+        err = theme.make_console(theme_name, file=sys.stderr)
+        err.print(f"[error]update check failed:[/error] "
+                  f"{theme.esc(result.get('error', 'unknown error'))}")
+        cached = result.get("cached")
+        if cached and cached.get("latest_tag"):
+            # Salvage, not silence: what we knew last time it worked.
+            err.print(f"[dim]last good check: "
+                      f"{theme.esc(cached['latest_tag'])} was "
+                      "latest[/dim]")
+        return 1
+
+    for line in update_check.format_check_result(result):
+        # tag/version strings are DATA from the network — never markup-parsed.
+        # soft_wrap=True keeps each line byte-contiguous: the `upgrade:  <cmd>`
+        # line is what operators copy-paste, and a Rich fold at column 80
+        # would break the command mid-path (same "keep the actionable
+        # substring contiguous" contract as verify's `next step:` lines).
+        console.print(theme.esc(line), soft_wrap=True)
+    return 0
+
+
 def _handle_help():
     """Handle 'hscc help [command]' and 'hscc --help' / '-h'."""
     if len(sys.argv) < 3:
@@ -1542,7 +1625,7 @@ def _handle_project():
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
     "log", "check", "watch", "triggers", "notify", "verify", "stats",
-    "throughput", "autoscale", "escalate",
+    "throughput", "autoscale", "escalate", "update",
 }
 
 
@@ -1719,6 +1802,12 @@ def main():
     elif cmd_lower == "log":
         from hscc_daemon.cli import cmd_log
         cmd_log()
+    elif cmd_lower == "update":
+        # Read-only version check (t_a4055572). The `hscc update -h/--help`
+        # case never reaches here: the DAEMON_COMMANDS help intercept above
+        # prints COMMAND_HELP first (the same source `hscc help update`
+        # prints), so a help token cannot trigger a network call.
+        sys.exit(_handle_update())
     elif cmd_lower == "start-daemon":
         from hscc_daemon.cli import cmd_start_daemon
         cmd_start_daemon()
@@ -1734,7 +1823,7 @@ def main():
         cmd_heal(status_only=True)
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
+        print("Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, update, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
         sys.exit(1)
 
 

@@ -313,6 +313,12 @@ def cmd_status():
         console.print(f"[warn]  ! {detail}[/warn]")
         console.print()
 
+    # Update notice BEFORE the stream table (and before the "no state data"
+    # early return below): a fresh machine whose daemon has written no state
+    # yet should still see "a newer release is out", and the notice is the
+    # one line on this surface that does not depend on stream state at all.
+    _print_update_notice(console)
+
     states = read_all_states()
 
     if not states:
@@ -364,6 +370,33 @@ def cmd_status():
             f"Rules:   {tr_state.get('rules_evaluated', 0)}\n"
             f"Actions: {tr_state.get('actions_fired', 0)}",
         ))
+
+
+def _print_update_notice(console):
+    """One dim INFO line when a newer release is cached (never anything else).
+
+    Ambient surface (card t_a4055572): reads ``~/.hscc/update-check.json``
+    ONLY — status must never block on the network or make status fail — and
+    prints only when the cache says newer AND is inside the 24h window
+    (spec: "status with stale cache (>24h) prints nothing"). Everything this
+    could get wrong (no cache, corrupt cache, old cache, bad version strings,
+    an unexpected exception in the module) lands in the same place: silence.
+    Status' exit code and every pre-existing line are untouched (pinned by
+    the byte-comparison tests in test_update_check.py).
+    """
+    try:
+        from . import update_check
+        notice = update_check.check_from_cache()
+        if notice:
+            console.print(f"[dim]update:[/dim] HSCC "
+                          f"{esc(notice['latest_tag'])} available "
+                          f"(installed {esc(notice['installed'])}); "
+                          f"upgrade: {esc(notice['upgrade_cmd'])}")
+    except Exception:
+        # Quiet by contract. A broken update notice must never take the
+        # status surface down — the daemon health table is what operators
+        # read here; the update line is decoration at most.
+        pass
 
 
 def _extract_repo_flag(argv):
