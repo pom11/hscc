@@ -13,7 +13,7 @@ Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, deco
 [![3 pinned deps](https://img.shields.io/badge/python-3%20pinned%20deps-orange.svg)](requirements.txt)
 [![5,000+ tests](https://img.shields.io/badge/tests-5%2C000%2B-brightgreen.svg)](scripts/README.md)
 
-HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a pure-Python plugin set with three pinned dependencies (PyYAML, rich, psutil — see `requirements.txt`). You develop in a work repo (`~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
+HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a pure-Python plugin set with three pinned dependencies (PyYAML, rich, psutil — see `requirements.txt`). Install it with Homebrew (or clone the repo, if you are editing it); `hscc bootstrap` then copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
 
 The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher and git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships, adding the thin physical layer (cluster control, monitoring, model lifecycle), a role framework for specialized workers, and a review gate on the dispatch path. Why this shape (what stock Hermes lacks and HSCC adds): [docs/WHY.md](docs/WHY.md).
 
@@ -37,17 +37,29 @@ hscc api :8787/8788 (bearer token, tailnet) ── iOS app (QR pair)
 - A configured [sparkrun](https://sparkrun.dev/) DGX Spark cluster (one or more GB10 nodes)
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
 - A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3
-- Python deps: three pinned packages (PyYAML, rich, psutil), installed by bootstrap
+- [Homebrew](https://brew.sh/) on that host, for the install path above (a source checkout needs none of it)
+- Python deps: three pinned packages (PyYAML, rich, psutil) — the brew formula builds them into the keg's own venv; from source, bootstrap installs them
 - tmux — REQUIRED for the iOS chat path: the app delivers chat by typing into the project's REPL pane; a REPL outside tmux is invisible to it. Delivery matrix: [hscc-api/README.md](hscc-api/README.md)
 
 ## Quick start
 
+Two brew commands to install, one `hscc` command to configure:
+
 ```
-git clone https://github.com/pom11/hscc ~/dev/hscc
-~/dev/hscc/hscc-bootstrap/bootstrap.sh --yes
+brew tap pom11/hscc
+brew install hscc
+hscc bootstrap --yes
 ```
 
-Bootstrap detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview; after a `git pull` re-run it to pick up changes (it backs up the previous runtime copy; `--no-backup` skips). Once installed, `hscc bootstrap [flags]` reaches the same installer from any layout (repo, deployed plugins, or a brew libexec install — where the CLI-shim stage is skipped because brew owns `hscc`), and `--dry-run` prints every planned write without performing any. Then, in order:
+`brew install` keeps everything inside its own keg — the release tree plus a brew-managed Python venv — and deliberately writes nothing into `~/.hermes` or `~/.hscc`. `hscc bootstrap --yes` is the step that does: it detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview, and `--dry-run` prints every planned write while performing none. `hscc --version` and `hscc --help` already work before bootstrap.
+
+If your keg predates the `bootstrap` verb (v2.12.0 and earlier), run the installer from the installed tree instead — `brew install` prints this as its next step and `brew info hscc` reprints it:
+
+```
+$(brew --prefix hscc)/libexec/hscc/hscc-bootstrap/bootstrap.sh --yes
+```
+
+Then, in order:
 
 ```
 hscc status                                 # daemon health + all streams at a glance
@@ -59,6 +71,59 @@ hscc api start --tailscale                  # HTTP API for external apps (prints
 ```
 
 Then open the iOS app and scan the QR (`hscc api status` reprints it) — [ios-app/README.md](ios-app/README.md).
+
+## Install from source (development)
+
+Editing HSCC itself? Clone instead of tapping: the checkout **is** the install tree, and the installer runs straight out of it.
+
+```
+git clone https://github.com/pom11/hscc ~/dev/hscc
+~/dev/hscc/hscc-bootstrap/bootstrap.sh --yes
+```
+
+Same installer, same flags — from a checkout `hscc bootstrap [flags]` finds that script as a sibling of the repo, and `HSCC_BOOTSTRAP_SH` overrides the lookup outright. Bootstrap backs up the previous runtime copy on each run (`--no-backup` skips). Component READMEs and the [docs/](docs/README.md) index assume this tree.
+
+## Upgrade
+
+| Installed via | Upgrade with |
+|---|---|
+| Homebrew | `brew upgrade hscc`, then `hscc bootstrap --yes` |
+| source checkout | `git pull`, then `hscc bootstrap --yes` (or `bootstrap.sh --yes` on a build that predates the verb) |
+
+Re-running bootstrap is not optional bookkeeping: `~/.hermes/plugins` is the copy Hermes actually loads, so a new release is inert until it is refreshed there. The tap serves the published release only and its formula is re-pinned by the release process — you never touch the tap yourself. From a brew keg the CLI-shim stage skips itself with the reason printed: brew owns `hscc` on PATH, and a shim into the Hermes venv would shadow it with a second, brew-invisible entry point.
+
+## Check whether you are behind
+
+```
+hscc update --check
+```
+
+Read-only: it asks GitHub's releases API (5 s timeout; authenticated `gh` when available, plain anonymous HTTPS otherwise) what the latest release is, compares it with the `VERSION` this build reports, and prints the upgrade command for YOUR install mode — `brew upgrade hscc` on a keg, `git -C <repo> pull` plus the bootstrap reminder in a checkout, both when the layout is unrecognisable. It never downloads, installs, or upgrades anything; the one file it writes is the 24 h cache at `~/.hscc/update-check.json`.
+
+Up to date is one quiet line, exit 0:
+
+```
+up to date — v2.12.0 is the latest release.
+```
+
+A release out is the comparison plus the command, still exit 0 (a newer release is not an error):
+
+```
+installed: v2.12.0
+latest:    v2.13.0
+upgrade:   brew upgrade hscc
+HSCC does not upgrade itself — run the command above.
+```
+
+Offline, quota-limited, or served malformed JSON you get exactly one short line on stderr and exit 1 — `update check failed:` followed by the reason (a 403 or 429 names the quota and points at `gh auth login`) — plus the last good check if one was cached. The failure never lands on stdout, so `hscc update --check 2>/dev/null` and `... || echo current` behave. `--json` prints the machine-readable shape instead, same exit codes.
+
+You rarely need to ask: the cached answer is what `hscc status` reads. Status never touches the network — it appends one dim line, and only when the cache says a newer release exists and is under 24 h old:
+
+```
+update: HSCC v2.13.0 available (installed v2.12.0); upgrade: brew upgrade hscc
+```
+
+Anything else — no cache, a cache older than 24 h, a cached "up to date" — prints nothing, and the line can never make `hscc status` fail. The daemon makes the same call at most once a day: it logs a WARN with that sentence when a release is out (INFO when you are current), never ERROR, and a failed check logs nothing and does not poison the cache — the last good answer survives on disk and the next run retries.
 
 ## Common tasks
 
@@ -72,6 +137,7 @@ Then open the iOS app and scan the QR (`hscc api status` reprints it) — [ios-a
 | see why a card is stuck / un-stick it | `hscc kanban blocked [--recover <id>]` |
 | preview what would be escalated | `hscc escalate` (dry-run) |
 | shut idle GPUs down | `hscc autodown enable` — OFF by default, see below |
+| see if a newer release is out | `hscc update --check` — read-only, prints the upgrade command |
 | run / stop the external API | `hscc api start [--tailscale]` · `hscc api stop` |
 | the full command surface | `hscc --help` · `hscc help advanced` · `hscc project --help` |
 
