@@ -60,6 +60,14 @@ order: 1
 `task:` defaults to the file stem, so it is optional. `order:` (integer,
 default `0`) only breaks ties between entries inside one file.
 
+A body line at column 0 that opens with one of those header keys — `kind:`,
+`task:`, `order:` — is a hard parse error, because it is not prose: it is the
+next block whose `---` was never written. Without the separator the block
+glues into the entry above, one whole entry disappears at release, and the
+bare header lines ship verbatim inside the previous section of
+`CHANGELOG.md`. To quote the format inside an entry, indent the line (as in the
+example above), which is exactly the boundary the header parser uses.
+
 Allowed `kind` values are the Keep a Changelog sections — `Added`, `Changed`,
 `Deprecated`, `Removed`, `Fixed`, `Security` — plus HSCC's **`Verified`**, which
 is rendered last. `Verified` is where the landing evidence goes (suite counts,
