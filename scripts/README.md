@@ -134,8 +134,15 @@ url) and `brew audit --strict` treats a redundant one as noise.
 
 Idempotent by design — re-running for the version already pinned writes nothing
 and exits `0` with `up to date`, after re-hashing the archive (so a right version
-with a stale digest is still corrected rather than waved through). Exit codes
-match `address_guard.py`: `0` bumped or up to date, `1` a gate or git step
+with a stale digest is still corrected rather than waved through). `up to date` is
+a claim about the *public* tap, not about the file in front of the tool, so it is
+only made after the checkout has been fast-forwarded onto `origin` and found to
+carry no unpushed commit. A bump commit whose push died gets published by the next
+run (`published the unpushed commit(s) that carry it`); a pin that exists only as
+an uncommitted hand edit, a checkout that has diverged from `origin`, and unpushed
+commits touching files besides the formula are all refused — the tool publishes
+its own bump and nothing else's work. Exit codes match `address_guard.py`:
+`0` bumped or up to date, `1` a gate or git step
 rejected it, `2` malformed tag / unreachable tarball / no ruby / no guard — never
 a silent pass. Env overrides for a release host that differs from the operator's:
 `HSCC_TAP_DIR`, `HSCC_TAP_CACHE_DIR`, `HSCC_RELEASE_REPO`, `HSCC_TAP_REPO`,

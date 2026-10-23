@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import gzip
 import os
 import re
 import shutil as sh
@@ -118,16 +119,23 @@ def formula_text(version="2.12.0", release_sha=OLD_SHA):
 
 
 def make_tarball(path: Path, version: str) -> Path:
-    """A real gzip tarball shaped like GitHub's archive: hscc-<version>/ at root."""
+    """A real gzip tarball shaped like GitHub's archive: hscc-<version>/ at root.
+
+    Byte-deterministic (gzip mtime zeroed, entries mtime 0) so a fixture digest
+    stays the digest of the bytes a later call would serve.
+    """
     root = f"hscc-{version}"
     payload = {f"{root}/VERSION": version + "\n",
                f"{root}/requirements.txt": "rich>=13,<16\n",
                f"{root}/README.md": "hscc\n"}
-    with tarfile.open(path, "w:gz") as tf:
+    with open(path, "wb") as raw, \
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, \
+            tarfile.open(fileobj=gz, mode="w") as tf:
         for name, text in payload.items():
             data = text.encode()
             info = tarfile.TarInfo(name)
             info.size = len(data)
+            info.mtime = 0
             tf.addfile(info, io.BytesIO(data))
     return path
 
@@ -198,6 +206,10 @@ def served(tmp_path, monkeypatch):
             make_tarball(path, version if version_file is None else version_file)
             self.tarball = path
             return path
+
+        def digest(self, version, *, version_file=None):
+            """The digest the served archive for ``version`` really has."""
+            return sha256_of(self.install(version, version_file=version_file))
 
         def fetch(self, url, dest, timeout=180.0):
             self.calls.append(url)
@@ -763,6 +775,112 @@ def test_repeated_bumps_are_stable(tap, served, monkeypatch):
     assert _git(tap, ["rev-list", "--count", "origin/main"]) == "3"   # init+pin+bump
 
 
+def test_an_unpushed_bump_is_pushed_not_reported_as_up_to_date(tap, served, monkeypatch,
+                                                               capsys):
+    """The failure this card exists to remove, in its quietest form: a previous run
+    committed the bump and its push died, leaving the LOCAL formula correct. A tool
+    that only reads the formula prints "up to date" while the public tap still
+    serves the previous release forever."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    bf.bump("v2.13.0", tap_dir=str(tap), push=False)          # commit, no push
+    origin_tip = _git(tap, ["rev-parse", "origin/main"])
+    assert _git(tap, ["rev-parse", "HEAD"]) != origin_tip
+
+    res = bf.bump("v2.13.0", tap_dir=str(tap))
+    assert res["status"] == "bumped" and res["pushed"] is True
+    assert res["committed"] is False and res["changes"] == []
+    assert _git(tap, ["rev-parse", "origin/main"]) == _git(tap, ["rev-parse", "HEAD"])
+    out = capsys.readouterr().out
+    assert "up to date" not in out
+    assert "published the unpushed commit(s) that carry it" in out
+    # and the retry after the recovery is the plain steady state
+    assert bf.bump("v2.13.0", tap_dir=str(tap))["status"] == "up-to-date"
+
+
+def test_an_unpushed_bump_with_no_push_refuses_to_claim_success(tap, served, monkeypatch):
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    bf.bump("v2.13.0", tap_dir=str(tap), push=False)
+    with pytest.raises(bf.BumpError, match="not on origin|still serves"):
+        bf.bump("v2.13.0", tap_dir=str(tap), push=False)
+
+
+def test_a_hand_edited_pin_is_not_committed_as_the_tools_own(tap, served, monkeypatch):
+    """An operator who edits the formula by hand has written content this tool did
+    not derive from the tarball. Refuse rather than `git add` their edit and call it
+    an automated bump."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    head = _git(tap, ["rev-parse", "HEAD"])
+    # Hand-pin the release: same content a bump would have produced, but uncommitted.
+    (tap / "Formula" / "hscc.rb").write_text(
+        formula_text("2.13.0", served.digest("2.13.0")), encoding="utf-8")
+    with pytest.raises(bf.BumpError, match="UNCOMMITTED edit"):
+        bf.bump("v2.13.0", tap_dir=str(tap))
+    assert _git(tap, ["rev-parse", "HEAD"]) == head           # nothing committed
+    # --dry-run is read-only: it may still say what it would do
+    assert bf.bump("v2.13.0", tap_dir=str(tap), dry_run=True)["status"] == "up-to-date"
+
+
+def test_unpushed_work_on_other_files_is_never_pushed_alongside_a_bump(tap, served,
+                                                                        monkeypatch):
+    """The push publishes the whole branch. If the checkout is ahead because of the
+    operator's own unpublished tap work, pushing it to a PUBLIC tap is a disclosure
+    decision this tool must not make — it refuses on both the write path and the
+    no-change path."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    (tap / "PRIVATE-NOTES.md").write_text("not for the public tap\n", encoding="utf-8")
+    _git(tap, ["add", "-A"])
+    _git(tap, ["commit", "--quiet", "-m", "private working note"])
+    head = _git(tap, ["rev-parse", "HEAD"])
+    origin_tip = _git(tap, ["rev-parse", "origin/main"])
+
+    with pytest.raises(bf.BumpError, match="PRIVATE-NOTES.md|besides"):
+        bf.bump("v2.13.0", tap_dir=str(tap))
+    # refused BEFORE writing, so the branch tip is untouched and nothing leaked
+    assert _git(tap, ["rev-parse", "HEAD"]) == head
+    assert _git(tap, ["rev-parse", "origin/main"]) == origin_tip
+    assert (tap / "Formula" / "hscc.rb").read_text(encoding="utf-8") == \
+        formula_text("2.12.0", OLD_SHA)
+    # --no-push cannot leak: nothing is published, so the refusal does not apply —
+    # it commits locally and leaves origin untouched.
+    res = bf.bump("v2.13.0", tap_dir=str(tap), push=False)
+    assert res["status"] == "bumped" and res["pushed"] is False
+    assert _git(tap, ["rev-parse", "origin/main"]) == origin_tip
+
+
+def test_a_diverged_checkout_is_refused_not_rebased(tap, served, monkeypatch):
+    """A checkout that has commits origin lacks AND misses commits origin has:
+    pushing here would rewrite public tap history, and rebasing it is not this
+    tool's call. sync_tap must refuse rather than guess."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.13.0", served.digest("2.13.0")))
+    origin_url = _git(tap, ["remote", "get-url", "origin"])
+    # local commit the tap has not pushed...
+    (tap / "NOTES.md").write_text("local only\n", encoding="utf-8")
+    _git(tap, ["add", "-A"])
+    _git(tap, ["commit", "--quiet", "-m", "local only"])
+    # ...and a commit origin has that the tap lacks => genuine divergence.
+    peer = tap.parent / "peer-diverged"
+    _git(tap.parent, ["clone", "--quiet", origin_url, str(peer)])
+    _git(peer, ["commit", "--quiet", "--allow-empty", "-m", "someone else"])
+    _git(peer, ["push", "--quiet", "origin", "HEAD:refs/heads/main"])
+
+    head = _git(tap, ["rev-parse", "HEAD"])
+    with pytest.raises(bf.BumpError, match="diverged"):
+        bf.bump("v2.13.0", tap_dir=str(tap))
+    assert _git(tap, ["rev-parse", "HEAD"]) == head           # nothing rewritten
+    assert _git(tap, ["rev-parse", "origin/main"]) == _git(peer, ["rev-parse", "HEAD"])
+
+
+
 # ── 4. the CLI contract ──────────────────────────────────────────────────────
 
 def test_cli_exit_codes_and_streams(tap, served, monkeypatch, capsys):
@@ -776,6 +894,10 @@ def test_cli_exit_codes_and_streams(tap, served, monkeypatch, capsys):
     assert "v2.12.0 -> v2.13.0" in out and "dry run" in out
     assert bf.main(["--tag", "v2.13.0", "--tap", str(tap), "--no-push"]) == 0
     assert "committed (not pushed" in capsys.readouterr().out
+    # The formula is already correct locally but origin still serves v2.12.0, so
+    # this run must say it PUSHED, not that everything was already fine.
+    assert bf.main(["--tag", "v2.13.0", "--tap", str(tap)]) == 0
+    assert "published the unpushed commit(s) that carry it" in capsys.readouterr().out
     assert bf.main(["--tag", "v2.13.0", "--tap", str(tap)]) == 0
     assert "up to date" in capsys.readouterr().out
     # a failure goes to stderr with the tool's prefix; stdout stays clean

@@ -462,9 +462,14 @@ def branch_of(tap: Path) -> str:
     return name
 
 
-def sync_tap(tap: Path) -> None:
-    """Fast-forward the checkout onto origin. Divergence is an error, never a
-    rebase or a merge: the release flow must not invent history in a public tap."""
+def sync_tap(tap: Path) -> str:
+    """Fast-forward the checkout onto origin; return where it stood.
+
+    "in-sync" | "behind" (origin had moved; the checkout was fast-forwarded) |
+    "ahead" (this checkout carries commits origin does not — a bump whose push died).
+    Divergence is an error, never a rebase or a merge: the release flow must not
+    invent history in a public tap.
+    """
     _git(tap, ["fetch", "--quiet", "origin"])
     branch = branch_of(tap)
     local, _, _ = _git(tap, ["rev-parse", "HEAD"])
@@ -472,8 +477,19 @@ def sync_tap(tap: Path) -> None:
                           check=False)
     if rrc != 0 or not remote:
         raise CannotRun(f"tap checkout {tap} has no origin/{branch} to sync against")
-    if local != remote:
+    if local == remote:
+        return "in-sync"
+    _, _, anc = _git(tap, ["merge-base", "--is-ancestor", remote, local], check=False)
+    if anc != 0:
+        _, _, anc2 = _git(tap, ["merge-base", "--is-ancestor", local, remote],
+                          check=False)
+        if anc2 != 0:
+            raise BumpError(
+                f"tap checkout {tap} has diverged from origin/{branch} — reconcile it "
+                "by hand; this tool will not rebase or merge public tap history")
         _git(tap, ["merge", "--ff-only", f"origin/{branch}"])
+        return "behind"
+    return "ahead"
 
 
 # ── the two gates ────────────────────────────────────────────────────────────
@@ -559,27 +575,64 @@ def guard_tracked(tap: Path) -> None:
 
 # ── the flow ─────────────────────────────────────────────────────────────────
 
+def _plan(original: str, version: str, digest: str, url: str, tap: Path, phase: str):
+    """Rewrite + verify + guard the PROPOSED text; return (new_text, changes).
+
+    Called once before the tap is touched and again after the fast-forward, because
+    the sync can bring someone else's formula edit in. ``phase`` only names the
+    check in the error text so a rejection says which content was rejected.
+    """
+    new_text, changes = rewrite_formula(original, version, digest, url=url)
+    pinned = formula_version(new_text)
+    if pinned != version:
+        raise BumpError(f"internal guard: the rewrite pins version {pinned!r}, "
+                        f"expected {version!r}")
+    where = FORMULA_REL if phase == "pre" else f"{FORMULA_REL} (after sync)"
+    check_text(load_guard(tap), new_text, where if phase == "pre"
+               else f"proposed {where}")
+    return new_text, changes
+
+
+def _ahead_detail(tap: Path, branch: str):
+    """(count, other_paths) for commits the checkout has that origin lacks.
+
+    ``other_paths`` are the files those commits touch besides the formula. The tool
+    may publish its OWN bump commit, but it must not push an operator's unpublished
+    work into a public tap on the side — that is a disclosure decision, not a
+    release step.
+    """
+    n, _, _ = _git(tap, ["rev-list", "--count", f"origin/{branch}..HEAD"])
+    files, _, _ = _git(tap, ["diff", "--name-only", f"origin/{branch}..HEAD"])
+    others = sorted({f for f in files.split("\n") if f and f != FORMULA_REL})
+    return n, others
+
+
 def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
          verify_version=True, tarball=None, timeout=180.0):
     """Run the whole flow. Returns a dict describing the outcome (used by tests).
 
-    Order matters: every read-only check that can fail (tag shape, tap state,
-    tarball reachability + hash + VERSION, proposed-content guard) happens BEFORE
-    the tap's working tree is touched at all. Only then: write -> ruby -> guard ->
-    commit -> push, with the original bytes restored on any failure.
+    Order matters: every read-only check that can fail (tag shape, tarball
+    reachability + hash + VERSION, proposed-content guard) happens BEFORE the tap's
+    working tree is touched at all. Only then: sync -> write -> ruby -> guard ->
+    commit -> push, with the original bytes restored if anything fails before the
+    commit lands.
+
+    "up to date" is a claim about the PUBLIC tap, so it is only ever made after the
+    checkout has been synced onto origin and found to carry no unpushed commit. The
+    three ways a local formula can look correct while the tap still serves the old
+    release — an uncommitted hand edit, a stale checkout, a bump commit whose push
+    died — are each answered below, in the order a repair must happen in.
     """
     version = parse_tag(tag)
     url = tarball_url(version)
     tap = validate_tap(resolve_tap_dir(tap_dir))
     formula = tap / FORMULA_REL
     original = formula.read_text(encoding="utf-8")
-
-    # Read-path first, all of it before the tap is touched: the version the
-    # formula pins today is what decides "up to date" vs "bump", and the digest
-    # below decides whether even the digest line has to move.
     current = formula_version(original)
 
-    # Fetch + hash + cross-check BEFORE touching anything.
+    # Fetch + hash + cross-check BEFORE touching anything: there is no point
+    # reporting a bump the archive cannot support, and nothing is written until the
+    # digest is real.
     tmpdir = None
     try:
         if tarball:
@@ -596,58 +649,106 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    new_text, changes = rewrite_formula(original, version, digest, url=url)
-    pinned = formula_version(new_text)
-    if pinned != version:
-        raise BumpError(f"internal guard: the rewrite pins version {pinned!r}, "
-                        f"expected {version!r}")
+    new_text, changes = _plan(original, version, digest, url, tap, "pre")
+
+    if dry_run:
+        # Read-only: no sync, no clean check, no write. A preview says what the
+        # bytes say right now, plus the one thing a real run would refuse on.
+        if not changes:
+            dirty, _, _ = _git(tap, ["status", "--porcelain", "--", FORMULA_REL])
+            print(f"up to date: {FORMULA_REL} already pins v{version} "
+                  f"(sha256 {digest[:12]}… re-hashed from the live tarball and it "
+                  "matches)")
+            if dirty:
+                print(f"note: that pin is an UNCOMMITTED edit here — a real run "
+                      "refuses to commit an edit it did not write")
+            print("dry run: tap untouched (no sync, no write, no commit, no push)")
+            return {"status": "up-to-date", "version": version, "sha256": digest,
+                    "url": url, "changes": [], "pushed": False, "committed": False,
+                    "dry_run": True}
+        print(f"bumping {FORMULA_REL}: v{current} -> v{version} "
+              f"({len(changes)} line(s)):")
+        print("\n".join(x for c in changes
+                        for x in (f"  line {c[0]}:", f"    - {c[1]}", f"    + {c[2]}")))
+        print("dry run: tap untouched (no sync, no write, no commit, no push)")
+        return {"status": "dry-run", "version": version, "sha256": digest,
+                "url": url, "changes": changes, "pushed": False, "committed": False}
+
+    # A pin the tool did not write is not the tool's to commit — checked before the
+    # generic clean check so the message names the real problem.
+    if not changes:
+        dirty, _, _ = _git(tap, ["status", "--porcelain", "--", FORMULA_REL])
+        if dirty:
+            raise BumpError(
+                f"{FORMULA_REL} pins v{version} only as an UNCOMMITTED edit in "
+                f"{tap} — the public tap does not serve it, so this run cannot "
+                "call the release done. Commit the edit (or revert it and re-run "
+                "without --dry-run) — this tool will not commit an edit it did "
+                "not write.")
+
+    # State checks BEFORE the tree is touched: `require_clean` can only mean "the
+    # operator's own dirt" while the formula still matches HEAD, and syncing first
+    # means the bump commit lands on top of origin, never beside it.
+    require_clean(tap)
+    branch = branch_of(tap)
+    state = sync_tap(tap)
+
+    # A fast-forward can carry someone ELSE's formula edit, and an "up to date"
+    # verdict computed from pre-sync bytes can be stale. Re-plan against what the
+    # checkout holds now; the plan, not the earlier read, decides what gets written.
+    synced = formula.read_text(encoding="utf-8")
+    if synced != original:
+        original, current = synced, formula_version(synced)
+        new_text, changes = _plan(original, version, digest, url, tap, "post")
 
     if not changes:
-        # Nothing to write: url, sha and (if any) version already say this release.
-        guard = load_guard(tap)
-        check_text(guard, new_text, FORMULA_REL)
-        print(f"up to date: {FORMULA_REL} already pins v{version} "
+        # Nothing to write. If the checkout is ahead of origin, this is a bump whose
+        # push died — publish it rather than report that everything was already fine.
+        if state == "ahead":
+            n, others = _ahead_detail(tap, branch)
+            if others:
+                raise BumpError(
+                    f"{tap} already pins v{version} but its {n} unpushed commit(s) "
+                    "touch files besides " + FORMULA_REL + ": "
+                    + ", ".join(others[:5]) + ("…" if len(others) > 5 else "")
+                    + f" — pushing would publish them into the public {TAP_REPO}. "
+                    "Push or drop them by hand first; this tool publishes only the "
+                    "formula bump.")
+            if not push:
+                raise BumpError(
+                    f"the tap checkout already pins v{version} but the commit is not "
+                    f"on origin/{branch}, and --no-push was given: the PUBLIC tap "
+                    "still serves the previous release. Push it (or drop --no-push).")
+            _git(tap, ["push", "origin", f"HEAD:refs/heads/{branch}"])
+            print(f"published the unpushed commit(s) that carry it: "
+                  f"{FORMULA_REL} -> {version} (tap: {tap})")
+            return {"status": "bumped", "version": version, "sha256": digest,
+                    "url": url, "changes": [], "pushed": True,
+                    "committed": False, "recovered_push": True}
+        where = " after sync" if state == "behind" else ""
+        print(f"up to date{where}: {FORMULA_REL} already pins v{version} "
               f"(sha256 {digest[:12]}… re-hashed from the live tarball and it matches)")
         return {"status": "up-to-date", "version": version, "sha256": digest,
                 "url": url, "changes": [], "pushed": False, "committed": False}
 
-    # Preview what would change (both modes), and guard the PROPOSED text so a
-    # --dry-run cannot report "would bump" for content its own tap gate rejects.
-    guard = load_guard(tap)
-    check_text(guard, new_text, f"proposed {FORMULA_REL}")
-    diff = []
-    for lineno, before, after in changes:
-        diff += [f"  line {lineno}:", f"    - {before}", f"    + {after}"]
-    print(f"bumping {FORMULA_REL}: v{current} -> v{version} ({len(changes)} line(s)):")
-    print("\n".join(diff))
-
-    if dry_run:
-        print("dry run: tap untouched (no write, no commit, no push)")
-        return {"status": "dry-run", "version": version, "sha256": digest,
-                "url": url, "changes": changes, "pushed": False, "committed": False}
-
-    # State checks BEFORE the tree is touched: `require_clean` can only mean
-    # "the operator's own dirt" while the formula still matches HEAD, and syncing
-    # first means the bump commit lands on top of origin, never beside it.
-    require_clean(tap)
-    branch = branch_of(tap)
-    sync_tap(tap)
-
-    # A fast-forward can carry someone ELSE's formula edit. Recompute against the
-    # synced bytes rather than writing a rewrite derived from the pre-sync file —
-    # otherwise the bump would silently revert their commit while claiming to only
-    # move three lines. If the synced formula already pins this release, their push
-    # did the job and this run has nothing to do.
-    if formula.read_text(encoding="utf-8") != original:
-        original = formula.read_text(encoding="utf-8")
-        current = formula_version(original)
-        new_text, changes = rewrite_formula(original, version, digest, url=url)
-        guard = load_guard(tap)
-        check_text(guard, new_text, f"proposed {FORMULA_REL} (after sync)")
-        if not changes:
-            print(f"up to date after sync: origin already pins v{version}")
-            return {"status": "up-to-date", "version": version, "sha256": digest,
-                    "url": url, "changes": [], "pushed": False, "committed": False}
+    # An "ahead" checkout may carry the operator's unpublished work. A push publishes
+    # everything on the branch, so foreign files in those commits stop the run BEFORE
+    # anything is written: publishing someone's private tap work is a disclosure
+    # decision, not a release step. (A bump commit of its own is fine to publish —
+    # that is the recovery case above.) With --no-push nothing is published, so the
+    # situation is only worth a notice.
+    if state == "ahead":
+        n, others = _ahead_detail(tap, branch)
+        listed = ", ".join(others[:5]) + ("…" if len(others) > 5 else "")
+        if others and push:
+            raise BumpError(
+                f"{tap} has {n} unpushed commit(s) touching files besides "
+                f"{FORMULA_REL}: {listed} — pushing would publish them into the "
+                f"public {TAP_REPO}. Push or drop them by hand first; this tool "
+                "publishes only the formula bump.")
+        if others:
+            print(f"notice: {n} unpushed commit(s) here besides the bump ({listed}); "
+                  "they stay local because nothing is pushed with --no-push")
 
     # `wrote` makes the restore exact: once the commit has landed the formula
     # content IS the released state, so a later failure must not roll the tap back
@@ -687,17 +788,6 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
           f"{FORMULA_REL} -> {version} (tap: {tap})")
     return {"status": "bumped", "version": version, "sha256": digest, "url": url,
             "changes": changes, "pushed": pushed, "committed": True}
-
-
-def sha256_of_current(text: str) -> str | None:
-    """The digest the formula currently pins (for reporting)."""
-    lines = _formula_lines(text)
-    limit = _resource_start(lines)
-    for i in range(limit):
-        m = re.match(r'^\s*sha256\s+"(?P<d>[0-9a-fA-F]{64})"$', lines[i])
-        if m:
-            return m.group("d").lower()
-    return None
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
