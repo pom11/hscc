@@ -79,6 +79,13 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "state/watchdog.json", '{"ok": true}\n')
     # activity.json is EVENT-DRIVEN and lives OUTSIDE state/ (at ~/.hscc root):
     _plant(ws, "activity.json", '{"ts": "planted"}\n')
+    # update-check.json (t_a4055572): the 24h GitHub-release cache. Planted so
+    # the manifest diff catches BOTH leak shapes — a new file in ~/.hscc and
+    # an overwrite of an existing cached check (the status notice and the
+    # daemon's daily tick read this file, so plenty of tests touch it).
+    _plant(ws, "update-check.json",
+           '{"checked_at": "2026-01-01T00:00:00+00:00", '
+           '"latest_tag": "v0.0.1"}\n')
     # serving.json + profile config.yaml — added (t_2985e00b) because
     # serving.update_orchestrator_followers() rewrites orchestrator-tracking
     # profile config.yaml files. The sandbox must plant those so a regression
