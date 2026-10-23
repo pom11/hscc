@@ -47,7 +47,7 @@ git clone https://github.com/pom11/hscc ~/dev/hscc
 ~/dev/hscc/hscc-bootstrap/bootstrap.sh --yes
 ```
 
-Bootstrap detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview; after a `git pull` re-run it to pick up changes (it backs up the previous runtime copy; `--no-backup` skips). Then, in order:
+Bootstrap detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview; after a `git pull` re-run it to pick up changes (it backs up the previous runtime copy; `--no-backup` skips). Once installed, `hscc bootstrap [flags]` reaches the same installer from any layout (repo, deployed plugins, or a brew libexec install — where the CLI-shim stage is skipped because brew owns `hscc`), and `--dry-run` prints every planned write without performing any. Then, in order:
 
 ```
 hscc status                                 # daemon health + all streams at a glance

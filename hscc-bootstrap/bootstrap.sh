@@ -5,6 +5,11 @@
 #   3. Minimal interview (orchestrator node, recipe) — defaults + --yes.
 #   4. Install: skills, role profiles, ~/.hscc + serving.json, daemon.
 # No vLLM model provisioning. Idempotent.
+# Works from ANY source root: a git checkout, the deployed plugins copy, or a
+# brew libexec tree (<prefix>/libexec/hscc-<ver>/, the homebrew-hscc tap).
+# From a brew tree the CLI-shim stage is SKIPPED (brew owns `hscc` on PATH);
+# `--dry-run` prints every planned write and performs none. Reachable as
+# `hscc bootstrap [flags]` — flags pass through (t_bc5a3fee).
 set -uo pipefail
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -221,7 +226,9 @@ hdr "Install: git hooks (public-repo address guard)"
 # worktree — including the dispatcher's worker worktrees — inherits the hook from
 # ONE install. Non-fatal: a machine whose repo is not a git checkout (or an older
 # revision without the committed hooks) reports skipped and still installs.
-if HK_JSON=$("$PYBIN" "$BOOT_DIR/install_hooks.py" "$REPO_ROOT" 2>/dev/null); then
+if $DRY_RUN; then
+  plan "git hooks: install_hooks.py sets core.hooksPath=.githooks in $REPO_ROOT (commit-time address guard)"
+elif HK_JSON=$("$PYBIN" "$BOOT_DIR/install_hooks.py" "$REPO_ROOT" 2>/dev/null); then
   HK_ACTION=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['action'])" _ "$HK_JSON" 2>/dev/null || echo unknown)
   case "$HK_ACTION" in
     installed) ok "address-guard hook armed (core.hooksPath=.githooks)" ;;
@@ -317,7 +324,9 @@ hdr "Install: hermes/sparkrun patches"
 # resume hook live in hermes core, so the review/resume features need them on a
 # fresh official install). Non-fatal: a machine already on a patched/newer
 # hermes will report patches that don't re-apply — that's expected, not an error.
-if $SKIP_PATCHES; then warn "skipped"; else
+if $SKIP_PATCHES; then warn "skipped"
+elif $DRY_RUN; then plan "patches: apply_patches.py --target $HERMES_HOME/hermes-agent --set hermes (+ sparkrun set when ~/sparkrun exists)"
+else
   HERMES_DIR="$HERMES_HOME/hermes-agent"
   CHK=$("$PYBIN" "$BOOT_DIR/apply_patches.py" --check 2>/dev/null)
   if echo "$CHK" | grep -q '"ok": true'; then
@@ -340,7 +349,9 @@ hdr "Install: enable HSCC plugins + toolsets"
 # exiting non-zero. Treat that as a warning, not success: reporting
 # "✓ config wired" for a fresh machine where nothing was wired is exactly the
 # silent gap this step exists to close.
-if WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null); then
+if $DRY_RUN; then
+  plan "config wiring: enable_plugins.py updates $HERMES_HOME/config.yaml (plugins.enabled, toolsets, kanban, delegation, compaction)"
+elif WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null); then
   case "$WIRED" in
     *"NOT WIRED"*) warn "$WIRED" ;;
     *)             ok "config wired ($WIRED)" ;;
@@ -350,13 +361,19 @@ else
 fi
 
 hdr "Install: agent instructions (SOUL + ops personality)"
+if $DRY_RUN; then
+  plan "SOUL/personality: install_soul.py updates $HERMES_HOME/SOUL.md + personality (sentinel blocks)"
+else
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"
+fi
 
 hdr "Install: ensure kanban review feature in Hermes runtime"
 # Re-apply the kanban_submit_review / auto_review feature (upstream PR #43425)
 # if a hermes update dropped it. Idempotent + safe (refuses a dirty repo, aborts
 # on conflict). No-op once the PR merges upstream. Non-fatal: warn, not die.
-if REVIEW_JSON=$("$PYBIN" "$BOOT_DIR/ensure_review_feature.py" 2>/dev/null); then
+if $DRY_RUN; then
+  plan "kanban review feature: ensure_review_feature.py re-applies PR #43425 into $HERMES_HOME/hermes-agent if missing"
+elif REVIEW_JSON=$("$PYBIN" "$BOOT_DIR/ensure_review_feature.py" 2>/dev/null); then
   REVIEW_STATUS=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['status'])" _ "$REVIEW_JSON" 2>/dev/null || echo unknown)
   case "$REVIEW_STATUS" in
     already_present|applied|skipped_missing) ok "kanban review feature: $REVIEW_STATUS" ;;
@@ -369,7 +386,9 @@ fi
 hdr "Install: default trigger rules"
 # Seed ~/.hscc/triggers.json with default alert rules (idempotent: only adds
 # rules whose id is not already present, preserves operator edits). Non-fatal.
-if TRIG_JSON=$("$PYBIN" "$BOOT_DIR/install_triggers.py" 2>/dev/null); then
+if $DRY_RUN; then
+  plan "trigger rules: install_triggers.py seeds defaults into $HSCC_DIR/triggers.json"
+elif TRIG_JSON=$("$PYBIN" "$BOOT_DIR/install_triggers.py" 2>/dev/null); then
   TRIG_TOTAL=$("$PYBIN" -c "import sys,json;d=json.loads(sys.argv[2]);print(d.get('total',0))" _ "$TRIG_JSON" 2>/dev/null || echo 0)
   TRIG_ADDED=$("$PYBIN" -c "import sys,json;d=json.loads(sys.argv[2]);print(len(d.get('added',[])))" _ "$TRIG_JSON" 2>/dev/null || echo 0)
   ok "trigger rules installed (${TRIG_TOTAL} total, added ${TRIG_ADDED})"
