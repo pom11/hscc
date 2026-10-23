@@ -140,6 +140,18 @@ class TestInstallMode:
         assert uc.detect_install_mode(root) == uc.MODE_BREW
         assert "git -C" not in uc.upgrade_command(uc.MODE_BREW)
 
+    def test_brew_marker_beats_a_git_directory(self, tmp_path):
+        """The ORDER pin with teeth: a brew tree that ALSO carries a .git
+        (a tap staged from a local clone, a stray vendored checkout) must
+        still read as brew. If dev were consulted first, this install would
+        be told to `git pull` a tree brew owns — and the brew upgrade
+        command would never be printed."""
+        root = tmp_path / "opt" / "custom-prefix" / "libexec" / "hscc"
+        (root / ".git").mkdir(parents=True)
+        (root / ".hscc-brew-libexec").write_text("brew\n")
+        assert uc.detect_install_mode(root) == uc.MODE_BREW
+        assert uc.upgrade_command(uc.MODE_BREW) == "brew upgrade hscc"
+
 
 # ── run_check: newer / older / equal + cache writes ───────────────────────
 
@@ -367,6 +379,27 @@ class TestStatusNotice:
         with redirect_stdout(out):
             cli.cmd_status()
         assert "HSCC Daemon Status" in out.getvalue()
+
+    def test_raising_notice_helper_cannot_take_status_down(
+            self, monkeypatch, tmp_path):
+        """The hard guarantee behind the try/except: even if check_from_cache
+        itself explodes (a future refactor, a corrupted cache entry the
+        defensive paths miss), `hscc status` still prints and still exits
+        normally. Mutation-probed: removing the swallow fails this test."""
+        from hscc_daemon import cli
+
+        def detonate(*a, **k):
+            raise RuntimeError("update_check exploded")
+        monkeypatch.setattr(uc, "check_from_cache", detonate)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.cmd_status()          # must NOT raise
+        assert "HSCC Daemon Status" in out.getvalue()
+        assert "update:" not in out.getvalue()
 
     def test_notice_appears_even_with_no_stream_state(self, monkeypatch, tmp_path):
         """The early `return` for 'no state data yet' must not swallow the
