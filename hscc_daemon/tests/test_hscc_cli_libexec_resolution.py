@@ -185,6 +185,30 @@ def test_shipped_keg_beats_the_hermes_plugins_decoy(tmp_path, probe):
     assert str(decoy.parent) not in sys.path
 
 
+def test_wrapper_falls_back_to_the_stable_libexec_dir_without_the_symlink(
+        tmp_path, probe):
+    """Same keg with the formula's symlink MISSING (a hand-copied or half-removed
+    keg): candidate #1 misses, so the libexec leg must name the version-STABLE
+    `libexec/hscc` — before the ~/.hermes/plugins decoy, which must not win.
+    This is the leg the versioned-only glob could never serve."""
+    keg = tmp_path / "opt" / "homebrew" / "Cellar" / "hscc" / "2.12.0" / "libexec"
+    payload = keg / "hscc"
+    (payload / "hscc_daemon").mkdir(parents=True)
+    (payload / "hscc_daemon" / "__init__.py").write_text("")
+    (payload / "hscc_daemon" / "hscc.py").write_text(
+        "def main():\n    return 'stable-libexec'\n")
+    decoy = tmp_path / "home" / ".hermes" / "plugins" / "hscc_daemon"
+    decoy.mkdir(parents=True)
+    (decoy / "__init__.py").write_text("")
+    (decoy / "hscc.py").write_text("def main():\n    return 'decoy'\n")
+    site = keg / "venv" / "lib" / "python3.11" / "site-packages"
+    mod = probe(site / "hscc_cli")
+    assert not (site / "plugins").exists()
+    assert list(keg.glob("hscc-*")) == [], "fixture must have no versioned dir"
+    assert mod.main() == "stable-libexec"
+    assert str(payload.resolve()) in sys.path
+
+
 def test_wrapper_non_brew_layout_unchanged(tmp_path, probe):
     """Deployed sibling-plugins layout still resolves via candidate #1 — the
     brew support is a pure no-op there. Candidate #1 is `<pkg-parent>/plugins`

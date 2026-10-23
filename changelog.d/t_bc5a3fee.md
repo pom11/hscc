@@ -46,7 +46,7 @@ order: 1
   without `hscc_daemon` skipped; deployed sibling-plugins layout unchanged),
   with `hscc_daemon*` purged from `sys.modules` around each probe so "which
   tree won" is measured, not assumed.
-- Shipped-tap layout pins (t_0f5616fd, +10 cases): the merged
+- Shipped-tap layout pins (t_0f5616fd, +11 cases): the merged
   `pom11/homebrew-hscc` formula installs at the version-STABLE
   `Cellar/hscc/<ver>/libexec/hscc` and drops no marker, so every tree above
   fabricated a shape `brew install` never produces. New fabricated-keg cases:
@@ -58,8 +58,11 @@ order: 1
   copy; the shim skip fires from the `*/Cellar/*` shape in dry-run (prints
   the reason) and in real mode (completes, rc 0); plus an e2e
   `hscc bootstrap --dry-run` whose dispatcher is imported through the
-  symlink. The stable `libexec/hscc` name is a real resolver fix: removing
-  that candidate fails exactly the two new locator cases (mutation-checked).
+  symlink. The stable `libexec/hscc` name is a real fix, not a test-only
+  tweak: `_resolve_bootstrap_script()` gained the stable candidate (removing
+  it fails exactly the two new locator cases — mutation-checked) and
+  `hscc_cli._libexec_daemon_dirs()` gained it too, so a keg whose
+  `plugins` symlink is missing still resolves the keg's own daemon.
 - `hscc_daemon/tests/test_bootstrap_verb.py` + `hscc-bootstrap/tests/` + the
   scripts help-surface/readme-lint gates green on the final tip via
   `scripts/run_tests.sh` (canonical Hermes venv, frozen tree);
