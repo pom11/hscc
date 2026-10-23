@@ -91,6 +91,16 @@ def test_wrapper_prefers_newest_libexec_version(tmp_path, probe):
     assert mod.main() == "2.12.0"
 
 
+def test_wrapper_version_order_is_numeric_not_lexical(tmp_path, probe):
+    """hscc-2.9.0 must NOT outrank hscc-2.10.0 (lexicographic sort would)."""
+    prefix = tmp_path / "opt"
+    _fabricate_tree(prefix, "2.9.0")
+    _fabricate_tree(prefix, "2.10.0")
+    site = prefix / "libexec" / "venv" / "lib" / "python3.11" / "site-packages"
+    mod = probe(site / "hscc_cli")
+    assert mod.main() == "2.10.0"
+
+
 def test_wrapper_ignores_libexec_dirs_without_daemon(tmp_path, probe):
     """A libexec/hscc-* without hscc_daemon is not a payload root: the
     ancestor is consumed (break) but the empty dir must not enter sys.path,

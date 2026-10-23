@@ -1,4 +1,5 @@
 """HSCC CLI wrapper — forwards to hscc_daemon package."""
+import re
 import sys
 from pathlib import Path
 
@@ -11,21 +12,28 @@ def _libexec_daemon_dirs(here):
     hscc-<ver>/`` and installs this package into a venv inside ``libexec/``
     — from ``site-packages`` NEITHER the sibling-``plugins`` candidate NOR
     the repo-root walk-up below can see the payload. Walk up to the nearest
-    ``libexec`` ancestor and offer every ``hscc-<ver>`` dir (newest first,
-    the same posture brew takes for the active formula version) that carries
-    an ``hscc_daemon``. Returns [] for every non-brew layout, so existing
-    installs resolve exactly as before.
+    ``libexec`` ancestor and offer every ``hscc-<ver>`` dir (newest first —
+    numeric version order, so 2.10.0 beats 2.9.0 — the same posture brew
+    takes for the active formula version) that carries an ``hscc_daemon``.
+    Returns [] for every non-brew layout, so existing installs resolve
+    exactly as before.
     """
     out = []
     try:
         ancestors = list(Path(here).resolve().parents)
     except OSError:
         return out
+
+    def _ver_key(p):
+        digits = re.findall(r"\d+", p.name)
+        return ([int(d) for d in digits], p.name)
+
     for anc in ancestors:
         libexec = anc / "libexec"
         if libexec.is_dir():
             try:
-                out.extend(d for d in sorted(libexec.glob("hscc-*"), reverse=True)
+                out.extend(d for d in sorted(libexec.glob("hscc-*"),
+                                             key=_ver_key, reverse=True)
                            if (d / "hscc_daemon").is_dir())
             except OSError:
                 pass

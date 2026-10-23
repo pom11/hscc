@@ -813,6 +813,15 @@ def _resolve_project_dir():
     return Path(__file__).resolve().parent.parent / "hscc-project"
 
 
+def _hscc_version_key(path):
+    """Sort key for a ``hscc-<ver>`` payload dir: numeric version tuple first,
+    name as tie-breaker. Plain lexicographic order would rank ``hscc-2.9.0``
+    above ``hscc-2.10.0`` (``9`` > ``1``); digits compare as integers (the
+    repo's own version scheme is numeric dotted, see VERSION)."""
+    digits = re.findall(r"\d+", Path(path).name)
+    return ([int(d) for d in digits], Path(path).name)
+
+
 def _bootstrap_script_candidates(source_root=None):
     """Ordered candidate paths for ``bootstrap.sh``, derived from where THIS
     running CLI resolved its code (card t_bc5a3fee).
@@ -831,8 +840,8 @@ def _bootstrap_script_candidates(source_root=None):
       4. ``HSCC_BOOTSTRAP_SH`` env override (checked first; tests + custom
          layouts).
 
-    A versioned libexec tree with several installs resolves the NEWEST (the
-    glob is sorted descending) — the same posture brew takes for the active
+    A versioned libexec tree with several installs resolves the NEWEST (see
+    ``_hscc_version_key``) — the same posture brew takes for the active
     formula version.
     """
     root = Path(source_root) if source_root else Path(__file__).resolve().parent
@@ -854,7 +863,8 @@ def _bootstrap_script_candidates(source_root=None):
         libexec = anc / "libexec"
         if libexec.is_dir():
             try:
-                for ver in sorted(libexec.glob("hscc-*"), reverse=True):
+                for ver in sorted(libexec.glob("hscc-*"),
+                                  key=_hscc_version_key, reverse=True):
                     cands.append(ver / "hscc-bootstrap" / "bootstrap.sh")
             except OSError:
                 pass

@@ -86,6 +86,20 @@ def test_libexec_glob_picks_newest_version(tmp_path):
     assert got == ver2 / "hscc-bootstrap" / "bootstrap.sh"
 
 
+def test_libexec_glob_uses_numeric_version_order(tmp_path):
+    """Lexicographic order would rank 2.9.0 ABOVE 2.10.0 ('9' > '1'). The
+    resolver must compare version digits numerically."""
+    low = tmp_path / "libexec" / "hscc-2.9.0"
+    high = tmp_path / "libexec" / "hscc-2.10.0"
+    for v in (low, high):
+        (v / "hscc-bootstrap").mkdir(parents=True)
+        (v / "hscc-bootstrap" / "bootstrap.sh").write_text("#!/bin/bash\n")
+    site = tmp_path / "libexec" / "venv" / "lib" / "python3.11" / "site-packages"
+    (site / "hscc_daemon").mkdir(parents=True)
+    got = h._resolve_bootstrap_script(site / "hscc_daemon")
+    assert got == high / "hscc-bootstrap" / "bootstrap.sh"
+
+
 def test_env_override_wins_over_everything(tmp_path, monkeypatch):
     real = tmp_path / "somewhere-else" / "bootstrap.sh"
     real.parent.mkdir()
