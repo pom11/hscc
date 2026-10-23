@@ -719,6 +719,18 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
                     f"the tap checkout already pins v{version} but the commit is not "
                     f"on origin/{branch}, and --no-push was given: the PUBLIC tap "
                     "still serves the previous release. Push it (or drop --no-push).")
+            # Whatever wrote that commit, it is about to become public: the same two
+            # gates the write path runs have to pass over the committed tree first.
+            # A bump this tool wrote has already passed them; a hand-authored pin
+            # (a valid one, by content) has not, and pushing an unparseable formula
+            # breaks `brew tap` for every user of the tap.
+            try:
+                ruby_check(formula)
+                guard_tracked(tap)
+            except BumpError as exc:
+                raise BumpError(
+                    f"the unpushed commit that pins v{version} does not pass the "
+                    f"tap's own gates, so it is not published:\n  {exc}") from exc
             _git(tap, ["push", "origin", f"HEAD:refs/heads/{branch}"])
             print(f"published the unpushed commit(s) that carry it: "
                   f"{FORMULA_REL} -> {version} (tap: {tap})")

@@ -775,6 +775,44 @@ def test_repeated_bumps_are_stable(tap, served, monkeypatch):
     assert _git(tap, ["rev-list", "--count", "origin/main"]) == "3"   # init+pin+bump
 
 
+def test_a_leaking_unpushed_pin_is_never_published(tap, served, monkeypatch):
+    """The recovery push publishes a commit this tool did not write. Either gate
+    refusing is fine; what must hold is that the leak never reaches origin."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    bad = formula_text("2.13.0", served.digest("2.13.0")).replace(
+        '  license "MIT"', f'  # mirror {_addr("100", ".64.77.8")}\n  license "MIT"')
+    (tap / "Formula" / "hscc.rb").write_text(bad, encoding="utf-8")
+    _git(tap, ["add", "-A"])
+    _git(tap, ["commit", "--quiet", "-m", "hand pin, committed by hand"])
+    origin_tip = _git(tap, ["rev-parse", "origin/main"])
+
+    with pytest.raises(bf.BumpError):
+        bf.bump("v2.13.0", tap_dir=str(tap))
+    assert _git(tap, ["rev-parse", "origin/main"]) == origin_tip   # nothing published
+    assert _addr("100", ".64.77.8") not in _git(tap, ["show", "origin/main:Formula/hscc.rb"])
+
+
+def test_an_unparseable_unpushed_pin_is_never_published(tap, served, monkeypatch):
+    """The gate the pre-plan check cannot cover: a committed pin whose content needs
+    no rewrite (so the text checks pass) but does not parse. `ruby -c` runs over the
+    committed tree before a recovery push, because a formula that does not parse
+    breaks `brew tap` for every user of the tap, not just for hscc."""
+    env_for(monkeypatch)
+    served.install("2.13.0")
+    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
+    broken = formula_text("2.13.0", served.digest("2.13.0")) + "\nend\n"
+    (tap / "Formula" / "hscc.rb").write_text(broken, encoding="utf-8")
+    _git(tap, ["add", "-A"])
+    _git(tap, ["commit", "--quiet", "-m", "hand pin with a stray end"])
+    origin_tip = _git(tap, ["rev-parse", "origin/main"])
+
+    with pytest.raises(bf.BumpError, match="does not pass the tap's own gates"):
+        bf.bump("v2.13.0", tap_dir=str(tap))
+    assert _git(tap, ["rev-parse", "origin/main"]) == origin_tip   # nothing published
+
+
 def test_an_unpushed_bump_is_pushed_not_reported_as_up_to_date(tap, served, monkeypatch,
                                                                capsys):
     """The failure this card exists to remove, in its quietest form: a previous run
