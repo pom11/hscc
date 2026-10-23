@@ -90,7 +90,7 @@ Same installer, same flags — from a checkout `hscc bootstrap [flags]` finds th
 | Homebrew | `brew upgrade hscc`, then `hscc bootstrap --yes` |
 | source checkout | `git pull`, then `hscc bootstrap --yes` (or `bootstrap.sh --yes` on a build that predates the verb) |
 
-Re-running bootstrap is not optional bookkeeping: `~/.hermes/plugins` is the copy Hermes actually loads, so a new release is inert until it is refreshed there. The tap serves the latest published release only, and its formula is bumped automatically per release — nothing else to remember (`brew install` prints the bootstrap next step itself, and names the bundled `bootstrap.sh` path as the fallback for a build that predates the verb). From a brew keg the CLI-shim stage skips itself with the reason printed: brew owns `hscc` on PATH, and a shim into the Hermes venv would shadow it with a second, brew-invisible entry point.
+Re-running bootstrap is not optional bookkeeping: `~/.hermes/plugins` is the copy Hermes actually loads, so a new release is inert until it is refreshed there. The tap serves the published release only and its formula is re-pinned by the release process — you never touch the tap yourself. From a brew keg the CLI-shim stage skips itself with the reason printed: brew owns `hscc` on PATH, and a shim into the Hermes venv would shadow it with a second, brew-invisible entry point.
 
 ## Check whether you are behind
 
@@ -123,7 +123,7 @@ You rarely need to ask: the cached answer is what `hscc status` reads. Status ne
 update: HSCC v2.13.0 available (installed v2.12.0); upgrade: brew upgrade hscc
 ```
 
-Anything else — no cache, a cache older than 24 h, a cached "up to date" — prints nothing, and the line can never make `hscc status` fail. The daemon makes the call at most once a day and logs the same sentence at WARN when a release is out (never ERROR); a failed check logs nothing and does not poison the cache, so the next run simply retries.
+Anything else — no cache, a cache older than 24 h, a cached "up to date" — prints nothing, and the line can never make `hscc status` fail. The daemon makes the same call at most once a day: it logs a WARN with that sentence when a release is out (INFO when you are current), never ERROR, and a failed check logs nothing and does not poison the cache — the last good answer survives on disk and the next run retries.
 
 ## Common tasks
 
