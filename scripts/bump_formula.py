@@ -144,11 +144,21 @@ BumpError.RC = 1
 # ── git / subprocess plumbing ────────────────────────────────────────────────
 
 def _git(repo: Path, args, *, check=True, input_bytes=None, strip=True):
-    """Run git inside ``repo``. Raises CannotRun if git itself is unavailable."""
+    """Run git inside ``repo``. Raises CannotRun if git itself is unavailable.
+
+    A timeout is CannotRun, not a traceback: a fetch/push that hangs on a network
+    is a host condition the release flow has to see as "could not run", and a
+    stack trace on the release path hides the one line that says which step hung.
+    """
     if shutil.which("git") is None:
         raise CannotRun("git is not on PATH — the tap flow needs git")
-    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                          input=input_bytes, timeout=300)
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              input=input_bytes, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        raise CannotRun(f"git {' '.join(args)} timed out after {exc.timeout}s") from exc
+    except OSError as exc:
+        raise CannotRun(f"cannot run git: {exc}") from exc
     out = proc.stdout.decode("utf-8", "replace")
     err = proc.stderr.decode("utf-8", "replace").strip()
     if strip:
@@ -167,6 +177,8 @@ def _run(cmd, *, check=True):
     """
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise CannotRun(f"{cmd[0]} timed out after {exc.timeout}s") from exc
     except OSError as exc:
         raise CannotRun(f"cannot run {cmd[0]}: {exc}") from exc
     out = proc.stdout.decode("utf-8", "replace").strip()
