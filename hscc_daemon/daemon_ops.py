@@ -183,7 +183,7 @@ UPDATE_CHECK_STARTUP_DELAY = 120
 
 
 def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
-                       update_interval=None):
+                       update_interval=None, renew_lock_fn=None):
     """Durable-liveness heartbeat writer — the daemon's main loop body.
 
     Calls ``touch_heartbeat()`` once per ``interval`` (default
@@ -193,6 +193,15 @@ def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
     leak: it runs in the daemon's main thread right where the old empty wait
     loop ran. On a clean stop it returns and the file simply stops advancing
     (never deleted), leaving a heartbeat that goes stale and cannot be missed.
+
+    Each heartbeat tick also renews the daemon single-instance lock
+    (t_52bd498e): the lock's age-based staleness fallback only adjudicates
+    INDETERMINATE holders, and a live holder that renews every heartbeat
+    (300s, well inside LOCK_STALE_AFTER) can never be judged abandoned no
+    matter how long it has run — the same "a LIVE holder is NEVER broken"
+    invariant autodown's lock guarantees. ``renew_lock_fn`` is injectable
+    (tests); like the heartbeat touch itself a failed renewal must never take
+    the loop down, so its exceptions are swallowed with a WARN.
 
     Extracted as a named function so the throttled-touch behaviour is directly
     testable without booting the monolithic ``run_daemon_loop``.
@@ -223,6 +232,14 @@ def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
         except Exception as e:                      # pragma: no cover
             log(f"update check disabled: {e}", "WARN")
             update_check_fn = lambda: None          # noqa: E731
+    if renew_lock_fn is None:
+        # Same contract as the update tick: a missing/broken singleton module
+        # disables renewal, it never kills the heartbeat.
+        try:
+            from .daemon_singleton import renew_daemon_lock as renew_lock_fn
+        except Exception as e:                      # pragma: no cover
+            log(f"daemon lock renewal disabled: {e}", "WARN")
+            renew_lock_fn = lambda: None            # noqa: E731
     last = 0.0
     # The update tick deliberately does NOT fire on the first iteration (the
     # heartbeat does, because a starting daemon must be durably alive at
@@ -238,6 +255,14 @@ def run_heartbeat_loop(stop_event, interval=None, update_check_fn=None,
         if now - last >= interval:
             touch_heartbeat()
             last = now
+            # Renew the single-instance claim on the same tick (t_52bd498e):
+            # a live holder's lock must never look abandoned. Errors are
+            # swallowed here for the same reason touch_heartbeat never
+            # raises — supervision continuity outranks lock bookkeeping.
+            try:
+                renew_lock_fn()
+            except Exception as e:
+                log(f"daemon lock renewal error: {e}", "WARN")
         if now >= next_update:
             next_update = now + update_interval
             # daemon_tick swallows everything; this guard is for the import
@@ -547,6 +572,35 @@ def _run_supervised_periodic(stop_event, check_fn, interval, stream_name):
 
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
+    # ── SINGLE-INSTANCE CLAIM (t_52bd498e) ────────────────────────────────
+    # First thing, before ANY probe, state write or thread: take the
+    # ~/.hscc/daemon.lock O_EXCL claim (daemon_singleton, same convention as
+    # autodown._acquire_lock). This is the enforcement point precisely
+    # because BOTH entry points — cmd_start's forked grandchild AND
+    # service-supervised cmd_start_daemon — land here: the pid file is only a
+    # shared label (launchd's start-daemon overwrote it over a live orphan
+    # loop and both ran for 2+ days), a claim cannot be clobbered silently.
+    # The claim is IDEMPOTENT for the same process, so the CLI entry points
+    # may (and do) claim EARLIER — before any pid-file bookkeeping — and this
+    # call is what makes the guarantee unbypassable even for a future caller
+    # that invokes the loop directly.
+    # A contender that finds a LIVE holder exits nonzero (3) instead of
+    # running alongside. Nonzero is deliberate: launchd KeepAlive
+    # (SuccessfulExit=false) then RETRIES the supervised start on its own
+    # throttle, so as soon as the twin releases the lock the supervised
+    # daemon takes over — supervision self-heals instead of staying down on a
+    # clean exit nobody supervises. Each retry logs the refusal loudly. An
+    # un-adjudicable lock (unreadable dir, exotic OS) fails OPEN with a loud
+    # WARN — a daemon that will not boot over a lock file is worse than the
+    # pre-fix status quo — but a positively-observed twin is always refused.
+    from . import daemon_singleton as _singleton
+    ok, why = _singleton.hold_daemon_loop_lock_fail_open()
+    if not ok:
+        log(f"Daemon refused to start: {why}", "ERROR")
+        raise SystemExit(3)
+    if why:
+        log(f"Daemon single-instance WARN: {why}", "WARN")
+
     # Operator state under ~/.hscc is private — it carries cluster topology,
     # node addresses and serving config. The files were being created 0644 by
     # the inherited umask. Set it HERE rather than in a cmd_* entry point:
@@ -744,6 +798,18 @@ def run_daemon_loop():
 
     log("Daemon loop stopped")
     write_stopped()
+    # Release the single-instance claim (t_52bd498e) — only if WE still hold
+    # it (release_daemon_lock never unlinks another holder's lock). A hard
+    # kill (SIGKILL) skips this; the next claimant then adjudicates the
+    # holder DEAD (pid gone / start-time mismatch) and breaks the stale lock,
+    # so a leaked lock can never wedge supervision (autodown's invariant,
+    # same mechanism).
+    try:
+        from .daemon_singleton import release_daemon_lock
+        release_daemon_lock()
+    except Exception as e:                          # pragma: no cover
+        log(f"daemon lock release error (next claim adjudicates): {e}",
+            "WARN")
 
 
 def run_autodown_loop(stop_event, interval=30):

@@ -156,7 +156,6 @@ def _isolate_hscc(tmp_path, monkeypatch):
         autodown, daemon_ops, desktop, dispatcher_wedge, hscc, lifecycle,
         recover, state, trigger,
     )
-
     # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
     real_hscc = os.path.expanduser("~/.hscc")
     _real_expanduser = os.path.expanduser
@@ -174,7 +173,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, health, heal_breaker, heal_lease,
+            autodown, daemon_ops, daemon_singleton, desktop, health,
+            heal_breaker, heal_lease,
             hscc, lifecycle,
             serving, state, trigger, update_check, usage,
         )
@@ -184,6 +184,28 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # autodown.py
             (autodown, "AUTODOWN_FILE", p("autodown.json")),
             (autodown, "AUTODOWN_LOCK", p("autodown.lock")),
+            # daemon_singleton.py (t_52bd498e) — the daemon-loop
+            # single-instance claim. This MUST be redirected: every
+            # run_daemon_loop / cmd_start / cmd_start_daemon test path takes
+            # and releases it, so an unredirected path would write a LIVE
+            # claim into the operator's real ~/.hscc (visible to the
+            # no-live-leak audit as a new file) and could suppress the real
+            # daemon's next start.
+            (daemon_singleton, "DAEMON_LOCK", p("daemon.lock")),
+            # Hermetic twin scan: the suite must never observe the OPERATOR's
+            # live process table (a real second loop on the dev box would
+            # make cmd_status print the twin line and break byte-comparison
+            # tests — flaky-by-environment). Pin the override to 0; tests
+            # that want a specific count set _SCAN_OVERRIDE themselves.
+            (daemon_singleton, "_SCAN_OVERRIDE", 0),
+            # Hermetic holder adjudication (t_52bd498e): no test may run
+            # `ps -o lstart` / os.kill against pids on the operator's host.
+            # Constant start string + empty foreign-alive set ⇒ every planted
+            # foreign holder adjudicates DEAD ("stale", breakable), every
+            # self-claim adjudicates "mine"; tests needing a live foreign
+            # holder set both seams per-test.
+            (daemon_singleton, "_PS_START_OVERRIDE", "Mon Jan  1 00:00:00 2024"),
+            (daemon_singleton, "_FAKE_ALIVE_PIDS", frozenset()),
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
             # Hermes cron jobs.json is Hermes' source of truth (feat
