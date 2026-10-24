@@ -1,5 +1,6 @@
 """Health check functions for the HSCC daemon."""
 
+import hashlib
 import json
 import os
 import re
@@ -3050,6 +3051,36 @@ _ENGINE_WEDGE_LATENCY_WINDOW = 16
 # it wedges (bound stays ~10s), while a unit that routinely takes ~8s under
 # load gets ~24s of headroom instead of a flat 10s.
 _ENGINE_WEDGE_TIMEOUT_MULTIPLIER = 3.0
+# ── One probe result per tick, SHARED across callers (t_e37a74c7) ─────────
+# On 2026-10-24 the live fleet ran TWO full daemon loops in TWO processes
+# (launchd's supervised `start-daemon` plus an orphaned `hscc start` fork —
+# both writers held ~/.hscc/daemon.log open). Each loop probes every unit on
+# its own 60 s tick ~2 s apart, so one "tick" hit every engine with TWO
+# streaming probes and two independent streak memories: contradictory
+# verdicts 1.6 s apart, and a single transient blip counted TWICE — enough
+# to cross the 2-tick wedge debounce by itself. An in-process memo cannot
+# fix that (the callers are different processes), so each probe RESULT is
+# recorded under the state dir and any caller whose own last probe of that
+# unit is older than a recorded sibling result inside this TTL consumes it
+# instead of re-probing. Well below the 60 s cadence, so a real next tick
+# (and every test that drives ticks) still probes fresh; a CLI
+# `hscc check engine_wedge` run (persist_disabled) neither reads nor writes
+# the share — it probes fresh, as an explicit operator request should.
+ENGINE_WEDGE_PROBE_SHARE_TTL = int(
+    os.environ.get("HSCC_ENGINE_WEDGE_PROBE_SHARE_TTL", "20"))
+# Sustained INCONCLUSIVE probes required before a unit starts accruing wedge
+# credit (see _probe_unit_generation's "closed_early" classification). Bounds
+# how long a unit that only ever closes the probe stream early can hide from
+# the wedge signal, while making isolated early-close blips — the actual
+# 2026-10-24 false-positive signature — individually harmless.
+ENGINE_WEDGE_INCONCLUSIVE_THRESHOLD = int(
+    os.environ.get("HSCC_ENGINE_WEDGE_INCONCLUSIVE_THRESHOLD", "3"))
+# Ceiling on waiting for a sibling caller's in-flight probe result before
+# deciding to probe ourselves. MUST stay strictly below ENGINE_WEDGE_TIMEOUT
+# so one tick's worst-case stall (a sibling wedged mid-probe) still fits
+# inside the stream's own 60 s cadence — one bounded pause per unit, never
+# a cascade (every probe path is independently bounded).
+ENGINE_WEDGE_PROBE_WAIT_CAP = 5
 
 # In-memory per-unit wedge state, keyed by unit id. Lives only for the lifetime
 # of this daemon process: ``first_seen`` (first tick we probed the unit),
@@ -3121,7 +3152,261 @@ def _unit_probe_timeout(st):
                _ENGINE_WEDGE_TIMEOUT_MULTIPLIER * median)
 
 
-def _read_sse_content_until(resp, stop_event, out_box):
+# ── Cross-process probe share (t_e37a74c7) ────────────────────────────────
+# ONE probe result per unit per tick, shared by every caller. The 2026-10-24
+# false positives came from two full daemon loops in TWO processes (an
+# orphaned `hscc start` fork alongside launchd's `start-daemon`) each probing
+# every unit on its own 60 s tick ~2 s apart: two streaming probes per tick,
+# two streak memories, and one transient blip counted twice — enough on its
+# own to cross the 2-tick wedge debounce. An in-process memo cannot cover two
+# processes, so the result itself is recorded in the state dir (deliberately
+# NOT a .json file: `hscc status` and `verify` glob state/*.json and must
+# never mistake a probe share for a stream).
+#
+# Consumption rule: a caller consumes a recorded result IFF that result is
+# NEWER than its own last probe of the unit and inside the TTL. A caller's
+# own result is therefore never "newer than its own last probe" (both stamp
+# the same ts), so consecutive ticks in ONE process still probe fresh — the
+# multi-tick debounce keeps its meaning. The .claim file (O_EXCL) marks an
+# in-flight probe: a caller that finds a live claim WAITS (bounded) for the
+# sibling result instead of firing a second concurrent probe at the same
+# engine; a claim whose holder died is stale, gets stolen, and the unit is
+# probed normally — sharing can never silence the check.
+
+# A claim is stale (holder presumed dead) once it is older than the longest
+# a probe legitimately needs plus our own bounded wait, with slack.
+def _engine_wedge_claim_horizon():
+    return ENGINE_WEDGE_TIMEOUT + ENGINE_WEDGE_PROBE_WAIT_CAP + 10
+
+
+def _engine_wedge_probe_share_enabled():
+    """Sharing is on when the TTL is positive and we are NOT an ad-hoc CLI
+    check (`hscc check engine_wedge` runs under persist_disabled and must
+    probe fresh on an explicit operator request — and publish nothing)."""
+    if ENGINE_WEDGE_PROBE_SHARE_TTL <= 0:
+        return False
+    try:
+        from .state import persist_disabled_active
+        return not persist_disabled_active()
+    except Exception:
+        return True
+
+
+def _engine_wedge_probe_share_path(node, port):
+    from . import state
+    digest = hashlib.sha1(("%s:%s" % (node, port)).encode()).hexdigest()[:16]
+    return os.path.join(state.STATE_DIR,
+                        f"engine-wedge-probe-{digest}.probe")
+
+
+def _engine_wedge_share_read(path):
+    """Read a recorded sibling probe result → dict or None. Never raises."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        result = data.get("result")
+        ts = data.get("ts")
+        if not isinstance(result, dict) or not isinstance(ts, (int, float)):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _engine_wedge_share_write(path, ts, probe_timeout, result, elapsed):
+    """Atomically record this caller's probe result. Never raises."""
+    entry = {"ts": ts, "pid": os.getpid(),
+             "probe_timeout": float(probe_timeout),
+             "elapsed": round(float(elapsed), 3), "result": result}
+    tmp = "%s.%s.%s.tmp" % (path, os.getpid(), threading.get_ident())
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(entry, f)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _engine_wedge_claim_try(path):
+    """Acquire the in-flight probe claim atomically (O_EXCL). True if ours."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, json.dumps({"pid": os.getpid(),
+                                     "ts": time.time()}).encode())
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        # A filesystem we cannot even write must NOT disable the check:
+        # fall through to the unshared probe (old behaviour).
+        return True
+
+
+def _engine_wedge_claim_release(path):
+    """Release OUR claim (pid-checked, so a stolen-then-ours race cannot let
+    us delete a live sibling's claim). Never raises."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if data.get("pid") != os.getpid():
+            return
+        os.unlink(path)
+    except Exception:
+        pass
+
+
+def _engine_wedge_claim_age(path, now):
+    """Seconds since the claim was taken; None if absent/unreadable; a
+    corrupt claim counts as ancient (steal it)."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        ts = data.get("ts")
+        if not isinstance(ts, (int, float)):
+            return None
+        return now - ts
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return float("inf")
+
+
+def _engine_wedge_fresh_share(path, st, now):
+    """A recorded result newer than this caller's own last probe and inside
+    the TTL → the sibling's probe for THIS tick. Returns entry or None."""
+    entry = _engine_wedge_share_read(path)
+    if entry is None:
+        return None
+    ts = entry["ts"]
+    if ts <= st.get("last_probe_ts", 0.0):
+        return None
+    if now - ts > ENGINE_WEDGE_PROBE_SHARE_TTL:
+        return None
+    return entry
+
+
+def _engine_wedge_probe_shared(node, port, probe_timeout, st):
+    """Probe one unit with the per-tick result shared across caller
+    processes (see the block comment above). Returns (result, elapsed).
+
+    NEVER waits longer than ENGINE_WEDGE_PROBE_WAIT_CAP for a sibling: with
+    every probe itself bounded by probe_timeout, the per-unit worst case
+    stays inside the stream's 60 s cadence — one bounded pause, never a
+    cascade, and never a silent stream (stale claims are stolen)."""
+    path = _engine_wedge_probe_share_path(node, port)
+    claim = path + ".claim"
+    now = time.time()
+
+    entry = _engine_wedge_fresh_share(path, st, now)
+    if entry is not None:
+        st["last_probe_ts"] = entry["ts"]
+        return entry["result"], float(entry.get("elapsed") or 0.0)
+
+    acquired = _engine_wedge_claim_try(claim)
+    if not acquired:
+        # A sibling is probing this unit right now. If its claim is stale the
+        # holder died — steal it and take over. Otherwise wait (bounded) for
+        # its result to land.
+        age = _engine_wedge_claim_age(claim, now)
+        if age is not None and age > _engine_wedge_claim_horizon():
+            try:
+                os.unlink(claim)
+            except OSError:
+                pass
+            acquired = _engine_wedge_claim_try(claim)
+        if not acquired:
+            deadline = time.monotonic() + ENGINE_WEDGE_PROBE_WAIT_CAP
+            while time.monotonic() < deadline:
+                time.sleep(0.1)
+                entry = _engine_wedge_fresh_share(path, st, time.time())
+                if entry is not None:
+                    st["last_probe_ts"] = entry["ts"]
+                    return entry["result"], float(entry.get("elapsed") or 0.0)
+                if _engine_wedge_claim_age(claim, time.time()) is None:
+                    # Claim vanished (sibling finished or died) without a
+                    # result we can use — take the claim ourselves.
+                    if _engine_wedge_claim_try(claim):
+                        acquired = True
+                        break
+    if not acquired:
+        # Either the sibling's claim was stolen-and-lost or the bounded wait
+        # expired (sibling wedged mid-probe). Probe ourselves rather than
+        # skip the unit — the fresh result replaces whatever the stale claim
+        # left behind. (No release below: this probe is not claim-guarded.)
+        t0 = time.monotonic()
+        result = _probe_unit_generation(node, port, timeout=probe_timeout)
+        elapsed = time.monotonic() - t0
+        ts = time.time()
+        st["last_probe_ts"] = ts
+        _engine_wedge_share_write(path, ts, probe_timeout, result, elapsed)
+        return result, elapsed
+
+    try:
+        t0 = time.monotonic()
+        result = _probe_unit_generation(node, port, timeout=probe_timeout)
+        elapsed = time.monotonic() - t0
+        ts = time.time()
+        st["last_probe_ts"] = ts
+        _engine_wedge_share_write(path, ts, probe_timeout, result, elapsed)
+        return result, elapsed
+    finally:
+        if acquired:
+            _engine_wedge_claim_release(claim)
+
+
+def _engine_wedge_prune_shares(units_now):
+    """Delete probe-share/claim files for units no longer configured, and
+    any file older than the horizon (a crash leftover). Bounded: one small
+    dir listing, throttled to once a minute per process. Never raises —
+    sharing must never be able to break the check that owns it."""
+    now = time.time()
+    if now - getattr(health_prune_state, "last", 0.0) < 60:
+        return
+    health_prune_state.last = now
+    try:
+        from . import state
+        keep = set()
+        for node, port in units_now:
+            digest = hashlib.sha1(
+                ("%s:%s" % (node, port)).encode()).hexdigest()[:16]
+            keep.add(f"engine-wedge-probe-{digest}.probe")
+        horizon = _engine_wedge_claim_horizon()
+        for fn in os.listdir(state.STATE_DIR):
+            if not fn.startswith("engine-wedge-probe-"):
+                continue
+            path = os.path.join(state.STATE_DIR, fn)
+            base = fn[:-6] if fn.endswith(".claim") else fn
+            if base in keep and fn.endswith(".claim"):
+                # Live unit: still age out a claim whose holder died.
+                age = _engine_wedge_claim_age(path, now)
+                if age is not None and age > horizon:
+                    os.unlink(path)
+                continue
+            if base in keep:
+                continue
+            try:
+                if now - os.stat(path).st_mtime > horizon:
+                    os.unlink(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+health_prune_state = threading.local()
+
+
+def _read_sse_content_until(resp, stop_event, out_box, ended_box=None):
     """Drain an OpenAI-compatible SSE stream on a helper thread.
 
     Accumulates ``choices[0].delta.content`` text into ``out_box`` (a plain
@@ -3130,15 +3415,34 @@ def _read_sse_content_until(resp, stop_event, out_box):
     probe with a bounded ``join(timeout=...)`` regardless of per-read socket
     timeouts. Best-effort: any parse/transport error just stops accumulating;
     the resulting (possibly empty) text is what the caller judges.
+
+    ``ended_box`` (t_e37a74c7): when given, a one-element list set to True IFF
+    the stream ENDED ON ITS OWN (EOF/peer-close, [DONE], or a transport error)
+    before the caller gave up. This separates the zero-token shapes the old
+    code conflated: "the engine held the connection open and never generated"
+    (a genuine wedge) vs "the stream terminated inside the window with no
+    tokens" (a transport blip, a handshake-only close, or the documented RST
+    race where the server's close beats the body bytes — NOT the wedge
+    signature, and the shape that produced the 2026-10-24 false positives).
+    The caller still checks the elapsed budget so a socket timeout AT the
+    bound stays the wedge signal. Exits caused by ``stop_event`` (caller
+    deadline) never set it.
     """
     buf = b""
     fp = getattr(resp, "fp", None)
     try:
         while not stop_event.is_set():
             if fp is None:
+                if ended_box is not None:
+                    ended_box[0] = True
                 break
             chunk = fp.read(256)
+            if stop_event.is_set():
+                break
             if not chunk:
+                # EOF: the peer closed the stream on its own.
+                if ended_box is not None:
+                    ended_box[0] = True
                 break
             buf += chunk
             while b"\n" in buf:
@@ -3148,6 +3452,8 @@ def _read_sse_content_until(resp, stop_event, out_box):
                     continue
                 payload = line[5:].strip()
                 if payload == b"[DONE]":
+                    if ended_box is not None:
+                        ended_box[0] = True
                     return
                 try:
                     obj = json.loads(payload)
@@ -3158,7 +3464,13 @@ def _read_sse_content_until(resp, stop_event, out_box):
                 except Exception:
                     pass
     except Exception:
-        pass
+        # Transport error mid-stream (ConnectionResetError from the server's
+        # close, socket.timeout AT the bound, ...). It IS "the stream ended"
+        # — the caller's elapsed-budget check decides which shape it was:
+        # ended well inside the bound = blip (inconclusive); ended at the
+        # bound = the stall signature (wedged).
+        if ended_box is not None:
+            ended_box[0] = True
 
 
 def _served_model_name(node, port, timeout=5):
@@ -3188,11 +3500,22 @@ def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
 
     Returns ``{"ok": bool, "status": int|None, "error": str, "text": str}``.
 
-    Core signal (the wedge signature): the unit returns HTTP 200 but produces
-    NO content deltas within ``timeout`` seconds ⇒ ``ok: False`` with a
-    "wedged" classification. HTTP/transport errors ⇒ ``ok: False`` with a
-    "down" error — unreachable, a distinct condition from "answering but never
-    generating". The caller separates the two in the stream's details.
+    Core signal (the wedge signature): the unit returns HTTP 200 and HOLDS the
+    streaming connection open for the whole ``timeout`` window producing NO
+    content deltas ⇒ ``ok: False`` with a "wedged" classification. HTTP/
+    transport errors ⇒ ``ok: False`` with a "down" error — unreachable, a
+    distinct condition from "answering but never generating". The caller
+    separates the two in the stream's details.
+
+    Third shape (t_e37a74c7): HTTP 200 but the stream ENDED ON ITS OWN well
+    inside the window with zero tokens (peer closed / [DONE] without content)
+    ⇒ ``ok: False`` with a "closed_early" classification. A stalled-to-death
+    engine holds the socket; a server that closes cleanly is answering — a
+    transient transport blip or a handshake-only close, NOT the wedge
+    signature. On 2026-10-24 this shape (probes returning in 2.2-4.0 s across
+    all 3 units, while a true stall burns the full >=10 s bound each) was
+    counted as wedge credit and — doubled by a second daemon loop re-probing
+    seconds later — crossed the debounce and false-alarmed healthy units.
     """
     import urllib.request
     import urllib.error
@@ -3200,6 +3523,7 @@ def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
 
     timeout = timeout or ENGINE_WEDGE_TIMEOUT
     max_tokens = max_tokens or ENGINE_WEDGE_MAX_TOKENS
+    _started = time.monotonic()
     # Ask the unit which model it actually serves. This used to send a
     # placeholder "x", which vLLM answers with HTTP 404 (no such model) — so
     # the probe could NEVER return ok against a real engine, and every unit was
@@ -3223,9 +3547,11 @@ def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = resp.status
             out_box = []
+            end_box = [False]
             stop = _threading.Event()
             t = _threading.Thread(
-                target=_read_sse_content_until, args=(resp, stop, out_box),
+                target=_read_sse_content_until,
+                args=(resp, stop, out_box, end_box),
                 daemon=True)
             t.start()
             # Overall wall-clock bound on the whole streaming probe. If the
@@ -3238,6 +3564,15 @@ def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
         if text.strip():
             return {"ok": True, "status": status, "text": text.strip(),
                     "error": ""}
+        # (t_e37a74c7) Two zero-token shapes, judged by WHO ended the stream
+        # and WHEN. A stalled engine HOLDS the socket until the caller
+        # abandons it: ended (by transport error or EOF) only at/after the
+        # budget ran out — that stays the wedge signature. A stream that
+        # terminated ON ITS OWN well inside the budget (clean close, RST
+        # race, early EOF) is a transport blip, not a stall.
+        elapsed = time.monotonic() - _started
+        if end_box[0] and elapsed < timeout * 0.9:
+            return {"ok": False, "status": status, "error": "closed_early"}
         return {"ok": False, "status": status, "error": "wedged"}
     except urllib.error.HTTPError as e:
         return {"ok": False, "status": e.code, "error": "down"}
@@ -3317,6 +3652,7 @@ def check_engine_wedge():
 
     now_wall = time.time()
     wedged, loading, down, ok_units, busy = [], [], [], [], []
+    live_endpoints = []
 
     for u in units:
         nodes = [n for n in (u.get("nodes") or []) if n]
@@ -3329,6 +3665,11 @@ def check_engine_wedge():
         st = _engine_wedge_units.setdefault(key, {
             "first_seen": now_wall, "consecutive_failures": 0,
             "last_success": 0.0, "latencies": [],
+            # t_e37a74c7: per-tick probe-share bookkeeping — wall clock of
+            # the last probe THIS caller ran for the unit (a shared result
+            # is consumed only when newer), and the run-length of
+            # inconclusive (closed-early) probes before wedge credit accrues.
+            "last_probe_ts": 0.0, "inconclusive": 0,
         })
 
         # A unit we've only just met may still be loading weights (minutes);
@@ -3344,9 +3685,19 @@ def check_engine_wedge():
         # it needs more headroom and no /metrics busy signal is reachable
         # (scope-2 fallback — see _unit_probe_timeout).
         probe_timeout = _unit_probe_timeout(st)
-        _probe_start = time.monotonic()
-        probe = _probe_unit_generation(node, port, timeout=probe_timeout)
-        _probe_elapsed = time.monotonic() - _probe_start
+        if _engine_wedge_probe_share_enabled():
+            # ONE probe result per unit per tick across ALL caller processes
+            # (t_e37a74c7): consume a sibling caller's in-flight/just-landed
+            # result instead of firing a second streaming probe at the same
+            # engine seconds apart.
+            probe, _probe_elapsed = _engine_wedge_probe_shared(
+                node, port, probe_timeout, st)
+        else:
+            _probe_start = time.monotonic()
+            probe = _probe_unit_generation(node, port, timeout=probe_timeout)
+            _probe_elapsed = time.monotonic() - _probe_start
+            st["last_probe_ts"] = time.time()
+        live_endpoints.append((node, port))
 
         if probe["ok"]:
             # Observed successful probe latency feeds the per-unit bound.
@@ -3355,9 +3706,61 @@ def check_engine_wedge():
             if len(lats) > _ENGINE_WEDGE_LATENCY_WINDOW:
                 del lats[:-_ENGINE_WEDGE_LATENCY_WINDOW]
             st["consecutive_failures"] = 0
+            st["inconclusive"] = 0
             st["last_success"] = now_wall
             ok_units.append({"unit": label, "node": node, "port": port,
                              "status": "ok"})
+            continue
+
+        if probe["error"] == "closed_early":
+            # (t_e37a74c7) 200 answered and the SSE stream ENDED ON ITS OWN
+            # well inside the bound with zero tokens. A genuinely stalled
+            # engine HOLDS the socket until the probe abandons it; a server
+            # that closes cleanly is answering — a transport blip or a
+            # handshake-only close. This shape (probes returning in 2.2-4.0 s
+            # while a true stall burns >=10 s each) produced every one of the
+            # 19 false WEDGED ERRORs on 2026-10-24, because the twin daemon
+            # loop re-probing ~2 s later turned ONE blip into TWO counted
+            # failures and crossed the wedge debounce by itself. An isolated
+            # blip is now inconclusive: no wedge credit, reported honestly.
+            # Only a SUSTAINED run of them (the engine refuses every probe
+            # stream) starts accruing wedge credit, and then the ordinary
+            # debounce applies — a real wedge is still caught.
+            st["inconclusive"] = st.get("inconclusive", 0) + 1
+            escalated = st["inconclusive"] >= ENGINE_WEDGE_INCONCLUSIVE_THRESHOLD
+            if escalated:
+                st["consecutive_failures"] += 1
+            note = ("stream closed early with no tokens (inconclusive %d/%d)"
+                    % (st["inconclusive"], ENGINE_WEDGE_INCONCLUSIVE_THRESHOLD))
+            if escalated and st["consecutive_failures"] >= ENGINE_WEDGE_THRESHOLD:
+                # About to declare a wedge — same corroboration the stall path
+                # gets (no regression of the busy-vs-wedged distinction): a
+                # congested engine can reset probe streams while it is busy
+                # serving other requests. /metrics settles it.
+                if _unit_busy(node, port):
+                    st["consecutive_failures"] = 0
+                    st["inconclusive"] = 0
+                    st["last_success"] = now_wall
+                    busy.append({"unit": label, "node": node, "port": port,
+                                 "status": "busy",
+                                 "message": "probe stream closed early "
+                                            "repeatedly but vLLM /metrics "
+                                            "shows it serving other requests"})
+                    continue
+                stalled_s = (now_wall - st["last_success"]) if st["last_success"] else None
+                wedged.append({
+                    "unit": label, "node": node, "port": port,
+                    "status": "wedged",
+                    "message": "HTTP 200 with no generated tokens on %d "
+                               "consecutive checks (stream closed early each "
+                               "time)" % st["consecutive_failures"],
+                    "last_success": st["last_success"] or None,
+                    "stalled_for_s": round(stalled_s) if stalled_s else None})
+            else:
+                loading.append({"unit": label, "node": node, "port": port,
+                                "status": "checking",
+                                "consecutive_failures": st["consecutive_failures"],
+                                "note": note})
             continue
 
         if probe["error"] == "wedged":
@@ -3439,9 +3842,12 @@ def check_engine_wedge():
         # job). Keep the streak reset so a unit that comes back healthy starts
         # clean instead of inheriting stale wedge credit.
         st["consecutive_failures"] = 0
+        st["inconclusive"] = 0
         down.append({"unit": label, "node": node, "port": port,
                      "status": "down",
                      "message": probe.get("error") or "unreachable"})
+
+    _engine_wedge_prune_shares(live_endpoints)
 
     ok = not wedged
     msg_parts = [f"{len(ok_units)}/{len(units)} streaming ok"]

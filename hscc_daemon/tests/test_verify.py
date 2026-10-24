@@ -1287,6 +1287,48 @@ class TestCheckChatRoundtrip:
         assert r["ok"] is None
         assert "unverified" in r["detail"]
 
+    def test_closed_early_excused_when_generation_advances(self, tmp_path,
+                                                            monkeypatch):
+        """t_e37a74c7: the probe's 'closed_early' shape (200, stream ended
+        inside the window, zero tokens) is a transport blip when the unit's
+        generation counter is still climbing — corroborated the same way
+        'wedged' already was, so `hscc verify` doesn't false-fail a healthy
+        engine on a blip."""
+        from hscc_daemon.verify import check_chat_roundtrip
+
+        def probe(node, port, timeout=None, max_tokens=None):
+            return {"ok": False, "error": "closed_early", "status": 200}
+
+        monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
+                            lambda: None)
+        monkeypatch.setattr("hscc_daemon.verify._generation_is_advancing",
+                            lambda node, port, window=20.0: True)
+        serving = self._serving(tmp_path, [{"role": "orchestrator",
+                                            "nodes": ["10.0.0.1"],
+                                            "port": 8000}])
+        r = check_chat_roundtrip(serving_path=serving, probe=probe)
+        assert r["ok"] is True
+
+    def test_closed_early_fails_when_counter_frozen(self, tmp_path,
+                                                    monkeypatch):
+        """The corroboration must not excuse a real failure: with the
+        generation counter frozen, closed_early still names the unit."""
+        from hscc_daemon.verify import check_chat_roundtrip
+
+        def probe(node, port, timeout=None, max_tokens=None):
+            return {"ok": False, "error": "closed_early", "status": 200}
+
+        monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
+                            lambda: None)
+        monkeypatch.setattr("hscc_daemon.verify._generation_is_advancing",
+                            lambda node, port, window=20.0: False)
+        serving = self._serving(tmp_path, [{"role": "orchestrator",
+                                            "nodes": ["10.0.0.1"],
+                                            "port": 8000}])
+        r = check_chat_roundtrip(serving_path=serving, probe=probe)
+        assert r["ok"] is False
+        assert "closed_early" in r["detail"]
+
 
 class TestCheckPluginPayload:
     """check_plugin_payload — installed payload must match what the repo deploys."""
