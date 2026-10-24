@@ -737,10 +737,18 @@ def test_no_auto_upgrade_surface_exists():
                    '["brew"', '["pip"', "os.exec", "os.system", "os.spawn",
                    "shutil.rmtree"):
         assert banned not in src, f"auto-upgrade-ish call site: {banned}"
-    # The only subprocess use allowed is the read-only gh release probe
-    # (argv built in _gh_argv) + its `gh auth status` gate.
-    assert src.count("subprocess.run") == 2, \
-        "update_check may only shell out for the gh API probe (2 call sites)"
+    # The only subprocess use allowed is read-only probing: the gh release
+    # probe (argv built in _gh_argv) + its `gh auth status` gate + the
+    # shadow scan's `<candidate> --version` probe (t_9b98e696 — reading a
+    # candidate's own version string; the scan's argv is [<path>, "--version"]
+    # and every failure path of it is contained).
+    assert src.count("subprocess.run") == 3, \
+        "update_check may only shell out for the gh API probe and the " \
+        "read-only shadow --version probe (3 call sites)"
+    # The shadow probe's argv is pinned to the read-only shape: a candidate
+    # path plus --version, nothing a package manager would accept.
+    assert '[str(path), "--version"]' in src, \
+        "the shadow probe must keep its argv shape ([path, '--version'])"
     # No import of any installer/service manager.
     for banned in ("import subprocess.run", "from shutil import move",
                    "launchd", "subprocess.Popen"):

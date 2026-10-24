@@ -5,6 +5,13 @@ Read-only by construction. This module talks to exactly one URL
 under ``~/.hscc``), and NEVER starts, stops, installs or upgrades anything.
 The operator upgrades by running the printed command themselves.
 
+The PATH shadow scan at the bottom of this module (card t_9b98e696) is
+read-only in the same sense: it walks ``$PATH``, stats the candidates named
+``hscc``, reads one shebang line and runs ``<candidate> --version`` with a
+short timeout, then REPORTS what it found. It writes no file, edits no PATH
+and no shell rc, and removes nothing — a shadow is the operator's to decide
+about, never this tool's to repair.
+
 Three surfaces read this module, and they differ deliberately in how LOUD
 they are (the body of card t_a4055572 asks for exactly that split; the tests
 in ``hscc_daemon/tests/test_update_check.py`` are named after these rows):
@@ -621,6 +628,359 @@ def daemon_tick(cache_file=None, fetch=None, now=None, log_fn=None):
         except Exception:
             pass
         return None
+
+
+# ── PATH shadow scan (card t_9b98e696) ────────────────────────────────────
+#
+# The measured case this exists for: a Homebrew keg at
+# ``<prefix>/bin/hscc`` and a shim EARLIER on PATH — typically
+# ``~/miniconda3/envs/<env>/bin/hscc`` whose shebang points at the Hermes
+# venv and whose code is the DEPLOYED plugins copy. When that env is active
+# (the operator's normal terminal), a plain ``hscc`` runs the older copy and
+# the keg's newer verbs silently do not exist. The scan only REPORTS that;
+# it never deletes, never re-points, never edits PATH or a shell rc.
+#
+# Why not ``shutil.which``: which() returns the FIRST match, which is exactly
+# the shadow — the question being asked here is "what is the ORDER", so the
+# scan walks every ``$PATH`` entry itself and compares each candidate's
+# realpath against the install that is actually executing.
+
+#: How long a single ``<candidate> --version`` probe may take. Two seconds:
+#: long enough for a slow-but-working shim, short enough that a wedged one is
+#: never the reason an ``update --check`` feels slow. A timeout is reported
+#: as "unknown version", never as an error (the body's fail-quiet rule).
+SHADOW_VERSION_TIMEOUT_SECONDS = 2
+
+#: Candidates probed per scan. The scan stops at the first real shadow, so the
+#: only way to reach this cap is several non-shadowing copies ahead of the
+#: running install — bounded work either way (each probe <= 2 s).
+SHADOW_MAX_PROBES = 3
+
+#: The executable name the scan looks for.
+SHADOW_NAME = "hscc"
+
+#: Install families :func:`_family_for` can name. Family identity — not
+#: version — is what makes ``~/miniconda3/envs/x/bin/hscc`` and
+#: ``<prefix>/bin/hscc`` different copies even when both report the same tag.
+FAMILY_BREW = "brew"
+FAMILY_CONDA = "conda-env"
+FAMILY_USER_LOCAL = "user-local"
+FAMILY_DEPLOYED = "deployed-plugins"
+FAMILY_VENV = "venv"
+FAMILY_SYSTEM = "system"
+FAMILY_OTHER = "other"
+
+#: Modes the scan runs for. Scoped to a brew keg on purpose (the body: "when
+#: running from a brew keg (mode=brew) and a shadow exists"); a dev checkout
+#: shadows itself by definition and the scan stays out of the way there.
+SHADOW_SCAN_MODES = (MODE_BREW,)
+
+#: Path prefixes that identify a conda-style install (matched per component
+#: with startswith, because every real one carries a version digit:
+#: miniconda3, anaconda3, miniforge3 — the literal names alone missed them).
+_CONDA_MARKERS = ("miniconda", "anaconda", "miniforge", "mambaforge",
+                  "micromamba")
+
+#: Path components that identify a Homebrew-style install.
+_BREW_MARKERS = ("cellar", "homebrew", "linuxbrew")
+
+
+def _path_entries(path_env=None):
+    """Ordered ``$PATH`` directories (the ORDER is the whole point).
+
+    Empty entries are dropped rather than treated as the current directory
+    (POSIX semantics for ``"::"``), because scanning cwd for an executable
+    named ``hscc`` would be a new behaviour nothing asked for.
+    """
+    raw = os.environ.get("PATH", "") if path_env is None else str(path_env)
+    return [e for e in raw.split(os.pathsep) if e]
+
+
+def _path_candidates(entries):
+    """Existing executables named ``hscc``, in PATH order.
+
+    Each item is ``(path, realpath)``. Directories, non-executables and
+    anything that raises on stat/access are skipped — a shadow scan must
+    never be the reason a command fails. Duplicates (the same realpath
+    reachable through two PATH dirs) are kept: ordering is decided later and
+    realpath equality is the dedup signal there.
+    """
+    out = []
+    for entry in entries:
+        cand = Path(entry) / SHADOW_NAME
+        try:
+            if not cand.is_file() or not os.access(cand, os.X_OK):
+                continue
+            out.append((cand, cand.resolve()))
+        except OSError:
+            continue
+    return out
+
+
+def _read_shebang(path):
+    """The interpreter a script names on its ``#!`` line, else None.
+
+    One line, read binary, decoded leniently: the scan is a *hint-gathering*
+    pass, and a binary or unreadable first line simply means "no shebang".
+    """
+    try:
+        with open(path, "rb") as f:
+            first = f.readline(256)
+    except OSError:
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    line = first[2:].decode("utf-8", "replace").strip()
+    if not line:
+        return None
+    # `#!/usr/bin/env python` / `#!/bin/sh -e`: the interpreter is token 1,
+    # except for `env`, where it is token 2.
+    parts = line.split()
+    if parts and Path(parts[0]).name == "env" and len(parts) > 1:
+        return parts[1]
+    return parts[0] if parts else None
+
+
+def _family_for(path, shebang=None):
+    """Coarse "where does this copy come from" label (report-only vocabulary).
+
+    PATH shape first, then the shebang: a conda-env shim whose interpreter is
+    the Hermes venv is still a conda-env entry on PATH — that is the fact the
+    operator needs in order to fix it — and the deployed-plugins detail is
+    what the WARN adds when the PATH shape alone is unremarkable.
+
+    The brew test reuses :func:`_under_brew_prefix` so the scan and
+    :func:`detect_install_mode` never disagree about what a keg looks like
+    (Cellar/homebrew components OR the tap's ``libexec/hscc[-*]`` shape).
+    """
+    if _under_brew_prefix(str(path)):
+        return FAMILY_BREW
+    parts = [p.lower() for p in Path(str(path)).parts]
+    if (any("conda" in p for p in parts)
+            or any(p.startswith(m) for p in parts for m in _CONDA_MARKERS)):
+        return FAMILY_CONDA
+    if ".hermes" in parts and ("plugins" in parts or "hermes-agent" in parts):
+        return FAMILY_DEPLOYED
+    if len(parts) >= 3 and parts[-3] == ".local" and parts[-2] == "bin":
+        return FAMILY_USER_LOCAL
+    if any(p in ("pyenv", ".pyenv", "venv", ".venv") for p in parts):
+        return FAMILY_VENV
+    if len(parts) >= 3 and parts[-2] == "bin" and parts[-3] in ("usr", "local"):
+        return FAMILY_SYSTEM
+    if shebang:
+        sb = [p.lower() for p in Path(str(shebang)).parts]
+        if ".hermes" in sb and ("plugins" in sb or "hermes-agent" in sb):
+            return FAMILY_DEPLOYED
+        if (any("conda" in p for p in sb)
+                or any(p.startswith(m) for p in sb for m in _CONDA_MARKERS)):
+            return FAMILY_CONDA
+    return FAMILY_OTHER
+
+
+def _probe_version(path, timeout=None):
+    """What ``<candidate> --version`` reports, normalised, or None.
+
+    Fail-quiet on purpose: a shim that hangs, dies, or prints prose is not
+    this module's problem — the caller still warns, with "unknown version"
+    (the body's rule). ``stdin`` is /dev/null so a candidate can never block
+    on a prompt, and nothing about the subprocess is allowed to propagate.
+    """
+    try:
+        proc = subprocess.run([str(path), "--version"],
+                              capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL,
+                              timeout=timeout or SHADOW_VERSION_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    text = (proc.stdout or "") or (proc.stderr or "")
+    m = _VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _running_install(argv0=None, source_root=None):
+    """The install that is EXECUTING this code: ``(exe, invoked, root)``.
+
+    ``exe`` is ``sys.argv[0]`` resolved — for a console script the shell
+    exec'd it by absolute path, so that is the keg's ``bin/hscc`` (through
+    brew's symlink, i.e. the Cellar target) — or None when argv[0] is not a
+    real file (``python -m hscc_daemon.hscc``). ``invoked`` is that same
+    argv[0] UNresolved: the stable name the operator knows
+    (``<prefix>/bin/hscc``), which is what the WARN suggests running. The
+    source root is always available and is what lets a second NAME into the
+    same tree (``<keg>/libexec/hscc/bin/hscc``) count as the same install
+    rather than as its own shadow.
+    """
+    argv0 = sys.argv[0] if argv0 is None else argv0
+    exe = None
+    invoked = None
+    try:
+        p = Path(str(argv0)).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if p.is_file():
+            exe = p.resolve()
+            invoked = str(p)
+    except (OSError, ValueError):
+        exe = None
+    return exe, invoked, Path(source_root) if source_root else _source_root()
+
+
+def _same_install(candidate_realpath, exe, source_root):
+    """True when ``candidate`` is just another name for the running install."""
+    if exe is not None and candidate_realpath == exe:
+        return True
+    try:
+        # Any path INSIDE the running source tree is the same install (a keg
+        # keeps both its launcher and its payload under one prefix).
+        Path(candidate_realpath).relative_to(Path(source_root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _derive_explicit_path(exe, invoked, source_root):
+    """The explicit path that runs THIS install, derived — never hardcoded.
+
+    Preference order: the path we were actually exec'd as UNRESOLVED (the
+    operator's stable name, ``<prefix>/bin/hscc`` — brew's symlink target
+    ``Cellar/hscc/<ver>/bin/hscc`` works too but embeds a version that
+    ``brew upgrade`` invalidates); then a ``bin/hscc`` beside any ancestor of
+    the source tree (covers ``python -m`` from
+    ``<prefix>/Cellar/hscc/<ver>/libexec/hscc``); then None — in which case
+    the WARN says ``brew`` instead of inventing a path.
+    """
+    if invoked:
+        return str(invoked)
+    if exe is not None:
+        return str(exe)
+    try:
+        for anc in list(Path(source_root).resolve().parents)[:6]:
+            cand = anc / "bin" / SHADOW_NAME
+            if cand.is_file():
+                return str(cand)
+    except OSError:
+        pass
+    return None
+
+
+def detect_path_shadow(install_mode=None, path_env=None, argv0=None,
+                       source_root=None, probe=None):
+    """The copy of ``hscc`` that a plain ``hscc`` would run, if not this one.
+
+    Returns None (silent) when there is nothing to say, else::
+
+        {"path", "realpath", "family", "version" (None = unresolvable),
+         "running_version", "running_family", "explicit_path", "probes"}
+
+    The rule (from the body): a shadow exists when an EARLIER ``$PATH``
+    entry resolves to a different realpath AND (a different version OR a
+    different install family). A version that cannot be resolved within
+    :data:`SHADOW_VERSION_TIMEOUT_SECONDS` does not clear the shadow — it is
+    reported as unknown, because the copy is still the one a plain ``hscc``
+    runs (fail-toward-warning is safe here precisely because the scan is
+    report-only).
+
+    Never destructive, never raises: an unusable PATH, an unreadable
+    candidate, or a failing probe all end in either None or a warning dict.
+    """
+    try:
+        mode = detect_install_mode() if install_mode is None else install_mode
+        if mode not in SHADOW_SCAN_MODES:
+            return None
+        entries = _path_entries(path_env)
+        if not entries:
+            return None
+        exe, invoked, root = _running_install(argv0, source_root)
+        running_root = root.resolve()
+        running_version = installed_version()
+        if mode == MODE_BREW:
+            # install-mode detection (marker / path shape) is the AUTHORITATIVE
+            # signal for what this install is; a shape guess on argv[0] is
+            # strictly weaker (a keg installed under a custom prefix has no
+            # "homebrew" component to see, and the fabricated-test case makes
+            # that difference observable every run).
+            running_family = FAMILY_BREW
+        else:
+            running_family = _family_for(invoked if invoked else (
+                exe if exe is not None else running_root),
+                _read_shebang(exe) if exe else None)
+
+        probes = 0
+        prober = probe or _probe_version
+        running_seen = False
+        for cand, real in _path_candidates(entries):
+            if _same_install(real, exe, running_root):
+                if exe is not None and real == exe:
+                    running_seen = True
+                continue           # same install under another name: no shadow
+            if not running_seen:
+                # Earlier than the running install -> this is what plain
+                # `hscc` resolves to. Scan at most SHADOW_MAX_PROBES of them.
+                version = None
+                if probes < SHADOW_MAX_PROBES:
+                    probes += 1
+                    try:
+                        version = prober(cand)
+                    except Exception:
+                        # A probe that raises (an injected stub, a bug in a
+                        # future transport) is "unresolvable" — NOT a scan
+                        # failure. The candidate still shadows, so the scan
+                        # must keep its warn-with-unknown-version behaviour
+                        # instead of the outer catch-all swallowing the
+                        # whole finding.
+                        version = None
+                shebang = _read_shebang(cand)
+                family = _family_for(cand, shebang)
+                differs = (version is None or family != running_family
+                           or version != running_version)
+                if differs:
+                    return {
+                        "path": str(cand),
+                        "realpath": str(real),
+                        "family": family,
+                        "version": version,
+                        "running_version": str(running_version),
+                        "running_family": running_family,
+                        "explicit_path": _derive_explicit_path(
+                            exe, invoked, running_root),
+                        "probes": probes,
+                    }
+                # Same family and same version: a duplicate of this install,
+                # not a shadow. Keep walking for one that really differs.
+        return None
+    except Exception:
+        # A shadow scan is a courtesy; it may never break the verb that
+        # called it (the body: "never crash", "Never fail the check because
+        # of the warning").
+        return None
+
+
+def format_shadow_warning(shadow):
+    """The WARN lines for a detected shadow (empty list when clean).
+
+    Four things the body asks for, in this order: the shadowing path, its
+    version ("unknown version" when the probe could not resolve one), the
+    plain-``hscc`` consequence, and the explicit path that runs this install.
+    The last line is the non-destructive promise, said out loud.
+    """
+    if not shadow:
+        return []
+    version = (f"v{shadow['version']}" if shadow.get("version")
+               else "unknown version")
+    lines = [f"WARN: another '{SHADOW_NAME}' shadows this install on PATH:",
+             f"      {shadow.get('path', '?')}  ({version},"
+             f" {shadow.get('family', FAMILY_OTHER)})",
+             f"      that copy is what a plain '{SHADOW_NAME}' runs — this"
+             f" check compared {display_tag(shadow.get('running_version', ''))}"]
+    explicit = shadow.get("explicit_path")
+    if explicit:
+        lines.append(f"      run this install explicitly with: {explicit}")
+    else:
+        lines.append("      run this install through brew's path"
+                     " (brew --prefix hscc)/bin/" + SHADOW_NAME)
+    lines.append(f"      nothing was changed — removing or re-pointing the"
+                 f" shadowing copy is your call")
+    return lines
 
 
 # ── human rendering ───────────────────────────────────────────────────────

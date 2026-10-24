@@ -254,6 +254,16 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # kept as a "~"-template precisely so the (a) expanduser redirect
             # above covers it too; rebinding here is the belt-and-braces half.
             (update_check, "CACHE_FILE", p("update-check.json")),
+            # update_check.py (t_9b98e696) — the PATH shadow scan DISABLED by
+            # default for the whole suite. The scan's inputs are PATH itself,
+            # which conftest must NOT rewrite (subprocess lookups for bash
+            # etc. depend on it); emptying SHADOW_SCAN_MODES makes every
+            # default-path call return None before it walks or probes
+            # anything, so no verb test can exec a real `hscc --version` off
+            # the operator's live PATH. Shadow tests re-arm it explicitly
+            # (monkeypatch SHADOW_SCAN_MODES) and always pass a fabricated
+            # path_env + probe, never the real PATH.
+            (update_check, "SHADOW_SCAN_MODES", ()),
             # launch guard (A2) — every launch path consults
             # health._launch_guard_status_fn() before starting a container.
             # Default it to "we looked, nothing foreign is running" ({}), so
