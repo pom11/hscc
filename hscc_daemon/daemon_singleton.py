@@ -253,7 +253,11 @@ def acquire_daemon_lock(lock_path=None, now=None):
     lock_path = lock_path or DAEMON_LOCK
     now = time.time() if now is None else now
     try:
-        os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+        # mode=0700: ~/.hscc is private operator state (cluster topology,
+        # node addresses) — a fresh-machine first-create must not land 755
+        # just because the daemon lock needed the dir first.
+        os.makedirs(os.path.dirname(lock_path) or ".", mode=0o700,
+                    exist_ok=True)
     except OSError:
         return False
     try:
@@ -409,7 +413,7 @@ def hold_daemon_loop_lock_fail_open(lock_path=None, stop_event=None,
     """
     try:
         os.makedirs(os.path.dirname(lock_path or DAEMON_LOCK) or ".",
-                    exist_ok=True)
+                    mode=0o700, exist_ok=True)
     except OSError:
         return True, (f"cannot prepare daemon lock dir at {lock_path} — "
                       "single-instance enforcement disabled")

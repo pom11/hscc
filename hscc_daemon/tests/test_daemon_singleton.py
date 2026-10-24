@@ -22,10 +22,10 @@ import pytest
 @pytest.fixture
 def singleton(tmp_path, monkeypatch):
     """Module + a lock path under tmp (conftest already redirected
-    DAEMON_LOCK; we pass lock_path explicitly everywhere anyway to make the
-    hermeticity per-test-visible)."""
+    DAEMON_LOCK; we rebind to an explicit per-test path so the hermeticity is
+    per-test-visible, and pass lock_path explicitly everywhere anyway)."""
     from hscc_daemon import daemon_singleton as ds
-    ds.DAEMON_LOCK = str(tmp_path / "daemon.lock")
+    monkeypatch.setattr(ds, "DAEMON_LOCK", str(tmp_path / "daemon.lock"))
     return ds
 
 
