@@ -1130,11 +1130,13 @@ def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
             why = res.get("error") or res.get("status") or "no text returned"
             # "wedged" means HTTP 200 with no tokens inside the probe window.
             # Under real load that is ALSO what a busy-but-healthy unit looks
-            # like: the probe queues behind production traffic. Corroborate
-            # against the generation counter before calling it a wedge — a
-            # counter that is still climbing proves the engine is generating,
-            # just not for us. Only a frozen counter is a genuine wedge.
-            if why == "wedged" and _generation_is_advancing(node, port):
+            # like: the probe queues behind production traffic. "closed_early"
+            # (t_e37a74c7) means the stream terminated inside the window with
+            # zero tokens — often just a transport blip. Both are corroborated
+            # against the generation counter before being called a failure:
+            # a counter that is still climbing proves the engine is
+            # generating, just not for us. Only a frozen counter is real.
+            if why in ("wedged", "closed_early") and _generation_is_advancing(node, port):
                 continue
             failures.append(f"model on {node}:{port} did not answer ({why})")
 

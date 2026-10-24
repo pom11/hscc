@@ -56,6 +56,18 @@ def _current_ctx():
     return getattr(_persist_disabled, "ctx", None)
 
 
+def persist_disabled_active():
+    """True inside a persist_disabled() block (an ad-hoc CLI check run).
+
+    Public because other shared-state writers must make the SAME distinction
+    ``write_state`` already makes: an ad-hoc `hscc check` run is not the
+    daemon's monitoring loop, so it must neither overwrite nor be governed by
+    state the daemon publishes. The engine-wedge probe share (t_e37a74c7) uses
+    this to keep a CLI run probing fresh and publishing nothing.
+    """
+    return _current_ctx() is not None
+
+
 def now_iso():
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
