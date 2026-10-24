@@ -234,6 +234,36 @@ class TestScan:
     def test_loop_command_matcher(self, singleton, cmd, want):
         assert singleton._is_loop_command(cmd) is want
 
+    def test_sh_shebang_wrappers_are_excluded_by_design(self, singleton,
+                                                        monkeypatch):
+        """Two layers, pinned separately: _is_loop_command is argv-SHAPE
+        matching — `/bin/sh /tmp/x/hscc start-daemon` HAS the shape (True).
+        The SCAN adds the wrapper filter (first token basename sh/bash/zsh/
+        ps/grep) so `bash -c '… start-daemon …'` monitors never self-count.
+        The real orphan (`…/venv/bin/python …/bin/hscc start`) passes both."""
+        assert singleton._is_loop_command(
+            "/tmp/x/hscc start-daemon") is True
+        assert singleton._is_loop_command(
+            "/bin/sh /tmp/x/hscc start-daemon") is True          # shape only
+        assert singleton._is_loop_command(
+            "/bin/bash -c kill $(pgrep -f hscc start-daemon)") is False
+
+        ps_text = (
+            "  100 /usr/bin/python3 /opt/hscc/hscc.py start-daemon\n"
+            "  200 /bin/sh /tmp/x/hscc start-daemon\n"          # wrapper: NO
+            "  300 /bin/bash -c watch hscc start-daemon\n"      # wrapper: NO
+            "  400 /usr/bin/python3 /x/venv/bin/hscc start\n"   # orphan shape
+            "  500 /usr/bin/grep --color hscc start-daemon\n"   # grep: NO
+        )
+
+        class _P:
+            stdout = ps_text
+        monkeypatch.setattr(singleton, "_SCAN_OVERRIDE", None)
+        monkeypatch.setattr(singleton.subprocess, "run",
+                            lambda *a, **k: _P())
+        # 100 and 400 count; 200/300/500 are filtered as wrappers/noise.
+        assert singleton.count_loop_processes() == 2
+
     def test_scan_honours_override(self, singleton, monkeypatch):
         monkeypatch.setattr(singleton, "_SCAN_OVERRIDE", 2)
         assert singleton.count_loop_processes() == 2
