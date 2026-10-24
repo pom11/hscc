@@ -173,7 +173,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, daemon_singleton, desktop, health,
+            autodown, cli as hscc_cli, daemon_ops, daemon_singleton, desktop,
+            health,
             heal_breaker, heal_lease,
             hscc, lifecycle,
             serving, state, trigger, update_check, usage,
@@ -206,6 +207,11 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # holder set both seams per-test.
             (daemon_singleton, "_PS_START_OVERRIDE", "Mon Jan  1 00:00:00 2024"),
             (daemon_singleton, "_FAKE_ALIVE_PIDS", frozenset()),
+            # cli.py — fork-emulating tests must never sit in the real
+            # verdict-pipe select(); 0 ⇒ EOF/None path → classic panel.
+            # (Verified separately: with no real children the pipe EOFs
+            # immediately anyway, this pin is the no-flake guarantee.)
+            (hscc_cli, "_START_VERDICT_TIMEOUT", 0),
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
             # Hermes cron jobs.json is Hermes' source of truth (feat
