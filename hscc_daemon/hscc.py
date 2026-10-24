@@ -928,6 +928,19 @@ def _handle_bootstrap():
               "sibling, libexec/hscc-*/, and $HERMES_HOME/plugins — or set "
               "HSCC_BOOTSTRAP_SH.", file=sys.stderr)
         return 1
+    # Shadow WARN (card t_9b98e696), printed BEFORE the installer's stage
+    # output so the operator reads it next to the CLI-shim stage. Warn-only
+    # by construction: this verb execs the installer; the scan touches
+    # nothing, and when the running install is not a brew keg (or the PATH
+    # is clean) it is completely silent. detect_path_shadow swallows
+    # everything; the try/except is belt-and-braces around the import too.
+    try:
+        from hscc_daemon import update_check
+        shadow = update_check.detect_path_shadow()
+        for line in update_check.format_shadow_warning(shadow):
+            print(line)
+    except Exception:
+        pass
     tail = [a for a in sys.argv[2:]]
     argv = [str(script)] + tail
     if not os.access(script, os.X_OK):
@@ -1584,9 +1597,26 @@ def _handle_update():
 
     result = update_check.run_check()
 
+    # Shadow scan (card t_9b98e696) — a REPORT about PATH ordering, never a
+    # repair, and never a reason this check fails. Only for a completed
+    # comparison: an offline check has its own single stderr line to spend,
+    # and the offline-quiet contract (card t_a4055572) is not amended here.
+    # detect_path_shadow swallows everything; the guard is belt-and-braces.
+    shadow = None
+    if result.get("ok"):
+        try:
+            shadow = update_check.detect_path_shadow(
+                install_mode=result.get("mode"))
+        except Exception:
+            shadow = None
+
     if json_mode:
-        print(json.dumps({k: v for k, v in result.items() if k != "entry"},
-                         sort_keys=True))
+        payload = {k: v for k, v in result.items() if k != "entry"}
+        if result.get("ok"):
+            # Extension, not a break: existing keys and their meanings are
+            # untouched; `shadow` is null-or-object (pinned back-compat).
+            payload["shadow"] = shadow
+        print(json.dumps(payload, sort_keys=True))
         return 0 if result.get("ok") else 1
 
     console = theme.make_console(theme_name)
@@ -1612,6 +1642,11 @@ def _handle_update():
         # line is what operators copy-paste, and a Rich fold at column 80
         # would break the command mid-path (same "keep the actionable
         # substring contiguous" contract as verify's `next step:` lines).
+        console.print(theme.esc(line), soft_wrap=True)
+    for line in update_check.format_shadow_warning(shadow):
+        # Same rendering contract as the comparison block: paths are DATA
+        # (esc) and must not be folded mid-path (soft_wrap) — the explicit
+        # keg path on the last-but-one line is copy-paste material.
         console.print(theme.esc(line), soft_wrap=True)
     return 0
 
