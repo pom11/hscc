@@ -115,6 +115,10 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # which rewrites profile config.yaml — must run in the sandbox so the
         # planted serving.json/profiles are asserted unchanged.
         "test_serving.py", "test_serving_extra.py",
+        # t_52bd498e: the single-instance claim WRITES a lock file — run it in
+        # the sandbox so a regression (e.g. someone rebinds DAEMON_LOCK to a
+        # literal ~/.hscc path) shows up as a new planted-tree file.
+        "test_daemon_singleton.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 

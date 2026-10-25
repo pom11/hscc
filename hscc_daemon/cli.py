@@ -89,6 +89,43 @@ def _detach_stdio():
                 pass
 
 
+# Upper bound on how long the `hscc start` parent waits for the grandchild's
+# single-instance verdict (t_52bd498e). Normal path: verdict arrives in ms.
+# The bound only matters when the grandchild dies before writing one — and
+# it must EXCEED the contender's own wait (daemon_singleton.
+# CONTEND_WAIT_SECONDS=30) plus slack, so a refusing contender still gets
+# its verdict reported instead of the parent timing out into the classic
+# "started" panel. conftest pins it to 0 for fork-emulating tests.
+_START_VERDICT_TIMEOUT = 40.0
+
+
+def _read_start_verdict(rfd, timeout=None):
+    """Read the grandchild's single-instance verdict from the pipe, at most
+    ``timeout`` seconds. Returns the verdict string or None (timeout / EOF /
+    any error ⇒ None, and the caller falls back to the classic panel).
+
+    Bounded by contract: `hscc start` must never block on a daemon it already
+    detached from (the F6 lesson), so this is a select() + single read, not a
+    blocking readline. The verdict is tiny (< 4 KB) so one read suffices.
+    ``_START_VERDICT_TIMEOUT`` is a module constant precisely so the test
+    suite can pin it to 0 (conftest): fork-emulating tests must never sit in
+    a real select(), while production waits the full window so a contending
+    grandchild (which itself waits up to CONTEND_WAIT_SECONDS) still gets
+    its verdict reported.
+    """
+    import select
+    if timeout is None:
+        timeout = _START_VERDICT_TIMEOUT
+    try:
+        ready, _, _ = select.select([rfd], [], [], timeout)
+        if not ready:
+            return None
+        data = os.read(rfd, 4096)
+        return data.decode("utf-8", "replace") or None
+    except (OSError, ValueError):
+        return None
+
+
 def cmd_start():
     """Start the daemon in the background."""
     from .daemon_ops import get_pid, save_pid, write_stopped
@@ -115,20 +152,63 @@ def cmd_start():
     console.print("Starting hscc_daemon...")
     log("Daemon starting")
 
+    # Verdict pipe (t_52bd498e): the grandchild now claims the single-instance
+    # lock BEFORE serving, and its claim verdict ("ok" / "refused\t<why>") is
+    # written here so the parent can report the TRUTH instead of always
+    # printing "started". The parent reads with a bounded select so a
+    # verdict-less daemon (old crash window, pipe write failure) still gets
+    # the classic success panel — behaviour only gets more honest, never
+    # slower or blocking. Created BEFORE the first fork so both children
+    # inherit both ends; every branch closes what it does not use.
+    try:
+        _rfd, _wfd = os.pipe()
+    except OSError:
+        _rfd = _wfd = None
+
     # Fork into background
     pid = os.fork()
     if pid > 0:
+        # Parent: the children hold their own inherited write end, so ours is
+        # closed immediately — if the grandchild dies before writing, the
+        # parent sees EOF (→ None → classic panel) instead of waiting out the
+        # full bound, and no fd leaks per start invocation.
+        if _wfd is not None:
+            try:
+                os.close(_wfd)
+            except OSError:
+                pass
+        verdict = _read_start_verdict(_rfd) if _rfd is not None else None
+        if _rfd is not None:
+            try:
+                os.close(_rfd)
+            except OSError:
+                pass
+        if verdict and verdict.startswith("refused"):
+            reason = verdict.split("\t", 1)[1] if "\t" in verdict else "unknown"
+            # Rich markup: reason is our own text but can carry paths — esc().
+            console.print(
+                make_status_panel(
+                    f"start refused — {esc(reason)}",
+                    status="error", title="start",
+                )
+            )
+            return
+        started_pid = pid
+        if verdict and verdict.startswith("ok"):
+            _rest = verdict.split(None, 1)
+            if len(_rest) > 1 and _rest[1].strip().isdigit():
+                started_pid = int(_rest[1].strip())  # the real daemon pid
         try:
             console.print(
                 make_status_panel(
-                    f"hscc_daemon started (PID {pid})",
+                    f"hscc_daemon started (PID {started_pid})",
                     status="ok", title="start",
                 )
             )
         except Exception:
             console.print(
                 make_status_panel(
-                    f"hscc_daemon started (child PID {pid})",
+                    f"hscc_daemon started (child PID {started_pid})",
                     status="ok", title="start",
                 )
             )
@@ -144,13 +224,62 @@ def cmd_start():
     # Re-fork so no controlling terminal
     pid2 = os.fork()
     if pid2 > 0:
+        if _rfd is not None:
+            try:
+                os.close(_rfd)
+            except OSError:
+                pass
+        if _wfd is not None:
+            try:
+                os.close(_wfd)
+            except OSError:
+                pass
         os._exit(0)
 
     # Grandchild. Detach the standard streams BEFORE anything else runs: this
     # is the point after which nobody owns the caller's terminal any more, and
     # leaving fd 0/1/2 attached is what made `hscc start` hold the caller's
     # pipe open (F6) and let the daemon write into the operator's terminal.
+    # The verdict pipe fds (>=3) are deliberately NOT detached fds and stay
+    # valid across the dup2s.
     _detach_stdio()
+    if _rfd is not None:
+        try:
+            os.close(_rfd)
+        except OSError:
+            pass
+
+    # SINGLE-INSTANCE CLAIM (t_52bd498e) BEFORE any pid-file bookkeeping.
+    # This grandchild is the process that would actually serve, so it is the
+    # process that must own the claim — and it must own it BEFORE save_pid():
+    # the 2026-10 twin incident began exactly here (an orphaned fork whose
+    # save_pid was later clobbered by launchd's write_stopped+save_pid, while
+    # the orphan kept serving). If the claim is refused a live loop already
+    # holds supervision: exit 3 loudly WITHOUT touching the pid file (the
+    # holder's label stays intact and `hscc status` keeps telling the truth).
+    # run_daemon_loop re-asserts the same idempotent claim as its unbypassable
+    # backstop, so no future caller can skip this by invoking the loop
+    # directly. Claiming only AFTER the second fork is deliberate: a claim
+    # taken by the parent/first child would record a pid that is microseconds
+    # from death and open a break-the-lock race against a concurrent start.
+    from . import daemon_singleton as _singleton
+    ok, why = _singleton.hold_daemon_loop_lock_fail_open()
+    _verdict = (f"ok {os.getpid()}" if ok else f"refused\t{why}")
+    if _wfd is not None:
+        try:
+            os.write(_wfd, _verdict.encode("utf-8", "replace"))
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(_wfd)
+            except OSError:
+                pass
+    if not ok:
+        log(f"hscc start refused: {why}", "ERROR")
+        os._exit(3)
+    if why:
+        log(f"hscc start single-instance WARN: {why}", "WARN")
 
     # Grandchild — write the PID exactly ONCE here, after the final fork, so
     # ~/.hscc/daemon.pid reflects the ONE process that actually serves (the
@@ -165,9 +294,25 @@ def cmd_start():
 
     try:
         run_daemon_loop()
+    except SystemExit as e:
+        # Control flow (a refusal from the loop's own backstop claim, or a
+        # deliberate exit) — not a crash we should paper over. We never
+        # became the holder in the refusal case, and release_daemon_lock is
+        # ownership-gated anyway.
+        try:
+            from . import daemon_singleton as _s
+            _s.release_daemon_lock()
+        except Exception:
+            pass
+        os._exit(e.code if isinstance(e.code, int) else 1)
     except Exception as e:
         log(f"Daemon crashed: {e}", "ERROR")
         write_stopped()
+        try:
+            from . import daemon_singleton as _s
+            _s.release_daemon_lock()
+        except Exception:
+            pass
         os._exit(1)
 
 
@@ -177,6 +322,14 @@ def _sigterm_handler(signum, frame):
     from . import log
     log(f"Received signal {signum}, shutting down...")
     write_stopped()
+    # The claim (t_52bd498e) is ownership-gated and this handler can fire
+    # BEFORE the grandchild took the claim (signal between forks) — release
+    # is a no-op then, and correct when we already hold it.
+    try:
+        from . import daemon_singleton as _s
+        _s.release_daemon_lock()
+    except Exception:
+        pass
     os._exit(0)
 
 
@@ -312,6 +465,36 @@ def cmd_status():
         # line that cannot be clipped like a single-line panel body.
         console.print(f"[warn]  ! {detail}[/warn]")
         console.print()
+
+    # TWIN-LOOP SURFACE (t_52bd498e): the 2026-10 incident was TWO full
+    # daemon loops serving side-by-side for 2+ days while status cheerfully
+    # reported the pid-file owner. The single-instance lock now refuses a
+    # twin at startup, but status still reports one (an old build's fork, a
+    # manual loop bypassing the CLI) whenever the process scan finds >1
+    # loop-entry-point process. This line is a REPORT, never an action:
+    # status must not be able to kill anything.
+    try:
+        from . import daemon_singleton
+        inst = daemon_singleton.daemon_instance_report()
+        if inst.get("twin"):
+            console.print(
+                f"[error]  ! TWIN LOOP DETECTED: {esc(inst['loop_processes'])} "
+                "daemon-loop processes are running (expected 1). The lock "
+                f"holder is '{esc(inst['holder'] or 'unknown')}'. Inspect the "
+                "pids (`ps -eo pid,ppid,lstart,command | grep hscc`), verify "
+                "which owns the pid file, then SIGKILL the orphan (NOT the "
+                "pid-file/launchd owner — a TERM'd twin deletes the holder's "
+                "pid file via write_stopped).[/error]")
+            console.print()
+        elif inst.get("lock_stale_claim"):
+            console.print(
+                "[dim]  note: a stale daemon single-instance lock was found "
+                "(holder dead); the next daemon start breaks it "
+                "automatically.[/dim]")
+    except Exception:
+        # Same silence contract as _print_update_notice: a broken diagnostic
+        # must never take the status surface down.
+        pass
 
     # Update notice BEFORE the stream table (and before the "no state data"
     # early return below): a fresh machine whose daemon has written no state
@@ -751,17 +934,38 @@ def cmd_start_daemon():
     This is the supervised daemon entry point. Its only output is the
     daemon's own ``log()`` background-level lines — NOT command output the
     user asked for — so it is intentionally NOT restyled.
+
+    SINGLE-INSTANCE CLAIM (t_52bd498e) FIRST, before ``write_stopped()``: the
+    twin incident happened because this path re-labelled supervision as its
+    own (write_stopped + save_pid) while a pre-existing loop kept serving —
+    the pid file is a label, so overwriting it reaped nothing. A contender
+    that finds a LIVE loop holding the claim exits 3 WITHOUT touching the pid
+    file (the holder's label and log stay authoritative), and launchd
+    KeepAlive (SuccessfulExit=false) retries until the holder releases. The
+    refusal is logged loudly on every retry; run_daemon_loop re-asserts the
+    same idempotent claim as the unbypassable backstop.
     """
     from .daemon_ops import get_pid, save_pid, write_stopped, run_daemon_loop
-    from . import log
+    from . import daemon_singleton, log
     from .state import ensure_state_dir
 
     log("start-daemon invoked (service-supervised mode)")
+    ok, why = daemon_singleton.hold_daemon_loop_lock_fail_open()
+    if not ok:
+        log(f"start-daemon refused: {why}", "ERROR")
+        raise SystemExit(3)
+    if why:
+        log(f"start-daemon single-instance WARN: {why}", "WARN")
     write_stopped()
     ensure_state_dir()
     save_pid()
     try:
         run_daemon_loop()
+    except SystemExit:
+        # A refusal raised from inside the loop (the backstop claim) or a
+        # deliberate loop exit is control flow, not a crash: propagate as-is
+        # (do not write_stopped a holder we never became).
+        raise
     except Exception as e:
         log(f"start-daemon crashed: {e}", "ERROR")
         write_stopped()
