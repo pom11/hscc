@@ -11,6 +11,190 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.13.1] - 2026-10-25
+
+### Added
+- **Daemon single-instance claim — a second `run_daemon_loop` can no longer
+  run beside the supervised one.** The engine-wedge double-probe incident
+  (t_e37a74c7) traced its root emitter to TWO full daemon loops serving for
+  2+ days: an orphaned `hscc start` fork whose pid label launchd's
+  `start-daemon` later overwrote (`write_stopped()` + `save_pid()` re-labels
+  supervision; it reaps nothing), while the orphan kept ticking every stream.
+  New `daemon_singleton.py` takes an O_EXCL claim (`~/.hscc/daemon.lock`,
+  deliberately the autodown `_acquire_lock` convention: holder recorded as
+  `pid=N start=<ps lstart>`, liveness-first staleness with one
+  break-and-retry) at `run_daemon_loop` entry — the single point BOTH entry
+  paths reach — so no caller can bypass it. The CLI paths claim even earlier:
+  the `cmd_start` grandchild claims BEFORE `save_pid()`, and
+  `cmd_start_daemon` claims BEFORE `write_stopped()`, so a refused contender
+  can never clobber the live holder's pid file; `cmd_start`'s parent now
+  reports the grandchild's real verdict (a refusal prints an error panel
+  instead of a false "started"). PID reuse — the case autodown's
+  minutes-long lock never had to answer — is detected by pinning the holder
+  to its `ps -o lstart` start time: same pid but different start ⇒ recycled ⇒
+  breakable. A live holder renews its claim on every heartbeat tick, so a
+  daemon running for months is never mistaken for abandoned; release is
+  ownership-gated, and a SIGKILL'd holder is adjudicated dead by the next
+  claim. A contender finds a live twin, waits out its (bounded) shutdown,
+  then refuses LOUDLY and exits 3 — deliberately nonzero so launchd
+  KeepAlive keeps retrying and supervision self-heals the moment the twin
+  releases. Fail-open (with a WARN) only when the lock cannot be adjudicated
+  at all: a daemon that will not boot over an unreadable lock file is worse
+  than the old status quo. `hscc status` gained the twin surface: a portable
+  `ps` scan of the two loop entry-point argv shapes
+  (`hscc start` / `hscc.py start-daemon`; `hscc api start` etc. never match)
+  prints "TWIN LOOP DETECTED" with the holder identity and the safe-kill
+  guidance (SIGKILL the orphan — a TERM'd twin deletes the holder's pid file
+  via `write_stopped()`), report-only, silence-by-contract on failure.
+- **PATH shadow WARN on `hscc update --check` and `hscc bootstrap`.** When a
+  Homebrew keg runs and an *earlier* `$PATH` entry holds a different `hscc` —
+  the measured case is a conda env's `~/miniconda3/envs/<env>/bin/hscc` whose
+  code is the deployed-plugins copy — a plain `hscc` silently runs that other
+  copy, so the keg's newer verbs "do not exist". `update_check.detect_path_shadow()`
+  now walks `$PATH` in order (not `shutil.which` — the ORDER is the question),
+  skips the running install's own realpath, and flags an earlier hit that
+  resolves elsewhere AND differs by version or install family (conda-env /
+  user-local / deployed-plugins / brew / …). `update --check` prints a
+  multi-line WARN naming the shadowing path, its version (an unresolvable
+  version still warns, as "unknown version"), that the shadow is what plain
+  `hscc` runs, and the *derived* explicit keg path (`sys.argv[0]` first, then
+  a `bin/hscc` beside a source-tree ancestor — never a hardcoded
+  `/opt/homebrew`); `bootstrap` (and `--dry-run`) print the same WARN before
+  the installer runs, beside the CLI-shim stage. The scan is warn-only by
+  construction: no deletion, no PATH or shell-rc edit, no uninstall — the
+  last WARN line says so out loud. Silent when the PATH is clean and on any
+  non-brew install mode; the offline-quiet contract is unchanged (a failed
+  check still prints its single stderr line); `--json` only GAINS a `shadow`
+  key (null when clean, and absent on a failure payload). A probe that hangs
+  is cut off at 2 s and reported unknown, and a scan that somehow explodes
+  internally returns None — it can never fail the check that called it.
+
+### Fixed
+- **Engine-wedge check stopped false-alarming `WEDGED unit(s) detected` on
+  idle-healthy units (19 ERRORs on 2026-10-24, self-contradictory verdicts
+  1.6 s apart).** Two independent defects, both fixed:
+  (1) **One probe result per tick, shared across caller processes.** The
+  live log proved the second caller was not a CLI run but a *second full
+  daemon loop in a second process* (an orphaned `hscc start` fork alongside
+  launchd's supervised `start-daemon` — both writers held `daemon.log`
+  open, and the 60 s cadence doubled to a ~31 s mean inter-arrival with
+  pass pairs 0–8 s apart). Each loop probed every unit with its own streak
+  memory, so every "tick" fired two streaming probes per engine seconds
+  apart and one transient blip counted twice — enough on its own to cross
+  the 2-tick wedge debounce. An in-process memo cannot cover two processes,
+  so each probe result is now recorded under the state dir (a
+  `.probe`-suffixed file, deliberately outside the `*.json` stream glob
+  that `status`/`verify` read); a caller consumes a recorded result only
+  when it is newer than its own last probe of that unit and inside a short
+  TTL (`HSCC_ENGINE_WEDGE_PROBE_SHARE_TTL`, default 20 s — well below the
+  60 s cadence, so genuine next ticks and every debounce test still probe
+  fresh), and an O_EXCL per-unit claim makes a caller WAIT (bounded by
+  `ENGINE_WEDGE_PROBE_WAIT_CAP`, always < the probe bound) for a sibling's
+  in-flight result instead of double-probing. Stale claims (holder died)
+  are stolen, so sharing can never silence the check; a CLI
+  `hscc check engine_wedge` run (under `persist_disabled`) neither reads
+  nor publishes shares — an explicit operator request always probes fresh;
+  orphaned share/claim files for removed units are pruned with the rest.
+  (2) **`closed_early` is no longer wedge credit.** Every false wedge
+  returned in 2.2–4.0 s across all 3 units while a genuine stall burns the
+  full >=10 s bound each: the 200-stream *ended on its own* (peer close /
+  RST race / early EOF — swallowed by the reader's bare except) with zero
+  tokens, and the old code judged that identically to a stalled engine.
+  `_probe_unit_generation` now reports this shape as `closed_early`: an
+  inconclusive probe that accrues no wedge credit unless it SUSTAINS
+  (`HSCC_ENGINE_WEDGE_INCONCLUSIVE_THRESHOLD`, default 3 consecutive), and
+  even then the ordinary debounce plus the `/metrics` busy corroboration
+  still apply before any wedge is declared. A stream that holds the FULL
+  bound with zero tokens remains the unchanged wedge signature.
+  `verify`'s `chat_roundtrip` corroborates `closed_early` against the
+  generation counter exactly as it already did for `wedged`. The twin-loop
+  condition itself (daemon single-instance enforcement) is deliberately
+  out of scope here — it is an ops/launcher fix, filed as follow-up.
+
+### Verified
+- `hscc_daemon/tests/test_daemon_singleton.py`: **50** new cases; RED first
+  (the 49-test set run against the base tree: 11 failed + 38 collection
+  errors, 0 passed — the 50th pin was added after the RED check and passes
+  only on the fixed tree):
+  acquire (free/idempotent/live-twin-blocked/dead-holder-broken/pid-reuse-
+  broken with a re-bound `lstart`/unparseable-age-rule/live-holder-never-
+  broken-however-old), renew+release (ownership-gated both ways, mtime
+  refresh, absent-safe), the entry hold() (live-twin refusal names the holder
+  pid, stop_event aborts the wait early, release-during-wait reacquires,
+  fail-open on unpreparable dir AND on adjudication crash while STILL
+  refusing a real twin), the argv matcher (both loop shapes match;
+  `hscc status`, `hscc api start --tailscale`, `hscc cluster monitor --live`,
+  a trailing-flag `hscc start extra-flag` never do), the status surface
+  (twin line present/absent, `twin=None` UNKNOWN prints nothing, stale-claim
+  note, exploded report stays silent), and the wiring pins: loop entry exits
+  3 on refused claim BEFORE any boot step, entry points claim BEFORE
+  pid-file bookkeeping (order-pinned for both `cmd_start_daemon` and the
+  fork-emulated grandchild), refusal never reaches `save_pid`/loop (faithful
+  `os._exit` emulation raises), heartbeat body renews on tick and survives a
+  raising renewal.
+- conftest registers `daemon_singleton.DAEMON_LOCK` in `_module_attrs` (the
+  no-live-~/.hscc-leak contract) and pins the scan/adjudication seams
+  (`_SCAN_OVERRIDE=0`, constant `_PS_START_OVERRIDE`, empty
+  `_FAKE_ALIVE_PIDS`) suite-wide so no test observes the operator's live
+  process table, plus `cli._START_VERDICT_TIMEOUT=0` for fork-emulating
+  tests.
+- Ops (same card): the live orphan (pid 29307, `hscc start` fork, PPID 1,
+  27 `sample` threads = full twin loop) was SIGKILL'd after read-only
+  verification that `~/.hscc/daemon.pid` named the launchd job (58499,
+  `launchctl list` confirmed); single `lsof` writer verified after; the
+  supervised daemon was never touched.
+- Live E2E smokes (sandbox HOME + `HSCC_SPARKRUN_BIN` fake, zero live-fleet
+  reach): `hscc start-daemon` against a lock whose holder is the REAL
+  launchd daemon pid adjudicated LIVE → exit code 3, refusal ERROR logged
+  with holder pid + lstart, pid file never created, foreign lock left
+  intact; `hscc status` with a second loop-shaped process (`…/python
+  /tmp/…/hscc start-daemon`, sleeps) running → exactly one "TWIN LOOP
+  DETECTED: 2 daemon-loop processes" line (and the sh-wrapper filter proved
+  itself by first refusing to count an sh-shebang stand-in).
+- `python3 scripts/address_guard.py --tracked` rc=0,
+  `scripts/run_tests.sh` ALL GREEN (frozen tree).
+- `hscc_daemon/tests/test_update_check_shadow.py`: **49** new cases, all on
+  fabricated tmp PATHs + fake `hscc` shell scripts (canned `--version`):
+  warn-present (conda/local/deployed shims), warn-absent (clean PATH, later
+  entry, symlink-into-running-install, path inside the running tree, non-brew
+  modes, empty-PATH-entry cwd semantics), unresolvable-version and
+  hanging-candidate fallbacks, probe-cap bounding, the AND rule (same version
+  + different family still warns), `--json` back-compat key pin, offline
+  single-line stderr pin, and call-order proof for bootstrap (the WARN is on
+  stdout *at* the installer exec, captured inside the stubbed
+  `subprocess.run`). Non-destructiveness pinned twice over: a
+  hash+mtime+mode snapshot of the whole fabricated tree is byte-identical
+  after a warning scan, and the shim's bytes+mode survive a verb run.
+- conftest pins `update_check.SHADOW_SCAN_MODES = ()` suite-wide so no
+  verb test anywhere can walk the operator's live PATH (the scan's input is
+  PATH itself, which conftest must not rewrite); the shadow suite re-arms it
+  explicitly with fully fabricated inputs.
+- `hscc_daemon/tests/test_update_check.py`: the NO-AUTO-UPGRADE static guard's
+  subprocess budget raised 2 -> 3 call sites, and the shadow probe's argv is
+  pinned to the read-only `[path, "--version"]` shape.
+- `python3 scripts/address_guard.py --tracked` rc=0,
+  `python3 scripts/changelog_fragments.py check` rc=0,
+  `scripts/run_tests.sh` ALL GREEN (canonical venv, frozen tree).
+- `hscc_daemon/tests/test_engine_wedge_double_probe.py`: **12** new cases +
+  **2** in `test_verify.py` (TestCheckChatRoundtrip), RED against the shipped
+  code (10 failed pre-fix) and green after. Classification: a real in-process
+  fake engine whose SSE stream closes cleanly with zero tokens inside the
+  bound yields `closed_early` (not `wedged`), while a fake that HOLDS the
+  socket to the bound still yields `wedged` (detection-preserved pin).
+  Check-level: fabricated idle-healthy units (metrics 0/0, chat 200 with
+  text) produce no `WEDGED` verdict and no ERROR line across ticks; an
+  alternating blip/healthy sequence never accumulates wedge credit and never
+  logs ERROR; a SUSTAINED early-close run escalates to wedge credit and IS
+  declared wedged once the debounce passes (no false-negative regression).
+  Probe-share: a sibling caller's recorded result inside the TTL is consumed
+  with the probe executed exactly ONCE (the card's call-count pin, in its
+  cross-process form), an older-than-own-probe or older-than-TTL sibling
+  record forces a re-probe, a live in-flight claim is awaited with zero
+  probes of our own, a dead holder's stale claim is stolen fast and the
+  probe still runs (and never leaks a claim), TTL=0 restores probe-per-call,
+  and a `persist_disabled` CLI run ignores a wedged daemon share, probes
+  fresh, and publishes nothing. `verify`: `closed_early` excused when the
+  generation counter climbs, still named when frozen.
 ## [2.13.0] - 2026-10-24
 
 ### Added
