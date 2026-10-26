@@ -245,7 +245,25 @@ def ensure_board(slug: str, _kanban=None) -> str:
     Idempotent: Hermes' ``create_board`` is ``mkdir -p`` semantics — it
     returns the existing metadata when the board is already there, so a
     re-run never duplicates anything. Returns the normalized slug.
+
+    Under an interpreter that cannot host the Hermes runtime (the brew keg
+    venv — t_9a9aeab1) the check + create run as remote ops under the hermes
+    venv interpreter: ``kanban_db.create_board`` touches the board DB (a
+    lazy ``hermes_state`` import behind it dies with ModuleNotFoundError in
+    the keg), so the in-process path would crash the whole lifecycle there.
     """
+    if _kanban is None:
+        profiles_mod, _SessionDB, _import_err = _in_process_runtime()
+        if profiles_mod is None:
+            try:
+                if not _remote_runtime_op("board_exists", {"slug": slug}):
+                    _remote_runtime_op("create_board", {"slug": slug})
+            except HermesRuntimeUnavailable:
+                raise
+            except RemoteRuntimeError as exc:
+                raise LifecycleError(
+                    f"could not ensure board {slug!r}: {exc}") from exc
+            return slug
     kb = _resolve_kanban(_kanban)
     try:
         exists = kb.board_exists(slug)
@@ -253,7 +271,13 @@ def ensure_board(slug: str, _kanban=None) -> str:
         raise LifecycleError(f"could not check board {slug!r}: {exc}") from exc
 
     if not exists:
-        kb.create_board(slug)
+        # A raw provider crash here (KanbanError, or a lazy import failure
+        # from a half-capable interpreter) is a functional step failure:
+        # report it, never let it escape create_project as a traceback.
+        try:
+            kb.create_board(slug)
+        except Exception as exc:
+            raise LifecycleError(f"could not create board {slug!r}: {exc}") from exc
     return slug
 
 
@@ -441,6 +465,24 @@ def _main():
                "error": "cannot import the Hermes runtime: %s: %s"
                         % (type(e).__name__, e)})
         return 0
+    if op in ("board_exists", "create_board"):
+        # Board access needs NO profile. board_exists is Hermes' own FS
+        # check; create_board touches the board DB (init_db -> lazy
+        # hermes_state -> the same httpx chain), so BOTH run here: Hermes'
+        # own kanban_db stays authoritative on both sides of the seam.
+        try:
+            from hermes_cli import kanban_db as _kb
+            if op == "board_exists":
+                _emit({"ok": True,
+                       "result": bool(_kb.board_exists(args["slug"]))})
+            else:
+                _kb.create_board(args["slug"])  # mkdir -p semantics
+                _emit({"ok": True, "result": True})
+        except Exception as e:
+            _emit({"ok": False, "code": "op_error",
+                   "error": "board op %s failed: %s: %s"
+                            % (op, type(e).__name__, e)})
+        return 0
     try:
         canon = _p.normalize_profile_name(args["profile"])
         _p.validate_profile_name(canon)
@@ -599,12 +641,17 @@ def _resolve_hermes_python_uncached() -> Optional[str]:
             return None
         try:
             cp = subprocess.run(
-                [cand, "-c", "import hermes_state, hermes_cli.profiles"],
+                [cand, "-c", "import hermes_state, hermes_cli.profiles; "
+                             "print('HSCC-RUNTIME-OK')"],
                 capture_output=True, text=True, timeout=30,
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        return cand if cp.returncode == 0 else None
+        # The SENTINEL (not just rc) must come back: a non-python program on
+        # PATH exits 0 for any argument (echo does), and accepting it would
+        # send every remote op to a program that cannot run them.
+        return (cand if cp.returncode == 0
+                and "HSCC-RUNTIME-OK" in (cp.stdout or "") else None)
 
     hit = _probe(os.environ.get("HSCC_HERMES_PYTHON", "").strip())
     if hit:
@@ -677,7 +724,15 @@ def _remote_runtime_op(op: str, args: dict, runner=None):
         (data fact; callers translate to None / False / a step failure).
       RemoteRuntimeError(op_error|transport) — the op or the transport failed
         (a failed LOOK surfaces, per the e2a3251 honesty rule).
+
+    ``HSCC_HERMES_OPS=off`` short-circuits with a forced RemoteRuntimeError —
+    the documented verification force for the rollback path (acceptance uses
+    it; production never sets it).
     """
+    if os.environ.get("HSCC_HERMES_OPS", "").strip().lower() in (
+            "off", "0", "fail"):
+        raise RemoteRuntimeError(
+            "forced", "remote runtime ops disabled via HSCC_HERMES_OPS=off")
     py = resolve_hermes_python()
     if py is None:
         raise HermesRuntimeUnavailable(
@@ -901,7 +956,8 @@ def ensure_session(name: str, profile: str, _session_db=None) -> dict:
             # Delegation path: the atomic one-op ensure under the hermes venv.
             # create_db=True mirrors the in-process branch: a profile created
             # moments ago legitimately has no state.db yet (hermes itself
-            # creates it on the profile's first run).
+            # creates it on the profile's first run). The HSCC_HERMES_OPS=off
+            # verification force is honoured centrally in _remote_runtime_op.
             try:
                 return _remote_runtime_op(
                     "ensure_session",
@@ -990,7 +1046,13 @@ def seed_session_with_digest(
     — the caller then records an honest "could not seed" rather than a fake one.
     """
     opener = _session_db if _session_db is not None else _open_profile_session_db
-    db = opener(profile)
+    try:
+        db = opener(profile)
+    except Exception:
+        # Includes HermesRuntimeUnavailable / RemoteRuntimeError (t_9a9aeab1
+        # delegation): seeding is an enhancement — a failed look is reported
+        # by the caller as "could not seed", never raised through a chat.
+        return False
     if db is None:
         return False
     try:

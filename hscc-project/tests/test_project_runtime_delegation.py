@@ -73,7 +73,7 @@ def _no_real_hermes_home(monkeypatch, tmp_path):
 class FakeProbe:
     """Stand in for subprocess.run inside project_lifecycle: only the import
     probe runs there during resolution. ``ok`` lists candidate paths that can
-    host the runtime; the probe's returncode decides."""
+    host the runtime; the probe's returncode AND the sentinel decide."""
 
     def __init__(self, ok_paths=()):
         self.ok = set(ok_paths)
@@ -81,8 +81,9 @@ class FakeProbe:
 
     def __call__(self, cmd, **kwargs):
         self.calls.append(list(cmd))
-        rc = 0 if cmd[0] in self.ok else 1
-        return subprocess.CompletedProcess(cmd, rc, "", "")
+        if cmd[0] in self.ok:
+            return subprocess.CompletedProcess(cmd, 0, "HSCC-RUNTIME-OK\n", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
 
 
 def test_resolve_prefers_hscc_hermes_python_override(monkeypatch, tmp_path):
@@ -137,6 +138,21 @@ def test_resolve_honours_env_hermes_home_layout(monkeypatch, tmp_path):
 def test_resolve_returns_none_when_nothing_can_host_runtime(monkeypatch, tmp_path):
     probe = FakeProbe(ok_paths=())  # everything fails the import probe
     monkeypatch.setattr(lifecycle.subprocess, "run", probe)
+    assert lifecycle.resolve_hermes_python() is None
+
+
+def test_resolve_rejects_non_python_program_that_exits_zero(monkeypatch, tmp_path):
+    """rc==0 alone must not pass the probe — a plain program on the candidate
+    path (a shell stub exiting 0 stands in for `echo`-like behaviour) must be
+    rejected for lacking the sentinel, or every remote op would be handed to
+    a non-interpreter."""
+    stub = tmp_path / "home" / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3"
+    stub.parent.mkdir(parents=True)
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: None)
+    lifecycle.reset_hermes_python_cache()
     assert lifecycle.resolve_hermes_python() is None
 
 
@@ -422,6 +438,21 @@ def fabricated_hermes(monkeypatch, tmp_path):
         "    def close(self):\n"
         "        self.path.parent.mkdir(parents=True, exist_ok=True)\n"
         "        self.path.write_text(json.dumps(self._data))\n")
+    (agent / "hermes_cli" / "kanban_db.py").write_text(
+        "import json, os, pathlib\n"
+        "def _boards():\n"
+        "    d = pathlib.Path(os.environ['FAKE_HERMES_HOME']) / 'kanban' / 'boards'\n"
+        "    d.mkdir(parents=True, exist_ok=True)\n"
+        "    return d\n"
+        "def board_exists(slug):\n"
+        "    b = _boards() / str(slug)\n"
+        "    return (b / 'board.json').exists() or (b / 'kanban.db').exists()\n"
+        "def create_board(slug, **kw):\n"
+        "    b = _boards() / str(slug)\n"
+        "    b.mkdir(parents=True, exist_ok=True)\n"
+        "    (b / 'board.json').write_text(json.dumps({'slug': str(slug)}))\n"
+        "    (b / 'kanban.db').write_text('')  # touch, like init_db does\n"
+        "    return {'slug': str(slug)}\n")
 
     # The planted "venv python": re-exec the test interpreter fully isolated
     # (-S -E: no site-packages, no PYTHONPATH — the REAL hermes_cli of the
@@ -530,6 +561,35 @@ def test_open_read_paths_still_report_no_db_for_fresh_profile(fabricated_hermes)
     _make_profile(fabricated_hermes, "dbless-orch", with_db=False)
     assert lifecycle._open_profile_session_db("dbless-orch",
                                               read_only=True) is None
+
+
+def test_ensure_board_over_real_delegation_is_idempotent(fabricated_hermes):
+    """The board step over the REAL delegation transport (t_9a9aeab1: in the
+    brew keg, kanban_db.create_board -> init_db -> lazy hermes_state -> httpx
+    crashed `project new` there; the op now runs under the hermes venv)."""
+    assert lifecycle.ensure_board("probe") == "probe"
+    board = fabricated_hermes["home"] / "kanban" / "boards" / "probe"
+    assert (board / "board.json").exists()
+    # Rerun: exists short-circuits; second call must not raise or duplicate.
+    assert lifecycle.ensure_board("probe") == "probe"
+    assert (board / "board.json").exists()
+
+
+def test_ensure_board_provider_crash_surfaces_as_step_failure():
+    """A raw provider crash (the acceptance-run failure mode: lazy import
+    dying mid-create) must be a reported LifecycleError, never an escaping
+    traceback from create_project."""
+    class BoomBoard:
+        def board_exists(self, slug):
+            return False
+
+        def create_board(self, slug):
+            raise ModuleNotFoundError("No module named 'httpx'")
+
+    import pytest as _pytest
+    with _pytest.raises(lifecycle.LifecycleError) as ei:
+        lifecycle.ensure_board("probe", _kanban=BoomBoard())
+    assert "could not create board" in str(ei.value)
 
 
 # --------------------------------------------------------------------------- #

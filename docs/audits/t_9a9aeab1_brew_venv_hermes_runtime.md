@@ -57,6 +57,35 @@ Chosen: subprocess delegation to the hermes venv interpreter. Justification:
 ## Findings (append)
 
 - [x] Root cause re-verified mechanically (probe output above).
-- [ ] rollback: `hermes profile delete -y` cleanup semantics (alias wrapper?) — check hermes_cli/profiles.py
-- [ ] existing test seams: _session_db / _default_db injected by tests (never proxy) vs production default opener
-- [ ]
+- [x] rollback: `hermes profile delete -y` is the cleanup verb (acceptance F
+      exercised it against the real CLI; rc=0, profile dir gone from the
+      SANDBOX home).
+- [x] test seams: `_session_db`/`_default_db` stay injected-by-test only; the
+      production default opener is what gained the delegation branch, and the
+      fabricated-tree tests drive it for real.
+- [x] **The board step dies in the keg too.** Acceptance run 1 (real brew keg,
+      sandbox HERMES_HOME) crashed `project new` at step 3:
+      `ensure_board -> kanban.create_board -> kanban_db.init_db -> lazy
+      import hermes_state -> httpx` — a raw ModuleNotFoundError that escaped
+      `create_project` as a traceback (rc=1, no report rendered). Fix:
+      `board_exists`/`create_board` are now remote ops on the same delegated
+      transport (Hermes' own kanban_db stays authoritative), and the
+      in-process `create_board` call is wrapped so a provider crash becomes a
+      reported LifecycleError step, never an escaping traceback.
+- [x] Acceptance (run 5, `acceptance_run5.log`): **10/10 phases PASS** against
+      the real keg interpreter — A keg lacks hermes_state/httpx (root cause
+      reproduced); B keg interpreter resolves the hermes venv python;
+      C/C2/C3/C4 `project new --apply` end-to-end: profile created, board +
+      roadmap seeded, session titled row on the profile state.db (verified by
+      opening the db with hermes' OWN SessionDB under the hermes venv);
+      D rerun clean no-op; E forced session failure -> rollback, no orphan
+      profile dir, hermes profile list clean; E3/E4 un-forced rerun
+      converges and is then idempotent; F probe project fully removed
+      (registry, board, both orch profiles) leaving the real home untouched.
+      Run against the shipped keg via the worktree on PYTHONPATH
+      (`flightdeck.cli`, the exact entry `hscc project` delegates to at
+      hscc_daemon/hscc.py:_handle_project); re-run post-release against the
+      shipped keg binary itself.
+- [ ] post-release: repeat phases C-E with the real `hscc` wrapper binary
+      (not `-m flightdeck.cli`) once the release ships this fix.
+
