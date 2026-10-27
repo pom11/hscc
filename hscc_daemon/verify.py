@@ -109,7 +109,10 @@ def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
     """Check multiplex configuration and profile coverage.
 
     Reads multiplex_profiles from config and served_profiles from gateway state.
-    OK if multiplex is truthy, served_profiles non-empty, and covers all profile dirs.
+    OK if multiplex is truthy, served_profiles is non-empty, and it covers every
+    REAL profile under ``profiles_dir`` — as decided by the shared
+    ``profile_roster`` gate (Hermes' own rule), not "every directory", so
+    tombstone dirs and marker-less stubs are never demanded of the gateway.
     """
     if config is None:
         config = os.path.expanduser("~/.hermes/config.yaml")
