@@ -132,7 +132,7 @@ def _hermes_gate():
 
     try:
         return _load()
-    except ImportError:
+    except Exception:
         pass
     hermes_path = os.path.expanduser(
         os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
@@ -141,7 +141,10 @@ def _hermes_gate():
     sys.path.insert(0, hermes_path)
     try:
         return _load()
-    except ImportError:
+    except Exception:
+        # Any failure — ImportError, or a module that raises at import time on a
+        # partial install — falls back to the mirror. The check must never be
+        # the thing that breaks the gateway stream.
         return None
 
 
