@@ -158,18 +158,18 @@ def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
 
     served_set = set(served)
 
-    # Check profile dirs are covered
-    try:
-        if os.path.isdir(profiles_dir):
-            subdirs = [
-                entry.name
-                for entry in os.scandir(profiles_dir)
-                if entry.is_dir()
-            ]
-            missing = [d for d in subdirs if d not in served_set]
-        else:
-            missing = []
-    except OSError:
+    # Check profile dirs are covered. Uses the SHARED roster helper so this
+    # check and the daemon's multiplex stream (health._check_multiplex_profiles
+    # -> gateway.json) demand exactly the same set (t_1c545ebb): Hermes builds
+    # ``served_profiles`` from its own enumeration, which is not "every
+    # directory under profiles/" — dot-directories (``.deleted`` is Hermes'
+    # tombstone dir), names outside the profile-id grammar, and marker-less
+    # stub directories are never served, and must never be counted as missing.
+    from . import profile_roster
+    if os.path.isdir(profiles_dir):
+        expected = profile_roster.list_profiles_on_disk(profiles_dir)
+        missing = [d for d in expected if d not in served_set]
+    else:
         missing = []
 
     if missing:
