@@ -30,7 +30,6 @@ and the module's ``_lan_curl_run`` seam are both stubbed.
 """
 
 import ast
-import importlib.util
 import json
 import os
 import sys
@@ -277,6 +276,3 @@ class TestLanCurlFallback:
         msg = str(ei.value)
         assert "No route to host" in msg               # original kept, not replaced
         assert "curl fallback unavailable" in msg      # + the one-line hint
-
-
-import inspect  # noqa: E402  (used by the mirror-compatibility test above)
