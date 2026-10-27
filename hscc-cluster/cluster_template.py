@@ -3011,7 +3011,7 @@ def _http_get_default(url: str, api_key: Optional[str] = None) -> str:
     except urllib.error.URLError as e:
         # A macOS Local-Network denial (errno 65 on a private host) retries
         # once through /usr/bin/curl; everything else propagates unchanged, so
-        # callers still tell 'probe/config error' from 'unreachable'.
+        # callers still tell a probe error apart from an unreachable endpoint.
         body = _lan_curl_fallback(url, 10, e, api_key=api_key)
         if body is None:
             raise
