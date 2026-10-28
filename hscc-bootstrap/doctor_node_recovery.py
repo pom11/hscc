@@ -107,12 +107,20 @@ V_OPTED_OUT = "opted_out"  # the operator turned this layer off (not green)
 
 _MARK = {V_OK: "ok", V_FAIL: "XX", V_ERROR: "XX", V_OPTED_OUT: "--"}
 
+#: Per-command ssh timeout for both probe legs. The installers use 60s for
+#: their probes and up to 120s for their writes; a doctor run needs to stay
+#: responsive in a preflight, so both legs share this smaller bound. Worst case
+#: is len(hosts) x 2 x PROBE_TIMEOUT_SEC, and a node that cannot answer inside
+#: it renders as an env-fault ERROR rather than hanging the whole check.
+PROBE_TIMEOUT_SEC = 30
+
 
 # ── the sysctl layer ────────────────────────────────────────────────────────
 
 
 def sysctl_layer(host: str, *, ssh_cmd: Callable[[str, int], Dict[str, Any]],
-                 enabled: bool, timeout: int = 60) -> Dict[str, Any]:
+                 enabled: bool,
+                 timeout: int = PROBE_TIMEOUT_SEC) -> Dict[str, Any]:
     """Live drift report for the panic-to-reboot drop-in on ONE node.
 
     ``ssh_cmd(command, timeout)`` is the injected per-node transport. Returns
@@ -227,7 +235,8 @@ def sysctl_layer(host: str, *, ssh_cmd: Callable[[str, int], Dict[str, Any]],
 
 
 def watchdog_layer(host: str, *, ssh_cmd: Callable[[str, int], Dict[str, Any]],
-                   enabled: bool, timeout: int = 30) -> Dict[str, Any]:
+                   enabled: bool,
+                   timeout: int = PROBE_TIMEOUT_SEC) -> Dict[str, Any]:
     """Live "is anyone petting the watchdog" report for ONE node.
 
     Delegates the whole probe to the installer's ``probe_node`` (the shared
@@ -388,7 +397,7 @@ def _opt_outs(hscc_dir: Optional[str]) -> Dict[str, Any]:
 def evaluate(hosts: List[str], *,
              ssh_factory: Optional[Callable[[str], Callable[[str, int], Dict[str, Any]]]] = None,
              hscc_dir: Optional[str] = None,
-             timeout: int = 30) -> Dict[str, Any]:
+             timeout: int = PROBE_TIMEOUT_SEC) -> Dict[str, Any]:
     """Per-node verdicts for both layers. Returns rows + the check summary.
 
     One node failing never suppresses the others, and an empty host list is an
@@ -431,7 +440,8 @@ def evaluate(hosts: List[str], *,
 
 
 def check(hosts: Optional[List[str]] = None, *, ssh_factory=None,
-          hscc_dir: Optional[str] = None, timeout: int = 30) -> Dict[str, Any]:
+          hscc_dir: Optional[str] = None,
+          timeout: int = PROBE_TIMEOUT_SEC) -> Dict[str, Any]:
     """The doctor check as a plain dict (Check-compatible fields).
 
     Non-fatal: an unprotected node is a loud red line, not a reason to abort an
@@ -505,7 +515,8 @@ def main(argv: Optional[List[str]] = None, *, ssh_factory=None) -> int:
     ap.add_argument("--hosts", default="",
                     help="comma-separated nodes; default: sparkrun cluster hosts")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("--timeout", type=int, default=30)
+    ap.add_argument("--timeout", type=int, default=PROBE_TIMEOUT_SEC,
+                    help=f"per-command ssh timeout (default {PROBE_TIMEOUT_SEC}s)")
     args = ap.parse_args(argv)
 
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()] or None
