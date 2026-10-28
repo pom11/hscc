@@ -36,7 +36,7 @@ for a in "$@"; do case "$a" in
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
   --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node's sysctls (the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -85,6 +85,9 @@ HOSTS="$(echo "$CLUSTER_JSON" | "$PYBIN" -c 'import sys,json;print(" ".join(json
 NAS="$(echo "$CLUSTER_JSON" | "$PYBIN" -c 'import sys,json;print(json.load(sys.stdin).get("nas") or "")')"
 CLUSTER_NAME="$(echo "$CLUSTER_JSON" | "$PYBIN" -c 'import sys,json;print(json.load(sys.stdin)["name"])')"
 read -ra HOST_ARR <<< "$HOSTS"
+# node_recovery.py takes a comma-separated host list (argv, never shell-eval'd);
+# $HOSTS stays space-separated for everything else here.
+HOSTS_CSV="$(printf '%s,' "${HOST_ARR[@]}")"; HOSTS_CSV="${HOSTS_CSV%,}"
 say "cluster: $CLUSTER_NAME"
 say "nodes:   $HOSTS"
 say "NAS:     ${NAS:-<none>}"
@@ -321,6 +324,33 @@ s = serving_gen.build_serving(cl, orchestrator=os.environ['ORCH'],
 open(os.environ['SERVING'], 'w').write(json.dumps(s, indent=2) + '\n')
 " && ok "serving.json written ($SERVING)" || warn "serving.json generation failed"
 fi
+fi
+
+hdr "Install: node hardware watchdog (self-recovery)"
+# Every cluster node gets systemd's runtime watchdog armed (a drop-in with
+# RuntimeWatchdogSec=30s + daemon-reexec) so a hard hang resets the SoC instead
+# of wedging until someone power-cycles it — Sparks have no BMC. Grounded in the
+# stage that already touches nodes: this runs the deployed
+# $PLUGINS/hscc-cluster/node_recovery.py, whose ONE transport is sparkrun's own
+# remote execution (this script never ssh's, and passes hosts as argv).
+#
+# Deliberately NON-FATAL: a node that refuses sudo, has no watchdog driver, or
+# is down must never abort an install. But it must never read as installed
+# either — a protected fleet is the whole point, so an unprotected node prints
+# WARN here and the doctor's watchdog check keeps printing RED until fixed.
+# Opt out: node_recovery.watchdog=false in ~/.hscc/cluster.json, or the flag.
+if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
+  warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
+elif $DRY_RUN; then
+  plan "node hardware watchdog: node_recovery.py --hosts $HOSTS_CSV (systemd drop-in + daemon-reexec on each node; writes NOTHING in dry-run)"
+elif [ ! -f "$PLUGINS/hscc-cluster/node_recovery.py" ]; then
+  warn "node_recovery.py missing from $PLUGINS — cluster nodes are NOT protected (see hscc-bootstrap/README.md)"
+elif NR_OUT=$("$PYBIN" "$PLUGINS/hscc-cluster/node_recovery.py" --hosts "$HOSTS_CSV" 2>&1); then
+  printf '%s\n' "$NR_OUT" | sed 's/^/  /'
+  ok "hardware watchdog armed on every cluster node"
+else
+  printf '%s\n' "$NR_OUT" | sed 's/^/  /'
+  warn "hardware watchdog NOT armed on every node — an unprotected node stays wedged until someone power-cycles it; see hscc doctor"
 fi
 
 hdr "Install: hermes/sparkrun patches"

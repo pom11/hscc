@@ -26,7 +26,10 @@ Skipped steps and why:
   --skip-node-recovery   SSHes the LIVE fleet to install panic-to-reboot sysctls
                          (t_1fc3fe83: the isolated run has the operator's real
                          sparkrun config, so without this flag a pytest run
-                         would arm reboot-on-panic on the actual nodes)
+                         would arm reboot-on-panic on the actual nodes) and to
+                         arm the systemd hardware watchdog (t_ebbe38d1: same
+                         reason — a sandboxed test must never escalate to root
+                         over ssh on the operator's nodes)
 Those four are the only steps that intentionally write outside the home.
 """
 
