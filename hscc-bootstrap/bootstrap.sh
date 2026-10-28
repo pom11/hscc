@@ -36,7 +36,7 @@ for a in "$@"; do case "$a" in
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
   --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, daemon, CLI shim) and perform NONE."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
