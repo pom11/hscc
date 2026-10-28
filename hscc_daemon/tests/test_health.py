@@ -2697,6 +2697,19 @@ class TestCheckMultiplexProfiles:
     """_check_multiplex_profiles() verifies that all Hermes profiles are served
     when multiplex is enabled."""
 
+    @staticmethod
+    def _mk_profile(profiles_dir, name):
+        """A dir Hermes counts as a profile: it must carry an identity marker.
+
+        t_1c545ebb — a marker-less ``mkdir()`` is exactly the stub shape
+        (``profiles/ecofire-bc`` with only ``workspaces/``) that the gateway
+        will never serve, so it must NOT be counted as expected-served.
+        """
+        home = profiles_dir / name
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text("toolsets:\n  - hermes-cli\n")
+        return home
+
     def _setup(self, tmp_path, monkeypatch):
         """Create tmp dirs and monkeypatch the module-level path constants."""
         hermes_dir = tmp_path / "hermes"
@@ -2754,9 +2767,9 @@ class TestCheckMultiplexProfiles:
         config_yaml.write_text("multiplex_profiles: true\n")
         gw_state.write_text(json.dumps({"served_profiles": ["backend-engineer"]}))
         profiles_dir.mkdir(parents=True)
-        (profiles_dir / "backend-engineer").mkdir()
-        (profiles_dir / "orchestrator").mkdir()
-        (profiles_dir / "researcher").mkdir()
+        self._mk_profile(profiles_dir, "backend-engineer")
+        self._mk_profile(profiles_dir, "orchestrator")
+        self._mk_profile(profiles_dir, "researcher")
 
         result = health._check_multiplex_profiles()
         assert result["ok"] is False
@@ -2771,8 +2784,8 @@ class TestCheckMultiplexProfiles:
         config_yaml.write_text("multiplex_profiles: true\n")
         gw_state.write_text(json.dumps({"served_profiles": ["backend-engineer", "orchestrator"]}))
         profiles_dir.mkdir(parents=True)
-        (profiles_dir / "backend-engineer").mkdir()
-        (profiles_dir / "orchestrator").mkdir()
+        self._mk_profile(profiles_dir, "backend-engineer")
+        self._mk_profile(profiles_dir, "orchestrator")
 
         result = health._check_multiplex_profiles()
         assert result["ok"] is True
