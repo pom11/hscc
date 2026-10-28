@@ -106,6 +106,20 @@ def parse_model_info(data: dict) -> dict:
     return {hp: sorted(names) for hp, names in routes.items()}
 
 
+def fmt_tokens(n) -> str:
+    """Compact token count: 999, 202k, 18.0M, 1.23G; '-' when unknown."""
+    if n is None:
+        return "-"
+    n = float(n)
+    if n < 1e3:
+        return f"{n:.0f}"
+    if n < 1e6:
+        return f"{n / 1e3:.0f}k"
+    if n < 1e9:
+        return f"{n / 1e6:.1f}M"
+    return f"{n / 1e9:.2f}G"
+
+
 def rates(prev: dict | None, cur: dict, dt: float) -> tuple:
     """(gen tok/s, prompt tok/s) from two counter snapshots; None when unknown.
 
@@ -467,7 +481,10 @@ class ServingPoller:
                 rows.append({**base, "model": model,
                              "running": int(m.get("running", 0)),
                              "waiting": int(m.get("waiting", 0)),
-                             "kv": m.get("kv"), "gen_tps": gen, "prompt_tps": prompt})
+                             "kv": m.get("kv"), "gen_tps": gen, "prompt_tps": prompt,
+                             # cumulative since the engine started (vLLM counters)
+                             "prompt_total": m.get("prompt_total"),
+                             "gen_total": m.get("gen_total")})
             self._prev[hp] = (now, metrics)
         return rows
 
@@ -540,7 +557,7 @@ def serving_table(rows: list, width: int | None = None) -> Table:
     if wide:
         cols.append(("Routes", "left", None))
     cols += [("Run", "right", 3), ("Wait", "right", 4), ("KV%", "right", 5),
-             ("Gen t/s", "right", 7)]
+             ("In", "right", 6), ("Out", "right", 6), ("Gen t/s", "right", 7)]
     if wide:
         cols.append(("Prompt t/s", "right", 10))
     t = _plain_table()
@@ -550,9 +567,9 @@ def serving_table(rows: list, width: int | None = None) -> Table:
                      min_width=w, max_width=None if w else 26)
 
     def row(node, port, model, routes, *rest):
-        cells = [node, port, model] + ([routes] if wide else []) + list(rest[:4])
+        cells = [node, port, model] + ([routes] if wide else []) + list(rest[:6])
         if wide:
-            cells.append(rest[4])
+            cells.append(rest[6])
         t.add_row(*cells)
 
     totals: dict[str, list] = {}
@@ -562,23 +579,29 @@ def serving_table(rows: list, width: int | None = None) -> Table:
         short = r["model"].rsplit("/", 1)[-1]
         if r.get("error"):
             row(esc(r["node"]), esc(r["port"]), Text("down", style="error"), esc(routes),
-                Text(esc(r["error"])[:30], style="error"), "", "", "", "")
+                Text(esc(r["error"])[:30], style="error"), "", "", "", "", "", "")
             continue
         run, wait = r["running"], r["waiting"]
-        tot = totals.setdefault(short, [0, 0, None, 0])
+        tot = totals.setdefault(short, [0, 0, None, 0, None, None])
         tot[0] += run
         tot[1] += wait
         if r["gen_tps"] is not None:
             tot[2] = (tot[2] or 0.0) + r["gen_tps"]
         tot[3] += 1
+        for i, key in ((4, "prompt_total"), (5, "gen_total")):
+            if r.get(key) is not None:
+                tot[i] = (tot[i] or 0.0) + r[key]
         row(esc(r["node"]), esc(r["port"]), esc(short), esc(routes),
             Text(str(run), style=_load_style(run, wait)),
             Text(str(wait), style="warn" if wait else "dim"),
             _cell(None if r["kv"] is None else 100 * r["kv"], "{:.1f}"),
+            Text(fmt_tokens(r.get("prompt_total")), style="dim"),
+            Text(fmt_tokens(r.get("gen_total")), style="dim"),
             _cell(r["gen_tps"], "{:.1f}"), _cell(r["prompt_tps"], "{:.0f}"))
-    for model, (run, wait, gen, n) in sorted(totals.items()):
+    for model, (run, wait, gen, n, tin, tout) in sorted(totals.items()):
         row(Text(f"total ({n})", style="label"), "", esc(model), "",
             Text(str(run), style="label"), Text(str(wait), style="label"), "",
+            Text(fmt_tokens(tin), style="label"), Text(fmt_tokens(tout), style="label"),
             Text("-" if gen is None else f"{gen:.1f}", style="label"), "")
     return t
 
@@ -592,7 +615,9 @@ def render(frame, rows, interval, proxy_error=None, host_error=None,
     if host_error:
         parts.append(Text(esc(host_error), style="error"))
     parts.append(Text(""))
-    parts.append(Text(f"serving — proxy :{PROXY_PORT}", style="title"))
+    head = Text(f"serving — proxy :{PROXY_PORT}", style="title")
+    head.append("   In/Out = tokens since each engine started", style="dim")
+    parts.append(head)
     if proxy_error:
         parts.append(Text(f"proxy /v1/model/info unreachable: {esc(proxy_error)}"
                           + (" (showing last known routes)" if rows else ""), style="warn"))

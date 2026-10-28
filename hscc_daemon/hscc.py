@@ -534,6 +534,8 @@ COMMAND_HELP = {
               "    <id> [--reason <t>]: recover one blocked card to ready\n"
               "  stale [--older-than <days>] [--json]: list non-terminal cards;\n"
               "    stale --archive <id>: archive one (t_e751e652)\n"
+              "  monitor [--live] [--interval <s>] [--board <slug>]: workers\n"
+              "    on every board, running/ready/counts/outcomes (read-only)\n"
               "  Usage: hscc kanban <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",

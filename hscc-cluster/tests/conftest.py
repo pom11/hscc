@@ -109,6 +109,29 @@ def _pin_serving_json_to_tmp(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _pin_expected_up_marker_to_tmp(monkeypatch, tmp_path):
+    """Defense-in-depth (same doctrine as _pin_serving_json_to_tmp): a real
+    ``cmd_cluster_up`` / ``cmd_cluster_down`` now records/clears the
+    post-boot expected_up marker (t_576964d5), so NO test may leave a live
+    marker in ~/.hscc — an unredirected marker would arm a real post-boot
+    relaunch decision AND trip the no-live-leak audits. Redirect the daemon
+    module constant to the per-test tmp dir (best-effort: if hscc_daemon is
+    not importable in this leg, the CLI's own fail-soft import already
+    returns None and nothing is written).
+    """
+    try:
+        from hscc_daemon import post_boot
+    except Exception:
+        return
+    monkeypatch.setattr(post_boot, "EXPECTED_UP_FILE",
+                        str(tmp_path / "expected-up.json"))
+    # post_boot binds daemon_ops.log at import (the same reason _load_cli
+    # patches health.log / daemon_ops.log): a marker record/clear from a CLI
+    # test must not append a line to the operator's LIVE ~/.hscc/daemon.log.
+    monkeypatch.setattr(post_boot, "log", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
 def _stub_sparkrun_proxy_write(monkeypatch):
     """Defense-in-depth (same doctrine as _pin_serving_json_to_tmp): NO test may
     drive the real sparkrun proxy.yaml write path.

@@ -154,7 +154,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
     from hscc_daemon import (
         autodown, daemon_ops, desktop, dispatcher_wedge, hscc, lifecycle,
-        recover, state, trigger,
+        post_boot, recover, state, trigger,
     )
     # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
     real_hscc = os.path.expanduser("~/.hscc")
@@ -228,6 +228,13 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (usage, "BUDGET_FILE", p("budget.json")),
             # recover.py (cooldown + attempt-cap state)
             (recover, "RECOVER_STATE_FILE", p("recover.json")),
+            # post_boot.py (t_576964d5) — the durable expected_up marker +
+            # boot baselines. MUST be redirected: `hscc cluster up`/teardown/
+            # wake tests all write it, so an unredirected path would leave a
+            # LIVE marker in the operator's real ~/.hscc (visible to the
+            # no-live-leak audit) — and worse, a stray marker could arm a
+            # real post-boot relaunch decision from a test run.
+            (post_boot, "EXPECTED_UP_FILE", p("expected-up.json")),
             # trigger.py
             (trigger, "EVENTS_FILE", p("events.jsonl")),
             (trigger, "TRIGGERS_FILE", p("triggers.json")),
