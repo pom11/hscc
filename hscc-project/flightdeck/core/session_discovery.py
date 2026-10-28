@@ -83,13 +83,18 @@ def _open_profile_session_db(profile: str):
 
 
 def _runtime_error() -> str | None:
-    """Return a message when the Hermes runtime is unimportable, else None.
+    """Return a message when the Hermes runtime is unusable, else None.
 
-    Callers use this to distinguish "no history" from "wrong interpreter".
+    Callers use this to distinguish "no history" from "wrong interpreter" —
+    and, since t_9a9aeab1, from "delegated runtime op failed": both surface
+    as a message (never None, which would let an environment fault render as
+    empty history).
     """
     try:
         _open_profile_sdb_ro("default", read_only=True)
     except _lifecycle.HermesRuntimeUnavailable as exc:
+        return str(exc)
+    except _lifecycle.RemoteRuntimeError as exc:
         return str(exc)
     except Exception:
         return None

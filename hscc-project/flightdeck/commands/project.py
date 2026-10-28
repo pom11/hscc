@@ -97,7 +97,8 @@ def cmd_new(args: argparse.Namespace) -> int:
 
     lines = ["\nresult:"]
     for step in result["steps"]:
-        mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
+        mark = {"ok": "ok ", "skipped": "-- ",
+                "rolled_back": "rb  "}.get(step["status"], "FAIL")
         lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")
@@ -249,7 +250,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
     lines = ["\nresult:"]
     for step in result["steps"]:
-        mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
+        mark = {"ok": "ok ", "skipped": "-- ",
+                "rolled_back": "rb  "}.get(step["status"], "FAIL")
         lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")

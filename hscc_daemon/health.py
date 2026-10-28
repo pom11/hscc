@@ -458,16 +458,19 @@ def _check_multiplex_profiles():
         return {"ok": False,
                 "message": "multiplex enabled but served_profiles is empty — all profiles unserved"}
 
-    # 3. Determine expected roster from profile dirs — best-effort
-    try:
-        expected = {
-            entry.name
-            for entry in os.scandir(_HERMES_PROFILES_DIR)
-            if entry.is_dir() and not entry.name.startswith(".")
-        }
-    except (FileNotFoundError, OSError):
+    # 3. Determine expected roster from profile dirs — best-effort.
+    # Shares ``profile_roster.list_profiles_on_disk`` with ``verify``'s
+    # multiplex check so the two surfaces can never disagree about what the
+    # gateway owes (t_1c545ebb): the gateway builds ``served_profiles`` from
+    # Hermes' own enumeration, which skips dot-dirs (``.deleted`` is Hermes'
+    # tombstone dir), names outside the profile-id grammar, and marker-less
+    # directories (a stub with only ``workspaces/``). Enumerating "every dir
+    # under profiles/" demanded those be served — a permanent false-fail.
+    from . import profile_roster
+    if not os.path.isdir(_HERMES_PROFILES_DIR):
         return {"ok": True,
                 "message": "multiplex check skipped: profiles dir not found"}
+    expected = set(profile_roster.list_profiles_on_disk(_HERMES_PROFILES_DIR))
 
     missing = expected - served
     if missing:
