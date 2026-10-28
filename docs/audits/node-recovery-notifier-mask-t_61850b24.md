@@ -77,7 +77,8 @@ on this fleet `disable` is measurably a no-op.
 
 Consequences we accept and record: a masked unit cannot be started by anything,
 including a future snap that would have fixed it, and unmasking is the deliberate
-undo (`hscc-cluster/notifier_mask.py --unmask`). Because it persists across
+undo (`python3 hscc-bootstrap/install_notifier_mask.py --unmask --hosts <node>`).
+Because it persists across
 refreshes and reboots, the state is also *loud*: `hscc doctor` has its own check
 that reads the mask back from every node and goes red if it is gone, so a mask
 that silently disappeared cannot masquerade as protection.
@@ -151,15 +152,88 @@ the desktop user, and `sudo -u spark` would lose the bus env again.
 
 | File | What |
 | --- | --- |
-| `hscc-cluster/notifier_mask.py` | New. Install/probe module + CLI (`--dry-run`, `--unmask`, `--probe-only`, `--hosts`, `--config`, `--json`). |
-| `hscc-cluster/tests/test_notifier_mask.py` | New. Fabricated-transport tests. |
-| `hscc-bootstrap/notifier_doctor.py` | New. The doctor check (own check, per card). |
-| `hscc-bootstrap/tests/test_notifier_doctor.py` | New. |
-| `hscc-bootstrap/bootstrap.sh` | New stage `Install: snap firmware-notifier mask` (whole-block insertion; `--skip-node-recovery` honoured). |
-| `hscc-bootstrap/tests/test_bootstrap_notifier_stage.py` | New. Stage wiring pins. |
+| `hscc-bootstrap/install_notifier_mask.py` | New. Install/probe module + CLI (`--dry-run`, `--unmask`, `--hosts`, `--bootstrap-lines`, `--json`). Mask, read-back verify, idempotence, foreign-override refusal — all here, one implementation. |
+| `hscc-bootstrap/tests/test_install_notifier_mask.py` | New. Fabricated-transport tests **plus bash-backed runs of the generated script** against a fake `systemctl`/`readlink` node, so the read-back matcher, the MODE gate and the drift rules are executed, not asserted textually. |
+| `hscc-bootstrap/doctor_notifier_mask.py` | New. The doctor check (own check, per card), mapping the installer's probe verdicts to ok / fail / drift / error; standalone `--probe-only` CLI. |
+| `hscc-bootstrap/tests/test_notifier_doctor.py` | New. Verdict mapping (an environment fault is never a data fact), hermetic doctor wiring, AST guards that the layer hand-rolls no systemctl/sudo and re-types no unit name. |
+| `hscc-bootstrap/doctor.py` | Registers the check in `run_doctor()` (fleet_checks-gated, non-fatal, missing-module reported rather than silently absent). Self-contained block: it does not edit the sibling node-recovery check's wiring. |
+| `hscc-bootstrap/bootstrap.sh` | New stage `Install: snap firmware-notifier mask (log-churn quarantine)` (whole-block insertion; `--skip-node-recovery` honoured). |
+| `hscc-bootstrap/tests/test_bootstrap_notifier_stage.py` | New. Stage wiring pins (delegation, argv quoting, both opt-outs, dry-run plans-only, non-fatal-but-loud, stage order). |
+| `hscc-bootstrap/README.md` | Stage 4b documented (the bootstrap warning points here). |
 | `changelog.d/t_61850b24.md` | New. |
 | `docs/audits/node-recovery-notifier-mask-t_61850b24.md` | This report. |
 
-## Findings so far
+## Findings
 
-- (in progress)
+1. **`disable` is measurably a no-op on this unit.** `UnitFileState=static`
+   with no `[Install]` section in the snap-generated fragment (measured:
+   `grep -c '\[Install\]'` = 0), so `systemctl --user disable` would report
+   success and change nothing. Mask is the only lever that works here, and it
+   is also the one that survives a snap refresh (mask targets the unit *name*
+   at `~/.config/systemd/user/<unit> -> /dev/null`; snapd regenerates the
+   *fragment* under `/etc/xdg/systemd/user/` on refresh and cannot clear a mask
+   it does not own). This settles the card's "pick the one that survives
+   refreshes" requirement with a measurement, not a belief.
+2. **`is-masked` is not a verb on this systemd (255.4).** It returns
+   `Unknown command verb 'is-masked'` (rc=1) — a naive read-back would treat
+   that rc=1 as "not masked" and yell forever. Read-back uses
+   `is-enabled` → `masked` and `show -p LoadState`, and a *refused verb* is
+   classified as a fault, never as a state.
+3. **The bus pitfall does not bite on this fleet's sparkrun ssh path today**
+   (`XDG_RUNTIME_DIR` and the bus socket are already set over ssh), but
+   `env -i systemctl --user …` on the same node dies with `Failed to connect
+   to bus: No medium found` — a string that reads exactly like a state answer
+   to a naive parser. The generated script exports both variables
+   (`${VAR:-default}`), classifies the bus failure by exit code + text, and
+   reports an environment fault. Linger is empty on all three nodes, so the
+   user manager being reachable is a property of the login session, not a
+   guarantee — which is why the exports stay.
+4. **A mask symlink that is not `/dev/null` is foreign, and both layers must
+   agree on it.** Fixed during review of this card: the node-side script
+   refuses it, but `probe_node` was reporting such a node as plain `masked`
+   (read-back said masked, so the foreign-link test never ran). A foreign
+   override would have been credited as HSCC protection — a false green of the
+   exact class this batch exists to prevent. `probe_node` now checks the link
+   *first* and returns drift; the doctor renders it as a distinct verdict.
+5. **State mode is read-only by construction, and it is now proven
+   behaviourally.** The generated script is ONE script with a `MODE` gate, so
+   the mask/stop strings are present in the state-mode text by design; only
+   executing it under bash proves the gate. Test added, and its non-vacuity
+   checked by re-running the same harness with `MODE="install"` — which does
+   produce mutating calls (`mask --now <svc>`, `mask --now <timer>`), so the
+   assertion can fail and is not decoration.
+6. **No `sudo` anywhere** — module, generated script, or doctor layer (AST
+   assertion on string constants, docstrings excluded, so the prose explaining
+   the bus pitfall does not trip it). The mask lives in the ssh user's own
+   home; the batch's other stages escalate with `sudo -n`, this one must not.
+7. **Scope is the resolved cluster only** (operator ruling 2026-10-28 12:54):
+   `sparkrun cluster list` resolves 3 hosts and that list is the complete
+   denominator. `detect_cluster()` is the only host source in both the
+   installer and the doctor; no host inventory was added. Verified by
+   re-measuring cluster-only (3 nodes) after the ruling — the earlier probe
+   run had included the out-of-cluster training node.
+8. **Causation is still NOT claimed.** The restart loop is real and measured;
+   its relationship to the `.244` hang of 2026-10-27 is unproven and asserted
+   nowhere in code, tests, changelog or this report.
+9. **Environment fault vs data fact is enforced at every surface.** Unmasked
+   (fact → red, fix by re-running bootstrap) ≠ unverifiable (fault → error
+   with the node's own words) ≠ opted out (never green) ≠ foreign override
+   (drift). The no-bus case is the regression this split exists to catch: a
+   naive implementation reports "not masked" for it and the operator chases a
+   mask that would not have helped.
+10. **The fleet was NOT masked by this card.** Every probe run recorded here is
+    read-only (`id`, `ls`, `is-enabled`/`is-active`/`show`, `journalctl`,
+    `readlink`). Applying the mask is the orchestrator's bootstrap run; the
+    `--dry-run` line and the doctor check exist so that application is
+    verifiable rather than assumed.
+
+## Follow-ups noticed, not done here (owned elsewhere)
+
+- `doctor.py::_sparkrun_default_cluster_matches_serving` raises
+  `AttributeError` when `sparkrun cluster default --json` answers valid JSON
+  that is not an object (`null`, or a list) — measured on pristine `main`,
+  independent of this card; a non-dict payload should skip like the
+  unparseable-text path does. Owned by the doctor/node-recovery sibling scope
+  (t_94598b3a area); flagged here because this card's hermetic doctor fixture
+  had to pin `_run_cluster_default` to `""` to stop the sibling check reaching
+  live sparkrun during a pytest run.
