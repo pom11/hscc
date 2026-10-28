@@ -20,10 +20,14 @@ configured" and the installer never runs. Two controls cover the gap instead:
     reach outside the sandbox.
 
 Skipped steps and why:
-  --skip-cli      installs a console script INTO the Hermes venv (shared, real)
-  --skip-patches  patches the hermes-agent git checkout (shared, real)
-  --skip-daemon   installs launchd/systemd units and restarts the live daemon
-Those three are the only steps that intentionally write outside the home.
+  --skip-cli             installs a console script INTO the Hermes venv (shared, real)
+  --skip-patches         patches the hermes-agent git checkout (shared, real)
+  --skip-daemon          installs launchd/systemd units and restarts the live daemon
+  --skip-node-recovery   SSHes the LIVE fleet to install panic-to-reboot sysctls
+                         (t_1fc3fe83: the isolated run has the operator's real
+                         sparkrun config, so without this flag a pytest run
+                         would arm reboot-on-panic on the actual nodes)
+Those four are the only steps that intentionally write outside the home.
 """
 
 import hashlib
@@ -72,7 +76,8 @@ def _run(sandbox, extra=()):
     })
     return subprocess.run(
         ["bash", str(BOOTSTRAP), "--yes",
-         "--skip-cli", "--skip-daemon", "--skip-patches", *extra],
+         "--skip-cli", "--skip-daemon", "--skip-patches",
+         "--skip-node-recovery", *extra],
         capture_output=True, text=True, env=env, timeout=900)
 
 

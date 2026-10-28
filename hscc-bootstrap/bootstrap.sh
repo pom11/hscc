@@ -24,6 +24,7 @@ PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false; DRY_RUN=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false; SKIP_CLI=false
+SKIP_NODE_RECOVERY=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --dry-run) DRY_RUN=true ;;
@@ -34,7 +35,8 @@ for a in "$@"; do case "$a" in
   --skip-daemon) SKIP_DAEMON=true ;;
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, daemon, CLI shim) and perform NONE."; exit 0 ;;
+  --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node's sysctls (the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -396,6 +398,78 @@ elif TRIG_JSON=$("$PYBIN" "$BOOT_DIR/install_triggers.py" 2>/dev/null); then
   ok "trigger rules installed (${TRIG_TOTAL} total, added ${TRIG_ADDED})"
 else
   warn "trigger rules install failed (~/.hscc/triggers.json may be missing default rules)"
+fi
+
+hdr "Install: node-recovery sysctls (panic-to-reboot)"
+# A node that hard-froze on 2026-10-27 had to be power-cycled by hand: Sparks
+# have no BMC, and with kernel.panic=0 a kernel-level wedge never self-resets.
+# This stage installs /etc/sysctl.d/90-hscc-autoreboot.conf on every cluster
+# node over the sparkrun ssh path (root via sudo -n), verifies every value by
+# READ-BACK, and never clobbers an operator-edited file (drift is reported,
+# the doctor surfaces it red). Opt out with
+# ~/.hscc/cluster.json -> {"node_recovery": {"autoreboot": false}}.
+# Non-fatal: an unreachable/refusing node warns loudly with per-node detail;
+# the rest of the install (and the other nodes) still complete.
+if $SKIP_NODE_RECOVERY; then warn "skipped (--skip-node-recovery)"
+elif $DRY_RUN; then
+  plan "node-recovery sysctls: install_autoreboot.py --hosts $HOSTS (drop-in + sysctl --system + read-back; --dry-run writes nothing on any node)"
+else
+  # 2>&1 keeps a transport traceback visible in the report instead of lost;
+  # the summariser below picks the LAST line that parses as JSON, so noise
+  # cannot turn a good result into a false "not verified".
+  if AR_JSON=$("$PYBIN" "$BOOT_DIR/install_autoreboot.py" --hosts "${HOST_ARR[@]}" 2>&1); then
+    AR_STATUS=$("$PYBIN" -c '
+import json, sys
+raw = sys.argv[1]
+d = None
+for line in reversed(raw.splitlines()):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    break
+if not isinstance(d, dict):
+    print("WARN|unparseable output — run: hscc-bootstrap/install_autoreboot.py --hosts ... manually")
+    sys.exit(0)
+if d.get("skipped_reason"):
+    print("OK|node-recovery sysctls skipped — " + str(d["skipped_reason"]))
+    sys.exit(0)
+rs = d.get("results") or []
+armed = [r for r in rs if r["action"] in ("installed", "unchanged", "live-reapplied")]
+drift = [r for r in rs if r["action"] == "drift"]
+failed = [r for r in rs if r["action"] == "failed"]
+summary = ("node-recovery sysctls armed+read-back-verified on %d/%d node(s) "
+           "(panic=10, panic_on_oops=1, softlockup_panic=1, hung_task_panic=1, "
+           "hung_task_timeout_secs=600)" % (len(armed), len(rs)))
+# Honest signals: a stage where ANY node failed or nothing got armed leads with
+# WARN — an OK line here would present a broken fleet as protected.
+if failed or not armed:
+    print("WARN|" + summary)
+else:
+    print("OK|" + summary)
+for r in drift:
+    print("WARN|%s: %s" % (r.get("host"), r.get("note") or "drop-in drifted"))
+for r in failed:
+    print("WARN|%s: %s" % (r.get("host"), r.get("error") or "failed"))
+if not rs:
+    print("WARN|no nodes were checked — is the sparkrun cluster configured?")
+elif failed:
+    print("WARN|some nodes FAILED — those nodes can still wedge without rebooting")
+' "$AR_JSON" 2>/dev/null)
+    [ -z "$AR_STATUS" ] && AR_STATUS="WARN|summary unavailable — run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+    while IFS= read -r AR_LINE; do
+      case "$AR_LINE" in
+        OK\|*)   ok "${AR_LINE#OK|}" ;;
+        WARN\|*) warn "${AR_LINE#WARN|}" ;;
+        *)       warn "$AR_LINE" ;;
+      esac
+    done <<< "$AR_STATUS"
+  else
+    warn "node-recovery sysctls FAILED to run — nodes may still never reboot on a kernel wedge. Run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+  fi
 fi
 
 hdr "Install: tmux (iOS chat reachability)"
