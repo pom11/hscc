@@ -306,6 +306,14 @@ def install_node(host: str, *, _ssh=None, dry_run: bool = False,
     live_mismatch = {k: (v, knobs.get(k)) for k, v in wanted.items()
                      if knobs.get(k) != v}
 
+    # A file byte-identical to one of OUR canonical variants is ours, not an
+    # operator edit: e.g. the kernel later exposed hardlockup_panic and the
+    # old managed file predates it. That upgrades; anything else foreign is
+    # drift. Only the two exact canonical contents qualify — a subset or a
+    # tweaked value is operator intent and is never rewritten.
+    ours_older_variant = (not file_matches and current_file is not None
+                          and current_file in (build_dropin(True), build_dropin(False)))
+
     if dry_run:
         if file_matches and not live_mismatch:
             diff = "(no change — file and live values already match)"
@@ -318,7 +326,7 @@ def install_node(host: str, *, _ssh=None, dry_run: bool = False,
         return {"host": host, "action": "unchanged", "changed_keys": [],
                 "skipped_keys": skipped, "error": None, "diff": "", "note": ""}
 
-    if current_file is not None and not file_matches:
+    if current_file is not None and not file_matches and not ours_older_variant:
         # Operator edited the managed file: report drift, NEVER clobber, and do
         # not sysctl --system either (their file, their values — the doctor
         # card surfaces this red until the operator resolves it).

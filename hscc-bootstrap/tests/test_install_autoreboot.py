@@ -209,6 +209,26 @@ def test_drift_operator_edited_file_reported_never_clobbered():
     assert "left untouched" in r["note"]
 
 
+def test_our_own_older_canonical_variant_upgrades_not_drift():
+    # Kernel later exposed hardlockup_panic: the file we wrote without it is
+    # OURS — it upgrades, and is never reported as operator drift.
+    n = FakeNode(file=m.build_dropin(False))
+    r = m.install_node("10.0.0.10", _ssh=n.ssh)
+    assert r["action"] == "installed"
+    assert n.file == m.build_dropin(True)
+
+
+def test_subset_of_canonical_is_drift_not_upgrade():
+    # A canonical variant minus a line is operator intent (they REMOVED it),
+    # not a stale managed file — must not be rewritten.
+    lines = m.build_dropin(True).splitlines(keepends=True)
+    subset = "".join(l for l in lines if not l.startswith("kernel.softlockup_panic"))
+    n = FakeNode(file=subset)
+    r = m.install_node("10.0.0.11", _ssh=n.ssh)
+    assert r["action"] == "drift"
+    assert n.file == subset
+
+
 def test_opt_out_skips_without_touching_node():
     n = FakeNode()
     r = m.install_node("10.0.0.5", _ssh=n.ssh, enabled=False)
