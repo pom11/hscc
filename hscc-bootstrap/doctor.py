@@ -40,6 +40,7 @@ from typing import List, Optional
 
 import _theme
 import backup_util
+import doctor_node_recovery
 
 
 @dataclass
@@ -719,6 +720,27 @@ def _run_cluster_list() -> str:
 # records. All three are warnings — report only, never fix, never fatal.
 
 
+def _node_hosts(_cluster_raw=None) -> List[str]:
+    """Every host of the default sparkrun cluster (for the node-recovery check).
+
+    Reuses the ONE cluster-list runner in this module; ``_cluster_raw`` is the
+    same injectable stand-in the NAS check uses, so the suite never shells out
+    to the live fleet. Unresolvable is ``[]`` — the node-recovery check then
+    renders an honest ERROR, never a vacuous pass.
+    """
+    import json
+    raw = (_cluster_raw or _run_cluster_list)()
+    if not raw:
+        return []
+    try:
+        clusters = json.loads(raw)
+        chosen = next((c for c in clusters if c.get("default")),
+                      (clusters[0] if clusters else {}))
+        return [h for h in (chosen.get("hosts") or []) if h]
+    except (ValueError, IndexError, KeyError, AttributeError):
+        return []
+
+
 def _serving_units(_serving_raw=None):
     """Units list from serving.json (injectable raw text for tests)."""
     import json
@@ -1015,7 +1037,8 @@ def _serving_consistency(_status_runner=None, _serving_raw=None,
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
-               _status_runner=None, fleet_checks=None) -> dict:
+               _status_runner=None, fleet_checks=None, _ssh_factory=None,
+               hscc_dir: Optional[str] = None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1025,6 +1048,11 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     human CLI process and skip inside a pytest process, so the test suite can
     never accidentally probe the live fleet by calling run_doctor(). A test
     that WANTS them passes fleet_checks=True plus the stub seams.
+
+    ``_ssh_factory`` / ``hscc_dir`` are the node-recovery check's seams: the
+    per-node ssh transport (production: sparkrun's own remote execution) and
+    the dir its ``cluster.json`` opt-out block is read from. Both are injected
+    in tests so no doctor test can reach a node.
     """
     if fleet_checks is None:
         fleet_checks = "pytest" not in sys.modules
@@ -1048,7 +1076,29 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         _check_models_served(home, _http_get=_http_get),
     ]
     if fleet_checks:
+        # A pytest process must never acquire sparkrun's production ssh
+        # transport, even when a test forces fleet_checks=True: the transport
+        # has to be injected. Without it the node-recovery check renders as an
+        # ERROR naming the missing seam — an honest "cannot verify", never a
+        # silent skip and never a real ssh attempt against the live fleet.
+        def _refused_transport(_host):
+            def refused(_cmd, _timeout):
+                return {"ok": False, "stdout": "", "code": None,
+                        "stderr": "production ssh transport refused inside a "
+                                  "pytest process — inject _ssh_factory"}
+            return refused
+        nr_factory = _ssh_factory or (
+            _refused_transport if "pytest" in sys.modules else None)
+        nr_res = doctor_node_recovery.check(
+            _node_hosts(_cluster_runner), ssh_factory=nr_factory,
+            hscc_dir=hscc_dir)
+        # Only the five Check fields go into the list, so every entry of
+        # `checks` — and therefore `doctor --json` — keeps one shape. The
+        # per-node rows stay available to callers of
+        # doctor_node_recovery.check() (the CLI, and the tests).
         checks += [
+            Check(name=nr_res["name"], ok=nr_res["ok"], detail=nr_res["detail"],
+                  fix=nr_res["fix"], fatal=nr_res["fatal"]),
             _sparkrun_lan_reachability(_venv_python=_venv_python,
                                        _probe=_lan_probe,
                                        _serving_raw=_serving_raw),
@@ -1059,6 +1109,10 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         ]
     else:
         checks.append(Check("sparkrun lan reachability", True,
+                            detail="skipped (fleet checks off)", fatal=False))
+        # Same honesty for the node-recovery check: a skipped check prints as
+        # skipped, never as "armed/ok" and never as absence-of-output.
+        checks.append(Check(doctor_node_recovery.CHECK_NAME, True,
                             detail="skipped (fleet checks off)", fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
