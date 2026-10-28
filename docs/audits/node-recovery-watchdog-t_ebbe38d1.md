@@ -157,8 +157,14 @@ emulated `systemctl` only flips `RuntimeWatchdogUSec` **and** sysfs `state` on
 `daemon-reexec`, so an install that writes bytes without re-execing cannot pass
 as armed. No test touches the network or the live fleet.
 
-Full-suite and address-guard results are in the completion metadata / card
-comment.
+Full-suite result (post-merge, `scripts/run_tests.sh`): **10 of 11 plugin
+suites green** — hscc-bootstrap, hscc-commands, hscc-cluster, hscc-project,
+hscc_daemon, sparkrun-hermes, hscc-api, memori_byodb, scripts, .github/scripts.
+The single red is `hscc-roles::test_every_hscc_owned_worker_profile_has_role_spec`,
+which fails because a live operator profile (`ecofire-pontaje-engineer`) has no
+role spec; it fails identically on pristine `main` and no file in this diff
+touches `hscc-roles` — environmental, not introduced here.
+`python3 scripts/address_guard.py --tracked` rc=0.
 
 ## Not in this card
 
