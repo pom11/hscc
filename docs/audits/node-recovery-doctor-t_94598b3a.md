@@ -98,11 +98,71 @@ not this card's, and this check reports them honestly until they happen:
   implemented but not yet enforced.
 - Deliberate crash/reboot testing was left to the operator by both parents.
 
+## Live read-only evidence (no node written, no escalation)
+
+`python3 hscc-bootstrap/doctor_node_recovery.py` on the operator's machine
+(sparkrun's own remote execution, the two read-only probes only; addresses
+redacted to the documented placeholder here and everywhere in this repo):
+
+    XX node recovery (watchdog + panic-to-reboot): 0/3 node(s) fully protected (watchdog armed + panic sysctls in sync); 3 NOT protected
+          [XX] 10.0.0.x fail: 10.0.0.x: watchdog NOT ARMED — RuntimeWatchdogUSec='0', expected 30s; /etc/systemd/system.conf.d/90-hscc-watchdog.conf absent (target RuntimeWatchdogSec=30s)
+          [XX] 10.0.0.x 10.0.0.x/kernel.hardlockup_panic: live '0', expected '1'
+          [XX] 10.0.0.x 10.0.0.x/kernel.hung_task_panic: live '0', expected '1'
+          [XX] 10.0.0.x 10.0.0.x/kernel.hung_task_timeout_secs: live '120', expected '600'
+          [XX] 10.0.0.x 10.0.0.x/kernel.panic: live '0', expected '10'
+          [XX] 10.0.0.x 10.0.0.x/kernel.panic_on_oops: live '0', expected '1'
+          [XX] 10.0.0.x 10.0.0.x/kernel.softlockup_panic: live '0', expected '1'
+          [XX] 10.0.0.x 10.0.0.x: /etc/sysctl.d/90-hscc-autoreboot.conf absent — panic-to-reboot is NOT configured on this node
+          ... (same 8 lines per node, 3 nodes) exit=1
+
+Independent of the parents' own probes, this confirms the fleet is currently
+unenforced on both layers on every node: `RuntimeWatchdogUSec=0`, the watchdog
+drop-in absent, every panic knob at its distro default, `hung_task_timeout_secs`
+at the 120s default (not the card's pinned 600), and the sysctl drop-in absent.
+It also confirms the conditional-knob path end to end on real hardware:
+`kernel.hardlockup_panic` EXISTS on these kernels (so it is expected and reported
+as drift at live '0'), which is exactly the branch the parent's conditional logic
+exists for.
+
+Two facts worth the orchestrator's attention:
+
+- **The check covers the hosts `sparkrun cluster list` reports — currently 3, not
+  the 4 in the card text.** The card names four nodes (.244/.246/.247/.248);
+  sparkrun's default cluster resolves three hosts, and the watchdog parent's own
+  measured evidence agrees ("all live nodes", "protected 3/3"). The fourth is
+  therefore outside every sparkrun-scoped operation in this batch — bootstrap's
+  install stages included, since both parents iterate the same host list. If that
+  node is meant to be covered, the fix is the cluster config, not this check.
+- This run is read-only and unprivileged for the sysctl leg (`cat /proc/sys/...`);
+  the watchdog leg is the parent's `state` mode, which likewise writes nothing.
+  No `sudo` was attempted by either leg.
+
 ## Not in this card
 
 - The snap-notifier check — sibling t_61850b24 owns it; nothing here duplicates it.
 - Fleet apply / merge / release — orchestrator.
 
-## Test + guard results
+## Test + guard results (as measured)
 
-See the completion metadata on the card for the counts as measured.
+- `hscc-bootstrap/tests/test_doctor_node_recovery.py`: **45 passed** (fabricated
+  transport; no socket, no host resolution, no `/etc`).
+- `scripts/run_tests.sh`: **10 of 11 legs green** — hscc-bootstrap 571,
+  hscc-commands, hscc-cluster, hscc-project, hscc_daemon, sparkrun-hermes,
+  hscc-api 938+1s, memori_byodb 11, scripts 262+1s, .github/scripts 129. The
+  sole red is `hscc-roles::test_every_hscc_owned_worker_profile_has_role_spec`,
+  which fails because a live operator profile has no role spec; it reproduces
+  identically on pristine `origin/main` and no file in this diff touches
+  `hscc-roles` — environmental, not introduced here.
+- `python3 scripts/address_guard.py --tracked` and `--staged`: rc=0. The full
+  diff against `origin/main` contains no IPv4 literal other than the
+  `10.0.0.x` placeholders.
+- Note on suite order: an earlier bootstrap-leg run reported 4 failures in
+  `test_bootstrap_node_recovery_stage` / `test_bootstrap_isolated` (dry-run
+  bootstrap tests that exec `bootstrap.sh` against a fabricated cluster). Those
+  tests pass in isolation (16 passed) and the leg is green on re-run (571
+  passed). I did NOT reproduce the failure, so I cannot attribute it: another
+  card's pytest leg (`rb90`) was running concurrently on this host, and those
+  tests exec a real bash installer against temp homes, so host contention is a
+  plausible mechanism. Nothing in this diff touches `bootstrap.sh`
+  (`git diff --name-only origin/main...HEAD` lists 6 files, none of them
+  bootstrap.sh), and none of my new tests exec it.
