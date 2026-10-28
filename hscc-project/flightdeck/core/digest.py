@@ -97,6 +97,10 @@ def _probe_runtime() -> str | None:
         _lifecycle._open_profile_session_db("default", read_only=True)
     except _lifecycle.HermesRuntimeUnavailable as exc:
         return str(exc)
+    except _lifecycle.RemoteRuntimeError as exc:
+        # t_9a9aeab1: a failed delegated op is a failed LOOK — report it,
+        # never leave rt None so message_count=0 renders as "no history".
+        return str(exc)
     except Exception:
         return None
     return None

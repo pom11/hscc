@@ -32,6 +32,7 @@ class FakeHermes:
         self.create_fails = create_fails
         self.profile_list_calls = 0
         self.profile_create_calls = []
+        self.profile_delete_calls = []
 
     def _proc(self, cmd, rc, stdout="", stderr=""):
         return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
@@ -47,6 +48,13 @@ class FakeHermes:
             if self.create_fails:
                 return self._proc(cmd, 1, "", "could not reach hermes")
             self._exists.append(target)
+            return self._proc(cmd, 0)
+        if cmd[2] == "delete":
+            # t_9a9aeab1 rollback path: `hermes profile delete <name> --yes`.
+            target = cmd[3]
+            self.profile_delete_calls.append(target)
+            if target in self._exists:
+                self._exists.remove(target)
             return self._proc(cmd, 0)
         raise AssertionError(f"unexpected hermes profile subcommand: {cmd}")
 
