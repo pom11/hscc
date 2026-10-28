@@ -477,7 +477,7 @@ def check(hosts: Optional[List[str]] = None, *, ssh_factory=None,
             "detail": "\n".join(lines), "fix": fix}
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[List[str]] = None, *, ssh_factory=None) -> int:
     """Standalone probe: `python3 doctor_node_recovery.py [--hosts a,b] [--json]`."""
     import argparse
     import json
@@ -492,7 +492,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()] or None
-    res = check(hosts, timeout=args.timeout)
+    res = check(hosts, ssh_factory=ssh_factory, timeout=args.timeout)
     if args.json:
         print(json.dumps(res, indent=2))
     else:

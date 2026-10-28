@@ -525,3 +525,97 @@ def test_sample_render_green_and_red():
     assert any(f"[ok] {NODE}" in ln for ln in lines)
     assert any(f"[XX] {OTHER}" in ln and "kernel.panic" in ln for ln in lines)
     assert any("watchdog" in ln for ln in lines if f"[XX] {OTHER}" in ln)
+
+
+# ── layout + transport guards (the silent-failure classes) ──────────────────
+
+def test_cluster_dir_resolves_the_sibling_plugin_in_both_layouts():
+    """A wrong sibling path would make the watchdog layer silently unavailability-error.
+
+    True in the work repo (hscc-bootstrap beside hscc-cluster) and in the
+    deployed ~/.hermes/plugins layout — the same assumption
+    install_autoreboot._default_ssh already makes for clusterlib.
+    """
+    d = dnr._cluster_dir()
+    assert os.path.isdir(d), d
+    assert os.path.isfile(os.path.join(d, "node_recovery.py")), d
+    assert os.path.isfile(os.path.join(d, "clusterlib.py")), d
+    assert dnr._nr() is not None, "the watchdog module must resolve from bootstrap"
+
+
+def test_sibling_path_is_appended_so_bootstrap_theme_still_wins():
+    """hscc-bootstrap and hscc-cluster BOTH ship a `_theme.py`.
+
+    The sibling dir is appended to sys.path precisely so importing the cluster
+    modules can never hijack a same-named bootstrap module. Pin the outcome:
+    `import _theme` must still be THIS plugin's file.
+    """
+    import _theme
+    dnr.check([NODE], ssh_factory=one(FakeNode()), hscc_dir="/nonexistent")
+    assert os.path.realpath(_theme.__file__) == os.path.realpath(
+        os.path.join(os.path.dirname(dnr.__file__), "_theme.py")), _theme.__file__
+
+
+def test_default_transport_refuses_inside_pytest():
+    """The production transport must be unreachable from a test process."""
+    run = dnr._default_ssh_factory()(NODE)
+    res = run("echo hi", 5)
+    assert res["ok"] is False and "pytest" in res["stderr"]
+
+
+def test_watchdog_layer_reports_unavailable_module_as_error(monkeypatch):
+    """A broken layout is an ERROR that names itself, never a silent skip."""
+    monkeypatch.setattr(dnr, "_nr", lambda: None)
+    layer = dnr.watchdog_layer(NODE, ssh_cmd=FakeNode(), enabled=True)
+    assert layer["verdict"] == dnr.V_ERROR
+    assert "unavailable" in layer["problems"][0]
+
+
+def test_sysctl_layer_reports_unavailable_module_as_error(monkeypatch):
+    monkeypatch.setattr(dnr, "_ar", lambda: None)
+    layer = dnr.sysctl_layer(NODE, ssh_cmd=FakeNode(), enabled=True)
+    assert layer["verdict"] == dnr.V_ERROR
+    assert "install_autoreboot" in layer["problems"][0]
+
+
+# ── the standalone CLI (also the doctor --json contract holder) ─────────────
+
+def test_cli_json_includes_every_node(tmp_path, capsys):
+    rc = dnr.main(["--hosts", f"{NODE},{OTHER}", "--json"],
+                  ssh_factory=one(FakeNode()))
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert [r["node"] for r in payload["rows"]] == [NODE, OTHER]
+    assert payload["name"] == dnr.CHECK_NAME
+
+
+def test_cli_exits_nonzero_when_a_node_is_not_protected(capsys):
+    bad = FakeNode(sysctl=sysctl_lines(HEALTHY_KNOBS, None))
+    rc = dnr.main(["--hosts", NODE, "--json"], ssh_factory=one(bad))
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["ok"] is False
+
+
+def test_doctor_json_output_carries_the_check(tmp_path, monkeypatch, capsys):
+    """The existing `doctor --json` contract: every check is one dict of the
+    same five fields, so a consumer can scan names without special-casing.
+
+    rc is NOT asserted: in a throwaway home the preflight legitimately fails
+    other fatal checks (no sparkrun cluster configured), and this test is about
+    the node-recovery row's presence and shape, not the preflight verdict.
+    """
+    home = hermetic_home(tmp_path, monkeypatch)
+    doctor.main(["--json", "--home", str(home)])
+    res = json.loads(capsys.readouterr().out)
+    match = [c for c in res["checks"] if c["name"] == dnr.CHECK_NAME]
+    assert match, [c["name"] for c in res["checks"]]
+    assert sorted(match[0]) == sorted(
+        ["name", "ok", "detail", "fix", "fatal"]), "check shape drifted"
+    # Fleet I/O is off inside pytest, so the row must SAY skipped, not look ok.
+    assert "skipped" in match[0]["detail"]
+
+
+def test_check_shape_has_no_extra_keys_for_the_doctor():
+    """run_doctor copies only the five Check fields; prove the rest is opt-in."""
+    res = dnr.check([NODE], ssh_factory=one(FakeNode()), hscc_dir="/nonexistent")
+    assert set(res) == {"name", "ok", "fatal", "detail", "fix", "rows"}
