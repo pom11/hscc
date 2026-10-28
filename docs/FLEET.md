@@ -25,13 +25,14 @@ hscc.py list                # roles + whether a profile exists
 (`hscc.py` is `hscc-roles/hscc.py`, installed as
 `~/.hermes/plugins/hscc-roles/hscc.py`.)
 
-The roster is **25 spec files** as of 2026-10-19 (`ls hscc-roles/roles/*.yaml`):
+The roster is **26 spec files** as of 2026-10-28 (`ls hscc-roles/roles/*.yaml`):
 orchestrator, architect, coder, reviewer, qa; backend/frontend/devops/security/
 data engineers; ml-engineer, ml-researcher, data-scientist; product-manager,
 technical-writer, ux-designer; financial-analyst, business-analyst,
 market-researcher; content-writer, social-media-manager, project-manager;
-ios-engineer, ecofire-bc-engineer; plus `worker` (the generic fallback). New
-roles are minted (by a human or the orchestrator) with `create`, so the roster
+ios-engineer, ecofire-bc-engineer, ecofire-pontaje-engineer; plus `worker` (the
+generic fallback). New roles are minted (by a human or the orchestrator) with
+`create`, so the roster
 is data, not code. Details: [hscc-roles/README.md](../hscc-roles/README.md).
 
 ## Review loop
