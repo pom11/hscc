@@ -61,6 +61,9 @@ Usage: hscc kanban <subcommand> [args]
                               whether the work is safe to re-run.
   hscc kanban stale [--older-than <days>] [--json]   (card t_e751e652)
                               List non-terminal cards across all boards.
+  hscc kanban monitor [--live] [--interval <s>] [--board <slug>]
+                              Workers on every board: running, ready, counts,
+                              last hour's outcomes (read-only).
   hscc kanban --help          This help
 """
 
@@ -494,8 +497,8 @@ def cmd_kanban(argv):
         if sub == "blocked":
             _console().print(SUBCOMMAND_HELP["blocked"])
             return 0
-        if sub == "stale":
-            # Single source of truth: `stale` help is kanban_cli's wording, so
+        if sub in ("stale", "monitor"):
+            # Single source of truth: `stale`/`monitor` help is kanban_cli's wording, so
             # hand the help request to the module that owns the verb (it never
             # acts on a --help argv). If that module is absent from the tree,
             # report that rather than advertise a verb this build lacks.
@@ -527,11 +530,14 @@ def cmd_kanban(argv):
     if sub == "blocked":
         return cmd_blocked(rest, json_mode, theme_name)
 
-    # Delegate `stale` (t_e751e652) when its module is present.
-    if sub == "stale":
+    # Delegate `stale` (t_e751e652) and `monitor` (t_cce254b9) to kanban_cli.
+    if sub in ("stale", "monitor"):
         try:
             from hscc_daemon import kanban_cli as _kcli
-            delegated = ["stale", *rest]
+            delegated = [sub, *rest]
+            if json_mode:
+                # --json was stripped above; kanban_cli re-parses it itself.
+                delegated.append("--json")
             if theme_name:
                 # Re-inject the palette so the delegated stale renders with the
                 # same theme the user asked for (kanban_cli.cmd_kanban strips it).
@@ -543,5 +549,5 @@ def cmd_kanban(argv):
                 json_mode)
 
     print(f"Error: unknown kanban subcommand: {sub}", file=sys.stderr)
-    print(f"Valid subcommands: blocked, stale", file=sys.stderr)
+    print(f"Valid subcommands: blocked, stale, monitor", file=sys.stderr)
     return 1

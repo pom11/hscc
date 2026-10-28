@@ -31,7 +31,7 @@ import sys
 from hscc_daemon import autodown
 from hscc_daemon import cli_theme as theme
 
-VALID_SUBCOMMANDS = ("stale",)
+VALID_SUBCOMMANDS = ("stale", "monitor")
 
 # The default for ``--older-than`` is decided here (a week) so the common
 # case surfaces genuinely-forgotten cards, not active work; the predicate
@@ -57,6 +57,11 @@ Usage: hscc kanban <subcommand> [args]
                               Archive exactly ONE task by id. Never automatic,
                               never bulk — this is a judgement call about
                               whether the work is actually done.
+  hscc kanban monitor [--live] [--interval <s>] [--board <slug>]
+                              What the workers on every board are doing:
+                              running cards (worker, run time, heartbeat),
+                              ready cards waiting for a slot, per-board
+                              counts and the last hour's outcomes.
   hscc kanban --help          This help
 """ % DEFAULT_STALE_DAYS
 
@@ -88,6 +93,21 @@ pass --older-than 0 for ALL non-terminal cards.
       done.
 
 '--theme <name>' selects the human palette.""" % DEFAULT_STALE_DAYS,
+    "monitor": """\
+hscc kanban monitor [--live] [--interval <s>] [--board <slug>] [--json]
+
+What the workers on every board are doing: running cards (board,
+worker, run time, heartbeat age), ready cards waiting for a slot,
+per-board counts by status, and the last hour's outcomes. The
+header shows the global kanban.max_in_progress slots in use.
+Read-only: never claims, promotes or archives.
+
+  --live          refresh until Ctrl-C (default every 5s)
+  --interval <s>  refresh period for --live (whole seconds, >= 1)
+  --board <slug>  only this board
+  --json          one snapshot as JSON (not with --live)
+
+'--theme <name>' selects the human palette.""",
 }
 
 
@@ -253,6 +273,55 @@ def _cmd_stale(rest, json_mode, theme_name=None):
     return 0
 
 
+def _parse_monitor_args(rest):
+    """``(opts, error)`` for ``hscc kanban monitor``. Unknown tokens are errors."""
+    from hscc_daemon import kanban_live
+    opts = {"live": False, "interval": kanban_live.DEFAULT_INTERVAL, "board": None}
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--live":
+            opts["live"] = True
+        elif tok in ("--interval", "-i", "--board"):
+            val = rest[i + 1] if i + 1 < len(rest) else None
+            if val is None or val.startswith("-"):
+                return opts, f"'{tok}' needs a value"
+            if tok == "--board":
+                opts["board"] = val
+            else:
+                try:
+                    opts["interval"] = int(val)
+                except ValueError:
+                    return opts, f"'{tok}' must be a whole number of seconds, got {val!r}"
+                if opts["interval"] < 1:
+                    return opts, f"'{tok}' must be at least 1"
+            i += 1
+        else:
+            return opts, f"unknown argument for 'hscc kanban monitor': {tok}"
+        i += 1
+    return opts, None
+
+
+def _cmd_monitor(rest, json_mode, theme_name=None):
+    """``hscc kanban monitor`` — read-only view of the workers on every board."""
+    from hscc_daemon import kanban_live
+    opts, err = _parse_monitor_args(rest)
+    if err:
+        return _error(err, json_mode)
+    if json_mode and opts["live"]:
+        return _error("--json is a single snapshot; drop --live", json_mode)
+    if json_mode:
+        print(json.dumps(kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])),
+                         default=list))
+        return 0
+    console = _console(theme_name)
+    if opts["live"]:
+        return kanban_live.run_live(console, interval=opts["interval"], board=opts["board"])
+    data = kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))
+    console.print(kanban_live.render(data, snapshot=True, width=console.width))
+    return 1 if data["errors"] and not data["boards"] else 0
+
+
 def cmd_kanban(argv):
     """Dispatch ``hscc kanban <subcommand>``; returns an exit code (never raises).
 
@@ -290,6 +359,8 @@ def cmd_kanban(argv):
 
     if sub == "stale":
         return _cmd_stale(rest, json_mode, theme_name)
+    if sub == "monitor":
+        return _cmd_monitor(rest, json_mode, theme_name)
 
     _console(theme_name).print(f"Error: unknown kanban subcommand: {sub}")
     _console(theme_name).print(
