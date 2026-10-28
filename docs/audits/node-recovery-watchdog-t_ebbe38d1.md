@@ -164,9 +164,24 @@ comment.
 
 - `hscc doctor` check — sibling t_94598b3a (this card exposes the probeable
   state it needs, listed above).
-- `kernel.panic`/`panic_on_oops`/softlockup sysctls — sibling t_1fc3fe83.
-  `--skip-node-recovery` is shared with it deliberately; both stages honour it
-  and the diff on the shared lines was kept insertion-only so the two merge
-  cleanly.
+- `kernel.panic`/`panic_on_oops`/softlockup sysctls — sibling t_1fc3fe83
+  (landed as PR #88). `--skip-node-recovery` is shared with it deliberately; see
+  the shared-file note below for the one conflict and how it was resolved.
 - Fleet apply (real arming) + merge/release — orchestrator.
 - Deliberate crash/reboot testing — operator's call, not run here.
+
+## Shared-file note (bootstrap)
+
+`--skip-node-recovery` is a **shared flag**, introduced independently by both
+this card and the sysctl card t_1fc3fe83 (PR #88), which landed on `main` while
+this card was in flight. Merging `main` produced one conflict, on the `--help`
+line, resolved by keeping the landed sentence and broadening its scope: the flag
+now gates **two** fleet-touching stages (panic-to-reboot sysctls, hardware
+watchdog), so a flag named for the shared concern that describes only one of
+them would invite someone to run bootstrap expecting sysctls to be skipped while
+the watchdog still armed the fleet.
+
+Both stages honour the flag and its `HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY` env
+guard, and the isolated-install test passes it once for both. Everything else in
+`bootstrap.sh` is additive: this card's stage sits with the other `Install:`
+stages and touches no sibling lines.
