@@ -8,12 +8,20 @@ import io
 import json
 import sqlite3
 
+import pytest
+
 
 from hscc_daemon import kanban_live
 from hscc_daemon.cli_theme import make_console
 from hscc_daemon.kanban_cli import _parse_monitor_args, cmd_kanban
 
 NOW = 1_800_000_000
+
+
+@pytest.fixture(autouse=True)
+def _no_real_hermes_home(tmp_path, monkeypatch):
+    # attach_tokens() defaults to ~/.hermes; never read the operator's DBs here.
+    monkeypatch.setattr(kanban_live, "HERMES_HOME", str(tmp_path / "hermes-home"))
 
 SCHEMA = """
 CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
@@ -177,3 +185,52 @@ def test_hscc_kanban_dispatcher_keeps_json_for_delegated_verbs(monkeypatch, caps
                                             "at": NOW})
     assert kanban_blocked.cmd_kanban(["monitor", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
+
+
+def _state_db(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, "
+              "input_tokens INTEGER, output_tokens INTEGER)")
+    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?)", rows)
+    c.commit()
+    c.close()
+
+
+def test_attach_tokens_matches_worker_session_and_sums_24h(tmp_path):
+    run_start = NOW - 5 * 3600
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
+        ("old", "kanban", run_start - 3000, 9, 9),            # earlier card, same worker
+        ("mine", "kanban", run_start + 2, 18_000_000, 202_000),
+        ("chat", "cli", run_start + 1, 5, 5),                  # not a worker session
+        ("stale", "kanban", NOW - 2 * 86400, 7, 7),            # outside 24h
+    ])
+    _state_db(tmp_path / "profiles" / "qa" / "state.db", [
+        ("q", "kanban", NOW - 60, 1_000, 50)])
+    (tmp_path / "profiles" / "no-db").mkdir()
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    run = d["running"][0]
+    assert (run["tok_in"], run["tok_out"]) == (18_000_000, 202_000)
+    # 24h: 'mine' (5h ago) + 'old' (5h50m ago) + qa's, never cli or >24h
+    assert d["tokens_24h"] == [18_000_000 + 9 + 1_000, 202_000 + 9 + 50]
+
+
+def test_attach_tokens_without_state_db_leaves_dashes(tmp_path):
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["running"][0]["tok_in"] is None and d["tokens_24h"] is None
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d))
+    assert "Tokens" in buf.getvalue()
+
+
+def test_render_shows_card_tokens_and_24h_total():
+    d = _collect()
+    d["running"][0].update(tok_in=18_000_000, tok_out=202_000)
+    d["tokens_24h"] = [1_234_000_000, 3_400_000]
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d))
+    out = buf.getvalue()
+    assert "18.0M/202k" in out
+    assert "tokens 24h in 1.23G · out 3.4M" in out

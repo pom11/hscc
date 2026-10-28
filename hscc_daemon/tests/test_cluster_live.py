@@ -450,3 +450,32 @@ def test_poller_renders_backends_up_under_errno65(curl_seam, monkeypatch):
     # the fallback ran for the two LAN backends only — never for the loopback proxy
     assert sorted(curl_urls) == ["http://10.0.0.1:8000/metrics",
                                  "http://10.0.0.2:8001/metrics"]
+
+
+def test_poller_rows_carry_cumulative_token_counters():
+    net, clock = FakeNet(), [0.0]
+    rows = _poller(net, clock).poll()
+    assert (rows[0]["prompt_total"], rows[0]["gen_total"]) == (5000.0, 1000.0)
+
+
+def test_serving_table_shows_token_totals_per_node_and_summed_even_narrow():
+    rows = [
+        {"node": "10.0.0.1", "port": "8000", "model": MODEL, "routes": ["worker-model"],
+         "running": 1, "waiting": 0, "kv": 0.1, "gen_tps": None, "prompt_tps": None,
+         "prompt_total": 110_862_221.0, "gen_total": 1_446_156.0},
+        {"node": "10.0.0.2", "port": "8001", "model": MODEL, "routes": ["worker-model"],
+         "running": 1, "waiting": 0, "kv": 0.1, "gen_tps": None, "prompt_tps": None,
+         "prompt_total": 900_000_000.0, "gen_total": 999.0},
+    ]
+    out = _render(cl.serving_table(rows, width=80))
+    head = next(line for line in out.splitlines() if line.startswith("Node"))
+    assert " In " in head and " Out " in head
+    assert "110.9M" in out and "1.4M" in out and "999" in out
+    total = next(line for line in out.splitlines() if line.startswith("total"))
+    assert "1.01G" in total and "1.4M" in total
+
+
+def test_fmt_tokens():
+    assert [cl.fmt_tokens(x) for x in (None, 999, 1_500, 202_000, 18_000_000,
+                                       1_234_000_000)] == [
+        "-", "999", "2k", "202k", "18.0M", "1.23G"]
