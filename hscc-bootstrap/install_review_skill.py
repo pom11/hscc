@@ -418,17 +418,21 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     for plan in report["targets"]:
         counts[plan["action"]] = counts.get(plan["action"], 0) + 1
     report["counts"] = counts
-    # ok == nothing is left unresolvable: a home whose bare name stays
-    # ambiguous (collision) — or, for the dispatcher-injected review skill,
-    # not-found — is a real failure even if nothing was written. A
-    # non-reviewer home missing an EXTRA skill is informational (the install
-    # deliberately skipped it), never a failure.
+    # ok == nothing is left unresolvable WHERE IT MATTERS: a collision blocks
+    # anywhere (it breaks the bare name for any spawn asking it), while a
+    # missing review skill only counts against reviewer-capable homes + the
+    # root (the same REVIEWER-ROLE SET the doctor check uses — the card
+    # forbids treating a non-reviewer profile's absence as a failure). A
+    # non-reviewer home missing an EXTRA skill is informational, never
+    # blocked.
     reasons: dict[str, set[str]] = {}
     for p in report["targets"]:
         verdict = p.get("bare_name_resolves")
         if verdict == "ambiguous":
             reasons.setdefault(p["profile"], set()).add("collision")
-        elif verdict == "not-found" and p.get("skill") == REVIEW_SKILL:
+        elif verdict == "not-found" and p.get("skill") == REVIEW_SKILL and (
+                p["profile"] == "default"
+                or skill_guard.is_reviewer_capable(p["profile"])):
             reasons.setdefault(p["profile"], set()).add("missing")
     report["blocked"] = sorted(f"{name} ({'+'.join(sorted(states))})"
                                for name, states in reasons.items())
@@ -498,10 +502,20 @@ def _summary_lines(report):
     for label, count in sorted(report["counts"].items()):
         lines.append(f"  {label}: {count}")
     if report.get("blocked"):
-        lines.append(
-            "  ⚠ still unresolvable: " + ", ".join(report["blocked"]) +
-            " — two different skills share the name; decide which one wins "
-            "(see --replace-top-level), do NOT guess in a deploy step.")
+        colliding = [b for b in report["blocked"] if "collision" in b]
+        missing = [b for b in report["blocked"] if "missing" in b]
+        if colliding:
+            lines.append(
+                "  ⚠ collision (two different skills share the name — hscc "
+                "will not guess which wins): " + ", ".join(colliding) +
+                " — decide by hand, or move HSCC's own stale flat copy aside "
+                "with --replace-top-level (backed up, never deleted).")
+        if missing:
+            lines.append(
+                "  ⚠ review skill still missing for: " + ", ".join(missing) +
+                " — the guarded install skipped these; re-run without "
+                "--dry-run to place them (missing installs go to "
+                "reviewer-capable profiles + the root home only).")
     return lines
 
 
