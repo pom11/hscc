@@ -172,6 +172,18 @@ class TestCheckPlugins:
 class TestCheckMultiplex:
     """check_multiplex — ok when enabled + served, fail on gaps, skip when absent."""
 
+    @staticmethod
+    def _mk_profile(profiles, name):
+        """A dir Hermes counts as a profile (needs an identity marker).
+
+        t_1c545ebb: a marker-less ``mkdir()`` is the stub shape the gateway
+        never serves, so it must not be counted as expected-served.
+        """
+        home = profiles / name
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text("toolsets:\n  - hermes-cli\n")
+        return home
+
     def _write_config(self, path, multiplex=True, kanban=None, toolsets=None):
         import yaml
         cfg = {"multiplex_profiles": multiplex}
@@ -192,8 +204,8 @@ class TestCheckMultiplex:
         json.dump({"served_profiles": ["backend-engineer", "writer"]},
                   open(gw_state, "w"))
 
-        (profiles / "backend-engineer").mkdir(parents=True)
-        (profiles / "writer").mkdir(parents=True)
+        self._mk_profile(profiles, "backend-engineer")
+        self._mk_profile(profiles, "writer")
 
         result = check_multiplex(
             gateway_state=str(gw_state),
@@ -213,8 +225,8 @@ class TestCheckMultiplex:
         json.dump({"served_profiles": ["backend-engineer"]},
                   open(gw_state, "w"))
 
-        (profiles / "backend-engineer").mkdir(parents=True)
-        (profiles / "writer").mkdir(parents=True)
+        self._mk_profile(profiles, "backend-engineer")
+        self._mk_profile(profiles, "writer")
 
         result = check_multiplex(
             gateway_state=str(gw_state),
@@ -232,7 +244,7 @@ class TestCheckMultiplex:
 
         self._write_config(config, multiplex=True)
         json.dump({"served_profiles": []}, open(gw_state, "w"))
-        (profiles / "backend-engineer").mkdir(parents=True)
+        self._mk_profile(profiles, "backend-engineer")
 
         result = check_multiplex(
             gateway_state=str(gw_state),

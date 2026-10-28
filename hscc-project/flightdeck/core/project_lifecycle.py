@@ -27,9 +27,11 @@ no longer fed by a Telegram step (Telegram was removed).
 
 from __future__ import annotations
 
+import json
 import os
-import sys
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -243,7 +245,25 @@ def ensure_board(slug: str, _kanban=None) -> str:
     Idempotent: Hermes' ``create_board`` is ``mkdir -p`` semantics — it
     returns the existing metadata when the board is already there, so a
     re-run never duplicates anything. Returns the normalized slug.
+
+    Under an interpreter that cannot host the Hermes runtime (the brew keg
+    venv — t_9a9aeab1) the check + create run as remote ops under the hermes
+    venv interpreter: ``kanban_db.create_board`` touches the board DB (a
+    lazy ``hermes_state`` import behind it dies with ModuleNotFoundError in
+    the keg), so the in-process path would crash the whole lifecycle there.
     """
+    if _kanban is None:
+        profiles_mod, _SessionDB, _import_err = _in_process_runtime()
+        if profiles_mod is None:
+            try:
+                if not _remote_runtime_op("board_exists", {"slug": slug}):
+                    _remote_runtime_op("create_board", {"slug": slug})
+            except HermesRuntimeUnavailable:
+                raise
+            except RemoteRuntimeError as exc:
+                raise LifecycleError(
+                    f"could not ensure board {slug!r}: {exc}") from exc
+            return slug
     kb = _resolve_kanban(_kanban)
     try:
         exists = kb.board_exists(slug)
@@ -251,7 +271,13 @@ def ensure_board(slug: str, _kanban=None) -> str:
         raise LifecycleError(f"could not check board {slug!r}: {exc}") from exc
 
     if not exists:
-        kb.create_board(slug)
+        # A raw provider crash here (KanbanError, or a lazy import failure
+        # from a half-capable interpreter) is a functional step failure:
+        # report it, never let it escape create_project as a traceback.
+        try:
+            kb.create_board(slug)
+        except Exception as exc:
+            raise LifecycleError(f"could not create board {slug!r}: {exc}") from exc
     return slug
 
 
@@ -360,8 +386,474 @@ class HermesRuntimeUnavailable(RuntimeError):
     wrong, so callers must say so rather than reporting an empty result.
     """
 
+# --------------------------------------------------------------------------- #
+# Hermes runtime delegation (t_9a9aeab1)
+# --------------------------------------------------------------------------- #
+# The brew keg installs hscc into an ISOLATED venv carrying only
+# PyYAML/rich/psutil/markdown-it-py/mdurl/pygments (Formula/hscc.rb). Measured
+# on the shipped keg (docs/audits/t_9a9aeab1_brew_venv_hermes_runtime.md):
+#
+#     import hermes_cli   -> ModuleNotFoundError
+#     import hermes_state -> ModuleNotFoundError
+#     import httpx        -> ModuleNotFoundError
+#
+# so an in-process ``from hermes_cli import ...`` / ``from hermes_state import
+# SessionDB`` dies there. The fix is NOT to vendor hermes_cli/httpx into the
+# keg: that duplicates a moving runtime's package set (version drift turns the
+# "environment fault rendered as data fact" trap this class exists to prevent
+# into a maintenance treadmill) and widens the tap's supply surface. Instead
+# every runtime touch is executed as a small, bounded op under the HERMES venv
+# interpreter — Hermes' OWN packages, so there is no second package set that
+# can drift. Precedent for resolving that interpreter in-repo:
+# hscc_daemon/install.py `_resolve_python`, hscc_daemon/api_launchd.py
+# `recommend_api_python`, hscc_daemon/lifecycle.py `find_hermes_bin`.
+#
+# A suitable `hermes` CLI verb for "ensure a session titled X exists" does NOT
+# exist (`hermes sessions` has list/rename/repair/recover but no create-titled;
+# `hermes profile create` creates no session), so delegation — not CLI reuse —
+# is the way to keep Hermes' own SessionDB machinery authoritative: the child
+# calls the very same SessionDB APIs the in-process path calls.
+#
+# The delegation keeps the in-process contract exactly:
+#   * unresolvable hermes runtime   -> raise HermesRuntimeUnavailable (an
+#     environment fault, never rendered as "profile has no data" — the
+#     semantic this class exists for);
+#   * profile unresolvable / no state.db -> None (a data fact, as before);
+#   * otherwise a duck-typed handle exposing the SessionDB methods the
+#     lifecycle/discovery/digest/seed call paths use; each call is one op;
+#   * a transport/op failure RAISES (a failed LOOK is never a false negative —
+#     the e2a3251 honesty rule).
 
-def _open_profile_session_db(profile: str, read_only: bool = False):
+# Bounded wall-clock for one remote runtime op. A healthy op is ~1s (measured
+# with the repo's audit probes); this is far above that while still failing a
+# wedged interpreter instead of hanging `project new` forever.
+_REMOTE_TIMEOUT_SECONDS = 120
+
+# The child-side program executed under the hermes venv interpreter. STATIC
+# text (no %-formatting of code) — the op name and its arguments arrive as one
+# JSON document in sys.argv[1]; the agent-tree path comes from
+# HERMES_AGENT_PATH (default ``~/.hermes/hermes-agent``, the same convention
+# as flightdeck.core.kanban._HERMES_AGENT_PATH), which the child inherits
+# exactly as the parent reads it.
+#
+# Protocol: prints exactly one JSON line on stdout.
+#   {"ok": true,  "result": <json>}                        success
+#   {"ok": false, "code": "no_runtime"|"no_db"|"op_error", "error": str}
+# Classification contract (mirrors the in-process opener EXACTLY):
+#   no_runtime -> the interpreter cannot host the runtime (environment fault)
+#   no_db      -> profile unresolvable / missing / unusable state.db (a DATA
+#                 fact; the parent maps it to None / an honest step failure)
+#   op_error   -> a data op failed (a LOOK failure; the parent raises)
+_REMOTE_OP_SCRIPT = r"""
+import sys, json, os
+
+def _emit(obj):
+    print(json.dumps(obj, default=str))
+
+def _main():
+    args = json.loads(sys.argv[1])
+    op = args.get("op")
+    root = os.path.expanduser(
+        os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
+    if os.path.isdir(root) and root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from hermes_cli import profiles as _p
+        from hermes_state import SessionDB
+    except Exception as e:
+        _emit({"ok": False, "code": "no_runtime",
+               "error": "cannot import the Hermes runtime: %s: %s"
+                        % (type(e).__name__, e)})
+        return 0
+    if op in ("board_exists", "create_board"):
+        # Board access needs NO profile. board_exists is Hermes' own FS
+        # check; create_board touches the board DB (init_db -> lazy
+        # hermes_state -> the same httpx chain), so BOTH run here: Hermes'
+        # own kanban_db stays authoritative on both sides of the seam.
+        try:
+            from hermes_cli import kanban_db as _kb
+            if op == "board_exists":
+                _emit({"ok": True,
+                       "result": bool(_kb.board_exists(args["slug"]))})
+            else:
+                _kb.create_board(args["slug"])  # mkdir -p semantics
+                _emit({"ok": True, "result": True})
+        except Exception as e:
+            _emit({"ok": False, "code": "op_error",
+                   "error": "board op %s failed: %s: %s"
+                            % (op, type(e).__name__, e)})
+        return 0
+    try:
+        canon = _p.normalize_profile_name(args["profile"])
+        _p.validate_profile_name(canon)
+    except Exception as e:
+        _emit({"ok": False, "code": "no_db",
+               "error": "profile %r unresolvable: %s: %s"
+                        % (args.get("profile"), type(e).__name__, e)})
+        return 0
+    db = None
+    try:
+        if op == "profile_exists":
+            _emit({"ok": True, "result": bool(_p.profile_exists(canon))})
+            return 0
+        if not _p.profile_exists(canon):
+            _emit({"ok": False, "code": "no_db",
+                   "error": "profile %r does not exist" % canon})
+            return 0
+        db_path = _p.get_profile_dir(canon) / "state.db"
+        create_db = bool(args.get("create_db"))
+        if not create_db and not db_path.exists():
+            _emit({"ok": False, "code": "no_db",
+                   "error": "profile %r has no state.db" % canon})
+            return 0
+        if op == "ensure_session":
+            # create + title in ONE op (two separate ops could leak an
+            # untitled row when the second fails). Always read-write:
+            # ensuring means the row may be created — and a fresh orchestrator
+            # profile legitimately has NO state.db yet (hermes itself creates
+            # it on the profile's first run), so SessionDB(db_path) opening it
+            # into existence is that native behaviour, not a repair.
+            db = SessionDB(db_path=db_path)
+            title = args["title"]
+            if db.resolve_session_by_title(title):
+                _emit({"ok": True, "result": {"status": "exists"}})
+            else:
+                import time as _t, uuid as _u
+                new_id = "%s_first_%s" % (_t.strftime("%Y%m%d"),
+                                          _u.uuid4().hex[:6])
+                db.create_session(new_id, source="cli",
+                                  model="orchestrator-model",
+                                  profile_name=canon)
+                db.set_session_title(new_id, title)
+                _emit({"ok": True, "result": {"status": "created",
+                                              "session": new_id,
+                                              "title": title}})
+            return 0
+        read_only = bool(args.get("read_only"))
+        db = SessionDB(db_path=db_path, read_only=read_only)
+        if op == "open_check":
+            _emit({"ok": True, "result": True})
+        elif op == "resolve_by_title":
+            _emit({"ok": True,
+                   "result": db.resolve_session_by_title(args["title"])})
+        elif op == "append_message":
+            _emit({"ok": True,
+                   "result": db.append_message(args["session_id"],
+                                               args["role"],
+                                               args["content"])})
+        elif op == "get_session":
+            _emit({"ok": True, "result": db.get_session(args["session_id"])})
+        elif op == "list_sessions_rich":
+            _emit({"ok": True, "result": db.list_sessions_rich(
+                source=args.get("source"), limit=args.get("limit", 20))})
+        elif op == "message_count":
+            _emit({"ok": True,
+                   "result": db.message_count(args.get("session_id"))})
+        elif op == "get_messages":
+            _emit({"ok": True, "result": db.get_messages(args["session_id"])})
+        elif op == "get_session_title":
+            _emit({"ok": True,
+                   "result": db.get_session_title(args["session_id"])})
+        else:
+            _emit({"ok": False, "code": "op_error",
+                   "error": "unsupported remote op %r" % op})
+        return 0
+    except Exception as e:
+        detail = "%s: %s" % (type(e).__name__, e)
+        # An open-time failure (db still unbound on a plain open) is the same
+        # class of outcome the in-process opener returns None for; a failure
+        # DURING a data op is a real LOOK failure.
+        if db is None and op in ("open_check", "profile_exists"):
+            _emit({"ok": False, "code": "no_db", "error": detail})
+        else:
+            _emit({"ok": False, "code": "op_error", "error": detail})
+        return 0
+    finally:
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
+try:
+    sys.exit(_main())
+except Exception as _boom:
+    _emit({"ok": False, "code": "op_error",
+           "error": "remote op harness failed: %s: %s"
+                    % (type(_boom).__name__, _boom)})
+    sys.exit(0)
+"""
+
+
+# Interpreter resolution cache: (env-key, resolved|None). Keyed on every env
+# var that participates in resolution so a test (or a bootstrapping shell)
+# that changes them re-resolves instead of inheriting a stale answer.
+_HERMES_PY_CACHE: tuple = (None, None)
+
+
+def reset_hermes_python_cache() -> None:
+    """Drop the memoised interpreter resolution (tests / env changes)."""
+    global _HERMES_PY_CACHE
+    _HERMES_PY_CACHE = (None, None)
+
+
+def resolve_hermes_python() -> Optional[str]:
+    """Absolute path of an interpreter that can import the Hermes runtime.
+
+    Candidates, each VERIFIED by a cheap ``import hermes_state,
+    hermes_cli.profiles`` probe — the probe is the whole point: a *wrong*
+    interpreter must never be chosen, or a delegation would fail somewhere the
+    environment-vs-data distinction cannot see:
+
+      1. ``HSCC_HERMES_PYTHON`` — explicit operator/test override;
+      2. ``$HERMES_HOME/hermes-agent/venv/bin/python3`` then ``python``
+         (HERMES_HOME-aware, like ``api_launchd.recommend_api_python``);
+      3. the default ``~/.hermes/hermes-agent/venv/bin/`` layout;
+      4. a ``python3``/``python`` on PATH whose site-packages can import the
+         runtime (dev shells that ``pip install -e`` the agent).
+
+    Returns None when nothing can host the runtime — callers must then raise
+    :class:`HermesRuntimeUnavailable`, never fake a data answer. The result is
+    memoised per relevant environment (resolution spawns probe processes).
+    """
+    global _HERMES_PY_CACHE
+    key = tuple(os.environ.get(k, "") for k in
+                ("HSCC_HERMES_PYTHON", "HERMES_HOME", "PATH", "HOME"))
+    if _HERMES_PY_CACHE[0] == key:
+        return _HERMES_PY_CACHE[1]
+    result = _resolve_hermes_python_uncached()
+    _HERMES_PY_CACHE = (key, result)
+    return result
+
+
+def _resolve_hermes_python_uncached() -> Optional[str]:
+    seen: set = set()
+
+    def _probe(cand: str) -> Optional[str]:
+        if not cand:
+            return None
+        try:
+            if cand in seen or not os.path.isfile(cand) \
+                    or not os.access(cand, os.X_OK):
+                return None
+            seen.add(cand)
+        except OSError:
+            return None
+        try:
+            cp = subprocess.run(
+                [cand, "-c", "import hermes_state, hermes_cli.profiles; "
+                             "print('HSCC-RUNTIME-OK')"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # The SENTINEL (not just rc) must come back: a non-python program on
+        # PATH exits 0 for any argument (echo does), and accepting it would
+        # send every remote op to a program that cannot run them.
+        return (cand if cp.returncode == 0
+                and "HSCC-RUNTIME-OK" in (cp.stdout or "") else None)
+
+    hit = _probe(os.environ.get("HSCC_HERMES_PYTHON", "").strip())
+    if hit:
+        return hit
+
+    homes: list = []
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        homes.append(Path(env_home))
+    homes.append(Path.home() / ".hermes")
+
+    candidates: list = []
+    for home in homes:
+        bindir = home / "hermes-agent" / "venv" / "bin"
+        candidates += [str(bindir / "python3"), str(bindir / "python")]
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+
+    for cand in candidates:
+        hit = _probe(cand)
+        if hit:
+            return hit
+    return None
+
+
+class RemoteRuntimeError(RuntimeError):
+    """A remote runtime op failed with a classified error payload.
+
+    ``code`` is the child's classification: ``no_db`` (data fact — the parent
+    maps it to None / an honest step failure), ``op_error`` / ``transport`` (a
+    failed LOOK — surfaced, never swallowed as empty data). ``no_runtime`` is
+    never raised as this class: it converts to :class:`HermesRuntimeUnavailable`
+    in :func:`_remote_runtime_op`.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _remote_default_run(cmd, cwd) -> subprocess.CompletedProcess:
+    """Production runner for remote ops: same shape as ``_default_run`` plus a
+    hard wall-clock timeout (a wedged interpreter must fail the step, never
+    hang the lifecycle)."""
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=_REMOTE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd, returncode=124, stdout="",
+            stderr=f"remote hermes runtime op timed out after "
+                   f"{_REMOTE_TIMEOUT_SECONDS}s: {exc}")
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return subprocess.CompletedProcess(cmd, returncode=128, stdout="",
+                                           stderr=str(exc))
+
+
+def _remote_runtime_op(op: str, args: dict, runner=None):
+    """Execute ONE runtime op under the hermes venv interpreter; return result.
+
+    Raises:
+      HermesRuntimeUnavailable — no interpreter can host the runtime (or the
+        chosen one lost the runtime mid-flight): environment fault, never a
+        data fact.
+      RemoteRuntimeError(no_db) — profile unresolvable / missing state.db
+        (data fact; callers translate to None / False / a step failure).
+      RemoteRuntimeError(op_error|transport) — the op or the transport failed
+        (a failed LOOK surfaces, per the e2a3251 honesty rule).
+
+    ``HSCC_HERMES_OPS=off`` short-circuits with a forced RemoteRuntimeError —
+    the documented verification force for the rollback path (acceptance uses
+    it; production never sets it).
+    """
+    if os.environ.get("HSCC_HERMES_OPS", "").strip().lower() in (
+            "off", "0", "fail"):
+        raise RemoteRuntimeError(
+            "forced", "remote runtime ops disabled via HSCC_HERMES_OPS=off")
+    py = resolve_hermes_python()
+    if py is None:
+        raise HermesRuntimeUnavailable(
+            "cannot import the Hermes runtime (hermes_cli/hermes_state). The "
+            f"`hscc` CLI runs under {sys.executable}, and no interpreter with "
+            "the Hermes runtime could be resolved (looked under "
+            "$HSCC_HERMES_PYTHON, $HERMES_HOME/hermes-agent/venv/bin, "
+            "~/.hermes/hermes-agent/venv/bin and PATH). Bootstrap Hermes or "
+            "point HSCC_HERMES_PYTHON at its venv python; session history "
+            "cannot be read from here.")
+    payload_args = {"op": op, **args}
+    run = runner or _remote_default_run
+    proc = run([py, "-c", _REMOTE_OP_SCRIPT, json.dumps(payload_args)],
+               os.getcwd())
+    out = (getattr(proc, "stdout", "") or "").strip()
+    err = (getattr(proc, "stderr", "") or "").strip()
+    payload = None
+    if out:
+        try:
+            payload = json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            payload = None
+    if payload is None:
+        raise RemoteRuntimeError(
+            "transport",
+            f"remote hermes runtime op {op!r} produced no parseable result "
+            f"(rc={getattr(proc, 'returncode', '?')}; stderr={err[:400]})")
+    if payload.get("ok"):
+        return payload.get("result")
+    code = str(payload.get("code", "op_error"))
+    message = str(payload.get("error", "unknown error"))
+    if code == "no_runtime":
+        # The probe passed but the chosen interpreter cannot import the
+        # runtime — an environment fault all the same; say it as one.
+        raise HermesRuntimeUnavailable(
+            f"cannot import the Hermes runtime ({message}). The `hscc` CLI "
+            f"runs under {sys.executable}; hermes_cli/hermes_state live in "
+            "the Hermes venv. Session history cannot be read from here.")
+    raise RemoteRuntimeError(code, message)
+
+
+class RemoteSessionHandle:
+    """Duck-typed ``SessionDB`` stand-in whose calls run as remote ops.
+
+    Exists so the in-process call paths (session_discovery, digest, chat
+    seed) keep their ``db.<method>()`` shape unchanged under an interpreter
+    that cannot import the runtime. ``read_only`` is stamped per open, exactly
+    like the real constructor; the child re-opens the DB per op.
+    """
+
+    def __init__(self, profile: str, read_only: bool, runner=None):
+        self.profile = profile
+        self.read_only = read_only
+        self._runner = runner
+        self.closed = False
+
+    def _call(self, op: str, **extra):
+        if self.closed:
+            raise RuntimeError("session db handle is closed")
+        return _remote_runtime_op(op, {"profile": self.profile,
+                                       "read_only": self.read_only,
+                                       **extra},
+                                  runner=self._runner)
+
+    def resolve_session_by_title(self, title):
+        return self._call("resolve_by_title", title=title)
+
+    def create_session(self, session_id, source="cli", **kwargs):
+        # Deliberately unsupported on the remote handle: session creation must
+        # go through ``ensure_session``, which does create+title in ONE atomic
+        # remote op (two separate ops could leak an untitled row when the
+        # second fails).
+        raise NotImplementedError(
+            "remote handle: use ensure_session (create+title in one op)")
+
+    def set_session_title(self, session_id, title):
+        raise NotImplementedError(
+            "remote handle: use ensure_session (create+title in one op)")
+
+    def append_message(self, session_id, role, content, **kwargs):
+        return self._call("append_message", session_id=session_id,
+                          role=role, content=content)
+
+    def get_session(self, session_id):
+        return self._call("get_session", session_id=session_id)
+
+    def list_sessions_rich(self, source=None, limit=20, **kwargs):
+        return self._call("list_sessions_rich", source=source, limit=limit)
+
+    def message_count(self, session_id=None):
+        return self._call("message_count", session_id=session_id)
+
+    def get_messages(self, session_id, **kwargs):
+        return self._call("get_messages", session_id=session_id)
+
+    def get_session_title(self, session_id):
+        return self._call("get_session_title", session_id=session_id)
+
+    def close(self):
+        self.closed = True
+
+
+def _in_process_runtime():
+    """Import the Hermes runtime in-process, or return (None, None, reason).
+
+    ``reason`` is the import failure text so the honest environment-fault
+    message can name the missing module (the original wording spirit). Any
+    import-time exception — not just ImportError — counts as "this
+    interpreter cannot host the runtime": what it lacks is delegation, not a
+    second guess about whose package set is broken.
+    """
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        return profiles_mod, SessionDB, None
+    except Exception as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
+
+
+def _open_profile_session_db(profile: str, read_only: bool = False,
+                             create_db: bool = False):
     """Open ``<profile>``'s state.db via Hermes' own SessionDB, or None.
 
     Mirrors ``routes_orchestrator._open_profile_session_db`` (same call
@@ -372,28 +864,58 @@ def _open_profile_session_db(profile: str, read_only: bool = False):
     that must never write to the operator's live session databases. Returns
     ``None`` when the profile is unresolvable or has no state.db — the caller
     then reports an honest step failure rather than guessing.
+
+    ``create_db=True`` (used only by the ensure-session path) accepts a
+    profile directory whose state.db does not exist yet: a freshly created
+    orchestrator profile legitimately has none (hermes itself creates state.db
+    on the profile's first run), and SessionDB opening it into existence IS
+    that native behaviour. Read paths never pass it.
+
+    In-process when this interpreter can import the runtime; otherwise
+    DELEGATED to the hermes venv interpreter as remote ops behind a duck-typed
+    handle (t_9a9aeab1 — the brew keg venv has no hermes_cli/httpx). The two
+    semantics stay exactly distinct: a wrong/unresolvable interpreter raises
+    :class:`HermesRuntimeUnavailable`; an unresolvable profile or a missing
+    state.db returns None (a data fact).
     """
-    try:
-        from hermes_cli import profiles as profiles_mod
-        from hermes_state import SessionDB
-    except ImportError as exc:
-        # NOT "this profile has no sessions" — this interpreter cannot see the
-        # Hermes runtime at all. Swallowing it made `project sessions` print
-        # "no telegram history" for projects with years of history, because the
-        # `hscc` entry point runs under miniconda while hermes_cli lives in the
-        # hermes venv. An environment fault must never render as a data fact.
-        raise HermesRuntimeUnavailable(
-            f"cannot import the Hermes runtime ({exc}). The `hscc` CLI runs "
-            f"under {sys.executable}; hermes_cli/hermes_state live in the "
-            f"Hermes venv. Session history cannot be read from here."
-        ) from exc
+    profiles_mod, SessionDB, import_err = _in_process_runtime()
+    if profiles_mod is None:
+        # This interpreter cannot see the Hermes runtime at all. Swallowing it
+        # made `project sessions` print "no telegram history" for projects
+        # with years of history, because the `hscc` entry point ran under an
+        # interpreter while hermes_cli lives in the hermes venv. An environment
+        # fault must never render as a data fact — so first try delegating to
+        # an interpreter that CAN host the runtime; when none resolves, raise
+        # exactly the honest fault the original code raised.
+        if resolve_hermes_python() is None:
+            raise HermesRuntimeUnavailable(
+                f"cannot import the Hermes runtime ({import_err}). The `hscc` "
+                f"CLI runs under {sys.executable}; hermes_cli/hermes_state "
+                "live in the Hermes venv, and no interpreter with the runtime "
+                "could be resolved ($HSCC_HERMES_PYTHON, "
+                "$HERMES_HOME/hermes-agent/venv/bin, "
+                "~/.hermes/hermes-agent/venv/bin, PATH). Session history "
+                "cannot be read from here.")
+        # Mirror the in-process None semantics remotely: one cheap open_check
+        # op classifies "profile/dir/db unusable" (None, a data fact) from a
+        # real LOOK failure (raises).
+        try:
+            _remote_runtime_op("open_check",
+                               {"profile": profile, "read_only": read_only,
+                                "create_db": create_db})
+        except RemoteRuntimeError as exc:
+            if exc.code == "no_db":
+                return None
+            raise
+        return RemoteSessionHandle(profile, read_only)
+
     try:
         canon = profiles_mod.normalize_profile_name(profile)
         profiles_mod.validate_profile_name(canon)
         if not profiles_mod.profile_exists(canon):
             return None
         db_path = Path(profiles_mod.get_profile_dir(canon)) / "state.db"
-        if not db_path.exists():
+        if not create_db and not db_path.exists():
             return None
         return SessionDB(db_path=db_path, read_only=read_only)
     except Exception:
@@ -413,14 +935,52 @@ def ensure_session(name: str, profile: str, _session_db=None) -> dict:
     divergent): open the profile's state.db and, when no session is titled
     ``name``, create one via ``create_session`` + ``set_session_title``.
 
+    Under an interpreter that cannot host the Hermes runtime (the brew keg
+    venv — t_9a9aeab1) the whole ensure runs as ONE remote op under the hermes
+    venv interpreter: create + title land atomically there, so a partial
+    failure can never leak an untitled row. A fresh profile with no state.db
+    yet is legitimately ensure-able (hermes itself creates state.db on first
+    run), so this path opens with ``create_db=True`` — unlike read paths.
+
     Idempotent + never clobbers: an existing titled session is left exactly as
     it is. Returns ``{"status": "exists"}`` when already present, or
     ``{"status": "created", "session": <id>, "title": name}``. Raises
     :class:`LifecycleError` when the profile has no usable state.db, so the
     caller records it as a step failure that ``repair`` retries idempotently.
+    Raises :class:`HermesRuntimeUnavailable` when no interpreter can host the
+    Hermes runtime at all — an environment fault, never a step-shaped lie.
     """
-    opener = _resolve_session_db(profile, _session_db)
-    db = opener(profile)
+    if _session_db is None:
+        profiles_mod, _SessionDB, _import_err = _in_process_runtime()
+        if profiles_mod is None:
+            # Delegation path: the atomic one-op ensure under the hermes venv.
+            # create_db=True mirrors the in-process branch: a profile created
+            # moments ago legitimately has no state.db yet (hermes itself
+            # creates it on the profile's first run). The HSCC_HERMES_OPS=off
+            # verification force is honoured centrally in _remote_runtime_op.
+            try:
+                return _remote_runtime_op(
+                    "ensure_session",
+                    {"profile": profile, "title": name, "create_db": True})
+            except HermesRuntimeUnavailable as exc:
+                # Name the module THIS interpreter is missing — the original
+                # HermesRuntimeUnavailable wording spirit (an environment
+                # fault must be diagnosable, not just announced).
+                raise HermesRuntimeUnavailable(
+                    f"cannot import the Hermes runtime ({_import_err}). "
+                    f"{exc}") from None
+            except RemoteRuntimeError as exc:
+                if exc.code == "no_db":
+                    raise LifecycleError(
+                        f"profile {profile!r} has no usable state.db — "
+                        f"cannot ensure session '{name}': {exc}"
+                    ) from exc
+                raise LifecycleError(
+                    f"could not ensure session '{name}' on {profile!r}: {exc}"
+                ) from exc
+        db = _open_profile_session_db(profile, create_db=True)
+    else:
+        db = _session_db(profile)
     if db is None:
         raise LifecycleError(
             f"profile {profile!r} has no state.db — cannot ensure session "
@@ -448,6 +1008,22 @@ def ensure_session(name: str, profile: str, _session_db=None) -> dict:
             pass
 
 
+def delete_profile(name: str, _run=None) -> bool:
+    """Remove the ``<name>-orch`` orchestrator profile (atomicity rollback).
+
+    Deletion goes through Hermes' OWN ``hermes profile delete -y`` as a
+    subprocess — never in-process: the brew keg interpreter cannot import
+    hermes_cli (t_9a9aeab1), and re-implementing hermes' profile lifecycle
+    (gateway stop, service deregister, tombstone, multiplexer settle) here
+    would diverge from it. Returns True when hermes reported success; False
+    on a nonzero exit (the caller reports the leftover honestly).
+    """
+    profile = _orch_profile_name(name)
+    proc = _run_cmd(["hermes", "profile", "delete", profile, "--yes"],
+                    os.getcwd(), _run)
+    return getattr(proc, "returncode", 1) == 0
+
+
 def seed_session_with_digest(
     session_id: str, profile: str, text: str, _session_db=None
 ) -> bool:
@@ -470,7 +1046,13 @@ def seed_session_with_digest(
     — the caller then records an honest "could not seed" rather than a fake one.
     """
     opener = _session_db if _session_db is not None else _open_profile_session_db
-    db = opener(profile)
+    try:
+        db = opener(profile)
+    except Exception:
+        # Includes HermesRuntimeUnavailable / RemoteRuntimeError (t_9a9aeab1
+        # delegation): seeding is an enhancement — a failed look is reported
+        # by the caller as "could not seed", never raised through a chat.
+        return False
     if db is None:
         return False
     try:
@@ -523,6 +1105,17 @@ def create_project(
     entry (``repo`` is the one mandatory field). Functional step failures
     never escape as exceptions: they are collected into the report. Only a
     genuinely unexpected error (not a LifecycleError) propagates.
+
+    Atomicity of the profile + session pair (t_9a9aeab1): a profile CREATED
+    by this run is rolled back (``hermes profile delete -y``, Hermes' own
+    verb) when the session step fails afterwards, so a failed run never
+    leaves an orphan stub ``<name>-orch`` profile behind — the module
+    docstring's "partial failure never leaves a half-registered project"
+    promise, enforced for the profile surface. A profile that already existed
+    (``skipped``) is never deleted: it is not ours to roll back. The registry
+    write itself is a REPORTED step (its failure surfaces in the report
+    instead of crashing the command), and the retry path stays idempotent:
+    a re-run recreates the rolled-back profile and ensures the session.
     """
     results: list[dict] = []
     failed = False
@@ -616,14 +1209,29 @@ def create_project(
         )
 
     # --- Step 5b: chat session titled <name> on the orchestrator profile ---
+    session_failed = False
     try:
         sess = ensure_session(name, _orch_profile_name(name), _session_db=_session_db)
         results.append(
             {"id": "session", "status": "ok", "detail":
              f"session {name} {sess['status']}"}
         )
+    except HermesRuntimeUnavailable as exc:
+        # An environment fault stays an environment fault (t_9a9aeab1): it is
+        # reported as its own step with the actionable fix, and it triggers the
+        # same rollback as any other session failure — never a silent pass and
+        # never dressed up as "profile has no data".
+        failed = True
+        session_failed = True
+        results.append(
+            {
+                "id": "session", "status": "failed", "detail": str(exc),
+                "retry": f"flightdeck project new {name} --repo {repo} --apply",
+            }
+        )
     except LifecycleError as exc:
         failed = True
+        session_failed = True
         results.append(
             {
                 "id": "session", "status": "failed", "detail": str(exc),
@@ -631,18 +1239,57 @@ def create_project(
             }
         )
 
+    # --- Atomicity rollback (t_9a9aeab1) ---
+    # A profile this run CREATED, followed by a FAILED session step, is rolled
+    # back through Hermes' own delete verb: no orphan stub <name>-orch profile
+    # survives a half-finished run (the operator's brew-venv repro left one).
+    # An already-existing profile ("skipped") is never deleted — not ours.
+    if session_failed and any(
+        r["id"] == "profile" and r["status"] == "ok" for r in results
+    ):
+        if delete_profile(name, _run=_run):
+            results = [r for r in results if r["id"] != "profile"]
+            results.insert(
+                next(i for i, r in enumerate(results) if r["id"] == "session"),
+                {"id": "profile", "status": "rolled_back",
+                 "detail": f"profile {name}-orch created then rolled back "
+                           f"(session step failed)"}
+            )
+        else:
+            results.append(
+                {"id": "profile-cleanup", "status": "failed",
+                 "detail": f"could not roll back created profile "
+                           f"{name}-orch — remove it with: hermes profile "
+                           f"delete {name}-orch --yes"}
+            )
+
     # --- Step 6: registry entry (records every surface that succeeded) ---
-    ensure_registry(
-        registry_path,
-        name=name,
-        repo=repo,
-        board=name if include_board and any(
-            r["id"] == "board" and r["status"] == "ok" for r in results
-        ) else None,
-        topic=topic_val,
-        roadmap=roadmap_val,
-    )
-    results.append({"id": "registry", "status": "ok", "detail": f"registered {name}"})
+    # A registry write failure is a REPORTED failure (rc=1 + retry hint), not
+    # a traceback escaping the command (t_9a9aeab1 second-run confusion: the
+    # operator's rerun "registered" only because the first run died before the
+    # write; a crash here would leave the run state undocumented).
+    try:
+        ensure_registry(
+            registry_path,
+            name=name,
+            repo=repo,
+            board=name if include_board and any(
+                r["id"] == "board" and r["status"] == "ok" for r in results
+            ) else None,
+            topic=topic_val,
+            roadmap=roadmap_val,
+        )
+        results.append({"id": "registry", "status": "ok",
+                        "detail": f"registered {name}"})
+    except Exception as exc:
+        failed = True
+        results.append(
+            {
+                "id": "registry", "status": "failed",
+                "detail": f"registry write failed: {exc}",
+                "retry": f"flightdeck project new {name} --repo {repo} --apply",
+            }
+        )
 
     retry = None
     if failed:

@@ -32,6 +32,11 @@ PERIODIC_INTERVALS = {
     "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
     "nas": 900, "idle": 300, "workers": 60, "proxy": 60, "engine_wedge": 60,
     "dispatcher": 60,
+    # t_576964d5: post-boot relaunch adjudication. Coarse on purpose — its
+    # only real work is one sparkrun boot sweep + health probes per tick, and
+    # post-crash recovery tolerates minutes, not seconds (fast per-repair
+    # healing stays with engine-wedge recovery / check_workers).
+    "post_boot": 180,
 }
 
 
@@ -610,6 +615,7 @@ def run_daemon_loop():
     # of a chmod). run_daemon_loop is the single point both paths reach.
     os.umask(0o077)
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy, check_engine_wedge
+    from .post_boot import check_post_boot_relaunch
     from .dispatcher_wedge import check_dispatcher_wedge
     from .dispatcher_wedge import DISPATCHER_RECOVER_CHECK_INTERVAL as _DWE_INTERVAL
     from .trigger import trigger_engine
@@ -684,6 +690,7 @@ def run_daemon_loop():
         "idle": check_idle_monitor, "workers": check_workers,
         "proxy": check_proxy, "engine_wedge": check_engine_wedge,
         "dispatcher": check_dispatcher_wedge,
+        "post_boot": check_post_boot_relaunch,
     }
 
     def run_watchdog_loop():

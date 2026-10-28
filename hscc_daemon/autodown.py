@@ -2077,6 +2077,21 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
     save_config(cfg)
     log("Autodown: recorded state=down")
 
+    # -- 5a. Clear the post-boot expected_up marker (t_576964d5) -----------
+    # A teardown is INTENTIONAL down: after this, the post-boot pass must
+    # never relaunch anything on a reboot. The gate order already protects the
+    # window while the block is latched (classify() reads the block + this
+    # state); this clear is what keeps the protection TRUE even after a later
+    # wake attempt clears the block (block cleared + state down = healthy →
+    # the watchdog resumes — an old marker would then look relaunchable).
+    # Fail-soft: a marker problem never blocks the teardown.
+    try:
+        from . import post_boot as _pb
+        _pb.clear_expected_up("autodown: intentional idle teardown")
+    except Exception as e:
+        log(f"Autodown: post_boot marker clear failed ({e}) — gate order "
+            f"still protects this window", "WARN")
+
     # -- 6. Notify the operator (desktop) -----------------------------------
     _notify("HSCC serving layer brought DOWN by idle autodown "
             "(entire fleet — orchestrator AND keepalive workers stopped)",
@@ -2567,6 +2582,16 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
 
     # -- 6. Set state up + clear wake bookkeeping AND down_since (§4.6) ------
     _record_wake_success()
+
+    # -- 6a. Re-arm the post-boot expected_up marker (t_576964d5) ----------
+    # The wake just brought the WHOLE serving layer up: re-record the
+    # fleet-up footprint so a later HOST reboot can again be told apart from
+    # an intentional stop. Fail-soft: a marker problem never breaks the wake.
+    try:
+        from . import post_boot as _pb
+        _pb.record_expected_up(plan, reason="autodown wake")
+    except Exception as e:
+        log(f"Autodown: post_boot marker record failed ({e})", "WARN")
 
     # -- 7. Notify operator (§4.7) ------------------------------------------
     if notify:
