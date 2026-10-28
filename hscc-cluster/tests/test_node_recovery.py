@@ -36,9 +36,15 @@ OTHER = "10.0.0.2"
 # ── fabricated transport ────────────────────────────────────────────────────
 
 def state_lines(*, present=False, sha="", usec="0", devices="watchdog0",
-                fuser="", name="sbsa-gwdt", systemd="present",
-                watchdog_class="present"):
-    """A node's `state`-mode stdout as the node would print it."""
+                fuser="", identity="SBSA Generic Watchdog", systemd="present",
+                watchdog_class="present", device_state="", device_timeout="10",
+                wdctl="present", wdctl_timeout="10seconds"):
+    """A node's `state`-mode stdout as the node would print it.
+
+    Field names/shape mirror what the real GB10 probe emits (measured:
+    identity `SBSA Generic Watchdog`, state `inactive` while unarmed, no
+    `name` attribute at all).
+    """
     out = ["HSCC_STATE_BEGIN: 1",
            f"HSCC_PATH: {nr.DROPIN_PATH}",
            f"HSCC_PRESENT: {'true' if present else 'false'}",
@@ -47,7 +53,13 @@ def state_lines(*, present=False, sha="", usec="0", devices="watchdog0",
            "HSCC_REBOOT_WATCHDOG_USEC: 2min",
            f"HSCC_WATCHDOG_CLASS: {watchdog_class}",
            f"HSCC_WATCHDOG_DEVICES: {devices}",
-           f"HSCC_WATCHDOG0_NAME: {name}",
+           f"HSCC_WATCHDOG0_IDENTITY: {identity}",
+           f"HSCC_WATCHDOG0_STATE: {device_state}",
+           f"HSCC_WATCHDOG0_TIMEOUT: {device_timeout}",
+           f"HSCC_WATCHDOG0_MIN_TIMEOUT: 1",
+           f"HSCC_WATCHDOG0_MAX_TIMEOUT: 0",
+           f"HSCC_WDCTL: {wdctl}",
+           f"HSCC_WDCTL_TIMEOUT: {wdctl_timeout}",
            f"HSCC_FUSER: {fuser or 'unavailable'}",
            "HSCC_STATE_END: 1",
            "HSCC_RC: 0"]
@@ -95,7 +107,14 @@ class FakeTransport:
         return [c for c in self.commands if c["mode"] == mode]
 
 
-def ok_state(**kw):
+def ok_state(*, device_state="armed", **kw):
+    """A fabricated healthy node.
+
+    ``device_state`` defaults to "armed" because the healthy fixture is a node
+    whose core PID1 actually holds; tests about the config-only false green pass
+    device_state="inactive" explicitly.
+    """
+    kw.setdefault("device_state", device_state)
     return {"ok": True, "stdout": state_lines(**kw), "stderr": "", "code": 0}
 
 
@@ -524,13 +543,13 @@ def test_probe_never_writes():
 def test_probe_result_carries_what_the_doctor_needs():
     tp = FakeTransport(state=[ok_state(present=True, sha=nr.dropin_sha256(),
                                         usec="30s", devices="watchdog0",
-                                        name="sbsa-gwdt")])
+                                        identity="SBSA Generic Watchdog")])
     r = nr.probe_node(NODE, ssh_cmd=tp)
     assert r["armed"] is True and r["outcome"] == nr.OK_UNCHANGED
     assert r["state"]["runtime_watchdog_usec"] == "30s"
     assert r["state"]["present"] is True
     assert r["state"]["watchdog_devices"] == "watchdog0"
-    assert r["state"]["watchdog0_name"] == "sbsa-gwdt"
+    assert r["state"]["watchdog0_identity"] == "SBSA Generic Watchdog"
     assert r["expected"] == {"RuntimeWatchdogSec": "30s", "RebootWatchdogSec": "2min"}
 
 
@@ -591,7 +610,8 @@ class FakeNode:
     never overrides it; the defaults stay the real paths.
     """
 
-    def __init__(self, tmp_path, *, usec="0", existing=None, holders=None):
+    def __init__(self, tmp_path, *, usec="0", existing=None, holders=None,
+                 env_extra=None):
         self.root = tmp_path / "node"
         self.bin = self.root / "bin"
         self.etc = self.root / "etc" / "systemd" / "system.conf.d"
@@ -599,7 +619,15 @@ class FakeNode:
         self.dev_dir = self.root / "dev"
         for d in (self.bin, self.etc, self.sysfs / "watchdog0", self.dev_dir):
             d.mkdir(parents=True)
-        (self.sysfs / "watchdog0" / "name").write_text("sbsa-gwdt\n")
+        wd0 = self.sysfs / "watchdog0"
+        # Mirrors the real GB10 attributes (measured): identity, not name;
+        # state starts `inactive` and only becomes `armed` once the emulator's
+        # systemctl adopts the drop-in on daemon-reexec.
+        (wd0 / "identity").write_text("SBSA Generic Watchdog\n")
+        (wd0 / "state").write_text("inactive\n")
+        (wd0 / "timeout").write_text("10\n")
+        (wd0 / "min_timeout").write_text("1\n")
+        (wd0 / "max_timeout").write_text("0\n")
         self.dev = self.dev_dir / "watchdog0"
         self.dev.write_text("")
         self.dropin = self.etc / "90-hscc-watchdog.conf"
@@ -608,6 +636,7 @@ class FakeNode:
         if existing is not None:
             self.dropin.write_text(existing)
         self.holders = holders or ""
+        self.env_extra = env_extra or {}
 
         self._write("sudo", '#!/bin/sh\nif [ "$1" = "-n" ] && [ "$2" = "true" ]; then '
                             'exit ${HSCC_FAKE_SUDO_RC:-0}; fi\n'
@@ -628,15 +657,22 @@ class FakeNode:
         p.chmod(0o755)
 
     def _systemctl(self):
+        # daemon-reexec is where real PID1 opens /dev/watchdog0: the emulator
+        # mirrors that by flipping sysfs `state` from inactive to armed, so a
+        # "config written but nothing petting it" bug cannot hide behind the
+        # emulator's optimism. HSCC_FAKE_ARM_STATE overrides it (e.g. "inactive"
+        # to exercise the config-only false green).
         return (
             "#!/bin/sh\n"
             f'ST="{self.state}"; DROP="{self.dropin}"\n'
+            f'WDSTATE="{self.sysfs / "watchdog0" / "state"}"\n'
             'if [ "$1" = "daemon-reexec" ]; then\n'
             '  # PID1 re-reads Manager: adopt RuntimeWatchdogSec from the drop-in\n'
             '  if [ -f "$DROP" ]; then\n'
             '    v=$(grep -E "^RuntimeWatchdogSec=" "$DROP" | tail -1 | cut -d= -f2)\n'
             '    printf "%s" "${v:-0}" > "$ST"\n'
-            '  else printf "0" > "$ST"; fi\n'
+            '    printf "%s" "${HSCC_FAKE_ARM_STATE:-armed}" > "$WDSTATE"\n'
+            '  else printf "0" > "$ST"; printf "inactive" > "$WDSTATE"; fi\n'
             '  exit 0\n'
             'fi\n'
             'if [ "$1" = "show" ]; then\n'
@@ -652,6 +688,7 @@ class FakeNode:
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["TMPDIR"] = str(self.root)
+        env.update(self.env_extra)
 
         def run(command, timeout):
             proc = subprocess.run(["bash", "-s"], input=command, capture_output=True,
@@ -760,20 +797,37 @@ def test_real_script_disarm_removes_only_our_file(tmp_path):
 @needs_bash
 @needs_shasum
 def test_real_script_sudo_refusal_fails_that_node_clearly(tmp_path):
-    node = FakeNode(tmp_path)
-    env_extra = {"HSCC_FAKE_SUDO_RC": "1"}
-    base = node.transport()
-
-    def run(command, timeout):
-        env = dict(os.environ)
-        env["PATH"] = f"{node.bin}{os.pathsep}{os.environ.get('PATH', '')}"
-        env["TMPDIR"] = str(node.root)
-        env.update(env_extra)
-        proc = subprocess.run(["bash", "-s"], input=command, capture_output=True,
-                              text=True, env=env, timeout=60)
-        return {"ok": proc.returncode == 0, "stdout": proc.stdout,
-                "stderr": proc.stderr, "code": proc.returncode}
-    r = nr.arm_node(NODE, ssh_cmd=run, paths=node.paths)
+    node = FakeNode(tmp_path, env_extra={"HSCC_FAKE_SUDO_RC": "1"})
+    r = nr.arm_node(NODE, ssh_cmd=node.transport(), paths=node.paths)
     assert r["outcome"] == nr.ERROR and r["armed"] is False
     assert "sudo" in r["message"].lower()
     assert not node.dropin.exists()
+
+
+@needs_bash
+@needs_shasum
+def test_real_script_rejects_config_armed_but_device_silent(tmp_path):
+    """systemd adopting the timeout is NOT protection; PID1 must hold the core.
+
+    The node writes our bytes and reports RuntimeWatchdogUSec=30s, but its
+    watchdog core stays `state=inactive` — the case where a config-only check
+    would call the node protected while a hard hang would wedge it forever.
+    """
+    node = FakeNode(tmp_path, env_extra={"HSCC_FAKE_ARM_STATE": "inactive"})
+    r = nr.arm_node(NODE, ssh_cmd=node.transport(), paths=node.paths)
+    assert node.dropin.exists(), "the bytes were in fact written"
+    assert r["state"]["runtime_watchdog_usec"] == "30s", "systemd did adopt it"
+    assert r["outcome"] == nr.ERROR and r["armed"] is False
+    assert "nothing is petting" in r["message"]
+    assert "/dev/watchdog0" in r["message"]
+
+
+@needs_bash
+@needs_shasum
+def test_real_script_probe_flags_config_armed_but_device_silent(tmp_path):
+    """The same false green must show up in --probe (read-only), not just at install."""
+    node = FakeNode(tmp_path, env_extra={"HSCC_FAKE_ARM_STATE": "inactive"})
+    nr.arm_node(NODE, ssh_cmd=node.transport(), paths=node.paths)
+    r = nr.probe_node(NODE, ssh_cmd=node.transport(), paths=node.paths)
+    assert r["outcome"] == nr.ERROR and r["armed"] is False
+    assert "state='inactive'" in r["message"]

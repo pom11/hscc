@@ -266,7 +266,27 @@ emit_state() {
   if [ -d "$SYSFS_DIR" ]; then
     say "HSCC_WATCHDOG_CLASS: present"
     say "HSCC_WATCHDOG_DEVICES: $(ls "$SYSFS_DIR" 2>/dev/null | tr '\n' ' ')"
-    [ -r "$SYSFS_DIR/watchdog0/name" ] && say "HSCC_WATCHDOG0_NAME: $(cat "$SYSFS_DIR/watchdog0/name" 2>/dev/null)"
+    # The SBSA driver's attributes are `identity`/`state`/`options`/`timeout`
+    # (measured on a GB10 running systemd 255 — there is NO `name` file, so
+    # reading `name` alone would report an empty identity on every node).
+    _w0="$SYSFS_DIR/watchdog0"
+    if [ -r "$_w0/identity" ]; then
+      say "HSCC_WATCHDOG0_IDENTITY: $(cat "$_w0/identity" 2>/dev/null)"
+    elif [ -r "$_w0/name" ]; then
+      say "HSCC_WATCHDOG0_IDENTITY: $(cat "$_w0/name" 2>/dev/null)"
+    fi
+    for _a in state timeout max_timeout min_timeout options status bootstatus; do
+      [ -r "$_w0/$_a" ] && say "HSCC_WATCHDOG0_$(printf '%s' "$_a" | tr 'a-z' 'A-Z'): $(cat "$_w0/$_a" 2>/dev/null)"
+    done
+    # `wdctl` is the operator-facing view the report asks for. Advisory: it is
+    # not installed everywhere, so absence is not a fault.
+    if command -v wdctl >/dev/null 2>&1; then
+      say "HSCC_WDCTL: present"
+      say "HSCC_WDCTL_TIMEOUT: $(wdctl "$DEV" 2>/dev/null | awk -F: '/^Timeout:/{gsub(/ /,"",$2);print $2}')"
+      say "HSCC_WDCTL_TIMELEFT: $(wdctl "$DEV" 2>/dev/null | awk -F: '/^Timeleft:/{gsub(/ /,"",$2);print $2}')"
+    else
+      say "HSCC_WDCTL: absent"
+    fi
   else
     say "HSCC_WATCHDOG_CLASS: missing"
     say "HSCC_WATCHDOG_DEVICES:"
@@ -475,10 +495,31 @@ def _state_from(lines: Dict[str, str]) -> Dict[str, Any]:
         "reboot_watchdog_usec": lines.get("HSCC_REBOOT_WATCHDOG_USEC") or "",
         "watchdog_class": lines.get("HSCC_WATCHDOG_CLASS") or "present",
         "watchdog_devices": lines.get("HSCC_WATCHDOG_DEVICES") or "",
-        "watchdog0_name": lines.get("HSCC_WATCHDOG0_NAME") or "",
+        "watchdog0_identity": lines.get("HSCC_WATCHDOG0_IDENTITY") or "",
+        # /sys/class/watchdog/watchdog0/* — `state` is the honest "is anyone
+        # petting it" signal; measured `inactive` on an unarmed GB10.
+        "device_state": lines.get("HSCC_WATCHDOG0_STATE") or "",
+        "device_timeout": lines.get("HSCC_WATCHDOG0_TIMEOUT") or "",
+        "device_min_timeout": lines.get("HSCC_WATCHDOG0_MIN_TIMEOUT") or "",
+        "device_max_timeout": lines.get("HSCC_WATCHDOG0_MAX_TIMEOUT") or "",
+        "wdctl": lines.get("HSCC_WDCTL") or "absent",
+        "wdctl_timeout": lines.get("HSCC_WDCTL_TIMEOUT") or "",
         "fuser": lines.get("HSCC_FUSER") or "",
         "systemd": lines.get("HSCC_SYSTEMD") or "present",
     }
+
+
+def device_is_active(state: Dict[str, Any]) -> Optional[bool]:
+    """Is the watchdog core actually held open and being petted?
+
+    None when the node gave no readable `state` (older driver, no sysfs) — the
+    caller must not turn "unknown" into either answer. `inactive` means nobody
+    owns it; `armed`/`active`/`paused` all mean PID1 (or someone) has it.
+    """
+    raw = (state.get("device_state") or "").strip().lower()
+    if not raw:
+        return None
+    return raw not in ("inactive", "closed", "disarmed")
 
 
 def _result(node: str, outcome: str, *, action: str = "", message: str = "",
@@ -552,14 +593,18 @@ def probe_node(node: str, *, ssh_cmd: Runners, timeout: int = 30,
     holders = (st.get("fuser") or "").strip()
     foreign = (not armed) and holders not in ("", "unavailable")
     if armed:
+        # Config adopted is not protection: PID1 must also have the core open.
+        problem = _device_petting_problem(st)
+        if problem:
+            return _result(node, ERROR, action="probe",
+                           message=f"{node}: {problem}", state=st)
         return _result(node, OK_UNCHANGED, action="probe",
-                       message=f"RuntimeWatchdogUSec={st['runtime_watchdog_usec']} "
-                               f"(target {RUNTIME_WATCHDOG_SEC}s); "
+                       message=f"{_verify_text(st)} (target {RUNTIME_WATCHDOG_SEC}s); "
                                f"drop-in {'present' if st['present'] else 'ABSENT'}",
                        state=st)
     if foreign:
         return _result(node, REFUSED_FOREIGN, action="probe",
-                       message=f"{DROPIN_PATH} not armed and {st.get('watchdog0_name') or '/dev/watchdog0'} "
+                       message=f"{DROPIN_PATH} not armed and {st.get('watchdog0_identity') or paths.dev} "
                                f"held by [{st['fuser']}]",
                        state=st)
     why = []
@@ -592,6 +637,35 @@ def arm_node(node: str, *, ssh_cmd: Runners, dry_run: bool = False,
     except Exception as e:  # a per-node fault must not abort the fleet pass
         return _result(node, ERROR,
                        message=f"unexpected {type(e).__name__}: {e}")
+
+
+def _verify_text(verify: Dict[str, Any]) -> str:
+    """What the node actually reports after the write — sysfs + wdctl."""
+    bits = [f"RuntimeWatchdogUSec={verify.get('runtime_watchdog_usec') or 'unset'}"]
+    if verify.get("device_state"):
+        bits.append(f"device state={verify['device_state']}")
+    if verify.get("device_timeout"):
+        bits.append(f"device timeout={verify['device_timeout']}s")
+    if verify.get("wdctl") == "present" and verify.get("wdctl_timeout"):
+        bits.append(f"wdctl Timeout={verify['wdctl_timeout']}")
+    return ", ".join(bits)
+
+
+def _device_petting_problem(verify: Dict[str, Any]) -> str:
+    """Why the device is NOT being petted, or "" when it is / cannot be known.
+
+    A drop-in that systemd adopted (RuntimeWatchdogUSec=30s) is only protection
+    if PID1 actually opened /dev/watchdog0. sysfs `state == inactive` proves it
+    did not — the exact case where a config-only check would report a false
+    green. An unreadable state is unknown, not a failure: we never assert a
+    fault we cannot see, and never assert safety we cannot see either.
+    """
+    active = device_is_active(verify)
+    if active is False:
+        return (f"systemd reports the timeout but the watchdog core is "
+                f"state={verify.get('device_state')!r} — nothing is petting "
+                f"{WATCHDOG_DEV}, so a hard hang would NOT reset this node")
+    return ""
 
 
 def _arm_node(node: str, *, ssh_cmd: Runners, dry_run: bool,
@@ -638,9 +712,13 @@ def _arm_node(node: str, *, ssh_cmd: Runners, dry_run: bool,
     # from the state we just read and re-exec only if it has not.
     if managed:
         if is_armed_state(st):
+            problem = _device_petting_problem(st)
+            if problem:
+                return _result(node, ERROR, action="refused",
+                               message=f"{node}: {problem}", state=st)
             return _result(node, OK_UNCHANGED, action="unchanged",
                            message=f"{node}: {paths.dropin} already managed and "
-                                   f"RuntimeWatchdogUSec={st['runtime_watchdog_usec']}",
+                                   f"{_verify_text(st)}",
                            state=st)
         # Content right, PID1 never took it (manual system.conf edit, or a run
         # that died before daemon-reexec). Re-applying identical bytes + re-exec
@@ -690,10 +768,20 @@ def _arm_node(node: str, *, ssh_cmd: Runners, dry_run: bool,
                                f"{verify.get('runtime_watchdog_usec') or 'unset'!r}; expected "
                                f"{RUNTIME_WATCHDOG_SEC}s (daemon-reexec may have been refused)",
                        code=code, state=st, detail={"verify": verify})
+    problem = _device_petting_problem(verify)
+    if problem:
+        # systemd took the config but the core is not being petted: the node
+        # would still wedge on a hard hang. Report it; never call this armed.
+        # `state` is the post-write observation — the pre-write state would
+        # hide the very discrepancy this result exists to surface.
+        return _result(node, ERROR, action=action or "applied",
+                       message=f"{node}: {problem} (RuntimeWatchdogUSec="
+                               f"{verify.get('runtime_watchdog_usec')})",
+                       code=code, state=verify, detail={"verify": verify})
     return _result(node, OK_UNCHANGED if action in ("unchanged", "reexec") else OK_APPLIED,
                    action=action or "applied",
                    message=f"RuntimeWatchdogSec={RUNTIME_WATCHDOG_SEC}s armed "
-                           f"(RuntimeWatchdogUSec={verify['runtime_watchdog_usec']})",
+                           f"({_verify_text(verify)})",
                    state=verify, detail={"verify": verify})
 
 
