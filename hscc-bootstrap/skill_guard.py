@@ -373,7 +373,7 @@ def readiness_for_home(hermes_home, *, name: str = REVIEW_SKILL) -> dict:
     Returns ``{"home", "label", "reviewer", "state", "paths", "duplicates"}``.
     """
     home = Path(hermes_home).expanduser()
-    label = home.name if home.name != "home" else str(home)
+    label = home.name
     roots = profile_skill_roots(home)
     res = resolution(roots, name)
     dups: dict[str, list[str]] = {}

@@ -148,11 +148,22 @@ def hermes_install_dir(hermes_home=None) -> str:
 
 
 def _skills_home(hermes_home) -> str:
-    """Root Hermes home for skill scanning (doctor may run with HERMES_HOME
-    pointing at a PROFILE dir — the normal worker mode; the skills trees to
-    audit live under the ROOT, which ``hermes_root_from_home`` resolves)."""
-    root = hermes_root_from_home(hermes_home)
-    return root or os.path.expanduser(str(hermes_home or "~/.hermes"))
+    """Root Hermes home for skill scanning.
+
+    A PROFILE-scoped ``HERMES_HOME`` (``<root>/profiles/<name>`` — the normal
+    worker mode) is walked up ONE level to the root, because the fleet-wide
+    audit must see every sibling profile. Any other home is scanned as-is.
+    Deliberately NO fallback to ``~/.hermes`` (unlike
+    ``hermes_root_from_home``): doctor may be pointed at a throwaway tree
+    (``--home`` in tests and acceptance runs), and silently reading the
+    operator's real home from a tmp run would both leak state into a "hermetic"
+    verdict and report the wrong tree.
+    """
+    home = os.path.expanduser(str(hermes_home or "~/.hermes"))
+    parent = os.path.dirname(home)
+    if parent and os.path.basename(parent) == "profiles":
+        return os.path.dirname(parent)
+    return home
 
 
 def _skill_findings(hermes_home) -> tuple[list, list]:
@@ -196,7 +207,7 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
                 dups.setdefault(name, []).extend(paths)
         for name in sorted(dups):
             dup_lines.append(f"{label}: {name} -> " + "; ".join(dups[name]))
-        reviewer = label.startswith("default (root)") or skill_guard.is_reviewer_capable(label)
+        reviewer = label == "default (root)" or skill_guard.is_reviewer_capable(label)
         if not reviewer:
             continue
         res = skill_guard.resolution(roots, skill_guard.REVIEW_SKILL)
