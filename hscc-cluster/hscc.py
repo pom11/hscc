@@ -467,6 +467,27 @@ def _run_or_print(cmd, dry_run, timeout=None):
     }
 
 
+def _post_boot_module():
+    """Import the daemon's post_boot module, or None when unavailable.
+
+    Best-effort on purpose: the expected_up marker is an ENHANCEMENT to the
+    fleet verbs — a post_boot import failure must never break `cluster up`
+    or `cluster down` (same tolerance the daemon gives its own startup hooks).
+    """
+    try:
+        from hscc_daemon import post_boot
+        return post_boot
+    except Exception:
+        try:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            from hscc_daemon import post_boot
+            return post_boot
+        except Exception:
+            return None
+
+
 def cmd_cluster_down(dry_run=False):
     """Stop ALL sparkrun workloads across the fleet. ``[--dry-run]``.
 
@@ -474,16 +495,31 @@ def cmd_cluster_down(dry_run=False):
     ``sparkrun stop --all`` built by ``serving.fleet_down_cmd()``, scoped to
     the configured cluster. Prints the exact command; ``--dry-run`` prints
     without executing. autodown.teardown() uses this same builder.
+
+    t_576964d5: a real (non-dry-run) down ALSO clears the post-boot
+    expected_up marker — this verb IS the operator's "stay down" intent, so
+    after it the post-boot pass must never relaunch anything (the fail-safe
+    direction: the marker is cleared even when the stop itself failed,
+    because "down, no relaunch" is always the safe reading of a deliberate
+    `cluster down`). ``--dry-run`` touches nothing.
     """
     serving = _load_daemon_serving()
     if serving is None:
         return {"error": "cannot import hscc_daemon.serving (fleet down "
                          "requires the daemon's serving module)"}
     cmd = serving.fleet_down_cmd()
-    return _run_or_print(cmd, dry_run)
+    res = _run_or_print(cmd, dry_run)
+    if not dry_run:
+        pb = _post_boot_module()
+        if pb is not None:
+            try:
+                pb.clear_expected_up("hscc cluster down")
+            except Exception as e:
+                print(f"WARN: expected_up marker clear failed: {e}")
+    return res
 
 
-def cmd_cluster_up(dry_run=False):
+def cmd_cluster_up(dry_run=False, nodes=None):
     """Start EVERY unit in serving.json (orchestrator AND keepalive workers).
 
     ``[--dry-run]`` prints the commands without executing. The single source
@@ -491,6 +527,13 @@ def cmd_cluster_up(dry_run=False):
     ``serving.fleet_up_plan()`` (reusing the existing ``VLLM_START_CMD`` form
     / ``orchestrator_recipe``) and runs them. autodown.autoup() uses this same
     builder.
+
+    ``nodes`` (t_576964d5) narrows the launch to the plan entries whose span
+    TOUCHES one of the given hosts — the scoping the post-boot relaunch path
+    (hscc_daemon/post_boot.py) needs to relaunch only the units on a node
+    that rebooted, through THIS surface rather than a second start path.
+    ``None`` (the default, every existing caller) is the full fleet-up plan,
+    byte-identical to the previous behaviour.
 
     Hardened per t_be4b94ca (2026-10-22: an already-serving unit's launch hung
     ~19 min under the 1200s model-load grace, and the SERIAL loop starved the
@@ -507,12 +550,29 @@ def cmd_cluster_up(dry_run=False):
 
     The A2 launch guard keeps its SINGLE status fetch for the whole plan
     (prefetched here, passed into every unit worker).
+
+    t_576964d5 marker hook (post-boot relaunch), fail-soft — a marker
+    problem must never break fleet up:
+
+      * a REAL (non-dry-run) up records the full fleet-up footprint as the
+        expected_up set regardless of ``nodes`` scoping (this verb is the
+        operator claiming "I want the fleet running"). No post-success stamp:
+        a later post-boot pass re-probes unit health, so a unit this call
+        brought up is simply "already serving" (no candidate), while one the
+        host then took down again correctly stays eligible for relaunch.
     """
     serving = _load_daemon_serving()
     if serving is None:
         return {"error": "cannot import hscc_daemon.serving (fleet up "
                          "requires the daemon's serving module)"}
     plan = serving.fleet_up_plan()
+    if nodes:
+        # Scope to units whose span touches a named host (a TP unit launches
+        # as its whole group, so membership is span-intersection, not head
+        # equality). Keeps plan ORDER. Dry-run shows the scoped plan.
+        wanted = {str(n) for n in nodes if n}
+        plan = [e for e in plan
+                if wanted & {str(n) for n in (e.get("nodes") or [])}]
     if not plan:
         return {"error": "no serving units to start (serving.json missing or "
                          "empty?)", "units": 0}
@@ -523,6 +583,17 @@ def cmd_cluster_up(dry_run=False):
     from hscc_daemon import health as _daemon_health  # deferred: CLI stays light
     guard_status = (None if dry_run
                     else _daemon_health._launch_guard_status_fn())
+
+    # Record the operator's "expected up" claim BEFORE launching (t_576964d5):
+    # the marker says what the fleet SHOULD be running even if this command's
+    # own launches then fail or are interrupted. Full footprint, always.
+    pb = None if dry_run else _post_boot_module()
+    if pb is not None:
+        try:
+            pb.record_expected_up(serving.fleet_up_plan(),
+                                  reason="hscc cluster up")
+        except Exception as e:
+            print(f"WARN: expected_up marker record failed: {e}")
 
     if dry_run:
         # Nothing is launched and nothing is probed — print the plan serially
