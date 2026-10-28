@@ -5,7 +5,10 @@ Everything network-facing is faked; nothing here touches the fleet.
 
 import io
 import json
+import urllib.error
+import urllib.request
 
+import pytest
 from rich.console import Console
 
 from hscc_daemon import cli_theme
@@ -213,3 +216,237 @@ def test_monitor_flags():
     assert "whole number" in ok("--live", "--interval", "x")[1]
     assert "at least 1" in ok("--live", "--interval", "0")[1]
     assert "only apply with --live" in ok("--interval", "5")[1]
+
+
+# ── errno 65 (macOS Local Network TCC) → /usr/bin/curl fallback ────────────
+#
+# A Homebrew keg / Framework python is adhoc-signed, so macOS TCC has no
+# stable identity to bind the Local Network grant to and EVERY private-range
+# connect fails `OSError(65, 'No route to host')` while the fleet is healthy
+# and Apple-signed /usr/bin/curl reaches the same URL. Symptom this pins: the
+# whole serving table rendering `down` on a live fleet. Nothing here touches
+# the network or a real curl — urlopen and the curl seam are both stubbed.
+
+import urllib.error
+import urllib.request
+
+
+class _CurlStub:
+    """Records every argv the fallback hands the curl seam; returns canned rc."""
+
+    def __init__(self, rc=0, out=b"curl-body", err=b""):
+        self.rc, self.out, self.err = rc, out, err
+        self.argvs = []
+        self.timeouts = []
+
+    def __call__(self, argv, timeout):
+        self.argvs.append(list(argv))
+        self.timeouts.append(timeout)
+        return self.rc, self.out, self.err
+
+
+def _urlopen_raises(exc):
+    """A urlopen replacement that always fails with ``exc``."""
+    def _fake(*a, **kw):
+        raise exc
+    return _fake
+
+
+def _errno65(host="10.0.0.1"):
+    return urllib.error.URLError(OSError(65, "No route to host", host))
+
+
+@pytest.fixture
+def curl_seam(monkeypatch):
+    """Install a curl stub on the real seam and hand back a fresh notice ticket."""
+    def _install(rc=0, out=b"curl-body", err=b""):
+        stub = _CurlStub(rc, out, err)
+        monkeypatch.setattr(cl, "_lan_curl_run", stub)
+        cl._lan_curl_reset_notice()
+        return stub
+    return _install
+
+
+def test_errno65_on_private_host_falls_back_to_curl_and_returns_body(curl_seam, monkeypatch):
+    """The reported failure: errno 65 on a LAN backend now yields the body."""
+    stub = curl_seam(out=METRICS.encode())
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    assert cl._http_get("http://10.0.0.1:8000/metrics", 3) == METRICS.encode()
+    assert stub.argvs == [["/usr/bin/curl", "-sS", "--fail", "-L", "--max-time", "3",
+                           "http://10.0.0.1:8000/metrics"]]
+    assert stub.timeouts == [3]
+
+
+def test_fallback_argv_is_a_list_never_a_shell(curl_seam, monkeypatch):
+    """argv-list only: no shell=True, no string command, URL last, curl first."""
+    stub = curl_seam()
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    argv = stub.argvs[0]
+    assert isinstance(argv, list) and argv[0] == "/usr/bin/curl"
+    assert argv[-1] == "http://10.0.0.1:8000/metrics"
+    for flag in ("--fail", "-L", "-sS", "--max-time"):
+        assert flag in argv
+
+
+@pytest.mark.parametrize("url", [
+    "http://example.com:8000/metrics",   # public name: not the TCC story
+    "http://8.8.8.8/metrics",            # public IP
+    "http://100.128.0.1/metrics",        # just ABOVE the tailnet CGNAT /10
+    "http://localhost:4000/v1/model/info",  # TCC does not gate loopback
+    "http://127.0.0.1:4000/v1/model/info",
+])
+def test_errno65_off_a_private_host_propagates_unchanged(curl_seam, monkeypatch, url):
+    """No silent curl detour for anything that is not a private host."""
+    stub = curl_seam()
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    with pytest.raises(urllib.error.URLError) as ei:
+        cl._http_get(url, 3)
+    assert ei.value.reason.errno == 65
+    assert stub.argvs == []
+
+
+def test_errno113_on_private_host_does_not_fall_back(curl_seam, monkeypatch):
+    """Linux EHOSTUNREACH is 113 = genuinely no route; it must stay an error."""
+    stub = curl_seam()
+    exc = urllib.error.URLError(OSError(113, "No route to host", "10.0.0.1"))
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
+    with pytest.raises(urllib.error.URLError) as ei:
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    assert ei.value.reason.errno == 113
+    assert stub.argvs == []
+
+
+def test_httperror_from_urlopen_is_untouched(curl_seam, monkeypatch):
+    """A status is a probe answer, not a denial — no fallback on any python."""
+    stub = curl_seam()
+    exc = urllib.error.HTTPError("http://10.0.0.1:8000/metrics", 503,
+                                 "down", None, None)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    assert ei.value.code == 503
+    assert stub.argvs == []
+
+
+def test_timeout_from_urlopen_is_untouched(curl_seam, monkeypatch):
+    stub = curl_seam()
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        _urlopen_raises(TimeoutError("timed out")))
+    with pytest.raises(TimeoutError):
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    assert stub.argvs == []
+
+
+def test_curl_exit_22_raises_the_httperror_family(curl_seam, monkeypatch):
+    """`--fail` exit 22 must come back as HTTPError, not 'unreachable'."""
+    curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 404\n")
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    assert ei.value.code == 404
+    assert isinstance(ei.value, urllib.error.URLError)
+
+
+def test_curl_failure_of_another_kind_keeps_the_original_error(curl_seam, monkeypatch):
+    """curl could not reach it either → it really is down (errno 65 stands)."""
+    curl_seam(rc=7, err=b"curl: (7) Couldn't connect to server\n")
+    exc = _errno65()
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
+    with pytest.raises(urllib.error.URLError) as ei:
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    assert ei.value.reason.errno == 65
+
+
+def test_curl_missing_surfaces_original_error_with_hint(curl_seam, monkeypatch):
+    """No usable /usr/bin/curl: the errno-65 error still surfaces, + a hint."""
+    def no_curl(argv, timeout):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+    monkeypatch.setattr(cl, "_lan_curl_run", no_curl)
+    cl._lan_curl_reset_notice()
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    with pytest.raises(urllib.error.URLError) as ei:
+        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    msg = str(ei.value)
+    assert "No route to host" in msg            # original message kept, not replaced
+    assert "curl fallback unavailable" in msg   # one-line hint appended
+
+
+def test_notice_appears_exactly_once_across_many_fallbacks(curl_seam, monkeypatch,
+                                                            capsys):
+    """The monitor re-renders per tick; the notice must not repeat."""
+    stub = curl_seam()
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+    for i in range(5):
+        cl._http_get(f"http://10.0.0.{i}:8000/metrics", 3)
+    assert len(stub.argvs) == 5
+    assert capsys.readouterr().err.count(cl.LAN_CURL_FALLBACK_NOTICE) == 1
+
+
+@pytest.mark.parametrize("host", ["10.0.0.1", "192.0.2.1", "172.20.3.4",
+                                 "100.64.0.3", "100.64.0.254",
+                                 "169.254.9.9", "node-1.local", "gateway.local",
+                                 "fd00::1234", "fe80::1"])
+def test_private_host_classification_covers_lan_tailnet_and_local(host):
+    """The ranges the Local Network gate can deny — incl. the whole tailnet
+    CGNAT block, which Python does NOT classify as private on its own."""
+    assert cl._lan_private_host(host) is True
+
+
+@pytest.mark.parametrize("host", ["8.8.8.8", "1.1.1.1", "example.com",
+                                  "api.example.local.example", "100.128.0.1",
+                                  "100.63.255.1", "2001:4860::8888",
+                                  "127.0.0.1", "localhost", "localhost.localdomain",
+                                  "", None, "::1", "  "])
+def test_public_loopback_and_unparseable_hosts_are_not_private(host):
+    """Public hosts, loopback and junk never take the fallback: TCC only gates
+    local traffic, and a public errno 65 is a real firewall/DNS problem."""
+    assert cl._lan_private_host(host) is False
+
+
+def test_poller_renders_backends_up_under_errno65(curl_seam, monkeypatch):
+    """End-to-end for the reported symptom: the table must show `up`, not `down`.
+
+    Realistic shape: the proxy is on loopback (TCC does not gate it, so urllib
+    serves it and the route map loads) while the LAN backends are denied — which
+    is exactly how the incident read: routes present, every backend `down`.
+    """
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        if url.endswith("/v1/model/info"):     # loopback proxy: urllib is fine
+            return _Resp(json.dumps(MODEL_INFO).encode())
+        raise _errno65()                        # LAN backend: denied
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    curl_urls = []
+
+    def fake_curl(argv, timeout):
+        curl_urls.append(argv[-1])
+        return 0, METRICS.encode(), b""
+    monkeypatch.setattr(cl, "_lan_curl_run", fake_curl)
+    cl._lan_curl_reset_notice()
+
+    p = cl.ServingPoller(clock=lambda: 100.0)
+    try:
+        rows = p.poll()
+    finally:
+        p.close()
+    assert not [r for r in rows if r.get("error")], rows
+    assert {(r["node"], r["port"], r["running"]) for r in rows} == {
+        ("10.0.0.1", "8000", 3), ("10.0.0.2", "8001", 3)}
+    # the fallback ran for the two LAN backends only — never for the loopback proxy
+    assert sorted(curl_urls) == ["http://10.0.0.1:8000/metrics",
+                                 "http://10.0.0.2:8001/metrics"]

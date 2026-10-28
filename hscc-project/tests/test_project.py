@@ -44,6 +44,7 @@ class FakeRun:
         self.committed = committed
         self.profiles = set(profiles)   # profiles `hermes profile list` reports
         self.created_profiles = []      # profiles actually created
+        self.deleted_profiles = []      # profiles `profile delete` removed
         self.fail_cmd = None      # e.g. ("git", "init") fail next matching call
         self.fail_stderr = "boom"
         self.calls: list[list[str]] = []
@@ -70,6 +71,12 @@ class FakeRun:
                     target = cmd[3]
                     self.created_profiles.append(target)
                     self.profiles.add(target)
+                    return self._proc(cmd, 0)
+                if cmd[2] == "delete":
+                    # t_9a9aeab1 rollback path: `hermes profile delete <n> --yes`.
+                    target = cmd[3]
+                    self.deleted_profiles.append(target)
+                    self.profiles.discard(target)
                     return self._proc(cmd, 0)
             raise AssertionError(f"FakeRun does not know this hermes command: {cmd!r}")
 

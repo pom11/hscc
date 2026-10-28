@@ -68,9 +68,34 @@ into `~/.hermes/plugins` and hyphenated dirs are not importable package names,
 so `hscc-cluster` cannot `import doctor` from `hscc-bootstrap`. Keep the two
 byte-compatible so both stay in lockstep.
 
+Since t_391b084e that rule is enforced, not just written down:
+`hscc-cluster/tests/test_lan_curl_fallback.py` extracts the delimited
+`lan_curl_fallback` block from all three copies
+(`hscc_daemon/cluster_live.py`, `hscc-bootstrap/doctor.py`,
+`hscc-cluster/cluster_template.py`) and fails on any byte of drift, and
+compares the two `_http_get_default` bodies apart from docstrings. Edit all
+three copies in one commit.
+
+The block is the macOS Local Network workaround: an adhoc-signed interpreter
+(a Homebrew keg's `Python.app`) has no stable TCC signing identity, so EVERY
+private-range connect fails `errno 65` while Apple-signed `/usr/bin/curl`
+reaches the same URL. The retry fires on errno **65 specifically** on a
+**private** host only — Linux `EHOSTUNREACH` (113) means genuinely no route and
+must never be retried — and maps curl's `--fail` exit 22 back to `HTTPError` so
+the three-way verdict above (`ok` / `unreachable` / `error`) survives. The
+api_key travels in a 0600 `-H @file`, never in argv, because `ps` shows every
+token of a child process.
+
 ## Tests that pin this
 
 `hscc-cluster/tests/test_apply.py` — the probe-before-write cases (alias
 served / only-concrete served / ambiguous / unreachable → refuse), the
 `skip_delegation` + `routing:` interaction, and the argv-level
 `--served-model-name` alias tests. Run: `python -m pytest tests/ -q`.
+
+`hscc-cluster/tests/test_lan_curl_fallback.py` — the mirror rule above, plus
+the fallback on this plugin's copy (errno 65 → body, errno 113 → no fallback,
+public/loopback → no fallback, exit 22 → `HTTPError`, notice once, api_key
+never in argv). The same fallback is pinned on the other two surfaces in
+`hscc_daemon/tests/test_cluster_live.py` and
+`hscc-bootstrap/tests/test_doctor.py::TestLanCurlFallback`.

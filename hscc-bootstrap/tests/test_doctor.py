@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from io import StringIO
 from unittest.mock import patch
 
@@ -1602,3 +1604,165 @@ class TestFleetChecksSkipInSuite:
             _status_runner=lambda cl: "",
             _serving_raw=_SERVING_TWO)
         assert res2["ok"] is True   # TCC denial is a WARNING, not fatal
+
+
+# ── errno 65 (macOS Local Network TCC) → /usr/bin/curl fallback ────────────
+#
+# The same block hscc_daemon/cluster_live.py and hscc-cluster/cluster_template.py
+# carry verbatim (each plugin deploys standalone; hyphenated dirs are not
+# importable package names, so none of them can import another). Pinned
+# byte-identical by hscc-cluster/tests/test_lan_curl_fallback.py. Nothing here
+# touches the network or a real curl — urlopen and the curl seam are stubbed.
+
+class _CurlStub:
+    """Records every argv the fallback hands the curl seam; returns canned rc."""
+
+    def __init__(self, rc=0, out=b'{"data": []}', err=b""):
+        self.rc, self.out, self.err = rc, out, err
+        self.argvs = []
+
+    def __call__(self, argv, timeout):
+        self.argvs.append(list(argv))
+        return self.rc, self.out, self.err
+
+
+def _errno65(host="10.0.0.1"):
+    return urllib.error.URLError(OSError(65, "No route to host", host))
+
+
+def _urlopen_raises(exc):
+    def _fake(*a, **kw):
+        raise exc
+    return _fake
+
+
+@pytest.fixture
+def curl_seam(monkeypatch):
+    """Stub the curl seam on THIS module's copy and refill the notice ticket."""
+    def _install(rc=0, out=b'{"data": []}', err=b""):
+        stub = _CurlStub(rc, out, err)
+        monkeypatch.setattr(doctor, "_lan_curl_run", stub)
+        doctor._lan_curl_reset_notice()
+        return stub
+    return _install
+
+
+class TestLanCurlFallback:
+    def test_errno65_on_private_host_falls_back_and_returns_body(self, curl_seam,
+                                                                monkeypatch):
+        stub = curl_seam(out=b'{"data": [{"id": "worker-model"}]}')
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        got = doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        assert got == '{"data": [{"id": "worker-model"}]}'
+        assert stub.argvs == [["/usr/bin/curl", "-sS", "--fail", "-L",
+                               "--max-time", "10",
+                               "http://10.0.0.1:4000/v1/models"]]
+
+    @pytest.mark.parametrize("url", [
+        "https://api.example.com/v1/models",   # public: not the TCC story
+        "http://localhost:4000/v1/models",     # TCC does not gate loopback
+        "http://127.0.0.1:4000/v1/models",
+    ])
+    def test_errno65_off_a_private_host_propagates_unchanged(self, curl_seam,
+                                                             monkeypatch, url):
+        stub = curl_seam()
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        with pytest.raises(urllib.error.URLError) as ei:
+            doctor._http_get_default(url)
+        assert ei.value.reason.errno == 65
+        assert stub.argvs == []
+
+    def test_errno113_does_not_fall_back(self, curl_seam, monkeypatch):
+        """113 is Linux EHOSTUNREACH = genuinely no route; it stays an error."""
+        stub = curl_seam()
+        exc = urllib.error.URLError(OSError(113, "No route to host", "10.0.0.1"))
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
+        with pytest.raises(urllib.error.URLError) as ei:
+            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        assert ei.value.reason.errno == 113
+        assert stub.argvs == []
+
+    def test_httperror_from_urlopen_is_untouched(self, curl_seam, monkeypatch):
+        stub = curl_seam()
+        exc = urllib.error.HTTPError("http://10.0.0.1:4000/v1/models", 401,
+                                     "unauthorized", None, None)
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        assert ei.value.code == 401
+        assert stub.argvs == []
+
+    def test_curl_exit_22_raises_the_httperror_family(self, curl_seam, monkeypatch):
+        """Auth/path errors must stay 'probe error', not 'unreachable'."""
+        curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        assert ei.value.code == 401
+
+    def test_probe_contract_still_reports_error_not_unreachable(self, curl_seam,
+                                                                monkeypatch):
+        """End-to-end: _probe_served_models must say 'error' (probe/auth), not
+        'unreachable', when only curl can reach the endpoint."""
+        curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        status, detail = doctor._probe_served_models("http://10.0.0.1:4000/v1")
+        assert status == "error"
+        assert "401" in detail[0]
+
+    def test_probe_recovers_models_over_the_fallback(self, curl_seam, monkeypatch):
+        """End-to-end happy path: the alias gate works again under errno 65."""
+        curl_seam(out=json.dumps({"data": [{"id": "worker-model"}]}).encode())
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        assert doctor._probe_served_models("http://10.0.0.1:4000/v1") == \
+            ("ok", ["worker-model"])
+
+    def test_api_key_never_reaches_argv_and_travels_in_a_0600_file(self, curl_seam,
+                                                                   monkeypatch):
+        """SECURITY: `ps` shows every argv token, so the Bearer value must live
+        in the -H @file only. The stub reads the file back to prove it arrives."""
+        key = "sk-SECRET-donotputinargv"
+        stub = curl_seam()
+        captured = {}
+
+        def spy(argv, timeout):
+            stub.argvs.append(list(argv))
+            for tok in argv:
+                assert key not in tok, f"api_key leaked into argv token {tok!r}"
+            i = argv.index("-H") + 1
+            assert argv[i].startswith("@"), "header must come from a file"
+            path = argv[i][1:]
+            captured["body"] = open(path).read()
+            captured["mode"] = oct(os.stat(path).st_mode & 0o777)
+            captured["path"] = path
+            return 0, b'{"data": []}', b""
+
+        monkeypatch.setattr(doctor, "_lan_curl_run", spy)
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        doctor._http_get_default("http://10.0.0.1:4000/v1/models", api_key=key)
+        assert captured["body"] == f"Authorization: Bearer {key}\n"
+        assert captured["mode"] == "0o600"
+        assert not os.path.exists(captured["path"])   # unlinked after the request
+        assert stub.argvs[0][-1] == "http://10.0.0.1:4000/v1/models"
+
+    def test_notice_printed_exactly_once_across_fallbacks(self, curl_seam,
+                                                          monkeypatch, capsys):
+        stub = curl_seam()
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        for i in range(4):
+            doctor._http_get_default(f"http://10.0.0.{i}:4000/v1/models")
+        assert len(stub.argvs) == 4
+        assert capsys.readouterr().err.count(doctor.LAN_CURL_FALLBACK_NOTICE) == 1
+
+    def test_curl_missing_surfaces_original_error_with_hint(self, monkeypatch):
+        def no_curl(argv, timeout):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        monkeypatch.setattr(doctor, "_lan_curl_run", no_curl)
+        doctor._lan_curl_reset_notice()
+        monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
+        with pytest.raises(urllib.error.URLError) as ei:
+            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        msg = str(ei.value)
+        assert "No route to host" in msg               # original kept, not replaced
+        assert "curl fallback unavailable" in msg      # + the one-line hint
+

@@ -2748,6 +2748,248 @@ def _models_probe_url(base_url: str) -> str:
     return url + "/models"
 
 
+# ── BEGIN mirrored block: lan_curl_fallback (t_391b084e) ──────────────────
+# macOS binds Privacy > Local Network to the *signing identity* of the
+# executable, so an adhoc-signed interpreter — a Homebrew keg's Python.app, a
+# python.org Framework build — is denied on EVERY private-range connect, no
+# matter how often the Python entries are re-toggled. urllib then reports
+# `OSError(65, 'No route to host')` (EHOSTUNREACH) for a host that is up and
+# answering, while Apple-signed /usr/bin/curl — which keeps its own TCC grant
+# — reaches the same URL fine. That is what made `hscc cluster monitor --live`
+# render every backend `down` on a healthy fleet (host stats survived only
+# because they ride ssh). Do NOT try to fix this with TCC/system changes: it is
+# an OS identity rule, not our bug. The workaround is to retry exactly that one
+# failure through curl.
+#
+# THREE PLUGINS CARRY THIS BLOCK VERBATIM (hscc_daemon/cluster_live.py,
+# hscc-bootstrap/doctor.py, hscc-cluster/cluster_template.py). It is NOT a
+# cross-plugin import on purpose: each plugin deploys standalone into
+# ~/.hermes/plugins and the hyphenated dirs are not importable package names,
+# so none of them can import another. The block is pinned byte-identical by
+# hscc-cluster/tests/test_lan_curl_fallback.py::test_mirrored_block_is_identical
+# — edit all three copies in the same commit, or that test fails.
+#
+# Deliberately narrow. The fallback fires ONLY when urllib reports errno 65
+# SPECIFICALLY on a PRIVATE host:
+#   * Linux EHOSTUNREACH is 113 and means there genuinely is no route, so it
+#     must NOT be retried by anything — a "helpful" fallback there would hide a
+#     dead node behind a second probe.
+#   * A public host is not the Local Network story at all (TCC gates only local
+#     traffic), so falling back there would paper over a real firewall or DNS
+#     problem.
+#   * Loopback never falls back: TCC does not gate localhost, so errno 65
+#     there is not this bug.
+# HTTPError, timeouts and every other errno propagate UNCHANGED, so callers
+# keep their existing 'probe error' vs 'unreachable' distinction.
+import ipaddress
+import queue
+import urllib.error
+import urllib.parse
+
+LAN_CURL_FALLBACK_NOTICE = "LAN via curl fallback (Local Network permission)"
+
+_CURL_BIN = "/usr/bin/curl"
+_CURL_UNUSABLE_HINT = (" — /usr/bin/curl fallback unavailable: restore it, or grant "
+                       "macOS Local Network to this interpreter")
+
+# One-shot ticket: filled at import, consumed by the first successful fallback.
+# Consume-once is the whole point — `cluster monitor --live` re-renders every
+# tick and the daemon loop ticks forever, so the notice must not repeat. A
+# maxsize-1 Queue rather than a bool because the monitor scrapes backends from
+# a thread pool, where a read-then-write flag would let two workers announce.
+_CURL_FALLBACK_TICKET: "queue.Queue" = queue.Queue(maxsize=1)
+_CURL_FALLBACK_TICKET.put_nowait(LAN_CURL_FALLBACK_NOTICE)
+
+# 100.64.0.0/10 is CGNAT — where Tailscale hands out addresses — and Python
+# does NOT classify it private, so it is named explicitly. fe80::/10 and
+# fc00::/7 cover IPv6 link-local and ULA.
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_ULA_NET = ipaddress.ip_network("fc00::/7")
+
+
+def _lan_private_host(host) -> bool:
+    """True for a private/LAN host the Local Network gate can deny.
+
+    RFC1918, 100.64.0.0/10 (tailnet CGNAT), 169.254.0.0/16 + fe80::/10
+    link-local, fc00::/7 ULA, and ``.local`` mDNS names. Loopback — numeric or
+    ``localhost`` — is False: TCC does not gate it, so errno 65 there is not
+    this bug. A name that is not an IP is False unless it is ``.local``, so a
+    public hostname can never reach the fallback.
+    """
+    h = (host or "").strip().rstrip(".").lower()
+    if not h or h == "localhost":
+        return False
+    if h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return False
+    # Family guard: `IPv4Address in <IPv6Network>` raises TypeError, so a
+    # membership test must only run against the network of the same family.
+    if ip.version == 4:
+        return bool(ip.is_private or ip.is_link_local or ip in _CGNAT_NET)
+    return bool(ip.is_private or ip.is_link_local or ip in _ULA_NET)
+
+
+def _lan_errno(exc):
+    """The errno behind a urllib failure, or None when it carries none.
+
+    ``URLError.reason`` is the OSError raised by the connect. ``HTTPError`` is
+    a URLError subclass whose reason is a *status string*, so it lands here as
+    None — a status is never a connectivity denial, and never a fallback.
+    """
+    return getattr(getattr(exc, "reason", None), "errno", None)
+
+
+def _lan_curl_notice_once() -> None:
+    """Print the fallback notice the first time only, then stay quiet.
+
+    stderr, not stdout: the two probe mirrors print structured output on stdout
+    (doctor's checklist, template's ``--json``) and must not be polluted, and
+    the daemon log picks stderr up — one line, then silence.
+    """
+    import sys
+    try:
+        _CURL_FALLBACK_TICKET.get_nowait()
+    except queue.Empty:
+        return
+    print(LAN_CURL_FALLBACK_NOTICE, file=sys.stderr, flush=True)
+
+
+def _lan_curl_reset_notice() -> None:
+    """Refill the one-shot notice ticket.
+
+    Test seam only — no runtime path calls it. A test that asserts 'the notice
+    appears exactly once across N fallbacks' has to start from a known state,
+    and the suite raises far more than one fallback per process, so without
+    this the assertion would silently depend on test order.
+    """
+    while not _CURL_FALLBACK_TICKET.empty():
+        _CURL_FALLBACK_TICKET.get_nowait()
+    _CURL_FALLBACK_TICKET.put_nowait(LAN_CURL_FALLBACK_NOTICE)
+
+
+def _lan_curl_run(argv, timeout):
+    """Run one curl argv LIST (never a shell) -> (returncode, stdout, stderr).
+
+    Injectable seam: the suite replaces this module attribute with a stub that
+    inspects argv — which is also how 'the api_key never reaches argv' is
+    proven, since every test asserts on the argv the stub was handed.
+    """
+    import subprocess
+    p = subprocess.run(argv, capture_output=True, timeout=timeout + 10)
+    return p.returncode, p.stdout, p.stderr
+
+
+def _lan_curl_unusable(original, cause) -> Exception:
+    """What the caller sees when curl could not be run at all.
+
+    Same ``URLError`` family the caller already handles, and its text still
+    carries the ORIGINAL errno-65 message — the hint is appended, never
+    substituted, so a reader still learns the endpoint was denied.
+    """
+    return urllib.error.URLError(f"{original}{_CURL_UNUSABLE_HINT} [{cause}]")
+
+
+def _lan_curl_argv(url, timeout, header_file=None) -> list:
+    """The curl argv.
+
+    ``-sS`` quiet but loud on error, ``--fail`` so a 4xx/5xx becomes exit 22
+    (urllib's HTTPError equivalent), ``-L`` because urllib follows redirects
+    too, ``--max-time`` so a hung node cannot hang the monitor. The URL is
+    always the LAST token, and no token ever holds a secret.
+    """
+    argv = [_CURL_BIN, "-sS", "--fail", "-L", "--max-time", str(timeout)]
+    if header_file:
+        argv += ["-H", f"@{header_file}"]
+    argv.append(url)
+    return argv
+
+
+def _lan_curl_write_header(api_key) -> str:
+    """Write the Bearer header to a 0600 temp file and return its path.
+
+    The api_key must NEVER be an argv token: ``ps`` shows every argument of a
+    child process for the life of the request, so ``-H "Authorization: Bearer
+    <key>"`` would leak the key to anyone on the box. curl reads the header
+    from the file instead (``-H @path``), and the caller unlinks it.
+    """
+    import os
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="hscc-lan-hdr-")
+    try:
+        os.fchmod(fd, 0o600)  # mkstemp is 0600 already; pin it explicitly
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"Authorization: Bearer {api_key}\n")
+    except OSError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _lan_curl_http_error(url, stderr) -> Exception:
+    """Map curl's exit-22 back onto urllib's HTTPError family.
+
+    Parity matters more than the number: callers branch on HTTPError to say
+    'endpoint reachable, probe/auth wrong' as opposed to 'unreachable', so the
+    fallback raises the same family urllib would, carrying the status curl
+    reported. ``code`` is 0 when curl did not name one — the exception TYPE is
+    what callers branch on.
+    """
+    import re
+    m = re.search(r"returned error: (\d{3})",
+                  (stderr or b"").decode("utf-8", "replace"))
+    code = int(m.group(1)) if m else 0
+    reason = f"curl fallback: HTTP {code}" if code else "curl fallback: HTTP error"
+    return urllib.error.HTTPError(url, code, reason, None, None)  # type: ignore[arg-type]
+
+
+def _lan_curl_fallback(url, timeout, exc, api_key=None):
+    """Retry one denied GET through /usr/bin/curl -> the body bytes, or None.
+
+    Returns the response body when the retry succeeded; None means 'not
+    eligible, or curl could not reach it either' and the caller MUST re-raise
+    the original error unchanged. ``api_key`` is only ever sent as a header
+    from a 0600 temp file — never in argv, never in a message.
+    """
+    import os
+    if _lan_errno(exc) != 65:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if not _lan_private_host(parsed.hostname):
+        return None
+    header_file = None
+    try:
+        if api_key:
+            header_file = _lan_curl_write_header(api_key)
+        rc, out, err = _lan_curl_run(_lan_curl_argv(url, timeout, header_file),
+                                     timeout)
+    except Exception as cause:      # curl missing / not executable / timed out
+        raise _lan_curl_unusable(exc, cause) from exc
+    finally:
+        if header_file:
+            try:
+                os.unlink(header_file)
+            except OSError:
+                pass
+    if rc == 22:
+        raise _lan_curl_http_error(url, err) from exc
+    if rc != 0:
+        # curl could not reach it either — it really is down. Let the original
+        # errno-65 error stand with the caller's own wording.
+        return None
+    _lan_curl_notice_once()
+    return out
+# ── END mirrored block: lan_curl_fallback ──────────────────────────────────
+
 def _http_get_default(url: str, api_key: Optional[str] = None) -> str:
     """Fetch ``url`` and return its body as text.
 
@@ -2757,13 +2999,23 @@ def _http_get_default(url: str, api_key: Optional[str] = None) -> str:
     raises ``urllib.error`` on failure so callers can tell a probe/config error
     apart from an unreachable endpoint.
     """
+    import urllib.error
     import urllib.request
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.URLError as e:
+        # A macOS Local-Network denial (errno 65 on a private host) retries
+        # once through /usr/bin/curl; everything else propagates unchanged, so
+        # callers still tell a probe error apart from an unreachable endpoint.
+        body = _lan_curl_fallback(url, 10, e, api_key=api_key)
+        if body is None:
+            raise
+        return body.decode("utf-8")
 
 
 def _probe_served_models(base_url, *, _http_get=None):
