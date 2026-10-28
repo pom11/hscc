@@ -44,7 +44,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    untouched** — `fwupd` updates stay wanted and operator-run. Non-fatal
    (`--skip-node-recovery` to opt out of the node-recovery stages;
    `node_recovery: {firmware_notifier_mask: false}` in `~/.hscc/cluster.json`
-   opts out of this one). `hscc doctor` has its own check
+   opts out of this one). The bootstrap doctor (`doctor.py`) has its own check
    (`snap firmware-notifier mask (node-recovery)`) that reads the mask back per
    node and goes red if it is gone, so a vanished mask cannot masquerade as
    protection.

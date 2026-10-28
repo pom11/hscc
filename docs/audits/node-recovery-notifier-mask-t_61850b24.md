@@ -79,7 +79,8 @@ Consequences we accept and record: a masked unit cannot be started by anything,
 including a future snap that would have fixed it, and unmasking is the deliberate
 undo (`python3 hscc-bootstrap/install_notifier_mask.py --unmask --hosts <node>`).
 Because it persists across
-refreshes and reboots, the state is also *loud*: `hscc doctor` has its own check
+refreshes and reboots, the state is also *loud*: the bootstrap doctor
+(`doctor.py`) has its own check
 that reads the mask back from every node and goes red if it is gone, so a mask
 that silently disappeared cannot masquerade as protection.
 

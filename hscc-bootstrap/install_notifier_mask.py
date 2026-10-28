@@ -656,7 +656,7 @@ def _state_error(st: Dict[str, Any]) -> str:
 
 def probe_node(node: str, *, ssh_cmd: Runners, timeout: int = 30,
                paths: UnitPaths = DEFAULT_PATHS) -> Dict[str, Any]:
-    """Read-only per-node mask state — the probe surface for `hscc doctor`.
+    """Read-only per-node mask state — the probe surface for the bootstrap doctor.
 
     Never writes, never masks, never escalates. Same result shape as
     :func:`mask_node`, so the doctor and the installer cannot diverge on what

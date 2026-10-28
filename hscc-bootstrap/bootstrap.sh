@@ -385,7 +385,7 @@ elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --hosts "$H
       *)       warn "$NM_LINE" ;;
     esac
   done <<< "$NM_OUT"
-  [ "$NM_RC" -ne 0 ] && warn "snap firmware-notifier NOT masked on every node — the notifier keeps crash-looping in the desktop user session (rc=$NM_RC); see hscc doctor"
+  [ "$NM_RC" -ne 0 ] && warn "snap firmware-notifier NOT masked on every node — the notifier keeps crash-looping in the desktop user session (rc=$NM_RC); re-run this stage, or check the bootstrap doctor (doctor.py) check 'snap firmware-notifier mask (node-recovery)'"
 fi
 
 hdr "Install: hermes/sparkrun patches"
