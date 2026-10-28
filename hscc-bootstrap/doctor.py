@@ -708,6 +708,40 @@ def _run_cluster_list() -> str:
         return ""
 
 
+# ── snap firmware-notifier mask check (card t_61850b24) ────────────────────
+# Name is defined here (not read from the module) so the "check missing"
+# rendering still names the check when the module itself is absent.
+_NOTIFIER_CHECK_NAME = "snap firmware-notifier mask (node-recovery)"
+
+
+def _notifier_node_hosts() -> List[str]:
+    """Cluster nodes for the notifier-mask check, via the ONE cluster reader.
+
+    Parses ``sparkrun cluster list --json`` exactly like the other fleet checks
+    (``_sparkrun_default_cluster_matches_serving`` reads the same structure) so
+    the notifier check reports the same node set the rest of doctor does.
+    """
+    import json
+    raw = _run_cluster_list()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    for entry in data if isinstance(data, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("default"):
+            return [h for h in (entry.get("hosts") or []) if h]
+    for entry in data if isinstance(data, list) else []:
+        if isinstance(entry, dict) and entry.get("hosts"):
+            return [h for h in entry["hosts"] if h]
+    return []
+
+
 # ── proxy-outage 2026-10-11 report-only checks (t_proxy_outage_20261011) ────
 #
 # Three fleet-state checks the outage proved worth having BEFORE the next
@@ -1060,6 +1094,47 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     else:
         checks.append(Check("sparkrun lan reachability", True,
                             detail="skipped (fleet checks off)", fatal=False))
+    # snap firmware-notifier mask (card t_61850b24) — its OWN check, kept in a
+    # self-contained block so it cannot collide with the sibling node-recovery
+    # check's wiring above. Same honesty rule as that check and as the install
+    # stage: a node we could not read is an ERROR, never ok, never a skip; a
+    # skipped check says it was skipped instead of vanishing.
+    #
+    # No new run_doctor() parameter is needed: the check resolves its own
+    # transport through doctor_notifier_mask._default_ssh_factory, which REFUSES
+    # to produce one inside a pytest process, so the suite can never ssh the
+    # live fleet by calling run_doctor(). A test injects its transport by
+    # calling doctor_notifier_mask.check(ssh_factory=...) directly.
+    if fleet_checks:
+        try:
+            import doctor_notifier_mask
+        except ImportError:
+            checks.append(Check(_NOTIFIER_CHECK_NAME, False,
+                                detail=f"doctor_notifier_mask.py missing from "
+                                       f"{os.path.dirname(os.path.abspath(__file__))} "
+                                       f"— the mask cannot be verified",
+                                fix="Restore hscc-bootstrap/doctor_notifier_mask.py "
+                                    "(re-run bootstrap); the notifier mask is "
+                                    "currently unverifiable.",
+                                fatal=False))
+        else:
+            nr_res = doctor_notifier_mask.check(
+                _notifier_node_hosts(),
+                hscc_dir=os.environ.get("HSCC_DIR"))
+            # Only the five Check fields enter the list, so `doctor --json`
+            # keeps one shape; per-node rows stay available to callers of
+            # doctor_notifier_mask.check().
+            checks.append(Check(name=nr_res["name"], ok=nr_res["ok"],
+                                detail=nr_res["detail"], fix=nr_res["fix"],
+                                fatal=nr_res["fatal"]))
+    else:
+        try:
+            import doctor_notifier_mask
+            _nm_name = doctor_notifier_mask.CHECK_NAME
+        except ImportError:
+            _nm_name = _NOTIFIER_CHECK_NAME
+        checks.append(Check(_nm_name, True, detail="skipped (fleet checks off)",
+                            fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
         "ok": not fatal_failed,

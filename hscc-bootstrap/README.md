@@ -28,6 +28,26 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    bit; `skipped`, never faked, for a non-checkout or a hookless revision).
    Non-fatal: a skipped/failed stage warns that the guard is INACTIVE.
 4. **Install: skills / role profiles / ~/.hscc + serving.json**.
+4b. **Install: snap firmware-notifier mask (log-churn quarantine)** —
+   `install_notifier_mask.py` masks snap firmware-updater's crash-looping desktop
+   notifier **and the timer that starts it** for the desktop user on every
+   **cluster node** — the hosts `sparkrun cluster list` resolves, whatever that
+   list is today; HSCC keeps no host inventory of its own and never touches a
+   node outside the resolved cluster. MASK, not disable: the unit is `static`
+   (no `[Install]` section), so `disable` cannot affect it, while a mask
+   symlinks the unit to `/dev/null` and survives snap refreshes and reboots.
+   Unprivileged by construction — the mask lives in the user's own
+   `~/.config/systemd/user/` and there is no `sudo` in the module or the
+   generated script. Idempotent (already-masked → no-op, zero new `systemctl`
+   calls), `--dry-run` plans without writing, and every mask is confirmed by
+   reading the state back from the node. **The firmware-updater snap itself is
+   untouched** — `fwupd` updates stay wanted and operator-run. Non-fatal
+   (`--skip-node-recovery` to opt out of the node-recovery stages;
+   `node_recovery: {firmware_notifier_mask: false}` in `~/.hscc/cluster.json`
+   opts out of this one). `hscc doctor` has its own check
+   (`snap firmware-notifier mask (node-recovery)`) that reads the mask back per
+   node and goes red if it is gone, so a vanished mask cannot masquerade as
+   protection.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official
    hermes. `--check`-gated + non-fatal; `--skip-patches` to opt out.

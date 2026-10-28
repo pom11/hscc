@@ -63,8 +63,8 @@ NO ROOT, NO PRIVILEGE ESCALATION
 --------------------------------
 The mask lives in the desktop user's own home, so this is an unprivileged
 operation for the ssh user. There is no ``sudo`` anywhere in this module — the
-failure mode this module must never produce is a root escalation on 4 nodes to
-stop a user-session notifier.
+failure mode this module must never produce is a root escalation on every
+cluster node to stop a user-session notifier.
 
 THE BUS PITFALL (the reason this module exists in the batch's idiom)
 --------------------------------------------------------------------
@@ -674,6 +674,18 @@ def probe_node(node: str, *, ssh_cmd: Runners, timeout: int = 30,
                        code=st.get("code"),
                        detail={"code_name": st.get("code_name", ""),
                                "bus_text": st.get("bus_text", "")})
+    # A mask link that is not /dev/null is not ours — checked FIRST, because
+    # reporting such a node as plain "masked" would let an override nobody
+    # installed be claimed as HSCC protection. The installer refuses the same
+    # thing, so probe and install cannot disagree about what "foreign" means.
+    foreign = [f"{u['unit']} -> {u['link']}" for u in st["units"]
+               if u["link"] and u["link"] != "/dev/null"]
+    if foreign:
+        return _result(node, DRIFT, action="probe",
+                       message=f"{node}: {', '.join(foreign)} is a user unit "
+                               f"override HSCC did not write — the unit may be "
+                               f"masked, but not by HSCC",
+                       state=st)
     if is_masked_state(st):
         runtime_only = any(u["state"] == "masked-runtime" for u in st["units"])
         return _result(node, OK_UNCHANGED, action="probe",

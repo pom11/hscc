@@ -15,7 +15,7 @@ Three layers, each proving something the others cannot:
     read-back verification fails here rather than looking green in Python.
 
 Two rules are pinned everywhere: **nothing privileged** (no ``sudo`` anywhere in
-the generated command, so the stage can never escalate on four nodes to stop a
+the generated command, so the stage can never escalate on any cluster node to stop a
 user-session notifier) and **an environment fault is never a data fact** (a
 node we could not read is ``error``, never ``masked`` and never "not masked").
 
@@ -968,3 +968,11 @@ def test_real_script_state_mode_reads_pre_mask_state(tmp_path):
     assert st["state"]["states"] == ["static", "enabled"], \
         "the fake's initial state, read exactly as the node reports it"
     assert "NOT MASKED" in st["message"]
+    # Behavioural proof of the read-only guarantee the doctor check relies on:
+    # the SHARED script contains mask/stop/daemon-reload arms, so only running
+    # it under bash proves state mode never reaches them. A textual assertion
+    # on the script could not (the strings are in there by design, MODE-gated).
+    mutating = re.compile(r"^(mask|unmask|stop|start|restart|daemon-reload)\b")
+    offenders = [ln for ln in node.systemctl_calls().splitlines()
+                 if mutating.match(ln)]
+    assert offenders == [], f"state mode must not mutate, ran: {offenders}"

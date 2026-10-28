@@ -15,11 +15,12 @@ snap.firmware-updater.firmware-notifier.service: Failed with result 'exit-code'.
 snap.firmware-updater.firmware-notifier.service: Scheduled restart job, restart counter is at 4178.
 ```
 
-That restart counter is **4178** on `.244`, **5920** on `.246`, **5924** on
-`.247`, and the journal holds **5976 `Main process exited` lines in the last 24 h**
-on `.244` alone. `Restart=on-failure` + `RestartUSec=100ms` turns one broken
-desktop notifier into a ~5-second restart loop inside the spark user's
-`systemd --user` session: pure log churn and process churn, forever.
+That restart counter is **5184** on `.244`, **6994** on `.247` and **6998** on
+`.248` — every cluster node — and the journal holds **5967 `Main process exited`
+lines in the last 24 h** on `.244` alone. `Restart=on-failure` +
+`RestartUSec=100ms` turns one broken desktop notifier into a ~5-second restart
+loop inside the spark user's `systemd --user` session: pure log churn and
+process churn, forever.
 
 The failure text the notifier itself prints is
 `error: timeout waiting for snap system profiles to get updated`.
@@ -81,30 +82,54 @@ refreshes and reboots, the state is also *loud*: `hscc doctor` has its own check
 that reads the mask back from every node and goes red if it is gone, so a mask
 that silently disappeared cannot masquerade as protection.
 
-## Measured node facts (read-only probe via sparkrun_bridge; hosts placeholdered)
+## Measured node facts (read-only probe via sparkrun_bridge; hosts as last octet)
 
-All four nodes (`.244`, `.246`, `.247`, `.248`) as observed 2026-10-28:
+**Scope = the sparkrun CLUSTER nodes only** (operator ruling, card comment
+2026-10-28 12:54). `sparkrun cluster list` resolves **3** nodes — `.244`, `.247`,
+`.248` — and that resolved list *is* the complete denominator for both the mask
+and the doctor check. A fourth Spark exists on the LAN but is a training node
+outside the cluster, is configured by hand, and HSCC must never touch it; it
+appears nowhere in this card's code, tests, or wording, and nothing here
+maintains a host inventory of its own.
+
+Observed 2026-10-28 on all three cluster nodes unless a row says otherwise:
 
 | probe | result |
 | --- | --- |
-| ssh user / uid | `spark` / `1000` on every node |
+| ssh user / uid | `spark` / `1000` on every cluster node |
 | `XDG_RUNTIME_DIR` over ssh | **already exported** (`/run/user/1000`) — the classic no-bus pitfall does NOT bite on this fleet's ssh path |
 | `DBUS_SESSION_BUS_ADDRESS` | already `unix:path=/run/user/1000/bus` |
-| `$XDG_RUNTIME_DIR/bus` | `BUS_SOCKET_PRESENT` on every node |
-| `systemctl --user is-enabled <notifier>` | `static` (rc=0) |
+| `$XDG_RUNTIME_DIR/bus` | `BUS_SOCKET_PRESENT` on every cluster node |
+| `systemctl --user is-enabled <notifier>` | `static` (rc=0) on all 3 |
+| `systemctl --user is-enabled <timer>` | `enabled` on all 3 |
+| `systemctl --user is-active <notifier>` | `active` on all 3 |
 | `systemctl --user is-masked` | **not a verb on this systemd** — "Unknown command verb 'is-masked'" (rc=1). Read-back must use `is-enabled` -> `masked` |
-| `UnitFileState` / `LoadState` | `static` / `loaded` |
-| `Restart` / `RestartUSec` | `on-failure` / `100ms` |
-| `NRestarts` | 4177 (.244) / 5920 (.246) / 5924 (.247) |
-| `FragmentPath` | `/etc/xdg/systemd/user/snap.firmware-updater.firmware-notifier.service` |
+| `Restart` / `RestartUSec` | `on-failure` / `100ms` on all 3 |
+| `NRestarts` | 5184 (`.244`) / 6994 (`.247`) / 6998 (`.248`) |
+| `Main process exited` in last 24 h | 5967 (`.244`) / 7033 (`.247`) / 7036 (`.248`) |
+| `Main process exited` since boot | 84110 (`.244`) / 117273 (`.247`) / 117802 (`.248`) |
+| boot time | `.244` 2026-10-27 19:34, `.247` 2026-10-14 10:48, `.248` 2026-10-08 14:13 |
+| `FragmentPath` | `/etc/xdg/systemd/user/snap.firmware-updater.firmware-notifier.service` on all 3 |
 | `[Install]` section in the notifier fragment | **absent** (`grep -c '\[Install\]'` = 0) → the unit is `static`: `disable` cannot affect it |
-| driving unit | `snap.firmware-updater.firmware-notifier.timer`, `OnCalendar=*-*-* 00:00/3` (8 firings/day), `[Install] WantedBy=timers.target`, `is-enabled` = `enabled` |
+| driving unit | `snap.firmware-updater.firmware-notifier.timer`, `OnCalendar=*-*-* 00:00/3` (8 firings/day), `[Install] WantedBy=timers.target` |
+| mask symlink in `~/.config/systemd/user/` | **absent on all 3** (service and timer) — nothing is masked yet, fleet-wide |
 | system-level snap units | **0 unit files** — the notifier is user-session only |
-| `~/.config/systemd/user/` | exists on some nodes (a `timers.target.wants/` dir), **no mask symlink present anywhere yet** |
-| `loginctl show-user spark` | `Linger=no` (session exists: 1 active session) |
-| `fwupd` | `active` on every node → firmware path stays wanted, snap untouched |
+| `ls /var/lib/systemd/linger/` | **empty on all 3** — `spark` has no linger. See "Linger and the bus" below |
+| `fwupd` | `active` on every cluster node → firmware path stays wanted, snap untouched |
 | no-bus failure text (measured with `env -i`) | `Failed to connect to bus: No medium found` (rc=1) — the string the doctor must treat as an ENV FAULT, not as "not masked" |
-| systemd version | see `systemd_version` row below |
+| systemd version | `systemd 255 (255.4-1ubuntu8.16)` on all 3 |
+
+Two numbers move every time they are read — `NRestarts` and the 24 h exit count
+are monotonic restart counters, not stable facts — so they are stated as
+observed at 2026-10-28, and the doctor never thresholds on them.
+
+**Linger and the bus.** `Linger` is off on all three nodes, yet
+`XDG_RUNTIME_DIR` and the bus socket are present over the sparkrun ssh path
+(measured above), so the user manager is reachable today. The module still
+exports both variables with `${VAR:-default}` rather than trusting the
+environment, because an empty linger directory means there is no guarantee the
+user manager is up on a transport that does not go through the login session —
+and a mask that silently talked to no bus would report "not masked" forever.
 
 The invocation the module therefore uses, and why:
 
