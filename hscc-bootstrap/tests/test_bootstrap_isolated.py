@@ -23,10 +23,6 @@ Skipped steps and why:
   --skip-cli      installs a console script INTO the Hermes venv (shared, real)
   --skip-patches  patches the hermes-agent git checkout (shared, real)
   --skip-daemon   installs launchd/systemd units and restarts the live daemon
-  --skip-node-recovery  escalates to root OVER SSH on every live cluster node;
-                  a sandboxed install must never arm the operator's real fleet.
-                  Belt and braces: the env guard
-                  HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY skips the same stage.
 Those three are the only steps that intentionally write outside the home.
 """
 
