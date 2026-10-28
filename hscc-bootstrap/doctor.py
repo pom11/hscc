@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import List, Optional
 
 import _theme
@@ -144,6 +145,112 @@ def hermes_install_dir(hermes_home=None) -> str:
     home = hermes_home or os.environ.get("HERMES_HOME") \
         or os.path.join(os.path.expanduser("~"), ".hermes")
     return os.path.join(os.path.expanduser(str(home)), "hermes-agent")
+
+
+def _skills_home(hermes_home) -> str:
+    """Root Hermes home for skill scanning (doctor may run with HERMES_HOME
+    pointing at a PROFILE dir — the normal worker mode; the skills trees to
+    audit live under the ROOT, which ``hermes_root_from_home`` resolves)."""
+    root = hermes_root_from_home(hermes_home)
+    return root or os.path.expanduser(str(hermes_home or "~/.hermes"))
+
+
+def _skill_findings(hermes_home) -> tuple[list, list]:
+    """Pure scan: returns ``(dup_lines, reviewer_lines)`` for one Hermes root.
+
+    Finding (i) — duplicate skill NAMES — runs over EVERY home (root + every
+    named profile): a duplicated name is a resolver landmine whatever the
+    profile. Finding (ii) — reviewer readiness — runs over the REVIEWER-ROLE
+    SET only (``skill_guard.is_reviewer_capable``: the ``*-orch`` set + the
+    reviewer role profile; the root home counts as the ``default`` profile,
+    which a spawn CAN target): the dispatcher force-injects ``sdlc-review``
+    for review-lane spawns for ANY assignee, so every profile that can
+    review must resolve it EXACTLY ONCE (hermes' same-root identical-copies
+    rule resolves, so it counts as ready). A non-reviewer profile missing
+    the skill is not listed at all — the card forbids nagging profiles that
+    never review.
+
+    Global-vs-profile duplication is deliberately NOT reported: a profile
+    session scans ONLY ``<profile>/skills`` + that profile's
+    ``skills.external_dirs`` (``tools/skills_tool._skill_search_dirs``); the
+    root ``~/.hermes/skills`` is not a fallback root for a profile spawn
+    (grounded in resolver source 2026-10-28), so a copy in one home can never
+    collide with a same-named copy in another.
+    """
+    try:
+        import skill_guard
+    except ImportError:  # pragma: no cover - deployed tree always ships it
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import skill_guard
+
+    home = Path(_skills_home(hermes_home))
+    homes = [("default (root)", home)] + [(n, p) for n, p in
+                                          skill_guard.discover_profiles(home)]
+    dup_lines: list[str] = []
+    reviewer_lines: list[str] = []
+    for label, path in homes:
+        roots = skill_guard.profile_skill_roots(path)
+        dups: dict[str, list[str]] = {}
+        for root in roots:
+            for name, paths in skill_guard.duplicate_names(root).items():
+                dups.setdefault(name, []).extend(paths)
+        for name in sorted(dups):
+            dup_lines.append(f"{label}: {name} -> " + "; ".join(dups[name]))
+        reviewer = label.startswith("default (root)") or skill_guard.is_reviewer_capable(label)
+        if not reviewer:
+            continue
+        res = skill_guard.resolution(roots, skill_guard.REVIEW_SKILL)
+        if res["state"] == "missing":
+            reviewer_lines.append(f"{label}: missing {skill_guard.REVIEW_SKILL}")
+        elif res["state"] == "collision":
+            reviewer_lines.append(
+                f"{label}: {skill_guard.REVIEW_SKILL} collides "
+                f"({res['count']} candidates) -> " + "; ".join(res["paths"]))
+    return dup_lines, reviewer_lines
+
+
+def _skills_duplicates_ok(hermes_home) -> "Check":
+    """Doctor finding (i): no skill NAME resolves twice within any home."""
+    try:
+        dup_lines, _ = _skill_findings(hermes_home)
+    except Exception as exc:  # noqa: BLE001 - doctor must never crash preflight
+        return Check("skill names (duplicates)", True, fatal=False,
+                     detail=f"scan skipped ({type(exc).__name__}: {exc})")
+    if not dup_lines:
+        return Check("skill names (duplicates)", True, fatal=False,
+                     detail="no duplicated skill names")
+    shown = dup_lines[:8]
+    more = f"; ... (+{len(dup_lines) - len(shown)} more)" if len(dup_lines) > len(shown) else ""
+    return Check(
+        "skill names (duplicates)", False, fatal=False,
+        detail="; ".join(shown) + more,
+        fix="Two SKILL.md packages share a name — hermes refuses to guess and "
+            "spawns die with 'Unknown skill(s)'. Move one aside yourself "
+            "(hscc never deletes operator data); see "
+            "hscc-bootstrap/install_review_skill.py --replace-top-level for "
+            "the backed-up move of HSCC's own stale flat copies.")
+
+
+def _reviewer_readiness_ok(hermes_home) -> "Check":
+    """Doctor finding (ii): every reviewer-capable profile resolves
+    ``sdlc-review`` exactly once (the skill the dispatcher force-injects)."""
+    try:
+        _, rev_lines = _skill_findings(hermes_home)
+    except Exception as exc:  # noqa: BLE001 - doctor must never crash preflight
+        return Check("reviewer readiness (sdlc-review)", True, fatal=False,
+                     detail=f"scan skipped ({type(exc).__name__}: {exc})")
+    if not rev_lines:
+        return Check("reviewer readiness (sdlc-review)", True, fatal=False,
+                     detail="every reviewer-capable profile resolves it once")
+    shown = rev_lines[:6]
+    more = f"; ... (+{len(rev_lines) - len(shown)} more)" if len(rev_lines) > len(shown) else ""
+    return Check(
+        "reviewer readiness (sdlc-review)", False, fatal=False,
+        detail="; ".join(shown) + more,
+        fix="A review-lane spawn to this profile dies with 'Unknown skill(s): "
+            "sdlc-review' (dispatcher force-injection). Run "
+            "hscc-bootstrap/install_review_skill.py --skill sdlc-review "
+            "(guarded: installs only where missing, never creates collisions).")
 
 
 def _hermes_ok(hermes_home: str) -> Check:
@@ -790,6 +897,14 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         _nas_ok(_cluster_runner),
         _disk_ok(os.path.expanduser("~")),
         _gateway_running(),
+        # Skill-tree integrity (card t_bc611809): 'Unknown skill(s) on a
+        # spawn' is a per-profile resolver state (collision or absence) that
+        # nothing else surfaces — the dispatcher force-injects sdlc-review
+        # for review-lane spawns, so one bad profile silently kills review
+        # cards. Non-fatal (bootstrap must not die over a skills tree the
+        # operator has to adjudicate), reported with every colliding path.
+        _skills_duplicates_ok(home),
+        _reviewer_readiness_ok(home),
         # Models-served is non-fatal (warning): drift to fix, not a reason to
         # hard-stop. It probes each distinct endpoint once; a probe failure is
         # reported as ok (no false alarm), so it never flips preflight `ok`.
@@ -1220,8 +1335,23 @@ def _home_from_argv(argv) -> str:
 def main(argv=None) -> int:
     import json
     argv = argv if argv is not None else sys.argv[1:]
-    fix_mode = "--fix" in argv
     home = _home_from_argv(argv)
+
+    if "--skills" in argv:
+        # Skills-only fast mode (card t_bc611809): the two skill findings and
+        # nothing else — no sparkrun, no fleet probes. Deterministic and
+        # read-only, so the orchestrator can re-run acceptance against any
+        # --home (e.g. a fabricated tmp tree) without a live cluster.
+        out = {
+            "home": _skills_home(home),
+            "skill_duplicates": asdict(_skills_duplicates_ok(home)),
+            "reviewer_readiness": asdict(_reviewer_readiness_ok(home)),
+        }
+        print(json.dumps(out, indent=2))
+        return 0 if (out["skill_duplicates"]["ok"]
+                     and out["reviewer_readiness"]["ok"]) else 1
+
+    fix_mode = "--fix" in argv
     config_path = os.path.join(os.path.expanduser(home), "config.yaml")
 
     if fix_mode:
