@@ -260,6 +260,26 @@ def test_watchdog_probe_without_rc_is_error():
     assert layer["verdict"] == dnr.V_ERROR
 
 
+def test_data_fact_and_env_fault_never_share_a_rendering():
+    """The card's core rule, pinned at the wording level.
+
+    "read a state that is not armed" is a DATA FACT (fail / NOT ARMED);
+    "the probe never returned state" is an ENVIRONMENT FAULT (error /
+    UNVERIFIABLE ... NOT verified). If those two ever print the same way, the
+    operator cannot tell a broken node from an unreadable one.
+    """
+    fact = watchdog_verdict(usec="0", device_state="inactive")
+    fault = dnr.watchdog_layer(
+        NODE, ssh_cmd=FakeNode(state_fail={"ok": False, "stdout": "", "code": 255,
+                                            "stderr": "ssh: connection refused"}),
+        enabled=True)
+    assert (fact["verdict"], fault["verdict"]) == (dnr.V_FAIL, dnr.V_ERROR)
+    assert "NOT ARMED" in fact["problems"][0]
+    assert "UNVERIFIABLE" not in fact["problems"][0]
+    assert "UNVERIFIABLE" in fault["problems"][0]
+    assert "NOT ARMED" not in fault["problems"][0]
+
+
 # ── the sysctl layer ────────────────────────────────────────────────────────
 
 def sysctl_verdict(knobs, file_content, *, omit_val_for=(), enabled=True):

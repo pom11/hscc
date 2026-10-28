@@ -293,8 +293,12 @@ def watchdog_layer(host: str, *, ssh_cmd: Callable[[str, int], Dict[str, Any]],
                 "notes": []}
     verdict = V_FAIL
     target = f"{nr.RUNTIME_WATCHDOG_SEC}s"
+    # "NOT ARMED" rather than the parent's outcome word: the parent uses
+    # `error` for BOTH "read a state that is not armed" and "got no state at
+    # all", and the doctor has just separated those two — printing its outcome
+    # word here would put the word "error" on a data-fact red line.
     return {"verdict": verdict,
-            "problems": [f"{host}: watchdog {outcome or 'unknown'} — {message} "
+            "problems": [f"{host}: watchdog NOT ARMED — {message} "
                          f"(target RuntimeWatchdogSec={target})"],
             "notes": []}
 
@@ -345,7 +349,16 @@ def _default_ssh_factory() -> Callable[[str], Callable[[str, int], Dict[str, Any
 
 
 def _topology_hosts() -> List[str]:
-    """Cluster hosts via bootstrap's own detect path (sparkrun cluster list)."""
+    """Cluster hosts via bootstrap's own detect path (sparkrun cluster list).
+
+    Skipped inside a pytest process, exactly like ``run_doctor``'s fleet-check
+    auto-detect: ``detect_cluster()`` shells out to the live sparkrun CLI, and a
+    test that wants nodes passes them to ``check()`` explicitly (or injects
+    ``_cluster_runner`` into ``run_doctor``). Returning ``[]`` here is safe
+    because an empty host list renders as an ERROR, never as an all-clear.
+    """
+    if "pytest" in sys.modules:
+        return []
     boot_dir = os.path.dirname(os.path.abspath(__file__))
     if boot_dir not in sys.path:
         sys.path.insert(0, boot_dir)
@@ -392,10 +405,14 @@ def evaluate(hosts: List[str], *,
 
     for host in hosts:
         ssh_cmd = factory(host)
+        # Both legs are read-only `cat`/`systemctl show` probes, so one timeout
+        # bounds the whole check: worst case is len(hosts) x 2 x timeout. It is
+        # deliberately not the installer's 120s write timeout — doctor must not
+        # make a preflight crawl when a node is half-dead.
         wd = watchdog_layer(host, ssh_cmd=ssh_cmd,
                             enabled=bool(opt["watchdog"]), timeout=timeout)
         sc = sysctl_layer(host, ssh_cmd=ssh_cmd,
-                          enabled=bool(opt["autoreboot"]), timeout=max(timeout, 60))
+                          enabled=bool(opt["autoreboot"]), timeout=timeout)
         verdicts = [wd["verdict"], sc["verdict"]]
         if V_ERROR in verdicts:
             verdict = V_ERROR
