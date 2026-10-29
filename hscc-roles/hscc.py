@@ -13,6 +13,12 @@ Commands:
                            (idempotent) and print its resolved identity
   orch-all [--registry P]  Ensure an orchestrator for EVERY registry project
                            plus the `general` catch-all (idempotent, bulk)
+  orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
+                           Bring every live <project>-orch profile in line with
+                           the template: re-render SOUL base + Operational /
+                           work rules (project Role section kept), add missing
+                           standard orchestrator skills. Never touches config,
+                           memory, sessions or project skills.
   provision-check         Report each profile's EFFECTIVE memory provider /
                            char limit / compaction cap / summarization endpoint
                            (provisioning verifier, read-only)
@@ -30,6 +36,7 @@ import generator
 import author
 import autonomy
 import orchestrators
+import orch_sync
 import _theme
 from _theme import escape, make_console, panel, status_panel, table
 
@@ -478,6 +485,43 @@ def cmd_provision_check(argv):
     return 1 if any(p.get("error") or p.get("discrepancy") for p in profiles) else 0
 
 
+def cmd_orch_sync(argv):
+    """`orch-sync`: see orch_sync.py. --dry-run reports without writing."""
+    rest = list(argv)
+    opts = {"dry": False, "only": None, "json": False,
+            "source": os.path.join(rolelib.HERMES_HOME, "skills")}
+    while rest:
+        a = rest.pop(0)
+        if a == "--dry-run":
+            opts["dry"] = True
+        elif a == "--json":
+            opts["json"] = True
+        elif a in ("--only", "--skills-source") and rest:
+            v = rest.pop(0)
+            if a == "--only":
+                opts["only"] = [x for x in v.split(",") if x]
+            else:
+                opts["source"] = os.path.expanduser(v)
+        else:
+            _usage("Usage: hscc.py orch-sync [--dry-run] [--only A,B] "
+                   "[--skills-source DIR] [--json]")
+            return 1
+    reports = orch_sync.sync_all(rolelib.PROFILES_DIR, _base_identity(), opts["source"],
+                                 only=opts["only"], dry_run=opts["dry"])
+    if opts["json"]:
+        print(json.dumps({"dry_run": opts["dry"], "profiles": reports}, indent=2))
+        return 0
+    tb = table("hscc-roles orch-sync" + (" (dry run)" if opts["dry"] else ""))
+    for col in ("profile", "SOUL", "skills added", "no shared copy"):
+        tb.add_column(col)
+    for r in reports:
+        tb.add_row(escape(r["profile"]), escape(r["soul"]),
+                   escape(", ".join(r["skills_added"]) or "-"),
+                   escape(", ".join(r["skills_missing_source"]) or "-"))
+    make_console().print(tb)
+    return 0
+
+
 def _fmt_raw(v):
     """Render a raw/effective value for the human table: None -> '(unset)'."""
     if v is None:
@@ -506,6 +550,8 @@ def main():
         return cmd_orch_all(sys.argv[2:])
     if cmd == "provision-check":
         return cmd_provision_check(sys.argv[2:])
+    if cmd == "orch-sync":
+        return cmd_orch_sync(sys.argv[2:])
     make_console(file=sys.stderr).print(
         f"[error]Unknown command: {escape(cmd)}[/error]")
     make_console().print(panel("hscc-roles — usage", str(__doc__)))
