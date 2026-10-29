@@ -317,8 +317,9 @@ def test_attach_orchestrators_picks_the_cli_session_with_latest_message(tmp_path
         ("job", "cron", NOW - 60, None, "cron run", 7, 7)],
         [("old", NOW - 80 * 86400), ("live", NOW - 30), ("done", NOW - 3700),
          ("ended-live", NOW - 600), ("job", NOW - 5)])
+    (tmp_path / "profiles" / "kronos-orch").mkdir(parents=True)                    # no state.db
     ps = ["/v/python /u/.local/bin/hermes -p sphoin-orch chat --continue sphoin",
-          "/v/python /u/.local/bin/hermes -p kronos-orch chat --continue kronos"]   # no state.db
+          "/v/python /u/.local/bin/hermes -p kronos-orch chat --continue kronos"]
     d = _collect()
     kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
     s, k = d["orchestrators"]
@@ -355,3 +356,17 @@ def test_attach_orchestrators_trusts_messages_not_ended_at(tmp_path):
                                      ps_lines=["/v/p /u/bin/hermes -p bc-orch chat --continue ecofire-bc"])
     assert d["orchestrators"][0]["title"] == "ecofire-bc"
     assert d["orchestrators"][0]["last_s"] == 90
+
+
+def test_attach_orchestrators_never_turns_a_foreign_argv_into_a_path(tmp_path):
+    outside = tmp_path / "elsewhere" / "state.db"
+    _orch_db(outside, [("x", "cli", NOW - 60, None, "leak", 1, 1)], [("x", NOW - 1)])
+    _orch_db(tmp_path / "profiles" / "ok-orch" / "state.db",
+             [("s", "cli", NOW - 60, None, "\x1b[2Jboom\x07", 5, 5)], [("s", NOW - 1)])
+    ps = ["/v/p /u/bin/hermes -p ../../elsewhere chat",       # traversal
+          "/v/p /u/bin/hermes -p ghost-orch chat",           # no such profile dir
+          "/v/p /u/bin/hermes -p ok-orch chat"]
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
+    assert [r["profile"] for r in d["orchestrators"]] == ["ok-orch"]
+    assert d["orchestrators"][0]["title"] == "[2Jboom"      # control chars stripped

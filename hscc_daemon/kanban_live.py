@@ -32,6 +32,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
@@ -365,6 +366,26 @@ def _chat_profiles(ps_lines):
     return seen
 
 
+_PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _known_profile(home, prof):
+    """True only for a real profile name: the ps argv is any local process's,
+    so a name never becomes a path unless it is a plain token naming an
+    existing ``<home>/profiles/<name>`` directory (or ``default``)."""
+    if prof == "default":
+        return True
+    return bool(_PROFILE_RE.fullmatch(prof)) and os.path.isdir(
+        os.path.join(home, "profiles", prof))
+
+
+def _clean(text):
+    """Strip control characters (ANSI escapes included) from argv/db strings;
+    rich markup escaping alone does not neutralise them."""
+    return None if text is None else _CONTROL_RE.sub("", str(text))
+
+
 def _ps_lines():
     try:
         return subprocess.run(["ps", "-Ao", "args="], capture_output=True, text=True,
@@ -385,6 +406,8 @@ def attach_orchestrators(data, hermes_home=None, now=None, ps_lines=None):
     now_s = int(now if now is not None else time.time())
     rows = []
     for prof in _chat_profiles(_ps_lines() if ps_lines is None else ps_lines):
+        if not _known_profile(home, prof):
+            continue
         row = {"profile": prof, "title": None, "last_s": None,
                "tok_in": None, "tok_out": None}
         path = _state_db_path(home, prof)
@@ -399,7 +422,7 @@ def attach_orchestrators(data, hermes_home=None, now=None, ps_lines=None):
             except sqlite3.Error:
                 hit = None
             if hit:
-                row.update(title=hit["title"], tok_in=hit["input_tokens"],
+                row.update(title=_clean(hit["title"]), tok_in=hit["input_tokens"],
                            tok_out=hit["output_tokens"],
                            last_s=None if hit["last"] is None else now_s - int(hit["last"]))
         rows.append(row)
@@ -466,7 +489,7 @@ def orchestrators_table(rows, width=None) -> Table:
         tok = ("-" if r.get("tok_in") is None
                else f"{fmt_tokens(r['tok_in'])}/{fmt_tokens(r['tok_out'])}")
         busy = r["last_s"] is not None and r["last_s"] < 120
-        t.add_row(esc(r["profile"]),
+        t.add_row(esc(_clean(r["profile"])),
                   Text(fmt_age(r["last_s"]), style="ok" if busy else "dim"),
                   Text(tok, style="dim"), esc(r["title"] or "-"))
     return t
