@@ -18,7 +18,7 @@ collects:
 * orchestrators — every live ``hermes -p <profile> chat`` REPL with its open
   session's title, last activity and lifetime tokens (``attach_orchestrators``).
 
-The running heading shows the global ``kanban.max_in_progress`` slots in use, because
+The title line shows the global ``kanban.max_in_progress`` slots in use, because
 when every slot is taken the ready cards on other boards strand silently.
 Nothing here writes to a board: no claim, no promote, no archive. The one
 write is the orchestrator token ledger (``LEDGER_PATH``, 5-min samples, 8 days). The kanban lib, the
@@ -574,8 +574,11 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
     full = cap is not None and n_run >= cap
     when = "snapshot (use --live to refresh)" if snapshot else f"every {interval}s"
     stamp = datetime.datetime.fromtimestamp(data["at"]).strftime("%H:%M:%S")
-    head = Text(f"hscc kanban monitor — {len(data['boards'])} board(s) — {when} — {stamp}",
-                style="title")
+    head = Text(f"hscc kanban monitor — {len(data['boards'])} board(s) — ", style="title")
+    head.append(f"{used} slots", style="error" if full else "title")
+    if per:
+        head.append(f" (≤{per}/profile)", style="dim")
+    head.append(f" — {when} — {stamp}", style="title")
     parts = [head]
     tok24 = data.get("tokens_24h")
     tok_lines = []
@@ -585,20 +588,15 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
         tok_lines = [Text(f"tokens 24h in {fmt_tokens(tok24[0])} · out {fmt_tokens(tok24[1])}"
                           "  (kanban worker sessions, all profiles)", style="dim")]
     parts += tok_lines
-    parts.append(Text(""))
-    # the slot count lives on the running heading: when every slot is taken
-    # the ready cards on other boards strand silently, so say so right here
-    running = Text(f"running ({used}", style="title")
-    if per:
-        running.append(f", ≤{per} per profile", style="title")
-    running.append(")", style="title")
-    if full and data["ready"]:
-        running.append("  ← global cap full: other boards' ready cards wait", style="warn")
-    parts.append(running)
+    # when every slot is taken the ready cards on other boards strand
+    # silently — the one case worth a line of its own
+    warn = full and bool(data["ready"])
+    if warn:
+        parts.append(Text("global cap full: other boards' ready cards wait", style="warn"))
     parts.append(running_table(data["running"], width) if data["running"]
                  else Text("no worker is running", style="dim"))
     tok_height = sum(r.row_count + 1 if isinstance(r, Table) else 1 for r in tok_lines)
-    used_lines = (3 + tok_height
+    used_lines = (1 + (1 if warn else 0) + tok_height
                   + (len(data["running"]) + 1 if data["running"] else 1))
     # Optional sections in priority order; in a short pane (`--live` in a tmux
     # split) the lower ones are dropped instead of scrolling the view.
