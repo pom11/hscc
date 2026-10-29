@@ -495,25 +495,33 @@ def orchestrators_table(rows, width=None) -> Table:
     return t
 
 
-def _tok_pair(pair):
-    return "-" if pair is None else f"{fmt_tokens(pair[0])}/{fmt_tokens(pair[1])}"
-
-
-def token_lines(tokens) -> list:
-    """Header lines: fleet total per window, then the workers/orchestrators split."""
+def token_table(tokens) -> list:
+    """The token block: one row per group (workers, orchestrators, total) and
+    in/out per window, plus a dim note while the orchestrator ledger is short."""
     w, o = tokens["workers"], tokens["orchestrators"]
-    head = Text("tokens", style="dim")
+    t = _plain_table()
+    t.add_column("Tokens", no_wrap=True)
     for name, _ in WINDOWS:
-        tot = [(w[name] or [0, 0])[i] + (o[name] or [0, 0])[i] for i in (0, 1)]
-        head.append(f"  {name} in {fmt_tokens(tot[0])} · out {fmt_tokens(tot[1])}", style="dim")
-    head.append("  (workers + orchestrators, all profiles)", style="dim")
-    split = Text("  workers " + " · ".join(f"{n} {_tok_pair(w[n])}" for n, _ in WINDOWS)
-                 + "    orchestrators " + " · ".join(f"{n} {_tok_pair(o[n])}" for n, _ in WINDOWS),
-                 style="dim")
+        t.add_column(f"{name} in", justify="right", no_wrap=True)
+        t.add_column(f"{name} out", justify="right", no_wrap=True)
+
+    def cells(group):
+        out = []
+        for name, _ in WINDOWS:
+            pair = group(name)
+            out += ["-", "-"] if pair is None else [fmt_tokens(pair[0]), fmt_tokens(pair[1])]
+        return out
+
+    total = lambda n: (None if w[n] is None and o[n] is None else
+                       [(w[n] or [0, 0])[i] + (o[n] or [0, 0])[i] for i in (0, 1)])
+    t.add_row("workers", *cells(lambda n: w[n]), style="dim")
+    t.add_row("orchestrators", *cells(lambda n: o[n]), style="dim")
+    t.add_row("total", *cells(total))
+    parts = [t]
     if o.get("since"):
         stamp = datetime.datetime.fromtimestamp(o["since"]).strftime("%m-%d %H:%M")
-        split.append(f"  (orchestrator history since {stamp})", style="dim")
-    return [head, split]
+        parts.append(Text(f"orchestrator history since {stamp}", style="dim"))
+    return parts
 
 
 def ready_table(rows, width=None) -> Table:
@@ -580,8 +588,7 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
     tok24 = data.get("tokens_24h")
     tok_lines = []
     if data.get("tokens"):
-        # own lines: appended to `slots` they wrap in a ~105-col tmux split
-        tok_lines = token_lines(data["tokens"])
+        tok_lines = [Text("")] + token_table(data["tokens"])
     elif tok24:
         tok_lines = [Text(f"tokens 24h in {fmt_tokens(tok24[0])} · out {fmt_tokens(tok24[1])}"
                           "  (kanban worker sessions, all profiles)", style="dim")]
@@ -590,7 +597,8 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
     parts.append(Text(f"running ({n_run})", style="title"))
     parts.append(running_table(data["running"], width) if data["running"]
                  else Text("no worker is running", style="dim"))
-    used_lines = (4 + len(tok_lines)
+    tok_height = sum(r.row_count + 1 if isinstance(r, Table) else 1 for r in tok_lines)
+    used_lines = (4 + tok_height
                   + (len(data["running"]) + 1 if data["running"] else 1))
     # Optional sections in priority order; in a short pane (`--live` in a tmux
     # split) the lower ones are dropped instead of scrolling the view.

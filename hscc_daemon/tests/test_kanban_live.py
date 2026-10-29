@@ -339,8 +339,12 @@ def test_render_shows_orchestrators_and_7d_tokens():
     buf = io.StringIO()
     make_console(file=buf, width=200, color_system=None).print(kanban_live.render(d))
     out = buf.getvalue()
-    assert "24h in 420.0M · out 6.3M" in out
-    assert "7d in 2.09G · out 31.0M" in out
+    lines = out.splitlines()
+    head = next(l for l in lines if l.startswith("Tokens"))
+    assert head.split() == ["Tokens", "24h", "in", "24h", "out", "7d", "in", "7d", "out"]
+    assert next(l for l in lines if l.startswith("workers")).split()[1:] == ["400.0M", "6.0M", "2.00G", "30.0M"]
+    assert next(l for l in lines if l.startswith("orchestrators ")).split()[1:] == ["20.0M", "300k", "90.0M", "1.0M"]
+    assert next(l for l in lines if l.startswith("total")).split()[1:] == ["420.0M", "6.3M", "2.09G", "31.0M"]
     assert "orchestrators (1 running)" in out
     assert "sphoin-orch" in out and "97.0M/990k" in out
     assert "orchestrator history since" in out
