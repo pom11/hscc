@@ -95,6 +95,10 @@ Also measured: `.246` (the training box named in the card) is **not in the live
 sparkrun cluster**, so the fleet-wide apply covers 3 nodes today, not 4. The
 code takes hosts from sparkrun, so it self-corrects when `.246` is re-added —
 flagged here rather than hardcoded.
+Per the operator ruling of 2026-10-28 12:54 this is permanent by design, not a
+pending re-add: the training box stays outside the sparkrun cluster and is
+configured by hand, so HSCC never touches it and "3 of the resolved cluster" is
+the intended steady state.
 
 ## Per-node dry-run diff sample
 

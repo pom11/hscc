@@ -854,7 +854,8 @@ def arm_fleet(nodes: List[str], *, ssh_factory: Callable[[str], Runners],
     ``ssh_factory(node)`` returns that node's ``(command, timeout) -> dict``
     transport (the test seam). ``ok`` is True only when every node is either
     protected or explicitly opted out; the summary names every node that is
-    neither, because "3 of 4 protected" must not read as a successful run.
+    neither, because a partial result — some cluster nodes protected, some not
+    — must never read as a successful run.
     """
     cfg = node_recovery_config(config_path)
     enabled = bool(cfg[WATCHDOG_SUBKEY])

@@ -133,6 +133,17 @@ Two facts worth the orchestrator's attention:
   therefore outside every sparkrun-scoped operation in this batch — bootstrap's
   install stages included, since both parents iterate the same host list. If that
   node is meant to be covered, the fix is the cluster config, not this check.
+  - **RESOLVED (operator ruling 2026-10-28 12:54) — closed as BY DESIGN, no
+    action for the orchestrator.** The whole node-recovery batch (sysctls PR #88,
+    watchdog PR #89, post-boot relaunch PR #90, doctor PR #91, snap-mask sibling)
+    applies ONLY to the sparkrun CLUSTER nodes — the hosts `sparkrun cluster list`
+    resolves (3 today). The fourth node named in the card text is a TRAINING node
+    outside the cluster: the operator configures it by hand and HSCC must never
+    touch it. The 3-vs-4 gap is therefore not a coverage bug and the cluster
+    config is not the fix — nothing here changes. Doctor `N/N` over the resolved
+    cluster (3/3 today) is the correct denominator; if the training box is ever
+    added to the sparkrun cluster by the operator, the same code covers it with no
+    edit, since hosts come from sparkrun.
 - This run is read-only and unprivileged for the sysctl leg (`cat /proc/sys/...`);
   the watchdog leg is the parent's `state` mode, which likewise writes nothing.
   No `sudo` was attempted by either leg.
