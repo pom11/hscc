@@ -49,6 +49,14 @@ def _no_real_inject(monkeypatch):
     monkeypatch.setattr(kp, "INJECT_BIN", "/nonexistent/hermes-inject")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cron(monkeypatch):
+    """Never touch a real profile's cron jobs from a test."""
+    class R:
+        returncode, stdout, stderr = 0, "No scheduled jobs.\n", ""
+    monkeypatch.setattr(kp, "_run_cron", lambda profile, args: R())
+
+
 @pytest.fixture
 def env(tmp_path):
     cfg = tmp_path / "config.yaml"
@@ -177,3 +185,46 @@ def test_missing_inject_tool_is_reported_not_fatal(env):
     assert rep["low"]["orchestrator"] == {"ok": False,
                                           "error": "/nonexistent/hermes-inject not found"}
     assert sorted(rep["low"]["held"]) == ["q1", "r1"]
+
+
+def test_enforce_reholds_a_recorded_card_released_behind_the_pause(env):
+    h = _boards()
+    kp.pause(["low"], run=h, state_path=env["state_path"], config_path=env["config_path"],
+             inject=None, cron=None)
+    h.boards["low"]["q1"]["status"] = "running"         # an in-flight orch turn unblocked it
+    assert kp.enforce(run=h, state_path=env["state_path"]) == {"low": ["q1"]}
+    assert h.boards["low"]["q1"]["status"] == "blocked"
+    ids = [c["id"] for c in kp.load_state(env["state_path"])["low"]["cards"]]
+    assert ids.count("q1") == 1
+
+
+class FakeCron:
+    def __init__(self, jobs):
+        self.jobs = dict(jobs)          # id -> "active"/"paused"
+        self.calls = []
+
+    def __call__(self, profile, args):
+        self.calls.append((profile, args))
+
+        class R:
+            returncode, stderr = 0, ""
+            stdout = ""
+        r = R()
+        if args[0] == "list":
+            r.stdout = "\n".join(f"  {j} [{st}]\n    Name: x" for j, st in self.jobs.items())
+        elif args[0] in ("pause", "resume"):
+            self.jobs[args[1]] = "paused" if args[0] == "pause" else "active"
+        return r
+
+
+def test_pause_parks_active_orchestrator_crons_and_resume_restores_them(env):
+    h = _boards()
+    c = FakeCron({"aaa111": "active", "bbb222": "paused"})
+    kw = dict(run=h, state_path=env["state_path"], config_path=env["config_path"], inject=None, cron=c)
+    rep = kp.pause(["low"], **kw)
+    assert rep["low"]["crons_paused"] == ["aaa111"]
+    assert c.jobs == {"aaa111": "paused", "bbb222": "paused"}
+    assert all(p == "low-orch" for p, _ in c.calls)
+    rep = kp.resume(["low"], **kw)
+    assert rep["low"]["crons_resumed"] == ["aaa111"]
+    assert c.jobs == {"aaa111": "active", "bbb222": "paused"}     # pre-paused job stays paused

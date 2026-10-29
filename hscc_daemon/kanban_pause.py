@@ -22,6 +22,8 @@ Built only from Hermes' own per-card verbs, so nothing here patches Hermes:
   through ``hermes-inject`` (types into the orchestrator's own tmux REPL);
   ``HSCC_INJECT_BIN`` overrides the path, and a missing tool or pane is
   reported, never fatal.
+* **crons** — the orchestrator's ACTIVE cron jobs (board watchers that run an
+  agent on their own schedule) are paused with the board and resumed with it.
 * **enforce** — blocks any card that became ``ready``/``running`` on a paused
   board after the pause (an orchestrator creating new cards). Idempotent; safe
   to run from a loop or the fleet check.
@@ -69,10 +71,27 @@ def _inject(profile: str, message: str, mode: str) -> dict:
             "error": None if r.returncode == 0 else (r.stderr or r.stdout).strip()[-200:]}
 
 
+def _run_cron(profile: str, args: list) -> subprocess.CompletedProcess:
+    return subprocess.run(["hermes", "-p", profile, "cron", *args], capture_output=True,
+                          text=True, timeout=60)
+
+
+def active_crons(profile: str, cron: Callable = _run_cron) -> list:
+    """Ids of the profile's ACTIVE cron jobs (parsed from `hermes cron list`)."""
+    out = cron(profile, ["list"]).stdout or ""
+    ids = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "[active]":
+            ids.append(parts[0])
+    return ids
+
+
 def orchestrator_for(board: str) -> str:
     """Per-project orchestrator naming convention: board `<p>` -> `<p>-orch`."""
     return f"{board}-orch"
 HOLD_STATUSES = ("running", "ready")
+_DEFAULT = object()   # "use the module-level runner", resolved at call time
 
 
 def _run_hermes(args: list) -> subprocess.CompletedProcess:
@@ -152,7 +171,9 @@ def _set_auto_decompose(value: bool, config_path: Optional[str] = None):
 
 def pause(boards: list, reason: str = "", *, run: Callable = _run_hermes,
           state_path: Optional[str] = None, config_path: Optional[str] = None,
-          now: Optional[int] = None, inject: Optional[Callable] = _inject) -> dict:
+          now: Optional[int] = None, inject: Optional[Callable] = _inject,
+          cron=_DEFAULT) -> dict:
+    cron = _run_cron if cron is _DEFAULT else cron
     state = load_state(state_path)
     stamp = int(now if now is not None else time.time())
     text = f"{REASON_PREFIX} by operator" + (f": {reason}" if reason else "") + \
@@ -176,6 +197,15 @@ def pause(boards: list, reason: str = "", *, run: Callable = _run_hermes,
         entry["triage_left"] = sorted(set(entry.get("triage_left") or []) | set(triage))
         state[board] = entry
         report[board] = {"held": added, "failed": failed, "triage": triage}
+        if cron is not None:
+            # An orchestrator's cron agents (board watchers, heartbeats) act on
+            # the board on their own schedule — park them with the board.
+            prof = orchestrator_for(board)
+            known = {c["job"] for c in entry.get("crons_paused") or []}
+            for job in active_crons(prof, cron):
+                if job not in known and cron(prof, ["pause", job]).returncode == 0:
+                    entry.setdefault("crons_paused", []).append({"profile": prof, "job": job})
+            report[board]["crons_paused"] = [c["job"] for c in entry.get("crons_paused") or []]
         if inject is not None:
             report[board]["orchestrator"] = inject(
                 orchestrator_for(board),
@@ -189,7 +219,9 @@ def pause(boards: list, reason: str = "", *, run: Callable = _run_hermes,
 
 def resume(boards: list, *, run: Callable = _run_hermes,
            state_path: Optional[str] = None, config_path: Optional[str] = None,
-           inject: Optional[Callable] = _inject) -> dict:
+           inject: Optional[Callable] = _inject,
+           cron=_DEFAULT) -> dict:
+    cron = _run_cron if cron is _DEFAULT else cron
     state = load_state(state_path)
     report = {}
     for board in boards:
@@ -203,6 +235,10 @@ def resume(boards: list, *, run: Callable = _run_hermes,
             (released if r.returncode == 0 else failed).append(card["id"])
         report[board] = {"released": released, "failed": failed,
                          "triage_left": entry.get("triage_left") or []}
+        if cron is not None:
+            report[board]["crons_resumed"] = [
+                c["job"] for c in entry.get("crons_paused") or []
+                if cron(c["profile"], ["resume", c["job"]]).returncode == 0]
         if inject is not None:
             report[board]["orchestrator"] = inject(
                 orchestrator_for(board), RESUME_NOTE.format(board=board, n=len(released)),
@@ -228,9 +264,13 @@ def enforce(*, run: Callable = _run_hermes, state_path: Optional[str] = None) ->
                f"`hscc kanban resume {board}`"
         added = []
         for card in list_cards(board, run):
-            if card["status"] in HOLD_STATUSES and card["id"] not in held:
+            # A recorded card that is ready/running again was released behind
+            # the pause's back (an orchestrator turn already in flight): hold it
+            # again, but record it only once.
+            if card["status"] in HOLD_STATUSES:
                 if _hold(board, card, text, run):
-                    entry["cards"].append({"id": card["id"], "was": card["status"]})
+                    if card["id"] not in held:
+                        entry["cards"].append({"id": card["id"], "was": card["status"]})
                     added.append(card["id"])
         if added:
             report[board] = added
