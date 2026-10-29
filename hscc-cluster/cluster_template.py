@@ -66,8 +66,27 @@ def _unit_models_probe(url, timeout=2):
     """
     try:
         from hscc_daemon import health as _h
+    except Exception:
+        # The daemon package is not importable in every caller (a bare
+        # `python -c` against the plugin dir). Falling back to "not serving"
+        # would bring the --ensure hang straight back, so probe directly.
+        return _plain_models_probe(url, timeout)
+    try:
         return _h._proxy_models_probe(url, timeout=timeout)
-    except Exception as e:  # daemon unimportable / probe blew up: not serving
+    except Exception as e:  # probe blew up: not serving
+        return {"ok": False, "models": [], "error": str(e)}
+
+
+def _plain_models_probe(url, timeout=2):
+    """Stdlib GET of /v1/models → {"ok", "models", "error"}; never raises."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        ids = [m.get("id") for m in (body.get("data") or [])
+               if isinstance(m, dict) and m.get("id")]
+        return {"ok": True, "models": ids, "error": None}
+    except Exception as e:
         return {"ok": False, "models": [], "error": str(e)}
 
 

@@ -3581,3 +3581,33 @@ class TestProvisionAlreadyServingSkip:
         assert self._run_for(calls, "deepseek.yaml") == []
         assert result["status"] == "warn"
         assert any("drift NOT applied" in w for w in result["warnings"])
+
+
+def test_unit_probe_falls_back_to_plain_http_without_the_daemon(monkeypatch):
+    """Without hscc_daemon importable the probe must still answer (a hard
+    'not serving' would resurrect the --ensure hang)."""
+    import builtins
+    import io
+    real_import = builtins.__import__
+
+    def no_daemon(name, *a, **kw):
+        if name.startswith("hscc_daemon"):
+            raise ImportError("no daemon here")
+        return real_import(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", no_daemon)
+    import urllib.request
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda url, timeout=2: _Resp(b'{"data":[{"id":"m"},{"id":"worker-model"}]}'))
+    # the autouse conftest stub replaced the seam; call the real implementation
+    real = cluster_template.__dict__["_plain_models_probe"]
+    assert real("http://10.0.0.2:8000/v1/models") == {"ok": True, "models": ["m", "worker-model"], "error": None}
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda url, timeout=2: (_ for _ in ()).throw(OSError("refused")))
+    assert real("http://10.0.0.2:8000/v1/models")["ok"] is False
