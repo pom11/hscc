@@ -268,3 +268,25 @@ def test_real_script_without_driver_fails_honestly(tmp_path):
     out = node.run("state")
     lines = gc._hscc_lines(out["stdout"])
     assert lines["HSCC_RC"] == "3" and "not found" in lines["HSCC_MSG"]
+
+
+@pytestmark_bash
+def test_real_script_waits_for_a_lagging_clock_to_settle(tmp_path):
+    """Regression: a loaded GPU steps down a moment after the lock; the
+    install read-back must see the settled clock, not the first sample."""
+    node = FakeNode(tmp_path)
+    lag = tmp_path / "lag"
+    node.smi.write_text(rf'''#!/usr/bin/env bash
+case "$*" in
+  *clocks.max.sm*) echo 3003 ;;
+  *clocks.sm*) n=$(cat "{lag}" 2>/dev/null || echo 0)
+               if [ "$n" -gt 0 ]; then echo $((n - 1)) > "{lag}"; echo 2431; else cat "{tmp_path}/clock"; fi ;;
+  -rgc) echo 2476 > "{tmp_path}/clock" ;;
+esac''')
+    # restart applies the cap, but the next 2 clock reads still show 2431
+    sysd = node.bin / "systemctl"
+    sysd.write_text(sysd.read_text().replace(
+        'echo active > "$S/active" ;;', f'echo active > "$S/active"; echo 2 > "{lag}" ;;', 1))
+    lines = gc._hscc_lines(node.run("install")["stdout"])
+    assert lines["HSCC_ACTION"] == "applied"
+    assert gc.cap_problems(gc._state_from(lines), 2200) == [], lines
