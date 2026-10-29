@@ -41,6 +41,7 @@ from typing import List, Optional
 import _theme
 import backup_util
 import doctor_node_recovery
+import doctor_role_soul
 
 
 @dataclass
@@ -1034,11 +1035,27 @@ def _serving_consistency(_status_runner=None, _serving_raw=None,
                         f"containers, no duplicates", fatal=False)
 
 
+def _refused_role_soul_scan() -> dict:
+    """In-suite stand-in for the role-SOUL scan when no seam was injected.
+
+    The check's real target is SOUL.md under rolelib.PROFILES_DIR — the operator's
+    LIVE profile root when the suite runs from a dispatched worker profile. Same
+    fence shape as ``_refused_transport`` above: the check comes back an ERROR
+    naming the missing seam, never a silent pass and never a real read.
+    """
+    return {"name": doctor_role_soul.check_name(), "ok": False, "fatal": False,
+            "rows": [], "scanned": 0,
+            "detail": "role-SOUL scan refused inside a pytest process — inject "
+                      "_role_soul_scan (fixture profile dirs)",
+            "fix": "Pass _role_soul_scan=lambda: {...} built from tmp profile "
+                   "fixtures; a suite must never read the operator's profiles."}
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
-               hscc_dir: Optional[str] = None) -> dict:
+               hscc_dir: Optional[str] = None, _role_soul_scan=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1053,6 +1070,13 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     per-node ssh transport (production: sparkrun's own remote execution) and
     the dir its ``cluster.json`` opt-out block is read from. Both are injected
     in tests so no doctor test can reach a node.
+
+    ``_role_soul_scan`` is the role-SOUL identity check's seam (t_c823ebc9): a
+    zero-arg callable returning the Check-shaped dict. Inside a pytest process
+    the scan MUST be injected, exactly like ``_ssh_factory`` — its default
+    target reads SOUL.md under the live profiles root, which in the operator's
+    env is real profile state. Uninjected inside a suite it renders as an ERROR
+    naming the missing seam, never as a pass.
     """
     if fleet_checks is None:
         fleet_checks = "pytest" not in sys.modules
@@ -1092,6 +1116,17 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         nr_res = doctor_node_recovery.check(
             _node_hosts(_cluster_runner), ssh_factory=nr_factory,
             hscc_dir=hscc_dir)
+        # Same fence for the role-SOUL audit: it reads SOUL.md files under
+        # rolelib.PROFILES_DIR, which in the operator's env is the LIVE profile
+        # root. A pytest process must never read it, so inside a suite the scan
+        # has to be injected (fixture dirs); without it the check renders as an
+        # ERROR naming the missing seam — an honest "cannot verify", never a
+        # silent pass and never a real read of the operator's profiles.
+        rs_scan = _role_soul_scan or (
+            _refused_role_soul_scan if "pytest" in sys.modules
+            else doctor_role_soul.check)
+        rs_res = rs_scan()
+
         # Only the five Check fields go into the list, so every entry of
         # `checks` — and therefore `doctor --json` — keeps one shape. The
         # per-node rows stay available to callers of
@@ -1099,6 +1134,11 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         checks += [
             Check(name=nr_res["name"], ok=nr_res["ok"], detail=nr_res["detail"],
                   fix=nr_res["fix"], fatal=nr_res["fatal"]),
+            # Role-SOUL identity drift (t_c823ebc9): WARNING, never fatal — a
+            # profile running under another role's identity is a loud red line
+            # to fix, not a reason to hard-stop an install.
+            Check(name=rs_res["name"], ok=rs_res["ok"], detail=rs_res["detail"],
+                  fix=rs_res["fix"], fatal=rs_res["fatal"]),
             _sparkrun_lan_reachability(_venv_python=_venv_python,
                                        _probe=_lan_probe,
                                        _serving_raw=_serving_raw),
@@ -1113,6 +1153,12 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # Same honesty for the node-recovery check: a skipped check prints as
         # skipped, never as "armed/ok" and never as absence-of-output.
         checks.append(Check(doctor_node_recovery.CHECK_NAME, True,
+                            detail="skipped (fleet checks off)", fatal=False))
+        # ...and the same for role-SOUL identity, so a suite run prints an
+        # explicit skipped line instead of quietly not auditing anything. The
+        # name comes through check_name() so the skipped line can never print a
+        # different key than the real check would have used.
+        checks.append(Check(doctor_role_soul.check_name(), True,
                             detail="skipped (fleet checks off)", fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
