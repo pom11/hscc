@@ -13,11 +13,15 @@ collects:
 * tokens — each running card's worker session (input/output) and the 24 h
   total over every profile's kanban sessions, read from the profiles'
   ``state.db`` (``attach_tokens``; the dispatcher tags worker sessions
-  ``source='kanban'`` and they open ~2 s after the run claims the card).
+  ``source='kanban'`` and they open ~2 s after the run claims the card);
+  plus 24 h / 7 d totals for workers and orchestrators (``_token_windows``);
+* orchestrators — every live ``hermes -p <profile> chat`` REPL with its open
+  session's title, last activity and lifetime tokens (``attach_orchestrators``).
 
 The header shows the global ``kanban.max_in_progress`` slots in use, because
 when every slot is taken the ready cards on other boards strand silently.
-Nothing here writes: no claim, no promote, no archive. The kanban lib, the
+Nothing here writes to a board: no claim, no promote, no archive. The one
+write is the orchestrator token ledger (``LEDGER_PATH``, 5-min samples, 8 days). The kanban lib, the
 config reader and the clock are injectable so the collector and renderer test
 offline.
 """
@@ -26,8 +30,10 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import json
 import os
 import sqlite3
+import subprocess
 import time
 
 from rich.console import Group
@@ -177,7 +183,7 @@ def _open_ro(path):
     return contextlib.closing(conn)
 
 
-def attach_tokens(data, hermes_home=None, now=None):
+def attach_tokens(data, hermes_home=None, now=None, ledger_path=None):
     """Add worker-session token counts to a ``collect()`` result, in place.
 
     Each running card gets ``tok_in``/``tok_out`` from the first
@@ -185,7 +191,9 @@ def attach_tokens(data, hermes_home=None, now=None):
     ``SESSION_MATCH_S`` of the run's claim (None when not found), and
     ``data["tokens_24h"]`` is ``[in, out]`` summed over every profile's kanban
     sessions started in the last 24 h (None when no state.db was readable).
-    Read-only; an unreadable database is skipped, never raised.
+    ``data["tokens"]`` adds 24h/7d windows for workers and orchestrators
+    (``_token_windows``). The databases are read-only; the one write is the
+    orchestrator token ledger. An unreadable database is skipped, never raised.
     """
     home = hermes_home or HERMES_HOME
     now_s = int(now if now is not None else time.time())
@@ -229,6 +237,173 @@ def attach_tokens(data, hermes_home=None, now=None):
         total[0] += row[0]
         total[1] += row[1]
     data["tokens_24h"] = total if seen else None
+    data["tokens"] = _token_windows(paths, now_s, ledger_path)
+    return data
+
+
+# ── orchestrators ──────────────────────────────────────────────────────────
+#
+# Worker (kanban) and cron sessions are short, so a started_at window counts
+# them exactly. Orchestrator REPL sessions live for weeks and Hermes stores only
+# their lifetime totals (messages.token_count is never filled), so their 24 h /
+# 7 d use is the growth of those totals between samples the monitor itself
+# keeps in a small ledger — "since <first sample>" until it has a week.
+
+WINDOWS = (("24h", 86400), ("7d", 7 * 86400))
+LEDGER_PATH = os.path.expanduser("~/.hscc/state/kmon_orch_tokens.json")
+LEDGER_STEP_S = 300          # one sample per 5 min is plenty for a 24 h window
+SHORT_SOURCES = ("kanban", "cron")
+
+
+def _sum_tokens(paths, sql, args=()):
+    total, seen = [0, 0], False
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with _open_ro(path) as conn:
+                row = conn.execute(sql, args).fetchone()
+        except sqlite3.Error:
+            continue
+        seen = True
+        total[0] += row[0] or 0
+        total[1] += row[1] or 0
+    return total if seen else None
+
+
+def _ledger_delta(samples, since_s):
+    """Token growth over the samples at/after ``since_s`` (plus the one before).
+
+    Summed step by step and floored at 0 per step, so a deleted session (the
+    lifetime total drops) costs nothing instead of making the window negative.
+    """
+    start = 0
+    for i, s in enumerate(samples):
+        if s[0] <= since_s:
+            start = i
+    window = samples[start:]
+    delta = [0, 0]
+    for prev, cur in zip(window, window[1:]):
+        delta[0] += max(0, cur[1] - prev[1])
+        delta[1] += max(0, cur[2] - prev[2])
+    return delta
+
+
+def _update_ledger(path, now_s, cum):
+    """Append ``[now, in, out]`` at most every LEDGER_STEP_S; keep 8 days.
+
+    Best effort: an unreadable or unwritable ledger just means no history.
+    """
+    try:
+        with open(path) as fh:
+            samples = [s for s in json.load(fh) if len(s) == 3]
+    except (OSError, ValueError, TypeError):
+        samples = []
+    if not samples or now_s - samples[-1][0] >= LEDGER_STEP_S:
+        samples.append([now_s, cum[0], cum[1]])
+        samples = [s for s in samples if s[0] >= now_s - 8 * 86400]
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w") as fh:
+                json.dump(samples, fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return samples
+
+
+def _token_windows(paths, now_s, ledger_path=None):
+    """``{"workers": {...}, "orchestrators": {...}}`` with 24h/7d ``[in, out]``.
+
+    workers = kanban sessions by started_at; orchestrators = cron sessions by
+    started_at plus the ledger growth of every long-lived (cli/gateway) session,
+    with ``since`` = the ledger's first sample when it covers less than 7 days.
+    """
+    marks = ",".join("?" * len(SHORT_SOURCES))
+    out = {"workers": {}, "orchestrators": {}}
+    for name, span in WINDOWS:
+        out["workers"][name] = _sum_tokens(
+            paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
+                   "WHERE source='kanban' AND started_at >= ?", (now_s - span,))
+        out["orchestrators"][name] = _sum_tokens(
+            paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
+                   "WHERE source='cron' AND started_at >= ?", (now_s - span,))
+    cum = _sum_tokens(paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
+                             f"WHERE source NOT IN ({marks})", SHORT_SOURCES)
+    since = None
+    if cum is not None:
+        samples = _update_ledger(ledger_path or LEDGER_PATH, now_s, cum)
+        if samples[0][0] > now_s - WINDOWS[-1][1]:
+            since = samples[0][0]
+        for name, span in WINDOWS:
+            grew = _ledger_delta(samples, now_s - span)
+            base = out["orchestrators"][name] or [0, 0]
+            out["orchestrators"][name] = [base[0] + grew[0], base[1] + grew[1]]
+    out["orchestrators"]["since"] = since
+    return out
+
+
+def _chat_profiles(ps_lines):
+    """Profiles with a live ``hermes -p <profile> chat`` REPL, in ps order.
+
+    Kanban workers run ``hermes_cli.main -p X --cli`` (no ``chat``), and the
+    ``zsh -c 'hermes … chat'`` pane wrapper has a shell as argv[0], so both are
+    skipped.
+    """
+    seen = []
+    for line in ps_lines:
+        argv = line.split()
+        if "chat" not in argv or not any(
+                a.endswith("/hermes") or a == "hermes" for a in argv[:2]):
+            continue
+        for flag in ("-p", "--profile"):
+            if flag in argv[:-1]:
+                prof = argv[argv.index(flag) + 1]
+                if prof not in seen:
+                    seen.append(prof)
+    return seen
+
+
+def _ps_lines():
+    try:
+        return subprocess.run(["ps", "-Ao", "args="], capture_output=True, text=True,
+                              timeout=5).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def attach_orchestrators(data, hermes_home=None, now=None, ps_lines=None):
+    """Add ``data["orchestrators"]``: one row per live orchestrator REPL.
+
+    Each row is the profile's ``cli`` session with the latest message — title,
+    last activity, lifetime input/output tokens. ``ended_at`` is not trusted: a
+    live REPL can keep writing to a session already stamped ended. A profile
+    whose state.db can't be read still gets a row (dashes). Read-only.
+    """
+    home = hermes_home or HERMES_HOME
+    now_s = int(now if now is not None else time.time())
+    rows = []
+    for prof in _chat_profiles(_ps_lines() if ps_lines is None else ps_lines):
+        row = {"profile": prof, "title": None, "last_s": None,
+               "tok_in": None, "tok_out": None}
+        path = _state_db_path(home, prof)
+        if os.path.exists(path):
+            try:
+                with _open_ro(path) as conn:
+                    hit = conn.execute(
+                        "SELECT s.title, s.input_tokens, s.output_tokens, "
+                        "(SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id=s.id) AS last "
+                        "FROM sessions s WHERE s.source='cli' "
+                        "ORDER BY last DESC LIMIT 1").fetchone()
+            except sqlite3.Error:
+                hit = None
+            if hit:
+                row.update(title=hit["title"], tok_in=hit["input_tokens"],
+                           tok_out=hit["output_tokens"],
+                           last_s=None if hit["last"] is None else now_s - int(hit["last"]))
+        rows.append(row)
+    data["orchestrators"] = rows
     return data
 
 
@@ -279,6 +454,43 @@ def running_table(rows, width=None) -> Table:
                   Text(fmt_age(r["hb_s"]), style=hb_style),
                   Text(tok, style="dim"), esc(r["title"]))
     return t
+
+
+def orchestrators_table(rows, width=None) -> Table:
+    t = _plain_table()
+    for col, just in (("Profile", "left"), ("Last", "right"), ("Tokens", "right")):
+        t.add_column(col, justify=just, no_wrap=True)
+    t.add_column("Session", no_wrap=True, overflow="ellipsis",
+                 max_width=max(20, (width or 120) - 60))
+    for r in rows:
+        tok = ("-" if r.get("tok_in") is None
+               else f"{fmt_tokens(r['tok_in'])}/{fmt_tokens(r['tok_out'])}")
+        busy = r["last_s"] is not None and r["last_s"] < 120
+        t.add_row(esc(r["profile"]),
+                  Text(fmt_age(r["last_s"]), style="ok" if busy else "dim"),
+                  Text(tok, style="dim"), esc(r["title"] or "-"))
+    return t
+
+
+def _tok_pair(pair):
+    return "-" if pair is None else f"{fmt_tokens(pair[0])}/{fmt_tokens(pair[1])}"
+
+
+def token_lines(tokens) -> list:
+    """Header lines: fleet total per window, then the workers/orchestrators split."""
+    w, o = tokens["workers"], tokens["orchestrators"]
+    head = Text("tokens", style="dim")
+    for name, _ in WINDOWS:
+        tot = [(w[name] or [0, 0])[i] + (o[name] or [0, 0])[i] for i in (0, 1)]
+        head.append(f"  {name} in {fmt_tokens(tot[0])} · out {fmt_tokens(tot[1])}", style="dim")
+    head.append("  (workers + orchestrators, all profiles)", style="dim")
+    split = Text("  workers " + " · ".join(f"{n} {_tok_pair(w[n])}" for n, _ in WINDOWS)
+                 + "    orchestrators " + " · ".join(f"{n} {_tok_pair(o[n])}" for n, _ in WINDOWS),
+                 style="dim")
+    if o.get("since"):
+        stamp = datetime.datetime.fromtimestamp(o["since"]).strftime("%m-%d %H:%M")
+        split.append(f"  (orchestrator history since {stamp})", style="dim")
+    return [head, split]
 
 
 def ready_table(rows, width=None) -> Table:
@@ -343,21 +555,30 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
         slots.append("  ← global cap full: other boards' ready cards wait", style="warn")
     parts = [head, slots]
     tok24 = data.get("tokens_24h")
-    if tok24:
-        # own line: appended to `slots` it wraps in a ~105-col tmux split
-        parts.append(Text(f"tokens 24h in {fmt_tokens(tok24[0])} · out {fmt_tokens(tok24[1])}"
-                          "  (kanban worker sessions, all profiles)", style="dim"))
+    tok_lines = []
+    if data.get("tokens"):
+        # own lines: appended to `slots` they wrap in a ~105-col tmux split
+        tok_lines = token_lines(data["tokens"])
+    elif tok24:
+        tok_lines = [Text(f"tokens 24h in {fmt_tokens(tok24[0])} · out {fmt_tokens(tok24[1])}"
+                          "  (kanban worker sessions, all profiles)", style="dim")]
+    parts += tok_lines
     parts.append(Text(""))
     parts.append(Text(f"running ({n_run})", style="title"))
     parts.append(running_table(data["running"], width) if data["running"]
                  else Text("no worker is running", style="dim"))
-    used_lines = (4 + (1 if tok24 else 0)
+    used_lines = (4 + len(tok_lines)
                   + (len(data["running"]) + 1 if data["running"] else 1))
     # Optional sections in priority order; in a short pane (`--live` in a tmux
     # split) the lower ones are dropped instead of scrolling the view.
     live_boards = [b for b in data["boards"]
                    if any(b["counts"].get(c) for c in STATUS_COLS) or b["done_24h"]]
     optional = []
+    orchs = data.get("orchestrators")
+    if orchs:
+        optional.append((len(orchs) + 3, [
+            Text(""), Text(f"orchestrators ({len(orchs)} running)", style="title"),
+            orchestrators_table(orchs, width)]))
     if data["ready"]:
         optional.append((len(data["ready"]) + 3, [
             Text(""), Text(f"ready, waiting for a slot ({len(data['ready'])})", style="title"),
@@ -388,7 +609,7 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
             while True:
-                data = attach_tokens(collect(kanban_db=kanban_db, board=board))
+                data = attach_orchestrators(attach_tokens(collect(kanban_db=kanban_db, board=board)))
                 live.update(render(data, interval, width=console.width, height=console.height),
                             refresh=True)
                 time.sleep(interval)
