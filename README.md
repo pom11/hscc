@@ -161,7 +161,7 @@ It never tears down while kanban work is running/ready/in-review, while an agent
 
 ## The fleet
 
-Work flows through native Hermes kanban: the orchestrator decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (25 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
+Work flows through native Hermes kanban: the orchestrator decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (26 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
 
 ## Components
 

@@ -14,7 +14,7 @@ Hermes' engine and wraps it in the operational shell a real fleet needs.
 | Gap in stock Hermes | What HSCC adds |
 |---|---|
 | No physical cluster control — can't provision / stop / heal vLLM models, no NAS or node-health awareness | A sparkrun-backed cluster toolset (orchestrator-only) + a self-heal daemon that keeps worker models alive and relaunches crashed ones |
-| Profiles exist, but no way to define a *roster* of specialists — every worker is generic | A role framework: each role is a spec file, generated into a Hermes profile with a layered SOUL (shared base + role disposition); 25 role specs ship, new ones minted on demand |
+| Profiles exist, but no way to define a *roster* of specialists — every worker is generic | A role framework: each role is a spec file, generated into a Hermes profile with a layered SOUL (shared base + role disposition); 26 role specs ship, new ones minted on demand |
 | The review-status dispatch path is present in core but inert — no producer, no reviewer skill | A `kanban_submit_review` producer + an `sdlc-review` skill, so code is gated (diff + tests + spec) and merged to an integration branch before it counts as done |
 | No "run hands-off" control | An autonomy flag (`~/.hscc/autonomy`) + a "do it autonomously" trigger that lets the orchestrator run idea→shipped without pausing for approval |
 | No cluster-aware setup | One bootstrap command that detects the cluster from sparkrun and installs everything — no hardcoded topology |

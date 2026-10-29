@@ -60,13 +60,13 @@ result with `hscc.py provision-check`.
 
 ## Roster (`roles/`)
 
-A full org (25 specs): orchestrator, architect, coder, **reviewer**, qa;
+A full org (26 specs): orchestrator, architect, coder, **reviewer**, qa;
 backend/frontend/devops/security/data engineers; ml-engineer, ml-researcher,
-data-scientist; **ios-engineer**, **ecofire-bc-engineer**; product-manager,
-technical-writer, ux-designer; financial-analyst, business-analyst,
-market-researcher; content-writer, social-media-manager, project-manager;
-worker. `ls roles/` is the census. New roles are minted with `create` — the
-roster is data, not code.
+data-scientist; **ios-engineer**, **ecofire-bc-engineer**,
+**ecofire-pontaje-engineer**; product-manager, technical-writer, ux-designer;
+financial-analyst, business-analyst, market-researcher; content-writer,
+social-media-manager, project-manager; worker. `ls roles/` is the census. New
+roles are minted with `create` — the roster is data, not code.
 
 `coder` blocks finished work for review; `reviewer` adversarially checks
 diff + tests + spec and approves only when all three pass (powers the WS4
