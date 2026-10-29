@@ -388,6 +388,34 @@ elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --hosts "$H
   [ "$NM_RC" -ne 0 ] && warn "snap firmware-notifier NOT masked on every node — the notifier keeps crash-looping in the desktop user session (rc=$NM_RC); re-run this stage, or check the bootstrap doctor (doctor.py) check 'snap firmware-notifier mask (node-recovery)'"
 fi
 
+hdr "Install: GPU clock cap (cooler nodes, ~same speed)"
+# Locks every node's GPU graphics clock to [0, cap] (default 2200 MHz) with a
+# systemd oneshot unit that re-applies `nvidia-smi -lgc 0,<cap>` at boot. A
+# two-Spark sweep measured 99.6 % overall / 100 % decode / 95 % uncached prefill
+# for -32 % GPU power and ~-5 C; decode on GB10 is bandwidth-bound. Applies live
+# (no model restart). sudo -n on the node; transport = the sparkrun bridge.
+# Non-fatal, never silently green: the doctor check 'GPU clock cap
+# (node-recovery)' stays red until every node reads back capped.
+# Value / opt-out: node_recovery.gpu_clock_cap_mhz (int, or false) in
+# ~/.hscc/cluster.json. Undo: install_gpu_clock_cap.py --uninstall --hosts ...
+if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
+  warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
+elif $DRY_RUN; then
+  plan "GPU clock cap: install_gpu_clock_cap.py --hosts $HOSTS_CSV (systemd unit hscc-gpu-clock-cap.service running nvidia-smi -lgc 0,<cap> + read-back; writes NOTHING in dry-run)"
+elif [ ! -f "$BOOT_DIR/install_gpu_clock_cap.py" ]; then
+  warn "install_gpu_clock_cap.py missing from $BOOT_DIR — GPUs stay on auto clocks"
+else
+  GC_RC=0; GC_OUT=$("$PYBIN" "$BOOT_DIR/install_gpu_clock_cap.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || GC_RC=$?
+  while IFS= read -r GC_LINE; do
+    case "$GC_LINE" in
+      OK\|*)   ok "${GC_LINE#OK|}" ;;
+      WARN\|*) warn "${GC_LINE#WARN|}" ;;
+      *)       warn "$GC_LINE" ;;
+    esac
+  done <<< "$GC_OUT"
+  [ "$GC_RC" -ne 0 ] && warn "GPU clock cap NOT verified on every node (rc=$GC_RC); see the doctor check 'GPU clock cap (node-recovery)'"
+fi
+
 hdr "Install: hermes/sparkrun patches"
 # Reapply the curated upstream patches (kanban review + kanban_task_claimed
 # resume hook live in hermes core, so the review/resume features need them on a

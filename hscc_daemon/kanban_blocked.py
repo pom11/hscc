@@ -61,9 +61,11 @@ Usage: hscc kanban <subcommand> [args]
                               whether the work is safe to re-run.
   hscc kanban stale [--older-than <days>] [--json]   (card t_e751e652)
                               List non-terminal cards across all boards.
-  hscc kanban pause <board>... [--reason <text>] / resume <board>... / paused / enforce
-                              Hold whole boards by project priority (reclaim +
-                              block running/ready; resume restores exactly those).
+  hscc kanban pause <board>... [--reason <text>]
+  hscc kanban resume <board>... | paused | enforce
+                              Hold whole boards by project priority (reclaim
+                              + block running/ready; resume restores exactly
+                              those).
   hscc kanban monitor [--live] [--interval <s>] [--board <slug>]
                               Workers on every board: running, ready, counts,
                               last hour's outcomes (read-only).

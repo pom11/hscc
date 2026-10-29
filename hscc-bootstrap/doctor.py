@@ -1164,6 +1164,26 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
             _nm_name = _NOTIFIER_CHECK_NAME
         checks.append(Check(_nm_name, True, detail="skipped (fleet checks off)",
                             fatal=False))
+    # GPU clock cap — same shape as the notifier block: own module, own check,
+    # the transport refuses to exist inside pytest (inject via
+    # install_gpu_clock_cap.doctor_check(ssh_factory=...)).
+    try:
+        import install_gpu_clock_cap
+    except ImportError:
+        checks.append(Check("GPU clock cap (node-recovery)", not fleet_checks,
+                            detail=("install_gpu_clock_cap.py missing — the cap cannot "
+                                    "be verified" if fleet_checks
+                                    else "skipped (fleet checks off)"),
+                            fix="Restore hscc-bootstrap/install_gpu_clock_cap.py (re-run bootstrap).",
+                            fatal=False))
+    else:
+        if fleet_checks:
+            gc = install_gpu_clock_cap.doctor_check(_node_hosts(_cluster_runner))
+            checks.append(Check(name=gc["name"], ok=gc["ok"], detail=gc["detail"],
+                                fix=gc["fix"], fatal=gc["fatal"]))
+        else:
+            checks.append(Check(install_gpu_clock_cap.CHECK_NAME, True,
+                                detail="skipped (fleet checks off)", fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
         "ok": not fatal_failed,
