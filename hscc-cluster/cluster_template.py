@@ -51,6 +51,40 @@ APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 # Override via HSCC_PROVISION_TIMEOUT env var (seconds).
 PROVISION_TIMEOUT_S = int(os.environ.get("HSCC_PROVISION_TIMEOUT", "900"))
 
+# Already-serving skip on apply (same fix as `cluster up`, t_be4b94ca): an
+# `sparkrun run --ensure` against a unit that is already up on the same recipe
+# is a no-op by definition, but its `ssh … bash -s` can fail to EOF and hang the
+# whole apply (2026-10-29, adding a 4th node: every existing unit hung up to the
+# 15-min PROVISION_TIMEOUT_S). Probe the span first; fail-open on any doubt.
+_UNIT_PROBE_TIMEOUT_S = 2
+
+
+def _unit_models_probe(url, timeout=2):
+    """GET + parse one unit's /v1/models via the daemon's body-parsing probe.
+
+    Returns {"ok", "models", "error"}; never raises. Test seam.
+    """
+    try:
+        from hscc_daemon import health as _h
+        return _h._proxy_models_probe(url, timeout=timeout)
+    except Exception as e:  # daemon unimportable / probe blew up: not serving
+        return {"ok": False, "models": [], "error": str(e)}
+
+
+def _span_already_serving(nodes, port):
+    """True iff EVERY span node answers its own /v1/models with a NON-EMPTY
+    catalogue (a lone TP head is mid-formation; an empty catalogue is the
+    hollow shape, 2026-10-11 — neither counts as serving)."""
+    if not nodes:
+        return False
+    for node in nodes:
+        res = _unit_models_probe(f"http://{node}:{port}/v1/models",
+                                 timeout=_UNIT_PROBE_TIMEOUT_S)
+        if not res.get("ok") or not (res.get("models") or []):
+            return False
+    return True
+
+
 # Cap timestamped backups per file so re-applies don't accumulate forever
 # (a prior version left 100+ serving.json.bak.* / models.json.bak.* in ~/.hscc).
 MAX_BACKUPS = 5
@@ -636,6 +670,14 @@ def _provision_models(plan: Any, cluster: str = "hscc",
         # prior record (which is what we just compared against), so we never
         # overwrite "what's running" with a command that did NOT take effect.
         actually_relaunched = recreate or not already_running_same
+        if (not recreate and already_running_same
+                and _span_already_serving(want_span, port)):
+            # --ensure would be a no-op; skip the call that can hang.
+            result["provisioned"].append(
+                f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+            result.setdefault("skipped_serving", []).append(
+                f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+            continue
         try:
             # Concrete id = recipe's model field (fall back to the resolved
             # unit's model). Always advertise concrete + alias so the endpoint

@@ -270,3 +270,17 @@ def _pin_topology():
     for name in _TOPOLOGY_NAMES:
         clusterlib.__dict__.pop(name, None)
     clusterlib.__dict__.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_unit_probe(monkeypatch):
+    """apply's already-serving skip probes each span node's /v1/models; tests
+    use placeholder hosts, so default to "not serving" (the pre-skip behaviour:
+    --ensure runs) and never open a socket. Tests that exercise the skip patch
+    ``cluster_template._unit_models_probe`` themselves."""
+    try:
+        import cluster_template as _ct
+    except Exception:
+        return
+    monkeypatch.setattr(_ct, "_unit_models_probe",
+                        lambda url, timeout=2: {"ok": False, "models": [], "error": "test"})
