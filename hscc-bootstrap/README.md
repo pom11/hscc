@@ -40,9 +40,11 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    HSCC identity + doc-driven/review-gate guidance (sentinel-managed blocks).
 8. **Install: daemon** — launchd (macOS) / systemd --user (Linux); resolves a
    real python (venv-preferred), so it won't respawn-loop on Homebrew-only hosts.
-   Then **restarts** the daemon via `hscc stop`/`hscc start` so freshly-installed
-   code is ALWAYS loaded (the setup script leaves an already-running daemon
-   alone) and verifies the PID turned over; a failed restart warns, never aborts.
+   Then **restarts** the daemon via `restart_daemon.sh` so freshly-installed code
+   is ALWAYS loaded (the setup script leaves an already-running daemon alone).
+   With the launchd job loaded that restart is `launchctl kickstart -k` — the
+   only restart that keeps the service's interpreter and supervisor — and the
+   PID is verified from launchd itself; a failed restart warns, never aborts.
 
 ## Files
 | File | Role |
@@ -58,7 +60,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | `serving_gen.py` | build serving.json from the detected cluster |
 | `suggest_template.py` | suggest a node-count template |
 | `apply_patches.py` | reapply the WS8 upstream patch set (see `../patches/`) |
-| `restart_daemon.sh` | restart the daemon via `hscc stop`/`hscc start` + verify PID turned over |
+| `restart_daemon.sh` | restart the daemon the supervised way — `launchctl kickstart -k` when the launchd job is loaded (PID verified from launchd), `hscc stop`/`hscc start` only when it is not — and refuse to start a second loop beside an unsupervised daemon |
 
 ## Flags
 `--yes` non-interactive · `--dry-run` print every planned write, perform none ·
