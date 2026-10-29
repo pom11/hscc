@@ -190,6 +190,14 @@ case "$MODE" in
       OUT="$(sudo -n systemctl enable "$UNIT" 2>&1)" || fail 6 "enable failed: $OUT"
       # restart = ExecStop (-rgc) then ExecStart (-lgc) — applies a changed value live
       OUT="$(sudo -n systemctl restart "$UNIT" 2>&1)" || fail 6 "restart failed: $OUT"
+      # A loaded GPU takes a moment to step down after the lock (measured: read
+      # 1 s after restart still showed 2353-2431 MHz on 2 of 4 nodes, capped on
+      # re-probe). Wait up to ~5 s so the read-back sees the settled clock.
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        C="$("$SMI" --query-gpu=clocks.sm --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+        [ -n "$C" ] && [ "$C" -le __SETTLE_MAX__ ] 2>/dev/null && break
+        sleep 0.5
+      done
       say "HSCC_ACTION: applied"
     fi
     emit_state; say "HSCC_RC: 0"; exit 0 ;;
@@ -219,7 +227,8 @@ def install_script(mode: str, cap_mhz: int = DEFAULT_CAP_MHZ, *,
             .replace("__UNIT_PATH__", unit_path)
             .replace("__UNIT_B64__", unit_b64)
             .replace("__UNIT__", UNIT_NAME)
-            .replace("__SMI__", smi))
+            .replace("__SMI__", smi)
+            .replace("__SETTLE_MAX__", str(cap_mhz + CLOCK_TOLERANCE_MHZ)))
 
 
 def command_for(mode: str, cap_mhz: int = DEFAULT_CAP_MHZ) -> str:
