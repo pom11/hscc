@@ -466,3 +466,24 @@ class TestGuardedInstall:
         mk_profile(home, "acme-orch")
         rc = irs.main(["--home", str(home), "--repo-root", REPO_ROOT, "--json"])
         assert rc == 0  # clean install -> ok
+
+    def test_blocked_summary_names_a_profile_under_both_states(self, tmp_path):
+        # A profile can carry TWO blocked states at once: ``collision`` comes
+        # from ANY row whose verdict is ambiguous (no REVIEW_SKILL gate), while
+        # ``missing`` comes only from the sdlc-review row — so an extra name
+        # colliding + sdlc-review absent yields "prof (collision+missing)".
+        # Both summary lines must name the profile. (``disabled`` and
+        # ``missing`` are mutually exclusive by construction: both read the
+        # single sdlc-review verdict.)
+        home = self._home(tmp_path)
+        mk_profile(home, "both-orch", {          # no sdlc-review at all
+            "software-development/systematic-debugging": "cat copy\n",
+            "systematic-debugging": "stale flat copy\n"})
+        report = self._run(home, skills=irs.INSTALLABLE, dry_run=True)
+        blocked = [b for b in report["blocked"] if b.startswith("both-orch")]
+        assert blocked and "collision" in blocked[0] and "missing" in blocked[0], \
+            report["blocked"]
+        lines = "\n".join(irs._summary_lines(report))
+        assert "collision" in lines and "both-orch" in lines, lines
+        assert "still missing for: both-orch" in lines, lines
+
