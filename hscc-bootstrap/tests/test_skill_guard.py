@@ -352,42 +352,64 @@ class TestGuardedInstall:
         assert (skills / "custom" / "sdlc-review" / "SKILL.md").is_file()
         assert not (skills / "devops").exists()
 
-    def test_no_bundled_marker_at_home_blocks_extra_names_only(self, tmp_path):
-        # B3 (round-2 review): the CANONICAL marker path is <profile home>/.
-        # no-bundled-skills (hermes_cli/profiles.py:1349 writes it, tools/
-        # skills_sync.py reads it) — the skills/-internal position the first
-        # cut checked is dead data. Stated decision: the marker is HONOURED
-        # for the extra names (systematic-debugging, test-driven-development)
-        # and OVERRIDDEN for the dispatcher-injected sdlc-review, because
-        # hscc-roles itself creates every *-orch with no_skills=True (which
-        # writes this very marker) while the dispatcher force-injects the
-        # review skill for spawns to that profile.
+    def test_marker_overridden_for_reviewer_home_all_three_names(self, tmp_path):
+        # B3 (round-2 review, stated decision). The CANONICAL marker path is
+        # <profile home>/.no-bundled-skills (hermes_cli/profiles.py:1349 writes
+        # it, tools/skills_sync.py reads it) — the skills/-internal position the
+        # first cut checked is dead data. Inside a REVIEWER-CAPABLE home the
+        # marker is overridden for the WHOLE guarded trio: hscc-roles creates
+        # every *-orch with no_skills=True (which writes this very marker) while
+        # the dispatcher force-injects sdlc-review for spawns to that profile,
+        # and the card's acceptance demands an empty missing-list for all THREE
+        # names across the five card profiles — the two hand-fixed
+        # ecofire-*-orch homes carry the marker and were the failing two.
         home = self._home(tmp_path)
         p = mk_profile(home, "acme-orch")
         (home / "profiles" / "acme-orch" / ".no-bundled-skills").write_text("opted out\n")
-        # Extras-only run: opt-out honoured, nothing written.
-        report = self._run(home, skills=("systematic-debugging",))
-        plan = next(x for x in report["targets"] if x["profile"] == "acme-orch")
-        assert plan["action"] == "skipped-no-bundled-skills"
-        assert not os.path.exists(os.path.join(p, "skills", "software-development",
-                                               "systematic-debugging"))
-        # Injected-name run: override — review readiness wins, skill installs.
-        report2 = self._run(home, skills=(irs.REVIEW_SKILL,))
-        plan2 = next(x for x in report2["targets"] if x["profile"] == "acme-orch")
-        assert plan2["action"] == "installed"
-        assert plan2.get("opt_out_override")
-        assert (home / "profiles" / "acme-orch" / "skills"
-                / "devops" / "sdlc-review" / "SKILL.md").is_file()
+        report = self._run(home, skills=irs.INSTALLABLE)
+        # One plan row per name for this home; every one installed, each marked
+        # as an override so the operator can see WHY a marker did not bind.
+        per_name = [x for x in report["targets"] if x["profile"] == "acme-orch"
+                    and "skill" in x]
+        assert len(per_name) == 3, per_name
+        for row in per_name:
+            assert row["action"] == "installed", row
+            assert row.get("opt_out_override"), row
+        for name, cat in (("sdlc-review", "devops"),
+                         ("systematic-debugging", "software-development"),
+                         ("test-driven-development", "software-development")):
+            assert (home / "profiles" / "acme-orch" / "skills" / cat
+                    / name / "SKILL.md").is_file(), name
+
+    def test_marker_binds_on_a_non_reviewer_home(self, tmp_path):
+        # The other half of the B3 decision: OUTSIDE the reviewer-role set the
+        # operator's --no-skills is honoured for every name, which is the only
+        # place the marker still guards anything (default fan-out is
+        # reviewer-only). Reached via reviewer_only=False (--all-profiles).
+        home = self._home(tmp_path)
+        p = mk_profile(home, "plain-worker")
+        (home / "profiles" / "plain-worker" / ".no-bundled-skills").write_text("opted out\n")
+        report = irs.install_review_skill(home=str(home), repo_root=REPO_ROOT,
+                                          stamp="t", skills=irs.INSTALLABLE,
+                                          reviewer_only=False)
+        rows = [x for x in report["targets"] if x["profile"] == "plain-worker"]
+        assert rows and all(r["action"] == "skipped-no-bundled-skills" for r in rows), rows
+        assert not (home / "profiles" / "plain-worker" / "skills").exists() \
+            or not any((home / "profiles" / "plain-worker" / "skills").rglob("SKILL.md"))
 
     def test_legacy_skills_marker_still_recognised(self, tmp_path):
         # The old (wrong-path) marker location is accepted as opt-out too —
-        # a marker there can only have been meant as an opt-out.
+        # a marker there can only have been meant as an opt-out. Uses a
+        # NON-reviewer home, where the marker binds (see the two tests above).
         home = self._home(tmp_path)
-        p = mk_profile(home, "acme-orch")
-        (home / "profiles" / "acme-orch" / "skills"
+        p = mk_profile(home, "plain-worker")
+        (home / "profiles" / "plain-worker" / "skills"
              / ".no-bundled-skills").write_text("")
-        report = self._run(home, skills=("test-driven-development",))
-        plan = next(x for x in report["targets"] if x["profile"] == "acme-orch")
+        report = irs.install_review_skill(home=str(home), repo_root=REPO_ROOT,
+                                          stamp="t",
+                                          skills=("test-driven-development",),
+                                          reviewer_only=False)
+        plan = next(x for x in report["targets"] if x["profile"] == "plain-worker")
         assert plan["action"] == "skipped-no-bundled-skills"
         assert not os.path.exists(os.path.join(p, "skills", "software-development",
                                                "test-driven-development"))

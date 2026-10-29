@@ -217,19 +217,17 @@ def seed_review_skills_for(profile_dir: str) -> dict:
         # into profiles that cannot review); orchestrators are all reviewers.
         report["skills"]["_"] = "skipped-not-reviewer"
         return report
-    # Same B3 policy as install_review_skill(): the .no-bundled-skills marker
-    # (canonical <home>/ path — generate_profile's create_profile(no_skills=
-    # True) writes exactly this) is HONOURED for the extra names and
-    # OVERRIDDEN for the dispatcher-injected sdlc-review.
-    try:
-        import skill_guard as _sg
-        opted_out = _sg.bundled_seeding_opted_out(profile_home)
-    except ImportError:  # pragma: no cover - half-deployed tree only
-        opted_out = (profile_home / irs.NO_BUNDLED_MARKER).exists()
+    # Same B3 policy as install_review_skill(): inside a REVIEWER-CAPABLE home
+    # the .no-bundled-skills marker does NOT bind — create_profile
+    # (no_skills=True) (generator.py:470) is what minted it, so it is hscc's own
+    # footprint rather than an operator opt-out, and honouring it would leave a
+    # freshly minted orchestrator unable to answer the dispatcher's
+    # force-injected review spawn. The card's acceptance needs all THREE names
+    # resolvable on the *-orch set, so all three are seeded here. (The marker
+    # still binds for NON-reviewer homes — install_review_skill's caller decides
+    # that, and every profile reaching this function is already gated as a
+    # reviewer by skill_guard_is_reviewer above.)
     for skill in irs.INSTALLABLE:
-        if opted_out and skill != irs.REVIEW_SKILL:
-            report["skills"][skill] = "skipped-no-bundled-skills"
-            continue
         bundle = irs.bundle_source(skill)
         if bundle is None or not (bundle / "SKILL.md").is_file():
             report["ok"] = False
@@ -239,7 +237,7 @@ def seed_review_skills_for(profile_dir: str) -> dict:
             plan = irs.plan_home(
                 name, str(profile_home / "skills"), skill, bundle,
                 dry_run=False, stamp="orch", profile_home=profile_home,
-                reviewer_only=True)
+                reviewer_only=True, honor_opt_out=False)
             report["skills"][skill] = plan["action"]
         except OSError as exc:
             report["ok"] = False

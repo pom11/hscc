@@ -263,7 +263,7 @@ def _install_into(src, target, *, stamp, backups_dir):
 
 
 def plan_home(label, skills_dir, name, bundle, *, dry_run, stamp,
-              profile_home=None, reviewer_only=False):
+              profile_home=None, reviewer_only=False, honor_opt_out=False):
     """One home's plan for ONE skill: guard decision + category action.
 
     The card rule that shapes every branch here:
@@ -373,6 +373,20 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, stamp,
 
     if dry_run:
         plan["action"] = "would-" + plan["action"]
+    if honor_opt_out and plan["action"] in ("write", "would-write"):
+        # DECIDED HERE, BEFORE THE WRITE (round-2 review B3, the actual defect
+        # behind "wrote sdlc-review anyway"): a caller CANNOT suppress a write
+        # it learns about after the fact — by the time plan_home returns, the
+        # copy is on disk and the action reads ``installed``, so a caller-side
+        # rewrite only relabels a write that already happened (measured: a
+        # marker-carrying profile with the full trio got all three skills
+        # written while the report claimed them skipped). The marker's whole
+        # effect must therefore be an input to this decision.
+        plan["action"] = ("would-skip-no-bundled-skills" if dry_run
+                          else "skipped-no-bundled-skills")
+        plan["reason"] = (f"home carries {NO_BUNDLED_MARKER} (canonical "
+                          f"<home>/ path) — bundled seeding opt-out honoured; "
+                          f"hscc writes nothing here")
     elif plan["action"] == "write":
         plan["backup"] = _install_into(bundle, target, stamp=stamp,
                                        backups_dir=_backups_dir(skills_dir))
@@ -433,34 +447,49 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     # here is a no-op/skip, so the provenance-vs-bundle comparison it fed is
     # gone (a copy that RESOLVES is never overwritten, edited or not).
     for label, skills_dir, profile_home in skill_dirs(home):
-        # B3 (round-2 review): the opt-out marker lives at the CANONICAL
-        # ``<profile home>/.no-bundled-skills`` path (hermes_cli/profiles.py:
-        # 1349 writes it, tools/skills_sync.py:368,468 reads it via
-        # ``_hermes_home()``), not inside ``skills/``. DECISION for the
-        # dispatcher-injected name (stated in the PR body, per the reviewer's
-        # "needs a stated decision"): reviewer-readiness OVERRIDES the seeding
-        # opt-out for ``sdlc-review`` only. Grounding — hscc-roles creates
-        # every orchestrator with ``create_profile(no_skills=True)``
-        # (generator.py:470), which is exactly the call that WRITES the marker
-        # (profiles.py ``_finish_profile_layout``), so honouring the marker
-        # would leave every ``*-orch`` unreviewable forever AND read GREEN;
-        # meanwhile the dispatcher force-injects the name for review-lane
-        # spawns to ANY assignee (kanban_db_dispatch.py:2073-2075), so the
-        # opt-out cannot be honoured without guaranteeing dead spawns. The
-        # marker IS honoured for the extra names (systematic-debugging,
-        # test-driven-development) — those are role-preload conveniences nobody
-        # force-injects, and skipping them is the operator's expressed wish.
-        # Either way the collision guard still decides the write, and doctor
-        # reports an opted-out reviewer-capable home that cannot resolve the
-        # injected name RED — never silent.
+        # B3 (round-2 review, STATED DECISION): the opt-out marker lives at the
+        # CANONICAL ``<profile home>/.no-bundled-skills`` path
+        # (hermes_cli/profiles.py:1349 writes it, tools/skills_sync.py:368,468
+        # reads it via ``_hermes_home()``), not inside ``skills/`` — the first
+        # cut checked the dead skills/ position. Where the marker BINDS and
+        # where it is OVERRIDDEN is a policy call, made per home:
+        #
+        #   * REVIEWER-ROLE SET (``*-orch`` + ``reviewer`` + the root home):
+        #     overridden for the WHOLE guarded trio. Grounding — hscc-roles
+        #     creates every orchestrator with ``create_profile(no_skills=True)``
+        #     (generator.py:470), the exact call that WRITES the marker
+        #     (profiles.py ``_finish_profile_layout``): inside an hscc-minted
+        #     ``*-orch`` the marker is HSCC's OWN footprint, not an operator
+        #     opt-out. Honouring it there would (a) leave every orchestrator
+        #     unable to answer the dispatcher's force-injected review spawn
+        #     (kanban_db_dispatch.py:2073-2075) and (b) fail the card's own
+        #     acceptance — the repro must print an EMPTY missing-list for all
+        #     THREE names across the five card profiles, and the two
+        #     hand-fixed ``ecofire-*-orch`` carry the marker (measured
+        #     2026-10-29: they were exactly the two failing homes).
+        #   * everywhere else (a non-reviewer home, reachable only via
+        #     --all-profiles): the marker BINDS for every name — that home has
+        #     no review-readiness obligation and the operator's ``--no-skills``
+        #     is the expressed wish there. Without this clause the marker would
+        #     guard nothing at all under the default reviewer-only fan-out,
+        #     which is precisely the dead-guard defect the review flagged.
+        #
+        # The collision guard still decides every write, and doctor reports an
+        # opted-out reviewer-capable home that cannot resolve the injected name
+        # RED — never silent.
         opted_out = skill_guard.bundled_seeding_opted_out(profile_home)
-        if opted_out and all(s != REVIEW_SKILL for s in skills):
+        reviewer_home = (label == "default (root)"
+                         or skill_guard.is_reviewer_capable(label))
+        # Where the marker BINDS, it binds before anything is written (see the
+        # honor_opt_out note in plan_home).
+        honor_marker = opted_out and not reviewer_home
+        if honor_marker and all(s != REVIEW_SKILL for s in skills):
             report["targets"].append({
                 "profile": label, "skills_dir": str(skills_dir),
                 "skill": "+".join(skills),
                 "action": "skipped-no-bundled-skills",
                 "reason": f"home carries {NO_BUNDLED_MARKER} (seeding opt-out "
-                          f"honoured for non-injected names)",
+                          f"honoured — non-reviewer home)",
                 "opted_out": True,
                 "bare_name_resolves": resolve_verdict(skills_dir, REVIEW_SKILL)[0],
             })
@@ -469,23 +498,16 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
             plan = plan_home(label, skills_dir, name, sources[name],
                              dry_run=dry_run, stamp=stamp,
                              profile_home=profile_home,
-                             reviewer_only=reviewer_only)
+                             reviewer_only=reviewer_only,
+                             honor_opt_out=honor_marker)
             if opted_out:
                 plan["opted_out"] = True
-                if name == REVIEW_SKILL:
+                if reviewer_home:
                     plan["opt_out_override"] = (
-                        f"{NO_BUNDLED_MARKER} honoured for bundled seeding but "
-                        f"NOT for the dispatcher-injected {REVIEW_SKILL} "
-                        f"(review readiness wins; see module docstring)")
-                elif plan["action"] in ("write", "would-write"):
-                    # An extra name the opt-out covers: the ONLY difference the
-                    # marker makes here is suppressing the first install — a
-                    # copy that already resolves (noop) or a guard skip stays
-                    # reported as itself, so the marker never masks findings.
-                    plan["action"] = ("would-skip-no-bundled-skills" if dry_run
-                                      else "skipped-no-bundled-skills")
-                    plan["reason"] = (f"home carries {NO_BUNDLED_MARKER} — "
-                                      f"bundled seeding opt-out honoured")
+                        f"{NO_BUNDLED_MARKER} is present but overridden for the "
+                        f"reviewer-capable home: the marker was minted by "
+                        f"hscc's own create_profile(no_skills=True), and "
+                        f"review readiness for {name} wins (see module docstring)")
             if replace_top_level:
                 plan["top_level"] = _plan_top_level(
                     label, skills_dir, name, plan, dry_run=dry_run,
