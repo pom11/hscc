@@ -42,21 +42,29 @@ Hermes' exact resolution rule, read from source (2026-10-28) — replicated by
 Search roots for a profile spawn (``_skill_search_dirs``):
 ``<profile HERMES_HOME>/skills`` plus ``skills.external_dirs`` from the
 profile's own ``config.yaml`` (the root ``~/.hermes/skills`` is NOT a fallback
-— a profile session resolves ONLY against its own tree). Same-identical-copies
-inside ONE root resolve fine, so the guard is content-aware: an HSCC flat
-install is skipped only when another root holds the name with DIFFERENT
-content (see ``plan_bundled_skill_writes``).
+— a profile session resolves ONLY against its own tree). Identical copies
+inside ONE root resolve ONLY when they rank apart (flat-vs-category, different
+depths), so the guard is content- AND layout-aware: an HSCC write is skipped
+when the name already resolves from another path, and an equal-rank identical
+pair is reported as a collision rather than waved through.
 
-The module exposes three things:
+The module exposes the read-only verdicts every writer and the doctor share:
 
-* ``profile_skill_inventory`` / ``scan_skill_names`` — a read-only scan that
-  mirrors the resolver's candidate rules for one skills root.
-* ``reviewer_readiness`` — doctor finding (ii): does a reviewer-capable
-  profile resolve a name EXACTLY ONCE (ok) / zero times (missing) / more than
-  once (collision), with every colliding path listed.
-* ``plan_bundled_skill_writes`` — the COLLISION GUARD every bundled-skill
-  writer must pass through: a name is never written into a tree whose scan set
-  already resolves it from another root with different content.
+* ``scan_skill_names`` / ``profile_skill_roots`` — a read-only scan mirroring
+  the resolver's candidate rules for one skills root, and the scan set for one
+  home.
+* ``resolution`` — how a name resolves for one scan set: ``ok`` / ``missing`` /
+  ``collision`` (with ``equal_rank``) / ``disabled``. The single decision point
+  the installer, the doctor and ``hscc.py install-skills`` all consult.
+* ``readiness_for_home`` / ``duplicate_names`` — the doctor's two findings
+  (reviewer readiness; duplicated SKILL.md names with every colliding path).
+* ``guard_write`` — the COLLISION GUARD every bundled-skill writer must pass
+  through: a name is never written into a tree whose scan set already resolves
+  it from another path.
+* ``is_reviewer_capable`` / ``bundled_seeding_opted_out`` /
+  ``disabled_skills_for_home`` / ``discover_profiles`` — the shared policy
+  predicates (REVIEWER-ROLE SET membership; the ``.no-bundled-skills`` marker;
+  ``skills.disabled``; the profile set under one home).
 """
 
 from __future__ import annotations

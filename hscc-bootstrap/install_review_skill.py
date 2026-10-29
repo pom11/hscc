@@ -52,7 +52,14 @@ Contract
   collision. ``origin_hashes`` remains available for reporting provenance.
 * NEVER delete an operator file: the only removals are ``--replace-top-level``
   moves, and each one is backed up first, OUTSIDE the scanned skills dir.
-  hscc reports collisions; the operator decides.
+  hscc reports collisions; the operator decides. There is no ``--no-backup``
+  escape hatch — a replacing write without a backup is a deletion.
+* ``<profile home>/.no-bundled-skills`` (hermes' ``--no-skills`` marker) is
+  OVERRIDDEN for reviewer-capable homes and BINDS everywhere else, decided
+  inside ``plan_home`` BEFORE any write. Reasoning in the B3 note at the fan-out
+  loop below; the short version is that hscc itself mints that marker for every
+  ``*-orch`` via ``create_profile(no_skills=True)``, and honouring it there
+  would guarantee dead review spawns.
 * ``--dry-run`` prints the plan — including every guard decision — and writes
   nothing at all.
 """

@@ -219,14 +219,17 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
             roots, skill_guard.REVIEW_SKILL,
             disabled=skill_guard.disabled_skills_for_home(path))
         # B3 transparency: an opted-out home reads RED like any other broken
-        # reviewer home, and the detail says the marker is present AND what
-        # hscc will do about it (the installer overrides the marker for
-        # reviewer-capable homes, so a bootstrap run closes it — the operator
-        # is never left guessing whether the marker means "hscc will leave
-        # this broken").
+        # reviewer home and the detail says the marker is present. For the
+        # MISSING case the detail also says what hscc will do about it (the
+        # installer overrides the marker for reviewer-capable homes, so a
+        # bootstrap run closes it) — but NOT for collision/disabled, where the
+        # guard deliberately writes nothing and only the operator can fix it.
+        has_marker = skill_guard.bundled_seeding_opted_out(path)
         marker_note = (" (home carries .no-bundled-skills; hscc still seeds "
                        "this reviewer-capable home on bootstrap)"
-                       if skill_guard.bundled_seeding_opted_out(path) else "")
+                       if has_marker else "")
+        marker_note_guarded = (" (home carries .no-bundled-skills)"
+                               if has_marker else "")
         if res["state"] == "missing":
             reviewer_lines.append(
                 f"{label}: missing {skill_guard.REVIEW_SKILL}{marker_note}")
@@ -234,7 +237,7 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
             reviewer_lines.append(
                 f"{label}: {skill_guard.REVIEW_SKILL} present but listed in "
                 f"skills.disabled — a preload spawn counts it missing"
-                f"{marker_note}")
+                f"{marker_note_guarded}")
         elif res["state"] == "collision":
             rank_note = (" (identical copies at equal rank — hermes ranks "
                          "same-root copies only when their depths differ)"
@@ -242,7 +245,7 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
             reviewer_lines.append(
                 f"{label}: {skill_guard.REVIEW_SKILL} collides "
                 f"({res['count']} candidates) -> " + "; ".join(res["paths"])
-                + rank_note)
+                + rank_note + marker_note_guarded)
     return dup_lines, reviewer_lines
 
 
