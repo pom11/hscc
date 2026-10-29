@@ -349,7 +349,7 @@ def test_render_shows_orchestrators_and_7d_tokens():
     assert next(l for l in lines if l.startswith("total")).split()[1:] == ["420.0M", "6.3M", "2.09G", "31.0M"]
     assert "orchestrators (1 running)" in out
     assert "sphoin-orch" in out and "97.0M/990k" in out
-    assert "orchestrator history since" in out
+    assert "orchestrator history since" not in out
 
 
 def test_attach_orchestrators_trusts_messages_not_ended_at(tmp_path):

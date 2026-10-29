@@ -497,7 +497,7 @@ def orchestrators_table(rows, width=None) -> Table:
 
 def token_table(tokens) -> list:
     """The token block: one row per group (workers, orchestrators, total) and
-    in/out per window, plus a dim note while the orchestrator ledger is short."""
+    in/out per window, then a blank row before the running table."""
     w, o = tokens["workers"], tokens["orchestrators"]
     t = _plain_table()
     t.add_column("Tokens", no_wrap=True)
@@ -517,10 +517,8 @@ def token_table(tokens) -> list:
     t.add_row("workers", *cells(lambda n: w[n]), style="dim")
     t.add_row("orchestrators", *cells(lambda n: o[n]), style="dim")
     t.add_row("total", *cells(total))
-    parts = [t]
-    if o.get("since"):
-        stamp = datetime.datetime.fromtimestamp(o["since"]).strftime("%m-%d %H:%M")
-        parts.append(Text(f"orchestrator history since {stamp}", style="dim"))
+    # a blank row, not a note: `--json` still carries orchestrators.since
+    parts = [t, Text("")]
     return parts
 
 
