@@ -134,7 +134,8 @@ def test_render_escapes_titles_and_flags_full_cap():
     buf = io.StringIO()
     make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d, snapshot=True))
     out = buf.getvalue()
-    assert "running (1/1, ≤2 per profile)" in out and "global cap full" in out
+    assert "1/1 slots (≤2/profile)" in out and "global cap full" in out
+    assert "running (" not in out
     assert "slots in use" not in out
     assert "t_run" in out and "5h00m" in out and "stuck [/bold]" in out
 
@@ -145,7 +146,7 @@ def test_short_pane_drops_lower_sections_first():
     make_console(file=buf, width=160, color_system=None).print(
         kanban_live.render(d, height=12))
     out = buf.getvalue()
-    assert "running (1/" in out and "ready, waiting" in out
+    assert "t_run" in out and "ready, waiting" in out
     assert "last hour" not in out
 
 
