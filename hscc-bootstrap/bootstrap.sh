@@ -353,6 +353,41 @@ else
   warn "hardware watchdog NOT armed on every node — an unprotected node stays wedged until someone power-cycles it; see hscc doctor"
 fi
 
+hdr "Install: snap firmware-notifier mask (log-churn quarantine)"
+# snap firmware-updater's desktop notifier crash-loops inside the desktop user's
+# systemd --user session on the Sparks (measured: restart counters in the
+# thousands, thousands of failed-exit journal lines per node per day). This masks
+# exactly two user units — the notifier service and the timer that only starts it
+# — which survives snap refreshes (a disable would not: the snap-generated
+# fragment has no [Install] section, so disable is a no-op there, and snapd
+# rewrites units on refresh). The firmware-updater SNAP ITSELF IS UNTOUCHED —
+# fwupd updates stay wanted and are run by hand. Unprivileged: the mask lives in
+# the user's own ~/.config/systemd/user, so no sudo anywhere on any node.
+# Grounded in the batch's idiom: the deployed install_notifier_mask.py carries its
+# own transport (clusterlib -> sparkrun bridge; this script never ssh's) and
+# prints OK|/WARN| lines for this stage. Non-fatal, and never silently green:
+# the doctor's own notifier-mask check keeps printing red until it is fixed.
+# Opt out: node_recovery.firmware_notifier_mask=false in ~/.hscc/cluster.json.
+if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
+  warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
+elif $DRY_RUN; then
+  plan "snap firmware-notifier mask: install_notifier_mask.py --hosts $HOSTS_CSV --dry-run --bootstrap-lines (masks 2 user units per node, read-back verified; writes NOTHING in dry-run; the firmware-updater snap itself untouched)"
+elif [ ! -f "$BOOT_DIR/install_notifier_mask.py" ]; then
+  warn "install_notifier_mask.py missing from $BOOT_DIR — the notifier restart loop keeps running (see hscc-bootstrap/README.md)"
+elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || NM_RC=$?; then
+  # The module prints OK|/WARN| for EVERY node on both exit paths, so the
+  # per-node detail is rendered whether or not rc says "all good"; a non-zero rc
+  # only ADDS the closing warning, it never replaces the detail with a dump.
+  while IFS= read -r NM_LINE; do
+    case "$NM_LINE" in
+      OK\|*)   ok "${NM_LINE#OK|}" ;;
+      WARN\|*) warn "${NM_LINE#WARN|}" ;;
+      *)       warn "$NM_LINE" ;;
+    esac
+  done <<< "$NM_OUT"
+  [ "$NM_RC" -ne 0 ] && warn "snap firmware-notifier NOT masked on every node — the notifier keeps crash-looping in the desktop user session (rc=$NM_RC); re-run this stage, or check the bootstrap doctor (doctor.py) check 'snap firmware-notifier mask (node-recovery)'"
+fi
+
 hdr "Install: hermes/sparkrun patches"
 # Reapply the curated upstream patches (kanban review + kanban_task_claimed
 # resume hook live in hermes core, so the review/resume features need them on a
