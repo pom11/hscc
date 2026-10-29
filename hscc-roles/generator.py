@@ -237,6 +237,65 @@ def _read_existing_config(pdir):
     return comp, aux
 
 
+# Reasoning depth by tier (operator 2026-10-29). The fleet is throughput-bound
+# and reasoning tokens are decode time, so implementation workers sit on the
+# `standard` tier; orchestrators and the roles whose job is to catch mistakes
+# sit on `max`; subagents (`delegate_task`, read-only lookups) use `light`. The
+# concrete effort per tier is model vocabulary and comes from the applied
+# cluster template's `reasoning:` block — with no policy recorded, nothing is
+# written and whatever the profile has stays.
+
+
+def reasoning_tier(spec_or_name):
+    """The tier for a role spec (dict) or a bare profile name (no spec)."""
+    if isinstance(spec_or_name, dict):
+        if spec_or_name.get("reasoning_tier"):
+            return spec_or_name["reasoning_tier"]
+        name = spec_or_name["name"]
+    else:
+        name = spec_or_name
+    return "max" if _is_orchestrator(name) else "standard"
+
+
+def load_reasoning_policy(path=None):
+    """``{tier: effort}`` recorded by the last template apply, or ``{}``."""
+    try:
+        with open(path or rolelib.REASONING_POLICY_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    tiers = data.get("tiers") if isinstance(data, dict) else None
+    if not isinstance(tiers, dict):
+        return {}
+    return {t: str(v) for t, v in tiers.items()
+            if t in rolelib.VALID_REASONING_TIERS and isinstance(v, str) and v.strip()}
+
+
+def reasoning_blocks(tier, policy, existing_agent, existing_delegation):
+    """Merged ``agent`` / ``delegation`` blocks carrying the policy's efforts.
+
+    A tier the policy does not declare leaves that key exactly as it was.
+    """
+    agent, delegation = dict(existing_agent or {}), dict(existing_delegation or {})
+    if policy.get(tier):
+        agent["reasoning_effort"] = policy[tier]
+    if policy.get("light"):
+        delegation["reasoning_effort"] = policy["light"]
+    return agent, delegation
+
+
+def _read_existing_block(pdir, key):
+    """The profile's on-disk top-level ``key:`` mapping, or ``{}``."""
+    path = os.path.join(pdir, "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return {}
+    block = data.get(key) if isinstance(data, dict) else None
+    return dict(block) if isinstance(block, dict) else {}
+
+
 def _read_existing_memory(pdir):
     """Read the profile's on-disk `memory:` block, if any.
 
@@ -564,6 +623,15 @@ def generate_profile(spec, base_identity):
     # fell back to Hermes' built-in memory at its smaller default.
     existing_memory = _read_existing_memory(pdir)
     config["memory"] = _memory_block(existing_memory)
+    # Reasoning depth from the applied template's policy, merged over any
+    # existing `agent:` / `delegation:` block so other hand-set keys survive.
+    agent, delegation = reasoning_blocks(
+        reasoning_tier(spec), load_reasoning_policy(),
+        _read_existing_block(pdir, "agent"), _read_existing_block(pdir, "delegation"))
+    if agent:
+        config["agent"] = agent
+    if delegation:
+        config["delegation"] = delegation
     # Worker roles serve from the load-balanced worker proxy so their work runs
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed; per-project

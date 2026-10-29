@@ -22,3 +22,4 @@ routing_description: 'Claim tasks that require code review: reading diffs advers
   they pass, and verifying the work matches the spec. Approve only when diff is sound,
   tests are green, AND spec is met. Write precise change requests otherwise. Do NOT
   claim implementation or design work.'
+reasoning_tier: max

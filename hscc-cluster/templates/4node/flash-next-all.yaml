@@ -58,7 +58,7 @@
 # This template builds the `vllm-node-b12x` image on every node (eugr
 # build_args: --exp-b12x), which sparkrun handles. First apply is slower.
 name: 4node-flash-next-all
-version: 3
+version: 4
 
 # ROLE-AGNOSTIC POOL. Every unit here runs the same recipe, so the
 # orchestrator/worker split HSCC's shape implies is meaningless — any node can
@@ -108,3 +108,13 @@ routing:
   delegation: family-coding
   compaction: family-coding
   auxiliaries: family-coding
+# Reasoning effort per tier, in THIS model's vocabulary: the Qwen3.8 chat
+# template accepts exactly low | medium | xhigh (anything else, `max`/`ultra`
+# included, is an HTTP 400; xhigh is also its default). max = orchestrators +
+# reviewer/architect/security roles, standard = implementation workers, light =
+# subagents + bookkeeping auxiliary calls. Reasoning tokens are decode time on a
+# throughput-bound fleet, so workers run below the maximum.
+reasoning:
+  max: xhigh
+  standard: medium
+  light: low

@@ -1311,6 +1311,14 @@ def apply_template(template_name: str, confirm: bool = False,
         if isinstance(getattr(tpl, "caps", None), dict):
             result["steps"].append(caps_step)
 
+        # Step 5e: reasoning tiers → policy file, root aliases/auxiliary, every
+        # profile. Only when the template declares `reasoning:`.
+        if isinstance(getattr(tpl, "reasoning", None), dict):
+            rz = _apply_reasoning_declaration(tpl)
+            result["steps"].append({"step": "reasoning", "status": "ok",
+                                    "tiers": rz["tiers"], "changed": rz["changed"],
+                                    "profiles": rz["profiles"]})
+
         # Step 6: Provision models via sparkrun
         provision_result = _provision_models(plan, recreate=recreate)
         result["steps"].append({
@@ -1473,7 +1481,8 @@ RECOGNISED_VERSIONS = (2, 3, 4)
 # Known keys per level. Anything else is a typo and a hard structural error
 # (spec: "unknown keys rejected"). Kept in sync with template_intent schema.
 _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
-                   "routing", "uniform_pool", "endpoints", "proxy", "caps"}
+                   "routing", "uniform_pool", "endpoints", "proxy", "caps",
+                   "reasoning"}
 _KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
@@ -1816,6 +1825,35 @@ def _validate_caps_block(tpl: Any, errors: List[str],
             f"max_parallel_requests is INERT, §8)")
 
 
+KNOWN_REASONING_TIERS = ("max", "standard", "light")
+
+
+def _validate_reasoning_block(tpl: Any, errors: List[str],
+                              warnings: List[str]) -> None:
+    """The `reasoning:` block: known tiers, non-empty string values.
+
+    The values themselves are the serving model's own vocabulary (e.g.
+    ``low|medium|xhigh``), so they are not checked against a fixed list — the
+    template author owns them.
+    """
+    block = getattr(tpl, "reasoning", None)
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        errors.append(f"reasoning: expected a mapping, got {type(block).__name__}")
+        return
+    for k, v in block.items():
+        if k not in KNOWN_REASONING_TIERS:
+            errors.append(f"reasoning: unknown tier '{k}' (known: "
+                          f"{', '.join(KNOWN_REASONING_TIERS)})")
+        elif not isinstance(v, str) or not v.strip():
+            errors.append(f"reasoning.{k}: expected a non-empty string, got {v!r}")
+    missing = [t for t in KNOWN_REASONING_TIERS if t not in block]
+    if missing:
+        warnings.append(f"reasoning: tier(s) {', '.join(missing)} not declared — "
+                        f"profiles on them keep their current effort")
+
+
 def derived_max_in_progress(tpl: Any) -> Optional[Tuple[int, str]]:
     """§3.1 — ``floor(sum(N over declared backends) / expected_requests_per_card)``.
 
@@ -2095,6 +2133,7 @@ def _structural_validate(raw: dict, tpl: Any,
     _validate_endpoints_block(tpl, errors, warnings)
     _validate_proxy_block(tpl, errors, warnings)
     _validate_caps_block(tpl, errors, warnings)
+    _validate_reasoning_block(tpl, errors, warnings)
 
     return errors, warnings
 
@@ -3788,6 +3827,97 @@ def _sparkrun_proxy_write(regions: dict) -> dict:
     except ImportError:
         import sparkrun_bridge
     return sparkrun_bridge.proxy_config_write(regions)
+
+
+REASONING_POLICY_PATH = Path(os.path.expanduser(
+    os.environ.get("HSCC_REASONING_POLICY", "~/.hscc/state/reasoning_policy.json")))
+# Root-config aliases → tier: the orchestrator alias runs orchestration, the
+# worker alias runs implementation work.
+REASONING_ALIAS_TIERS = {"orchestrator-model": "max", "worker-model": "standard"}
+# Auxiliary tasks (root config) → tier. Judgement calls stay on `standard`;
+# bookkeeping goes `light`. title_generation is left alone: its calls already
+# run with reasoning disabled.
+REASONING_AUX_TIERS = {"compression": "standard", "kanban_decomposer": "standard",
+                       "triage_specifier": "standard", "goal_judge": "standard",
+                       "approval": "standard", "curator": "light",
+                       "profile_describer": "light", "skills_hub": "light"}
+_ROLES_CLI = Path(__file__).resolve().parent.parent / "hscc-roles" / "hscc.py"
+
+
+def _run_reasoning_sync() -> dict:
+    """Run `hscc-roles reasoning-sync --json` (sibling plugin) and summarise."""
+    import subprocess
+    import sys
+    if not _ROLES_CLI.is_file():
+        return {"ok": False, "error": f"{_ROLES_CLI} not found", "changed": 0, "profiles": 0}
+    try:
+        proc = subprocess.run([sys.executable, str(_ROLES_CLI), "reasoning-sync", "--json"],
+                              capture_output=True, text=True, timeout=120)
+        out = json.loads(proc.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "changed": 0, "profiles": 0}
+    reports = out.get("profiles") or []
+    return {"ok": proc.returncode == 0, "profiles": len(reports),
+            "changed": sum(1 for r in reports if r.get("changed"))}
+
+
+def _apply_reasoning_declaration(tpl: Any, *, config_yaml: Optional[Path] = None,
+                                 policy_path: Optional[Path] = None,
+                                 _sync=None) -> dict:
+    """Record the template's reasoning tiers and push them everywhere.
+
+    1. ``REASONING_POLICY_PATH`` ← ``{template, tiers}`` (read by hscc-roles,
+       so a later ``generate`` keeps the same efforts);
+    2. root config: ``agent.reasoning_overrides`` for the orchestrator/worker
+       aliases and ``auxiliary.<task>.reasoning_effort`` per REASONING_AUX_TIERS;
+    3. every profile via ``hscc-roles reasoning-sync``.
+
+    A tier the template does not declare is never written anywhere.
+    """
+    block = tpl.reasoning if isinstance(getattr(tpl, "reasoning", None), dict) else {}
+    tiers = {t: v.strip() for t, v in block.items()
+             if t in KNOWN_REASONING_TIERS and isinstance(v, str) and v.strip()}
+    result = {"tiers": tiers, "changed": False, "profiles": None}
+    if not tiers:
+        return result
+    ppath = Path(policy_path or REASONING_POLICY_PATH)
+    ppath.parent.mkdir(parents=True, exist_ok=True)
+    policy = {"template": getattr(tpl, "name", None), "tiers": tiers}
+    old = None
+    if ppath.exists():
+        try:
+            old = json.loads(ppath.read_text())
+        except (OSError, ValueError):
+            old = None
+    if old != policy:
+        ppath.write_text(json.dumps(policy, indent=2) + "\n")
+        result["changed"] = True
+
+    def _upd(d: dict) -> dict:
+        agent = d.get("agent") if isinstance(d.get("agent"), dict) else {}
+        d["agent"] = agent
+        overrides = agent.get("reasoning_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+            agent["reasoning_overrides"] = overrides
+        for alias, tier in REASONING_ALIAS_TIERS.items():
+            if tier in tiers and overrides.get(alias) != tiers[tier]:
+                overrides[alias] = tiers[tier]
+        aux = d.get("auxiliary") if isinstance(d.get("auxiliary"), dict) else {}
+        d["auxiliary"] = aux
+        for task, tier in REASONING_AUX_TIERS.items():
+            if tier not in tiers:
+                continue
+            cfg = aux.get(task) if isinstance(aux.get(task), dict) else {}
+            if cfg.get("reasoning_effort") != tiers[tier]:
+                cfg["reasoning_effort"] = tiers[tier]
+                aux[task] = cfg
+        return d
+
+    _, changed = atomic_yaml_update(config_yaml or CONFIG_YAML, _upd)
+    result["changed"] = result["changed"] or bool(changed)
+    result["profiles"] = (_sync or _run_reasoning_sync)()
+    return result
 
 
 def _apply_caps_declaration(tpl: Any, *, config_yaml: Optional[Path] = None,
