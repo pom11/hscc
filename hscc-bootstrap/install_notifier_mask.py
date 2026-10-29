@@ -1044,7 +1044,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     hosts: List[str] = []
     if "--hosts" in argv:
         i = argv.index("--hosts")
-        hosts = [h for h in argv[i + 1:] if not h.startswith("--")]
+        # bootstrap.sh passes ONE comma-joined arg (--hosts "$HOSTS_CSV");
+        # without the split the whole list became a single bogus host.
+        for tok in argv[i + 1:]:
+            if tok.startswith("--"):
+                break
+            hosts.extend(h for h in tok.split(",") if h)
     if not hosts:
         hosts = _hosts_from_detect()
     if not hosts:

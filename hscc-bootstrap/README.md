@@ -48,6 +48,18 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    (`snap firmware-notifier mask (node-recovery)`) that reads the mask back per
    node and goes red if it is gone, so a vanished mask cannot masquerade as
    protection.
+4c. **Install: GPU clock cap** — `install_gpu_clock_cap.py` installs a systemd
+   oneshot unit (`/etc/systemd/system/hscc-gpu-clock-cap.service`) on every node
+   that runs `nvidia-smi -lgc 0,<cap>` at boot (default **2200 MHz**; undo
+   `nvidia-smi -rgc`). Applies live, no model restart. A two-Spark sweep
+   measured 99.6 % overall throughput (decode 100 %, uncached prefill 95 %) for
+   -32 % GPU power and ~-5 C. `sudo -n` on the node, sparkrun transport,
+   read-back verified (unit present with the wanted value + enabled + active +
+   SM clock at or under the cap). Set the value with
+   `node_recovery: {gpu_clock_cap_mhz: 1900}` or turn it off with `false` in
+   `~/.hscc/cluster.json` (off does not remove an installed cap — run
+   `install_gpu_clock_cap.py --uninstall --hosts ...`). Doctor check:
+   `GPU clock cap (node-recovery)`.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official
    hermes. `--check`-gated + non-fatal; `--skip-patches` to opt out.
