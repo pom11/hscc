@@ -11,6 +11,287 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.14.0] - 2026-10-29
+
+### Added
+- **Panic-to-reboot sysctls installed cluster-wide by bootstrap.** A node
+  hard-froze on 2026-10-27 with the journal dead mid-sentence and no BMC to
+  reach — recovery was a human at the power button. `hscc bootstrap` now
+  installs `/etc/sysctl.d/90-hscc-autoreboot.conf` on every sparkrun cluster
+  node over the existing ssh path (`sudo -n`, never a password prompt):
+  `kernel.panic=10`, `panic_on_oops=1`, `softlockup_panic=1`,
+  `hung_task_panic=1` with `hung_task_timeout_secs=600` pinned alongside it
+  (the deliberate choice against the 120s distro default — an ordinary NFS
+  failover must not reboot a serving node), and `hardlockup_panic=1` only on
+  kernels that expose the knob. Writes are atomic + content-compared
+  (operator-edited file => drift report, never clobbered), every value is
+  READ BACK and a mismatch fails that node loudly, `--dry-run` touches
+  nothing, and `{"node_recovery": {"autoreboot": false}}` in cluster.json
+  opts out. Doctor coverage arrives in the sibling card;
+  `install_autoreboot.py` exports the expected-set constants for it.
+- **Post-reboot relaunch for cluster-up-owned units.** A watchdog- or
+  panic-triggered reboot left the node up but serving nothing: the auto-relaunch
+  path refuses registered units by design (`lifecycle.py` — registered units
+  launch ONLY through `hscc cluster up`), so the operator had to run
+  `hscc cluster up` by hand. New `hscc_daemon/post_boot.py` adds a
+  persisted `expected_up` marker (`~/.hscc/expected-up.json`, written by
+  `hscc cluster up` / autodown wake, cleared by `hscc cluster down` / autodown
+  teardown) plus a per-node boot-id baseline read through sparkrun's own
+  transport. The daemon now relaunches a registered unit after a host reboot
+  ONLY when every pre-existing gate already said the fleet is meant to be up:
+  no intentional-autodown window, autodown lock free, heal lease free, the
+  node's boot id actually changed, and the unit's health probe is down. The
+  launch goes through the cluster-up surface itself (`cmd_cluster_up(nodes=…)`
+  — one filter kwarg, not a second start path), the observed boot is recorded
+  as baseline *before* launching so a same-boot repeat can never re-fire, and
+  any missing evidence (marker absent, boot sweep failed, node unseen) means no
+  action. `HSCC_POST_BOOT_RELAUNCH=0` disables the whole pass.
+- **`hscc doctor` now answers "would this node come back on its own?".** The two
+  node-recovery install layers had no coverage after install: a node could lose
+  its watchdog arming or drift a panic knob and nothing would ever say so. The
+  new `node recovery (watchdog + panic-to-reboot)` check probes every cluster
+  node read-only over the sparkrun ssh path and reports per node: the hardware
+  watchdog (`RuntimeWatchdogUSec` vs the installed 30s target, the watchdog
+  core's sysfs state, and `wdctl`) and every managed sysctl the
+  `/etc/sysctl.d/90-hscc-autoreboot.conf` drop-in declares (`kernel.panic=10`,
+  `panic_on_oops`, `softlockup_panic`, `hung_task_panic` with
+  `hung_task_timeout_secs=600`, and `hardlockup_panic` only where that kernel
+  exposes it). Each red line names node + key + actual-vs-expected. It reuses
+  the installers' own surfaces — `probe_node`/`is_armed_state`/
+  `RUNTIME_WATCHDOG_SEC` and `probe_command`/`MANAGED_KEYS`/`build_dropin` — so
+  doctor and bootstrap can never disagree about what protected means, and it
+  adds no constants of its own.
+- **An environment fault never reads as protection.** An unreachable node, a
+  probe that dies before printing `HSCC_RC`, a `sudo -n` refusal, or a
+  `/proc/sys` that names no knob renders as a check ERROR on that node naming
+  the reason — never `armed/ok`, never a silent skip. The same rule covers the
+  opt-outs: `node_recovery: {watchdog|autoreboot: false}` renders as *opted out*
+  (`--`), not green, because "nothing enforces this" and "this is enforced" must
+  not share a rendering. The check is non-fatal, like the install stages: an
+  unprotected node is loud, but it never blocks an install.
+- **Token counts in both monitors.** `hscc cluster monitor` gains `In` / `Out`
+  columns (cumulative prompt / generated tokens per vLLM engine since it
+  started, from `vllm:prompt_tokens_total` / `vllm:generation_tokens_total`)
+  at every width, summed in the per-model total row. `hscc kanban monitor`
+  shows each running card's worker-session tokens (`in/out`, matched by worker
+  profile + run claim time against the profile's `state.db`
+  `source='kanban'` session) and a 24 h total over every profile's kanban
+  sessions; `--json` carries `tok_in` / `tok_out` / `tokens_24h`. Read-only,
+  databases opened `mode=ro` and closed every pass.
+- **`hscc kanban monitor [--live]`.** The kanban twin of `hscc cluster monitor
+  --live`: running cards on every board (worker, run time, heartbeat age —
+  >4h runs and >10 min silent heartbeats are flagged), ready cards waiting
+  for a slot, per-board counts by status plus cards done in the last 24h, and
+  the last hour's outcomes (completed / blocked / gave_up / crashed / …). The
+  header shows the global `kanban.max_in_progress` slots in use and says when
+  a full cap is stranding other boards' ready cards. `--board <slug>`,
+  `--interval <s>`, `--json` snapshot. Read-only; reuses the autodown board
+  enumeration that `hscc kanban stale` uses.
+- **Nodes can now self-recover from a hard hang.** A DGX Spark has no BMC, so
+  when `.244` froze solid on 2026-10-27 (journal stops mid-sentence, no panic,
+  no oops, no softlockup line) the only recovery was a human at the power
+  button ~2h later. `hscc-cluster/node_recovery.py` arms the GB10's unused
+  SBSA hardware watchdog through systemd —
+  `/etc/systemd/system.conf.d/90-hscc-watchdog.conf` with
+  `RuntimeWatchdogSec=30s` + `RebootWatchdogSec=2min`, then `daemon-reexec` —
+  so PID1 pets `/dev/watchdog0` and a hang resets the SoC instead of wedging.
+  Installed by bootstrap (`Install: node hardware watchdog`, non-fatal,
+  `--skip-node-recovery`); transport is sparkrun's own remote execution, root
+  via `sudo -n` only, never a password prompt. Idempotent (content-compares,
+  atomic same-dir rename), and it will not steal a device: an already-held
+  `/dev/watchdog0` or an operator-edited drop-in is refused/reported as drift.
+  Opt out with `node_recovery: {watchdog: false}` in `~/.hscc/cluster.json`
+  (default ON when absent; subkeys are read independently, so the sysctl
+  sibling's `autoreboot` can never disarm this). Probe surface for the doctor
+  check: `probe_node()` / `is_armed_state()`.
+
+### Fixed
+- **`hscc verify` multiplex false-failed on two leftover directories, and
+  `gateway.json` contradicted it with a different count.** Both multiplex
+  scanners enumerated "every directory under `~/.hermes/profiles`", but the
+  gateway builds `served_profiles` from Hermes' own enumeration
+  (`hermes_cli.profiles._iter_named_profile_dirs`), which is narrower — so the
+  check demanded the gateway serve profiles Hermes refuses to recognise, a
+  requirement that can never be met. `profiles/.deleted/` (Hermes' tombstone
+  dir, holding one 8-byte marker per deleted profile) was reported as a profile
+  id named `.deleted`, and `profiles/ecofire-bc/` — a stub carrying only
+  `workspaces/` and none of the six identity markers — as an unserved profile.
+  The two surfaces also disagreed *with each other*: the daemon's scanner
+  skipped dot-dirs and `verify`'s did not, so `gateway.json` said
+  "1 profile(s) not served" while `hscc verify` named two. Both now share one
+  roster helper, `hscc_daemon/profile_roster.list_profiles_on_disk`, which
+  mirrors Hermes' gate (identity marker + profile-id grammar + not tombstoned
+  + not parked), using Hermes' own predicates when `hermes_constants` is
+  importable and a conservative mirror when it is not — the daemon deploys
+  under `~/.hermes/plugins`, where it need not be. Coverage is NOT weakened: a
+  directory that carries an identity marker and is unserved still fails, and
+  names the missing profile on both surfaces. Measured on this host: the naive
+  scan's expected-minus-served was `['.deleted', 'ecofire-bc']`; the shared
+  gate's is `[]` (46 real profiles, all served).
+- **`watchdog.json` reported "Degraded — gateway not reachable" while the
+  gateway job and vLLM were both healthy.** Same root cause, not a separate
+  defect: `check_gateway()` forces `ok=False` on a multiplex failure, and the
+  watchdog copies that into its own verdict (and into the 3-failures-in-10min
+  pipeline breaker). With the false-fail gone the stream reports healthy —
+  `gateway.json` shows `gateway_job: true`, `vllm_healthy: true`,
+  `multiplex_ok: true`. No no-op vLLM auto-restart is triggered by this check
+  (`auto_restart_count` moves only on a `not dgx_ok` path), so the counter's
+  270 is historical and untouched here.
+- **`hscc cluster monitor --live` rendered every backend `down` under a
+  Homebrew/Framework Python — `Errno 65 No route to host` on every LAN probe.**
+  macOS ties Privacy > Local Network to the *signing identity* of the
+  executable, so an adhoc-signed interpreter (a brew keg's `Python.app`) is
+  denied on every private-range connect no matter how often the Python entries
+  are re-toggled, while Apple-signed `/usr/bin/curl` reaches the same URL.
+  Every LAN GET in HSCC went through `urllib`, so the whole serving table went
+  red while the fleet was healthy (host stats survived because they ride ssh).
+  All three LAN surfaces — `hscc_daemon/cluster_live.py::_http_get` (backend
+  `/metrics` + proxy `/v1/model/info`), `hscc-bootstrap/doctor.py::
+  _http_get_default` and its `hscc-cluster/cluster_template.py` mirror
+  (Bearer-auth `/models` probes) — now retry that one failure through
+  `/usr/bin/curl` as an **argv list** (never a shell) when, and only when,
+  `urllib` reports errno **65 specifically** on a **private** host: RFC1918,
+  `100.64.0.0/10` (tailnet CGNAT), `169.254/16` + `fe80::/10` link-local,
+  `fc00::/7`, or `.local`. Loopback never falls back; Linux `EHOSTUNREACH` is
+  113 and means genuinely no route, so it propagates untouched — as do
+  `HTTPError`, timeouts and any public host. Parity is kept so callers still
+  tell a probe/auth error from an unreachable endpoint: curl's `--fail` exit 22
+  is mapped back to `urllib.error.HTTPError` carrying the status curl reported,
+  every other curl exit to `URLError`. The `api_key` NEVER reaches argv (`ps`
+  shows every token): the Bearer header goes through a `mkstemp` 0600 file curl
+  reads with `-H @path`, unlinked in a `finally`. The notice —
+  `LAN via curl fallback (Local Network permission)` — surfaces exactly once per
+  process (`_lan_curl_reset_notice()` refills a consume-once ticket; the
+  per-tick monitor cannot repeat it), on **stderr** so doctor's checklist and
+  the template's `--json` stdout stay unpolluted and a daemon logs it once,
+  then goes quiet. When `/usr/bin/curl` is missing or unusable the original
+  errno-65 error surfaces with a one-line hint appended. The block is mirrored
+  verbatim across the three standalone plugins (hyphenated plugin dirs are not
+  importable, so no cross-plugin import) and pinned byte-identical by
+  `hscc-cluster/tests/test_lan_curl_fallback.py`.
+- **`project new --apply` died under the brew keg venv and left an orphan
+  stub profile.** The keg venv carries only PyYAML/rich/psutil/markdown-it-py/
+  mdurl/pygments (Formula/hscc.rb), so `ensure_session -> _open_profile_session_db`
+  hit `ModuleNotFoundError: httpx` mid-import-chain, the session step died, and
+  the just-created `<name>-orch` stub profile stayed behind with no registry
+  entry — exactly the half-registered state the module docstring promises
+  never to leave. The session-db opener now DELEGATES every runtime touch to
+  the hermes venv interpreter as bounded JSON-line ops (Hermes' own
+  SessionDB APIs on Hermes' own packages — nothing vendored into the keg, so
+  no second package set to drift); `HSCC_HERMES_PYTHON` overrides resolution,
+  which otherwise probes `$HERMES_HOME/hermes-agent/venv/bin`, `~/.hermes/...`
+  and PATH with a sentinel-verified import check. A profile CREATED in a run
+  whose session step fails is rolled back through `hermes profile delete -y`
+  (Hermes' own verb; a pre-existing profile is never touched), the ensure
+  itself is one atomic create+title op, the registry write is a reported step
+  instead of a crash, and the rerun path is idempotent (recreate -> ensure
+  once -> registered). The **board step had the same wall** (create_board ->
+  init_db -> lazy hermes_state -> httpx crashed the whole command): it now
+  runs as remote ops on the same transport, and any raw provider crash there
+  is reported as a failed step instead of escaping as a traceback. The
+  environment-vs-data distinction is preserved verbatim: an unresolvable
+  runtime raises `HermesRuntimeUnavailable` naming the missing module, never
+  "profile has no state.db".
+- **`hscc kanban stale --json` printed the human table.** The `hscc kanban`
+  dispatcher (`kanban_blocked.cmd_kanban`) strips `--json` before delegating
+  `stale`/`monitor` to `kanban_cli` and never handed it back; it is now
+  re-appended on delegation.
+- **"Watchdog configured" no longer counts as "watchdog armed".** systemd can
+  adopt `RuntimeWatchdogSec` and still never open the device — e.g. a driver
+  that does not advertise `WDIOF_CARDRESET`, or a PID1 that refused the reexec.
+  A check on the config value alone would report those nodes protected while a
+  hard hang wedges them exactly as before. `node_recovery.py` now reads the
+  watchdog core's own sysfs `state` (and `wdctl`) and refuses to call a node
+  armed while it reads `inactive`, in both `--arm` and `--probe`.
+
+### Verified
+- `hscc_daemon/tests/test_profile_roster_multiplex_t1c545ebb.py`: **16 new**
+  cases — the card's two required pins (a dot-directory under `profiles/` is
+  never a profile id; a directory with no profile config is never counted as
+  expected-served), plus identity-marker set, `default`, id-grammar, tombstone,
+  parked, and a reproduction of this host's exact leftover shape. Every roster
+  case runs against **both** branches (Hermes' predicates injected, and the
+  fallback mirror forced) and asserts they agree, so the mirror cannot drift
+  into a false-fail silently. `check_gateway()` is pinned too: a false multiplex
+  fail no longer drags the gateway verdict red.
+- Mutation probe: restoring the old naive scan (append-a-shadowing-def, byte
+  copy + restore) turns **13 of the 16** new cases RED (`13 failed, 3 passed`)
+  — they pin the gate, not its own shadow. `verify.py`/`health.py` fixtures in
+  the pre-existing suites that used a bare `mkdir()` as "a profile" now use a
+  helper that writes a `config.yaml`, so the "unserved real profile must fail"
+  intent stays pinned rather than being satisfied by a stub.
+- Suites: `test_verify.py` + `test_health.py` + new file — **248 passed**.
+  Live host (read-only, hermes venv): `verify.check_multiplex()` →
+  `ok=True, "all 46 profiles served"`; `health._check_multiplex_profiles()` →
+  `ok=True`. Both agree, and the two counts differ only because `verify` counts
+  the served list (46 incl. `default`) and the daemon counts the
+  served∩expected intersection (45, `default` is not a dir under `profiles/`).
+- `hscc-bootstrap/tests/test_install_autoreboot.py`: 27 fabricated-node cases
+  (stubbed ssh seam — drop-in content exact, hardlockup conditional both
+  ways, read-back mismatch fails the node, idempotent no-op, drift-never-
+  clobbered, opt-out skip, dry-run clean, sudo-refused/unreachable honest
+  failures, fleet fan-out, main() rc contract).
+- `hscc-bootstrap/tests/test_bootstrap_autoreboot_stage.py`: 7 cases exec'ing
+  the bootstrap stage's embedded summariser extracted from `bootstrap.sh`
+  (no false-green: any failed node or zero armed renders WARN; stderr noise
+  cannot hide the JSON).
+- `test_bootstrap_isolated.py` now runs with `--skip-node-recovery` so the
+  suite never arms reboot-on-panic on the operator's live nodes.
+- `hscc_daemon/tests/test_cluster_live.py`: **14 -> 53** cases (+39) on the
+  monitor surface — errno-65 + private host falls back and returns the body
+  verbatim; public host and errno 113 do not; `HTTPError` and timeouts
+  untouched; exit 22 -> `HTTPError` with the status; notice once across N
+  fallbacks; `curl` missing -> original error + hint; and a `ServingPoller`
+  test that reproduces the reported symptom (loopback proxy served by urllib,
+  LAN backends denied) and asserts the table renders `running` instead of
+  `down` while the fallback touches the two LAN URLs only.
+- `hscc-bootstrap/tests/test_doctor.py`: **88 -> 100** cases (+12) — the
+  `_http_get_default` contract plus two `_probe_served_models` end-to-end cases
+  proving the three-way verdict (`ok` / `unreachable` / `error`) survives the
+  fallback, incl. the api_key case: the stub reads the `-H @file` back to prove
+  the header arrives, asserts mode `0600` and that the file is unlinked, and
+  asserts the key string is absent from **every** argv token.
+- `hscc-cluster/tests/test_lan_curl_fallback.py`: **14** new cases — the same
+  contract on this plugin's copy, plus the mirror rule.
+  `test_mirrored_block_is_identical_across_the_three_plugins` extracts the
+  delimited block from all three sources and fails on any byte of drift;
+  `test_probe_mirrors_stay_compatible_with_doctor` compares the two
+  `_http_get_default` bodies apart from docstrings. **The second test caught
+  real drift in this card's own first pass** (the same inline comment worded
+  two ways in the two copies), which is the evidence the rule earns its keep.
+- `scripts/run_tests.sh`: green across every package except
+  `hscc-roles::test_every_hscc_owned_worker_profile_has_role_spec`, which fails
+  identically on pristine `main` on this host (the live operator profile
+  `ecofire-pontaje-engineer` carries no role spec) — environmental, unrelated
+  to this diff. `python3 scripts/address_guard.py --tracked` rc=0.
+- `hscc_daemon/tests/test_post_boot.py`: 29 new cases — post-boot condition
+  fires exactly once through the cluster-up surface; intentional down never
+  fires; autodown-lock / heal-lease / cleared-under-lock gates all win;
+  a unit already down before the reboot stays down; partial and TP-span
+  reboots scope the launch to the rebooted node; marker + boot-sweep layers.
+- `hscc-cluster/tests/test_cluster_up_post_boot_hooks.py`: 9 new cases — the
+  verbs' hooks: `cluster up` records, `cluster down` clears, failures are
+  non-fatal to the verb, and no marker is written when nothing launched.
+- Suites: `hscc-cluster/tests` **675 passed, 1 skipped**;
+  `hscc_daemon/tests` green with the new file; both under the sparkrun
+  execution fence (no real sparkrun call).
+- `hscc-project/tests/test_project_runtime_delegation.py`: **29** new cases —
+  interpreter resolution order + sentinel probing, delegation chosen under a
+  simkeyed brew-venv interpreter, the op protocol executed END TO END against
+  a fabricated agent tree + planted venv python (no operator `~/.hermes` in
+  sight), `create_db` semantics for a fresh profile, no-orphan rollback
+  (created profile deleted, pre-existing profile untouched, failed rollback
+  reported with the exact cleanup command), and retry idempotence across
+  three runs. Full `scripts/run_tests.sh` green.
+- `hscc_daemon/tests/test_kanban_live.py`: 9 cases (collector, board filter +
+  unreadable board, render escaping + full-cap warning, short-pane section
+  dropping, age format, arg parsing, `--json` snapshot, `--help` executes
+  nothing, `--json` through the `hscc kanban` dispatcher); kanban CLI suites
+  green.
+- `test_kanban_live.py` +3 (session match picks the run's own session and
+  ignores non-kanban / >24 h rows, missing state.db renders `-`, render
+  format), `test_cluster_live.py` +3 (poller carries counters, narrow table
+  shows summed In/Out, `fmt_tokens`); tests never read the real `~/.hermes`.
 ## [2.13.1] - 2026-10-25
 
 ### Added
