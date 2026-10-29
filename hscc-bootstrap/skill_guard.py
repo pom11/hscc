@@ -29,9 +29,15 @@ Hermes' exact resolution rule, read from source (2026-10-28) — replicated by
     (``_collect_skill_candidates`` + ``agent.skill_utils.iter_skill_index_files``);
   * more than one candidate -> refusal, UNLESS all candidates live under ONE
     search root AND are provably the same skill: one realpath (symlink view)
-    or byte-identical ``SKILL.md`` (``_provably_same_skill``);
+    or byte-identical ``SKILL.md`` (``_provably_same_skill``) AND the two
+    shallowest rank distinctly (``_rank_same_root_candidate`` + the
+    ``rank[0] != rank[1]`` gate) — two identical copies at the SAME depth
+    still refuse;
   * legacy flat ``<name>.md`` files anywhere under a root also count as
-    candidates.
+    candidates;
+  * a name listed under ``skills.disabled`` loads off-disk but counts as
+    MISSING for a preload spawn (``build_preloaded_skills_prompt`` passes
+    ``disabled_as_missing=True``).
 
 Search roots for a profile spawn (``_skill_search_dirs``):
 ``<profile HERMES_HOME>/skills`` plus ``skills.external_dirs`` from the
@@ -57,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 #: The skill the dispatcher force-injects for review-lane spawns. Any profile
@@ -85,27 +92,46 @@ REVIEWER_ROLE_PROFILES = frozenset({"reviewer"})
 
 # ── resolver mirror: candidate scan ─────────────────────────────────────────
 
+#: Closing fence of a frontmatter block, exactly as hermes finds it:
+#: ``agent.skill_utils.parse_frontmatter`` searches ``\n---\s*\n`` in the text
+#: after the opening ``---``. Mirrored (instead of a line loop) so a fence with
+#: trailing whitespace, and any frontmatter LENGTH, are handled identically.
+_FM_CLOSE_RE = re.compile(r"\n---\s*\n")
+
+
 def _frontmatter_name(skill_md: Path) -> str | None:
     """The ``name:`` value in a SKILL.md's YAML frontmatter, best-effort.
 
     Hermes counts a SKILL.md as a candidate for a bare name when its
     frontmatter ``name:`` matches, not only when the directory matches — so a
-    faithful scan must read the same field. Deliberately regex-simple (no
-    yaml import): anything unparseable yields None and the frontmatter-name
-    candidate is not counted, which can only UNDER-count collisions (doctor
-    may then read ok where hermes refuses) — never over-count, and never
-    misreport a genuine collision as clean, for the common dir-name case.
+    faithful scan must read the same field. Mirrors hermes' two behaviours
+    (round-2 review S1, both measured against the live resolver):
+
+      * the read is ``utf-8-sig`` — hermes reads skill text with
+        ``encoding="utf-8-sig"`` (``tools/skills_tool_plugin._read_skill_text``)
+        and ``parse_frontmatter`` additionally ``removeprefix("\ufeff")``, so a
+        BOM'd file still fails its ``---`` fence check. Reading plain utf-8
+        here made a BOM'd copy INVISIBLE to the mirror (real: refused /
+        mirror: ok) — a false green, the direction that kills spawns;
+      * the fence is a regex over the WHOLE text, not a line loop over a fixed
+        window, so frontmatter longer than the old 40 lines is scanned too.
+
+    Deliberately regex-simple (no yaml import — hscc-bootstrap must work from
+    the deployed plugins tree without hermes): anything unparseable yields
+    None and the frontmatter-name candidate is not counted.
     """
     try:
-        text = skill_md.read_text(encoding="utf-8", errors="replace")
+        text = skill_md.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
+    text = text.removeprefix("\ufeff")
     if not text.startswith("---"):
         return None
-    for line in text.splitlines()[1:40]:
+    close = _FM_CLOSE_RE.search(text[3:])
+    if close is None:
+        return None
+    for line in text[3:close.start() + 3].splitlines():
         stripped = line.strip()
-        if stripped == "---":
-            break
         if stripped.startswith("name:"):
             val = stripped[len("name:"):].strip().strip("'\"")
             return val or None
@@ -255,46 +281,143 @@ def _identical(paths: list[Path]) -> bool:
         return False
 
 
-def resolution(skills_roots, name: str) -> dict:
+def _same_root_rank(cand, root) -> tuple:
+    """``(0 for a SKILL.md package / 1 for a legacy flat <name>.md, depth)`` —
+    verbatim mirror of ``tools/skills_tool._rank_same_root_candidate``."""
+    is_flat = 1 if (cand.suffix == ".md" and cand.name != "SKILL.md") else 0
+    if cand.suffix != ".md":
+        md = cand / "SKILL.md"
+    else:
+        md = cand
+    try:
+        depth = len(md.relative_to(root).parts)
+    except ValueError:
+        depth = 99
+    return (is_flat, depth)
+
+
+def resolution(skills_roots, name: str, *, disabled=()) -> dict:
     """How *name* resolves for a session whose scan set is *skills_roots*.
 
-    Returns ``{"state": "ok"|"missing"|"collision", "count": int,
+    Returns ``{"state": "ok"|"missing"|"collision"|"disabled", "count": int,
     "paths": [...], "identical_copies": bool}``.
 
     ``ok``            exactly one candidate, or several candidates that are
-                      provably the SAME skill inside ONE root (hermes ranks
-                      those and loads the shallowest — not a failure).
+                      provably the SAME skill inside ONE root AND rank
+                      distinctly — see the rank gate below.
     ``missing``       zero candidates.
+    ``disabled``      the operator listed the name under ``skills.disabled``
+                      (round-2 review S2):
+                      ``build_preloaded_skills_prompt(..., disabled_as_missing=
+                      True)`` counts a disabled skill as MISSING, so a spawn
+                      asking for it dies with the card's error string even
+                      though the tree holds it. ``disabled_skills_for_home``
+                      reads the same config.
     ``collision``     >1 candidates that hermes would refuse: different
                       content, an equal-rank tie, or spread across roots.
+
+    RANK GATE (round-2 review B2, the one the first cut got wrong): hermes
+    collapses same-root identical copies ONLY when the top two rank distinctly
+    (``tools/skills_tool.py:524`` — ``if _rank_same_root_candidate(ranked[0],
+    root) != _rank_same_root_candidate(ranked[1], root)``). Two byte-identical
+    copies at the SAME depth (``catA/x/SKILL.md`` + ``catB/x/SKILL.md``) keep
+    2 candidates -> "Refusing to guess" -> the name lands in ``missing`` for a
+    spawn. Accepting them as ``ok`` made doctor read reviewer-readiness GREEN
+    while every review spawn to that profile died — the exact false negative
+    this card exists to remove — and let the installer skip a needed install
+    as a no-op. So: same root + identical + distinct ranks -> ok; identical
+    but EQUAL ranks -> collision.
     """
-    candidates: list[Path] = []
-    roots_seen = set()
+    candidates: list[tuple[Path, Path]] = []  # (candidate, owning root)
     for root in skills_roots:
         root = Path(root)
-        hits = scan_skill_names(root).get(name, [])
-        candidates.extend(hits)
-        if hits:
-            roots_seen.add(str(root))
+        for hit in scan_skill_names(root).get(name, []):
+            candidates.append((hit, root))
     # Dedupe by realpath (the same dir reached twice through roots).
-    uniq: dict[str, Path] = {}
-    for c in candidates:
+    uniq: dict[str, tuple[Path, Path]] = {}
+    for c, r in candidates:
         try:
-            uniq.setdefault(os.path.realpath(str(c)), c)
+            key = os.path.realpath(str(c))
         except OSError:
-            uniq.setdefault(str(c), c)
-    candidates = list(uniq.values())
-    if not candidates:
+            key = str(c)
+        uniq.setdefault(key, (c, r))
+    cands = [c for c, _r in uniq.values()]
+    if not cands:
         return {"state": "missing", "count": 0, "paths": [], "identical_copies": False}
-    if len(candidates) == 1:
-        return {"state": "ok", "count": 1,
-                "paths": [str(candidates[0])], "identical_copies": False}
-    same_root = len(roots_seen) <= 1 and _identical(candidates)
-    if same_root:
-        return {"state": "ok", "count": len(candidates),
-                "paths": [str(c) for c in candidates], "identical_copies": True}
-    return {"state": "collision", "count": len(candidates),
-            "paths": [str(c) for c in candidates], "identical_copies": False}
+    paths = [str(c) for c in cands]
+    if len(cands) == 1:
+        verdict = {"state": "ok", "count": 1,
+                   "paths": paths, "identical_copies": False}
+    else:
+        owned = [r for _c, r in uniq.values()]
+        same_root = len({str(r) for r in owned}) == 1 and _identical(cands)
+        if same_root:
+            root = owned[0]
+            ranked = sorted(cands, key=lambda c: _same_root_rank(c, root))
+            if _same_root_rank(ranked[0], root) != _same_root_rank(ranked[1], root):
+                verdict = {"state": "ok", "count": len(cands),
+                           "paths": paths, "identical_copies": True}
+            else:
+                # Identical but the resolver cannot rank them apart: it refuses.
+                verdict = {"state": "collision", "count": len(cands),
+                           "paths": paths, "identical_copies": True,
+                           "equal_rank": True}
+        else:
+            verdict = {"state": "collision", "count": len(cands),
+                       "paths": paths, "identical_copies": False}
+    # A disabled skill loads fine off-disk but counts as MISSING for a preload
+    # spawn (disabled_as_missing=True), so it only ever UPGRADES a verdict from
+    # ok to disabled — a genuine collision stays the more actionable finding.
+    if verdict["state"] == "ok" and disabled and name in set(disabled):
+        return {"state": "disabled", "count": verdict["count"],
+                "paths": paths, "identical_copies": False,
+                "disabled": True}
+    return verdict
+
+
+#: ``agent.skill_utils.ESSENTIAL_SKILLS`` — names the disabled set can never
+#: contain (``disabled - ESSENTIAL_SKILLS``), mirrored so a fabricated guard
+#: name behaves like the resolver.
+ESSENTIAL_SKILLS = frozenset({"hermes-agent"})
+
+
+def disabled_skills_for_home(hermes_home) -> frozenset:
+    """``skills.disabled`` (+ ``skills.platform_disabled`` for every platform)
+    from *hermes_home*/config.yaml — the set
+    ``build_preloaded_skills_prompt`` treats as MISSING
+    (``disabled_as_missing=True``; source: ``agent.skill_commands.
+    _disabled_skill_names`` -> ``agent.skill_utils.get_disabled_skill_names``).
+
+    Deliberately platform-AGNOSTIC: doctor/installer must not depend on which
+    platform a spawn will claim, so every platform list is UNIONed in. That
+    over-counts (a name disabled only for another platform reads as disabled
+    here) and the over-count direction is SAFE — doctor reports RED for a tree
+    that might be fine, never green for a dead spawn. Missing/unreadable
+    config -> empty set. ``ESSENTIAL_SKILLS`` are subtracted, as upstream does.
+    """
+    config = Path(hermes_home).expanduser() / "config.yaml"
+    try:
+        import yaml  # available in the hermes venv and via requirements.txt
+        cfg = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return frozenset()
+    skills_cfg = cfg.get("skills") if isinstance(cfg, dict) else None
+    if not isinstance(skills_cfg, dict):
+        return frozenset()
+
+    def _names(value):
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return set()
+        return {str(v).strip() for v in value if isinstance(v, str) and v.strip()}
+
+    out = _names(skills_cfg.get("disabled"))
+    platform_disabled = skills_cfg.get("platform_disabled")
+    if isinstance(platform_disabled, dict):
+        for entries in platform_disabled.values():
+            out |= _names(entries)
+    return frozenset(out - ESSENTIAL_SKILLS)
 
 
 def profile_skill_roots(profile_home) -> list[Path]:
@@ -367,25 +490,58 @@ def duplicate_names(skills_root) -> dict:
     return dup
 
 
+#: Opt-out marker's CANONICAL location (round-2 review B3): the profile HOME,
+#: written by ``hermes_cli/profiles._finish_profile_layout`` (:1349) for
+#: ``--no-skills`` and read by ``tools/skills_sync`` (:368, :468) via
+#: ``_hermes_home()``. NOT inside ``skills/`` — a marker there is nothing
+#: upstream ever reads, and a guard that only checks that path is dead code
+#: (measured on this host: 14 profiles carry the home marker, 0 the skills/
+#: one). ``hermes_cli/profiles.has_bundled_skills_opt_out`` is the upstream
+#: predicate; this mirrors it.
+NO_BUNDLED_MARKER = ".no-bundled-skills"
+
+
+def bundled_seeding_opted_out(hermes_home) -> bool:
+    """True when *hermes_home* (root or profile home) opted out of bundled
+    seeding: ``<home>/.no-bundled-skills`` exists (the canonical path; the
+    legacy ``<home>/skills/.no-bundled-skills`` position an earlier hscc cut
+    checked is accepted too, since a marker there can only mean opt-out)."""
+    home = Path(hermes_home).expanduser()
+    return ((home / NO_BUNDLED_MARKER).exists()
+            or (home / "skills" / NO_BUNDLED_MARKER).exists())
+
+
 def readiness_for_home(hermes_home, *, name: str = REVIEW_SKILL) -> dict:
     """Doctor verdict for ONE home (root or profile). Read-only.
 
-    Returns ``{"home", "label", "reviewer", "state", "paths", "duplicates"}``.
+    Returns ``{"home", "label", "reviewer", "state", "paths", "duplicates",
+    "opted_out"}``. ``label`` distinguishes the root home ("default (root)")
+    from a real profile named ``default`` (round-2 review N1 — both used to
+    render as ``default`` and the operator could not tell which tree was
+    broken). ``state == "opted-out"`` is reported for reviewer-capable homes
+    whose seeding opt-out leaves the dispatcher-injected name unresolvable
+    (B3): never silent, and the operator — not hscc — decides whether to
+    delete the marker.
     """
     home = Path(hermes_home).expanduser()
-    label = home.name
+    label = "default (root)" if home.name == ".hermes" else home.name
     roots = profile_skill_roots(home)
-    res = resolution(roots, name)
+    res = resolution(roots, name, disabled=disabled_skills_for_home(home))
     dups: dict[str, list[str]] = {}
     for root in roots:
         for dn, paths in duplicate_names(root).items():
             dups.setdefault(dn, []).extend(p for p in paths if p not in dups.get(dn, []))
     return {
         "home": str(home), "label": label,
-        "reviewer": is_reviewer_capable(label),
+        # The root home is itself spawnable (a bare `hermes -s x` session), so
+        # it joins the reviewer-capable set — same rule doctor/installer use.
+        "reviewer": (label == "default (root)"
+                     or is_reviewer_capable(label)),
         "state": res["state"], "count": res["count"],
         "identical_copies": res["identical_copies"],
+        "equal_rank": res.get("equal_rank", False),
         "paths": res["paths"], "duplicates": dups,
+        "opted_out": bundled_seeding_opted_out(home),
     }
 
 

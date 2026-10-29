@@ -174,13 +174,17 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
     named profile): a duplicated name is a resolver landmine whatever the
     profile. Finding (ii) — reviewer readiness — runs over the REVIEWER-ROLE
     SET only (``skill_guard.is_reviewer_capable``: the ``*-orch`` set + the
-    reviewer role profile; the root home counts as the ``default`` profile,
+    reviewer role profile; the root home counts as ``default (root)``,
     which a spawn CAN target): the dispatcher force-injects ``sdlc-review``
     for review-lane spawns for ANY assignee, so every profile that can
-    review must resolve it EXACTLY ONCE (hermes' same-root identical-copies
-    rule resolves, so it counts as ready). A non-reviewer profile missing
-    the skill is not listed at all — the card forbids nagging profiles that
-    never review.
+    review must resolve it EXACTLY ONCE — using the FULL resolver rule,
+    including the same-root rank gate (identical copies resolve only when
+    their ranks differ; identical equal-rank copies refuse) and
+    ``skills.disabled`` (a disabled name is MISSING for a preload spawn).
+    A non-reviewer profile missing the skill is not listed at all — the card
+    forbids nagging profiles that never review. A reviewer-capable home that
+    carries ``.no-bundled-skills`` and cannot resolve the name is listed like
+    any other broken home, annotated with the marker (never silent).
 
     Global-vs-profile duplication is deliberately NOT reported: a profile
     session scans ONLY ``<profile>/skills`` + that profile's
@@ -211,13 +215,32 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
         reviewer = label == "default (root)" or skill_guard.is_reviewer_capable(label)
         if not reviewer:
             continue
-        res = skill_guard.resolution(roots, skill_guard.REVIEW_SKILL)
+        res = skill_guard.resolution(
+            roots, skill_guard.REVIEW_SKILL,
+            disabled=skill_guard.disabled_skills_for_home(path))
+        # B3 transparency: an opted-out home reads RED like any other broken
+        # reviewer home, and the detail says the marker is present, so the
+        # operator is never left guessing why (and hscc's stated policy is to
+        # override the opt-out for THIS dispatcher-injected name only — see
+        # install_review_skill.py).
+        marker_note = (" (home carries .no-bundled-skills)"
+                       if skill_guard.bundled_seeding_opted_out(path) else "")
         if res["state"] == "missing":
-            reviewer_lines.append(f"{label}: missing {skill_guard.REVIEW_SKILL}")
+            reviewer_lines.append(
+                f"{label}: missing {skill_guard.REVIEW_SKILL}{marker_note}")
+        elif res["state"] == "disabled":
+            reviewer_lines.append(
+                f"{label}: {skill_guard.REVIEW_SKILL} present but listed in "
+                f"skills.disabled — a preload spawn counts it missing"
+                f"{marker_note}")
         elif res["state"] == "collision":
+            rank_note = (" (identical copies at equal rank — hermes ranks "
+                         "same-root copies only when their depths differ)"
+                         if res.get("equal_rank") else "")
             reviewer_lines.append(
                 f"{label}: {skill_guard.REVIEW_SKILL} collides "
-                f"({res['count']} candidates) -> " + "; ".join(res["paths"]))
+                f"({res['count']} candidates) -> " + "; ".join(res["paths"])
+                + rank_note)
     return dup_lines, reviewer_lines
 
 

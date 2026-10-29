@@ -86,6 +86,10 @@ INSTALLABLE = skill_guard.GUARDED_SKILLS
 MANIFEST_NAME = ".bundled_manifest"
 #: Profiles created with `--no-skills` carry this marker; seeding them would
 #: fight the operator's explicit choice (mirrors tools/skills_sync.py).
+#: CANONICAL PATH IS THE PROFILE HOME (`<profile>/.no-bundled-skills`, written
+#: by hermes_cli/profiles.py:1349 and read by tools/skills_sync.py:368,468) —
+#: not inside skills/. Round-2 review B3: the first cut checked the skills/
+#: position only, which nothing upstream reads (dead guard).
 NO_BUNDLED_MARKER = ".no-bundled-skills"
 _RUNTIME_SUFFIXES = {".pyc", ".pyo"}
 _RUNTIME_DIRS = {"__pycache__"}
@@ -130,9 +134,13 @@ def skill_dirs(home):
     spawn". Dot-prefixed entries are skipped: ``profiles/.deleted`` and
     friends are not profiles (the same trap that made `hscc verify` false-fail
     in t_1c545ebb).
+
+    The root label is ``"default (root)"`` (round-2 review N1): a real profile
+    may be named ``default``, and labelling the root home the same made
+    ``report["blocked"]`` ambiguous about WHICH tree was broken.
     """
     home = Path(home).expanduser()
-    out = [("default", home / "skills", home)]
+    out = [("default (root)", home / "skills", home)]
     profiles = home / "profiles"
     if profiles.is_dir():
         try:
@@ -194,18 +202,25 @@ def origin_hashes(skills_dir):
 def resolve_verdict(skills_dir, name=REVIEW_SKILL):
     """What the BARE ``name`` resolves to for one home, via the shared
     resolver mirror in ``skill_guard`` (the home's own skills dir plus
-    external dirs from its own config).
+    external dirs from its own config, minus ``skills.disabled``).
 
-    Returns ``("resolves"|"resolves-duplicate"|"ambiguous"|"not-found", path|None)``
-    — the vocabulary the plan/summary code has always used, measured against
-    the real resolver with fabricated homes (2026-10-27/28).
+    Returns ``("resolves"|"resolves-duplicate"|"ambiguous"|"disabled"|"not-found", path|None)``
+    — the vocabulary the plan/summary code has always used, extended with
+    ``disabled`` (round-2 review S2: a name the operator listed under
+    ``skills.disabled`` loads off-disk but ``build_preloaded_skills_prompt``
+    counts as MISSING for a preload spawn, so a spawn dies with the card's
+    error string even though the tree holds the skill).
     """
-    roots = skill_guard.profile_skill_roots(Path(skills_dir).parent)
-    res = skill_guard.resolution(roots, name)
+    home = Path(skills_dir).parent
+    roots = skill_guard.profile_skill_roots(home)
+    res = skill_guard.resolution(roots, name,
+                                 disabled=skill_guard.disabled_skills_for_home(home))
     if res["state"] == "missing":
         return "not-found", None
     if res["state"] == "collision":
         return "ambiguous", None
+    if res["state"] == "disabled":
+        return "disabled", Path(res["paths"][0])
     if res["identical_copies"]:
         return "resolves-duplicate", Path(res["paths"][0])
     return "resolves", Path(res["paths"][0])
@@ -223,24 +238,31 @@ def _backups_dir(skills_dir):
     return Path(skills_dir).parent / "skills-backups"
 
 
-def _install_into(src, target, *, backup, stamp, backups_dir):
-    """Replace ``target`` with ``src`` (backing up first). Returns backup name."""
+def _install_into(src, target, *, stamp, backups_dir):
+    """Replace ``target`` with ``src``, ALWAYS backing up first.
+
+    Round-2 review S3: the first cut honoured ``backup=False`` with
+    ``shutil.rmtree(target)`` — a real deletion on the one path whose contract
+    is 'no deletions ever' (card body; module docstring). Backing up is now
+    unconditional: the reachable case is a pre-existing ``target`` directory
+    without a SKILL.md (a half-written copy the scanner sees as 'missing'),
+    and moving it aside into ``backups_dir`` (OUTSIDE the scan root) costs
+    nothing and keeps the operator's bytes recoverable. There is no code path
+    here that removes content without a backup copy.
+    """
     backed_up = None
     if target.exists():
-        if backup:
-            backups_dir.mkdir(parents=True, exist_ok=True)
-            bak = backups_dir / f"{target.parent.name}-{target.name}.bak-{stamp}"
-            shutil.move(str(target), str(bak))
-            backed_up = bak.name
-            backup_util.prune_backup_dir(backups_dir)
-        else:
-            shutil.rmtree(target)
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        bak = backups_dir / f"{target.parent.name}-{target.name}.bak-{stamp}"
+        shutil.move(str(target), str(bak))
+        backed_up = bak.name
+        backup_util.prune_backup_dir(backups_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, target)
     return backed_up
 
 
-def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
+def plan_home(label, skills_dir, name, bundle, *, dry_run, stamp,
               profile_home=None, reviewer_only=False):
     """One home's plan for ONE skill: guard decision + category action.
 
@@ -269,6 +291,12 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
       ``noop-resolves-elsewhere``        already resolves from another path
       ``skip-collision``                 hermes would refuse the name (the card
                                          rule; ``reason`` lists ALL paths)
+      ``skip-disabled``                  present but listed under
+                                         ``skills.disabled`` (S2): a preload
+                                         spawn still counts it missing, and a
+                                         second copy would be a collision — so
+                                         hscc reports instead of writing, and
+                                         the operator removes the config entry
       ``skipped-not-reviewer``           non-reviewer home missing the skill
       ``skipped-local-modified``         (defensive) target exists but is
                                          unreadable for hashing — left alone
@@ -279,7 +307,9 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
     category = skill_guard.category_for(name, *roots)
     target_rel = Path(category) / name
     target = Path(skills_dir) / target_rel
-    res = skill_guard.resolution(roots, name)
+    disabled = (skill_guard.disabled_skills_for_home(profile_home)
+                if profile_home else frozenset())
+    res = skill_guard.resolution(roots, name, disabled=disabled)
 
     plan = {
         "profile": label,
@@ -298,6 +328,16 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
         plan["action"] = "skip-collision"
         plan["reason"] = ("skipped: name already present at "
                           + ", ".join(res["paths"]) + " (would create collision)")
+        if res.get("equal_rank"):
+            plan["reason"] += (" — identical copies at equal rank: hermes ranks "
+                               "same-root copies only when their depths differ, "
+                               "so it refuses this name")
+    elif res["state"] == "disabled":
+        plan["action"] = "skip-disabled"
+        plan["reason"] = ("present but listed under skills.disabled — a preload "
+                          "spawn still counts it missing; hscc does not undo an "
+                          "operator opt-out (remove the name from "
+                          "config.yaml to restore)")
     elif res["state"] == "ok":
         resolved = {os.path.realpath(p) for p in res["paths"]}
         if os.path.realpath(str(target)) in resolved:
@@ -312,7 +352,7 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
             plan["reason"] = ("skipped: name already present at "
                               + ", ".join(res["paths"])
                               + " (would create collision)")
-    elif reviewer_only and not (label == "default"
+    elif reviewer_only and not (label == "default (root)"
                                 or skill_guard.is_reviewer_capable(label)):
         plan["action"] = "skipped-not-reviewer"
         plan["reason"] = "non-reviewer profile missing the skill (informational)"
@@ -334,8 +374,7 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
     if dry_run:
         plan["action"] = "would-" + plan["action"]
     elif plan["action"] == "write":
-        plan["backup"] = _install_into(bundle, target, backup=backup,
-                                       stamp=stamp,
+        plan["backup"] = _install_into(bundle, target, stamp=stamp,
                                        backups_dir=_backups_dir(skills_dir))
         plan["action"] = "installed"
     # Every other action writes nothing, ever.
@@ -347,7 +386,7 @@ def plan_home(label, skills_dir, name, bundle, *, dry_run, backup, stamp,
 
 
 def install_review_skill(home=None, repo_root=None, *, dry_run=False,
-                         backup=True, stamp=None, replace_top_level=False,
+                         stamp=None, replace_top_level=False,
                          skills=(REVIEW_SKILL,), reviewer_only=True):
     """Fan the bundled review-lane skills out across ``home`` — guarded.
 
@@ -358,6 +397,11 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     to reviewer-capable profiles (the ``*-orch`` set + the reviewer role
     profile); collision reporting and the guard run for every home either
     way, and homes that already resolve the skill are no-ops regardless.
+
+    There is deliberately NO ``--no-backup`` escape hatch (S3): every write
+    that replaces anything is backed up first, because a replacing write
+    without a backup is a deletion and the contract here is 'no deletions
+    ever'.
 
     ``replace_top_level`` (opt-in): move a flat ``<skills>/<name>`` copy out
     of the way (backed up, never deleted) when it makes the bare name
@@ -389,25 +433,63 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     # here is a no-op/skip, so the provenance-vs-bundle comparison it fed is
     # gone (a copy that RESOLVES is never overwritten, edited or not).
     for label, skills_dir, profile_home in skill_dirs(home):
-        marker = Path(skills_dir) / NO_BUNDLED_MARKER
-        if marker.exists():
+        # B3 (round-2 review): the opt-out marker lives at the CANONICAL
+        # ``<profile home>/.no-bundled-skills`` path (hermes_cli/profiles.py:
+        # 1349 writes it, tools/skills_sync.py:368,468 reads it via
+        # ``_hermes_home()``), not inside ``skills/``. DECISION for the
+        # dispatcher-injected name (stated in the PR body, per the reviewer's
+        # "needs a stated decision"): reviewer-readiness OVERRIDES the seeding
+        # opt-out for ``sdlc-review`` only. Grounding — hscc-roles creates
+        # every orchestrator with ``create_profile(no_skills=True)``
+        # (generator.py:470), which is exactly the call that WRITES the marker
+        # (profiles.py ``_finish_profile_layout``), so honouring the marker
+        # would leave every ``*-orch`` unreviewable forever AND read GREEN;
+        # meanwhile the dispatcher force-injects the name for review-lane
+        # spawns to ANY assignee (kanban_db_dispatch.py:2073-2075), so the
+        # opt-out cannot be honoured without guaranteeing dead spawns. The
+        # marker IS honoured for the extra names (systematic-debugging,
+        # test-driven-development) — those are role-preload conveniences nobody
+        # force-injects, and skipping them is the operator's expressed wish.
+        # Either way the collision guard still decides the write, and doctor
+        # reports an opted-out reviewer-capable home that cannot resolve the
+        # injected name RED — never silent.
+        opted_out = skill_guard.bundled_seeding_opted_out(profile_home)
+        if opted_out and all(s != REVIEW_SKILL for s in skills):
             report["targets"].append({
                 "profile": label, "skills_dir": str(skills_dir),
                 "skill": "+".join(skills),
                 "action": "skipped-no-bundled-skills",
-                "reason": "profile created with --no-skills",
+                "reason": f"home carries {NO_BUNDLED_MARKER} (seeding opt-out "
+                          f"honoured for non-injected names)",
+                "opted_out": True,
                 "bare_name_resolves": resolve_verdict(skills_dir, REVIEW_SKILL)[0],
             })
             continue
         for name in skills:
             plan = plan_home(label, skills_dir, name, sources[name],
-                             dry_run=dry_run, backup=backup, stamp=stamp,
+                             dry_run=dry_run, stamp=stamp,
                              profile_home=profile_home,
                              reviewer_only=reviewer_only)
+            if opted_out:
+                plan["opted_out"] = True
+                if name == REVIEW_SKILL:
+                    plan["opt_out_override"] = (
+                        f"{NO_BUNDLED_MARKER} honoured for bundled seeding but "
+                        f"NOT for the dispatcher-injected {REVIEW_SKILL} "
+                        f"(review readiness wins; see module docstring)")
+                elif plan["action"] in ("write", "would-write"):
+                    # An extra name the opt-out covers: the ONLY difference the
+                    # marker makes here is suppressing the first install — a
+                    # copy that already resolves (noop) or a guard skip stays
+                    # reported as itself, so the marker never masks findings.
+                    plan["action"] = ("would-skip-no-bundled-skills" if dry_run
+                                      else "skipped-no-bundled-skills")
+                    plan["reason"] = (f"home carries {NO_BUNDLED_MARKER} — "
+                                      f"bundled seeding opt-out honoured")
             if replace_top_level:
                 plan["top_level"] = _plan_top_level(
                     label, skills_dir, name, plan, dry_run=dry_run,
-                    stamp=stamp, backup=backup)
+                    stamp=stamp)
                 if plan["top_level"].get("action", "").endswith("-top-level"):
                     # The colliding flat copy moved aside; re-read the verdict.
                     plan["bare_name_resolves"], plan["resolves_to"] = (
@@ -424,15 +506,21 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     # root (the same REVIEWER-ROLE SET the doctor check uses — the card
     # forbids treating a non-reviewer profile's absence as a failure). A
     # non-reviewer home missing an EXTRA skill is informational, never
-    # blocked.
+    # blocked. A name the operator listed under ``skills.disabled`` counts as
+    # unresolvable too (S2: build_preloaded_skills_prompt treats disabled as
+    # missing), for reviewer-capable homes only.
     reasons: dict[str, set[str]] = {}
     for p in report["targets"]:
         verdict = p.get("bare_name_resolves")
+        reviewer_home = (p["profile"] == "default (root)"
+                         or skill_guard.is_reviewer_capable(p["profile"]))
         if verdict == "ambiguous":
             reasons.setdefault(p["profile"], set()).add("collision")
-        elif verdict == "not-found" and p.get("skill") == REVIEW_SKILL and (
-                p["profile"] == "default"
-                or skill_guard.is_reviewer_capable(p["profile"])):
+        elif verdict == "disabled" and p.get("skill") == REVIEW_SKILL \
+                and reviewer_home:
+            reasons.setdefault(p["profile"], set()).add("disabled")
+        elif verdict == "not-found" and p.get("skill") == REVIEW_SKILL \
+                and reviewer_home:
             reasons.setdefault(p["profile"], set()).add("missing")
     report["blocked"] = sorted(f"{name} ({'+'.join(sorted(states))})"
                                for name, states in reasons.items())
@@ -440,7 +528,7 @@ def install_review_skill(home=None, repo_root=None, *, dry_run=False,
     return report
 
 
-def _plan_top_level(label, skills_dir, name, plan, *, dry_run, stamp, backup):
+def _plan_top_level(label, skills_dir, name, plan, *, dry_run, stamp):
     """Decide about the FLAT ``<skills>/<name>`` copy under --replace-top-level.
 
     Only ever MOVED (backed up, outside the scan root), never deleted — and
@@ -503,7 +591,9 @@ def _summary_lines(report):
         lines.append(f"  {label}: {count}")
     if report.get("blocked"):
         colliding = [b for b in report["blocked"] if "collision" in b]
-        missing = [b for b in report["blocked"] if "missing" in b]
+        missing = [b for b in report["blocked"]
+                   if "missing" in b and "disabled" not in b]
+        disabled = [b for b in report["blocked"] if "disabled" in b]
         if colliding:
             lines.append(
                 "  ⚠ collision (two different skills share the name — hscc "
@@ -516,6 +606,12 @@ def _summary_lines(report):
                 " — the guarded install skipped these; re-run without "
                 "--dry-run to place them (missing installs go to "
                 "reviewer-capable profiles + the root home only).")
+        if disabled:
+            lines.append(
+                "  ⚠ review skill present but DISABLED for: "
+                + ", ".join(disabled) + " — remove the name from that home's "
+                "config.yaml (skills.disabled); hscc never undoes an operator "
+                "opt-out, but the spawn would still die on it.")
     return lines
 
 
@@ -530,8 +626,6 @@ def main(argv=None):
                         help="root holding install/hscc-skills (default: auto)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the plan (guard decisions included), write nothing")
-    parser.add_argument("--no-backup", action="store_true",
-                        help="overwrite without a .bak copy (still skips edited copies)")
     parser.add_argument("--replace-top-level", action="store_true",
                         help="move a flat <skills>/<skill> copy aside (backed up) "
                              "so the category copy is unambiguous")
@@ -555,7 +649,7 @@ def main(argv=None):
 
     report = install_review_skill(
         home=args.home, repo_root=args.repo_root, dry_run=args.dry_run,
-        backup=not args.no_backup, replace_top_level=args.replace_top_level,
+        replace_top_level=args.replace_top_level,
         skills=tuple(skills), reviewer_only=not args.all_profiles)
     if args.json:
         print(json.dumps(report, indent=2))

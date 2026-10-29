@@ -90,8 +90,9 @@ class TestSkillFindings:
         assert chk.ok is False and "sdlc-review" in chk.detail
 
     def test_identical_duplicates_stay_green(self, clean_home):
-        # Byte-identical copies in one root RESOLVE for hermes (same-root
-        # ranking) — doctor must not cry wolf, and readiness counts them ok.
+        # Byte-identical copies in one root whose RANKS DIFFER (flat depth-1
+        # vs category depth-2) RESOLVE for hermes (same-root ranking) — doctor
+        # must not cry wolf, and readiness counts them ok.
         mk_profile(clean_home, "dup-orch", {
             "sdlc-review": "SAME\n", "devops/sdlc-review": "SAME\n"})
         _, rev = doctor._skill_findings(str(clean_home))
@@ -100,6 +101,43 @@ class TestSkillFindings:
         # the name — a landmine the moment either copy is edited).
         dups, _ = doctor._skill_findings(str(clean_home))
         assert any("dup-orch" in d for d in dups)
+
+    def test_equal_rank_identical_copies_read_red(self, clean_home):
+        # B2 (round-2 review): the SAME content in two category dirs (equal
+        # rank) is NOT collapsed by the resolver's `rank[0] != rank[1]` gate —
+        # a spawn to that profile dies with 'Unknown skill(s)'. Readiness must
+        # be RED (was GREEN in the first cut) and say collision, listing both
+        # paths, with the equal-rank explanation.
+        mk_profile(clean_home, "tie-orch", {
+            "catA/sdlc-review": "SAME\n", "catB/sdlc-review": "SAME\n"})
+        dups, rev = doctor._skill_findings(str(clean_home))
+        assert any("tie-orch" in d for d in dups)
+        assert len(rev) == 1 and "tie-orch" in rev[0] and "collides" in rev[0]
+        assert "equal rank" in rev[0]
+        chk = doctor._reviewer_readiness_ok(str(clean_home))
+        assert chk.ok is False and "tie-orch" in chk.detail
+
+    def test_disabled_skill_reads_red(self, clean_home):
+        # S2: present but listed in skills.disabled -> a preload spawn counts
+        # it missing; readiness must be RED, not ok.
+        pdir = mk_profile(clean_home, "off-orch", {"devops/sdlc-review": "x\n"})
+        with open(os.path.join(pdir, "config.yaml"), "w", encoding="utf-8") as f:
+            f.write("skills:\n  disabled: [sdlc-review]\n")
+        _, rev = doctor._skill_findings(str(clean_home))
+        assert len(rev) == 1 and "off-orch" in rev[0]
+        assert "skills.disabled" in rev[0]
+
+    def test_opted_out_home_annotated_never_silent(self, clean_home):
+        # B3: a reviewer-capable home carrying the canonical
+        # <home>/.no-bundled-skills marker and missing the name is reported
+        # like any other broken home, annotated with the marker.
+        pdir = mk_profile(clean_home, "opt-orch")  # zero sdlc-review
+        with open(os.path.join(pdir, ".no-bundled-skills"), "w", encoding="utf-8") as f:
+            f.write("opted out\n")
+        _, rev = doctor._skill_findings(str(clean_home))
+        assert len(rev) == 1 and "opt-orch" in rev[0]
+        assert "missing sdlc-review" in rev[0]
+        assert ".no-bundled-skills" in rev[0]
 
     def test_findings_survive_broken_trees(self, tmp_path):
         # A skills tree missing everything must not crash preflight: the

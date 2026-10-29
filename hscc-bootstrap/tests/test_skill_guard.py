@@ -19,6 +19,7 @@ leave everything that already resolves exactly once alone (no-op), with
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -79,12 +80,77 @@ class TestResolverMirror:
         assert len(res["paths"]) == 2  # BOTH colliding paths listed
 
     def test_identical_copies_same_root_resolve(self, tmp_path):
-        # hermes _provably_same_skill: byte-identical same-root copies rank,
-        # they do NOT refuse. The mirror must agree (no false alarms).
+        # hermes _provably_same_skill + the RANK GATE: byte-identical copies
+        # whose ranks DIFFER (flat depth-1 vs category depth-2) rank and load
+        # — they do NOT refuse. The mirror must agree (no false alarms).
         p = mk_profile(tmp_path, "worker", {
             "sdlc-review": "SAME\n", "devops/sdlc-review": "SAME\n"})
         res = skill_guard.resolution(skill_guard.profile_skill_roots(p), "sdlc-review")
         assert res["state"] == "ok" and res["identical_copies"] is True
+
+    def test_identical_copies_equal_rank_refuse_as_collision(self, tmp_path):
+        # B2 (round-2 review, the first cut's false green): two byte-identical
+        # copies at the SAME depth (catA/x + catB/x) have equal
+        # _rank_same_root_candidate tuples, so the `rank[0] != rank[1]` gate at
+        # tools/skills_tool.py:524 does NOT collapse them — the resolver
+        # refuses and the name is MISSING for a spawn. The mirror must say
+        # collision (not ok), listing both paths.
+        p = mk_profile(tmp_path, "worker", {
+            "catA/sdlc-review": "SAME\n", "catB/sdlc-review": "SAME\n"})
+        res = skill_guard.resolution(skill_guard.profile_skill_roots(p), "sdlc-review")
+        assert res["state"] == "collision" and res.get("equal_rank") is True
+        assert len(res["paths"]) == 2
+
+    def test_bom_frontmatter_name_is_visible(self, tmp_path):
+        # S1: hermes reads skill text utf-8-sig; a BOM'd frontmatter still
+        # registers its `name:`. The mirror used plain utf-8 and missed it
+        # (real resolver: refused; mirror: ok — a false green).
+        p = mk_profile(tmp_path, "worker")
+        skills = Path(p) / "skills"
+        for rel in ("catA/x", "catB/y"):
+            d = skills / rel
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                "\ufeff---\nname: sdlc-review\n---\nbody\n", encoding="utf-8")
+        res = skill_guard.resolution(skill_guard.profile_skill_roots(p), "sdlc-review")
+        assert res["state"] == "collision"
+
+    def test_long_frontmatter_name_still_found(self, tmp_path):
+        # S1: the old 40-line window hid a `name:` beyond line 40.
+        p = mk_profile(tmp_path, "worker")
+        d = Path(p) / "skills" / "catA" / "renamed"
+        d.mkdir(parents=True)
+        pad = "\n".join(f"pad{i}: v" for i in range(60))
+        (d / "SKILL.md").write_text(
+            f"---\n{pad}\nname: sdlc-review\n---\nbody\n", encoding="utf-8")
+        (Path(p) / "skills" / "catB" / "sdlc-review").mkdir(parents=True)
+        (Path(p) / "skills" / "catB" / "sdlc-review" / "SKILL.md").write_text(
+            "other\n", encoding="utf-8")
+        res = skill_guard.resolution(skill_guard.profile_skill_roots(p), "sdlc-review")
+        assert res["state"] == "collision"  # renamed copy registers via frontmatter
+
+    def test_disabled_skill_counts_as_unresolvable(self, tmp_path):
+        # S2: build_preloaded_skills_prompt(..., disabled_as_missing=True)
+        # treats skills.disabled entries as MISSING for a preload spawn — a
+        # spawn dies even though the tree resolves the name. The mirror must
+        # report 'disabled', never ok.
+        p = mk_profile(tmp_path, "worker", {"devops/sdlc-review": "cat\n"})
+        (Path(p) / "config.yaml").write_text(
+            "skills:\n  disabled:\n    - sdlc-review\n", encoding="utf-8")
+        assert "sdlc-review" in skill_guard.disabled_skills_for_home(p)
+        res = skill_guard.resolution(
+            skill_guard.profile_skill_roots(p), "sdlc-review",
+            disabled=skill_guard.disabled_skills_for_home(p))
+        assert res["state"] == "disabled"
+
+    def test_platform_disabled_counts_and_essential_survives(self, tmp_path):
+        p = mk_profile(tmp_path, "worker")
+        (Path(p) / "config.yaml").write_text(
+            "skills:\n  platform_disabled:\n    kanban:\n      - sdlc-review\n"
+            "  disabled: [hermes-agent]\n", encoding="utf-8")
+        names = skill_guard.disabled_skills_for_home(p)
+        assert "sdlc-review" in names        # every platform's list counts
+        assert "hermes-agent" not in names   # ESSENTIAL_SKILLS subtracted
 
     def test_frontmatter_name_counts_as_candidate(self, tmp_path):
         p = mk_profile(tmp_path, "worker", {
@@ -274,7 +340,7 @@ class TestGuardedInstall:
         plan = irs.plan_home("acme-orch",
                              str(home / "profiles" / "acme-orch" / "skills"),
                              "sdlc-review", irs.bundle_source("sdlc-review", REPO_ROOT),
-                             dry_run=True, backup=True, stamp="t",
+                             dry_run=True, stamp="t",
                              profile_home=home / "profiles" / "acme-orch")
         # category_for() follows the existing layout, so the target IS the
         # existing copy -> no-op at target; the point is no SECOND category
@@ -286,24 +352,65 @@ class TestGuardedInstall:
         assert (skills / "custom" / "sdlc-review" / "SKILL.md").is_file()
         assert not (skills / "devops").exists()
 
-    def test_no_bundled_skills_marker_respected(self, tmp_path):
+    def test_no_bundled_marker_at_home_blocks_extra_names_only(self, tmp_path):
+        # B3 (round-2 review): the CANONICAL marker path is <profile home>/.
+        # no-bundled-skills (hermes_cli/profiles.py:1349 writes it, tools/
+        # skills_sync.py reads it) — the skills/-internal position the first
+        # cut checked is dead data. Stated decision: the marker is HONOURED
+        # for the extra names (systematic-debugging, test-driven-development)
+        # and OVERRIDDEN for the dispatcher-injected sdlc-review, because
+        # hscc-roles itself creates every *-orch with no_skills=True (which
+        # writes this very marker) while the dispatcher force-injects the
+        # review skill for spawns to that profile.
+        home = self._home(tmp_path)
+        p = mk_profile(home, "acme-orch")
+        (home / "profiles" / "acme-orch" / ".no-bundled-skills").write_text("opted out\n")
+        # Extras-only run: opt-out honoured, nothing written.
+        report = self._run(home, skills=("systematic-debugging",))
+        plan = next(x for x in report["targets"] if x["profile"] == "acme-orch")
+        assert plan["action"] == "skipped-no-bundled-skills"
+        assert not os.path.exists(os.path.join(p, "skills", "software-development",
+                                               "systematic-debugging"))
+        # Injected-name run: override — review readiness wins, skill installs.
+        report2 = self._run(home, skills=(irs.REVIEW_SKILL,))
+        plan2 = next(x for x in report2["targets"] if x["profile"] == "acme-orch")
+        assert plan2["action"] == "installed"
+        assert plan2.get("opt_out_override")
+        assert (home / "profiles" / "acme-orch" / "skills"
+                / "devops" / "sdlc-review" / "SKILL.md").is_file()
+
+    def test_legacy_skills_marker_still_recognised(self, tmp_path):
+        # The old (wrong-path) marker location is accepted as opt-out too —
+        # a marker there can only have been meant as an opt-out.
         home = self._home(tmp_path)
         p = mk_profile(home, "acme-orch")
         (home / "profiles" / "acme-orch" / "skills"
              / ".no-bundled-skills").write_text("")
-        report = self._run(home)
+        report = self._run(home, skills=("test-driven-development",))
         plan = next(x for x in report["targets"] if x["profile"] == "acme-orch")
         assert plan["action"] == "skipped-no-bundled-skills"
-        assert not os.path.exists(os.path.join(p, "skills", "devops", "sdlc-review"))
+        assert not os.path.exists(os.path.join(p, "skills", "software-development",
+                                               "test-driven-development"))
 
     def test_default_root_home_gets_missing_skill(self, tmp_path):
-        # The root ('default') home is spawnable -> treated as reviewer-capable.
+        # The root home is spawnable -> treated as reviewer-capable.
         home = self._home(tmp_path)
         (home / "skills").mkdir(parents=True, exist_ok=True)
         report = self._run(home)
-        plan = next(p for p in report["targets"] if p["profile"] == "default")
+        plan = next(p for p in report["targets"] if p["profile"] == "default (root)")
         assert plan["action"] == "installed"
         assert (home / "skills" / "devops" / "sdlc-review" / "SKILL.md").is_file()
+
+    def test_root_home_label_not_ambiguous_with_profile_default(self, tmp_path):
+        # N1: a REAL profile named 'default' must not be conflated with the
+        # root home in report['blocked'].
+        home = self._home(tmp_path)
+        (home / "skills").mkdir(parents=True, exist_ok=True)
+        mk_profile(home, "default", {
+            "sdlc-review": "flat a\n", "devops/sdlc-review": "flat b\n"})
+        report = self._run(home)
+        assert "default (collision)" in report["blocked"]
+        assert not any(b.startswith("default (root)") for b in report["blocked"])
 
     def test_replace_top_level_moves_stale_flat_with_backup(self, tmp_path):
         home = self._home(tmp_path)

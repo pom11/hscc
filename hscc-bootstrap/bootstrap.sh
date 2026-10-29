@@ -253,22 +253,6 @@ else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"
 fi
 
-# Guarded review-skill fan-out (t_bc611809): the dispatcher force-injects
-# sdlc-review for review-lane spawns for ANY assignee, so every reviewer-capable
-# profile must resolve it exactly once. install_review_skill.py is collision-
-# guarded (skips wherever the name already resolves elsewhere), idempotent,
-# never deletes and never overwrites a resolving copy, and --dry-run plans
-# without writing. Warn-not-die: a residual collision is operator data to
-# adjudicate (the doctor's two skill findings report it with every path).
-hdr "Install: review skills (guarded)"
-if $SKIP_SKILLS; then warn "skipped"
-elif $DRY_RUN; then plan "review skills: $BOOT_DIR/install_review_skill.py --skill all (guarded fan-out into $HERMES_HOME profiles)"
-else
-  "$PYBIN" "$BOOT_DIR/install_review_skill.py" --skill all >/dev/null 2>&1 \
-    && ok "review skills guarded-installed" \
-    || warn "review skills: unresolved profile(s) remain — run: $PYBIN $BOOT_DIR/install_review_skill.py --json (per-profile verdicts) and doctor.py --skills"
-fi
-
 hdr "Install: role profiles"
 if $SKIP_ROLES; then warn "skipped"
 elif $DRY_RUN; then plan "role profiles: $PLUGINS/hscc-roles/hscc.py generate (writes $HERMES_HOME/profiles)"
@@ -291,6 +275,30 @@ if $SKIP_ROLES; then warn "skipped"; else
   else
     "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
   fi
+fi
+
+# Guarded review-skill fan-out (t_bc611809): the dispatcher force-injects
+# sdlc-review for review-lane spawns for ANY assignee, so every reviewer-capable
+# profile must resolve it exactly once. install_review_skill.py is collision-
+# guarded (skips wherever the name already resolves elsewhere), idempotent,
+# never deletes and never overwrites a resolving copy, and --dry-run plans
+# without writing. Warn-not-die: a residual collision is operator data to
+# adjudicate (the doctor's two skill findings report it with every path).
+#
+# STAGE ORDER IS LOAD-BEARING (B1, round-2 review): this stage MUST run AFTER
+# both profile-provisioning stages above. `generate` and `orch-all` CREATE the
+# role profiles and every `*-orch` — with EMPTY skills trees — so a fan-out
+# that ran before them saw zero reviewer-capable profiles, installed only the
+# root home, and shipped freshly-created orchestrators that die on the very
+# first review-lane spawn ('Unknown skill(s): sdlc-review'). The stage is
+# idempotent, so running it here costs a no-op for homes that already resolve.
+hdr "Install: review skills (guarded)"
+if $SKIP_SKILLS; then warn "skipped"
+elif $DRY_RUN; then plan "review skills: $BOOT_DIR/install_review_skill.py --skill all (guarded fan-out into $HERMES_HOME profiles)"
+else
+  "$PYBIN" "$BOOT_DIR/install_review_skill.py" --skill all >/dev/null 2>&1 \
+    && ok "review skills guarded-installed" \
+    || warn "review skills: unresolved profile(s) remain — run: $PYBIN $BOOT_DIR/install_review_skill.py --json (per-profile verdicts) and doctor.py --skills"
 fi
 
 hdr "Install: ~/.hscc state + serving.json"
