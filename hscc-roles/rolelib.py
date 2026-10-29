@@ -76,6 +76,12 @@ def file_md5(path):
 
 REQUIRED_FIELDS = ("name", "identity", "routing_description")
 VALID_MODEL_TIERS = ("fast", "strong")
+# Abstract reasoning tiers. The concrete effort string per tier is MODEL
+# vocabulary, so it lives in the applied cluster template's `reasoning:` block
+# (recorded at REASONING_POLICY_PATH), never in a role spec.
+VALID_REASONING_TIERS = ("max", "standard", "light")
+REASONING_POLICY_PATH = os.path.expanduser(
+    os.environ.get("HSCC_REASONING_POLICY", "~/.hscc/state/reasoning_policy.json"))
 
 
 def load_spec(path):
@@ -133,6 +139,17 @@ def load_spec(path):
         if not model_name:
             raise ValueError(f"{path}: model_name must be a non-empty string")
 
+    # Optional reasoning tier; None = orchestrators `max`, everyone else
+    # `standard` (see generator.reasoning_tier).
+    reasoning_tier = data.get("reasoning_tier")
+    if reasoning_tier is not None:
+        reasoning_tier = str(reasoning_tier).strip().lower()
+        if reasoning_tier not in VALID_REASONING_TIERS:
+            raise ValueError(
+                f"{path}: reasoning_tier must be one of {VALID_REASONING_TIERS}, "
+                f"got '{reasoning_tier}'"
+            )
+
     return {
         "name": str(data["name"]).strip(),
         "identity": str(data["identity"]).rstrip() + "\n",
@@ -141,6 +158,7 @@ def load_spec(path):
         "model_tier": model_tier,
         "model_endpoint": model_endpoint,
         "model_name": model_name,
+        "reasoning_tier": reasoning_tier,
     }
 
 

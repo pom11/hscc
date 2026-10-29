@@ -42,7 +42,7 @@ class TemplateIntentError(ValueError):
 # The v4-only declaration blocks (docs/design/2026-10-15-template-declarations.md
 # §1.6). Listed ONCE here so the legacy-key refusal below and any future
 # consumer agree on exactly which keys arrived with version 4.
-_V4_DECLARATION_KEYS = ("endpoints", "proxy", "caps")
+_V4_DECLARATION_KEYS = ("endpoints", "proxy", "caps", "reasoning")
 
 
 def _deep_copy(value: Any) -> Any:
@@ -225,6 +225,10 @@ class ClusterTemplate:
     #   carrying them is recording them, never promising they work.
     # caps: {max_in_progress, max_in_progress_per_profile,
     #        expected_requests_per_card} — kanban concurrency (§3).
+    # reasoning: {max, standard, light} — this model's reasoning-effort string
+    #   per abstract tier (orchestrators+reviewers / workers / subagents). The
+    #   value is model vocabulary, which is why the template, not the role
+    #   spec, owns it.
     #
     # Byte-identity note: v4 keys are REFUSED below for version < 4, so a v3
     # template can never reach to_dict() with any of these set. to_dict()
@@ -234,6 +238,7 @@ class ClusterTemplate:
     endpoints: Optional[Dict[str, Any]] = None
     proxy: Optional[Dict[str, Any]] = None
     caps: Optional[Dict[str, Any]] = None
+    reasoning: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def from_dict(d: dict) -> "ClusterTemplate":
@@ -294,6 +299,7 @@ class ClusterTemplate:
             endpoints=d.get("endpoints"),
             proxy=d.get("proxy"),
             caps=d.get("caps"),
+            reasoning=d.get("reasoning"),
         )
 
     def to_dict(self) -> dict:
@@ -318,6 +324,8 @@ class ClusterTemplate:
             out["proxy"] = _deep_copy(self.proxy)
         if self.caps is not None:
             out["caps"] = _deep_copy(self.caps)
+        if self.reasoning is not None:
+            out["reasoning"] = _deep_copy(self.reasoning)
         return out
 
 

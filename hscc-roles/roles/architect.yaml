@@ -19,3 +19,4 @@ routing_description: Claim tasks that require system design, architecture decisi
   contracts, and YAGNI scoping. Do NOT claim implementation tasks — hand to coder,
   backend-engineer, frontend-engineer, or other specialists. Do NOT claim documentation,
   testing, or deployment work.
+reasoning_tier: max
