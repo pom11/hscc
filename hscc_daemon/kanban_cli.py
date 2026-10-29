@@ -311,13 +311,15 @@ def _cmd_monitor(rest, json_mode, theme_name=None):
     if json_mode and opts["live"]:
         return _error("--json is a single snapshot; drop --live", json_mode)
     if json_mode:
-        print(json.dumps(kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])),
+        print(json.dumps(kanban_live.attach_orchestrators(
+            kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))),
                          default=list))
         return 0
     console = _console(theme_name)
     if opts["live"]:
         return kanban_live.run_live(console, interval=opts["interval"], board=opts["board"])
-    data = kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))
+    data = kanban_live.attach_orchestrators(
+        kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])))
     console.print(kanban_live.render(data, snapshot=True, width=console.width))
     return 1 if data["errors"] and not data["boards"] else 0
 
