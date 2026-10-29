@@ -3511,3 +3511,73 @@ class TestUniformPoolApplyEndToEndNoNodeUrls:
         assert cust["model"]["default"] == _UNIF_NODE_DEFAULT
         state = json.loads((hscc / "applied_template.json").read_text())
         assert state["uniform_pool"] is False
+
+
+class TestProvisionAlreadyServingSkip:
+    """apply's already-serving skip (2026-10-29): `sparkrun run --ensure` on a unit
+    already up on the same recipe is a no-op that can hang on ssh EOF — so it is
+    not called at all when every span node answers /v1/models non-empty."""
+
+    # Borrow the recreate suite's harness (not inheritance: that would re-run
+    # every one of its tests here too).
+    _invoke = TestProvisionRecreateOnChange._invoke
+    _stops = staticmethod(TestProvisionRecreateOnChange._stops)
+    _run_for = staticmethod(TestProvisionRecreateOnChange._run_for)
+    _expected_worker_cmd = staticmethod(TestProvisionRecreateOnChange._expected_worker_cmd)
+
+    @staticmethod
+    def _serving(monkeypatch, up=("10.0.0.2",)):
+        seen = []
+
+        def probe(url, timeout=2):
+            seen.append(url)
+            ok = any(f"//{h}:" in url for h in up)
+            return {"ok": ok, "models": ["deepseek", "worker-model"] if ok else [], "error": None}
+        monkeypatch.setattr(cluster_template, "_unit_models_probe", probe)
+        return seen
+
+    def test_serving_same_recipe_unit_is_not_launched(self, monkeypatch, tmp_path):
+        seen = self._serving(monkeypatch)
+        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
+                                     unit_nodes=("10.0.0.2",),
+                                     worker_serve_cmd=self._expected_worker_cmd())
+        assert self._run_for(calls, "deepseek.yaml") == []
+        assert "http://10.0.0.2:8000/v1/models" in seen
+        assert result["skipped_serving"] == ["10.0.0.2:8000:deepseek.yaml"]
+        assert "10.0.0.2:8000:deepseek.yaml" in result["provisioned"]
+        assert result["status"] == "ok" and result["warnings"] == []
+
+    def test_hollow_or_unreachable_unit_still_launches(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cluster_template, "_unit_models_probe",
+                            lambda url, timeout=2: {"ok": True, "models": [], "error": None})
+        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
+                                     unit_nodes=("10.0.0.2",))
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        assert "skipped_serving" not in result
+
+    def test_recreate_ignores_the_skip(self, monkeypatch, tmp_path):
+        self._serving(monkeypatch)
+        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
+                                     unit_nodes=("10.0.0.2",))
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+
+    def test_tp_span_needs_every_node_serving(self, monkeypatch, tmp_path):
+        self._serving(monkeypatch, up=("10.0.0.2",))         # peer 10.0.0.3 silent
+        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n10.0.0.3\n"
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
+                                     unit_nodes=("10.0.0.2", "10.0.0.3"))
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+
+    def test_drifted_serving_unit_still_reports_drift(self, monkeypatch, tmp_path):
+        self._serving(monkeypatch)
+        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
+                                     unit_nodes=("10.0.0.2",),
+                                     worker_serve_cmd=["sparkrun", "run", "old-flags"])
+        assert self._run_for(calls, "deepseek.yaml") == []
+        assert result["status"] == "warn"
+        assert any("drift NOT applied" in w for w in result["warnings"])

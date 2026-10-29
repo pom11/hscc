@@ -108,6 +108,24 @@ routing:
   delegation: family-coding
   compaction: family-coding
   auxiliaries: family-coding
+# Kanban concurrency, owned by the template (apply writes kanban.* in hermes
+# config). Operator rule: at most ~5 RUNNING requests per node for a decent
+# decode speed. 4 nodes x 5 = 20 request slots; cards are ~1 in-flight request
+# each, but the 9-ish orchestrators, subagents and auxiliary calls share the
+# same nodes, so 12 cards leaves that headroom (measured 2026-10-29: 12 cards
+# + orchestrators = 4-6 running per node). Per-profile 2 keeps one role from
+# taking every slot.
+caps:
+  max_in_progress: 12
+  max_in_progress_per_profile: 2
+
+# Balancer: least-in-flight over the uniform pool (the default for a
+# uniform_pool template, declared explicitly so the template states it).
+proxy:
+  families:
+    coding:
+      routing: least-in-flight
+
 # Reasoning effort per tier, in THIS model's vocabulary: the Qwen3.8 chat
 # template accepts exactly low | medium | xhigh (anything else, `max`/`ultra`
 # included, is an HTTP 400; xhigh is also its default). max = orchestrators +
