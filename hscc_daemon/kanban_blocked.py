@@ -61,6 +61,9 @@ Usage: hscc kanban <subcommand> [args]
                               whether the work is safe to re-run.
   hscc kanban stale [--older-than <days>] [--json]   (card t_e751e652)
                               List non-terminal cards across all boards.
+  hscc kanban pause <board>... [--reason <text>] / resume <board>... / paused / enforce
+                              Hold whole boards by project priority (reclaim +
+                              block running/ready; resume restores exactly those).
   hscc kanban monitor [--live] [--interval <s>] [--board <slug>]
                               Workers on every board: running, ready, counts,
                               last hour's outcomes (read-only).
@@ -497,7 +500,7 @@ def cmd_kanban(argv):
         if sub == "blocked":
             _console().print(SUBCOMMAND_HELP["blocked"])
             return 0
-        if sub in ("stale", "monitor"):
+        if sub in ("stale", "monitor", "pause", "resume", "paused", "enforce"):
             # Single source of truth: `stale`/`monitor` help is kanban_cli's wording, so
             # hand the help request to the module that owns the verb (it never
             # acts on a --help argv). If that module is absent from the tree,
@@ -531,7 +534,7 @@ def cmd_kanban(argv):
         return cmd_blocked(rest, json_mode, theme_name)
 
     # Delegate `stale` (t_e751e652) and `monitor` (t_cce254b9) to kanban_cli.
-    if sub in ("stale", "monitor"):
+    if sub in ("stale", "monitor", "pause", "resume", "paused", "enforce"):
         try:
             from hscc_daemon import kanban_cli as _kcli
             delegated = [sub, *rest]
@@ -549,5 +552,5 @@ def cmd_kanban(argv):
                 json_mode)
 
     print(f"Error: unknown kanban subcommand: {sub}", file=sys.stderr)
-    print(f"Valid subcommands: blocked, stale, monitor", file=sys.stderr)
+    print(f"Valid subcommands: blocked, stale, monitor, pause, resume, paused, enforce", file=sys.stderr)
     return 1
