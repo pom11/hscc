@@ -518,10 +518,12 @@ def readiness_for_home(hermes_home, *, name: str = REVIEW_SKILL) -> dict:
     "opted_out"}``. ``label`` distinguishes the root home ("default (root)")
     from a real profile named ``default`` (round-2 review N1 — both used to
     render as ``default`` and the operator could not tell which tree was
-    broken). ``state == "opted-out"`` is reported for reviewer-capable homes
-    whose seeding opt-out leaves the dispatcher-injected name unresolvable
-    (B3): never silent, and the operator — not hscc — decides whether to
-    delete the marker.
+    broken). ``opted_out`` is purely FACTUAL (does ``<home>/.no-bundled-skills``
+    exist) — it is not a ``state``. Doctor renders it as an annotation on the
+    reviewer-readiness line so an opted-out home that cannot resolve the
+    injected name is never silent; note the installer OVERRIDES the marker for
+    reviewer-capable homes (see install_review_skill.py's B3 note), so this
+    annotation reads "the marker is here", not "hscc will leave it broken".
     """
     home = Path(hermes_home).expanduser()
     label = "default (root)" if home.name == ".hermes" else home.name

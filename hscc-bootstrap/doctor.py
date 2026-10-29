@@ -219,11 +219,13 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
             roots, skill_guard.REVIEW_SKILL,
             disabled=skill_guard.disabled_skills_for_home(path))
         # B3 transparency: an opted-out home reads RED like any other broken
-        # reviewer home, and the detail says the marker is present, so the
-        # operator is never left guessing why (and hscc's stated policy is to
-        # override the opt-out for THIS dispatcher-injected name only — see
-        # install_review_skill.py).
-        marker_note = (" (home carries .no-bundled-skills)"
+        # reviewer home, and the detail says the marker is present AND what
+        # hscc will do about it (the installer overrides the marker for
+        # reviewer-capable homes, so a bootstrap run closes it — the operator
+        # is never left guessing whether the marker means "hscc will leave
+        # this broken").
+        marker_note = (" (home carries .no-bundled-skills; hscc still seeds "
+                       "this reviewer-capable home on bootstrap)"
                        if skill_guard.bundled_seeding_opted_out(path) else "")
         if res["state"] == "missing":
             reviewer_lines.append(
