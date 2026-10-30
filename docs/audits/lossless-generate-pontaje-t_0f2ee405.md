@@ -128,6 +128,23 @@ profile, and `generate` is still the operator's action.
    content now lives under `## Role: ecofire-pontaje-engineer`, and the three named
    shared/prod sandboxes intentionally do not come back.
 
+## Caveats / limits of this measurement
+
+- The fleet numbers are a **snapshot** of this host's `~/.hermes/profiles` at run
+  time (25 judged, 23 excluded). They say nothing about a future profile or a
+  different machine; the permanent guard is the test, not this measurement.
+- The 23 excluded rows are the orchestrator family and dirs without the worker
+  signature. Those SOULs are minted by `orchestrators.py`/`orch_sync.py`, not by
+  `compose_soul()` over a spec, so "generate is lossless for them" is not a claim
+  this card can make and this sweep does not judge them.
+- The pass answers "what is lost", not "is the resulting text desirable". After
+  `generate`, the constraint text moves out of a `## Project override:` heading and
+  under `## Role: ecofire-pontaje-engineer` — same information, different heading
+  (see operator step 4).
+- Nothing here verifies that the operator has run `generate` yet, or that the live
+  SOUL has changed. At the time of writing the live SOUL is still the drifted one,
+  byte-identical to the measurement input: this card changed only tracked files.
+
 ## Tests added (hermetic, 3)
 
 `hscc-roles/tests/test_generator.py` (leg went 50 -> 53 passed):
