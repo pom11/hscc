@@ -25,14 +25,14 @@ service is called ONE thing on both platforms instead of two.
 
 SINGLE SOURCE OF TRUTH
 ----------------------
-``install.py`` imports the constants from here; ``systemd-setup.sh`` sources
-them out of this file at run time (``sh``-sourced, POSIX, so any shell can
-read it); ``restart_daemon.sh``'s candidate list and the migration script are
-pinned against them by
-``hscc-bootstrap/tests/test_restart_daemon.py`` and
-``hscc-bootstrap/tests/test_migrate_systemd_unit_name.py``. A rename therefore
-has exactly one edit site, and the drift pin turns any missed reader red in
-CI rather than in production.
+``install.py`` imports the constants from here and is the ONLY code that writes a
+unit file; ``systemd-setup.sh`` no longer types either name — it runs the
+daemon's own ``unit-emit`` verb and takes both names out of its JSON.
+``restart_daemon.sh``'s candidate list and the migration script are pinned
+against these constants by ``hscc-bootstrap/tests/test_restart_daemon.py`` and
+``hscc-bootstrap/tests/test_migrate_systemd_unit_name.py``. A rename therefore has
+exactly one edit site, and the drift pins turn any missed reader red in CI rather
+than in production.
 
 Address discipline: no real LAN/tailnet address appears here; fixtures use the
 documented placeholder convention (10.0.0.x for a LAN node).

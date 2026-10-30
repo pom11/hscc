@@ -95,6 +95,16 @@ not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
 | `hscc plist` | Print the launchd plist (no install) |
 
+One auto-start service per host, one name per platform: launchd label
+`com.hermes.hscc_daemon` / systemd --user unit
+`com.hermes.hscc_daemon.service` (both declared once in `unit_name.py`, and
+`install.py` is the only code that writes a unit file). The unit name
+`hscc_daemon.service` is retired — `hscc install`/`uninstall` and
+`systemd-setup.sh` purge it so a host cannot end up with two enabled units for
+one daemon. Nodes installed before that change keep it until the operator runs
+`hscc-bootstrap/migrate_systemd_unit_name.py`; readers (`restart_daemon.sh`,
+`hscc-cluster/bootstrap.sh`) probe both names until then.
+
 Also read-only verbs: `verify`, `stats [days]`, `throughput`, `autoscale`,
 `escalate`, and the groups `cluster`, `template`, `profiles`, `project`, `api`,
 `autodown`, `kanban` (`blocked` / `stale`).
@@ -110,8 +120,7 @@ interpreter the `hscc` console script uses, which on a Homebrew-installed CLI is
 (TCC) grant, so it reads every cluster node as unreachable while launchd still
 reports the job as registered with no pid. Restart supervised instead:
 `launchctl kickstart -k gui/$(id -u)/com.hermes.hscc_daemon` on macOS, or
-`systemctl --user restart hscc_daemon.service` on Linux — `com.hermes.hscc_daemon.service`
-on a box set up by `hscc install`, which writes the unit under that name (or
+`systemctl --user restart com.hermes.hscc_daemon.service` on Linux (or
 `bash ~/.hermes/plugins/hscc-bootstrap/restart_daemon.sh`, which also verifies
 the PID turned over and refuses to start a twin beside an orphan). This is the
 2026-10-29 operator rule; the 2.14.0 deploy is the incident that earned it.
@@ -164,7 +173,7 @@ fleet suite via `scripts/run_tests.sh`). The heal-trio suites are
 
 | Problem | Solution |
 |---------|----------|
-| `hscc status` shows STOPPED | If the service is loaded, `launchctl kickstart -k gui/$(id -u)/com.hermes.hscc_daemon` on macOS / `systemctl --user restart hscc_daemon.service` on Linux (or `hscc install` to (re)install it). Only on a machine with no service: `hscc start` |
+| `hscc status` shows STOPPED | If the service is loaded, `launchctl kickstart -k gui/$(id -u)/com.hermes.hscc_daemon` on macOS / `systemctl --user restart com.hermes.hscc_daemon.service` on Linux (or `hscc install` to (re)install it). Only on a machine with no service: `hscc start` |
 | A node is not being healed | `hscc heal-status` — if suspended, investigate then `hscc heal-clear <node>` |
 | `hscc` says unknown command | `hscc help` / `hscc help advanced` list the real verbs |
 | `hscc` not on PATH | It is installed in the Hermes venv (`~/.hermes/hermes-agent/venv/bin/hscc`) — see [hscc-cli](../hscc-cli/README.md) |
