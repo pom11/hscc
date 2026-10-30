@@ -88,7 +88,8 @@ fold it into the spec's `identity` first).
 
 It is a **reporter, not a pytest assertion**. Live profile state belongs where
 a fault is surfaced to the operator: `doctor_role_soul.py` registers it as a
-non-fatal WARNING in `hscc doctor`. The repair — `hscc roles generate`
+non-fatal WARNING in the bootstrap doctor (`hscc-bootstrap/doctor.py`, which
+`bootstrap.sh` runs as its preflight gate). The repair — `hscc.py generate`
 re-stamps every generated profile and rewrites live profile state — is an
 operator action the check deliberately never takes.
 

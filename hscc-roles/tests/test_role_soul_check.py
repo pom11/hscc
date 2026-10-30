@@ -423,7 +423,7 @@ def test_fix_names_the_command_and_the_operator_action_rule(tmp_path):
         profiles={"a-engineer": _worker_soul("wrong-a")},
         specs={"a-engineer": "a-engineer"})
     res = rsc.check(proot, roles_dir=rroot, base_path=base)
-    assert "hscc roles generate" in res["fix"]
+    assert "hscc.py generate" in res["fix"]
     assert "OPERATOR" in res["fix"]
     assert "FIRST" in res["fix"]
 

@@ -27,7 +27,7 @@ as a silent skip. A doctor run that quietly checks nothing is the false
 green this rule exists to prevent.
 
 READ-ONLY: the check reads SOUL.md files and nothing else. The repair
-(``hscc roles generate``) rewrites live profile state and is an operator action.
+(``hscc.py generate``) rewrites live profile state and is an operator action.
 """
 
 from __future__ import annotations

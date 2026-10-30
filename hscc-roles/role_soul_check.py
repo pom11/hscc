@@ -11,13 +11,14 @@ green. Identity drift is invisible to an existence test.
 
 The same class of drift is the hand-appended block: a live SOUL carried
 ``## Project override: ecofire-pontaje``, a heading ``compose_soul()`` cannot
-produce. Nothing warns that the next ``hscc roles generate`` overwrites it.
+produce. Nothing warns that the next ``hscc.py generate`` overwrites it.
 
 This module reports both, and it is a REPORTER, not a pytest assertion. The
 card's ruling is explicit: a live-state invariant belongs where a fault is
-surfaced to the operator (``hscc doctor``), never as a test that is red on the
-operator machine and vacates in CI. Nothing here writes anything; the repair is
-an operator action (``hscc roles generate``), and re-stamping every live profile
+surfaced to the operator (the bootstrap doctor, ``hscc-bootstrap/doctor.py``),
+never as a test that is red on the operator machine and vacates in CI. Nothing
+here writes anything; the repair is
+an operator action (``hscc.py generate``), and re-stamping every live profile
 is not something a check may do on the operator's behalf.
 
 The population (why worker-signature, not "every dir")
@@ -184,7 +185,7 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
 
     ``known_spec_names`` is every spec name/filename stem in the tree, so the
     only thing missing here is a profile that has NO spec at all — the one fault
-    ``hscc roles generate`` cannot repair. ``spec_loader(name, roles_dir)``
+    ``hscc.py generate`` cannot repair. ``spec_loader(name, roles_dir)``
     defaults to :func:`_load_spec_quietly`.
     """
     heads = _headings(soul_text)
@@ -227,7 +228,7 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
         # identity headings, so the sweep is skipped and said so.
         if name not in set(known_spec_names):
             problems.append(
-                f"{name}: no roles/{name}.yaml spec — `hscc roles generate` "
+                f"{name}: no roles/{name}.yaml spec — `hscc.py generate` "
                 "skips this profile, so nothing can repair its SOUL until a "
                 "spec exists (add roles/<name>.yaml, then generate)")
         else:
@@ -273,11 +274,11 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
             problems.append(
                 f"{name}: SOUL has a second '## {h}' heading — compose_soul() "
                 "emits exactly one '## Role:' header, so this one is "
-                "hand-patched and the next `hscc roles generate` drops it")
+                "hand-patched and the next `hscc.py generate` drops it")
             continue
         problems.append(
             f"{name}: SOUL heading '## {h}' cannot be emitted by compose_soul() "
-            "— hand-patched block; the next `hscc roles generate` drops it "
+            "— hand-patched block; the next `hscc.py generate` drops it "
             "(fold it into the spec identity first)")
     return row
 
@@ -373,7 +374,7 @@ def check(profiles_dir: Optional[str] = None, *, roles_dir: Optional[str] = None
     for r in bad:
         for i, p in enumerate(r["problems"]):
             lines.append(("      [XX] " if i == 0 else "           ") + p)
-    fix = ("`hscc roles generate` rewrites every SOUL from its spec and repairs "
+    fix = ("`hscc.py generate` rewrites every SOUL from its spec and repairs "
            "the header. It re-stamps ALL generated profiles and rewrites live "
            "profile state, so it is an OPERATOR action — and any hand-appended "
            "heading named above must be folded into roles/<name>.yaml's identity "
