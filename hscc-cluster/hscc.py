@@ -777,6 +777,10 @@ def cmd_orch_inject(argv=None, repl=None):
     ns = ap.parse_args(argv if argv is not None else sys.argv[2:])
     receipt = dict(repl.inject(ns.profile, ns.message, mode=ns.mode,
                                pane_override=ns.pane, dry_run=ns.dry_run))
+    # The card's --json contract: pane, idle/busy, verb, chars. inject()'s
+    # dry-run receipt already carries chars (the rstripped text); a real-send
+    # receipt gets the message length here — display metadata, not delivery.
+    receipt.setdefault("chars", len(ns.message))
     if ns.dry_run:
         # The reference tool's own one-line target rendering, so a dry run
         # prints exactly what the reference tool prints for the same pane.

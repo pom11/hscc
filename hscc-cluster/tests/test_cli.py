@@ -196,6 +196,10 @@ class FakeReplModule:
 
     def inject(self, profile, text, mode="auto", pane_override=None,
                dry_run=False, sleep_fn=None):
+        # Mirrors real deliver(): refuse empty, rstrip newlines, then decide.
+        if not text or not text.strip():
+            raise _FakeInjectError("empty", "empty message")
+        text = text.rstrip("\n")
         self.calls.append({"profile": profile, "text": text, "mode": mode,
                            "pane_override": pane_override, "dry_run": dry_run})
         if self.fail:
@@ -264,6 +268,18 @@ class TestOrchInjectVerb:
             ["pom-orch", "msg", "--mode", "steer"], repl=fake)
         assert fake.calls[0]["mode"] == "steer" and fake.calls[0]["dry_run"] is False
         assert r["mode"] == "steer" and r["sent_text"] == "/steer msg"
+
+    def test_real_send_receipt_carries_the_json_fields(self):
+        # Card contract: --json prints the receipt (pane, idle/busy, verb, chars).
+        fake = FakeReplModule(busy=False)
+        r = cluster_hscc_engine.cmd_orch_inject(["pom-orch", "hello"], repl=fake)
+        assert r["pane"] == "%7" and r["busy"] is False
+        assert r["verb"] == "" and r["chars"] == 5
+        # The dry-run path keeps inject()'s own (rstripped) chars, not ours.
+        fake2 = FakeReplModule(busy=False)
+        r2 = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "hi\n\n", "--dry-run"], repl=fake2)
+        assert r2["chars"] == 2
 
     def test_busy_explicit_plain_reports_interrupts(self):
         fake = FakeReplModule(busy=True)
