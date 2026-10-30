@@ -286,7 +286,7 @@ def test_render_fills_exact_height_with_waiting_cards_at_the_bottom(tmp_path):
     assert "slots 4/10" in lines[0]
     assert lines[-1].strip() == "+2 more waiting"
     assert "t_w2" in lines[-2]
-    assert lines[-5].startswith("╰")         # grid's last row ends right above the bar
+    assert lines[1].startswith("b · t_0")     # first header rule directly under the status line
 
 
 def test_plus_minus_change_columns_from_the_current_auto_grid():
@@ -316,4 +316,29 @@ def test_forced_columns_drive_the_grid(tmp_path):
     mon.refresh()
     out = render_text(mon, width=160, height=40, cols=1)
     assert "cols 1" in out.split("\n")[0]
-    assert sum(1 for line in out.split("\n") if line.startswith("╭")) == 4   # 4 stacked rows
+    assert sum(1 for line in out.split("\n") if line.startswith("b · t_")) == 4  # 4 stacked rows
+
+
+def test_cards_are_header_rules_not_boxes(tmp_path):
+    write_log(tmp_path, "b", "t_0", "hello body\n")
+    rows = [run_row("b", f"t_{i}") for i in range(2)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))
+    mon.refresh()
+    mon.poll_logs()
+    out = render_text(mon, width=120, height=20)
+    assert not any(ch in out for ch in "╭╮╰╯")   # (│ only as the in-title separator)
+    header = out.split("\n")[1]
+    assert header.startswith("b · t_0") and "─" in header and "b · t_1" in header
+    assert "hello body" in out.split("\n")[2]   # body starts right under the rule
+
+
+def test_title_always_gold_rule_gold_only_when_focused(tmp_path):
+    rows = [run_row("b", f"t_{i}") for i in range(2)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))
+    mon.refresh()
+    focused = cards_live.card_panel(mon, ("b", "t_0"), 60, 10, True, False, NOW)
+    idle = cards_live.card_panel(mon, ("b", "t_1"), 60, 10, False, False, NOW)
+    f_rule, i_rule = focused.renderables[0].renderable, idle.renderables[0].renderable
+    assert f_rule.title.style == i_rule.title.style == cards_live.TITLE_STYLE
+    assert f_rule.style == cards_live.FOCUS_BORDER
+    assert i_rule.style == cards_live.IDLE_BORDER

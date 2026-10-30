@@ -36,7 +36,9 @@ import time
 
 from rich.console import Group
 from rich.layout import Layout
+from rich.padding import Padding
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.text import Text
 
 from hscc_daemon import kanban_live
@@ -57,12 +59,12 @@ OUTCOME_STYLE = {"completed": ("done", "ok"), "blocked": ("blocked", "error"),
                  "block_loop_detected": ("block loop", "error")}
 
 # The hscc palette is all gold; a wall of ~10 transcripts in it is too loud.
-# This view keeps gold for the focused panel only and uses neutral greys plus a
-# muted blue for tool calls (explicit colours, readable on dark and light).
+# Each card is a single header rule (no box — more room for the transcript):
+# the title is always gold, the rule itself gold only on the focused card;
+# tool calls muted blue (explicit colours, readable on dark and light).
 FOCUS_BORDER = "#FFBF00"
-FOCUS_TITLE = "bold #FFD700"
+TITLE_STYLE = "bold #FFD700"
 IDLE_BORDER = "grey35"
-IDLE_TITLE = "grey70"
 TOOL_STYLE = "#7A9CC6"
 ERROR_LINE_STYLE = "#C97B6B"
 MUTED = "grey50"
@@ -270,21 +272,21 @@ def _body(lines: list[str], width: int, height: int, tools_only: bool) -> Text:
 
 
 def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
-               tools_only: bool, now: float) -> Panel:
-    """One card's panel. ``height`` sizes the body tail; the Layout region
-    the panel lands in decides its real height (``expand`` fills it)."""
+               tools_only: bool, now: float) -> Group:
+    """One card: a header rule carrying the title, then the transcript tail.
+    No side/bottom border; one blank column on the right separates cards."""
     row = mon.cards[key]
     title, details = header_fields(row, now)
-    header = fit_header(title, details, max(width - 8, 8))  # ╭─ ... ─╮ + padding
+    header = fit_header(title, details, max(width - 6, 8))  # "─ " + title + " ─" + gap
     tail = mon.tails.get(key)
     lines = tail.view(tools_only) if tail else []
-    body = _body(lines, max(width - 4, 1), max(height - 2, 1), tools_only)
+    body = _body(lines, max(width - 1, 1), max(height - 1, 1), tools_only)
     if "ended" in row:
-        _, style = OUTCOME_STYLE.get(row.get("outcome"), ("", "warn"))
+        _, line_style = OUTCOME_STYLE.get(row.get("outcome"), ("", "warn"))
     else:
-        style = FOCUS_BORDER if focused else IDLE_BORDER
-    return Panel(body, title=Text(header, style=FOCUS_TITLE if focused else IDLE_TITLE),
-                 title_align="left", border_style=style, padding=(0, 1))
+        line_style = FOCUS_BORDER if focused else IDLE_BORDER
+    rule = Rule(Text(header, style=TITLE_STYLE), align="left", style=line_style)
+    return Group(Padding(rule, (0, 1, 0, 0)), Padding(body, (0, 1, 0, 0)))
 
 
 def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: float,
