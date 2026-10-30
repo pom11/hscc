@@ -152,6 +152,22 @@ def test_duplicate_role_heading_is_flagged(tmp_path):
     assert "drops it" in joined
 
 
+def test_identical_duplicate_role_heading_is_flagged(tmp_path):
+    """The exemption is a COUNT of one, not a string match. Pasting the SAME
+    `## Role:` block twice is the plainest copy-paste artifact there is — the
+    exact fault class this card exists for — and a
+    `if h == emitted: continue` would excuse both occurrences."""
+    soul = _worker_soul("a-engineer").replace(
+        "role identity text",
+        "role identity text\n\n## Role: a-engineer\n\nduplicated block")
+    proot, rroot, base = _world(tmp_path, profiles={"a-engineer": soul},
+                                specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    assert res["ok"] is False, "the header matches the dir, so only the duplicate can be the fault"
+    joined = "\n".join(_row(res, "a-engineer")["problems"])
+    assert "second '## Role: a-engineer'" in joined, joined
+
+
 def test_clean_world_reports_counts_not_silence(tmp_path):
     """A healthy fleet prints an explicit count, so a clean result is EVIDENCE
     rather than absence of output (the same rule flightdeck's doctor follows)."""

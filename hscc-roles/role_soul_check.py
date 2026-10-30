@@ -253,18 +253,23 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
 
     emittable = set(base) | set(ops) | set(spec_identity_headings(spec))
     # compose_soul emits exactly ONE `## Role:` heading, and it is the one read
-    # as `header` above. The sweep must therefore skip that one heading LITERALLY
-    # (once) and flag every other `Role:`-prefixed heading: a duplicate is a
-    # hand-patched section that generate will drop, and the previous blanket
-    # `startswith(_ROLE_PREFIX): continue` let it pass silently on the claim that
-    # it had "already been reported" — which is true only of the first.
-    consumed_role_heading = actual[0] if actual else None
+    # as `header` above. The sweep may therefore exempt that heading exactly
+    # ONCE and must flag every other `Role:`-prefixed heading: a duplicate is a
+    # hand-patched section that generate drops, and the previous blanket
+    # `startswith(_ROLE_PREFIX): continue` let it pass silently on the claim
+    # that it had "already been reported" — true only of the first. The budget
+    # is a COUNT, not a string comparison, so two *identical* `## Role: x`
+    # headings — the plainest paste-the-block-twice artifact, and this card is
+    # about copy-paste — cannot both be excused as "the" emitted header.
+    emitted = actual[0] if actual else None
+    role_budget = 1 if actual else 0
     for h in heads:
         if h in emittable:
             continue
         if h.startswith(_ROLE_PREFIX):
-            if h == consumed_role_heading:
-                continue  # the single emitted role header, already judged above
+            if h == emitted and role_budget:
+                role_budget -= 1
+                continue  # the single emitted role header, judged above
             problems.append(
                 f"{name}: SOUL has a second '## {h}' heading — compose_soul() "
                 "emits exactly one '## Role:' header, so this one is "
