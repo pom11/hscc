@@ -37,10 +37,10 @@ operator re-picks the shortlist itself — §8 Q1):
 
 | tier | unit model | server | weight format | GB10 notes |
 |---|---|---|---|---|
-| image gen | `Qwen/Qwen-Image-2.1` | SGLang Diffusion | BF16 native; FP8 components optional | the only published DGX Spark row (35.4 s/gen, all-resident); FP8 buys memory headroom, not speed on bandwidth-bound GB10 |
+| image gen | `unsloth/Qwen-Image-2.1-FP8` (same architecture as `Qwen/Qwen-Image-2.1`) | SGLang Diffusion | **FP8 default** — operator standing rule: standard models are NVFP4 or FP8 native, never plain BF16; plain BF16 (`Qwen/Qwen-Image-2.1`) is a documented fallback only if FP8 kernels misbehave on sm_121 | the published DGX Spark row (35.4 s/gen, all-resident) was measured BF16; FP8 halves the DiT footprint (§5), buys memory headroom, not speed on bandwidth-bound GB10 |
 | image gen (speed backup) | `FLUX.2-klein-9b-nvfp4` | SGLang Diffusion | ModelOpt NVFP4 | UNVERIFIED load test needed; ~6 GB DiT; FlashInfer cudnn FP4 backend only (matrix C1) |
 | image edit | `lmsys/qwen-image-edit-2511-modelopt-nvfp4-sglang` | SGLang Diffusion | ModelOpt NVFP4, `--model-path` direct | canonical loader path; fall back to BF16 + `convrot_int8` (matrix C3, explicitly GB10-capable) if FP4 kernels misbehave |
-| video | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` + lmsys ModelOpt FP8 transformer override | SGLang Diffusion | BF16 base + FP8 transformer (NVFP4 transformer variant = opt-in, cudnn backend) | MoE dual-transformer: keep `transformer_2` BF16 per docs; ~80 GiB working set fits unified memory |
+| video | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` + lmsys ModelOpt FP8 transformer override | SGLang Diffusion | FP8 transformer (lmsys override; NVFP4 transformer variant = opt-in, cudnn backend); `transformer_2` stays BF16 — **forced exception** to the never-plain-BF16 rule: the MoE dual-transformer ships an FP8 override for one expert only, no published FP8/NVFP4 build of the second (docs); ~80 GiB working set fits unified memory |
 | video (alt) | `Lightricks/LTX-2.5-Diffusers` 🔒 | SGLang Diffusion | BF16/FP8 — **never NVFP4** | no NVFP4 kernel path on either server (matrix) |
 
 Runtime shape per unit (design contract for M1's recipe; flags per
@@ -282,8 +282,9 @@ header says why):
    is a `validate` error.
 2. **Image units may co-locate with one LLM unit** at declared fractions:
    the image unit gets `gpu_memory_utilization: 0.25–0.35` (Qwen-Image-2.1
-   BF16 DiT + T5 + VAE resident ≈ 55–60 GB of *claimed* memory is comfortable
-   at 0.4 on a 119 GiB-usable card; FP8 components halve the DiT), the LLM
+   FP8 DiT + T5 + VAE: ≈ 55–60 GB of *claimed* memory at BF16, ~half the DiT
+   in FP8; comfortable
+   at 0.4 on a 119 GiB-usable card — the FP8 default (§1) is what makes 0.25–0.35 work), the LLM
    partner keeps its own fraction, **sum ≤ 0.8**. The whisper recipe
    (`~/.sparkrun-local/recipes/local-fixed/whisper-large-v3-vllm.yaml`,
    `gpu_memory_utilization: 0.1` side-by-side replicas) is the fleet precedent
@@ -310,7 +311,10 @@ header says why):
   cadence) populates `/mnt/nas/hub/models--<org>--<repo>` HF-cache layout.
   Media checkpoints land there in exactly the HF `hub/` layout LLM models use,
   because `sglang serve --model-path` consumes diffusers directories / ModelOpt
-  repos from disk.
+  repos from disk. **Mac-side staging caveat (measured 2026-10-30):** the Mac
+  (uid 501) cannot write `/mnt/nas/hub` (uid-1000-owned over NFS), so
+  Mac-staged repos land in `/Volumes/NAS/hub-mac/` and need a uid-1000 `mv`
+  into `hub/` on the NAS before any node can consume them.
 - **The flash-next lesson, applied without re-litigating: the model must be on
   LOCAL NVMe before the unit boots.** The measured NFS numbers (4 KiB random
   5.72 ms — the per-token-read killer documented in
@@ -380,7 +384,8 @@ header says why):
 ## 8. Open questions for the operator
 
 1. **Shortlist re-pick.** The matrix recommends per tier: image gen
-   Qwen-Image-2.1 (BF16/FP8), edit lmsys Qwen-Image-Edit-2511 NVFP4, video
+   Qwen-Image-2.1 in FP8 (operator never-plain-BF16 rule; BF16 fallback only
+   on kernel trouble), edit lmsys Qwen-Image-Edit-2511 NVFP4, video
    Wan2.2 + lmsys FP8 transformer; LTX-2.5 only in BF16/FP8. FLUX.2-dev stays
    runs-with-work, and FLUX.3 Image Klein (FP8+NVFP4, SGLang cookbook) is a
    plausible late addition. Which models get M1 recipes + template slots first?
