@@ -27,6 +27,30 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "gateway node" in soul.lower()
 
 
+def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
+    """t_1d284d82: `orch_message` is a NUDGE channel, not a work order.
+
+    The rule has to live INSIDE the generated "## How you manage work" list (an
+    orch reads that list as its work-management contract), so it is asserted on
+    the text that follows the heading — not merely somewhere in the SOUL.
+    """
+    spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+            "preload_skills": []}
+    soul = generator.compose_soul(spec, base_identity="BASE")
+    assert "## How you manage work" in soul
+    section = soul.split("## How you manage work", 1)[1]
+    assert "`orch_message`" in section
+    assert "11. **`orch_message` is a nudge, not a work order.**" in section
+    assert "never by commenting on DONE cards" in section
+    assert "on a CARD on the right board (`--board` explicit)" in section
+    # Workers cannot send orch_message at all (the tool refuses a non-orch
+    # sender), so the rule belongs to the orchestrator block only.
+    worker = generator.compose_soul(
+        {"name": "coder", "identity": "You build.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert "orch_message" not in worker
+
+
 def test_generate_profile_writes_files(tmp_path, monkeypatch):
     # PROFILES_DIR covers the fallback path; HERMES_HOME covers the native API
     # path (create_profile reads HERMES_HOME, not PROFILES_DIR), so the test is

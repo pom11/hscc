@@ -477,6 +477,11 @@ _PROJECT_ORCH_OPS = (
     "changes.\n"
     "10. **Stop and report** when you need the operator. Production / LIVE "
     "actions are the operator's alone.\n"
+    "11. **`orch_message` is a nudge, not a work order.** Orchestrators nudge "
+    "each other with the `orch_message` tool (\"look at t_xxx on <board>, it's "
+    "done/needs you\"), never by commenting on DONE cards. Work itself always "
+    "goes on a CARD on the right board (`--board` explicit); `orch_message` is "
+    "the nudge, not the work order.\n"
 )
 
 
