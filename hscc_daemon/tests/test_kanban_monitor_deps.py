@@ -291,6 +291,11 @@ def test_brew_keg_venv_imports_the_board_read_chain(tmp_path):
         pytest.skip(f"no brew keg venv under {KEG_PY_GLOB} (CI / non-brew install)")
     verdicts = []
     for py in kegs:
+        if not py.exists():
+            # Dangling interpreter symlink: a stale keg left by a brew upgrade
+            # whose python is gone. Environment state, not a repo regression.
+            verdicts.append(f"{py}: skip (dangling interpreter symlink)")
+            continue
         manifest = _keg_manifest(py)
         if manifest is not None and "httpx" not in parse_requirements(
                 manifest.read_text()):
