@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 
 from .cli_theme import esc, make_console, make_status_panel
+# The ONE unit name, shared with systemd-setup.sh, restart_daemon.sh and the
+# migration script (t_d8f13693). Import it — never re-type the literal here:
+# hscc-bootstrap/tests/test_unit_name_drift.py pins every reader to this file.
+from .unit_name import LEGACY_UNIT_NAME, UNIT_NAME
 
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
@@ -17,8 +21,12 @@ LOG_FILE = os.path.join(HSCC_DIR, "daemon.log")
 PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
 PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc_daemon.plist")
 SYSTEMD_USER_DIR = Path(os.path.expanduser("~/.config/systemd/user"))
-SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / "com.hermes.hscc_daemon.service"
-SYSTEMD_UNIT_NAME = "com.hermes.hscc_daemon.service"
+SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / UNIT_NAME
+SYSTEMD_UNIT_NAME = UNIT_NAME
+#: The retired name (written by systemd-setup.sh before t_d8f13693). Nothing
+#: here WRITES it; uninstall purges it so a box cannot keep it enabled.
+LEGACY_SYSTEMD_UNIT_NAME = LEGACY_UNIT_NAME
+LEGACY_SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / LEGACY_UNIT_NAME
 
 PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -166,7 +174,20 @@ def generate_plist():
 
 
 def generate_systemd_unit():
-    """Generate the systemd --user unit with resolved paths."""
+    """Generate the systemd --user unit with resolved paths.
+
+    THE raw-text emitter. Everything that puts a unit file on disk calls this —
+    ``hscc install`` (``_install_systemd``) and ``systemd-setup.sh`` (through
+    :func:`emit_systemd_unit`). Neither may build the file from a rendered
+    console view: ``cmd_plist`` prints through Rich, which SOFT-WRAPS long lines,
+    and a redirected copy of that output is a unit file systemd cannot parse.
+    Measured on this checkout before t_d8f13693 — the Rich render folds
+    ``ExecStart=... -m hscc_daemon start-daemon`` across a newline, so systemd
+    (which keeps only text up to the first ``=`` per line, and skips a line with
+    no ``=``) got ``ExecStart=<python> -m hscc_daemon`` with ``start-daemon``
+    dropped on the floor, and the PATH line lost its ``~/.local/bin`` entry.
+    A node installed that way runs the wrong command under a name nobody probes.
+    """
     hmdir = os.path.expanduser("~")
     python_path = _resolve_python()
     pkg_dir = str(Path(__file__).resolve().parent)
@@ -178,6 +199,108 @@ def generate_systemd_unit():
         PATH_ENV=_daemon_path_env(hmdir),
         PLUGINS_DIR=plugins_dir,
     )
+
+
+# ── systemd --user: the ONE emitter + the legacy purge (t_d8f13693) ─────────
+#
+# ``systemd-setup.sh`` used to generate its unit with `hscc.py plist > UNIT`
+# (a rendered console view — see generate_systemd_unit's docstring) AND under a
+# different name. Both are fixed by routing the shell helper through these two
+# functions, so there is exactly one place that writes a unit file and exactly
+# one name it writes.
+
+def systemd_unit_paths(dest_dir=None):
+    """(unit_name, unit_file, legacy_name, legacy_file) for this host.
+
+    ``dest_dir`` overrides ``SYSTEMD_USER_DIR`` (tests point it at a tmp dir);
+    read via the module global so a monkeypatched test cannot aim at the
+    operator's real ``~/.config/systemd/user``.
+    """
+    base = Path(dest_dir) if dest_dir else Path(SYSTEMD_USER_DIR)
+    return (SYSTEMD_UNIT_NAME, base / SYSTEMD_UNIT_NAME,
+            LEGACY_SYSTEMD_UNIT_NAME, base / LEGACY_SYSTEMD_UNIT_NAME)
+
+
+def emit_systemd_unit(dest_dir=None, *, dry_run=False):
+    """Write the canonical unit file and report the names a caller must handle.
+
+    Returns ``{"unit_name", "unit_file", "legacy_name", "legacy_file",
+    "changed"}``. This is the function ``systemd-setup.sh`` calls (and
+    ``_install_systemd`` calls), so the shell helper and `hscc install` cannot
+    drift on content or name. Writes only the unit file — starting/enabling it
+    stays with the caller, which also owns the twin-avoidance ordering.
+    ``dry_run=True`` reports what WOULD change and writes nothing.
+    """
+    name, unit_file, legacy_name, legacy_file = systemd_unit_paths(dest_dir)
+    body = generate_systemd_unit()
+    changed = not (unit_file.exists() and unit_file.read_text() == body)
+    if changed and not dry_run:
+        unit_file.parent.mkdir(parents=True, exist_ok=True)
+        unit_file.write_text(body)
+    return {"unit_name": name, "unit_file": str(unit_file),
+            "legacy_name": legacy_name, "legacy_file": str(legacy_file),
+            "changed": bool(changed and not dry_run)}
+
+
+def purge_legacy_systemd_unit(dest_dir=None, *, dry_run=False, runner=None):
+    """Disable + remove the retired ``hscc_daemon.service`` if this host has one.
+
+    Without this, a node installed by the old ``systemd-setup.sh`` keeps the
+    legacy unit ENABLED after a re-install: two enabled units for one daemon is
+    the supervisor-level twin, and `systemctl --user disable` of the new name
+    would leave the old one running at next login.
+
+    ``runner`` is the systemctl seam (``subprocess.run`` by default; tests
+    inject a recorder) — never a hand-rolled transport. Returns a dict naming
+    what was found and what was done; a legacy unit that was not ours to remove
+    is reported, never silently kept.
+    """
+    run = runner or subprocess.run
+    name, _unit_file, legacy_name, legacy_file = systemd_unit_paths(dest_dir)
+
+    def probe(verb):
+        res = run(["systemctl", "--user", verb, legacy_name],
+                  capture_output=True, text=True, timeout=15)
+        return (res.stdout or "").strip()
+
+    enabled = probe("is-enabled")
+    active = probe("is-active")
+    present = Path(legacy_file).exists()
+    found = bool(present or enabled in ("enabled", "enabled-runtime", "static",
+                                        "masked", "generated") or active == "active")
+    if not found:
+        return {"legacy_name": legacy_name, "found": False, "changed": False,
+                "enabled": enabled, "active": active, "detail": "no legacy unit"}
+    if dry_run:
+        return {"legacy_name": legacy_name, "found": True, "changed": False,
+                "enabled": enabled, "active": active, "present": present,
+                "detail": "dry-run: would disable --now + remove"}
+
+    steps = []
+    if active == "active" or active == "activating":
+        run(["systemctl", "--user", "disable", "--now", legacy_name],
+            capture_output=True, text=True, timeout=20)
+        steps.append("disable --now")
+    elif enabled.startswith("enabled"):
+        run(["systemctl", "--user", "disable", legacy_name],
+            capture_output=True, text=True, timeout=20)
+        steps.append("disable")
+    if present:
+        try:
+            Path(legacy_file).unlink()
+            steps.append("remove file")
+        except OSError as e:
+            return {"legacy_name": legacy_name, "found": True, "changed": False,
+                    "enabled": enabled, "active": active, "present": True,
+                    "detail": f"could not remove {legacy_file}: {e}"}
+    run(["systemctl", "--user", "daemon-reload"],
+        capture_output=True, text=True, timeout=15)
+    after_rc, after = probe("is-enabled")
+    return {"legacy_name": legacy_name, "found": True, "changed": True,
+            "enabled": enabled, "active": active, "present": present,
+            "after": after, "steps": steps,
+            "detail": f"retired {legacy_name} ({'; '.join(steps) or 'already inert'}); "
+                      f"only {name} remains"}
 
 
 def _install_launchd():
@@ -203,13 +326,24 @@ def _install_launchd():
 
 
 def _install_systemd():
-    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    unit_file = Path(SYSTEMD_UNIT_FILE)
-    unit_file.write_text(generate_systemd_unit())
+    # ONE unit name, ONE emitter: emit_systemd_unit() is also what
+    # systemd-setup.sh calls, so the two install paths cannot write different
+    # files under different names (t_d8f13693).
+    emitted = emit_systemd_unit()
+    unit_file = Path(emitted["unit_file"])
     _console().print(f"  Unit installed: {esc(unit_file)}")
 
     subprocess.run(["systemctl", "--user", "daemon-reload"],
                    capture_output=True, text=True, timeout=10)
+
+    # Retire the pre-t_d8f13693 name BEFORE enabling the canonical one: a box
+    # that still carries hscc_daemon.service would otherwise end up with TWO
+    # enabled units for one daemon (the supervisor-level twin), and a later
+    # `disable` of one name would leave the other running at next login.
+    retired = purge_legacy_systemd_unit()
+    if retired["found"]:
+        _console().print(f"  Legacy unit: {esc(retired['detail'])}")
+
     result = subprocess.run(
         ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME],
         capture_output=True, text=True, timeout=15
@@ -255,9 +389,55 @@ def _uninstall_systemd():
         ))
     else:
         _console().print("  No unit found — nothing to remove")
+    # The retired name is uninstalled too: leaving hscc_daemon.service enabled
+    # behind an `hscc uninstall` would mean the daemon is still started at next
+    # login by a unit nothing in the repo writes any more.
+    retired = purge_legacy_systemd_unit()
+    if retired["found"]:
+        _console().print(f"  Legacy unit: {esc(retired['detail'])}")
 
 
 # ── CLI Command Wrappers ──────────────────────────────────────────────────
+
+def cmd_unit_emit(argv=None):
+    """Internal entry point: write the canonical systemd --user unit (t_d8f13693).
+
+    ``systemd-setup.sh`` calls exactly this — ``hscc.py unit-emit --json`` — and
+    parses the unit names out of the JSON. It used to run ``hscc.py plist >
+    UNIT_FILE``, which redirected a *rendered Rich console view* into a unit
+    file: box-drawing lines, and long assignments soft-wrapped so systemd's
+    parser dropped ``start-daemon`` from ``ExecStart`` and truncated the
+    ``PATH=`` value (see generate_systemd_unit's docstring). A view for humans
+    is not a file format.
+
+    ``--unit-dir DIR`` overrides the destination (tests; never used by the
+    setup helper). ``--json`` is the default shape and is accepted explicitly
+    so the caller can be unambiguous. Exit 0 on success, 1 on a write error —
+    the caller is a ``set -e`` script that must not enable a unit it could not
+    write. No service call happens here: enable/start order belongs to the
+    caller, which owns never leaving two units active.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    dest = None
+    if "--unit-dir" in argv:
+        i = argv.index("--unit-dir")
+        if i + 1 >= len(argv):
+            print("unit-emit: --unit-dir needs a directory", file=sys.stderr)
+            return 1
+        dest = argv[i + 1]
+    try:
+        emitted = emit_systemd_unit(dest)
+        retired = purge_legacy_systemd_unit(dest, dry_run="--dry-run" in argv)
+    except OSError as e:
+        print(f"unit-emit: could not write the unit file: {e}", file=sys.stderr)
+        return 1
+    import json as _json
+    payload = dict(emitted)
+    payload["legacy"] = retired
+    payload["dry_run"] = "--dry-run" in argv
+    print(_json.dumps(payload, sort_keys=True))
+    return 0
+
 
 def cmd_plist():
     """Generate and display the auto-start service definition."""

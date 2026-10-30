@@ -1964,6 +1964,14 @@ def main():
     elif cmd_lower == "plist":
         from hscc_daemon.install import cmd_plist
         cmd_plist()
+    elif cmd_lower == "unit-emit":
+        # INTERNAL verb (t_d8f13693), deliberately absent from DAEMON_COMMANDS /
+        # COMMAND_HELP / the help surface: it is the machine-readable unit-file
+        # writer systemd-setup.sh calls (`hscc.py unit-emit --json`), not an
+        # operator command. It replaced `hscc.py plist > UNIT_FILE`, which
+        # redirected a rendered Rich view into a unit file.
+        from hscc_daemon.install import cmd_unit_emit
+        sys.exit(cmd_unit_emit(args[1:]))
     elif cmd_lower == "install":
         from hscc_daemon.install import cmd_install
         cmd_install()
