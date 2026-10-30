@@ -3,27 +3,29 @@
 restart_daemon.sh is the bash helper bootstrap.sh calls right after the daemon
 setup step. It has two restart paths and the tests cover both:
 
-  * launchd-loaded (the operator host) -> `launchctl kickstart -k
-    gui/$UID/com.hermes.hscc_daemon`, verified against the pid launchd itself
-    reports. This is the ONLY sanctioned restart while the job is loaded: the
+  * a supervisor owns the service (the operator host, and every Linux node) ->
+    restart THROUGH the supervisor: `launchctl kickstart -k
+    gui/$UID/com.hermes.hscc_daemon` on macOS, `systemctl --user restart
+    <unit>` on Linux, verified against the pid the supervisor itself reports.
+    This is the ONLY sanctioned restart while the service is loaded: the
     2026-10-29 P0 showed that the `hscc` console script is brew python with no
     macOS Local Network grant (every stream then reads "No route to host" and
     the daemon declares the fleet dead) and that `hscc start` escapes launchd
     (PPID 1), leaving the job label supervised with no pid.
-  * no launchd job (fresh machine, CI) -> the daemon's own CLI (`hscc stop` /
-    `hscc start`) + pid-file turnover.
+  * no service loaded (fresh machine, CI) -> the daemon's own CLI (`hscc stop`
+    / `hscc start`) + pid-file turnover.
 
-Both paths first run the supervisor-level twin check: a live daemon process
-launchd does not own is reported by pid and a second loop is never started
+Both paths first run the supervisor-level twin check: a live daemon process the
+supervisor does not own is reported by pid and a second loop is never started
 beside it (rc 4).
 
-The tests drive the helper with STUBS for `launchctl`, `pgrep` and the daemon
-CLI in a fresh tmp dir, so they exercise the real bash logic (which command
-runs with which arguments, pid comparison, exit codes) without ever touching a
-real daemon, the real launchd job, systemd, or ~/.hscc. The stubs are wired in
-by `_setup` for EVERY case — a test that forgot them would talk to the real
-service on a macOS runner, which is exactly why the helper honours
-HSCC_LAUNCHCTL / HSCC_PGREP at all.
+The tests drive the helper with STUBS for `launchctl`, `systemctl`, `pgrep` and
+the daemon CLI in a fresh tmp dir, so they exercise the real bash logic (which
+command runs with which arguments, pid comparison, exit codes) without ever
+touching a real daemon, the real launchd job, a real systemd unit, or ~/.hscc.
+The stubs are wired in by `_setup` for EVERY case — a test that forgot them
+would talk to the real service on a macOS runner, which is exactly why the
+helper honours HSCC_LAUNCHCTL / HSCC_SYSTEMCTL / HSCC_PGREP at all.
 """
 
 import os
@@ -238,6 +240,77 @@ for p in pids:
 sys.exit(0 if pids else 1)
 """
 
+# Stub `systemctl`. The daemon has a second supervisor (systemd --user, written
+# by systemd-setup.sh) and the helper must treat it exactly like launchd:
+# restart THROUGH it and trust only ITS pid. Behaviour from env:
+#   STUB_SYSTEMD_ACTIVE     comma-separated unit names that are "active"
+#                           (empty -> systemd has no hscc unit -> console path)
+#   STUB_SYSTEMD_PID_BEFORE MainPID reported before `restart`
+#   STUB_SYSTEMD_PID_AFTER  MainPID(s) reported after `restart` (comma list,
+#                           last entry repeats) — "" keeps reporting none
+#   STUB_SYSTEMD_RESTART_RC exit code of `restart`                     [default 0]
+#   STUB_SYSTEMD_RESTART_ERR text `restart` writes to stderr
+# Every invocation is appended to $STUB_SYSTEMD_CALLS; the restarted-state file
+# lets the answer survive across the helper's polling loop.
+SYSTEMCTL_STUB = """#!/usr/bin/env python3
+import os, sys
+
+calls_file = os.environ["STUB_SYSTEMD_CALLS"]
+state_file = os.environ["STUB_SYSTEMD_STATE"]
+active = [u.strip() for u in os.environ.get("STUB_SYSTEMD_ACTIVE", "").split(",") if u.strip()]
+restart_rc = int(os.environ.get("STUB_SYSTEMD_RESTART_RC", "0"))
+restart_err = os.environ.get("STUB_SYSTEMD_RESTART_ERR", "")
+pid_before = os.environ.get("STUB_SYSTEMD_PID_BEFORE", "").strip()
+after = [p.strip() for p in os.environ.get("STUB_SYSTEMD_PID_AFTER", "").split(",")]
+
+argv = sys.argv[1:]
+with open(calls_file, "a") as f:
+    f.write(" ".join(argv) + "\\n")
+
+def state():
+    d = {"restarted": False, "polls": 0}
+    if os.path.exists(state_file):
+        for line in open(state_file):
+            k, _, v = line.strip().partition("=")
+            if k == "restarted":
+                d["restarted"] = v == "1"
+            elif k == "polls":
+                d["polls"] = int(v or "0")
+    return d
+
+def save(d):
+    with open(state_file, "w") as f:
+        f.write("restarted=%d\\npolls=%d\\n" % (1 if d["restarted"] else 0, d["polls"]))
+
+# argv looks like: --user is-active --quiet <unit>
+args = [a for a in argv if not a.startswith("--")]
+verb = args[0] if args else ""
+unit = args[1] if len(args) > 1 else ""
+
+if verb == "is-active":
+    sys.exit(0 if unit in active else 3)
+if verb == "show":
+    st = state()
+    if st["restarted"]:
+        i = st["polls"]
+        pid = after[i] if i < len(after) else (after[-1] if after else "")
+        st["polls"] = i + 1
+        save(st)
+    else:
+        pid = pid_before
+    print(pid or "0")
+    sys.exit(0)
+if verb == "restart":
+    if restart_rc == 0:
+        st = state(); st["restarted"] = True; save(st)
+    else:
+        sys.stderr.write(restart_err or "Job for hscc_daemon.service failed\\n")
+    sys.exit(restart_rc)
+if verb == "status":
+    sys.exit(0 if unit in active else 3)
+sys.exit(0)
+"""
+
 
 def _make_exec(path: Path, content: str) -> Path:
     path.write_text(content)
@@ -248,17 +321,22 @@ def _make_exec(path: Path, content: str) -> Path:
 def _setup(tmp_path, mode="normal", preexisting_pid=None, *, launchd=False,
            launchd_pid_before="", launchd_pid_after="",
            launchd_kick_rc=0, launchd_kick_err="",
+           systemd_unit=None, systemd_pid_before="", systemd_pid_after="",
+           systemd_restart_rc=0, systemd_restart_err="",
            orphan_pids=None):
-    """Create stub daemon CLI + launchctl + pgrep + pid files in a fresh tmp
-    dir; return (env, calls_path).
+    """Create stub daemon CLI + launchctl + systemctl + pgrep + pid files in a
+    fresh tmp dir; return (env, calls_path).
 
-    EVERY case gets stubbed launchctl and pgrep (see module docstring): on a
-    macOS runner an unstubbed `launchctl print` would find the operator's real
-    job and the helper would restart the real daemon. Defaults: job not loaded,
-    no daemon processes anywhere — i.e. the classic console-script world.
+    EVERY case gets stubbed launchctl, systemctl and pgrep (see module
+    docstring): on a macOS runner an unstubbed `launchctl print` would find the
+    operator's real job and the helper would restart the real daemon. Defaults:
+    no supervisor at all, no daemon processes anywhere — i.e. the classic
+    console-script world. `systemd_unit="hscc_daemon.service"` makes systemd the
+    supervisor instead of launchd.
     """
     stub = _make_exec(tmp_path / "hscc.py", STUB)
     launchctl = _make_exec(tmp_path / "launchctl", LAUNCHCTL_STUB)
+    systemctl = _make_exec(tmp_path / "systemctl", SYSTEMCTL_STUB)
     pgrep = _make_exec(tmp_path / "pgrep", PGREP_STUB)
 
     calls = tmp_path / "calls.txt"
@@ -283,6 +361,7 @@ def _setup(tmp_path, mode="normal", preexisting_pid=None, *, launchd=False,
         # ── service-layer stubs (never the real ones) ──
         "HSCC_LAUNCHCTL": str(launchctl),
         "HSCC_LAUNCHD_LABEL": LAUNCHD_LABEL,
+        "HSCC_SYSTEMCTL": str(systemctl),
         "HSCC_PGREP": str(pgrep),
         "STUB_LAUNCHD_CALLS": str(tmp_path / "launchd-calls.txt"),
         "STUB_LAUNCHD_STATE": str(tmp_path / "launchd-state.txt"),
@@ -291,10 +370,21 @@ def _setup(tmp_path, mode="normal", preexisting_pid=None, *, launchd=False,
         "STUB_LAUNCHD_PID_AFTER": launchd_pid_after,
         "STUB_LAUNCHD_KICK_RC": str(launchd_kick_rc),
         "STUB_LAUNCHD_KICK_ERR": launchd_kick_err,
+        "STUB_SYSTEMD_CALLS": str(tmp_path / "systemd-calls.txt"),
+        "STUB_SYSTEMD_STATE": str(tmp_path / "systemd-state.txt"),
+        "STUB_SYSTEMD_ACTIVE": systemd_unit or "",
+        "STUB_SYSTEMD_PID_BEFORE": systemd_pid_before,
+        "STUB_SYSTEMD_PID_AFTER": systemd_pid_after,
+        "STUB_SYSTEMD_RESTART_RC": str(systemd_restart_rc),
+        "STUB_SYSTEMD_RESTART_ERR": systemd_restart_err,
         "STUB_ORPHAN_PIDS": "" if orphan_pids is None else ",".join(str(p) for p in orphan_pids),
         "LAUNCHD_POLL_ATTEMPTS": "3",
         "LAUNCHD_POLL_INTERVAL": "1",
     })
+    if systemd_unit:
+        # name the unit explicitly so a candidate-list change cannot silently
+        # redirect a systemd case at launchd
+        env["HSCC_SYSTEMD_UNIT"] = systemd_unit
     return env, calls
 
 
@@ -308,6 +398,25 @@ def _run(env, **kw):
 def _launchd_calls(env) -> list:
     p = Path(env["STUB_LAUNCHD_CALLS"])
     return p.read_text().splitlines() if p.exists() else []
+
+
+def _systemd_calls(env) -> list:
+    p = Path(env["STUB_SYSTEMD_CALLS"])
+    return p.read_text().splitlines() if p.exists() else []
+
+
+def _all_service_calls(env) -> list:
+    return _launchd_calls(env) + _systemd_calls(env)
+
+
+def _code_lines_only() -> str:
+    """restart_daemon.sh with whole-line comments dropped. The behavioural pins
+    below read the helper's SOURCE for which supervisor verbs it may invoke;
+    prose is allowed to *name* forbidden commands (the WARN line hands the
+    operator the bootout+bootstrap remedy), so only code lines count."""
+    return "\n".join(
+        l for l in RESTART.read_text().splitlines() if not l.lstrip().startswith("#")
+    )
 
 
 def _invoked(env) -> list:
@@ -424,6 +533,132 @@ def test_launchd_loaded_job_with_no_pid_still_uses_kickstart(tmp_path):
     assert res.returncode == 4
     assert "27723" in res.stdout
     assert "launchd" in res.stdout
+
+
+# ── the same rule for the OTHER supervisor: systemd --user (Linux) ──────────
+
+
+def test_systemd_unit_active_restarts_through_systemctl_not_the_cli(tmp_path):
+    """Linux is not "no supervisor": systemd-setup.sh runs the daemon as a
+    --user unit, so the restart must go through `systemctl --user restart` and
+    be verified from MainPID. Falling off to the console path here would (a)
+    skip the reload this script exists for and (b) leave `hscc stop`/`start`
+    fighting a unit systemd owns.
+    """
+    env, calls = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                        systemd_pid_before="5001", systemd_pid_after="5002")
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert "restart hscc_daemon.service" in " ".join(_systemd_calls(env))
+    assert calls.exists() is False or calls.read_text() == ""
+    assert _invoked(env) == []
+    assert "daemon restarted via systemd restart (pid 5001 -> 5002)" in res.stdout
+    # and launchd must not have been *restarted* (probing it is fine, kicking a
+    # non-existent job is not)
+    assert not any(c.startswith("kickstart") for c in _launchd_calls(env))
+
+
+def test_systemd_alternative_unit_name_is_recognised(tmp_path):
+    """The two installers emit different unit names (systemd-setup.sh writes
+    hscc_daemon.service, install.py writes com.hermes.hscc_daemon.service). If
+    the helper recognised only one, a daemon installed by the other would look
+    unsupervised — and the orphan guard would then REFUSE the restart, silently
+    skipping the reload. Both names must be probed."""
+    env, calls = _setup(tmp_path,
+                        systemd_unit="com.hermes.hscc_daemon.service",
+                        systemd_pid_before="6001", systemd_pid_after="6002")
+    del env["HSCC_SYSTEMD_UNIT"]  # exercise the candidate-list probe, not the override
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert "restart com.hermes.hscc_daemon.service" in " ".join(_systemd_calls(env))
+    assert calls.exists() is False or calls.read_text() == ""
+    assert "pid 6001 -> 6002" in res.stdout
+
+
+def test_systemd_supervised_pid_is_not_an_orphan(tmp_path):
+    """The systemd-owned loop IS visible to pgrep (`... hscc.py start-daemon`),
+    so excluding only launchd's pid would flag every Linux node's healthy daemon
+    as an orphan and refuse its restart — the bug class this guard was written
+    to prevent, turned against itself."""
+    env, calls = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                        systemd_pid_before="5001", systemd_pid_after="5002",
+                        orphan_pids=[5001])
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert "WARN" not in res.stdout
+    assert "daemon restarted via systemd restart (pid 5001 -> 5002)" in res.stdout
+    assert calls.exists() is False or calls.read_text() == ""
+
+
+def test_systemd_restart_failure_rc3_surfaces_reason(tmp_path):
+    """A failed `systemctl --user restart` must surface rc + systemd's own
+    text, exactly like the kickstart case (rc 3, never success)."""
+    env, _ = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                    systemd_pid_before="5001", systemd_pid_after="5002",
+                    systemd_restart_rc=1,
+                    systemd_restart_err="Job for hscc_daemon.service failed")
+    res = _run(env)
+
+    assert res.returncode == 3
+    assert "systemctl --user restart hscc_daemon.service exited 1" in res.stdout
+    assert "Job for hscc_daemon.service failed" in res.stdout
+
+
+def test_systemd_same_mainpid_reports_unchanged_rc2(tmp_path):
+    """If MainPID does not move, the unit was not restarted (rc 2)."""
+    env, _ = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                    systemd_pid_before="5001", systemd_pid_after="5001")
+    res = _run(env)
+
+    assert res.returncode == 2
+    assert "PID unchanged after restart" in res.stdout
+    assert "systemd restart" in res.stdout
+
+
+def test_systemd_no_mainpid_ever_rc3(tmp_path):
+    """Unit restarted but never came up: no MainPID => rc 3 and a line saying
+    which supervisor stayed silent."""
+    env, _ = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                    systemd_pid_before="5001", systemd_pid_after="")
+    res = _run(env)
+
+    assert res.returncode == 3
+    assert "did not come back" in res.stdout
+    assert "systemd" in res.stdout
+
+
+def test_systemd_path_ignores_launchd_stub_entirely(tmp_path):
+    """When systemd owns the service the helper must not kick launchd even if a
+    launchd job exists on that machine — two supervisors for one daemon is a
+    misconfiguration, and the one that owns the running pid is the one we restart
+    (launchd wins over systemd when both claim it; here only systemd does)."""
+    env, _ = _setup(tmp_path, systemd_unit="hscc_daemon.service",
+                    systemd_pid_before="5001", systemd_pid_after="5002")
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert "kickstart" not in " ".join(_launchd_calls(env))
+
+
+def test_launchd_wins_when_both_supervisors_claim_the_service(tmp_path):
+    """A machine where both a loaded launchd job AND an active systemd unit
+    claim the daemon is a misconfiguration; the helper must pick ONE and say
+    which it used rather than restarting twice (two restarts in one bootstrap
+    step = two loops, i.e. the twin class again). The documented choice is
+    launchd, whose `kickstart -k` is the stronger verb."""
+    env, _ = _setup(tmp_path, launchd=True, launchd_pid_before="61218",
+                    launchd_pid_after="77001",
+                    systemd_unit="hscc_daemon.service",
+                    systemd_pid_before="5001", systemd_pid_after="5002")
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert "launchd kickstart" in res.stdout
+    assert "systemd" not in res.stdout
+    assert not any(c.startswith("restart") for c in _systemd_calls(env))
 
 
 # ── the twin check: never start a second loop beside an unsupervised daemon ──
@@ -743,6 +978,38 @@ def test_launchd_label_constant_matches_sibling_emitters():
     assert f'PLIST_FILE = os.path.join(PLIST_DIR, "{LAUNCHD_LABEL}.plist")' in install
 
 
+def test_systemd_unit_candidates_match_sibling_emitters():
+    """The helper probes a fixed candidate list of unit names, and the two
+    installers emit DIFFERENT ones (pre-existing drift): systemd-setup.sh writes
+    `hscc_daemon.service`, install.py writes `com.hermes.hscc_daemon.service`.
+    If either changes and the candidate list is not updated, the helper stops
+    seeing the service as supervised on that box — and then the orphan guard
+    refuses the restart (rc 4) and freshly-installed code silently never loads.
+    Pin every emitted unit name to appear in the probe list, so the drift can
+    only ever be caught here, never in production."""
+    helper = RESTART.read_text()
+    m = re.search(r'SYSTEMD_UNIT_CANDIDATES="([^"]+)"', helper)
+    assert m, "helper must keep its unit-name probe list declarative"
+    candidates = m.group(1).split()
+
+    setup = (BOOT.parent / "hscc_daemon" / "systemd-setup.sh").read_text()
+    install = (BOOT.parent / "hscc_daemon" / "install.py").read_text()
+    emitted = set()
+    for pat, src in ((r'UNIT_NAME="([^"]+)"', setup),
+                     (r'SYSTEMD_UNIT_NAME = "([^"]+)"', install)):
+        found = re.search(pat, src)
+        assert found, f"could not read the unit name out of {pat!r}"
+        emitted.add(found.group(1))
+    assert emitted == {"hscc_daemon.service", "com.hermes.hscc_daemon.service"}, (
+        f"unit-name drift between the two installers: {sorted(emitted)}"
+    )
+    missing = emitted - set(candidates)
+    assert not missing, (
+        f"helper would treat a supervised daemon as an orphan; add to "
+        f"SYSTEMD_UNIT_CANDIDATES: {sorted(missing)}"
+    )
+
+
 def test_helper_only_reads_and_kicks_launchd_never_reinstalls():
     """The plist and the job's bootstrap state are operator-owned runtime state
     (launchd-setup.sh / install.py write them). This helper may only LOOK at the
@@ -753,10 +1020,35 @@ def test_helper_only_reads_and_kicks_launchd_never_reinstalls():
     Asserted against the code lines' actual `$LAUNCHCTL <verb>` invocations, not
     prose: comments are allowed to *name* the forbidden commands (the WARN
     message hands the operator the bootout+bootstrap remedy)."""
-    code = "\n".join(
-        l for l in RESTART.read_text().splitlines() if not l.lstrip().startswith("#")
-    )
+    code = _code_lines_only()
     verbs = set(re.findall(r'\$LAUNCHCTL"?\s+([a-z][a-z-]*)', code))
     assert verbs == {"print", "kickstart"}, (
         f"helper may only read + kickstart the job, saw verbs: {sorted(verbs)}"
     )
+
+
+def test_helper_never_installs_or_enables_the_systemd_unit():
+    """The systemd counterpart of the pin above: the unit file belongs to
+    systemd-setup.sh / install.py. The helper may ask whether the unit is active
+    (`is-active`), read its pid (`show -p MainPID`) and restart it — never
+    `enable`, `daemon-reload`, `stop`, `kill` or anything that writes the unit,
+    since a mid-install enable/daemon-reload can change what systemd starts and
+    would take the restart away from the operator's own definition."""
+    code = _code_lines_only()
+    verbs = set(re.findall(r'\$SYSTEMCTL"?\s+(?:--user\s+)?([a-z][a-z-]*)', code))
+    assert verbs == {"is-active", "show", "restart"}, (
+        f"helper may only query + restart the unit, saw verbs: {sorted(verbs)}"
+    )
+    # Every CALL (not the `command -v` presence probes) must go through the
+    # --user manager, not just "somewhere in the file": a system-wide
+    # `systemctl restart` of a --user unit targets a different (root-owned)
+    # service or nothing at all, so a dropped `--user` on ONE call would
+    # silently restart the wrong thing and still report a clean restart.
+    calls = []
+    for line in code.splitlines():
+        if "command -v" in line:
+            continue  # presence probe, not an invocation
+        calls += re.findall(r'"\$SYSTEMCTL"\s+([^\n]*)', line)
+    assert calls, "helper must invoke systemctl through the seam"
+    bad = [c for c in calls if not c.startswith("--user")]
+    assert not bad, f"every systemctl call must use the --user manager, found: {bad}"

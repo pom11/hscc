@@ -208,7 +208,7 @@ EXTERNAL = frozenset({
     # iOS / macOS
     "xcodebuild", "xcrun", "xcodegen", "swift", "swiftc", "simctl", "act",
     "security", "defaults", "osascript", "codesign", "plutil", "sysctl",
-    "sw_vers", "launchctl", "open",
+    "sw_vers", "launchctl", "systemctl", "open",
     # node
     "node", "npm", "npx", "yarn",
     # containers / net / observability
