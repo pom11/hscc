@@ -128,6 +128,27 @@ profile, and `generate` is still the operator's action.
    content now lives under `## Role: ecofire-pontaje-engineer`, and the three named
    shared/prod sandboxes intentionally do not come back.
 
+## Post-fix verification (what re-running the sweep shows, and why)
+
+After the spec edit, the STRICT positional sweep still reports the same 7 lines for
+this profile — and that is correct, not a failed fix. The sweep compares the live
+(drifted, pre-`generate`) SOUL against the composed text; the live lines carry the
+copied bc-engineer identity and the verbatim sandbox names that are deliberately
+NOT reproduced, so those lines can never match line-for-line. What the fix changes
+is verifiable at CONTENT level — every token the live block carried, tested for
+presence in `compose_soul()` of the tracked spec:
+
+    PRESENT  feat/pontaje / 70600-70699 / Pontaje/ / POM_PONTAJE / docs/superpowers / 2026-10-26-pontaje
+    clean    the three named shared/prod sandboxes are not reproduced in-tree
+
+i.e. every constraint the live block carried is now carried by `compose_soul()` of
+the tracked spec, and the only thing `generate` will still not reproduce is the
+named inventory that t_8d22ec81 ruled must not come back. Expectation after the
+operator runs `generate`: the live SOUL becomes byte-identical to the composed
+text, so the strict sweep must report **0** non-reproducible lines for this
+profile. It is the one check here that can confirm the repair actually landed; the
+doctor's row going to 0 problems is the equivalent operator-facing signal.
+
 ## Caveats / limits of this measurement
 
 - The fleet numbers are a **snapshot** of this host's `~/.hermes/profiles` at run
