@@ -1,7 +1,8 @@
 # Media serving on the Sparks — design for operator review (M0)
 
 **Date:** 2026-10-30
-**Status:** Proposed — design only. No recipes, no code, no fleet action in this card.
+**Status:** Approved (operator ruling 2026-10-30 22:33) — design only. No
+recipes, no code, no fleet action in this card. §8 carries the inline rulings.
 **Card:** t_13c64d9b (media workstream M0).
 **Consumes:** the support-matrix answer of parent card t_165c208f — committed
 on branch `wt/t_165c208f` as `docs/design/media-serving-support-matrix.md`
@@ -104,10 +105,11 @@ Contract details the fleet commits to regardless (each is what clients —
 LiteLLM, Hermes, the M5 node pack — may rely on; all satisfied natively):
 
 - **Async job semantics for video**: create → job id → poll → content. An
-  accepted job survives client disconnect; polling is cheap GETs. A client-side
-  polling deadline of **30 min** for 720p Wan2.2 tiers is the documented cap
-  (the upstream Kandinsky6 cookbook example uses exactly `1800 s`; video jobs
-  on GB10 run in minutes, not seconds — see matrix latency notes).
+  accepted job survives client disconnect; polling is cheap GETs. Per the
+  operator ruling (§8 Q5) there is **no client-side deadline and no
+  client-imposed size/length caps** — the client polls until the job reaches
+  `completed`/`failed`; the only client pacing rule is a sane polling interval
+  (~5 s recommended, M6 default).
 - **Sticky-job constraint (real, and the reason for §3's registration shape):**
   video job metadata is **process-local** — it does not survive an HTTP server
   restart, and when load balancing independent HTTP servers, *poll and content
@@ -126,11 +128,11 @@ LiteLLM, Hermes, the M5 node pack — may rely on; all satisfied natively):
   upstream of the backend. No error translation needed.
 - **Timeouts / sizing caps** (design values; enforcement point in parens):
   image sync request ≤ **300 s** end-to-end (proxy per-deployment timeout, §3;
-  measured native is ~35–45 s, the margin covers cold path + queue); video
-  client deadline **1800 s** (client-side, as in the cookbook); image `size`
-  cap **1536×1536**, `n ≤ 2` (client/M6 policy — the server validates against
-  model-supported sizes, and a facade-free design has no other clamp point);
-  video tier cap **720p / ≤ 8 s** (M6 request defaults). Server-side bounded
+  measured native is ~35–45 s, the margin covers cold path + queue); no video
+  client deadline and **no client-side size/seconds caps** (§8 Q5 ruling — the
+  server validates requested size/length against model-supported values; M6
+  ships request defaults, not ceilings); image `n ≤ 2` stays a client-side
+  courtesy default in M6, not a cap. Server-side bounded
   scheduler wait: `--scheduler-rpc-timeout` per recipe (marks a job `failed`,
   does not cancel GPU work — documented caveat).
 - **Output retention**: `DELETE` does not remove generated files and job
@@ -274,12 +276,13 @@ must exceed its per-GPU need, and the sum across co-located units stays ≤ ~0.8
 on GB10 unified memory the remainder is *not* slack — the flash-next template
 header says why):
 
-1. **Video units hold a node exclusively, cycle 1.** Wan2.2's ~80 GiB working
-   set (matrix C5) plus the encode/decode peak is a bandwidth + capacity
-   hog; sharing with an LLM makes both tiers unmeasurable. Template encoding:
-   video unit in its own family with its own `workers:` count, or explicit
-   `nodes:`; a video model in a family that shares a node with any other unit
-   is a `validate` error.
+1. **Media units co-locate freely — no video-exclusive-node rule** (§8 Q6
+   ruling). Video and image units are placed like any other unit: unpinned,
+   free co-tenancy with LLM units, no dedicated media node from the start.
+   The single hard rule is the **fraction sum ≤ 0.8** across units on a node,
+   and `validate` enforces it (rule 3 below); placement stays the balancer's
+   job. The Wan2.2 working set (§5 rule 3's declared fraction) is what keeps
+   a video unit from being co-scheduled into a starving node — not exclusivity.
 2. **Image units may co-locate with one LLM unit** at declared fractions:
    the image unit gets `gpu_memory_utilization: 0.25–0.35` (Qwen-Image-2.1
    FP8 DiT + T5 + VAE: ≈ 55–60 GB of *claimed* memory at BF16, ~half the DiT
@@ -381,7 +384,7 @@ header says why):
   literal, and the address-guard rule (placeholders only — `10.0.0.x`) applies
   to every committed artifact this workstream produces.
 
-## 8. Open questions for the operator
+## 8. Open questions for the operator — RULED (operator, 2026-10-30 22:33)
 
 1. **Shortlist re-pick.** The matrix recommends per tier: image gen
    Qwen-Image-2.1 in FP8 (operator never-plain-BF16 rule; BF16 fallback only
@@ -390,26 +393,54 @@ header says why):
    runs-with-work, and FLUX.3 Image Klein (FP8+NVFP4, SGLang cookbook) is a
    plausible late addition. Which models get M1 recipes + template slots first?
    (M1 is blocked on nothing except this ruling + §1.)
+   **RULING Q1 — first tier locked:** image gen = **Qwen-Image-2.1 FP8**
+   (diffusers layout; BF16 documented as fallback only, never the default);
+   speed backup for image gen = **FLUX.2-klein-9b NVFP4**; image edit =
+   **lmsys/qwen-image-edit-2511-modelopt-nvfp4-sglang**; video =
+   **Wan2.2-T2V-A14B + lmsys FP8 transformer** (the `transformer_2` BF16
+   component is the one *forced exception* to the never-BF16 rule — fp32
+   master-weights module, documented in M1's recipe); video alternative =
+   **LTX-2.5 FP8**. M1 recipes + M4 template slots cover exactly this set.
 2. **vLLM-Omni as second backend.** Framed here as optional and tracked, not
    built (its aarch64 packaging fix vllm-omni#1121 is open). Confirm: no M-card
    invests in vLLM-Omni until upstream ships aarch64, or want a spike card the
    moment it does?
+   **RULING Q2 — watch line only:** no M-card invests in vLLM-Omni. It stays
+   one tracked watch line (vllm-omni#1121); re-open only when upstream ships
+   aarch64. No spike card before then.
 3. **M2 facade: archive?** §2's table says the chosen server natively covers
    every contract endpoint including async `/v1/videos`. Recommendation:
    archive the conditional M2 card; keep the three residuals (durable jobs,
    queue caps, retention) as cycle-2 watch items if real usage demands them.
    This is the explicit human gate on that card — ruling requested.
+   **RULING Q3 — archive M2.** Native SGLang-Diffusion covers every endpoint
+   (§2 table); the facade card is archived. Durable jobs / queue caps /
+   retention stay cycle-2 watch items, revisited only if real usage bites.
 4. **sparkrun `model_info.mode` addition** (§3): approve proposing the
    smallest sparkrun-side patch — map discovered `task_type`/
    `supported_task_types` from `/v1/models` to `model_info.mode`
    `image_generation`/`video_generation` in `build_litellm_config`. Cycle 1
    works without it; with it, `/v1/models` at `:4000` stops lying about media
    models. Same hook family as template-declarations §4.3.
+   **RULING Q4 — yes via upstream PR route.** A dedicated card files the
+   smallest focused diff in `build_litellm_config` on our sparkrun fork
+   (branch off upstream main, conventional commit, unit tests incl. a
+   chat-unchanged regression, zero behavior change for LLM endpoints). No
+   push / no PR open until the operator reviews the diff. This stays the ONLY
+   sanctioned sparkrun edit; hscc cards never touch sparkrun.
 5. **Video polling caps + retention.** Proposed client deadline 1800 s /
    720p tier (upstream cookbook's own value), poll every 5 s; `--output-path`
    scratch dir per unit with who-cleans-it left to a daemon-side card. Accept,
    or pick different numbers — these become M6 defaults.
+   **RULING Q5 — no client caps.** The 1800 s deadline, the 720p tier cap and
+   the ≤ 8 s length cap are DELETED from this design (see §2). M6 gets a sane
+   polling interval only (~5 s); no size/seconds/deadline caps in defaults.
+   `--output-path` scratch dir + daemon-side cleanup stays as written.
 6. **Co-tenancy ruling** (§5): confirm cycle-1 policy — video units exclusive
    node, image units shareable at fraction sum ≤ 0.8 — and whether any node is
    designated media-dedicated from the start or media units place anywhere
    (unpinned like `flash-next-all`).
+   **RULING Q6 — free co-tenancy, no video-exclusive rule.** §5 rule 1 is
+   rewritten accordingly: no video-exclusive-node rule, no media-dedicated
+   node, media units unpinned like `flash-next-all`. The only hard rule is
+   fraction sum ≤ 0.8 per node and `validate` enforces it.
