@@ -119,6 +119,39 @@ def test_matching_header_is_not_flagged(tmp_path):
     assert _row(res, "pontaje-engineer")["problems"] == []
 
 
+def test_mismatch_line_renders_the_heading_literally(tmp_path):
+    """The report is the operator's diff against the FILE, so it must quote the
+    heading as it physically reads — `## Role: bc-engineer`, not `##
+    bc-engineer`. A truncated rendering sends the operator hunting for a heading
+    that is not in the file, and hides which heading the file DOES carry."""
+    proot, rroot, base = _world(
+        tmp_path,
+        profiles={"pontaje-engineer": _worker_soul("bc-engineer")},
+        specs={"pontaje-engineer": "pontaje-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    joined = "\n".join(_row(res, "pontaje-engineer")["problems"])
+    assert "'## Role: bc-engineer'" in joined, joined
+    # And the truncation this replaces must not come back: a bare `## bc-...`
+    # with no `Role:` between the sigil and the name is the bug.
+    assert "'## bc-engineer'" not in joined
+
+
+def test_duplicate_role_heading_is_flagged(tmp_path):
+    """compose_soul() emits exactly ONE `## Role:` heading. A second one is
+    hand-patched and generate drops it, so it must be reported — the sweep may
+    skip the heading it already judged, not every `Role:`-prefixed heading."""
+    soul = _worker_soul("a-engineer").replace(
+        "role identity text",
+        "role identity text\n\n## Role: someone-else\n\nbogus second identity")
+    proot, rroot, base = _world(tmp_path, profiles={"a-engineer": soul},
+                                specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    assert res["ok"] is False
+    joined = "\n".join(_row(res, "a-engineer")["problems"])
+    assert "second '## Role: someone-else'" in joined, joined
+    assert "drops it" in joined
+
+
 def test_clean_world_reports_counts_not_silence(tmp_path):
     """A healthy fleet prints an explicit count, so a clean result is EVIDENCE
     rather than absence of output (the same rule flightdeck's doctor follows)."""

@@ -207,10 +207,14 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
             f"{name}: SOUL.md carries the worker signature but has no "
             f"'## Role:' header at all — expected '## Role: {name}'")
     elif header != name:
+        # Render the heading LITERALLY (`## Role: x`, not `## x`): this line is
+        # the operator's diff against what is physically in the file, and a
+        # truncated rendering sends them hunting for a heading that does not
+        # exist there.
         problems.append(
-            f"{name}: SOUL header '## {header}' != profile dir name — expected "
-            f"'## Role: {name}' (copy-pasted profile: this worker has run under "
-            "the wrong role identity)")
+            f"{name}: SOUL header '## {actual[0]}' != profile dir "
+            f"name — expected '## Role: {name}' (copy-pasted profile: this "
+            "worker has run under the wrong role identity)")
 
     loader = spec_loader or _load_spec_quietly
     spec = loader(name, roles_dir)
@@ -248,14 +252,24 @@ def inspect_profile(name: str, soul_text: str, *, base: List[str],
             "(t_8d22ec81 rule: spec name == profile dir name)")
 
     emittable = set(base) | set(ops) | set(spec_identity_headings(spec))
-    allowed_headers = {f"Role: {name}"}
-    if header is not None:
-        allowed_headers.add(f"Role: {header}")
+    # compose_soul emits exactly ONE `## Role:` heading, and it is the one read
+    # as `header` above. The sweep must therefore skip that one heading LITERALLY
+    # (once) and flag every other `Role:`-prefixed heading: a duplicate is a
+    # hand-patched section that generate will drop, and the previous blanket
+    # `startswith(_ROLE_PREFIX): continue` let it pass silently on the claim that
+    # it had "already been reported" — which is true only of the first.
+    consumed_role_heading = actual[0] if actual else None
     for h in heads:
-        if h in emittable or h in allowed_headers:
+        if h in emittable:
             continue
         if h.startswith(_ROLE_PREFIX):
-            continue  # already reported as the header mismatch above
+            if h == consumed_role_heading:
+                continue  # the single emitted role header, already judged above
+            problems.append(
+                f"{name}: SOUL has a second '## {h}' heading — compose_soul() "
+                "emits exactly one '## Role:' header, so this one is "
+                "hand-patched and the next `hscc roles generate` drops it")
+            continue
         problems.append(
             f"{name}: SOUL heading '## {h}' cannot be emitted by compose_soul() "
             "— hand-patched block; the next `hscc roles generate` drops it "
