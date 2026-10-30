@@ -19,17 +19,20 @@ Built only from Hermes' own per-card verbs, so nothing here patches Hermes:
 * **orchestrators** — pause INTERRUPTS the board's orchestrator (`<board>-orch`)
   and steers it: cancel the running turn, do not unblock/create/dispatch until
   resumed. resume tells it the board is live again (queued if it is busy). Sent
-  through ``hermes-inject`` (types into the orchestrator's own tmux REPL);
-  ``HSCC_INJECT_BIN`` overrides the path, and a missing tool or pane is
-  reported, never fatal.
+  through ``repl_inject`` — the same module the API and ``hscc orch inject``
+  use (types into the orchestrator's own tmux REPL; t_75f17c83 replaced the
+  old shell-out to ``~/bin/hermes-inject``, which is retired together with the
+  ``INJECT_BIN``/``HSCC_INJECT_BIN`` knobs). A missing module, pane or refused
+  injection is reported in the ``orchestrator`` report key, never fatal.
 * **crons** — the orchestrator's ACTIVE cron jobs (board watchers that run an
   agent on their own schedule) are paused with the board and resumed with it.
 * **enforce** — blocks any card that became ``ready``/``running`` on a paused
   board after the pause (an orchestrator creating new cards). Idempotent; safe
   to run from a loop or the fleet check.
 
-State lives in ``~/.hscc/state/kanban_paused.json``. The hermes CLI runner and
-the state path are injectable so the tests never touch a real board.
+State lives in ``~/.hscc/state/kanban_paused.json``. The hermes CLI runner, the
+inject function and the state path are injectable so the tests never touch a
+real board or a real tmux pane.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from typing import Callable, Optional
 
@@ -44,7 +48,6 @@ STATE_PATH = os.path.expanduser(
     os.environ.get("HSCC_KANBAN_PAUSE_STATE", "~/.hscc/state/kanban_paused.json"))
 HERMES_CONFIG = os.path.expanduser("~/.hermes/config.yaml")
 REASON_PREFIX = "PAUSED"
-INJECT_BIN = os.path.expanduser(os.environ.get("HSCC_INJECT_BIN", "~/bin/hermes-inject"))
 
 PAUSE_STEER = (
     "PAUSE — the operator paused board `{board}` (project priority{why}). Cancel what you are "
@@ -59,16 +62,55 @@ RESUME_NOTE = (
     "from where you were; re-check anything time-sensitive before acting on it.")
 
 
-def _inject(profile: str, message: str, mode: str) -> dict:
-    if not os.path.exists(INJECT_BIN):
-        return {"ok": False, "error": f"{INJECT_BIN} not found"}
+def _load_repl_inject():
+    """Import ``repl_inject`` from the sibling hscc-api plugin dir.
+
+    The inject implementation lives in hscc-api (the API write path,
+    ``hscc orch inject`` and, since t_75f17c83, this module all share it —
+    one pane-discovery, one exactly-one-pane rule, one verb table). hscc-api
+    is a SIBLING plugin dir, not a package of this one, so loading it follows
+    the established pattern (routes_ws.py imports it bare once its dir is on
+    sys.path; _load_daemon_serving in hscc-cluster/hscc.py does the mirror
+    image for hscc_daemon): try the plain import, else insert the sibling dir.
+    Returns the module, or None if hscc-api is not deployed next to us.
+    """
     try:
-        r = subprocess.run([INJECT_BIN, profile, "--mode", mode, message],
-                           capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"ok": False, "error": str(exc)}
-    return {"ok": r.returncode == 0,
-            "error": None if r.returncode == 0 else (r.stderr or r.stdout).strip()[-200:]}
+        import repl_inject  # noqa: PLC0415 — already importable in-process
+        return repl_inject
+    except ImportError:
+        pass
+    api_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hscc-api")
+    if os.path.isdir(api_dir) and api_dir not in sys.path:
+        sys.path.insert(0, api_dir)
+    try:
+        import repl_inject
+        return repl_inject
+    except ImportError:
+        return None
+
+
+def _inject(profile: str, message: str, mode: str) -> dict:
+    """Steer the orchestrator's REPL through the repl_inject MODULE (no shell-out).
+
+    Returns the same ``{ok, error}`` shape the report has always carried, plus
+    ``mode``/``pane`` from the receipt so ops see what was actually delivered
+    (t_75f17c83: previously this exec'd ``~/bin/hermes-inject``; the module and
+    the CLI now share one implementation). A module we cannot load, a refused
+    injection (no pane / ambiguous pane / bad mode) or a tmux failure is
+    REPORTED, never raised — a pause must hold the board even when the
+    orchestrator's pane is gone.
+    """
+    repl = _load_repl_inject()
+    if repl is None:
+        return {"ok": False, "error": "repl_inject not importable (hscc-api plugin missing)",
+                "mode": mode, "pane": None}
+    try:
+        receipt = repl.inject(profile, message, mode=mode)
+    except Exception as exc:  # InjectError or anything a live tmux raises
+        return {"ok": False, "error": str(exc)[-200:] or repr(exc), "mode": mode, "pane": None}
+    return {"ok": True, "error": None,
+            "mode": receipt.get("mode"), "pane": receipt.get("target")}
 
 
 def _run_cron(profile: str, args: list) -> subprocess.CompletedProcess:
@@ -210,7 +252,10 @@ def pause(boards: list, reason: str = "", *, run: Callable = _run_hermes,
             report[board]["orchestrator"] = inject(
                 orchestrator_for(board),
                 PAUSE_STEER.format(board=board, why=f": {reason}" if reason else ""),
-                "interrupt")
+                # Canonical name of the no-verb send (the parity contract,
+                # t_ff665ff9): while the orchestrator is busy this is exactly
+                # what interrupts its turn — which a PAUSE must do.
+                "plain")
     if paused_boards(state) and "_auto_decompose_was" not in state:
         state["_auto_decompose_was"] = _set_auto_decompose(False, config_path)
     save_state(state, state_path)

@@ -165,6 +165,152 @@ class TestStatusAndValidateCommands:
         result = cmd_cluster_template(["validate"])
         assert "error" in result
 
+
+# ── hscc orch inject (t_75f17c83: thin CLI verb over hscc-api/repl_inject) ──
+#
+# `import hscc` resolves through this suite's conftest (plugin dir on
+# sys.path) — the same engine module object test_no_ansi.py uses; the alias
+# just keeps these tests readable.
+
+class _FakeInjectError(Exception):
+    """Stand-in for repl_inject.InjectError (kind + message)."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind, self.message = kind, message
+
+
+class FakeReplModule:
+    """Stub of the repl_inject MODULE for the CLI verb — no tmux, ever.
+
+    Records the inject() calls so the tests can pin WHAT the CLI passes
+    through (mode/dry_run/pane_override) and prove `--dry-run` sends nothing;
+    busy/verb follow the parity contract (VERB_PREFIX table in repl_inject)
+    so the assertions read like the real receipt.
+    """
+
+    def __init__(self, busy=False, fail=None):
+        self.calls = []
+        self.busy = busy
+        self.fail = fail                       # exception inject() raises
+
+    def inject(self, profile, text, mode="auto", pane_override=None,
+               dry_run=False, sleep_fn=None):
+        self.calls.append({"profile": profile, "text": text, "mode": mode,
+                           "pane_override": pane_override, "dry_run": dry_run})
+        if self.fail:
+            raise self.fail
+        eff = "queue" if (mode == "auto" and self.busy) else \
+            ("plain" if mode in ("auto", "interrupt") else mode)
+        verb = {"plain": "", "queue": "/queue ", "steer": "/steer "}[eff]
+        base = {"pane": "%7", "target": "s1:0.1", "profile": profile,
+                "busy": self.busy, "mode": eff, "verb": verb,
+                "interrupts": eff == "plain" and self.busy}
+        if dry_run:
+            return {**base, "dry_run": True, "text": text, "chars": len(text)}
+        return {**base, "sent_text": (verb + text) if verb else text}
+
+    @staticmethod
+    def format_plan(p):
+        line = (f"target: {p['profile']} @ {p['target']} "
+                f"({'busy' if p['busy'] else 'idle'}) -> {p['mode']}")
+        if p.get("interrupts"):
+            line += " (interrupts the running turn)"
+        return line
+
+
+import hscc as cluster_hscc_engine  # noqa: E402
+
+
+class TestOrchInjectVerb:
+    def test_registered_in_commands(self):
+        assert cluster_hscc_engine.COMMANDS["orch-inject"] is cluster_hscc_engine.cmd_orch_inject
+        assert cluster_hscc_engine.COMMANDS["inject"] is cluster_hscc_engine.cmd_orch_inject
+        assert cluster_hscc_engine.COMMANDS["orch"] is cluster_hscc_engine.cmd_orch
+
+    def test_orch_group_routes_inject(self, monkeypatch):
+        seen = {}
+        def spy(argv=None, repl=None):
+            seen["argv"] = argv
+            return {"ok": True}
+        monkeypatch.setattr(cluster_hscc_engine, "cmd_orch_inject", spy)
+        cluster_hscc_engine.cmd_orch(["inject", "pom-orch", "hello"])
+        assert seen["argv"] == ["pom-orch", "hello"]
+        with pytest.raises(ValueError, match="unknown orch subcommand"):
+            cluster_hscc_engine.cmd_orch(["nope"])
+        with pytest.raises(ValueError, match="unknown orch subcommand"):
+            cluster_hscc_engine.cmd_orch([])
+
+    def test_dry_run_reports_and_sends_nothing(self):
+        fake = FakeReplModule(busy=False)
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "hi there", "--dry-run"], repl=fake)
+        assert r["dry_run"] is True and r["mode"] == "plain" and r["chars"] == 8
+        assert r["line"] == "target: pom-orch @ s1:0.1 (idle) -> plain"
+        assert fake.calls == [{"profile": "pom-orch", "text": "hi there",
+                               "mode": "auto", "pane_override": None,
+                               "dry_run": True}]
+
+    def test_dry_run_busy_auto_queues(self):
+        fake = FakeReplModule(busy=True)
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "ping", "--dry-run"], repl=fake)
+        assert r["mode"] == "queue" and r["verb"] == "/queue " and r["interrupts"] is False
+        assert "(busy) -> queue" in r["line"]
+
+    def test_explicit_mode_passed_straight_through(self):
+        fake = FakeReplModule(busy=True)
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "msg", "--mode", "steer"], repl=fake)
+        assert fake.calls[0]["mode"] == "steer" and fake.calls[0]["dry_run"] is False
+        assert r["mode"] == "steer" and r["sent_text"] == "/steer msg"
+
+    def test_busy_explicit_plain_reports_interrupts(self):
+        fake = FakeReplModule(busy=True)
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "stop", "--mode", "plain"], repl=fake)
+        assert r["mode"] == "plain" and r["verb"] == ""
+        # The one combination that cuts off a running turn must be reported.
+        assert r["interrupts"] is True
+
+    def test_legacy_alias_interrupt_accepted(self):
+        fake = FakeReplModule()
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "x", "--mode", "interrupt"], repl=fake)
+        assert fake.calls[0]["mode"] == "interrupt"    # NOT rewritten by the CLI
+        assert r["mode"] == "plain"                    # repl_inject canonicalises
+
+    def test_pane_override_and_json_flag(self):
+        fake = FakeReplModule()
+        r = cluster_hscc_engine.cmd_orch_inject(
+            ["pom-orch", "x", "--pane", "%7", "--json"], repl=fake)
+        assert fake.calls[0]["pane_override"] == "%7"
+        assert r["pane"] == "%7" and r["target"] == "s1:0.1"
+
+    def test_missing_args_refuse_without_sending(self):
+        fake = FakeReplModule()
+        with pytest.raises(ValueError, match="required"):
+            cluster_hscc_engine.cmd_orch_inject(["only-profile"], repl=fake)
+        with pytest.raises(ValueError, match="required"):
+            cluster_hscc_engine.cmd_orch_inject([], repl=fake)
+        assert fake.calls == []
+
+    def test_unknown_mode_refusal_surfaces_from_wrapper(self):
+        fake = FakeReplModule(fail=_FakeInjectError("empty", "unknown mode 'teleport'"))
+        with pytest.raises(_FakeInjectError):
+            cluster_hscc_engine.cmd_orch_inject(
+                ["pom-orch", "x", "--mode", "teleport"], repl=fake)
+
+    def test_module_unavailable_is_a_clear_error(self, monkeypatch):
+        monkeypatch.setattr(cluster_hscc_engine, "_load_repl_inject", lambda: None)
+        with pytest.raises(RuntimeError, match="repl_inject not importable"):
+            cluster_hscc_engine.cmd_orch_inject(["p", "m"])
+
+    def test_loader_finds_the_sibling_hscc_api_module(self):
+        repl = cluster_hscc_engine._load_repl_inject()
+        assert repl is not None and repl.__file__.endswith("hscc-api/repl_inject.py")
+        assert repl.MODES == ("auto", "plain", "queue", "steer")
+
 # ── Fix 4: CLI argv passes sys.argv[1:] ──────────────────────────────────────
 
 class TestCLIArgvNoScriptName:

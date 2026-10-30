@@ -13,12 +13,15 @@ Commands:
   down [--dry-run] Stop ALL sparkrun workloads across the fleet
   up   [--dry-run] Start every unit in serving.json (orch + keepalive)
   info             Detailed cluster configuration
+  orch inject <p> "<msg>" [--mode auto|plain|queue|steer] [--dry-run] [--json]
+                   Inject a message into a running Hermes REPL pane (repl_inject)
 """
 
 import sys
 import json
 import subprocess
 import os
+import argparse
 
 import _theme  # guarded themed render helper (peer cli_theme + neutral fallback)
 
@@ -688,6 +691,112 @@ def cmd_profile_status():
     return _get_status()
 
 
+# ── Orchestrator inject (thin CLI wrapper over hscc-api/repl_inject) ────────
+
+def _load_repl_inject():
+    """Import ``repl_inject`` from the sibling hscc-api plugin dir.
+
+    ``repl_inject`` owns pane discovery, the exactly-one-pane rule, the mode
+    vocabulary and delivery — this plugin must not re-implement any of it (and
+    the unified ``hscc orch inject`` verb reaches here the same way the daemon
+    reaches ``serving``: a sibling plugin dir on ``sys.path``). Returns the
+    module, or None if hscc-api is not deployed next to this plugin.
+    """
+    try:
+        import repl_inject
+        return repl_inject
+    except ImportError:
+        pass
+    api_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hscc-api")
+    if os.path.isdir(api_dir) and api_dir not in sys.path:
+        sys.path.insert(0, api_dir)
+    try:
+        import repl_inject
+        return repl_inject
+    except ImportError:
+        return None
+
+
+class _InjectParser(argparse.ArgumentParser):
+    """argparse that refuses by raising, not by SystemExit.
+
+    main()'s error path owns rendering (raw JSON with ``--json``, themed panel
+    otherwise, exit 1); a bare parser's SystemExit would bypass that contract
+    and print argparse's own stderr instead of the CLI's error surface.
+    """
+
+    def error(self, message):
+        raise ValueError(f"{self.prog}: {message}")
+
+
+def cmd_orch_inject(argv=None, repl=None):
+    """``hscc orch inject <profile> "<message>"`` — inject a running Hermes REPL.
+
+    A THIN wrapper over ``repl_inject.inject`` (t_75f17c83): the pane
+    resolution, busy read and mode->verb decision all stay in that module, so
+    the CLI's ``--dry-run`` cannot drift from what a real send does. ``--mode``
+    is passed straight through (repl_inject owns the vocabulary
+    ``auto|plain|queue|steer``, plus the accepted legacy alias ``interrupt``);
+    this function contains no prefix logic and reads no screen of its own.
+
+    Result dict (machine path — ``--json`` dumps it raw): the receipt from
+    ``inject()`` — ``pane``, ``target``, ``profile``, ``busy``, ``mode``,
+    ``verb``, ``interrupts`` (and ``sent_text`` on a real send, ``text``/
+    ``chars`` on a dry run) — plus, on a dry run, the human target ``line``
+    (``format_plan``) proving nothing was sent.
+
+    Refusals raise (``repl_inject.InjectError`` for no/ambiguous pane, empty
+    text or unknown mode; ``ValueError`` for bad argv), which main() renders as
+    its error path (JSON dump with ``--json``, themed panel otherwise; exit 1).
+
+    ``repl=`` injects a stub module for tests; ``argv`` defaults to the real
+    tail (``sys.argv[2:]`` on the standalone entry).
+    """
+    repl = repl or _load_repl_inject()
+    if repl is None:
+        raise RuntimeError(
+            "repl_inject not importable — the hscc-api plugin must be "
+            "deployed next to hscc-cluster for `hscc orch inject`")
+    ap = _InjectParser(
+        prog="hscc orch inject",
+        description="Inject a message into the operator's RUNNING Hermes REPL "
+                    "pane for <profile> (tmux bracketed paste; exactly one "
+                    "pane for the profile or refuse).")
+    ap.add_argument("profile", help="profile whose REPL pane receives the message")
+    ap.add_argument("message", help="message text to deliver")
+    ap.add_argument("--mode", default="auto",
+                    help="auto (queue while busy, plain when idle) | plain | "
+                         "queue | steer (legacy alias: interrupt) [default: auto]")
+    ap.add_argument("--pane", default=None,
+                    help="optional tmux pane id/target to pin the target to")
+    ap.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="resolve + report the plan (target, busy, verb); send nothing")
+    ap.add_argument("--json", dest="as_json", action="store_true",
+                    help=argparse.SUPPRESS)  # rendering is main()'s; accept, ignore
+    ns = ap.parse_args(argv if argv is not None else sys.argv[2:])
+    receipt = dict(repl.inject(ns.profile, ns.message, mode=ns.mode,
+                               pane_override=ns.pane, dry_run=ns.dry_run))
+    if ns.dry_run:
+        # The reference tool's own one-line target rendering, so a dry run
+        # prints exactly what the reference tool prints for the same pane.
+        receipt["line"] = repl.format_plan(receipt)
+    return receipt
+
+
+def cmd_orch(argv=None):
+    """``hscc orch <verb>`` group router. Only ``inject`` exists today.
+
+    The card-title surface is `hscc orch inject ...`; COMMANDS also maps
+    `orch-inject`/`inject` directly, so every spelling reaches cmd_orch_inject.
+    """
+    argv = list(sys.argv[2:] if argv is None else argv)
+    if argv and argv[0] == "inject":
+        return cmd_orch_inject(argv[1:])
+    raise ValueError(f"unknown orch subcommand: {argv[0] if argv else '(none)'} "
+                     "(available: inject)")
+
+
 # ── Command Map ───────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -701,6 +810,9 @@ COMMANDS = {
     "info": cmd_info,
     "cluster-template": cmd_cluster_template,
     "profile-status": cmd_profile_status,
+    "orch": cmd_orch,
+    "orch-inject": cmd_orch_inject,
+    "inject": cmd_orch_inject,
 }
 
 
@@ -793,6 +905,19 @@ def _human_lines(cmd: str, result) -> list:
             lines.append(f"  {esc(str(profile)):<24} {n}")
         return lines
 
+    if cmd in ("orch", "orch-inject", "inject"):
+        # The inject receipt: one target line, plus what was/wasn't sent.
+        if result.get("line"):
+            lines.append(esc(str(result["line"])))
+        if result.get("dry_run"):
+            lines.append(f"[dim]--dry-run: nothing sent "
+                         f"({result.get('chars', '?')} chars)[/dim]")
+        elif result.get("target"):
+            lines.append(
+                f"[ok]injected[/] {esc(str(result.get('mode', '')))} "
+                f"-> {esc(str(result['target']))}")
+        return lines or ["[dim]command completed[/dim]"]
+
     # Generic fallback: flatten nested dicts/lists into indented, escaped lines.
     def _flatten(value, depth=0):
         pad = "  " * depth
@@ -864,6 +989,10 @@ Commands:
         elif cmd in ("down", "up"):
             dry_run = "--dry-run" in sys.argv[2:]
             result = fn(dry_run=dry_run)
+        elif cmd in ("orch", "orch-inject", "inject"):
+            # The unified `hscc orch inject <profile> "msg" ...` reaches the
+            # same engine verb with its tail; cmd_orch_inject owns the flags.
+            result = fn(sys.argv[2:])
         elif cmd == "cluster-template":
             # Pass remaining args through to template CLI
             result = fn()
