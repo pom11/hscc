@@ -22,12 +22,13 @@
 # ran the module with no subcommand), and a `PATH=` truncated at the wrap. Use
 # `unit-emit`, which writes the raw template.
 #
-# TWIN RULE: this script never leaves zero or two *enabled* units. The legacy
-# unit is purged BEFORE the canonical one is enabled, so an interrupted run can
-# leave the daemon briefly stopped but never double-enabled. If you want the
-# fully atomic version (both names present, one active) use
-# hscc-bootstrap/migrate_systemd_unit_name.py, which is dry-run capable and
-# read-back verifies.
+# TWIN RULE: this script never leaves zero or two *enabled* units. The canonical
+# unit is enabled + started FIRST and only then is the legacy name purged, so an
+# interrupted run can leave a brief overlap (harmless — daemon_singleton.py
+# refuses a second loop and systemd retries the supervised start) but never a
+# window with no supervisor. For the fully verified version (dry-run capable,
+# read-back confirms one enabled + one active unit on every node) use
+# hscc-bootstrap/migrate_systemd_unit_name.py.
 #
 # Usage:
 #   ./systemd-setup.sh          # Install, enable + start, verify (idempotent)
@@ -72,8 +73,10 @@ fi
 mkdir -p "${UNIT_DIR}" "$(dirname "${LOG_FILE}")"
 
 # ── Install unit through the ONE emitter ────────────────────────────────────
-# `unit-emit` writes the canonical unit file, purges the legacy one, and prints
-# the names it used as JSON, so this script never hardcodes either name.
+# `unit-emit` writes the canonical unit file and prints the names as JSON, so
+# this script never hardcodes either name. NO --purge-legacy here: purging the
+# old name before the canonical one is enabled + verified would leave this box
+# with no supervisor if `enable --now` then failed (see the TWIN RULE header).
 EMIT_RC=0
 EMIT_JSON="$(PYTHONPATH="${SCRIPT_DIR}/.." "${PYBIN}" "${DAEMON}" unit-emit --unit-dir "${UNIT_DIR}" 2>&1)" || EMIT_RC=$?
 if [[ "${EMIT_RC}" -ne 0 ]]; then
@@ -88,9 +91,6 @@ if [[ -z "${UNIT_NAME}" ]]; then
     exit 1
 fi
 info "Installed unit ${UNIT_NAME} in ${UNIT_DIR}"
-if printf '%s' "${EMIT_JSON}" | grep -q '"found": true'; then
-    info "Retired legacy unit ${LEGACY_NAME:-hscc_daemon.service} (it would have kept the daemon enabled under the old name)"
-fi
 
 systemctl --user daemon-reload
 
@@ -100,6 +100,21 @@ if [[ "${1:-}" == "force" ]]; then
 fi
 systemctl --user enable --now "${UNIT_NAME}"
 info "Enabled + started ${UNIT_NAME}"
+
+# ── Retire the legacy name, now that supervision is proven ──────────────────
+# Second call to the SAME emitter (writing is idempotent) with --purge-legacy:
+# still one emitter and one name, but only after the canonical unit is up, which
+# is what keeps "never zero active units" true even if enable had failed above.
+if [[ -n "${LEGACY_NAME}" ]]; then
+    PURGE_RC=0
+    PURGE_JSON="$(PYTHONPATH="${SCRIPT_DIR}/.." "${PYBIN}" "${DAEMON}" unit-emit --unit-dir "${UNIT_DIR}" --purge-legacy --json 2>&1)" || PURGE_RC=$?
+    if [[ "${PURGE_RC}" -ne 0 ]]; then
+        warn "could not retire ${LEGACY_NAME} (rc ${PURGE_RC}): ${PURGE_JSON}"
+        warn "  until it is gone, 'systemctl --user disable ${UNIT_NAME}' will leave the daemon running: ${LEGACY_NAME}"
+    elif printf '%s' "${PURGE_JSON}" | grep -q '"found": true'; then
+        info "Retired legacy unit ${LEGACY_NAME} (it would have kept the daemon enabled under the old name)"
+    fi
+fi
 
 # Survive logout (no-op if already enabled or not permitted).
 loginctl enable-linger "$USER" 2>/dev/null \

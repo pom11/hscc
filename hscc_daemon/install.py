@@ -1,5 +1,6 @@
 """Install/uninstall/service management for the HSCC daemon."""
 
+import json
 import os
 import shutil
 import signal
@@ -295,7 +296,7 @@ def purge_legacy_systemd_unit(dest_dir=None, *, dry_run=False, runner=None):
                     "detail": f"could not remove {legacy_file}: {e}"}
     run(["systemctl", "--user", "daemon-reload"],
         capture_output=True, text=True, timeout=15)
-    after_rc, after = probe("is-enabled")
+    after = probe("is-enabled")
     return {"legacy_name": legacy_name, "found": True, "changed": True,
             "enabled": enabled, "active": active, "present": present,
             "after": after, "steps": steps,
@@ -336,19 +337,20 @@ def _install_systemd():
     subprocess.run(["systemctl", "--user", "daemon-reload"],
                    capture_output=True, text=True, timeout=10)
 
-    # Retire the pre-t_d8f13693 name BEFORE enabling the canonical one: a box
-    # that still carries hscc_daemon.service would otherwise end up with TWO
-    # enabled units for one daemon (the supervisor-level twin), and a later
-    # `disable` of one name would leave the other running at next login.
-    retired = purge_legacy_systemd_unit()
-    if retired["found"]:
-        _console().print(f"  Legacy unit: {esc(retired['detail'])}")
-
     result = subprocess.run(
         ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME],
         capture_output=True, text=True, timeout=15
     )
     if result.returncode == 0:
+        # Retire the pre-t_d8f13693 name only AFTER the canonical unit is up.
+        # Purging first would open a window with NO supervisor, and if
+        # `enable --now` then failed the box would be left unmanaged — the
+        # inverse of the twin this card kills. A transient overlap is harmless
+        # (daemon_singleton.py rejects a second loop) while a supervision gap is
+        # not: the daemon silently stops healing the cluster.
+        retired = purge_legacy_systemd_unit()
+        if retired["found"]:
+            _console().print(f"  Legacy unit: {esc(retired['detail'])}")
         _console().print(make_status_panel(
             "Enabled + started via systemd --user — hscc_daemon is now "
             "managed by systemd.",
@@ -377,14 +379,20 @@ def _uninstall_launchd():
 
 
 def _uninstall_systemd():
-    subprocess.run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME],
+    # Paths resolved at CALL time through systemd_unit_paths(), not the
+    # import-time SYSTEMD_UNIT_FILE constant: the emitter does the same, and an
+    # uninstall that aimed at a different directory than the install wrote is
+    # exactly the drift this card is about (and it makes the pair testable
+    # against a tmp unit dir instead of the operator's real one).
+    name, unit_file, _legacy_name, _legacy_file = systemd_unit_paths()
+    subprocess.run(["systemctl", "--user", "disable", "--now", name],
                    capture_output=True, text=True, timeout=15)
-    if Path(SYSTEMD_UNIT_FILE).exists():
-        Path(SYSTEMD_UNIT_FILE).unlink()
+    if Path(unit_file).exists():
+        Path(unit_file).unlink()
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True, text=True, timeout=10)
         _console().print(make_status_panel(
-            f"Unit removed: {esc(SYSTEMD_UNIT_FILE)} — hscc_daemon uninstalled.",
+            f"Unit removed: {esc(unit_file)} — hscc_daemon uninstalled.",
             status="ok", title="uninstall",
         ))
     else:
@@ -402,20 +410,28 @@ def _uninstall_systemd():
 def cmd_unit_emit(argv=None):
     """Internal entry point: write the canonical systemd --user unit (t_d8f13693).
 
-    ``systemd-setup.sh`` calls exactly this — ``hscc.py unit-emit --json`` — and
-    parses the unit names out of the JSON. It used to run ``hscc.py plist >
-    UNIT_FILE``, which redirected a *rendered Rich console view* into a unit
-    file: box-drawing lines, and long assignments soft-wrapped so systemd's
-    parser dropped ``start-daemon`` from ``ExecStart`` and truncated the
-    ``PATH=`` value (see generate_systemd_unit's docstring). A view for humans
-    is not a file format.
+    ``systemd-setup.sh`` and ``migrate_systemd_unit_name.py`` call exactly this —
+    ``hscc.py unit-emit --json`` — and parse the unit names out of the JSON. The
+    setup helper used to run ``hscc.py plist > UNIT_FILE``, which redirected a
+    *rendered Rich console view* into a unit file: box-drawing lines, and long
+    assignments soft-wrapped so systemd's parser dropped ``start-daemon`` from
+    ``ExecStart`` and truncated the ``PATH=`` value (see
+    generate_systemd_unit's docstring). A view for humans is not a file format.
 
-    ``--unit-dir DIR`` overrides the destination (tests; never used by the
-    setup helper). ``--json`` is the default shape and is accepted explicitly
-    so the caller can be unambiguous. Exit 0 on success, 1 on a write error —
-    the caller is a ``set -e`` script that must not enable a unit it could not
-    write. No service call happens here: enable/start order belongs to the
-    caller, which owns never leaving two units active.
+    ``--unit-dir DIR`` overrides the destination (tests; also how the migration
+    script aims it). ``--json`` is the default shape and is accepted explicitly so
+    the caller can be unambiguous.
+
+    ``--purge-legacy`` additionally retires the old name. It is OPT-IN, and the
+    rule behind it is the same one the migration script enforces: never leave zero
+    supervised units. A caller that has not yet enabled + verified the canonical
+    unit must not purge first, or a later enable failure would leave the box
+    unmanaged. ``hscc install`` passes it (it enables, then purges); the migration
+    script does NOT (it purges in its own verified retire-old step).
+
+    Exit 0 on success, 1 on a write error — the caller is a ``set -e`` script that
+    must not enable a unit it could not write. No enable/start happens here: that
+    ordering belongs to the caller, which owns never leaving zero or two units.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     dest = None
@@ -427,15 +443,18 @@ def cmd_unit_emit(argv=None):
         dest = argv[i + 1]
     try:
         emitted = emit_systemd_unit(dest)
-        retired = purge_legacy_systemd_unit(dest, dry_run="--dry-run" in argv)
+        retired = (purge_legacy_systemd_unit(dest, dry_run="--dry-run" in argv)
+                   if "--purge-legacy" in argv else None)
     except OSError as e:
         print(f"unit-emit: could not write the unit file: {e}", file=sys.stderr)
         return 1
-    import json as _json
     payload = dict(emitted)
-    payload["legacy"] = retired
+    payload["legacy"] = retired if retired is not None else {
+        "found": False, "changed": False,
+        "detail": "not attempted (pass --purge-legacy once the canonical unit "
+                  "is enabled + verified)"}
     payload["dry_run"] = "--dry-run" in argv
-    print(_json.dumps(payload, sort_keys=True))
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 

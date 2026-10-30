@@ -298,8 +298,20 @@ esac
 
 EN_O="$(raw_en "$OLD")"
 if [ "$EN_O" != "not-found" ] || [ -e "$OLD_FILE" ]; then
-  OUT="$(systemctl --user disable --now "$OLD" 2>&1)"
+  OUT="$(systemctl --user disable --now "$OLD" 2>&1)"; DISABLE_RC=$?
   say "HSCC_DISABLE_OUT: $OUT"
+  if [ "$DISABLE_RC" -ne 0 ]; then
+    # `disable --now` can fail while the unit keeps RUNNING (systemd refuses a
+    # destructive transaction, e.g. another unit Wants= it). Two enabled units are
+    # already a defect the final check will report — but two RUNNING loops are the
+    # worse half, so make a bounded best-effort attempt to stop the loser before
+    # re-reading. This does NOT downgrade the report: if it is still enabled the
+    # final arithmetic says TWIN and the run fails.
+    say "HSCC_DISABLE_RC: $DISABLE_RC"
+    STOP_OUT="$(systemctl --user stop "$OLD" 2>&1)"; STOP_RC=$?
+    [ -n "$STOP_OUT" ] && say "HSCC_STOP_OUT: $STOP_OUT"
+    [ "$STOP_RC" -ne 0 ] && say "HSCC_STOP_RC: $STOP_RC"
+  fi
   # A legacy file that is a SYMLINK is somebody's override, not our unit:
   # `disable` already inerted it and deleting a foreign symlink is not ours to
   # do. Report it instead of removing it.
@@ -362,8 +374,39 @@ def command_for(mode: str, *, pkgs: str = "") -> str:
     return f"printf '%s' '{b64}' | base64 -d | bash -s"
 
 
+_MODE_LINE = re.compile(r'^MODE="([a-z-]+)"$', re.M)
+_PAYLOAD = re.compile(r"printf '%s' '([A-Za-z0-9+/=]+)'")
+_MODES = ("probe", "enable-new", "retire-old")
+
+
+def mode_of_command(command: str) -> Optional[str]:
+    """Which mode a remote command asks for, or None if it is not ours.
+
+    Decoded from the payload rather than matched on the command line: the
+    transport is one opaque string, and anything asserting *which* verb a node was
+    asked to run must not have to re-derive the base64 by hand. Used by the tests
+    to prove the enable-new-before-retire ordering, and by nothing that touches a
+    node.
+    """
+    m = _PAYLOAD.search(command)
+    if not m:
+        return None
+    try:
+        payload = base64.b64decode(m.group(1)).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
+    found = _MODE_LINE.search(payload)
+    if not found or found.group(1) not in _MODES:
+        return None
+    return found.group(1)
+
+
 # ── parsing the node's answer ───────────────────────────────────────────────
-_LINE = re.compile(r"^HSCC_([A-Z_]+): (.*)$")
+# The KEY KEEPS the ``HSCC_`` prefix: every lookup below is written as
+# ``_one(lines, "HSCC_RC")``. (A regex that captured only the suffix would make
+# every lookup miss and turn every healthy node into "no HSCC_RC" — the shape this
+# parser must never produce, so the tests pin both the prefix and a real answer.)
+_LINE = re.compile(r"^(HSCC_[A-Z_]+): (.*)$")
 
 
 def _hscc_lines(stdout: str) -> Dict[str, List[str]]:
@@ -652,10 +695,19 @@ def migrate_fleet(nodes: List[str], *, ssh_factory: Callable[[str], Runners],
                   dry_run: bool = False, pkgs: str = "") -> Dict[str, Any]:
     results = [migrate_node(n, ssh_cmd=ssh_factory(n), dry_run=dry_run,
                             pkgs=pkgs) for n in nodes]
-    done = [r for r in results if r["outcome"] in OK_OUTCOMES]
+    if dry_run:
+        # A dry run has nothing to be "migrated": every node is a PLAN, and the
+        # pass is clean exactly when no node hit a fault. Treating DRY_RUN as a
+        # failure here would make `--dry-run` exit 1 on a healthy fleet, which
+        # reads as "the migration is broken" and discourages the very rehearsal
+        # this card asks for.
+        ok = bool(results) and all(r["outcome"] == DRY_RUN for r in results)
+    else:
+        done = [r for r in results if r["outcome"] in OK_OUTCOMES]
+        ok = bool(results) and len(done) == len(results)
     return {"nodes": results, "dry_run": dry_run,
             "unit_name": UNIT_NAME, "legacy_unit_name": LEGACY_UNIT_NAME,
-            "ok": bool(results) and len(done) == len(results),
+            "ok": ok,
             "migrated": [r["node"] for r in results
                          if r["outcome"] == OK_MIGRATED],
             "already": [r["node"] for r in results
