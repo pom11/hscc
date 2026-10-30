@@ -5,3 +5,13 @@
 PyYAML>=6.0
 rich>=13,<16
 psutil>=5.9
+
+# Exact pin, deliberately unlike the ranges above. The brew libexec venv is built
+# from this file, and the kanban board-read path (`hscc kanban monitor`) imports
+# hermes_cli code that imports httpx — without it every board comes back
+# "unreadable: No module named 'httpx'". Hermes itself pins httpx[socks]==0.28.1,
+# so this tracks Hermes' exact version rather than floating: a venv httpx that
+# disagrees with Hermes' own is a second package set free to drift. Bare `httpx`
+# is enough — socksio is imported lazily and only when a socks5:// proxy is
+# configured (httpx/_transports/default.py), which this path never does.
+httpx==0.28.1
