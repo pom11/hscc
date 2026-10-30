@@ -173,7 +173,7 @@ def test_monitor_unknown_outcome_is_stopped(tmp_path):
 
 def render_text(mon, width=160, height=40, **kw):
     console = make_console(file=io.StringIO(), width=width, height=height, color_system=None)
-    console.print(cards_live.render(mon, width, height, **kw))
+    console.print(cards_live.render(mon, width, height, **kw), height=height)
     return console.file.getvalue()
 
 
@@ -272,3 +272,18 @@ def test_cli_snapshot_uses_collector(tmp_path, monkeypatch):
     console = make_console(file=io.StringIO(), width=120, height=30, color_system=None)
     assert cmd_cards(["monitor", "--board", "b"], console=console) == 0
     assert "b · t_1" in console.file.getvalue()
+
+
+def test_render_fills_exact_height_with_waiting_cards_at_the_bottom(tmp_path):
+    ready = [{"board": "b", "id": f"t_w{i}", "worker": "qa", "wait_s": 60,
+              "title": "w", "priority": 0} for i in range(5)]
+    rows = [run_row("b", f"t_{i}") for i in range(4)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap(rows, ready=ready))
+    mon.refresh()
+    lines = render_text(mon, width=120, height=30).rstrip("\n").split("\n")
+    assert len(lines) == 30
+    assert "slots 4/10" in lines[0]
+    assert lines[-1].strip() == "+2 more waiting"
+    assert "t_w2" in lines[-2]
+    assert lines[-5].startswith("╰")         # grid's last row ends right above the bar

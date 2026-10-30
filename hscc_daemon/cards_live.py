@@ -54,6 +54,17 @@ OUTCOME_STYLE = {"completed": ("done", "ok"), "blocked": ("blocked", "error"),
                  "reclaimed": ("reclaimed", "warn"),
                  "block_loop_detected": ("block loop", "error")}
 
+# The hscc palette is all gold; a wall of ~10 transcripts in it is too loud.
+# This view keeps gold for the focused panel only and uses neutral greys plus a
+# muted blue for tool calls (explicit colours, readable on dark and light).
+FOCUS_BORDER = "#FFBF00"
+FOCUS_TITLE = "bold #FFD700"
+IDLE_BORDER = "grey35"
+IDLE_TITLE = "grey70"
+TOOL_STYLE = "#7A9CC6"
+ERROR_LINE_STYLE = "#C97B6B"
+MUTED = "grey50"
+
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
 
@@ -238,16 +249,16 @@ def _body(lines: list[str], width: int, height: int, tools_only: bool) -> Text:
     rows = wrap_tail(lines, width, height)
     if not rows:
         text.append("(waiting for output)" if not tools_only else "(no tool calls yet)",
-                    style="dim")
+                    style=MUTED)
         return text
     for i, r in enumerate(rows):
         if i:
             text.append("\n")
         s = r.lstrip()
         if s.startswith(TOOL_PREFIX):
-            text.append(r, style="accent")
+            text.append(r, style=TOOL_STYLE)
         elif re.search(r"\b(error|traceback|failed|exception)\b", r, re.I):
-            text.append(r, style="warn")
+            text.append(r, style=ERROR_LINE_STYLE)
         else:
             text.append(r)
     return text
@@ -255,6 +266,8 @@ def _body(lines: list[str], width: int, height: int, tools_only: bool) -> Text:
 
 def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
                tools_only: bool, now: float) -> Panel:
+    """One card's panel. ``height`` sizes the body tail; the Layout region
+    the panel lands in decides its real height (``expand`` fills it)."""
     row = mon.cards[key]
     title, details = header_fields(row, now)
     header = fit_header(title, details, max(width - 8, 8))  # ╭─ ... ─╮ + padding
@@ -264,10 +277,9 @@ def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
     if "ended" in row:
         _, style = OUTCOME_STYLE.get(row.get("outcome"), ("", "warn"))
     else:
-        style = "primary" if focused else "border"
-    return Panel(body, title=Text(header, style="title" if focused else "label"),
-                 title_align="left", border_style=style, padding=(0, 1),
-                 height=height)
+        style = FOCUS_BORDER if focused else IDLE_BORDER
+    return Panel(body, title=Text(header, style=FOCUS_TITLE if focused else IDLE_TITLE),
+                 title_align="left", border_style=style, padding=(0, 1))
 
 
 def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: float) -> Text:
@@ -281,8 +293,8 @@ def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: f
              f"{time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
     flags = ["tools" if tools_only else "full"] + (["PAUSED"] if paused else []) \
         + (["zoom"] if zoom else [])
-    t.append(f"  [{' '.join(flags)}]", style="warn" if paused else "dim")
-    t.append("  tab/arrows focus · enter zoom · t tools · p pause · q quit", style="dim")
+    t.append(f"  [{' '.join(flags)}]", style="warn" if paused else MUTED)
+    t.append("  tab/arrows focus · enter zoom · t tools · p pause · q quit", style=MUTED)
     return t
 
 
@@ -292,41 +304,48 @@ def ready_lines(mon: Monitor, width: int) -> list[Text]:
     for r in ready[:READY_ROWS]:
         s = (f"⏳ {r['board']} · {r['id']} · {r['worker']} · wait "
              f"{kanban_live.fmt_age(r.get('wait_s'))} · {r['title']}")
-        out.append(Text(s[:max(width, 10)], style="dim", no_wrap=True, overflow="crop"))
+        out.append(Text(s[:max(width, 10)], style=MUTED, no_wrap=True, overflow="crop"))
     if len(ready) > READY_ROWS:
-        out.append(Text(f"   +{len(ready) - READY_ROWS} more waiting", style="dim"))
+        out.append(Text(f"   +{len(ready) - READY_ROWS} more waiting", style=MUTED))
     return out
 
 
 def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = False,
-           tools_only: bool = False, paused: bool = False, now: float | None = None):
+           tools_only: bool = False, paused: bool = False, now: float | None = None) -> Layout:
+    """The whole screen as one Layout: status line, card grid, waiting cards,
+    errors. Region sizes sum to ``height`` so the grid fills exactly the space
+    left and the bottom lines stay on screen."""
     now = mon.clock() if now is None else now
     keys = mon.panels()
     top = status_line(mon, tools_only, paused, zoom, now)
-    bottom = ready_lines(mon, width)
-    errors = [Text(e, style="error") for e in mon.data.get("errors", [])][:2]
-    grid_h = max(height - 1 - len(bottom) - len(errors), 3)
+    foot = ready_lines(mon, width) + [Text(e, style="error")
+                                      for e in mon.data.get("errors", [])][:2]
+    grid_h = max(height - 1 - len(foot), 3)
+    grid = Layout(name="grid", size=grid_h)
     if not keys:
-        body = Panel(Text("no cards running", style="dim"), height=grid_h,
-                     border_style="border")
-        return Group(top, body, *bottom, *errors)
-    focus = focus % len(keys)
-    if zoom:
-        body = card_panel(mon, keys[focus], width, grid_h, True, tools_only, now)
-        return Group(top, body, *bottom, *errors)
-    cols, rows = grid_shape(len(keys), width, grid_h)
-    layout = Layout(size=grid_h)
-    row_layouts = []
-    for r in range(rows):
-        cells = keys[r * cols:(r + 1) * cols]
-        row_h = grid_h // rows + (1 if r < grid_h % rows else 0)
-        cell_w = width // max(len(cells), 1)
-        rl = Layout(size=row_h)
-        rl.split_row(*[Layout(card_panel(mon, k, cell_w, row_h, keys.index(k) == focus,
-                                         tools_only, now)) for k in cells])
-        row_layouts.append(rl)
-    layout.split_column(*row_layouts)
-    return Group(top, layout, *bottom, *errors)
+        grid.update(Panel(Text("no cards running", style=MUTED), border_style=IDLE_BORDER))
+    elif zoom:
+        k = keys[focus % len(keys)]
+        grid.update(card_panel(mon, k, width, grid_h, True, tools_only, now))
+    else:
+        focus %= len(keys)
+        cols, rows = grid_shape(len(keys), width, grid_h)
+        row_layouts = []
+        for r in range(rows):
+            cells = keys[r * cols:(r + 1) * cols]
+            row_h = grid_h // rows + (1 if r < grid_h % rows else 0)
+            cell_w = width // max(len(cells), 1)
+            rl = Layout(size=row_h)
+            rl.split_row(*[Layout(card_panel(mon, k, cell_w, row_h, keys.index(k) == focus,
+                                             tools_only, now)) for k in cells])
+            row_layouts.append(rl)
+        grid.split_column(*row_layouts)
+    root = Layout()
+    parts = [Layout(top, size=1), grid]
+    if foot:
+        parts.append(Layout(Group(*foot), size=len(foot)))
+    root.split_column(*parts)
+    return root
 
 
 # ── keys + live loop ───────────────────────────────────────────────────────
@@ -423,7 +442,8 @@ def snapshot(console, board: str | None = None, tools_only: bool = False,
     mon.refresh()
     mon.poll_logs()
     height = max(console.height, 12 * max(len(mon.panels()), 1))
-    console.print(render(mon, console.width, min(height, 200), tools_only=tools_only))
+    height = min(height, 200)
+    console.print(render(mon, console.width, height, tools_only=tools_only), height=height)
     return 1 if mon.data["errors"] and not mon.data["boards"] else 0
 
 
