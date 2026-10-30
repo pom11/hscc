@@ -238,8 +238,8 @@ class TestOrchInjectVerb:
             seen["argv"] = argv
             return {"ok": True}
         monkeypatch.setattr(cluster_hscc_engine, "cmd_orch_inject", spy)
-        cluster_hscc_engine.cmd_orch(["inject", "pom-orch", "hello"])
-        assert seen["argv"] == ["pom-orch", "hello"]
+        cluster_hscc_engine.cmd_orch(["inject", "demo-orch", "hello"])
+        assert seen["argv"] == ["demo-orch", "hello"]
         with pytest.raises(ValueError, match="unknown orch subcommand"):
             cluster_hscc_engine.cmd_orch(["nope"])
         with pytest.raises(ValueError, match="unknown orch subcommand"):
@@ -248,43 +248,43 @@ class TestOrchInjectVerb:
     def test_dry_run_reports_and_sends_nothing(self):
         fake = FakeReplModule(busy=False)
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "hi there", "--dry-run"], repl=fake)
+            ["demo-orch", "hi there", "--dry-run"], repl=fake)
         assert r["dry_run"] is True and r["mode"] == "plain" and r["chars"] == 8
-        assert r["line"] == "target: pom-orch @ s1:0.1 (idle) -> plain"
-        assert fake.calls == [{"profile": "pom-orch", "text": "hi there",
+        assert r["line"] == "target: demo-orch @ s1:0.1 (idle) -> plain"
+        assert fake.calls == [{"profile": "demo-orch", "text": "hi there",
                                "mode": "auto", "pane_override": None,
                                "dry_run": True}]
 
     def test_dry_run_busy_auto_queues(self):
         fake = FakeReplModule(busy=True)
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "ping", "--dry-run"], repl=fake)
+            ["demo-orch", "ping", "--dry-run"], repl=fake)
         assert r["mode"] == "queue" and r["verb"] == "/queue " and r["interrupts"] is False
         assert "(busy) -> queue" in r["line"]
 
     def test_explicit_mode_passed_straight_through(self):
         fake = FakeReplModule(busy=True)
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "msg", "--mode", "steer"], repl=fake)
+            ["demo-orch", "msg", "--mode", "steer"], repl=fake)
         assert fake.calls[0]["mode"] == "steer" and fake.calls[0]["dry_run"] is False
         assert r["mode"] == "steer" and r["sent_text"] == "/steer msg"
 
     def test_real_send_receipt_carries_the_json_fields(self):
         # Card contract: --json prints the receipt (pane, idle/busy, verb, chars).
         fake = FakeReplModule(busy=False)
-        r = cluster_hscc_engine.cmd_orch_inject(["pom-orch", "hello"], repl=fake)
+        r = cluster_hscc_engine.cmd_orch_inject(["demo-orch", "hello"], repl=fake)
         assert r["pane"] == "%7" and r["busy"] is False
         assert r["verb"] == "" and r["chars"] == 5
         # The dry-run path keeps inject()'s own (rstripped) chars, not ours.
         fake2 = FakeReplModule(busy=False)
         r2 = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "hi\n\n", "--dry-run"], repl=fake2)
+            ["demo-orch", "hi\n\n", "--dry-run"], repl=fake2)
         assert r2["chars"] == 2
 
     def test_busy_explicit_plain_reports_interrupts(self):
         fake = FakeReplModule(busy=True)
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "stop", "--mode", "plain"], repl=fake)
+            ["demo-orch", "stop", "--mode", "plain"], repl=fake)
         assert r["mode"] == "plain" and r["verb"] == ""
         # The one combination that cuts off a running turn must be reported.
         assert r["interrupts"] is True
@@ -292,14 +292,14 @@ class TestOrchInjectVerb:
     def test_legacy_alias_interrupt_accepted(self):
         fake = FakeReplModule()
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "x", "--mode", "interrupt"], repl=fake)
+            ["demo-orch", "x", "--mode", "interrupt"], repl=fake)
         assert fake.calls[0]["mode"] == "interrupt"    # NOT rewritten by the CLI
         assert r["mode"] == "plain"                    # repl_inject canonicalises
 
     def test_pane_override_and_json_flag(self):
         fake = FakeReplModule()
         r = cluster_hscc_engine.cmd_orch_inject(
-            ["pom-orch", "x", "--pane", "%7", "--json"], repl=fake)
+            ["demo-orch", "x", "--pane", "%7", "--json"], repl=fake)
         assert fake.calls[0]["pane_override"] == "%7"
         assert r["pane"] == "%7" and r["target"] == "s1:0.1"
 
@@ -315,7 +315,7 @@ class TestOrchInjectVerb:
         fake = FakeReplModule(fail=_FakeInjectError("empty", "unknown mode 'teleport'"))
         with pytest.raises(_FakeInjectError):
             cluster_hscc_engine.cmd_orch_inject(
-                ["pom-orch", "x", "--mode", "teleport"], repl=fake)
+                ["demo-orch", "x", "--mode", "teleport"], repl=fake)
 
     def test_module_unavailable_is_a_clear_error(self, monkeypatch):
         monkeypatch.setattr(cluster_hscc_engine, "_load_repl_inject", lambda: None)
