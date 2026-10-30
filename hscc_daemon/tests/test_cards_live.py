@@ -287,3 +287,33 @@ def test_render_fills_exact_height_with_waiting_cards_at_the_bottom(tmp_path):
     assert lines[-1].strip() == "+2 more waiting"
     assert "t_w2" in lines[-2]
     assert lines[-5].startswith("╰")         # grid's last row ends right above the bar
+
+
+def test_plus_minus_change_columns_from_the_current_auto_grid():
+    v = ViewState()
+    v.apply("bigger", 6, auto_cols=3)
+    assert v.cols == 2                     # bigger panels = one column fewer
+    v.apply("bigger", 6, auto_cols=3)
+    v.apply("bigger", 6, auto_cols=3)
+    assert v.cols == 1                     # floor
+    v.apply("smaller", 6, auto_cols=3)
+    assert v.cols == 2
+    for _ in range(10):
+        v.apply("smaller", 6, auto_cols=3)
+    assert v.cols == 6                     # never more columns than cards
+    v.apply("auto", 6)
+    assert v.cols is None
+    km = cards_live.KEYMAP
+    assert km["+"] == km["="] == "bigger" and km["-"] == "smaller" and km["0"] == "auto"
+
+
+def test_forced_columns_drive_the_grid(tmp_path):
+    assert grid_shape(6, 240, 40, cols=1) == (1, 6)
+    assert grid_shape(6, 240, 40, cols=2) == (2, 3)
+    assert grid_shape(3, 240, 40, cols=9) == (3, 1)
+    rows = [run_row("b", f"t_{i}") for i in range(4)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))
+    mon.refresh()
+    out = render_text(mon, width=160, height=40, cols=1)
+    assert "cols 1" in out.split("\n")[0]
+    assert sum(1 for line in out.split("\n") if line.startswith("╭")) == 4   # 4 stacked rows

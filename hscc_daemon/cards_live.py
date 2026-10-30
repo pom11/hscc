@@ -14,7 +14,9 @@ too narrow. Body: the full transcript, or only tool calls (``t`` toggles).
 
 Keys (live mode, interactive terminal): Tab / arrows move the focus, Enter or
 ``z`` zooms the focused panel to full screen, Esc leaves zoom, ``t`` toggles
-full transcript / tools only, ``p`` pauses scrolling, ``q`` quits.
+full transcript / tools only, ``+``/``-`` make panels bigger/smaller (fewer /
+more columns, ``0`` back to auto), ``p`` pauses scrolling, ``q`` quits. Glyph
+size belongs to the terminal (iTerm: Cmd +/-), not to this view.
 
 Read-only: card data comes from ``kanban_live.collect`` + ``attach_tokens``
 (the same pass `hscc kanban monitor` makes) and logs are only read. The board,
@@ -196,13 +198,16 @@ class Monitor:
 
 # ── rendering ──────────────────────────────────────────────────────────────
 
-def grid_shape(n: int, width: int, height: int) -> tuple[int, int]:
+def grid_shape(n: int, width: int, height: int, cols: int | None = None) -> tuple[int, int]:
     """``(cols, rows)`` for ``n`` panels: as square as the terminal allows,
-    counting a cell as ~2.2x taller than wide."""
+    counting a cell as ~2.2x taller than wide. ``cols`` forces the column
+    count (the +/- density zoom), clamped to ``1..n``."""
     if n <= 0:
         return 0, 0
-    aspect = max(width, 1) / max(height * 2.2, 1)
-    cols = max(1, min(n, round(math.sqrt(n * aspect))))
+    if cols is None:
+        aspect = max(width, 1) / max(height * 2.2, 1)
+        cols = round(math.sqrt(n * aspect))
+    cols = max(1, min(n, cols))
     rows = math.ceil(n / cols)
     cols = math.ceil(n / rows)          # drop empty columns
     return cols, rows
@@ -282,7 +287,8 @@ def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
                  title_align="left", border_style=style, padding=(0, 1))
 
 
-def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: float) -> Text:
+def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: float,
+                cols: int | None = None) -> Text:
     d = mon.data
     cap = d.get("caps", (None, None))[0]
     running = len(d.get("running", []))
@@ -292,9 +298,10 @@ def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: f
     t.append(f"  slots {slots} · waiting {len(d.get('ready', []))} · "
              f"{time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
     flags = ["tools" if tools_only else "full"] + (["PAUSED"] if paused else []) \
-        + (["zoom"] if zoom else [])
+        + (["zoom"] if zoom else []) + ([f"cols {cols}"] if cols else [])
     t.append(f"  [{' '.join(flags)}]", style="warn" if paused else MUTED)
-    t.append("  tab/arrows focus · enter zoom · t tools · p pause · q quit", style=MUTED)
+    t.append("  tab/arrows focus · enter zoom · +/- size · t tools · p pause · q quit",
+             style=MUTED)
     return t
 
 
@@ -311,13 +318,14 @@ def ready_lines(mon: Monitor, width: int) -> list[Text]:
 
 
 def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = False,
-           tools_only: bool = False, paused: bool = False, now: float | None = None) -> Layout:
+           tools_only: bool = False, paused: bool = False, now: float | None = None,
+           cols: int | None = None) -> Layout:
     """The whole screen as one Layout: status line, card grid, waiting cards,
     errors. Region sizes sum to ``height`` so the grid fills exactly the space
     left and the bottom lines stay on screen."""
     now = mon.clock() if now is None else now
     keys = mon.panels()
-    top = status_line(mon, tools_only, paused, zoom, now)
+    top = status_line(mon, tools_only, paused, zoom, now, cols)
     foot = ready_lines(mon, width) + [Text(e, style="error")
                                       for e in mon.data.get("errors", [])][:2]
     grid_h = max(height - 1 - len(foot), 3)
@@ -329,7 +337,7 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
         grid.update(card_panel(mon, k, width, grid_h, True, tools_only, now))
     else:
         focus %= len(keys)
-        cols, rows = grid_shape(len(keys), width, grid_h)
+        cols, rows = grid_shape(len(keys), width, grid_h, cols)
         row_layouts = []
         for r in range(rows):
             cells = keys[r * cols:(r + 1) * cols]
@@ -352,7 +360,8 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
 
 KEYMAP = {"\t": "next", "\x1b[C": "next", "\x1b[B": "next", "\x1b[Z": "prev",
           "\x1b[D": "prev", "\x1b[A": "prev", "\r": "zoom", "\n": "zoom", "z": "zoom",
-          "\x1b": "unzoom", "t": "tools", "p": "pause", "q": "quit", "\x03": "quit"}
+          "\x1b": "unzoom", "t": "tools", "p": "pause", "q": "quit", "\x03": "quit",
+          "+": "bigger", "=": "bigger", "-": "smaller", "_": "smaller", "0": "auto"}
 
 
 def read_key(fd, timeout: float) -> str | None:
@@ -383,14 +392,23 @@ def _cbreak(fd):
 
 class ViewState:
     def __init__(self, tools_only=False):
+        self.cols: int | None = None   # None = auto grid; +/- pin a column count
         self.focus = 0
         self.zoom = False
         self.tools_only = tools_only
         self.paused = False
         self.quit = False
 
-    def apply(self, action: str | None, n: int):
-        if action == "next" and n:
+    def apply(self, action: str | None, n: int, auto_cols: int = 1):
+        """``auto_cols`` = the column count the auto grid uses right now, so
+        the first +/- steps from what is on screen."""
+        if action in ("bigger", "smaller"):
+            cur = self.cols or auto_cols
+            step = -1 if action == "bigger" else 1      # bigger panels = fewer columns
+            self.cols = max(1, min(max(n, 1), cur + step))
+        elif action == "auto":
+            self.cols = None
+        elif action == "next" and n:
             self.focus = (self.focus + 1) % n
         elif action == "prev" and n:
             self.focus = (self.focus - 1) % n
@@ -425,12 +443,14 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
                 if not view.paused:
                     mon.poll_logs()
                 live.update(render(mon, console.width, console.height, view.focus, view.zoom,
-                                   view.tools_only, view.paused), refresh=True)
+                                   view.tools_only, view.paused, cols=view.cols), refresh=True)
                 if fd is None:
                     time.sleep(TICK_S)
                     continue
                 key = read_key(fd, TICK_S)
-                view.apply(KEYMAP.get(key) if key else None, len(mon.panels()))
+                n = len(mon.panels())
+                auto = grid_shape(n, console.width, max(console.height - 5, 3))[0]
+                view.apply(KEYMAP.get(key) if key else None, n, auto)
     except KeyboardInterrupt:
         pass
     return 0
@@ -463,8 +483,9 @@ board · card · worker │ run · heartbeat · tokens (as space allows).
   --board <slug>  only this board
   --tools         start in tools-only view (t toggles in --live)
 
-Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · t full/tools ·
-p pause · q quit. Read-only: never claims, promotes or archives.
+Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · +/- bigger or
+smaller panels (fewer/more columns; 0 = auto) · t full/tools · p pause · q quit.
+Font size itself is the terminal's (iTerm: Cmd +/-). Read-only: never claims, promotes or archives.
 """
 
 
