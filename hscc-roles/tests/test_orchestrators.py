@@ -172,6 +172,59 @@ def test_ensure_orchestrator_idempotent(registry_file, isolated_home, monkeypatc
     assert got2["changed"] is False  # second run changes nothing
 
 
+def test_ensure_orchestrator_seeds_review_skills(registry_file, isolated_home):
+    """B1 (round-2 review): `orch <new-project>` is the hole NO bootstrap stage
+    can cover — a project added after the last bootstrap gets a profile with an
+    EMPTY skills tree, and the dispatcher force-injects ``sdlc-review`` for
+    review-lane spawns to ANY assignee (kanban_db_dispatch.py:2073-2075), so an
+    unseeded orchestrator dies on its first review card with the card's error
+    string. Provisioning must seed the acceptance trio itself.
+    """
+    got = orchestrators.ensure_orchestrator("hscc", base_identity="BASE-ID",
+                                            path=registry_file)
+    pdir = os.path.join(isolated_home, "hscc-orch")
+    seed = got["review_skill"]
+    assert seed["ok"] is True, seed
+    assert set(seed["skills"].values()) == {"installed"}, seed["skills"]
+    for name, cat in (("sdlc-review", "devops"),
+                      ("systematic-debugging", "software-development"),
+                      ("test-driven-development", "software-development")):
+        assert os.path.isfile(os.path.join(pdir, "skills", cat, name, "SKILL.md"))
+
+
+def test_ensure_orchestrator_seed_is_idempotent_and_never_clobbers(
+        registry_file, isolated_home):
+    """A re-run is a no-op (no rewrite, no backup churn), and where the name
+    already resolves from ANOTHER path the guard skips instead of creating a
+    collision — the same contract the bootstrap fan-out has."""
+    orchestrators.ensure_orchestrator("hscc", base_identity="BASE-ID",
+                                      path=registry_file)
+    pdir = os.path.join(isolated_home, "hscc-orch")
+    target = os.path.join(pdir, "skills", "devops", "sdlc-review", "SKILL.md")
+    mtime = os.stat(target).st_mtime_ns
+
+    got2 = orchestrators.ensure_orchestrator("hscc", base_identity="BASE-ID",
+                                             path=registry_file)
+    assert got2["changed"] is False
+    assert set(got2["review_skill"]["skills"].values()) == {
+        "noop-resolves-at-target"}, got2["review_skill"]["skills"]
+    assert os.stat(target).st_mtime_ns == mtime          # nothing rewritten
+    assert not os.path.isdir(os.path.join(pdir, "skills-backups"))
+
+    # Fabricate a stale flat copy that makes the bare name ambiguous: the seed
+    # must SKIP (report the collision) rather than write a third copy.
+    flat = os.path.join(pdir, "skills", "sdlc-review")
+    os.makedirs(flat, exist_ok=True)
+    with open(os.path.join(flat, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write("stale june copy — operator data, must survive\n")
+    got3 = orchestrators.ensure_orchestrator("hscc", base_identity="BASE-ID",
+                                             path=registry_file)
+    assert got3["review_skill"]["skills"]["sdlc-review"] == "skip-collision", \
+        got3["review_skill"]
+    with open(os.path.join(flat, "SKILL.md"), encoding="utf-8") as f:
+        assert "stale june copy" in f.read()             # never deleted/overwritten
+
+
 def test_ensure_orchestrator_does_not_clobber_existing_memory(
     registry_file, isolated_home, monkeypatch
 ):

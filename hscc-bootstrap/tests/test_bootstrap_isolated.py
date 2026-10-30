@@ -142,6 +142,48 @@ def test_rerun_is_idempotent(sandbox):
         "second run re-added trigger rules (not idempotent)"
 
 
+@needs_runtime
+def test_fresh_bootstrap_leaves_every_orchestrator_reviewable(sandbox):
+    """B1 (round-2 review): the guarded review-skill fan-out must run AFTER
+    role/orchestrator provisioning, so a SINGLE fresh bootstrap leaves every
+    `*-orch` it just created able to resolve the dispatcher-injected
+    `sdlc-review` exactly once.
+
+    The first cut ordered the stage before provisioning: the fan-out saw zero
+    profiles, installed only the root home, and the orchestrators created
+    afterwards had EMPTY skills trees — a review-lane spawn to one died with
+    the card's error string while doctor read GREEN, and nothing forced the
+    second bootstrap that would have fixed it. This drives the REAL installer
+    (shared helper with the e2e test above, so the suite pays for one run) and
+    checks the end state per created profile via the resolver mirror — the
+    same rule cross-validated against the live resolver in
+    test_skill_resolver_xval.py."""
+    r = _run(sandbox)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    _assert_all_orch_profiles_reviewable(sandbox)
+
+
+def _assert_all_orch_profiles_reviewable(sandbox):
+    profiles = sandbox["hermes"] / "profiles"
+    orchs = [p for p in profiles.iterdir()
+             if p.is_dir() and not p.name.startswith(".")
+             and p.name.endswith("-orch")]
+    assert orchs, "bootstrap provisioned no *-orch profiles — nothing to check"
+    import importlib
+    import sys as _sys
+    sys_path_hack = str(REPO / "hscc-bootstrap")
+    if sys_path_hack not in _sys.path:
+        _sys.path.insert(0, sys_path_hack)
+    skill_guard = importlib.import_module("skill_guard")
+    broken = []
+    for p in orchs:
+        res = skill_guard.resolution(
+            skill_guard.profile_skill_roots(p), skill_guard.REVIEW_SKILL)
+        if res["state"] != "ok":
+            broken.append(f"{p.name}: {res['state']}")
+    assert not broken, f"profiles created by THIS run cannot review: {broken}"
+
+
 def test_helpers_do_not_hardcode_the_home_paths():
     """Static guard, runs without the runtime.
 
