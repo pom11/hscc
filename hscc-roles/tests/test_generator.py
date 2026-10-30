@@ -945,12 +945,23 @@ def test_compose_soul_pontaje_keeps_publish_constraint_without_naming_others():
       - 'restore' the live block verbatim -> the named shared/prod inventory
         lands in a PUBLIC repo (the leak class scripts/address_guard.py
         documents; no tracked file names them today).
+
+    The guardrail is pinned as the CONTIGUOUS normalized phrase, not as the
+    words 'shared'/'production': mutation M3 (guardrail sentence deleted from
+    the spec) SURVIVED the first version of this test, because base-identity.md
+    carries 'shows up in production' and the identity's own closing carries
+    'shared values' — word-level assertions were fail-open. Whitespace
+    normalization keeps it robust against compose_soul's reflow, which raw
+    substring-on-source would not be.
     """
     base = open(rolelib.BASE_IDENTITY_PATH, encoding="utf-8").read()
     soul = generator.compose_soul(rolelib.load_spec(_PONTAJE_SPEC), base)
+    flat = " ".join(soul.split())
     assert "POM_PONTAJE" in soul
-    assert "shared" in soul.lower() and "production" in soul.lower(), (
-        "the publish guardrail (never a shared or production sandbox) was lost")
+    assert "never a shared or production sandbox" in flat, (
+        "the publish guardrail (never a shared or production sandbox) was lost "
+        "from the composed SOUL — generate would drop the constraint that keeps "
+        "this worker off shared/prod BC sandboxes")
 
 
 def test_role_specs_name_no_shared_sandbox_inventory():
