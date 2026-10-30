@@ -728,7 +728,18 @@ def _model_name(recipe_path: str) -> str:
 
 def to_serving_json(plan: ResolvedPlan) -> dict:
     """Resolved plan → serving.json (one keepalive unit per worker unit, on its
-    assigned port; the orchestrator on 8000)."""
+    assigned port; the orchestrator on 8000).
+
+    ``max_num_seqs`` is carried onto every unit that has one — it MUST be,
+    because serving.json is the ONLY record the daemon's wake path reads
+    (``hscc_daemon/serving.py:_unit_run_cmd`` builds every ``hscc cluster up`` /
+    autodown-wake / gentle-relaunch command from these entries). A cap that was
+    applied but not recorded here comes back at the RECIPE default after any
+    autodown, reboot or heal cycle — silently breaking a per-node concurrency
+    rule the operator stated in the template. Omitted when None (the same
+    omit-if-absent rule as ``uniform_pool`` below), so serving.json for a
+    template that never mentions the key stays byte-identical.
+    """
     units = [{
         "id": "orch",
         "role": "orchestrator",
@@ -737,11 +748,13 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
         "nodes": plan.orchestrator.nodes,
         "port": plan.orchestrator.port,
     }]
+    if plan.orchestrator.max_num_seqs is not None:
+        units[0]["max_num_seqs"] = plan.orchestrator.max_num_seqs
     for fam in plan.families:
         for u in fam.units:
             short = u.model.split("/")[-1]
             suffix = u.nodes[0].rsplit(".", 1)[-1]
-            units.append({
+            entry = {
                 "id": f"family-{fam.name}-{short}-{suffix}-{u.port}",
                 "role": "worker",
                 "keepalive": True,
@@ -752,7 +765,10 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
                 "tp": u.tp,
                 "pp": u.pp,
                 "family": fam.name,
-            })
+            }
+            if u.max_num_seqs is not None:
+                entry["max_num_seqs"] = u.max_num_seqs
+            units.append(entry)
     out = {"version": 2, "units": units}
     # Record the pool shape so downstream consumers that only read serving.json
     # (hscc-roles' profile generator, bootstrap) can tell a role-agnostic pool

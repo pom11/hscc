@@ -120,8 +120,14 @@ class TestKeepaliveUnits:
         # derive BOTH aliases for a uniform pool (else a gentle relaunch
         # collapses the pool one node at a time). False when absent/not a pool.
         assert all(u["uniform_pool"] is False for u in units)
+        # max_num_seqs is carried too (None when the unit declares no cap) —
+        # health's gentle relaunch and auto-heal both hand these entries to
+        # serving._unit_run_cmd, which needs the cap to re-issue the unit's
+        # declared concurrency limit instead of the recipe default.
+        assert all(u["max_num_seqs"] is None for u in units)
         assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes",
-                                     "tp", "model", "role", "uniform_pool"}
+                                     "tp", "model", "role", "uniform_pool",
+                                     "max_num_seqs"}
                    for u in units)
 
     def test_dedupes_dup_nodes_same_unit(self, monkeypatch):

@@ -368,6 +368,12 @@ def keepalive_units(serving):
                             "tp": tp,
                             "model": u.get("model"),
                             "role": u.get("role"),
+                            # Carried so a relaunch of THIS entry (health's
+                            # gentle relaunch and auto-heal both feed these
+                            # entries straight into serving._unit_run_cmd)
+                            # re-issues the unit's declared concurrency cap
+                            # instead of the recipe default. None = no cap.
+                            "max_num_seqs": u.get("max_num_seqs"),
                             "uniform_pool": pool})
     for node in _env_keepalive_nodes():
         key = (node, default_port)
@@ -470,6 +476,53 @@ def _flag_after(cmd, flag, default=None):
     return default
 
 
+# Recipe overrides ride as the repeatable `-o key=value` pair (sparkrun has no
+# dedicated flag for them — verified against the live `sparkrun run --help`:
+# "-o, --option TEXT  Override any recipe default: -o key=value (repeatable)").
+# This is how `max_num_seqs` reaches vLLM, on both the apply path
+# (cluster_template._render_serve_cmd) and the wake path (_unit_run_cmd).
+OPTION_FLAGS = ("-o", "--option")
+
+
+def _option_overrides(cmd):
+    """{key: value} for every `-o key=value` / `--option key=value` in ``cmd``.
+
+    Mirrors ``cluster_template._serve_cmd_flags``'s handling of the same pairs,
+    which is the form the apply path RECORDS in serve_cmd. Folding both spellings
+    (`-o`, `--option`) into the same key is what lets the drift canary compare a
+    recorded command and a derived command without the spelling of the flag
+    reading as drift, and without the `-o` token (no `--` prefix) being mistaken
+    for a positional.
+    """
+    out = {}
+    for i, tok in enumerate(cmd):
+        if tok in OPTION_FLAGS and i + 1 < len(cmd):
+            key, _, val = str(cmd[i + 1]).partition("=")
+            out[key] = val
+    return out
+
+
+def _max_num_seqs_from(unit):
+    """The unit's per-unit vLLM concurrency cap as an int, or None.
+
+    Sanitised rather than trusted: serving.json is operator-editable, and a
+    bool / float / string / non-positive value here would reach sparkrun as a
+    malformed `-o max_num_seqs=…`. None of those are meaningful caps, so they
+    degrade to "no cap" (the recipe default), which is the pre-existing
+    behaviour for a unit that never stated one. The template parse path
+    (template_intent._max_num_seqs_from) is the strict one that REJECTS such
+    values; this one only has to avoid emitting garbage.
+    """
+    raw = unit.get("max_num_seqs")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val >= 1 else None
+
+
 def _serve_cmd_mismatch(u, cmd):
     """'' if unit's serve_cmd agrees with its authoritative fields, else a reason.
 
@@ -511,6 +564,24 @@ def _serve_cmd_mismatch(u, cmd):
         got = _flag_after(sc, flag)
         if want is not None and got is not None and got != want:
             return f"serve_cmd {flag} {got!r} != derived {want!r}"
+    # Recipe overrides (`-o key=value`) are NOT part of the intent hash —
+    # sparkrun deliberately does not hash serve args
+    # (sparkrun.core.job_metadata.generate_intent_id hashes runtime/model/
+    # container/port/served-model-name/parallelism only), so a disagreement here
+    # can never spawn a duplicate container. It is still worth being loud,
+    # because the recorded command is the only other place the fleet's intended
+    # launch knobs live: a record that carries a `-o` the derived command lacks
+    # means the unit's own fields DROPPED that knob, and the wake would restart
+    # it at the RECIPE default instead of at the declared value (this is exactly
+    # how a `max_num_seqs` cap went missing after an autodown cycle).
+    rec_opts = _option_overrides(sc)
+    der_opts = _option_overrides(cmd)
+    for key in sorted(set(rec_opts) | set(der_opts)):
+        got, want = rec_opts.get(key), der_opts.get(key)
+        if got == want:
+            continue
+        derived = f"-o {key}={want!r}" if want is not None else f"no -o {key}"
+        return f"serve_cmd -o {key}={got!r} != derived {derived}"
     return ""
 
 
@@ -549,6 +620,21 @@ def _unit_run_cmd(unit):
     # intent-hash divergence the docstring above warns about.
     tp = unit.get("tp")
     cmd.extend(["--tp", str(int(tp)) if tp is not None else "1"])
+    # Then the recipe overrides, LAST — the same position
+    # cluster_template._render_serve_cmd puts them in, so a recorded serve_cmd
+    # and a derived wake command for one unit read alike.
+    #
+    # `max_num_seqs` MUST ride here or the cap is silently lost on every wake:
+    # serving.json is the only record of what the template declared (the
+    # template itself is never re-read by this path), and sparkrun does NOT hash
+    # serve args into the intent id — so an omitted cap is not a duplicate-
+    # container hazard, it is a unit that comes back at its RECIPE default
+    # (flash-next ships 8) after an autodown/reboot/heal cycle, while the
+    # operator's per-node rule says <=5. Emitting it keeps the value faithful
+    # across the whole lifecycle.
+    cap = _max_num_seqs_from(unit)
+    if cap is not None:
+        cmd.extend(["-o", f"max_num_seqs={cap}"])
     return cmd
 
 
@@ -597,7 +683,8 @@ def fleet_up_plan(serving=None):
                          "nodes": nodes, "port": port, "unit_id": unit_id,
                          "recipe": recipe, "keepalive": False,
                          "model": u.get("model"), "serve_cmd": u.get("serve_cmd"),
-                         "tp": u.get("tp"), "uniform_pool": pool})
+                         "tp": u.get("tp"), "uniform_pool": pool,
+                         "max_num_seqs": u.get("max_num_seqs")})
         elif role == "worker":
             # BOTH keepalive and non-keepalive workers come up on fleet-up.
             recipe = u.get("recipe") or _topo_value("VLLM_RECIPE")
@@ -608,7 +695,8 @@ def fleet_up_plan(serving=None):
                             "keepalive": bool(u.get("keepalive")),
                             "model": u.get("model"),
                             "serve_cmd": u.get("serve_cmd"),
-                            "tp": u.get("tp"), "uniform_pool": pool})
+                            "tp": u.get("tp"), "uniform_pool": pool,
+                            "max_num_seqs": u.get("max_num_seqs")})
     workers.sort(key=lambda e: e["unit_id"])
     plan = orch + workers
     cmds = []
