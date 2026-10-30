@@ -476,6 +476,22 @@ def test_production_transport_is_the_sparkrun_bridge(monkeypatch):
     assert bad["ok"] is False and "clusterlib unavailable" in bad["stderr"]
 
 
+def test_pkgs_default_follows_the_environment(monkeypatch):
+    """An install rooted elsewhere must be migrated against ITS code.
+
+    Baking ``~/.hermes/plugins`` makes the migration emit a unit whose ExecStart
+    and PYTHONPATH name a copy the node does not run — the same rule
+    ``install_payload.py`` follows, and the reason
+    ``test_bootstrap_isolated.test_helpers_do_not_hardcode_the_home_paths``
+    rejects a bare expanduser in a bootstrap helper.
+    """
+    monkeypatch.delenv("PLUGINS", raising=False)
+    assert m._pkgs_from_args([]) == os.path.expanduser("~/.hermes/plugins")
+    monkeypatch.setenv("PLUGINS", "/opt/other-runtime/plugins")
+    assert m._pkgs_from_args([]) == "/opt/other-runtime/plugins"
+    assert m._pkgs_from_args(["--pkgs", "/srv/checkout"]) == "/srv/checkout"
+
+
 # ── bash-backed fake node: the REAL script against a stateful systemctl ─────
 
 STUB_SYSTEMCTL = r"""#!/usr/bin/env bash

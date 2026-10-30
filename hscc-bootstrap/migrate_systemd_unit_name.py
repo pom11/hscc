@@ -792,14 +792,17 @@ def _pkgs_from_args(argv: List[str]) -> str:
     """PYTHONPATH for the node-side emitter.
 
     The migration targets the DEPLOYED runtime copy, so the default is
-    ``~/.hermes/plugins`` (where ``hscc_daemon/`` sits on a node). ``--pkgs``
-    overrides it for a box that runs from a checkout.
+    ``$PLUGINS`` — falling back to ``~/.hermes/plugins``, where ``hscc_daemon/``
+    sits on a node. ``--pkgs`` overrides both for a box that runs from a
+    checkout. The env is consulted first so an install rooted elsewhere is not
+    migrated against a copy of the code that is not the one it runs (same rule
+    ``install_payload.py`` follows).
     """
     if "--pkgs" in argv:
         i = argv.index("--pkgs")
         if i + 1 < len(argv):
             return argv[i + 1]
-    return os.path.expanduser("~/.hermes/plugins")
+    return os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
