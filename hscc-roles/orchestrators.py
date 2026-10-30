@@ -171,6 +171,95 @@ def _project_orch_spec(project: str, resolved: dict) -> dict:
     }
 
 
+def seed_review_skills_for(profile_dir: str) -> dict:
+    """Guarded install of the review-lane skills into ONE orchestrator profile
+    home (B1, round-2 review — the `orch`/`orch-all` hole).
+
+    A profile that `orch`/`orch-all` has just created has an EMPTY skills
+    tree, and the dispatcher force-injects ``sdlc-review`` for review-lane
+    spawns to ANY assignee (kanban_db_dispatch) — so a freshly provisioned
+    orchestrator that nobody seeded dies on its very first review card with
+    'Unknown skill(s): sdlc-review', exactly the card's bug class. The
+    bootstrap stage covers the batch case; this covers profiles created LATER
+    by `hscc.py orch <new-project>` (or the API's bootstrap route), where no
+    later bootstrap run is guaranteed.
+
+    Delegates every write decision to ``install_review_skill.plan_home`` — the
+    same collision-guarded, idempotent, never-delete, always-back-up path the
+    bootstrap stage uses (a name that resolves elsewhere is skipped, never
+    duplicated). Best-effort by design: provisioning an orchestrator must
+    never fail because skill seeding could not run (half-deployed tree), so a
+    failure is REPORTED in the returned dict, not raised — and doctor's
+    reviewer-readiness finding surfaces it on the next read.
+
+    Returns a small report ``{"ok": bool, "skills": {name: action}, ...}``.
+    """
+    from pathlib import Path as _Path
+    import sys as _sys
+    profile_home = _Path(profile_dir)
+    name = profile_home.name
+    report = {"ok": True, "skills": {}}
+    try:
+        # Sibling plugin dir (deployed layout: ~/.hermes/plugins/hscc-bootstrap
+        # next to hscc-roles; repo layout: <repo>/hscc-bootstrap). String
+        # concat, NOT os.path.join(dir, os.sep, ...) — os.sep is absolute and
+        # would restart the path at '/'.
+        _sibling = (os.path.dirname(os.path.abspath(__file__))
+                    + os.sep + ".." + os.sep + "hscc-bootstrap")
+        if _sibling not in _sys.path:
+            _sys.path.insert(0, _sibling)
+        import install_review_skill as irs  # noqa: F401 (lazy sibling import)
+    except ImportError as exc:  # pragma: no cover - half-deployed tree only
+        return {"ok": False, "skills": {},
+                "error": f"install_review_skill unavailable: {exc}"}
+    if not skill_guard_is_reviewer(name):
+        # Non-reviewer homes are never seeded (the card forbids installing
+        # into profiles that cannot review); orchestrators are all reviewers.
+        report["skills"]["_"] = "skipped-not-reviewer"
+        return report
+    # Same B3 policy as install_review_skill(): inside a REVIEWER-CAPABLE home
+    # the .no-bundled-skills marker does NOT bind — create_profile
+    # (no_skills=True) (generator.py:470) is what minted it, so it is hscc's own
+    # footprint rather than an operator opt-out, and honouring it would leave a
+    # freshly minted orchestrator unable to answer the dispatcher's
+    # force-injected review spawn. The card's acceptance needs all THREE names
+    # resolvable on the *-orch set, so all three are seeded here. (The marker
+    # still binds for NON-reviewer homes — install_review_skill's caller decides
+    # that, and every profile reaching this function is already gated as a
+    # reviewer by skill_guard_is_reviewer above.)
+    for skill in irs.INSTALLABLE:
+        bundle = irs.bundle_source(skill)
+        if bundle is None or not (bundle / "SKILL.md").is_file():
+            report["ok"] = False
+            report["skills"][skill] = "missing-bundle"
+            continue
+        try:
+            plan = irs.plan_home(
+                name, str(profile_home / "skills"), skill, bundle,
+                dry_run=False, stamp="orch", profile_home=profile_home,
+                reviewer_only=True, honor_opt_out=False)
+            report["skills"][skill] = plan["action"]
+        except OSError as exc:
+            report["ok"] = False
+            report["skills"][skill] = f"error: {exc}"
+    return report
+
+
+def skill_guard_is_reviewer(profile_name: str) -> bool:
+    """Reviewer-capability via the shared rule (skill_guard), falling back to
+    the local ``-orch`` convention if the bootstrap module is unreachable."""
+    import sys as _sys
+    try:
+        _sibling = (os.path.dirname(os.path.abspath(__file__))
+                    + os.sep + ".." + os.sep + "hscc-bootstrap")
+        if _sibling not in _sys.path:
+            _sys.path.insert(0, _sibling)
+        import skill_guard  # noqa: F401 (lazy sibling import)
+        return skill_guard.is_reviewer_capable(profile_name)
+    except ImportError:  # pragma: no cover - half-deployed tree only
+        return profile_name.endswith("-orch") or profile_name == "reviewer"
+
+
 def ensure_orchestrator(
     project: Optional[str] = None,
     base_identity: str = "",
@@ -182,9 +271,17 @@ def ensure_orchestrator(
     and sessions are never clobbered). Built on the existing ``hscc-roles``
     ``generator.generate_profile`` machinery — the same path that mints the
     shipped role profiles. Returns the resolved identity dict (see
-    :func:`resolve_orchestrator`) with a ``changed`` flag.
+    :func:`resolve_orchestrator`) with a ``changed`` flag and a
+    ``review_skill`` seeding report (B1: the dispatcher force-injects
+    ``sdlc-review`` for review-lane spawns to ANY profile, so a freshly
+    provisioned orchestrator must resolve it before it can hold a review
+    card — guarded, idempotent, best-effort; see
+    :func:`seed_review_skills_for`).
     """
     resolved = resolve_orchestrator(project, path=path)
     spec = _project_orch_spec(resolved["project"], resolved)
     changed = generator.generate_profile(spec, base_identity=base_identity)
-    return {**resolved, "changed": changed}
+    # Same rolelib object generate_profile uses (tests monkeypatch it).
+    seed = seed_review_skills_for(
+        os.path.join(generator.rolelib.PROFILES_DIR, resolved["profile"]))
+    return {**resolved, "changed": changed, "review_skill": seed}

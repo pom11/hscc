@@ -209,6 +209,12 @@ def cmd_install():
             skills_results[skill] = ("MISSING", f"not found in source")
             continue
 
+        skip = _guard_skips(skill, SKILLS_DEST, HERMES_HOME)
+        if skip:
+            skills_skipped += 1
+            skills_results[skill] = ("GUARDED", skip[:120])
+            continue
+
         results = copy_skill_dir(src, SKILLS_DEST, skill)
         if not results:
             skills_skipped += 1
@@ -277,8 +283,42 @@ def cmd_install():
         print("  Everything is already up to date. Nothing to do.")
 
 
+def _guard_skips(skill_name, dest_dir, hermes_home):
+    """Collision-guard verdict for one bundled skill about to be written into
+    ``dest_dir`` (card t_bc611809).
+
+    This module is the writer that CREATED the June collisions: BUNDLED_SKILLS
+    were copied FLAT into the live skills tree while hermes' own builtin sync
+    maintained category copies (``devops/sdlc-review``,
+    ``software-development/{systematic-debugging,test-driven-development}``)
+    with different content, and hermes refuses to resolve an ambiguous bare
+    name — every spawn asking for one died with 'Unknown skill(s)'. Writes now
+    go through the same guard install_review_skill.py uses: a name is only
+    copied when it resolves from NO other path in this home's scan set. The
+    import is lazy and fail-open ONLY when skill_guard.py is absent (a
+    half-deployed tree) — never on a guard *decision*.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))
+                        + os.sep + ".." + os.sep + "hscc-bootstrap")
+        import skill_guard
+    except ImportError:
+        return None
+    roots = [os.path.abspath(dest_dir)]
+    ext = skill_guard.external_dirs_for_home(hermes_home)
+    roots.extend(str(r) for r in ext)
+    res = skill_guard.resolution(roots, skill_name)
+    if res["state"] == "collision":
+        return ("collision: " + ", ".join(res["paths"]))
+    if res["state"] == "ok" and not all(
+            os.path.realpath(p) == os.path.realpath(os.path.join(dest_dir, skill_name))
+            for p in res["paths"]):
+        return ("already resolves elsewhere: " + ", ".join(res["paths"]))
+    return None
+
+
 def cmd_install_skills():
-    """Install / update Hermes skills only."""
+    """Install / update Hermes skills only (collision-guarded)."""
     print("─── Installing Hermes Skills ───")
     print(f"  Source: {SKILLS_SOURCE}")
     print(f"  Dest:   {SKILLS_DEST}")
@@ -290,10 +330,16 @@ def cmd_install_skills():
 
     results = []
     copied = 0
+    guarded = 0
     for skill in BUNDLED_SKILLS:
         src = os.path.join(SKILLS_SOURCE, skill)
         if not os.path.isdir(src):
             results.append((skill, "MISSING", "not found"))
+            continue
+        skip = _guard_skips(skill, SKILLS_DEST, HERMES_HOME)
+        if skip:
+            guarded += 1
+            results.append((skill, "GUARDED", skip[:120]))
             continue
         file_results = copy_skill_dir(src, SKILLS_DEST, skill)
         copies = sum(1 for s in file_results.values() if s == "copied")
@@ -305,6 +351,9 @@ def cmd_install_skills():
 
     print(format_status_table(results))
     print()
+    if guarded:
+        print(f"{guarded} skill(s) GUARDED (name already resolves elsewhere — "
+              "hscc will not create a collision; the category copy wins).")
     print(f"Done. {copied} file(s) installed, rest unchanged.")
 
 
