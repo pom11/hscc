@@ -31,7 +31,7 @@ import sys
 from hscc_daemon import autodown
 from hscc_daemon import cli_theme as theme
 
-VALID_SUBCOMMANDS = ("stale", "monitor")
+VALID_SUBCOMMANDS = ("stale", "monitor", "pause", "resume", "paused", "enforce")
 
 # The default for ``--older-than`` is decided here (a week) so the common
 # case surfaces genuinely-forgotten cards, not active work; the predicate
@@ -79,7 +79,26 @@ SUB_HELP = ("--help", "-h")
 # convention); wording is this module's own group HELP_TEXT verbatim, so the
 # two surfaces cannot drift. Only flag-shaped bracket tokens are used: Rich
 # swallows bare-word brackets as markup.
+_PAUSE_HELP = """\
+hscc kanban pause <board>... [--reason TEXT] [--json]
+hscc kanban resume <board>... [--json]
+hscc kanban paused [--json]
+hscc kanban enforce [--json]
+
+Hold whole boards so the fleet's slots go to higher-priority projects.
+pause    reclaims every running card (its worker stops, the worktree stays) and
+         blocks it and every ready card with a PAUSED reason; todo cards stay
+         parent-gated; kanban.auto_decompose is held off while any board is
+         paused (triage cards cannot be blocked).
+resume   unblocks EXACTLY the cards pause blocked (each goes to ready or back to
+         todo per its parents); cards blocked before the pause stay blocked.
+paused   lists paused boards and what they hold.
+enforce  blocks cards that became ready/running on a paused board since.
+State: ~/.hscc/state/kanban_paused.json.
+"""
+
 SUBCOMMAND_HELP = {
+    "pause": _PAUSE_HELP, "resume": _PAUSE_HELP, "paused": _PAUSE_HELP, "enforce": _PAUSE_HELP,
     "stale": """\
 hscc kanban stale [--older-than <days>] [--json]
 
@@ -311,15 +330,54 @@ def _cmd_monitor(rest, json_mode, theme_name=None):
     if json_mode and opts["live"]:
         return _error("--json is a single snapshot; drop --live", json_mode)
     if json_mode:
-        print(json.dumps(kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])),
+        print(json.dumps(kanban_live.attach_orchestrators(
+            kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))),
                          default=list))
         return 0
     console = _console(theme_name)
     if opts["live"]:
         return kanban_live.run_live(console, interval=opts["interval"], board=opts["board"])
-    data = kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))
+    data = kanban_live.attach_orchestrators(
+        kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])))
     console.print(kanban_live.render(data, snapshot=True, width=console.width))
     return 1 if data["errors"] and not data["boards"] else 0
+
+
+def _cmd_pause(sub, rest, json_mode, theme_name=None):
+    """pause / resume / paused / enforce (kanban_pause)."""
+    from hscc_daemon import kanban_pause as kp
+    reason = ""
+    if "--reason" in rest:
+        i = rest.index("--reason")
+        if i + 1 >= len(rest):
+            return _error("--reason needs a value", json_mode)
+        reason = rest[i + 1]
+        rest = rest[:i] + rest[i + 2:]
+    boards = [b for b in rest if not b.startswith("-")]
+    if sub in ("pause", "resume") and not boards:
+        return _error(f"usage: hscc kanban {sub} <board>...", json_mode)
+    if sub == "pause":
+        out = kp.pause(boards, reason)
+    elif sub == "resume":
+        out = kp.resume(boards)
+    elif sub == "enforce":
+        out = kp.enforce()
+    else:
+        state = kp.load_state()
+        out = {b: {"paused_at": state[b].get("paused_at"), "reason": state[b].get("reason"),
+                   "cards": [c["id"] for c in state[b].get("cards") or []],
+                   "triage_left": state[b].get("triage_left") or []}
+               for b in kp.paused_boards(state)}
+    if json_mode:
+        print(json.dumps(out, indent=2))
+        return 0
+    con = _console(theme_name)
+    if not out:
+        con.print("no boards paused" if sub in ("paused", "enforce") else "nothing to do")
+        return 0
+    for board, info in out.items():
+        con.print(f"[accent]{theme.esc(board)}[/accent]  {theme.esc(json.dumps(info))}")
+    return 0
 
 
 def cmd_kanban(argv):
@@ -361,6 +419,8 @@ def cmd_kanban(argv):
         return _cmd_stale(rest, json_mode, theme_name)
     if sub == "monitor":
         return _cmd_monitor(rest, json_mode, theme_name)
+    if sub in ("pause", "resume", "paused", "enforce"):
+        return _cmd_pause(sub, rest, json_mode, theme_name)
 
     _console(theme_name).print(f"Error: unknown kanban subcommand: {sub}")
     _console(theme_name).print(

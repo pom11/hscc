@@ -710,6 +710,15 @@ def _run_cluster_list() -> str:
         return ""
 
 
+# ── snap firmware-notifier mask check (card t_61850b24) ────────────────────
+# Name is defined here (not read from the module) so the "check missing"
+# rendering still names the check when the module itself is absent.
+# Hosts come from the ONE cluster reader `_node_hosts()` (the sibling
+# node-recovery check uses the same); this card deliberately does not add a
+# second one.
+_NOTIFIER_CHECK_NAME = "snap firmware-notifier mask (node-recovery)"
+
+
 # ── proxy-outage 2026-10-11 report-only checks (t_proxy_outage_20261011) ────
 #
 # Three fleet-state checks the outage proved worth having BEFORE the next
@@ -1160,6 +1169,67 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # different key than the real check would have used.
         checks.append(Check(doctor_role_soul.check_name(), True,
                             detail="skipped (fleet checks off)", fatal=False))
+    # snap firmware-notifier mask (card t_61850b24) — its OWN check, kept in a
+    # self-contained block so it cannot collide with the sibling node-recovery
+    # check's wiring above. Same honesty rule as that check and as the install
+    # stage: a node we could not read is an ERROR, never ok, never a skip; a
+    # skipped check says it was skipped instead of vanishing.
+    #
+    # No new run_doctor() parameter is needed: the check resolves its own
+    # transport through doctor_notifier_mask._default_ssh_factory, which REFUSES
+    # to produce one inside a pytest process, so the suite can never ssh the
+    # live fleet by calling run_doctor(). A test injects its transport by
+    # calling doctor_notifier_mask.check(ssh_factory=...) directly.
+    if fleet_checks:
+        try:
+            import doctor_notifier_mask
+        except ImportError:
+            checks.append(Check(_NOTIFIER_CHECK_NAME, False,
+                                detail=f"doctor_notifier_mask.py missing from "
+                                       f"{os.path.dirname(os.path.abspath(__file__))} "
+                                       f"— the mask cannot be verified",
+                                fix="Restore hscc-bootstrap/doctor_notifier_mask.py "
+                                    "(re-run bootstrap); the notifier mask is "
+                                    "currently unverifiable.",
+                                fatal=False))
+        else:
+            nm_res = doctor_notifier_mask.check(
+                _node_hosts(_cluster_runner),
+                hscc_dir=os.environ.get("HSCC_DIR"))
+            # Only the five Check fields enter the list, so `doctor --json`
+            # keeps one shape; per-node rows stay available to callers of
+            # doctor_notifier_mask.check().
+            checks.append(Check(name=nm_res["name"], ok=nm_res["ok"],
+                                detail=nm_res["detail"], fix=nm_res["fix"],
+                                fatal=nm_res["fatal"]))
+    else:
+        try:
+            import doctor_notifier_mask
+            _nm_name = doctor_notifier_mask.CHECK_NAME
+        except ImportError:
+            _nm_name = _NOTIFIER_CHECK_NAME
+        checks.append(Check(_nm_name, True, detail="skipped (fleet checks off)",
+                            fatal=False))
+    # GPU clock cap — same shape as the notifier block: own module, own check,
+    # the transport refuses to exist inside pytest (inject via
+    # install_gpu_clock_cap.doctor_check(ssh_factory=...)).
+    try:
+        import install_gpu_clock_cap
+    except ImportError:
+        checks.append(Check("GPU clock cap (node-recovery)", not fleet_checks,
+                            detail=("install_gpu_clock_cap.py missing — the cap cannot "
+                                    "be verified" if fleet_checks
+                                    else "skipped (fleet checks off)"),
+                            fix="Restore hscc-bootstrap/install_gpu_clock_cap.py (re-run bootstrap).",
+                            fatal=False))
+    else:
+        if fleet_checks:
+            gc = install_gpu_clock_cap.doctor_check(_node_hosts(_cluster_runner))
+            checks.append(Check(name=gc["name"], ok=gc["ok"], detail=gc["detail"],
+                                fix=gc["fix"], fatal=gc["fatal"]))
+        else:
+            checks.append(Check(install_gpu_clock_cap.CHECK_NAME, True,
+                                detail="skipped (fleet checks off)", fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
         "ok": not fatal_failed,

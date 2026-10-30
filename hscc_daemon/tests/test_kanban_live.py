@@ -22,6 +22,9 @@ NOW = 1_800_000_000
 def _no_real_hermes_home(tmp_path, monkeypatch):
     # attach_tokens() defaults to ~/.hermes; never read the operator's DBs here.
     monkeypatch.setattr(kanban_live, "HERMES_HOME", str(tmp_path / "hermes-home"))
+    # ...nor write the real orchestrator ledger or read the real process list.
+    monkeypatch.setattr(kanban_live, "LEDGER_PATH", str(tmp_path / "ledger.json"))
+    monkeypatch.setattr(kanban_live, "_ps_lines", lambda: [])
 
 SCHEMA = """
 CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
@@ -131,7 +134,9 @@ def test_render_escapes_titles_and_flags_full_cap():
     buf = io.StringIO()
     make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d, snapshot=True))
     out = buf.getvalue()
-    assert "slots in use 1/1" in out and "global cap full" in out
+    assert "1/1 slots (≤2/profile)" in out and "global cap full" in out
+    assert "running (" not in out
+    assert "slots in use" not in out
     assert "t_run" in out and "5h00m" in out and "stuck [/bold]" in out
 
 
@@ -141,7 +146,7 @@ def test_short_pane_drops_lower_sections_first():
     make_console(file=buf, width=160, color_system=None).print(
         kanban_live.render(d, height=12))
     out = buf.getvalue()
-    assert "running (1)" in out and "ready, waiting" in out
+    assert "t_run" in out and "ready, waiting" in out
     assert "last hour" not in out
 
 
@@ -234,3 +239,140 @@ def test_render_shows_card_tokens_and_24h_total():
     out = buf.getvalue()
     assert "18.0M/202k" in out
     assert "tokens 24h in 1.23G · out 3.4M" in out
+
+
+def test_token_windows_split_workers_and_orchestrators(tmp_path):
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
+        ("w1", "kanban", NOW - 3600, 100, 10),                 # in 24h and 7d
+        ("w2", "kanban", NOW - 3 * 86400, 1_000, 100),         # 7d only
+        ("w3", "kanban", NOW - 9 * 86400, 5, 5)])              # neither
+    _state_db(tmp_path / "profiles" / "sphoin-orch" / "state.db", [
+        ("c1", "cron", NOW - 600, 40, 4),                      # cron = orchestrator, by started_at
+        ("repl", "cli", NOW - 60 * 86400, 9_000, 900)])        # weeks-old REPL: ledger only
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps([[NOW - 8 * 86400, 1_000, 100],   # before the 7d window
+                                  [NOW - 2 * 86400, 5_000, 500],
+                                  [NOW - 3600, 8_000, 800]]))
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW, ledger_path=str(ledger))
+    t = d["tokens"]
+    assert t["workers"]["24h"] == [100, 10]
+    assert t["workers"]["7d"] == [1_100, 110]
+    # 24h: cron 40/4 + growth since the sample at/before NOW-24h (5000 → 8000 → 9000)
+    assert t["orchestrators"]["24h"] == [40 + 4_000, 4 + 400]
+    # 7d: cron + growth from the NOW-8d sample (1000 → 9000)
+    assert t["orchestrators"]["7d"] == [40 + 8_000, 4 + 800]
+    assert t["orchestrators"]["since"] is None      # ledger already covers 7 days
+    assert json.loads(ledger.read_text())[-1] == [NOW, 9_000, 900]
+
+
+def test_ledger_survives_a_deleted_session_and_reports_since(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    samples = [[NOW - 7200, 5_000, 500], [NOW - 3600, 1_000, 100]]   # a session got deleted
+    ledger.write_text(json.dumps(samples))
+    _state_db(tmp_path / "profiles" / "x-orch" / "state.db", [("r", "cli", NOW - 86400 * 30, 1_600, 160)])
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW, ledger_path=str(ledger))
+    o = d["tokens"]["orchestrators"]
+    assert o["24h"] == [600, 60]                    # the drop costs 0, never negative
+    assert o["since"] == NOW - 7200                 # less than 7 days of history
+
+
+def test_ledger_samples_at_most_every_step(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    kanban_live._update_ledger(str(ledger), NOW, [1, 1])
+    kanban_live._update_ledger(str(ledger), NOW + 60, [2, 2])        # too soon: not stored
+    kanban_live._update_ledger(str(ledger), NOW + 400, [3, 3])
+    assert json.loads(ledger.read_text()) == [[NOW, 1, 1], [NOW + 400, 3, 3]]
+
+
+def test_chat_profiles_skips_workers_and_pane_wrappers():
+    ps = [
+        "/venv/bin/python /Users/x/.local/bin/hermes -p sphoin-orch chat --continue sphoin",
+        "zsh -c /Users/x/.local/bin/hermes -p ecofire-flows-orch chat --continue ecofire-flows; exec zsh",
+        "/venv/bin/python /Users/x/.local/bin/hermes -p ecofire-flows-orch chat --continue ecofire-flows",
+        "/venv/bin/python -m hermes_cli.main -p backend-engineer --cli --accept-hooks",
+        "/venv/bin/python -m hermes_cli.main gateway run --replace",
+        "vim notes-about-hermes-chat.md",
+    ]
+    assert kanban_live._chat_profiles(ps) == ["sphoin-orch", "ecofire-flows-orch"]
+
+
+def _orch_db(path, sessions, messages):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, ended_at REAL, "
+              "title TEXT, input_tokens INTEGER, output_tokens INTEGER)")
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL)")
+    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", sessions)
+    c.executemany("INSERT INTO messages (session_id, timestamp) VALUES (?,?)", messages)
+    c.commit()
+    c.close()
+
+
+def test_attach_orchestrators_picks_the_cli_session_with_latest_message(tmp_path):
+    _orch_db(tmp_path / "profiles" / "sphoin-orch" / "state.db", [
+        ("old", "cli", NOW - 90 * 86400, None, "stale", 1, 1),
+        ("live", "cli", NOW - 9 * 86400, None, "sphoin", 97_000_000, 990_000),
+        ("done", "cli", NOW - 86400, NOW - 3600, "closed", 5, 5),      # older activity
+        ("ended-live", "cli", NOW - 3 * 86400, NOW - 7200, "ended", 3, 3),  # stamped ended, older msgs
+        ("job", "cron", NOW - 60, None, "cron run", 7, 7)],
+        [("old", NOW - 80 * 86400), ("live", NOW - 30), ("done", NOW - 3700),
+         ("ended-live", NOW - 600), ("job", NOW - 5)])
+    (tmp_path / "profiles" / "kronos-orch").mkdir(parents=True)                    # no state.db
+    ps = ["/v/python /u/.local/bin/hermes -p sphoin-orch chat --continue sphoin",
+          "/v/python /u/.local/bin/hermes -p kronos-orch chat --continue kronos"]
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
+    s, k = d["orchestrators"]
+    assert (s["profile"], s["title"], s["last_s"]) == ("sphoin-orch", "sphoin", 30)
+    assert (s["tok_in"], s["tok_out"]) == (97_000_000, 990_000)
+    assert k == {"profile": "kronos-orch", "title": None, "last_s": None,
+                 "tok_in": None, "tok_out": None}
+
+
+def test_render_shows_orchestrators_and_7d_tokens():
+    d = _collect()
+    d["tokens"] = {"workers": {"24h": [400_000_000, 6_000_000], "7d": [2_000_000_000, 30_000_000]},
+                   "orchestrators": {"24h": [20_000_000, 300_000], "7d": [90_000_000, 1_000_000],
+                                     "since": NOW - 3600}}
+    d["orchestrators"] = [{"profile": "sphoin-orch", "title": "sphoin", "last_s": 30,
+                           "tok_in": 97_000_000, "tok_out": 990_000}]
+    buf = io.StringIO()
+    make_console(file=buf, width=200, color_system=None).print(kanban_live.render(d))
+    out = buf.getvalue()
+    lines = out.splitlines()
+    head = next(l for l in lines if l.startswith("Tokens"))
+    assert head.split() == ["Tokens", "24h", "in", "24h", "out", "7d", "in", "7d", "out"]
+    assert next(l for l in lines if l.startswith("workers")).split()[1:] == ["400.0M", "6.0M", "2.00G", "30.0M"]
+    assert next(l for l in lines if l.startswith("orchestrators ")).split()[1:] == ["20.0M", "300k", "90.0M", "1.0M"]
+    assert next(l for l in lines if l.startswith("total")).split()[1:] == ["420.0M", "6.3M", "2.09G", "31.0M"]
+    assert "orchestrators (1 running)" in out
+    assert "sphoin-orch" in out and "97.0M/990k" in out
+    assert "orchestrator history since" not in out
+
+
+def test_attach_orchestrators_trusts_messages_not_ended_at(tmp_path):
+    # a live REPL whose only session is already stamped ended (seen on ecofire-bc-orch)
+    _orch_db(tmp_path / "profiles" / "bc-orch" / "state.db",
+             [("seed", "cli", NOW - 30 * 86400, NOW - 86400, "ecofire-bc", 1_000, 10)],
+             [("seed", NOW - 90)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW,
+                                     ps_lines=["/v/p /u/bin/hermes -p bc-orch chat --continue ecofire-bc"])
+    assert d["orchestrators"][0]["title"] == "ecofire-bc"
+    assert d["orchestrators"][0]["last_s"] == 90
+
+
+def test_attach_orchestrators_never_turns_a_foreign_argv_into_a_path(tmp_path):
+    outside = tmp_path / "elsewhere" / "state.db"
+    _orch_db(outside, [("x", "cli", NOW - 60, None, "leak", 1, 1)], [("x", NOW - 1)])
+    _orch_db(tmp_path / "profiles" / "ok-orch" / "state.db",
+             [("s", "cli", NOW - 60, None, "\x1b[2Jboom\x07", 5, 5)], [("s", NOW - 1)])
+    ps = ["/v/p /u/bin/hermes -p ../../elsewhere chat",       # traversal
+          "/v/p /u/bin/hermes -p ghost-orch chat",           # no such profile dir
+          "/v/p /u/bin/hermes -p ok-orch chat"]
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
+    assert [r["profile"] for r in d["orchestrators"]] == ["ok-orch"]
+    assert d["orchestrators"][0]["title"] == "[2Jboom"      # control chars stripped

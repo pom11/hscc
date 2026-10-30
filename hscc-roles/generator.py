@@ -237,6 +237,65 @@ def _read_existing_config(pdir):
     return comp, aux
 
 
+# Reasoning depth by tier (operator 2026-10-29). The fleet is throughput-bound
+# and reasoning tokens are decode time, so implementation workers sit on the
+# `standard` tier; orchestrators and the roles whose job is to catch mistakes
+# sit on `max`; subagents (`delegate_task`, read-only lookups) use `light`. The
+# concrete effort per tier is model vocabulary and comes from the applied
+# cluster template's `reasoning:` block — with no policy recorded, nothing is
+# written and whatever the profile has stays.
+
+
+def reasoning_tier(spec_or_name):
+    """The tier for a role spec (dict) or a bare profile name (no spec)."""
+    if isinstance(spec_or_name, dict):
+        if spec_or_name.get("reasoning_tier"):
+            return spec_or_name["reasoning_tier"]
+        name = spec_or_name["name"]
+    else:
+        name = spec_or_name
+    return "max" if _is_orchestrator(name) else "standard"
+
+
+def load_reasoning_policy(path=None):
+    """``{tier: effort}`` recorded by the last template apply, or ``{}``."""
+    try:
+        with open(path or rolelib.REASONING_POLICY_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    tiers = data.get("tiers") if isinstance(data, dict) else None
+    if not isinstance(tiers, dict):
+        return {}
+    return {t: str(v) for t, v in tiers.items()
+            if t in rolelib.VALID_REASONING_TIERS and isinstance(v, str) and v.strip()}
+
+
+def reasoning_blocks(tier, policy, existing_agent, existing_delegation):
+    """Merged ``agent`` / ``delegation`` blocks carrying the policy's efforts.
+
+    A tier the policy does not declare leaves that key exactly as it was.
+    """
+    agent, delegation = dict(existing_agent or {}), dict(existing_delegation or {})
+    if policy.get(tier):
+        agent["reasoning_effort"] = policy[tier]
+    if policy.get("light"):
+        delegation["reasoning_effort"] = policy["light"]
+    return agent, delegation
+
+
+def _read_existing_block(pdir, key):
+    """The profile's on-disk top-level ``key:`` mapping, or ``{}``."""
+    path = os.path.join(pdir, "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return {}
+    block = data.get(key) if isinstance(data, dict) else None
+    return dict(block) if isinstance(block, dict) else {}
+
+
 def _read_existing_memory(pdir):
     """Read the profile's on-disk `memory:` block, if any.
 
@@ -368,6 +427,56 @@ _PROJECT_ORCH_OPS = (
     "work through its kanban board and hold sole authority over that board, "
     "but you do NOT hold authority over the physical cluster (only the "
     "cluster-wide `orchestrator` role does).\n"
+    "\n"
+    "## How you manage work\n\n"
+    "1. **Sub-atomic cards.** One card = one small change a reviewer can check "
+    "in minutes: one file (plus its test), one question, or one run. If the "
+    "acceptance check does not fit in one sentence, split the card. A card a "
+    "worker cannot finish in about two hours, or that would grow its context "
+    "past ~120K tokens, is too big — split it BEFORE dispatch. Big multi-part "
+    "cards wedge workers: the context fills, each model call slows to ten "
+    "minutes, and nothing gets committed.\n"
+    "2. **Chain with parents, never with `blocked`.** A dependent card is "
+    "created `todo` with its parents set; it promotes by itself when they "
+    "finish. A card created `blocked` never auto-promotes — use `blocked` only "
+    "for a human step or an explicit gate, and say on the card who unblocks it.\n"
+    "3. **Never park a card in `triage`** — the decomposer auto-splits it.\n"
+    "4. **Every card states** the files it may touch, the evidence to report "
+    "(the test command and pass count, `git status --short` empty after the "
+    "commit, the PR as `PR #N` — no URLs), and: commit early, open a PR, never "
+    "merge.\n"
+    "5. **You review and merge your board's PRs.** Read the diff and re-run "
+    "the stated checks yourself. A worker's \"0 errors\" or \"all green\" is a "
+    "claim until you have seen it.\n"
+    "6. **Pick the execution path:**\n"
+    "   - a **kanban card** for any change to the repo, anything longer than a "
+    "few minutes, and anything that needs its own branch, a PR, or evidence that "
+    "outlives this session;\n"
+    "   - a **subagent** (`delegate_task`) only for a quick, read-only, bounded "
+    "lookup whose answer you need now in this session (where is X defined, "
+    "what does this log say). Subagents share the fleet's GPUs but not the "
+    "kanban slot cap, so keep at most two running and never use them for code "
+    "that must land;\n"
+    "   - **yourself** only for board operations (create, link, unblock, "
+    "comment, review, merge) and reading.\n"
+    "7. **Missing specialist? Create the profile.** When no existing worker "
+    "fits a card (check `ls ~/.hermes/profiles` and the profiles' routing "
+    "descriptions), author a role instead of overloading a generic worker: "
+    "`~/.hermes/hermes-agent/venv/bin/python ~/.hermes/plugins/hscc-roles/hscc.py "
+    "create <name> <one-line description>`, then the same `hscc.py generate`. "
+    "Never copy another "
+    "profile's directory by hand. Then put a card on the hscc board to commit "
+    "the new `roles/<name>.yaml` spec into the repo. Until the profile exists, "
+    "assign the nearest specialist and say so on the card.\n"
+    "8. **Slots belong to the dispatcher.** The global cap "
+    "(`kanban.max_in_progress`) and the per-profile cap are fleet-wide; never "
+    "hand-dispatch past them or edit them. A stranded card waits — say so on "
+    "the card.\n"
+    "9. **No polling loops** in your pane: no `while true; sleep`, no watcher "
+    "daemons, no long-running heredoc pollers. The board wakes you when state "
+    "changes.\n"
+    "10. **Stop and report** when you need the operator. Production / LIVE "
+    "actions are the operator's alone.\n"
 )
 
 
@@ -514,6 +623,15 @@ def generate_profile(spec, base_identity):
     # fell back to Hermes' built-in memory at its smaller default.
     existing_memory = _read_existing_memory(pdir)
     config["memory"] = _memory_block(existing_memory)
+    # Reasoning depth from the applied template's policy, merged over any
+    # existing `agent:` / `delegation:` block so other hand-set keys survive.
+    agent, delegation = reasoning_blocks(
+        reasoning_tier(spec), load_reasoning_policy(),
+        _read_existing_block(pdir, "agent"), _read_existing_block(pdir, "delegation"))
+    if agent:
+        config["agent"] = agent
+    if delegation:
+        config["delegation"] = delegation
     # Worker roles serve from the load-balanced worker proxy so their work runs
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed; per-project
