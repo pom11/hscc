@@ -967,6 +967,8 @@ Commands:
   info                Detailed cluster configuration
   cluster-template    Manage cluster templates (list|preview|apply)
   profile-status      Show running kanban task counts per profile
+  orch inject <p> "<msg>" [--mode auto|plain|queue|steer] [--dry-run] [--json]
+                      Inject a message into a running Hermes REPL pane
         """.strip())
         sys.exit(0)
 
