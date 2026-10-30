@@ -82,6 +82,12 @@ description: "4 nodes: Qwen3.8-Flash-Next NVFP4 on every node at 262k context (S
 
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
+  # Per-node concurrency rule (see `caps` below): at most 5 RUNNING requests
+  # per node. The solo recipe ships max_num_seqs: 8, so the template caps it
+  # explicitly — `sparkrun run ... -o max_num_seqs=5` overrides the recipe
+  # default on every unit. Changing this value later reports serve-command
+  # drift on the next apply until --force-recreate.
+  max_num_seqs: 5
 
 families:
   - name: coding
@@ -92,6 +98,9 @@ families:
     # instances coincide, so that is 3 instances behind one proxy.
     models:
       - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
+        # Same cap on every worker unit (the per-node rule is per node, and
+        # each unit here owns one node).
+        max_num_seqs: 5
     workers: remaining
     proxy: true
 
