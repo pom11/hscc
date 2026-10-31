@@ -6,6 +6,12 @@ import pytest
 
 from hscc_daemon import kanban_pause as kp
 
+#: Pristine loader reference: the autouse fixture below re-binds
+#: kp._load_repl_inject, and a function-scoped monkeypatch undo would undo
+#: every pin at once — the one test that must reach the REAL sibling module
+#: uses this captured reference instead.
+_REAL_LOAD_REPL = kp._load_repl_inject
+
 
 class FakeHermes:
     """In-memory boards driven through the same argv the module sends."""
@@ -45,8 +51,17 @@ class FakeHermes:
 
 @pytest.fixture(autouse=True)
 def _no_real_inject(monkeypatch):
-    """Never type into a real tmux pane from a test."""
-    monkeypatch.setattr(kp, "INJECT_BIN", "/nonexistent/hermes-inject")
+    """Never type into a real tmux pane from a test.
+
+    t_75f17c83: the shell-out to ~/bin/hermes-inject is GONE — _inject now
+    loads the repl_inject MODULE (the sibling hscc-api dir IS importable from
+    this checkout, so without a pin a test could reach the real module and,
+    past its seam-guard, the real tmux). The default pin makes the module
+    "unavailable", which is the honest no-pane outcome for every test that
+    doesn't care about delivery; tests that do install their own stub loader
+    afterwards (a later monkeypatch of the same attribute wins).
+    """
+    monkeypatch.setattr(kp, "_load_repl_inject", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -172,19 +187,86 @@ def test_pause_interrupts_and_steers_the_orchestrator_resume_notifies(env):
     rep = kp.pause(["low"], "ecofire first", **kw)
     assert rep["low"]["orchestrator"]["ok"]
     profile, mode, msg = sent[0]
-    assert (profile, mode) == ("low-orch", "interrupt")
+    # The parity contract's canonical no-verb name (t_ff665ff9): `plain` is
+    # what interrupts a busy pane, and a PAUSE must interrupt. The legacy
+    # `interrupt` spelling must no longer be emitted.
+    assert (profile, mode) == ("low-orch", "plain")
     assert "Cancel what you are doing" in msg and "ecofire first" in msg and "`low`" in msg
     kp.resume(["low"], **kw)
     profile, mode, msg = sent[1]
     assert (profile, mode) == ("low-orch", "auto") and "RESUMED" in msg and "2 card(s)" in msg
 
 
-def test_missing_inject_tool_is_reported_not_fatal(env):
+def test_missing_inject_module_is_reported_not_fatal(env):
+    # The autouse _no_real_inject fixture pinned _load_repl_inject -> None.
     h = _boards()
     rep = kp.pause(["low"], run=h, state_path=env["state_path"], config_path=env["config_path"])
-    assert rep["low"]["orchestrator"] == {"ok": False,
-                                          "error": "/nonexistent/hermes-inject not found"}
+    assert rep["low"]["orchestrator"]["ok"] is False
+    assert "repl_inject not importable" in rep["low"]["orchestrator"]["error"]
+    assert sorted(rep["low"]["held"]) == ["q1", "r1"]      # the pause itself still happened
+
+
+class FakeReplInject:
+    """Stub of the repl_inject MODULE: records inject() calls, no tmux, no subprocess."""
+
+    def __init__(self, fail=None):
+        self.calls = []
+        self.fail = fail                      # exception to raise, or None
+
+    def inject(self, profile, message, mode="auto", pane_override=None, dry_run=False):
+        self.calls.append({"profile": profile, "message": message, "mode": mode,
+                           "pane_override": pane_override, "dry_run": dry_run})
+        if self.fail:
+            raise self.fail
+        return {"pane": "%1", "target": "s1:0.0", "profile": profile, "busy": mode == "auto",
+                "mode": "queue" if mode == "auto" else mode, "verb": "/queue ",
+                "interrupts": False, "sent_text": message}
+
+
+def test_inject_path_calls_the_module_stub_and_no_subprocess_at_all(monkeypatch, env):
+    """THE t_75f17c83 test: kanban_pause's inject path goes through the
+    repl_inject module — never a subprocess to ~/bin/hermes-inject."""
+    fake = FakeReplInject()
+    monkeypatch.setattr(kp, "_load_repl_inject", lambda: fake)
+
+    def boom_subprocess(*a, **k):
+        raise AssertionError("kanban_pause must not shell out for inject any more")
+    monkeypatch.setattr(kp.subprocess, "run", boom_subprocess)
+
+    rep = kp.pause(["low"], run=_boards(), state_path=env["state_path"],
+                   config_path=env["config_path"])
+    assert rep["low"]["orchestrator"] == {"ok": True, "error": None,
+                                          "mode": "plain", "pane": "s1:0.0"}
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["profile"] == "low-orch"
+    assert fake.calls[0]["mode"] == "plain"
+    assert "PAUSE" in fake.calls[0]["message"]
+    rep = kp.resume(["low"], run=_boards(), state_path=env["state_path"],
+                    config_path=env["config_path"])
+    assert rep["low"]["orchestrator"]["ok"] is True
+    assert fake.calls[1]["mode"] == "auto"       # resume queues if busy, never interrupts
+
+
+def test_inject_refusal_is_reported_not_fatal(monkeypatch, env):
+    """A pane-less / refused injection is reported in the orchestrator key;
+    the board still gets held (same contract the shell-out version had)."""
+    fake = FakeReplInject(fail=RuntimeError("no tmux pane running a Hermes REPL for profile"))
+    monkeypatch.setattr(kp, "_load_repl_inject", lambda: fake)
+    rep = kp.pause(["low"], run=_boards(), state_path=env["state_path"],
+                   config_path=env["config_path"])
+    assert rep["low"]["orchestrator"]["ok"] is False
+    assert "no tmux pane" in rep["low"]["orchestrator"]["error"]
+    assert rep["low"]["orchestrator"]["mode"] == "plain"
     assert sorted(rep["low"]["held"]) == ["q1", "r1"]
+
+
+def test_load_repl_inject_resolves_the_sibling_hscc_api_module():
+    """The loader must find the REAL hscc-api/repl_inject.py from a repo/deploy
+    layout (sibling dir), and must expose the functions _inject calls."""
+    repl = _REAL_LOAD_REPL()
+    assert repl is not None and repl.__file__.endswith("hscc-api/repl_inject.py")
+    for fn in ("inject", "resolve_pane", "deliver", "plan", "format_plan"):
+        assert callable(getattr(repl, fn))
 
 
 def test_enforce_reholds_a_recorded_card_released_behind_the_pause(env):
