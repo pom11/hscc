@@ -48,6 +48,43 @@ else was hand-patched and a regeneration drops it. The base set and the ops set
 are READ from the modules that own them — if base-identity.md gains a section,
 the check follows without an edit here.
 
+The content pass (why a heading sweep is not enough — t_5b362400)
+-----------------------------------------------------------------
+A heading sweep cannot see a hand-patched *paragraph under an emittable
+heading*: the heading is legal, so the row comes back clean while the sentence
+under it is exactly what the next ``generate`` deletes. t_0f2ee405 measured that
+gap with an ad-hoc whole-document diff and found one genuine loss in the fleet
+that the heading sweep never mentioned. This module now does that diff
+permanently: it composes what ``generate`` WOULD write (``compose_soul`` of the
+profile's own tracked spec + base-identity.md) and positionally diffs the live
+SOUL against it, so the operator gets the loss list, not just the bad headings.
+
+Two measurement rules the ad-hoc script had to learn the hard way, pinned here
+and in the tests:
+
+* POSITIONAL, not a set difference. A live line counts as surviving only if it
+  falls inside an ``equal`` opcode of ``difflib.SequenceMatcher(composed, live)``
+  — otherwise a hand-patched line "survives" by coincidentally matching identical
+  text elsewhere in the document (a duplicated bullet, a boilerplate sentence).
+* NOT every differing line is a loss, or the report is a wall nobody triages.
+  Each non-equal line is classified: ``identity_lines`` carry the role identity
+  that ``generate`` exists to replace (the copy-pasted header's name);
+  ``inventory_lines`` carry only sandbox-shaped identifiers the composed text
+  does not — the named shared/prod sandboxes t_8d22ec81 ruled must NOT come back,
+  so their removal is intended; ``moved_lines`` do not survive byte-for-byte but
+  every distinctive token on them still appears in the composed text (a rewrap or
+  a reorder lost no information). Only ``lost_lines`` — content that appears
+  nowhere in what ``generate`` would write — are reported as problems.
+  ``## `` heading lines are excluded from the content pass: the heading sweep
+  above already owns them, and double-reporting one defect under two headings
+  makes the loss list look bigger than the repair.
+
+The shape rule for the sandbox inventory is deliberately a SHAPE (an identifier
+carrying an underscore) and never a name list: the leak class t_0f2ee405's first
+audit draft committed was an audit doc that spelled the sandboxes out to explain
+why they must not be spelled out. This file must not repeat that mistake, so it
+matches the shape and the tests use fixture-shaped names only.
+
 Honest signal (the fleet rule this file obeys)
 ----------------------------------------------
 A profile whose SOUL cannot be read is a row naming the profile and the reason,
