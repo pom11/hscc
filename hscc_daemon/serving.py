@@ -580,8 +580,16 @@ def _serve_cmd_mismatch(u, cmd):
         got, want = rec_opts.get(key), der_opts.get(key)
         if got == want:
             continue
-        derived = f"-o {key}={want!r}" if want is not None else f"no -o {key}"
-        return f"serve_cmd -o {key}={got!r} != derived {derived}"
+        if got is None:
+            return (f"serve_cmd has no -o {key} but derived command uses "
+                    f"-o {key}={want!r} — the record predates the declared "
+                    f"override (the fleet is NOT running it)")
+        if want is None:
+            return (f"serve_cmd -o {key}={got!r} but derived command has no "
+                    f"-o {key} — the unit's own fields dropped a knob the "
+                    f"record still carries (wake would restart it at the "
+                    f"recipe default)")
+        return f"serve_cmd -o {key}={got!r} != derived -o {key}={want!r}"
     return ""
 
 

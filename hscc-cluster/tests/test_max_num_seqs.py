@@ -438,6 +438,23 @@ class TestServingJsonCarriesCap:
             assert "max_num_seqs" not in u, (
                 f"cap key leaked into a no-cap unit {u['id']!r}")
 
+    def test_no_cap_serving_json_is_the_exact_pre_change_shape(self):
+        """The byte-identity claim stated independently of the goldens: a no-cap
+        plan's serialization is exactly the pre-PR-#118 record — same keys, same
+        order, nothing appended. The goldens pin the same thing end-to-end; this
+        names the shape so a reviewer can read the contract off one assertion,
+        and it fails if anyone appends the key unconditionally (the mistake the
+        ``uniform_pool`` omit-if-absent rule exists to prevent)."""
+        sj = ti.to_serving_json(self._plan())
+        assert list(sj) == ["version", "units"]
+        orch, w1, w2 = sj["units"]
+        assert list(orch) == ["id", "role", "model", "recipe", "nodes", "port"]
+        for w in (w1, w2):
+            assert list(w) == ["id", "role", "keepalive", "model", "recipe",
+                               "nodes", "port", "tp", "pp", "family"]
+        assert json.dumps(sj, sort_keys=False) == json.dumps(
+            {"version": 2, "units": [orch, w1, w2]})
+
     def test_every_worker_of_a_replicated_family_carries_it(self):
         # workers: 2 replicates the model; each resolved unit keeps the cap so
         # neither node comes back over the operator's per-node limit.
