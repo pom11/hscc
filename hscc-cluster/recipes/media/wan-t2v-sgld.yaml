@@ -1,0 +1,156 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PINNED SOURCE — media unit: VIDEO tier (Wan2.2 T2V A14B + ModelOpt FP8 DiT)
+#
+# LIVE copy: ~/.sparkrun-local/recipes/media/wan-t2v-sgld.yaml
+# Install + first validation are OPERATOR actions (sparkrun recipe validate on
+# the installed path); offline gate: hscc-cluster/tests/test_media_recipes.py.
+# Design contract: docs/design/media-serving.md; tier + formats locked by the
+# operator's §8 Q1 ruling: Wan2.2-T2V-A14B + lmsys FP8 transformer, with
+# transformer_2 BF16 as the ONE documented FORCED EXCEPTION to the
+# never-plain-BF16 rule.
+#
+# ── STAGING LIST — OPERATOR: stage these EXACT HF repos. ──────────────────────
+#   Wan-AI/Wan2.2-T2V-A14B-Diffusers                 (base pipeline)
+#   lmsys/wan22-t2v-a14b-modelopt-fp8-sglang-transformer   (FP8 primary DiT)
+#
+# Measured against the Hub tree API 2026-10-31 (the loader flags follow from
+# this):
+#   * base repo — model_index.json + scheduler/ text_encoder/ tokenizer/
+#     transformer/ transformer_2/ vae/: the MoE DUAL-transformer pipeline.
+#   * lmsys override — NO model_index.json; config.json +
+#     diffusion_pytorch_model{,-00001-of-00002,-00002-of-00002}.safetensors +
+#     index: a transformers-style COMPONENT DIRECTORY that already carries its
+#     own config.json. That is precisely the shape the quantization guide
+#     routes through `--component-paths.<component>` ("Replaces that
+#     component's config AND weights") — not the weights-path flow, and not a
+#     `--model-path` swap.
+#
+# THE FORCED EXCEPTION — transformer_2 stays BF16, and it is not a shortcut.
+# Wan2.2's MoE dual-transformer ships an FP8 override for ONE expert only
+# (the high-noise `transformer`); no published FP8/NVFP4 build of
+# `transformer_2` exists upstream (M0 §1, ruling text). This recipe therefore
+# overrides `transformer` ONLY and lets `transformer_2` load BF16 from the
+# base repo. It is the sanctioned exception — do not "fix" it by dropping the
+# FP8 override, and do not add a BF16 default tier elsewhere.
+#
+#   /mnt/nas/hub/models--Wan-AI--Wan2.2-T2V-A14B-Diffusers     → ~/.cache/huggingface/hub/
+#   /mnt/nas/hub/models--lmsys--wan22-t2v-a14b-modelopt-fp8-sglang-transformer → ~/.cache/huggingface/hub/
+#   (NAS = staging source ONLY; local NVMe before boot — flash-next rule,
+#    templates/4node/flash-next-all.yaml:17-45. A cold NFS read of this
+#    checkpoint set is minutes-per-boot AND EVERY self-heal relaunch pays it.)
+#
+# GATE: Wan-AI repos are license-gated on the Hub — staging needs the
+# operator's accepted HF account, or the dirs simply never appear.
+#
+# ── CO-TENANCY / GPU BUDGET (§5 + §8 Q6: free co-tenancy, NO exclusive node) ──
+# There is no video-exclusive-node rule. Placement stays the balancer's job;
+# what keeps a video unit from being co-scheduled into a starving node is its
+# DECLARED FRACTION, and that fraction must therefore be honest, not
+# optimistic. The design's number is "≈80 GiB working set" on a ~119 GiB-usable
+# GB10 → 0.70 declared here (80/119 ≈ 0.67 + headroom for denoise buffers, and
+# still leaving room for a small LLM side under the §5 sum ≤ 0.8 rule).
+# ⚠ 0.70 is DERIVED from the design's figure, not measured: the first live
+# boot owns the number — treat it as the starting value for §5's rule-3 check
+# (declared fraction ≥ weights + peak estimate).
+# The same VERIFIED CONSTRAINT as the image units: SGLang Diffusion has NO
+# memory-fraction field (absent from the v0.5.22 diffusion argparse surface)
+# AND its CLI SystemExits on unrecognized args (server_args.py:3609
+# @v0.5.22) — so the fraction lives in `defaults:` ONLY as a SPARKRUN-LEVEL
+# claim (scheduler budget + VRAM visibility + §5 sum), never as a CLI flag,
+# and the on-node bound is component residency. `--performance-mode manual` +
+# explicit `--component-residency` keep the video DiTs resident while the text
+# encoder (once per request) streams — video DiT placement is
+# model-specific under `auto`, so `manual` + explicit residency is also the
+# reproducible choice.
+#
+# ── ASYNC JOB SEMANTICS (§2 — the reason for one-backend-per-alias) ───────────
+# POST /v1/videos returns a job object; poll GET /v1/videos/{id} →
+# /v1/videos/{id}/content. Job metadata is PROCESS-LOCAL: it dies with the
+# server, and independent servers share no store — so this alias must have
+# exactly ONE healthy backend at the proxy (§3) or polls 404. Accepted cycle-1
+# failure semantics: unit dies → its jobs die → clients re-submit.
+#
+# NO CLIENT CAPS (§8 Q5 ruling): no client deadline, no size/seconds caps;
+# clients poll (~5 s is the M6 default). `--scheduler-rpc-timeout` is
+# therefore DELIBERATELY UNSET: upstream leaves it unset precisely so
+# legitimately long/queued video jobs are not failed by the transport layer,
+# and setting a server-side deadline here would reintroduce, in a different
+# place, the cap the operator deleted. It is also documented as not cancelling
+# GPU work — a timeout that only marks a job failed while the GPU keeps
+# grinding is not a bound worth having by default.
+#
+# Output retention (§2/§6): --output-path is a bounded node-side scratch dir
+# under the already-mounted cache root; the server never deletes generated
+# files; cleanup is a daemon-side card, deletion is operator action.
+# ─────────────────────────────────────────────────────────────────────────────
+recipe_version: "2"
+name: Wan2.2 T2V A14B video generation (SGLang Diffusion, FP8 DiT)
+description: >-
+  SGLang Diffusion video unit: Wan-AI/Wan2.2-T2V-A14B-Diffusers with the
+  lmsys ModelOpt FP8 primary-transformer override (transformer_2 BF16 = the
+  sanctioned forced exception), one GB10, async OpenAI /v1/videos surface.
+  Media M1; UNVERIFIED on GB10 (matrix: upstream benchmarks B200).
+
+model: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+runtime: sglang
+
+container: "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+# Tag spelling: lmsysorg/sglang:v0.5.22-cu130 (multi-arch index, arm64
+# verified 2026-10-31). Same digest as the whole media workstream; pre-pull.
+
+solo_only: true
+mods: []
+
+defaults:
+  port: 30003
+  host: 0.0.0.0
+  num_gpus: 1
+  gpu_memory_utilization: 0.70   # derived from §5's ~80 GiB working set — see header
+  served_model_name: wan-t2v
+
+distribution_config:
+  models:
+    enabled: false       # operator pre-stages (gated repos); NAS = staging only
+  containers:
+    enabled: false       # pre-pulled by digest
+
+readiness:
+  inference: false       # REQUIRED — no chat endpoint (see FP8 recipe note).
+                         # /health on a diffusion server additionally waits for
+                         # warmup completion, so the 900 s health budget is what
+                         # a ~80 GiB boot lives under; raise it in the cluster
+                         # readiness config if the first boot is slower.
+
+env:
+  # Inert while the primary DiT is FP8 — pinned because the NVFP4 transformer
+  # override (documented opt-in alternative, matrix) inherits this block and
+  # the trtllm default silently rejects sm_121 (matrix C1).
+  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: "flashinfer_cudnn"
+
+command: |
+  sglang serve \
+    --model-path {model} \
+    --component-paths.transformer lmsys/wan22-t2v-a14b-modelopt-fp8-sglang-transformer \
+    --served-model-name {served_model_name} \
+    --num-gpus {num_gpus} \
+    --performance-mode manual \
+    --component-residency all=resident text_encoder=component-offload \
+    --pin-cpu-memory \
+    --warmup-mode server \
+    --host {host} \
+    --port {port} \
+    --strict-ports true \
+    --output-path /cache/huggingface/media-scratch/wan-t2v \
+    --input-save-path /cache/huggingface/media-scratch/wan-t2v/uploads
+
+# NO `--quantization`: the override repo is self-describing (quant_method=
+# modelopt, quant_algo=FP8 in its config.json) and the guide's modelopt-fp8
+# row routes it through --component-paths.<component>. The guide also notes
+# dit_layerwise_offload is supported for this family while dit_cpu_offload
+# stays disabled — which is consistent with `all=resident` above (no offload
+# of the DiTs) and why the text encoder carries the offload instead.
+# `--warmup-mode server` is the engine default and is explicit: a half-warm
+# video unit must not take proxy traffic.
+# Expected validate findings: restated-managed-path (SUGGESTION) on the
+# repo-relative component path — kept deliberately; {model} cannot point at
+# the override repo. No errors expected.

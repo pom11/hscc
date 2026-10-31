@@ -73,6 +73,50 @@ diff + tests + spec and approves only when all three pass (powers the WS4
 `auto_review` gate). Profiles are build artifacts (not tracked) — regenerate
 with `generate`.
 
+## Role SOUL drift (`role_soul_check.py`)
+
+`generate` loops over **specs**, so a profile dir that was copy-pasted from
+another one keeps the SOURCE's identity and nothing notices: the live
+`ecofire-pontaje-engineer` ran its whole life under `## Role:
+ecofire-bc-engineer` while its spec existed and
+`test_every_hscc_owned_worker_profile_has_role_spec` was green — an existence
+test cannot see identity drift. `role_soul_check.py` reports what an existence
+test cannot: a `## Role:` header that disagrees with its profile dir name or
+with `roles/<name>.yaml`, a missing/invalid spec, and any `## ` heading
+`compose_soul()` cannot emit (a hand-patched block the next `generate` drops —
+fold it into the spec's `identity` first).
+
+A heading sweep, though, is blind to the worse case: a hand-patched **paragraph
+under an emittable heading** keeps every row clean while the next `generate`
+deletes the sentence. So the check also runs a **content pass** — it composes
+what `generate` WOULD write (`compose_soul` of the profile's own spec +
+`base-identity.md`) and positionally diffs the live SOUL against it, reporting
+the lines `generate` would delete. Surviving means sitting inside an `equal`
+opcode of `difflib.SequenceMatcher`, never "this text appears somewhere in the
+document", so a duplicated line cannot hide a patch. Each differing line is then
+classified so the report stays triageable: the copied `## Role:` identity
+(replacing it is the repair), the named shared/prod sandbox inventory
+(t_8d22ec81 ruled it must not come back, so its removal is intended), and lines
+that only rewrap/reorder/duplicate text `generate` already writes. Only a line
+whose content appears nowhere in the composed text is a problem — and because
+that classification is a judgement, the lines it excludes are still printed with
+their line numbers. Sandbox-shaped identifiers are masked to `<sandbox>` in every
+surface: the line worth quoting is the one naming the operator's sandboxes, and a
+`doctor --json` paste must not become the leak. Full reasoning and the live
+fleet's numbers: [docs/audits/content-loss-list-t_5b362400.md](../docs/audits/content-loss-list-t_5b362400.md).
+
+It is a **reporter, not a pytest assertion**. Live profile state belongs where
+a fault is surfaced to the operator: `doctor_role_soul.py` registers it as a
+non-fatal WARNING in the bootstrap doctor (`hscc-bootstrap/doctor.py`, which
+`bootstrap.sh` runs as its preflight gate). The repair — `hscc.py generate`
+re-stamps every generated profile and rewrites live profile state — is an
+operator action the check deliberately never takes.
+
+Orchestrator-family SOULs are excluded by design: `orchestrators.py` stamps a
+per-project orch with the name of the SHARED spec it passes (`general-orch`
+legitimately carries `## Role: orchestrator`), so judging it by dir name would
+red-flag a layout that is correct by construction.
+
 ## How to test / Links
 
 `tests/` — from this dir: `python -m pytest tests/ -q`.

@@ -1,0 +1,134 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PINNED SOURCE — media unit: VIDEO ALTERNATIVE (LTX-2.5, online FP8)
+#
+# LIVE copy: ~/.sparkrun-local/recipes/media/ltx-video-sgld.yaml
+# Install + first validation are OPERATOR actions (sparkrun recipe validate on
+# the installed path); offline gate: hscc-cluster/tests/test_media_recipes.py.
+# Design contract: docs/design/media-serving.md; tier locked by the operator's
+# §8 Q1 ruling as the video ALTERNATIVE: LTX-2.5 FP8.
+#
+# ── FORMAT RULING, STATED PLAINLY (M0 matrix, both servers) ──────────────────
+# LTX is served BF16/FP8 — NEVER NVFP4. The shortlist's NVFP4 LTX build has
+# no SGLang kernel path at all (the modelopt-nvfp4 supported-models list has
+# no LTX entry; the matrix verdict is "blocked" for NVFP4 on either server).
+# FP8 here is ONLINE quantization of the open Diffusers repo — which is why
+# the staging list is a single repo and no lmsys-style override repo exists.
+#
+# ── STAGING LIST — OPERATOR: stage this EXACT HF repo. ────────────────────────
+#   Lightricks/LTX-2.5-Diffusers     (the ONLY repo this unit needs)
+#
+# Measured against the Hub tree API 2026-10-31: model_index.json (+
+# modular_model_index.json) + transformer/ transformer_full/ vae/ audio_vae/
+# vocoder/ connectors/ diffusion_decoder/ duration_head/ latent_upsampler/
+# temporal_latent_upsampler/ text_encoder/ tokenizer/ processor/ scheduler/
+# prompt_enhancer/ + ltx-2.5-22b-distilled-lora-450-bf16.safetensors.
+# The layout matches the upstream cookbook's component table: `transformer/`
+# is the distilled DiT (served by default), `transformer_full/` loads with
+# `--model-variant dev` (NOT set here — the distilled default is the tier).
+#
+#   /mnt/nas/hub/models--Lightricks--LTX-2.5-Diffusers → ~/.cache/huggingface/hub/
+#   (NAS = staging source ONLY; local NVMe before boot — flash-next rule,
+#    templates/4node/flash-next-all.yaml:17-45.)
+#
+# GATE: LTX-2.5 is 🔒 gated on the Hub AND carries the LTX-2.x Community
+# License (commercial-use restrictions for some entities — upstream's own
+# warning). The operator accepts the license at staging time; no key material
+# ever enters this recipe (§7).
+#
+# ── HONEST GAPS (do not read this recipe as validated) ───────────────────────
+# * UNVERIFIED on GB10 for the FP8 path. The upstream LTX-2.5 cookbook is the
+#   source for "fp8 halves DiT, −18 GB peak" (matrix row); the quantization
+#   guide's ONLINE-fp8 row lists Z-Image-Turbo as "validated" and says "others
+#   likely work". First boot owns the outcome. If online FP8 trips, the tier's
+#   fallback is simply removing `--quantization fp8` (serve BF16 — permitted
+#   for LTX by the ruling, the never-plain-BF16 rule's exception set), NOT
+#   NVFP4, which has no path here.
+# * ONLINE quantization constructs the quantized implementation during load:
+#   the BF16 checkpoint is read first, so boot needs headroom for the BF16
+#   pass before FP8 residency is reached (the guide documents the flow; the
+#   GB10 numbers do not exist yet). The video fraction below is already the
+#   large-tier number.
+#
+# ── CO-TENANCY / GPU BUDGET (§5 + §8 Q6 free co-tenancy) ──────────────────────
+# Same rules and the same VERIFIED CONSTRAINT as wan-t2v-sgld.yaml — read its
+# header first: SGLang Diffusion has no memory-fraction field and its CLI
+# SystemExits on unrecognized args (server_args.py:3609 @v0.5.22), so the
+# fraction lives in `defaults:` only — a SPARKRUN-LEVEL claim (scheduler
+# budget, VRAM visibility, §5 per-node fraction sum ≤ 0.8) — and component
+# residency is what bounds the unit on the node. LTX-2.5 is a 22B DiT +
+# Gemma-class text encoder + joint audio/video pipeline, i.e. the same
+# heavy-video class: 0.70 declared,
+# DERIVED from §5's video-tier working-set figure, first boot owns the number.
+# `--component-residency` keeps DiTs resident and streams the text encoder.
+# (The joint audio path — audio_vae/vocoder — stays resident by `all=resident`;
+# it runs every request, so streaming it would cost latency it cannot pay back.)
+#
+# ── ASYNC JOB SEMANTICS (§2) ──────────────────────────────────────────────────
+# Same async /v1/videos contract, same process-local job store, same
+# one-backend-per-alias rule, same NO-CLIENT-CAPS ruling (§8 Q5) →
+# `--scheduler-rpc-timeout` deliberately unset. See wan-t2v-sgld.yaml's header
+# for the full statement; it applies verbatim to this unit.
+# ─────────────────────────────────────────────────────────────────────────────
+recipe_version: "2"
+name: LTX-2.5 video generation (SGLang Diffusion, FP8)
+description: >-
+  SGLang Diffusion video alternative: Lightricks/LTX-2.5-Diffusers served with
+  online FP8 quantization of the distilled DiT, one GB10, async OpenAI
+  /v1/videos surface (video+audio joint). Media M1; NVFP4 is NOT a format
+  option for this model on either server (matrix).
+
+model: Lightricks/LTX-2.5-Diffusers
+runtime: sglang
+
+container: "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+# Tag spelling: lmsysorg/sglang:v0.5.22-cu130 (multi-arch index, arm64
+# verified 2026-10-31). Same digest as the whole media workstream; pre-pull.
+
+solo_only: true
+mods: []
+
+defaults:
+  port: 30004
+  host: 0.0.0.0
+  num_gpus: 1
+  gpu_memory_utilization: 0.70   # video tier, derived — see header + wan-t2v header
+  served_model_name: ltx-video
+
+distribution_config:
+  models:
+    enabled: false       # operator pre-stages (gated repo); NAS = staging only
+  containers:
+    enabled: false       # pre-pulled by digest
+
+readiness:
+  inference: false       # REQUIRED — no chat endpoint (see FP8 recipe note);
+                         # 900 s /health budget covers warmup, same as wan-t2v.
+
+env:
+  # Inert for FP8 serving (no NVFP4 loader runs); pinned so an experimental
+  # NVFP4 experiment inherits the GB10-safe backend rather than the trtllm
+  # default — which would fail on sm_121 anyway (matrix C1).
+  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: "flashinfer_cudnn"
+
+command: |
+  sglang serve \
+    --model-path {model} \
+    --quantization fp8 \
+    --served-model-name {served_model_name} \
+    --num-gpus {num_gpus} \
+    --performance-mode manual \
+    --component-residency all=resident text_encoder=component-offload \
+    --pin-cpu-memory \
+    --warmup-mode server \
+    --host {host} \
+    --port {port} \
+    --strict-ports true \
+    --output-path /cache/huggingface/media-scratch/ltx-video \
+    --input-save-path /cache/huggingface/media-scratch/ltx-video/uploads
+
+# `--quantization fp8` is the documented primary-DiT convenience spelling
+# ("Online (post-load) quantization from a BF16/FP16 checkpoint is supported
+# for 'fp8'…" — the v0.5.22 --quantization help). No component paths, no
+# model-variant: the distilled `transformer/` is the default partition.
+# Expected validate findings: none (model flows via {model}; no recipe host
+# paths; no managed-env collisions).

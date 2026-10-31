@@ -1,0 +1,233 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PINNED SOURCE — media unit: image generation, FP8 tier (SGLang Diffusion)
+#
+# Staged here; the LIVE copy lives in the local overlay at
+#   ~/.sparkrun-local/recipes/media/qwen-image-gen-sgld.yaml
+# (bootstrap.sh reads the overlay dir — hscc-bootstrap/bootstrap.sh:19 — and
+# NEVER copies from this repo automatically). Installing this file is an
+# operator action, and the FIRST validation gate is the real CLI:
+#   sparkrun recipe validate ~/.sparkrun-local/recipes/media/qwen-image-gen-sgld.yaml
+# Offline gate: hscc-cluster/tests/test_media_recipes.py.
+#
+# Contract: docs/design/media-serving.md — §1 runtime/format, §2 API surface,
+# §5 co-tenancy budget, §6 local-NVMe rule, §7 LAN-only ports. Tier locked by
+# the operator's §8 Q1 ruling: Qwen-Image-2.1 FP8 (diffusers layout), BF16
+# documented as fallback only, never the default (never-plain-BF16 rule).
+#
+# ── STAGING LIST — OPERATOR: stage these EXACT HF repos. The agent downloads
+# NOTHING and runs NO live model test; sglang runs with HF_HUB_OFFLINE=1
+# (sparkrun sets it for pre-staged weights — runtimes/_util.py:47) so an
+# unstaged repo FAILS THE BOOT rather than self-healing over the wire.
+#
+# Layout facts measured against the Hub tree API on 2026-10-31 (recorded here
+# because they decide the loader flags — do not "simplify" them):
+#
+#   unsloth/Qwen-Image-2.1-FP8   — NOT a standalone diffusers repo: 0 hits for
+#     model_index.json. It ships single-file exports:
+#       Qwen-Image-2.1-FP8.safetensors                 (FP8 DiT)
+#       Qwen-Image-2.1-text_encoder-FP8.safetensors    (FP8 text encoder)
+#       vae/qwen_image_2.1_vae_bf16.safetensors        (BF16 VAE — the only
+#                                                      BF16 component upstream
+#                                                      ships; not a BF16 default)
+#   Qwen/Qwen-Image-2.1          — the full-diffusers BASE (model_index.json +
+#     text_encoder/ transformer/ vae/ scheduler/ processor/). Required: every
+#     non-DiT component (scheduler, tokenizer/processor) loads from here.
+#
+# So the FP8 unit loads the base repo plus two weight-file overrides — the
+# documented weights-path flow (SGLang quantization guide: "`--model-path`
+# always selects the base model"; component weight files may be given as
+# `owner/repo/path/file.safetensors`).
+#
+#   Stage to NAS, then to each serving node's LOCAL NVMe (flash-next rule:
+#   NAS is a STAGING source only — measured 4 KiB NFS random read = 5.72 ms
+#   makes weight reads off NAS unusable; see the template header at
+#   hscc-cluster/templates/4node/flash-next-all.yaml:17-45):
+#
+#     /mnt/nas/hub/models--unsloth--Qwen-Image-2.1-FP8   → ~/.cache/huggingface/hub/
+#     /mnt/nas/hub/models--Qwen--Qwen-Image-2.1          → ~/.cache/huggingface/hub/
+#
+#   `distribution_config.models.enabled: false` below makes sparkrun skip
+#   download/distribution entirely and serve from the node-local cache mount
+#   (HF_HOME=/cache/huggingface, HF_HUB_CACHE=/cache/huggingface/hub —
+#   runtimes/base.py:712).
+#
+#   Documented fallbacks (NOT served by default; M0 §1):
+#     BF16 fallback (kernel trouble on sm_121 is the only trigger): drop the
+#       two `--*-weights-path` lines below and serve the already-staged
+#       Qwen/Qwen-Image-2.1 alone. No extra staging.
+#     Partial-KERNEL gap, honest flag: the FP8 TEXT-ENCODER file is unsloth's
+#       own artifact but the quantization guide routes text_encoder* formats
+#       through Transformers delegation ("fail closed" on unsupported
+#       metadata), and no one has run this exact file on sm_121. If the boot
+#       trips there, drop ONLY the --component-weights-paths.text_encoder line:
+#       the BF16 text encoder from the base repo is the upstream-blessed
+#       sidecar on quantized-DiT paths (matrix FLUX.2 row: "SGLang keeps them
+#       from the base repo automatically") — the FP8 DiT stays. Not a
+#       never-plain-BF16 violation: the rule governs the model tier (DiT),
+#       and BF16 TE/VAE sidecars are what every quantized row here ships.
+#     INT8-ConvRot: unsloth ships Qwen-Image-2.1-INT8-ConvRot.safetensors and
+#       Qwen-Image-2.1-text_encoder-INT8-ConvRot.safetensors in the SAME repo
+#       (measured, same date). ConvRot INT8 is explicitly GB10-capable
+#       (M0 matrix C3). Point the two flags at those two files. UNVERIFIED here.
+#
+# ── CO-TENANCY / GPU BUDGET (media-serving.md §5 + operator ruling §8 Q6) ─────
+# This unit is designed to share one GB10 with ONE LLM unit: image unit 0.30,
+# partner's own fraction, per-node FRACTION SUM ≤ 0.8 (the only hard rule;
+# `validate` enforces it; placement stays the balancer's job — free co-tenancy,
+# no media-dedicated node). The fraction is exposed as a DEFAULTS KNOB so a
+# template can carry it (template → `--gpu-mem` → this config chain → the
+# defaults key, which sparkrun's VRAM check reads and the §5 sum check sums).
+#
+# ⚠ VERIFIED CONSTRAINT — the fraction is SPARKRUN-LEVEL ONLY, never a CLI
+# flag. SGLang *Diffusion* has NO memory-fraction field: it is absent from the
+# v0.5.22 diffusion argparse surface (python/sglang/multimodal_gen/runtime/
+# server_args/server_args.py — zero hits for fraction/gpu_memory/mem-fraction,
+# re-verified 2026-10-31) AND unknown args are fatal there:
+# `ServerArgs.from_cli_args` ends its dynamic-flag extraction with
+# `raise SystemExit("error: unrecognized arguments: …")` (server_args.py:3609
+# @v0.5.22), so a hand-written `--mem-fraction-static` in a diffusion command
+# template CRASHES THE BOOT. (sparkrun's sglang flag map does map the key to
+# that flag — runtimes/sglang.py:42 — but the map is only consulted for
+# template-less recipes; with an explicit `command:` the renderer returns the
+# template verbatim (runtimes/sglang.py:371-384), so nothing injects the flag
+# either. The key is also in known_config_keys, so leaving it in `defaults:`
+# draws no unmapped-key warning.) The value is therefore a scheduler/VRAM/§5
+# claim, and what actually keeps the unit inside its share on the node is
+# component placement, which IS honored (`--performance-mode manual` +
+# explicit `--component-residency`, both real flags in that same file
+# @2672/:2340). Diffusion units hold weights resident and spike with denoise
+# buffers — there is no KV pool to shrink (§5).
+#
+# ── OUTPUT SCRATCH (media-serving.md §2 retention + §7, §8 Q5: no client caps) ─
+# Pinned under the ALREADY-MOUNTED cache root rather than a new host bind
+# mount: no recipe-level host path (nothing for `recipe validate`'s
+# portability check to flag), no per-node mkdir prerequisite, no uid guessing —
+# the container runs as the SSH user (validation.py:1145 notes this), and the
+# HF-cache bind is rw by definition. Files are persistent on the node (survive
+# a unit restart, which is what `response_format=url` polling needs), and
+# cleanup stays a daemon-side card (§2) / operator action (§6: deleting from a
+# cache dir is operator action).
+# `--input-save-path` is pinned explicitly because the ENGINE DEFAULT is a
+# cwd-relative `inputs/uploads` (@v0.5.22:582) — without it, edits/uploads
+# land wherever the process happened to start.
+#
+# ── MODE / PROXY REGISTRATION (media-serving.md §3) ───────────────────────────
+# ONE backend per media alias in the proxy model_list: image/video job stores
+# are process-local, so LiteLLM fan-out would round-robin polls and 404 them.
+# The unit's `/v1/models` is mode-tagged (`task_type`, `supported_task_types`,
+# `dit_precision`/`vae_precision`/`pipeline_class`) — that is the tag the
+# sanctioned sparkrun `model_info.mode` patch maps to `image_generation`
+# (M0 §8 Q4). Cycle 1 works without the patch: route dispatch at :4000 is by
+# URL. The master-key proxy stays the single entry point; this port is LAN-only
+# and additionally exposes /v1/set_lora & friends — never proxied (§7).
+# ─────────────────────────────────────────────────────────────────────────────
+recipe_version: "2"
+name: Qwen-Image-2.1 FP8 image generation (SGLang Diffusion)
+description: >-
+  SGLang Diffusion image unit: unsloth/Qwen-Image-2.1-FP8 DiT + FP8 text
+  encoder over the Qwen/Qwen-Image-2.1 base, one GB10, OpenAI
+  /v1/images/generations + /v1/images/edits surface. Media M1; contract in
+  docs/design/media-serving.md.
+
+model: Qwen/Qwen-Image-2.1
+runtime: sglang
+
+container: "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+# Tag spelling of the digest above: lmsysorg/sglang:v0.5.22-cu130 — the image
+# family the upstream GB10 report ran on (sgl-project/sglang#46390). The digest
+# is a multi-arch OCI index digest, verified 2026-10-31 to carry BOTH amd64 and
+# arm64 entries; the nodes pull arm64. `latest` is never referenced here.
+# Pre-pull the digest on every serving node (mirror first) — container
+# distribution is disabled below.
+
+solo_only: true          # one GB10; a diffusion pipeline has no cross-node story
+mods: []
+
+defaults:
+  port: 30000            # sglang-diffusion's own default (@v0.5.22:561); the template
+                         # re-ports per unit — LAN-bound either way (§7)
+  host: 0.0.0.0
+  num_gpus: 1            # diffusion units never multi-GPU in cycle 1 (§1)
+  gpu_memory_utilization: 0.30   # §5 rule 2 image tier (0.25–0.35); see the
+                                 # HONEST GAP note above re: what it enforces
+  served_model_name: qwen-image-gen
+
+# Diffusion pipelines have no KV pool: the LLM knobs deliberately do NOT appear
+# (no max_model_len / context-length / kv-cache-dtype / sampling parsers).
+# Template side, `kind: image` + the §5 fraction-sum check own the budget.
+
+distribution_config:
+  models:
+    enabled: false       # operator pre-stages to node-local HF cache; NAS = staging only
+  containers:
+    enabled: false       # image pre-pulled by digest (see header)
+
+readiness:
+  inference: false       # REQUIRED. sparkrun's sglang runtime declares an
+                         # openai-chat-stream readiness probe (runtimes/sglang.py:147)
+                         # and a diffusion server has no chat endpoint — without
+                         # this the unit never reaches "ready". /health stays probed
+                         # (the diffusion server serves it; @v0.5.22 docs "Health
+                         # endpoints"), within the 900 s health budget. Media liveness
+                         # per §5 rule 4 is /v1/models reachability, never a token.
+
+env:
+  # GB10 (sm_121) NVFP4/FP4 GEMM must never take the trtllm FlashInfer backend
+  # (M0 matrix C1). The variable is real (@v0.5.22 multimodal_gen/envs.py:126,
+  # documented default = flashinfer_trtllm, which rejects capability 120/121).
+  # Inert while this unit serves FP8 — pinned now because the FP4 sibling
+  # recipes inherit the same block and the mistake is silent when wrong.
+  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: "flashinfer_cudnn"
+
+command: |
+  sglang serve \
+    --model-path {model} \
+    --component-weights-paths.transformer unsloth/Qwen-Image-2.1-FP8/Qwen-Image-2.1-FP8.safetensors \
+    --component-weights-paths.text_encoder unsloth/Qwen-Image-2.1-FP8/Qwen-Image-2.1-text_encoder-FP8.safetensors \
+    --served-model-name {served_model_name} \
+    --num-gpus {num_gpus} \
+    --performance-mode manual \
+    --component-residency all=resident text_encoder=component-offload \
+    --pin-cpu-memory \
+    --host {host} \
+    --port {port} \
+    --strict-ports true \
+    --warmup-mode request \
+    --output-path /cache/huggingface/media-scratch/qwen-image-gen \
+    --input-save-path /cache/huggingface/media-scratch/qwen-image-gen/uploads
+
+# Flag provenance (all verified against sglang v0.5.22
+# multimodal_gen/runtime/server_args/server_args.py, 2026-10-31):
+#   --component-weights-paths.<component>  dynamic map, lines 3415-3427
+#   --component-residency COMPONENT=MODE   line 2672 (nargs='+'; `all` group +
+#                                          exact model_index.json keys)
+#   --performance-mode                     line 2340 (manual = placement stays
+#                                          under explicit control, auto would
+#                                          dispatch residency from headroom)
+#   --pin-cpu-memory                       line 2855 (StoreBoolean; the offload
+#                                          path wants pinned host memory)
+#   --strict-ports                         line 3055 (fail rather than silently
+#                                          re-port — a moved port would break
+#                                          the proxy's api_base and hscc's
+#                                          serve-cmd drift compare)
+#   --warmup-mode request                  line 2620: primes the request path so
+#                                          /health answers 200 without a full
+#                                          synthetic server warmup — image tier
+#                                          joins rotation fast; the video unit
+#                                          deliberately keeps the `server`
+#                                          default so the proxy never routes to
+#                                          a half-warm video box.
+#   --text-encoder-cpu-offload equivalent  expressed via --component-residency
+#                                          (the modern spelling; the legacy flag
+#                                          @2834 remains supported).
+#
+# Known-acceptable `sparkrun recipe validate` findings (NO errors expected):
+#   - restated-managed-path (SUGGESTION): the two `owner/repo/file.safetensors`
+#     specs reference files inside the staged cache and {model} cannot point at
+#     a different repo; SGLang's own quantization guide spells this exact form.
+#     Keeping it — the finding is advice.
+#   - unpinned-model-revision (WARNING) appears ONLY if a `model_revision:` pin
+#     is ever added, because the diffusion ServerArgs takes `--revision` and
+#     sparkrun's sglang flag map does not map it (core/validation.py:806).
+#     Deliberate choice: no revision pin, so the cache tree the operator rsyncs
+#     (refs/main + snapshots) is exactly what serves. See the dir README.
