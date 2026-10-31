@@ -1,0 +1,11 @@
+# comfyui-sparkrun — runtime requirements.
+#
+# Intentionally EMPTY of third-party packages. HTTP is stdlib urllib (see
+# http_client.py), and the media conversions use Pillow + numpy, both of which
+# ComfyUI already installs — pinning them here would put a second, competing
+# version constraint next to ComfyUI's own and invite a resolver to downgrade
+# torch. Anything added to this file must be justified against that trap.
+#
+# The pack's OWN tests need pytest, which the HSCC repo suite already provides;
+# they are not re-declared here because this file describes the ComfyUI
+# runtime, not the dev environment.
