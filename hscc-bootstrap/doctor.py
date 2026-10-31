@@ -1240,7 +1240,7 @@ _ORCH_WAKER_CHECK_NAME = "orch-waker (orchestrator waker)"
 def _refused_orch_waker_check() -> dict:
     """In-suite stand-in for the orch-waker check when no seam was injected.
 
-    The check's real targets are ``~/.hscc/config.json`` and
+    The check's real targets are ``~/.hscc/orch_waker.json`` and
     ``~/.hscc/state/orch_waker.json`` — the OPERATOR's live daemon state when
     the suite runs from a dispatched worker. Same fence shape as
     ``_refused_transport`` / ``_refused_role_soul_scan``: an ERROR naming the
