@@ -33,23 +33,39 @@ WORKER_OPS = "## Operational\n\nYou run as the **{name}** role on a worker GPU "
 
 BASE_MD = "## Shared value one\n\nbody\n\n## Shared value two\n\nbody\n"
 
+#: The stub spec's `identity:` text. Kept in ONE place so the fixture SOUL can
+#: carry the same words the spec emits: t_5b362400 added a CONTENT pass, so a
+#: SOUL whose prose does not match its spec is now (correctly) reported as a
+#: loss. A fixture that "passed" only because the check looked at headings
+#: would be the vacuous test this file exists to prevent.
+SPEC_IDENTITY = "spec identity text.\n"
 
-def _worker_soul(role_header, *, extra_headings=()):
-    """A worker SOUL shaped like compose_soul()'s output."""
-    blocks = ["# base", "## Shared value one", "body", "## Shared value two",
-              "body", f"## Role: {role_header}", "role identity text",
-              WORKER_OPS.format(name=role_header)]
+
+def _worker_soul(role_header, *, extra_headings=(), base_md=BASE_MD,
+                 identity=SPEC_IDENTITY):
+    """A worker SOUL for ``role_header`` + ``identity`` over ``base_md``.
+
+    DERIVED from the generator's own ``compose_soul`` rather than re-typed: with
+    a content pass in play, a hand-typed facsimile of the ops block is a
+    phantom "loss" (and a phantom "move") that has nothing to do with what is
+    being tested, and re-typing the block is exactly the doctor-vs-generator
+    disagreement this repo keeps having to fix. Tests that need a defect pass
+    ``identity``/``extra_headings`` or edit the returned text.
+    """
+    import generator
+    soul = generator.compose_soul({"name": role_header, "identity": identity},
+                                  base_md)
     for h in extra_headings:
-        blocks.append(f"## {h}\n\nhand-patched body\n")
-    return "\n\n".join(blocks) + "\n"
+        soul += f"\n## {h}\n\nhand-patched body\n"
+    return soul
 
 
 def _world(tmp_path, *, profiles, specs, base=BASE_MD):
     """Build tmp profiles/ + roles/ + base-identity.md; return the three paths.
 
     ``profiles`` maps dir name -> SOUL text (or None for a dir with no SOUL.md);
-    ``specs`` maps spec stem -> the spec's ``name:`` field (identity text is a
-    stub, which the heading sweep only needs for attribution).
+    ``specs`` maps spec stem -> the spec's ``name:`` field (identity text is
+    :data:`SPEC_IDENTITY`, which is what the fixture SOULs carry).
     """
     proot = tmp_path / "profiles"
     rroot = tmp_path / "roles"
@@ -63,7 +79,7 @@ def _world(tmp_path, *, profiles, specs, base=BASE_MD):
     for stem, spec_name in specs.items():
         (rroot / f"{stem}.yaml").write_text(
             yaml.safe_dump({"name": spec_name,
-                            "identity": "spec identity text.\n",
+                            "identity": SPEC_IDENTITY,
                             "routing_description": "routing."}),
             encoding="utf-8")
     base_path = tmp_path / "base-identity.md"
@@ -141,8 +157,8 @@ def test_duplicate_role_heading_is_flagged(tmp_path):
     hand-patched and generate drops it, so it must be reported — the sweep may
     skip the heading it already judged, not every `Role:`-prefixed heading."""
     soul = _worker_soul("a-engineer").replace(
-        "role identity text",
-        "role identity text\n\n## Role: someone-else\n\nbogus second identity")
+        "spec identity text",
+        "spec identity text\n\n## Role: someone-else\n\nbogus second identity")
     proot, rroot, base = _world(tmp_path, profiles={"a-engineer": soul},
                                 specs={"a-engineer": "a-engineer"})
     res = rsc.check(proot, roles_dir=rroot, base_path=base)
@@ -158,8 +174,8 @@ def test_identical_duplicate_role_heading_is_flagged(tmp_path):
     exact fault class this card exists for — and a
     `if h == emitted: continue` would excuse both occurrences."""
     soul = _worker_soul("a-engineer").replace(
-        "role identity text",
-        "role identity text\n\n## Role: a-engineer\n\nduplicated block")
+        "spec identity text",
+        "spec identity text\n\n## Role: a-engineer\n\nduplicated block")
     proot, rroot, base = _world(tmp_path, profiles={"a-engineer": soul},
                                 specs={"a-engineer": "a-engineer"})
     res = rsc.check(proot, roles_dir=rroot, base_path=base)
@@ -228,7 +244,7 @@ def test_spec_identity_heading_is_not_flagged(tmp_path):
         "identity": "You do the thing.\n\n## Project scope\n\nown it\n",
         "routing_description": "routing."}), encoding="utf-8")
     soul = (_worker_soul("a-engineer")
-            .replace("role identity text",
+            .replace("spec identity text",
                      "You do the thing.\n\n## Project scope\n\nown it"))
     (proot / "a-engineer" / "SOUL.md").write_text(soul, encoding="utf-8")
     res = rsc.check(str(proot), roles_dir=str(rroot),
@@ -457,30 +473,346 @@ def test_cli_clean_world_exits_zero(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# The content pass (t_5b362400): the loss list a heading sweep cannot see.
+# --------------------------------------------------------------------------- #
+#
+# The headline gap: a hand-patched PARAGRAPH under an EMITTABLE heading leaves
+# the heading sweep silent, so every test below drives CONTENT, not headings.
+
+def test_paragraph_under_an_emittable_heading_is_reported(tmp_path):
+    """THE reason this pass exists. The heading is legal (`## Role:` is emitted),
+    so the heading sweep returns a clean row while the sentence under it is
+    exactly what the next `generate` deletes — the measurement t_0f2ee405 had to
+    make with an ad-hoc script. Must be a problem line naming the line number and
+    quoting the line, and must be a WARNING (ok False, fatal False)."""
+    live_identity = ("spec identity text\n\n"
+                     "Read docs/superpowers/specs/2026-10-26-module-design.md "
+                     "before planning new work.")
+    soul = _worker_soul("a-engineer", identity=live_identity)
+    proot, rroot, base = _world(  # spec identity is only SPEC_IDENTITY
+        tmp_path, profiles={"a-engineer": soul},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+
+    row = _row(res, "a-engineer")
+    assert res["ok"] is False
+    assert res["fatal"] is False, "a content loss is a WARNING, never fatal"
+    assert row["content"]["compared"] is True
+    assert row["content"]["lost_count"] == 1
+    lost = row["content"]["lost"][0]
+    assert "superpowers" in lost["text"]
+    joined = "\n".join(row["problems"])
+    assert f"SOUL line {lost['line']}" in joined, joined
+    assert "cannot be reproduced by compose_soul()" in joined
+    assert "deletes it" in joined
+    # The operator must see it in the rendered detail, not only in --json.
+    assert "superpowers" in res["detail"]
+    assert res["lost_lines"] == 1
+
+
+def test_a_duplicated_line_does_not_survive_by_coincidence(tmp_path):
+    """TRAP (3a): a live line whose text matches identical text ELSEWHERE must
+    NOT count as surviving — the positional opcode test, not a set difference.
+    Fixture: a bullet generate already writes under a shared value, hand-patched
+    a SECOND time under the role section. The positional pass flags the extra
+    copy (a set difference would flag NOTHING, because the text is present);
+    it is not a loss, because the first copy survives, but it is printed."""
+    base_md = BASE_MD + "\n- keep every commit small\n"
+    soul_lines = _worker_soul("a-engineer", base_md=base_md).splitlines()
+    for i, ln in enumerate(soul_lines):
+        if ln.startswith("spec identity text"):
+            soul_lines.insert(i + 1, "- keep every commit small")
+            break
+    soul = "\n".join(soul_lines)
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": soul},
+        specs={"a-engineer": "a-engineer"}, base=base_md)
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    c = row["content"]
+
+    # The set-difference answer would be "nothing flagged at all": the bullet's
+    # text IS present in the composed document. Prove that first.
+    assert "- keep every commit small" in base_md
+    # The positional pass disagrees: exactly one copy survives, the extra one
+    # sits in a non-equal opcode and is reported (in `covered`, since losing a
+    # duplicate loses no novel content — but it IS said, line number included).
+    assert c["lost_count"] == 0, c
+    assert c["covered_count"] == 1, c
+    assert any("keep every commit small" in n for n in row["notes"]), row["notes"]
+
+
+def test_copied_identity_lines_are_not_reported_as_losses(tmp_path):
+    """TRAP (3b, first half): the copy-pasted `## Role:` identity is what
+    `generate` EXISTS to replace, so its disappearance is the repair, not a
+    loss. It must land in `identity`, be said in a note, and never become a
+    problem line — or every drifted profile reports a wall of noise."""
+    proot, rroot, base = _world(
+        tmp_path,
+        profiles={"pontaje-engineer": _worker_soul("bc-engineer")},
+        specs={"pontaje-engineer": "pontaje-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "pontaje-engineer")
+
+    # The header mismatch is still exactly one problem line...
+    assert len([p for p in row["problems"] if "SOUL header" in p]) == 1
+    # ...and the lines that carry it are classified, not listed as losses.
+    assert row["content"]["identity_count"] >= 1
+    assert row["content"]["lost_count"] == 0, row["content"]
+    assert not any("cannot be reproduced" in p for p in row["problems"])
+    assert any("identity" in n and "repair" in n for n in row["notes"])
+
+
+def test_identity_bucket_does_not_swallow_novel_content(tmp_path):
+    """The identity exemption requires a header mismatch AND no other missing
+    word. A hand-patched paragraph that merely happens to mention the copied
+    role name is still a genuine loss."""
+    live = ("spec identity text\n\nAlso ask the bc-engineer role for the "
+            "retirement runbook in docs/legacy/runbook.md.")
+    proot, rroot, base = _world(
+        tmp_path, profiles={"pontaje-engineer": _worker_soul(
+            "bc-engineer", identity=live)},
+        specs={"pontaje-engineer": "pontaje-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "pontaje-engineer")
+    assert row["content"]["lost_count"] == 1
+    assert "runbook" in row["content"]["lost"][0]["text"], row["content"]["lost"]
+
+
+def test_shared_sandbox_inventory_line_is_intended_removal(tmp_path):
+    """TRAP (3b, second half): the named shared/prod sandboxes t_8d22ec81 ruled
+    must NOT come back. A live line whose missing tokens are ALL sandbox-shaped
+    identifiers is intended removal — a note, never a problem. The rule is a
+    SHAPE (an identifier carrying an underscore), never a name list, so this
+    file does not name the operator's real sandboxes either."""
+    live = ("spec identity text.\n\n"
+            "POM_FIXTURE_ONE, POM_FIXTURE_TWO, FIXTURE_LIVE\n")
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul("a-engineer",
+                                                       identity=live)},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    assert row["content"]["inventory_count"] == 1, row["content"]
+    assert row["content"]["lost_count"] == 0
+    assert not any("cannot be reproduced" in p for p in row["problems"])
+    assert any("sandbox" in n for n in row["notes"])
+    # Masked in every surface, counted in --json.
+    blob = json.dumps(res)
+    assert "POM_FIXTURE_ONE" not in blob and "<sandbox>" in blob
+
+
+def test_inventory_line_carrying_novel_prose_is_still_a_loss(tmp_path):
+    """`all tokens are inventory-shaped`, not `any`: the real pontaje line
+    carried the sandbox inventory AND the doc pointer. Classifying it as
+    inventory because one token matched would hide the one genuine loss in the
+    fleet — the same fail-open shape as t_0f2ee405's surviving mutant M3."""
+    live = ("spec identity text\n\n"
+            "POM_FIXTURE_ONE or POM_FIXTURE_TWO). Spec + plan in "
+            "docs/superpowers/specs/2026-10-26-module-design.md.")
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul("a-engineer",
+                                                       identity=live)},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    assert row["content"]["inventory_count"] == 0
+    assert row["content"]["lost_count"] == 1
+    assert "superpowers" in row["content"]["lost"][0]["text"]
+
+
+def test_rewrapped_line_is_counted_as_covered_not_lost(tmp_path):
+    """A line that does not survive byte-for-byte but whose every word still
+    appears in the composed text lost no NOVEL content (a re-wrap or reorder),
+    so it is not a problem — but it is still printed with its line number,
+    because the classification is the operator's to audit."""
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul(
+            "a-engineer", identity="alpha beta gamma delta epsilon zeta\n")},
+        specs={"a-engineer": "a-engineer"})
+    (tmp_path / "roles" / "a-engineer.yaml").write_text(
+        yaml.safe_dump({"name": "a-engineer",
+                        "identity": "alpha beta gamma delta epsilon zeta\n",
+                        "routing_description": "r."}), encoding="utf-8")
+    (tmp_path / "profiles" / "a-engineer" / "SOUL.md").write_text(
+        _worker_soul("a-engineer",
+                     identity="alpha beta gamma\ndelta epsilon zeta\n"),
+        encoding="utf-8")
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    assert row["content"]["lost_count"] == 0, row["content"]
+    assert row["content"]["covered_count"] == 2
+    assert res["ok"] is True, res["detail"]
+    # Printed, not summarised away: each line shows with its line number.
+    assert any("re-wrap" in n for n in row["notes"])
+    assert any("L11:" in n and "alpha beta gamma" in n for n in row["notes"]), \
+        row["notes"]
+    assert "alpha beta gamma" in res["detail"]
+
+
+def test_excluded_lines_are_printed_and_capped(tmp_path):
+    """Two properties of the excluded-line rendering: the cap bounds what one
+    row can print (a genuinely re-written block must not bury every other row),
+    and the full list always survives into --json. The exact split between
+    buckets for a duplicated block is difflib's anchor choice, so the invariant
+    asserted is over ALL printed lines, not one bucket."""
+    many = "\n".join(f"wordalpha{i} wordbeta wordgamma worddelta"
+                     for i in range(rsc._NOTE_LINE_CAP + 3))
+    proot, rroot, base = _world(
+        tmp_path,
+        # The live SOUL carries the block TWICE; the spec writes it once. The
+        # extra copy is exactly what a set difference would have skipped.
+        profiles={"a-engineer": _worker_soul(
+            "a-engineer", identity=SPEC_IDENTITY + "\n" + many + "\n" + many)},
+        specs={"a-engineer": "a-engineer"})
+    (tmp_path / "roles" / "a-engineer.yaml").write_text(
+        yaml.safe_dump({"name": "a-engineer",
+                        "identity": SPEC_IDENTITY + "\n" + many + "\n",
+                        "routing_description": "r."}), encoding="utf-8")
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    c = row["content"]
+    flagged = (c["lost_count"] + c["covered_count"] + c["identity_count"]
+               + c["inventory_count"])
+    assert flagged >= rsc._NOTE_LINE_CAP + 3, c  # nothing silently dropped
+    shown = [n for n in row["notes"] if "wordalpha" in n]
+    assert shown, row["notes"]                      # printed, not hidden
+    assert len(shown) <= rsc._NOTE_LINE_CAP, row["notes"]   # bounded
+    assert any("full list in `--json`" in n for n in row["notes"])
+    # The cap is a RENDERING cap: every flagged line is in --json.
+    blob = json.dumps(c)
+    for i in range(rsc._NOTE_LINE_CAP + 3):
+        assert f"wordalpha{i}" in blob
+
+
+def test_sandbox_names_are_masked_in_every_surface(tmp_path):
+    """The check reads the operator's live SOUL, and the line it must quote is
+    the one carrying the named shared/prod sandboxes. A verbatim rendering turns
+    a `doctor --json` paste into the leak t_0f2ee405 recorded — so the identifier
+    shape is masked in the row AND in the rendered detail AND in --json."""
+    live = ("spec identity text\n\n"
+            "Publish only to POM_FIXTURE_ONE — never POM_FIXTURE_TWO, and read "
+            "docs/legacy/runbook.md first.")
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul("a-engineer",
+                                                       identity=live)},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    blob = json.dumps(res)
+    assert "POM_FIXTURE_ONE" not in blob, "the loss list leaked a sandbox name"
+    assert "POM_FIXTURE_TWO" not in blob
+    assert "<sandbox>" in blob, "masking must be visible, not a silent drop"
+    # The operator keeps everything needed to FIND the line.
+    assert "docs/legacy/runbook.md" in blob
+    assert "runbook" in res["detail"]
+
+
+def test_content_pass_reports_without_any_heading_defect(tmp_path):
+    """Additivity, the other direction: with ZERO heading problems the content
+    pass still flips the verdict and still says how many lines are at risk in
+    the summary — so a heading-only sweep can never read as 'content checked'."""
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul(
+            "a-engineer", identity="spec identity text\n\n"
+                                   "Own the widgets ledger in reports/ledger.md.")},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    assert not any("heading" in p for p in _row(res, "a-engineer")["problems"])
+    assert res["ok"] is False
+    assert "1 live line(s) across 1 profile(s) cannot be reproduced" in \
+        res["detail"].splitlines()[0]
+
+
+def test_clean_soul_loses_nothing_and_says_so(tmp_path):
+    """A SOUL byte-identical to what compose_soul writes must report zero in
+    every bucket AND print the positive 'no live content would be lost' clause —
+    the pair that keeps the loss count from being vacuously zero."""
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul("a-engineer")},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "a-engineer")
+    assert res["ok"] is True, res["detail"]
+    assert res["lost_lines"] == 0
+    c = row["content"]
+    assert (c["compared"], c["lost_count"], c["covered_count"],
+            c["identity_count"], c["inventory_count"]) == (True, 0, 0, 0, 0)
+    assert row["notes"] == []
+    assert "no live content would be lost by generate" in res["detail"]
+
+
+def test_uncomposable_soul_says_the_content_pass_skipped(tmp_path):
+    """Honest signal: if the base identity cannot be read there is nothing to
+    diff against. The row must say the pass was SKIPPED (compared False + the
+    reason) and the summary must not let the reader assume every profile's
+    content was compared — never a silent pass."""
+    proot, rroot, base = _world(
+        tmp_path, profiles={"a-engineer": _worker_soul("a-engineer")},
+        specs={"a-engineer": "a-engineer"})
+    res = rsc.scan(proot, roles_dir=rroot, base_path=base, base_text=None)
+    row = _row(res, "a-engineer")
+    assert row["content"]["compared"] is False
+    assert "unreadable" in row["content"]["reason"]
+    assert any("SKIPPED" in n for n in row["notes"])
+
+
+def test_spec_name_mismatch_defers_the_content_pass(tmp_path):
+    """generate would stamp a different identity here, so every identity line
+    differs by construction and the diff would be a wall of noise on top of the
+    problem already reported. Deferred with a reason, never judged clean."""
+    proot, rroot, base = _world(
+        tmp_path, profiles={"pontaje-engineer": _worker_soul("pontaje-engineer")},
+        specs={"pontaje-engineer": "bc-engineer"})
+    res = rsc.check(proot, roles_dir=rroot, base_path=base)
+    row = _row(res, "pontaje-engineer")
+    assert row["content"]["compared"] is False
+    # A deferred row must not even CARRY a loss count: `lost_count: 0` reads as
+    # "checked, nothing lost", which is the false green this card is about.
+    assert "lost_count" not in row["content"], row["content"]
+    assert "fix that first" in row["content"]["reason"]
+    assert any("SKIPPED" in n for n in row["notes"])
+
+
+def test_content_diff_is_pure_and_positional():
+    """Unit pin of the classifier itself: identical input -> zero everywhere,
+    and a line appended at the END is the only thing reported."""
+    a = "## Role: x\n\none two three\n\n## Operational\n\nops line\n"
+    assert rsc.content_diff(a, a)["lost_count"] == 0
+    b = a + "\nan extra sentence about the ledger\n"
+    d = rsc.content_diff(b, a)
+    assert d["lost_count"] == 1
+    assert d["lost"][0]["line"] == len(b.splitlines())
+    assert d["live_lines"] == len(b.splitlines())
+
+
+# --------------------------------------------------------------------------- #
 # Derivation, not re-typing: the emittable set follows the modules that own it.
 # --------------------------------------------------------------------------- #
 
 def test_base_headings_read_from_the_file_not_a_hardcoded_list(tmp_path):
     """Add a heading to base-identity.md and the check must accept it without an
-    edit here — the rule that keeps doctor and the generator from disagreeing."""
+    edit here — the rule that keeps doctor and the generator from disagreeing.
+
+    The fixture SOUL is built from the SAME extended base text the check reads,
+    so a clean row here is clean for the content pass too, not just for the
+    heading sweep."""
+    extended = BASE_MD + "\n## A brand new shared value\n\nbody\n"
     p = tmp_path / "base3.md"
-    p.write_text(BASE_MD + "\n## A brand new shared value\n\nbody\n",
-                 encoding="utf-8")
+    p.write_text(extended, encoding="utf-8")
     assert "A brand new shared value" in rsc.base_headings(str(p))
     proot = tmp_path / "profiles" / "a-engineer"
     proot.mkdir(parents=True)
     (proot / "SOUL.md").write_text(
-        _worker_soul("a-engineer").replace(
-            "# base", "# base\n\n## A brand new shared value\n\nbody"),
-        encoding="utf-8")
+        _worker_soul("a-engineer", base_md=extended), encoding="utf-8")
     rroot = tmp_path / "roles3"
     rroot.mkdir()
     (rroot / "a-engineer.yaml").write_text(yaml.safe_dump(
-        {"name": "a-engineer", "identity": "x.\n", "routing_description": "y."}),
-        encoding="utf-8")
+        {"name": "a-engineer", "identity": SPEC_IDENTITY,
+         "routing_description": "y."}), encoding="utf-8")
     res = rsc.check(str(tmp_path / "profiles"), roles_dir=str(rroot),
                     base_path=str(p))
     assert res["ok"] is True, res["detail"]
+    assert res["lost_lines"] == 0
 
 
 def test_ops_heading_set_comes_from_generator(tmp_path):
