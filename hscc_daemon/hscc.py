@@ -408,6 +408,11 @@ def _get_help_text():
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
+        # orch group (t_5da7fd56): dispatched at main() and listed in
+        # COMMAND_HELP, so the main banner must show it too (F5 surface-honesty
+        # rule: a live command must not hide from the primary help surface).
+        *_entry('orch inject <p> "<msg>"',
+                "Inject into a running Hermes REPL pane (tmux)"),
     ])
 
     util = _section("Utility", [
@@ -544,6 +549,19 @@ COMMAND_HELP = {
              "    one panel per running card streaming its transcript; waiting\n"
              "    cards at the bottom; keys tab/enter/t/p/q in --live\n"
              "  Usage: hscc cards monitor [args]",
+    # orch group (card t_5da7fd56): the unified-CLI surface for the cluster
+    # engine's cmd_orch router. Every line authored <=76 for the (B) gate's
+    # 78 budget (only the FIRST line receives _handle_help's 2-space prefix),
+    # same convention as cluster/project above. The verb list mirrors what the
+    # engine router actually resolves TODAY (inject); a new orch verb must be
+    # advertised here in the same change that adds it to the router (F5 rule:
+    # help never advertises a command that does not exist).
+    "orch": "Orchestrator commands.\n"
+            "  Subcommands: inject <profile> \"<message>\"\n"
+            "  inject flags: [--mode auto|plain|queue|steer]\n"
+            "  [--dry-run] [--json] [--pane <target>]\n"
+            "  --dry-run resolves the pane and sends nothing.\n"
+            "  Usage: hscc orch <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -1120,6 +1138,117 @@ def _handle_cluster():
         "info": cluster_render.render_info,
     }[sub]
     return renderer(console, result)
+
+
+# ── orch group surface (card t_5da7fd56) ───────────────────────────────────
+# `hscc orch inject <profile> "<msg>"` — the unified-CLI entry the operator
+# asked for. The VERB lives in the cluster engine (hscc-cluster/hscc.py
+# cmd_orch -> cmd_orch_inject -> hscc-api/repl_inject, merged by t_75f17c83);
+# this branch owns only dispatch + rendering + exit codes, exactly like
+# _handle_cluster delegates cmd_status/cmd_up. It holds NO pane logic: no
+# mode vocabulary, no prefix, no screen read — that is repl_inject's contract
+# (parent card's ruling), and duplicating it here is how the two drift.
+_ORCH_GROUP_ENTRIES = [
+    ('hscc orch inject <profile> "<message>"',
+     "Inject a message into the profile's running Hermes REPL pane (tmux "
+     "bracketed paste; exactly one pane for the profile or refuse). Flags: "
+     "[--mode auto|plain|queue|steer] [--dry-run] [--pane <target>] [--json]. "
+     "--dry-run resolves the pane and reports target/busy/verb, sending "
+     "nothing."),
+]
+
+
+def _print_orch_group_help():
+    """`hscc orch` / `hscc orch --help` / `hscc orch inject --help`.
+
+    Text only — no engine import, no dispatch (the cluster/profiles rule:
+    a help request loads nothing and shells out nothing, t_875c5019 /
+    t_5132deb3). One verb today, so the group listing doubles as the verb
+    usage; when a second verb lands it gets its own entry here and this
+    function stays the single source for all three help paths.
+    """
+    width = _cluster_help_width()
+    print("Orchestrator commands:")
+    print()
+    for cmd, desc in _ORCH_GROUP_ENTRIES:
+        for line in _cluster_group_entry_lines(cmd, desc, width):
+            print(line)
+
+
+def _orch_receipt_line(receipt):
+    """The one-line human view of an inject receipt.
+
+    A dry run carries repl_inject's own `line` (format_plan) — reused verbatim
+    so `hscc orch inject --dry-run` prints exactly what the reference tool
+    prints for the same pane. A real send has no `line`, so the same shape is
+    rebuilt from the receipt fields the engine already returns; the char count
+    is appended because that is the one thing a send proves that a plan does
+    not.
+    """
+    if not isinstance(receipt, dict):
+        return str(receipt)
+    line = receipt.get("line")
+    if not line:
+        line = (f"target: {receipt.get('profile')} @ {receipt.get('target')} "
+                f"({'busy' if receipt.get('busy') else 'idle'}) "
+                f"-> {receipt.get('mode')}")
+    chars = receipt.get("chars")
+    if chars is None and receipt.get("sent_text") is not None:
+        chars = len(receipt["sent_text"])
+    if chars is not None and "chars" not in line:
+        line += f" ({chars} chars)"
+    return line
+
+
+def _handle_orch(argv):
+    """Route `hscc orch <verb>` to the cluster engine's cmd_orch router.
+
+    Shape mirrors _handle_cluster / the api branch: help first (loads nothing),
+    then the engine load, then one call, then rendering. Exit codes:
+    0 = delivered (or a printed plan), 1 = refusal or a bad verb.
+
+    `--json` is passed straight through to the engine (cmd_orch_inject accepts
+    and ignores it — rendering is ours) and only selects the raw receipt dump
+    here; `--theme` is stripped (it is a human-view flag the engine does not
+    know).
+    """
+    tail, _theme_name = _strip_theme_arg(list(argv))
+    json_mode = "--json" in tail
+
+    # A help token ANYWHERE in the tail is help — before the engine load, so
+    # `hscc orch inject --help` can never reach a verb that injects (the
+    # t_5132deb3 rule: -h must never execute).
+    if not tail or _help_token_index(tail) is not None:
+        _print_orch_group_help()
+        return 0
+
+    eng = _load_cluster_engine()
+    if eng is None:
+        return 1
+
+    try:
+        receipt = eng.cmd_orch(list(tail))
+    except Exception as exc:
+        # repl_inject.InjectError (no pane / ambiguous pane / empty text / bad
+        # mode / tmux failure) and ValueError (bad argv, unknown verb) are
+        # REFUSALS: one reported line + exit 1, never a traceback and never a
+        # stack trace leaking a pane id. `--json` keeps its machine contract
+        # (an {"error": ...} object on stdout, same shape as the engine's own
+        # error path).
+        if json_mode:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"error: {exc}")
+        return 1
+
+    if json_mode:
+        # Byte-identical to the standalone engine entry's --json dump
+        # (hscc-cluster/hscc.py::_emit_result): daemon scripts and the iOS
+        # console parse this.
+        print(json.dumps(receipt, indent=2, default=str))
+    else:
+        print(_orch_receipt_line(receipt))
+    return 0
 
 
 def _strip_theme_and_json(args):
@@ -1872,6 +2001,19 @@ def main():
         rc = cmd_cards(args[1:])
         sys.exit(rc)
 
+    # 'orch' group — orchestrator verbs (t_5da7fd56). The VERB lives in the
+    # cluster engine (its cmd_orch router, merged by t_75f17c83); without this
+    # branch `hscc orch inject` died on "Unknown command: orch" while the
+    # standalone engine entry worked — the split the operator called out.
+    # Help is intercepted INSIDE _handle_orch (before the engine load), so it
+    # is deliberately not routed through the DAEMON_COMMANDS intercept below:
+    # that one prints COMMAND_HELP, which is a one-line-per-verb blurb, and
+    # `hscc cluster`/`template`/`api` set the group precedent of a dedicated
+    # group listing instead.
+    if cmd == "orch":
+        rc = _handle_orch(args[1:])
+        sys.exit(rc)
+
     # Per-command help for the daemon verbs (t_5132deb3: the branch used to
     # fire only on `args[1] == "--help"`, so `escalate -h` / `autoscale -h`
     # RAN the read-only verb instead of printing help, and a --help that was
@@ -2015,7 +2157,7 @@ def main():
         cmd_heal(status_only=True)
     else:
         print(f"Unknown command: {cmd}")
-        print("Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, bootstrap, update, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
+        print("Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, bootstrap, update, cluster, template, profiles, project, api, kanban, orch, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
         sys.exit(1)
 
 
