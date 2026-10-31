@@ -83,6 +83,14 @@ class TestKindValidation:
             m = ti.ModelIntent.from_dict(_model_dict(kind=good))
             assert m.kind == good
 
+    def test_kind_image_parses_and_round_trips(self):
+        m = ti.ModelIntent.from_dict(_model_dict(kind="image"))
+        assert m.kind == "image" and m.to_dict()["kind"] == "image"
+
+    def test_kind_video_parses_and_round_trips(self):
+        m = ti.ModelIntent.from_dict(_model_dict(kind="video"))
+        assert m.kind == "video" and m.to_dict()["kind"] == "video"
+
     def test_rejects_unknown_string(self):
         for bad in ("audio", "imagen", "", "CHAT", "Image", "video "):
             with pytest.raises(ti.TemplateIntentError) as e:
