@@ -100,6 +100,12 @@ so the stdout channel itself was fixed (a) and the tests were made hermetic (b):
 
 ## Verification (all actually executed)
 
+Order matters: gates ran on a CLEAN tree at the exact pushed commit
+(`git status --short` empty; `git rev-parse HEAD == origin/wt/t_18318fd9`), and
+nothing was edited under the repo while a run was in flight — an earlier
+full-suite run was deliberately KILLED when a code change landed mid-run rather
+than stamping a stale tree.
+
 - Deterministic repro of the exact card error before the fix (above): the card's
   verbatim `JSONDecodeError: Expecting ',' delimiter: line 1 column 6 (char 5)`.
 - `test_kanban_cli.py + test_daemon_ops.py` isolated: 75 passed.
