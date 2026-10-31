@@ -142,12 +142,13 @@ def test_row_builder_reports_unverifiable_when_module_missing(tmp_path,
 
 def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
     """The human-CLI path: with the pytest branch forced off, the row delegates
-    to orch_waker.doctor_check() — the injected stub proves the delegation,
-    no real config/state is read."""
+    to orch_waker.doctor_check(hscc_dir=...) — the injected stub proves the
+    delegation AND that the HSCC_DIR pass-through is wired, no real config or
+    state is read."""
     calls = []
 
-    def fake_check():
-        calls.append(1)
+    def fake_check(hscc_dir=None):
+        calls.append(hscc_dir)
         return {"name": CHECK_NAME, "ok": True, "fatal": False,
                 "detail": "from the real check", "fix": ""}
 
@@ -156,8 +157,8 @@ def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
 
     monkeypatch.setattr(doctor, "_load_orch_waker", lambda: Waker())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
-    row = doctor._orch_waker_check_row(None)
-    assert calls == [1] and row.detail == "from the real check"
+    row = doctor._orch_waker_check_row(None, hscc_dir="/sandbox/.hscc")
+    assert calls == ["/sandbox/.hscc"] and row.detail == "from the real check"
 
 
 def test_waker_row_is_in_the_check_list_exactly_once(tmp_path, monkeypatch):

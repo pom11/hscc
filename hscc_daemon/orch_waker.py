@@ -946,8 +946,32 @@ def tick_freshness_limit_s(poll_s) -> float:
     return 2 * float(poll_s) + DOCTOR_SLACK_S
 
 
+def _daemon_predates_build(pid_file=None, build_file=None) -> bool:
+    """Did the RUNNING daemon start before this build of the waker landed?
+
+    The upgrade race the fatal verdict must never mis-fire on: doctor is
+    bootstrap's Stage-1 gate and the daemon restart is a LATER stage, so
+    during an upgrade the live daemon was started from code that has no
+    waker stream at all. "Enabled + daemon alive + never stamped" only proves
+    broken wiring when the running process is newer than the module — the
+    signal available out-of-process is file mtimes: the pid file is written at
+    daemon start, so ``pid mtime >= orch_waker.py mtime`` means the daemon
+    could have stamped and did not (broken); an older pid means it never could
+    (upgrade). Either stat failing answers False — an unverdictable check must
+    not sink an install (the same fail-open posture as the not-running case).
+    """
+    try:
+        path = _resolve(pid_file or DAEMON_PID_PATH)
+        started = os.path.getmtime(path)
+        built = os.path.getmtime(build_file or __file__)
+    except OSError:
+        return False
+    return started < built
+
+
 def doctor_check(now=None, config_path=None, state_dir=None,
-                 stream_state=None, _daemon_running=None) -> dict:
+                 stream_state=None, _daemon_running=None,
+                 hscc_dir=None, _predates_build=None) -> dict:
     """Doctor verdict: is the built-in waker alive and doing its job?
 
     * ``disabled``                -> ok, detail says ``disabled`` (the operator
@@ -968,15 +992,38 @@ def doctor_check(now=None, config_path=None, state_dir=None,
     Reads only (config + the stream state file), so it is safe to run while the
     daemon ticks and it never touches a board DB. ``stream_state=`` injects the
     stream entry and ``_daemon_running=`` the liveness probe (tests); otherwise
-    they read ``<state_dir>/orch_waker.json`` / ``~/.hscc/daemon.pid``. Never
-    raises: an unreadable state file is "never ticked", an unreadable config
-    falls back to the defaults exactly as the daemon's tick does, so doctor and
-    daemon always agree.
+    they read ``<state_dir>/orch_waker.json`` / ``<root>/daemon.pid``.
+    ``hscc_dir=`` (the ``doctor_notifier_mask`` convention — run_doctor passes
+    ``os.environ.get("HSCC_DIR")``) relocates the WHOLE ``~/.hscc`` root for
+    this read: config, stream state and the daemon pid file all resolve under
+    it. That is what keeps a sandboxed bootstrap (HSCC_DIR = tmp, HOME = the
+    operator's real one — bootstrap.sh never fakes HOME) from reading the
+    OPERATOR's live daemon.pid while looking at the sandbox's missing stream
+    state and firing the fatal verdict over someone else's machine. Without
+    the env var every path is the plain ``~/.hscc`` default.
+    ``_predates_build=`` injects the upgrade-race probe (tests; the real one
+    is :func:`_daemon_predates_build`, which needs NO injection because the
+    pid file it stats is the same file the default liveness probe read).
+    Never raises: an unreadable state file is "never ticked", an unreadable
+    config falls back to the defaults exactly as the daemon's tick does, so
+    doctor and daemon always agree.
     """
     if now is None:
         now = _real_time()
+    pid_file = None
+    if hscc_dir:
+        root = _resolve(hscc_dir)
+        if config_path is None:
+            config_path = os.path.join(root, "orch_waker.json")
+        if state_dir is None:
+            state_dir = os.path.join(root, "state")
+        pid_file = os.path.join(root, "daemon.pid")
+        if _daemon_running is None:
+            _daemon_running = lambda: _daemon_pid_alive(pid_file)  # noqa: E731
     if _daemon_running is None:
         _daemon_running = _daemon_pid_alive
+    if _predates_build is None:
+        _predates_build = lambda: _daemon_predates_build(pid_file)  # noqa: E731
     cfg = load_config(config_path)
     limit = tick_freshness_limit_s(stream_interval(cfg))
     fix = ("start/restart the hscc daemon (`hscc start`) and re-run; if it "
@@ -992,11 +1039,24 @@ def doctor_check(now=None, config_path=None, state_dir=None,
         stream_state = _read_stream_state(state_dir)
     last_tick = (stream_state or {}).get("last_tick")
     if not isinstance(last_tick, (int, float)):
-        if _daemon_running():
+        state_hint = (os.path.join(_resolve(state_dir), f"{STREAM_NAME}.json")
+                      if state_dir else "~/.hscc/state/orch_waker.json")
+        running = _daemon_running()   # probe ONCE: a restart mid-check must
+        # not flip the verdict between the liveness bit and the age comparison.
+        if running and not _predates_build():
             return {"name": CHECK_NAME, "ok": False, "fatal": True,
-                    "detail": "ENABLED but never ticked while the daemon runs "
-                              "(no stream state at ~/.hscc/state/"
-                              "orch_waker.json)",
+                    "detail": f"ENABLED but never ticked while the daemon runs "
+                              f"(no stream state at {state_hint})",
+                    "fix": fix}
+        if _daemon_running():
+            # Upgrade race, not broken wiring: doctor is Stage 1, the daemon
+            # restart is a LATER stage, so this live daemon was started from
+            # code without the waker stream. Warn; it goes green on its own
+            # after the restart.
+            return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                    "detail": "enabled but the RUNNING daemon predates this "
+                              "build (never ticked yet) — the daemon restart "
+                              "later in bootstrap starts the stream",
                     "fix": fix}
         return {"name": CHECK_NAME, "ok": False, "fatal": False,
                 "detail": "enabled but the daemon is not running — nothing "

@@ -1254,7 +1254,7 @@ def _refused_orch_waker_check() -> dict:
                    "operator's daemon state."}
 
 
-def _orch_waker_check_row(injected=None) -> "Check":
+def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
     """The orch-waker row for the shared check list (five Check fields).
 
     Three sources, in order of trust: an injected callable (tests pass a
@@ -1262,7 +1262,11 @@ def _orch_waker_check_row(injected=None) -> "Check":
     (a human CLI run), and the in-suite refusal (pytest with no seam — never a
     real read of the operator's daemon state). A module that cannot be imported
     at all reports itself UNVERIFIABLE rather than vanishing from the list, the
-    same honesty rule as the notifier-mask check.
+    same honesty rule as the notifier-mask check. ``hscc_dir`` is forwarded to
+    the real check exactly like ``doctor_notifier_mask.check`` takes it: a
+    sandboxed bootstrap (doctor is Stage 1, HOME stays real there) must read
+    the SANDBOX's ~/.hscc root — config, stream state and daemon.pid — or the
+    check fires a fatal verdict over the operator's live daemon.
     """
     if injected is not None:
         res = injected()
@@ -1277,7 +1281,7 @@ def _orch_waker_check_row(injected=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = waker.doctor_check()
+        res = waker.doctor_check(hscc_dir=hscc_dir)
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1349,8 +1353,12 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # OPERATOR's live ~/.hscc (config + the waker's stream state), so
         # inside a pytest process it must be injected — without a seam it
         # renders as an ERROR naming the seam, never a silent pass and never a
-        # real read of the operator's daemon state.
-        _orch_waker_check_row(_orch_waker_check),
+        # real read of the operator's daemon state. hscc_dir comes from the
+        # environment (the doctor_notifier_mask convention two rows down):
+        # bootstrap's sandboxed tests keep HOME real and relocate only
+        # HSCC_DIR, and doctor runs there as the Stage-1 gate.
+        _orch_waker_check_row(_orch_waker_check,
+                              hscc_dir=os.environ.get("HSCC_DIR")),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh

@@ -483,9 +483,86 @@ def test_doctor_boundary_exactly_at_budget_is_ok(tmp_path):
 
 def test_doctor_red_only_when_enabled_but_never_ticked_while_running(tmp_path):
     res = ow.doctor_check(now=NOW, config_path=cfg_path(tmp_path),
-                          stream_state={}, _daemon_running=lambda: True)
+                          stream_state={}, _daemon_running=lambda: True,
+                          _predates_build=lambda: False)
     assert res["ok"] is False and res["fatal"] is True
     assert "never ticked" in res["detail"]
+
+
+def test_doctor_upgrade_race_is_a_warning_never_fatal(tmp_path):
+    """THE fresh/upgrade-bootstrap case (t_2b34b5c7 review finding): doctor is
+    Stage 1 and the daemon restart is a LATER stage, so the live daemon may
+    have been started from code that has NO waker stream. 'Enabled + alive +
+    never stamped' then proves nothing about the wiring — fatal would abort
+    every upgrade bootstrap (it did, on the first run of the isolated suite).
+    Must print as a warning naming the upgrade race."""
+    res = ow.doctor_check(now=NOW, config_path=cfg_path(tmp_path),
+                          stream_state={}, _daemon_running=lambda: True,
+                          _predates_build=lambda: True)
+    assert res["ok"] is False and res["fatal"] is False
+    assert "predates this build" in res["detail"]
+
+
+def test_predates_build_compares_pid_mtime_to_the_module(tmp_path):
+    """pid file is written at daemon START, so its mtime is the process age;
+    a pid older than this module = the daemon cannot have this stream."""
+    pid = tmp_path / "daemon.pid"
+    build = tmp_path / "orch_waker.py"
+    pid.write_text("4242")
+    build.write_text("# module\n")
+    os.utime(pid, (NOW - 3600, NOW - 3600))       # started an hour ago
+    os.utime(build, (NOW, NOW))                   # module newer
+    assert ow._daemon_predates_build(str(pid), str(build)) is True
+    os.utime(pid, (NOW + 10, NOW + 10))           # daemon restarted after it
+    assert ow._daemon_predates_build(str(pid), str(build)) is False
+
+
+def test_predates_build_unverdictable_answers_no(tmp_path):
+    """Missing pid file (daemon never ran) or missing module: False — an
+    unverdictable probe must never turn the fatal branch on (fail-open, same
+    posture as the not-running case)."""
+    assert ow._daemon_predates_build(str(tmp_path / "no.pid"),
+                                     str(tmp_path / "no.py")) is False
+
+
+def test_doctor_hscc_dir_relocates_every_read(tmp_path):
+    """The doctor_notifier_mask convention under bootstrap's sandbox: HOME
+    stays the operator's real one, HSCC_DIR points at tmp. With the sandbox
+    root given, EVERY read (config, stream state, daemon.pid) resolves under
+    it — a live OPERATOR daemon must not make the sandbox's untouched waker
+    read fatal, and the state hint in the detail names the sandbox path."""
+    root = tmp_path / "sandbox-hscc"
+    (root / "state").mkdir(parents=True)
+    pid = root / "daemon.pid"
+    pid.write_text(str(os.getpid()))          # sandbox daemon IS alive
+    res = ow.doctor_check(now=NOW, hscc_dir=str(root),
+                          _predates_build=lambda: False)
+    assert res["ok"] is False and res["fatal"] is True
+    assert str(root) in res["detail"], "the hint names the sandbox state path"
+    # flip the sandbox's own config -> disabled verdict proves config reloc too
+    ow.set_enabled(False, str(root / "orch_waker.json"))
+    res = ow.doctor_check(now=NOW, hscc_dir=str(root))
+    assert res["ok"] is True and "disabled" in res["detail"]
+    # stamp the sandbox stream (config back ON) -> the relocated read goes
+    # green: the stamp lives under the sandbox root, not the operator's
+    ow.set_enabled(True, str(root / "orch_waker.json"))
+    (root / "state" / "orch_waker.json").write_text(json.dumps(
+        {"ok": True, "last_tick": NOW - 5}))
+    res = ow.doctor_check(now=NOW, hscc_dir=str(root))
+    assert res["ok"] is True and "5s ago" in res["detail"]
+
+
+def test_doctor_hscc_dir_sandbox_dead_daemon_is_not_running(tmp_path):
+    """Symmetric case: sandbox pid file garbage/absent while the OPERATOR's
+    real daemon runs — the relocated probe must answer 'not running' (warn),
+    never fatal: whoever runs the sandboxed doctor gets a verdict about the
+    sandbox, not about someone else's machine."""
+    root = tmp_path / "sandbox-hscc2"
+    (root / "state").mkdir(parents=True)
+    (root / "daemon.pid").write_text("not-a-pid")
+    res = ow.doctor_check(now=NOW, hscc_dir=str(root))
+    assert res["ok"] is False and res["fatal"] is False
+    assert "not running" in res["detail"]
 
 
 def test_doctor_not_red_when_the_daemon_is_not_running(tmp_path):
