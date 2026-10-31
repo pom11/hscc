@@ -31,11 +31,18 @@ WORKER_OPS = ("## Operational\n\nYou run as the **{name}** role on a worker GPU 
               "node of the cluster, executing a single kanban task in your own "
               "git worktree.\n")
 BASE_MD = "## Shared value one\n\nbody\n"
+SPEC_IDENTITY = "text.\n"
 
 
 def _soul(role_header):
-    return (f"# base\n\n## Shared value one\n\nbody\n\n## Role: {role_header}\n\n"
-            f"identity text\n\n{WORKER_OPS.format(name=role_header)}")
+    """A worker SOUL for `role_header` DERIVED from the generator's own
+    compose_soul over the fixture spec's identity. With t_5b362400's content
+    pass a hand-typed facsimile would be flagged as lost content by the very
+    check these tests are exercising."""
+    drs._roles_dir()
+    import generator
+    return generator.compose_soul({"name": role_header,
+                                   "identity": SPEC_IDENTITY}, BASE_MD)
 
 
 def _fixture_world(tmp_path, *, soul_for, spec_names):
@@ -252,6 +259,41 @@ def test_run_doctor_fleet_off_marks_the_check_skipped(tmp_path, monkeypatch):
     res = doctor.run_doctor(str(home), _cluster_runner=lambda: FAKE_CLUSTER)
     names = {c["name"]: c for c in res["checks"]}
     assert names[drs.CHECK_NAME]["detail"] == "skipped (fleet checks off)"
+
+
+def test_run_doctor_surfaces_a_content_loss_without_a_heading_defect(
+        tmp_path, monkeypatch):
+    """t_5b362400 end to end through doctor: a hand-patched PARAGRAPH under an
+    emittable heading is invisible to a heading sweep, so the content pass is the
+    only thing that can surface it. The header here MATCHES its dir and there is
+    no bad heading — the loss line must still reach the operator's detail."""
+    home = _home(tmp_path, monkeypatch)
+    proot, rroot, base = _fixture_world(
+        tmp_path, soul_for={"a-engineer": "a-engineer"},
+        spec_names={"a-engineer": "a-engineer"})
+    (tmp_path / "profiles" / "a-engineer" / "SOUL.md").write_text(
+        _soul("a-engineer")
+        + "\nSpec and plan live in docs/superpowers/specs/2026-10-26-module.md\n",
+        encoding="utf-8")
+
+    def run():
+        drs._roles_dir()
+        import role_soul_check as rsc
+        return rsc.check(proot, roles_dir=rroot, base_path=base)
+
+    res = doctor.run_doctor(
+        str(home), _cluster_runner=lambda: FAKE_CLUSTER, fleet_checks=True,
+        _ssh_factory=lambda h: (lambda c, t: {"ok": False, "stdout": "",
+                                              "code": 127, "stderr": "stub"}),
+        hscc_dir="/nonexistent", _role_soul_scan=run, **_fleet_health())
+    names = {c["name"]: c for c in res["checks"]}
+    c = names[drs.CHECK_NAME]
+    assert c["ok"] is False
+    assert "docs/superpowers" in c["detail"], c["detail"]
+    assert "cannot be reproduced" in c["detail"]
+    # Still a WARNING: the loss list must never hard-stop preflight.
+    assert c["fatal"] is False
+    assert res["ok"] is True
 
 
 def test_run_doctor_json_carries_the_check(tmp_path, monkeypatch):
