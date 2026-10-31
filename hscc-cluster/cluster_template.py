@@ -421,7 +421,8 @@ def _unit_serve_names(u: Any, plan: Any) -> str:
 
 def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
                       alias: str, tp: int, model: str = "",
-                      gpu_mem: Optional[float] = None) -> List[str]:
+                      gpu_mem: Optional[float] = None,
+                      max_num_seqs: Optional[int] = None) -> List[str]:
     """Canonical serve argv for a wanted unit — the exact argv that gets run.
 
     This is the SINGLE source of truth shared by both (a) recording at
@@ -449,6 +450,15 @@ def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
     # not co-locate wants.
     if gpu_mem is not None:
         cmd.extend(["--gpu-mem", str(gpu_mem)])
+    # Same rule as --gpu-mem: emit only when the template asked for a cap.
+    # sparkrun has NO dedicated concurrency flag (verified against the live
+    # `sparkrun run --help`): the recipe-key override is `-o, --option TEXT`
+    # (`-o key=value`, repeatable), so the cap rides as one argv PAIR,
+    # `-o max_num_seqs=N`, overriding any recipe default (the flash-next solo
+    # recipe ships 8). `_serve_cmd_flags` normalizes this pair so a changed
+    # value reads as named drift, exactly like --gpu-mem.
+    if max_num_seqs is not None:
+        cmd.extend(["-o", f"max_num_seqs={max_num_seqs}"])
     return cmd
 
 
@@ -459,12 +469,24 @@ def _serve_cmd_flags(cmd: List[str]) -> dict:
     rendered never reads as fleet drift. Currently: a missing ``--tp`` means
     ``--tp 1``, because commands recorded before tp became explicit omit it
     while an equivalent command rendered today includes it.
+
+    ``-o``/``--option`` pairs (sparkrun's repeatable ``-o key=value`` recipe
+    override — how ``max_num_seqs`` rides) are folded into their OWN key
+    ``-o <name>`` instead of landing in ``positional``. Two reasons: the bare
+    ``-o`` token has no ``--`` prefix and would otherwise be swallowed by the
+    positional list alongside the recipe path, and the diff then names the
+    actual knob (``-o max_num_seqs: '8' -> '5'``) exactly like ``--gpu-mem``
+    does, instead of dumping the whole positional list.
     """
     out: dict = {}
     i = 0
     while i < len(cmd):
         tok = cmd[i]
-        if tok.startswith("--"):
+        if tok in ("-o", "--option") and i + 1 < len(cmd):
+            key, _, val = cmd[i + 1].partition("=")
+            out[f"-o {key}"] = val
+            i += 2
+        elif tok.startswith("--"):
             if i + 1 < len(cmd) and not cmd[i + 1].startswith("--"):
                 out[tok] = cmd[i + 1]
                 i += 2
@@ -664,7 +686,8 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             rendered = _render_serve_cmd(
                 cluster, hosts_arg, port, recipe, alias, tp,
                 getattr(unit, "model", ""),
-                getattr(unit, "gpu_memory_utilization", None))
+                getattr(unit, "gpu_memory_utilization", None),
+                getattr(unit, "max_num_seqs", None))
             rec = serving_records.get(unit_id)
             rec_cmd = (rec or {}).get("serve_cmd")
             if rec_cmd is None:
@@ -709,7 +732,8 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             cmd = _render_serve_cmd(
                 cluster, hosts_arg, port, recipe, alias, tp,
                 getattr(unit, "model", ""),
-                getattr(unit, "gpu_memory_utilization", None))
+                getattr(unit, "gpu_memory_utilization", None),
+                getattr(unit, "max_num_seqs", None))
             r = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=PROVISION_TIMEOUT_S)
             if r.returncode == 0:
@@ -1544,7 +1568,8 @@ RECOGNISED_VERSIONS = (2, 3, 4)
 _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
                    "routing", "uniform_pool", "endpoints", "proxy", "caps",
                    "reasoning"}
-_KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization"}
+_KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization",
+                     "max_num_seqs"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
 
