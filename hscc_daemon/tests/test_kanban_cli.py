@@ -23,45 +23,35 @@ from hscc_daemon.kanban_cli import (cmd_kanban, _parse_older_than,
 
 @pytest.fixture(autouse=True)
 def _no_live_prci_probes(monkeypatch):
-    """Hermeticity guard for this file (t_18318fd9): no test may reach the
-    REAL ``gh`` PR/CI screen.
+    """Hermeticity fixture for this file (t_18318fd9): the PR/CI interlock is
+    pinned CLEAR for every test here.
 
-    ``autodown_cli._cmd_status`` evaluates ``_has_active_pr_ci()``, which falls
-    back to the real ``_screen_prci`` — twelve live ``gh`` probes over
-    ``DEFAULT_PRCI_REPOS``. Two independent problems, both observed:
+    ``autodown_cli._cmd_status`` evaluates ``_has_active_pr_ci()``, which with no
+    injected checker falls back to the real ``_screen_prci`` — twelve live ``gh``
+    probes over ``DEFAULT_PRCI_REPOS``. Two independent problems, both observed:
 
-      * a blip on ANY repo (``gh run list --repo … rc=1``) flips the interlock
-        to ``_PRCI_UNREACHABLE``, which made status report a different
-        ``blocked_by`` than the test asserted — a ~1-in-2 suite flake;
+      * a blip on ANY repo (``gh run list --repo … rc=1``) flipped the interlock
+        to ``_PRCI_UNREACHABLE``, so status reported a different ``blocked_by``
+        than the test asserted — the ~1-in-2 suite flake;
       * that path also emitted a WARN, which used to land on stdout and broke
         ``json.loads`` of the ``--json`` payload.
 
-    ``test_autodown_cli.py`` already stubs this autouse-wide (``_no_active_prci``);
-    this file did not, which is why only its two ``cmd_autodown`` tests flaked.
+    ``test_autodown_cli.py`` already stubbed this autouse-wide
+    (``_no_active_prci``) and this file did not — that asymmetry is why only
+    this file's two ``cmd_autodown`` tests flaked, and why the failure looked
+    unrelated to autodown.
 
-    Two layers, because the fail-safe would swallow a raised guard: the stubs
-    keep every test deterministic and off the network, and a probe that reaches
-    the real screen anyway is RECORDED and reported at teardown — an exception
-    raised there is caught by ``_has_active_pr_ci``'s own ``except Exception``
-    and turned into a fail-safe True, so a raise would have looked like a pass.
+    Pinning the interlock here (rather than relying only on the package-wide
+    GH PROBE FENCE in conftest.py) is what keeps the assertions deterministic:
+    the fence BLOCKS an unstubbed probe and returns the fail-safe
+    ``_PRCI_UNREACHABLE``, which is the honest production answer but would still
+    make ``blocked_by`` mention PR/CI. The fence is the backstop that turns a
+    forgotten stub into a loud failure instead of a host-dependent result.
     """
-    hits = []
     monkeypatch.setattr(ad, "_has_active_pr_ci", lambda *a, **k: False)
     monkeypatch.setattr(ad, "prci_blocking_signal", lambda: None)
     monkeypatch.setattr(ad, "prci_check_state", lambda: {
         "ok": True, "reason": "", "blocking": None})
-
-    def _never_reach_the_network(*a, **k):
-        hits.append(1)
-        raise AssertionError("live gh PR/CI screen reached from a test")
-
-    monkeypatch.setattr(ad, "_screen_prci", _never_reach_the_network)
-    yield
-    assert not hits, (
-        f"{len(hits)} live gh PR/CI probe(s) reached from this test — stub the "
-        "interlock (see _no_live_prci_probes, t_18318fd9). The fail-safe turns "
-        "a screen failure into 'active', so an unstubbed probe means a "
-        "result that depends on this host's GitHub reachability.")
 
 
 # ---------------------------------------------------------------------------
