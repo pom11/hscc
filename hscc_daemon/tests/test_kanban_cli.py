@@ -21,6 +21,39 @@ from hscc_daemon.kanban_cli import (cmd_kanban, _parse_older_than,
                                     DEFAULT_STALE_DAYS)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_prci_probes(monkeypatch):
+    """Hermeticity guard for this file (t_18318fd9): no test may reach the
+    REAL ``gh`` PR/CI screen.
+
+    ``autodown_cli._cmd_status`` evaluates ``_has_active_pr_ci()``, which falls
+    back to the real ``_screen_prci`` — twelve live ``gh`` probes over
+    ``DEFAULT_PRCI_REPOS``. Two independent problems, both observed:
+
+      * a blip on ANY repo (``gh run list --repo … rc=1``) flips the interlock
+        to ``_PRCI_UNREACHABLE``, which made status report a different
+        ``blocked_by`` than the test asserted — a ~1-in-2 suite flake;
+      * that path also emitted a WARN, which used to land on stdout and broke
+        ``json.loads`` of the ``--json`` payload.
+
+    ``test_autodown_cli.py`` already stubs this autouse-wide (``_no_active_prci``);
+    this file did not, which is why only its two ``cmd_autodown`` tests flaked.
+    Stub it clear, and make the real screen a hard failure so a future test that
+    reaches it fails loudly here instead of flaking on a developer's laptop.
+    """
+    monkeypatch.setattr(ad, "_has_active_pr_ci", lambda *a, **k: False)
+    monkeypatch.setattr(ad, "prci_blocking_signal", lambda: None)
+    monkeypatch.setattr(ad, "prci_check_state", lambda: {
+        "ok": True, "reason": "", "blocking": None})
+
+    def _never_reach_the_network(*a, **k):
+        raise AssertionError(
+            "live gh PR/CI screen reached from a test — stub it "
+            "(see _no_live_prci_probes, t_18318fd9)")
+
+    monkeypatch.setattr(ad, "_screen_prci", _never_reach_the_network)
+
+
 # ---------------------------------------------------------------------------
 # Fake Hermes kanban lib — real in-memory sqlite, board-aware
 # ---------------------------------------------------------------------------

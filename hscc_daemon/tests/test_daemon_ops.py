@@ -590,6 +590,50 @@ class TestLog:
         assert "first" in lines[0]
         assert "second" in lines[1]
 
+    def test_foreground_echo_goes_to_stderr_not_stdout(
+            self, capsys, tmp_hfcc_dir, monkeypatch):
+        """The foreground-mode echo must NOT touch stdout (t_18318fd9).
+
+        stdout is the machine channel for every HSCC CLI: `--json` is a raw
+        `json.dumps` printed there. While PID_FILE was absent the echo went to
+        stdout, so a single WARN could splice itself in front of a JSON
+        document and break the caller's `json.loads` — that is exactly the
+        intermittent `hscc autodown status --json` failure this pins closed.
+        """
+        from hscc_daemon import daemon_ops
+        pid_file = tmp_hfcc_dir / "pid"          # never created -> foreground
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
+        log_file = tmp_hfcc_dir / "log"
+        monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
+
+        daemon_ops.log("interlock unevaluable", "WARN")
+
+        captured = capsys.readouterr()
+        assert captured.out == "", (
+            f"log() wrote to stdout; a --json payload would be corrupted: "
+            f"{captured.out!r}")
+        assert "[ WARN] interlock unevaluable" in captured.err
+        # Visibility is not lost — the file write is unconditional.
+        assert "[ WARN] interlock unevaluable" in log_file.read_text()
+
+    def test_daemon_mode_prints_nothing(self, capsys, tmp_hfcc_dir,
+                                        monkeypatch):
+        """With a live PID file (daemon mode) there is no echo at all — only
+        the file. Guards against a fix that printed unconditionally."""
+        from hscc_daemon import daemon_ops
+        pid_file = tmp_hfcc_dir / "pid"
+        pid_file.write_text(str(os.getpid()))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
+        log_file = tmp_hfcc_dir / "log"
+        monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
+
+        daemon_ops.log("quiet please", "WARN")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+        assert "quiet please" in log_file.read_text()
+
 
 class TestGetDaemonLogTail:
     """get_daemon_log_tail() reads last N lines from log."""
