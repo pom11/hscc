@@ -21,6 +21,39 @@ from hscc_daemon.kanban_cli import (cmd_kanban, _parse_older_than,
                                     DEFAULT_STALE_DAYS)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_prci_probes(monkeypatch):
+    """Hermeticity fixture for this file (t_18318fd9): the PR/CI interlock is
+    pinned CLEAR for every test here.
+
+    ``autodown_cli._cmd_status`` evaluates ``_has_active_pr_ci()``, which with no
+    injected checker falls back to the real ``_screen_prci`` — twelve live ``gh``
+    probes over ``DEFAULT_PRCI_REPOS``. Two independent problems, both observed:
+
+      * a blip on ANY repo (``gh run list --repo … rc=1``) flipped the interlock
+        to ``_PRCI_UNREACHABLE``, so status reported a different ``blocked_by``
+        than the test asserted — the ~1-in-2 suite flake;
+      * that path also emitted a WARN, which used to land on stdout and broke
+        ``json.loads`` of the ``--json`` payload.
+
+    ``test_autodown_cli.py`` already stubbed this autouse-wide
+    (``_no_active_prci``) and this file did not — that asymmetry is why only
+    this file's two ``cmd_autodown`` tests flaked, and why the failure looked
+    unrelated to autodown.
+
+    Pinning the interlock here (rather than relying only on the package-wide
+    GH PROBE FENCE in conftest.py) is what keeps the assertions deterministic:
+    the fence BLOCKS an unstubbed probe and returns the fail-safe
+    ``_PRCI_UNREACHABLE``, which is the honest production answer but would still
+    make ``blocked_by`` mention PR/CI. The fence is the backstop that turns a
+    forgotten stub into a loud failure instead of a host-dependent result.
+    """
+    monkeypatch.setattr(ad, "_has_active_pr_ci", lambda *a, **k: False)
+    monkeypatch.setattr(ad, "prci_blocking_signal", lambda: None)
+    monkeypatch.setattr(ad, "prci_check_state", lambda: {
+        "ok": True, "reason": "", "blocking": None})
+
+
 # ---------------------------------------------------------------------------
 # Fake Hermes kanban lib — real in-memory sqlite, board-aware
 # ---------------------------------------------------------------------------
