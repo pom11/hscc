@@ -406,6 +406,8 @@ def _get_help_text():
                 "Idle autodown/autoup: status enable disable wake cancel"),
         *_entry("kanban <cmd>",
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
+        *_entry("cards monitor [--live]",
+                "One live panel per running card, streaming its worker"),
     ])
 
     util = _section("Utility", [
@@ -537,6 +539,11 @@ COMMAND_HELP = {
               "  monitor [--live] [--interval <s>] [--board <slug>]: workers\n"
               "    on every board, running/ready/counts/outcomes (read-only)\n"
               "  Usage: hscc kanban <subcommand> [args]",
+    "cards": "Live per-card worker view (read-only).\n"
+             "  monitor [--live] [--interval <s>] [--board <slug>] [--tools]:\n"
+             "    one panel per running card streaming its transcript; waiting\n"
+             "    cards at the bottom; keys tab/enter/t/p/q in --live\n"
+             "  Usage: hscc cards monitor [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -1857,6 +1864,12 @@ def main():
     if cmd == "kanban":
         from hscc_daemon.kanban_blocked import cmd_kanban
         rc = cmd_kanban(args[1:])
+        sys.exit(rc)
+
+    # 'cards' group — live per-card worker view (read-only)
+    if cmd == "cards":
+        from hscc_daemon.cards_live import cmd_cards
+        rc = cmd_cards(args[1:])
         sys.exit(rc)
 
     # Per-command help for the daemon verbs (t_5132deb3: the branch used to
