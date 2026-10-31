@@ -55,6 +55,16 @@
 #     BF16 fallback (kernel trouble on sm_121 is the only trigger): drop the
 #       two `--*-weights-path` lines below and serve the already-staged
 #       Qwen/Qwen-Image-2.1 alone. No extra staging.
+#     Partial-KERNEL gap, honest flag: the FP8 TEXT-ENCODER file is unsloth's
+#       own artifact but the quantization guide routes text_encoder* formats
+#       through Transformers delegation ("fail closed" on unsupported
+#       metadata), and no one has run this exact file on sm_121. If the boot
+#       trips there, drop ONLY the --component-weights-paths.text_encoder line:
+#       the BF16 text encoder from the base repo is the upstream-blessed
+#       sidecar on quantized-DiT paths (matrix FLUX.2 row: "SGLang keeps them
+#       from the base repo automatically") — the FP8 DiT stays. Not a
+#       never-plain-BF16 violation: the rule governs the model tier (DiT),
+#       and BF16 TE/VAE sidecars are what every quantized row here ships.
 #     INT8-ConvRot: unsloth ships Qwen-Image-2.1-INT8-ConvRot.safetensors and
 #       Qwen-Image-2.1-text_encoder-INT8-ConvRot.safetensors in the SAME repo
 #       (measured, same date). ConvRot INT8 is explicitly GB10-capable
@@ -66,24 +76,27 @@
 # `validate` enforces it; placement stays the balancer's job — free co-tenancy,
 # no media-dedicated node). The fraction is exposed as a DEFAULTS KNOB so a
 # template can carry it (template → `--gpu-mem` → this config chain → the
-# rendered command; sparkrun's sglang flag map maps the key to
-# --mem-fraction-static — runtimes/sglang.py:42 — and the key stays visible to
-# sparkrun's VRAM check, which only reads it when it is a `defaults:` entry).
+# defaults key, which sparkrun's VRAM check reads and the §5 sum check sums).
 #
-# ⚠ HONEST GAP — read before touching this knob. SGLang *Diffusion* has NO
-# memory-fraction field: it is absent from the v0.5.22 diffusion argparse
-# surface (python/sglang/multimodal_gen/runtime/server_args/server_args.py —
-# zero hits for fraction/gpu_memory/mem-fraction, verified 2026-10-31) and the
-# diffusion CLI docs never list it. The flag still travels (sglang's outer CLI
-# tolerates it) so the value is a SPARKRUN-LEVEL claim: scheduler budget +
-# VRAM math + the §5 fraction-sum check. What actually keeps the unit inside
-# its share on the node is component placement, which IS honored
-# (`--performance-mode manual` + explicit `--component-residency`, both real
-# flags in that same file @2672/:2340). Diffusion units hold weights resident
-# and spike with denoise buffers — there is no KV pool to shrink (§5).
-# If sglang ever errors on the unknown flag at boot, delete that ONE line and
-# keep the defaults key: the budget contract survives, the engine flag does
-# not matter.
+# ⚠ VERIFIED CONSTRAINT — the fraction is SPARKRUN-LEVEL ONLY, never a CLI
+# flag. SGLang *Diffusion* has NO memory-fraction field: it is absent from the
+# v0.5.22 diffusion argparse surface (python/sglang/multimodal_gen/runtime/
+# server_args/server_args.py — zero hits for fraction/gpu_memory/mem-fraction,
+# re-verified 2026-10-31) AND unknown args are fatal there:
+# `ServerArgs.from_cli_args` ends its dynamic-flag extraction with
+# `raise SystemExit("error: unrecognized arguments: …")` (server_args.py:3609
+# @v0.5.22), so a hand-written `--mem-fraction-static` in a diffusion command
+# template CRASHES THE BOOT. (sparkrun's sglang flag map does map the key to
+# that flag — runtimes/sglang.py:42 — but the map is only consulted for
+# template-less recipes; with an explicit `command:` the renderer returns the
+# template verbatim (runtimes/sglang.py:371-384), so nothing injects the flag
+# either. The key is also in known_config_keys, so leaving it in `defaults:`
+# draws no unmapped-key warning.) The value is therefore a scheduler/VRAM/§5
+# claim, and what actually keeps the unit inside its share on the node is
+# component placement, which IS honored (`--performance-mode manual` +
+# explicit `--component-residency`, both real flags in that same file
+# @2672/:2340). Diffusion units hold weights resident and spike with denoise
+# buffers — there is no KV pool to shrink (§5).
 #
 # ── OUTPUT SCRATCH (media-serving.md §2 retention + §7, §8 Q5: no client caps) ─
 # Pinned under the ALREADY-MOUNTED cache root rather than a new host bind
@@ -181,8 +194,7 @@ command: |
     --strict-ports true \
     --warmup-mode request \
     --output-path /cache/huggingface/media-scratch/qwen-image-gen \
-    --input-save-path /cache/huggingface/media-scratch/qwen-image-gen/uploads \
-    --mem-fraction-static {gpu_memory_utilization}
+    --input-save-path /cache/huggingface/media-scratch/qwen-image-gen/uploads
 
 # Flag provenance (all verified against sglang v0.5.22
 # multimodal_gen/runtime/server_args/server_args.py, 2026-10-31):
