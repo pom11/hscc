@@ -11,13 +11,24 @@ turn-lease fight.
 Mechanism (identical to the proven tool):
   * discovery: ``tmux list-panes -a`` -> for each pane tty, ``ps -t`` ->
     keep panes whose command is a ``hermes ... chat`` process (gateway/serve
-    processes excluded), extract the profile from ``-p/--profile``.
+    processes excluded), extract the profile from ``-p/--profile``. A pane's
+    first chat-looking line may be a WRAPPER (a launcher such as the one that
+    starts ``kronos-orch``, or ``hscc project chat <p>``) with the real
+    ``hermes -p X chat`` child underneath it, so every line of the pane is
+    scanned and the one that NAMES a profile wins (see
+    :func:`_pane_chat_command`).
   * resolution: EXACTLY ONE pane for the profile, or refuse. Never guess —
     a wrong injection target is worse than no injection (the operator's rule:
     never inject a REPL you did not pick).
-  * busy detection: the REPL prompt shows ``msg=interrupt`` while a turn is
-    running; a plain message then INTERRUPTS it. Auto mode sends ``/queue``
-    instead so a running goal is never cut off mid-work.
+  * modes: ``plain`` (no verb prefix), ``queue`` (``/queue ``), ``steer``
+    (``/steer ``) and ``auto`` = ``queue`` while busy else ``plain``. The
+    busy prompt shows ``msg=interrupt``, i.e. a plain message sent during a
+    running turn INTERRUPTS it; ``auto`` therefore queues so a running goal is
+    never cut off mid-work. Legacy ``interrupt`` == ``plain``.
+  * planning: :func:`plan` / :func:`plan_pane` answer "which pane, busy or
+    idle, which verb" and touch nothing — the dry-run path (and the
+    ``hscc orch inject --dry-run`` verb built on it) renders that, never a
+    ``send-keys``.
   * delivery: tmux bracketed paste (load-buffer + ``paste-buffer -p -d``) so
     a multi-line message arrives as ONE message, then Enter.
 
@@ -35,9 +46,20 @@ import uuid
 BUSY_MARK = "msg=interrupt"          # shown in the prompt line while a turn runs
 REPLY_BOX = "☤ Hermes"               # header of the assistant's reply box
 
-# modes: auto -> plain when idle, /queue when busy. Explicit overrides.
-MODES = ("auto", "queue", "steer", "interrupt")
-_PREFIX = {"queue": "/queue ", "steer": "/steer ", "interrupt": "", "plain": ""}
+# Modes (operator naming contract, same as ~/bin/hermes-inject):
+#   plain   -> no verb prefix (the reference tool's `interrupt`; a plain
+#              message sent while a turn runs is what INTERRUPTS it)
+#   queue   -> "/queue "   (never cuts off a running turn)
+#   steer   -> "/steer "
+#   auto    -> queue when the pane is busy, plain when it is idle
+# `interrupt` is kept as a legacy alias of `plain` so callers written against
+# the old vocabulary keep working; the resolved mode in any receipt is always
+# the canonical name, never `interrupt`.
+MODES = ("auto", "plain", "queue", "steer")
+LEGACY_MODES = ("interrupt",)            # accepted, normalised to `plain`
+
+# The ONE verb table in the repo: resolved mode -> what gets typed first.
+VERB_PREFIX = {"plain": "", "queue": "/queue ", "steer": "/steer "}
 
 
 class InjectError(Exception):
@@ -107,13 +129,77 @@ _ORIG_RUN_PS = run_ps
 # --------------------------------------------------------------------------- #
 
 _PROFILE_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
+_CHAT_MARK = " chat"
+
+
+def normalize_mode(mode: str) -> str:
+    """Canonical mode name, or InjectError.
+
+    ``interrupt`` (the reference tool's old name for a no-verb send) is
+    accepted as an alias of ``plain``; everything else must already be one of
+    :data:`MODES`. ``auto`` stays ``auto`` here — it is resolved against the
+    pane's busy state by :func:`resolve_mode`.
+    """
+    if mode == "interrupt":
+        return "plain"
+    if mode not in MODES:
+        raise InjectError(
+            "empty", f"unknown mode {mode!r} (want one of {MODES}"
+                     f", or the legacy alias {LEGACY_MODES[0]!r})")
+    return mode
+
+
+def resolve_mode(mode: str, busy: bool) -> str:
+    """The concrete mode to deliver with, given the pane's busy state.
+
+    ``auto`` -> ``queue`` while busy (never cut off a running turn), ``plain``
+    when idle. An explicit mode is honoured as asked — including ``plain``
+    while busy, which is the one combination that interrupts, so callers that
+    report to a human mark it (see :func:`plan_pane`).
+    """
+    mode = normalize_mode(mode)
+    if mode == "auto":
+        return "queue" if busy else "plain"
+    return mode
+
+
+def _pane_chat_command(cmds) -> tuple[str, str] | None:
+    """The ``(profile, command)`` of a pane's Hermes REPL, or None.
+
+    ``cmds`` are the ``ps -t <tty>`` command lines for that pane. A pane can
+    hold BOTH a wrapper (a launcher script, or ``hscc project chat <p>``) AND
+    the real ``hermes -p <profile> chat`` child, and the wrapper is frequently
+    the FIRST line — the 2026-10-29 lesson from ~/bin/hermes-inject: taking
+    the first chat-looking line labelled such a pane ``default`` (no ``-p`` on
+    a launcher) and an inject by profile name then refused on the one pane
+    that was actually right.
+
+    Rule: scan every line; prefer the chat line that NAMES a profile; fall
+    back to ``default`` only when none of them does. Gateway/serve command
+    lines are never a REPL target.
+    """
+    fallback: tuple[str, str] | None = None
+    for cmd in cmds:
+        if "hermes" not in cmd or _CHAT_MARK not in f" {cmd}":
+            continue
+        if "gateway" in cmd:
+            continue
+        m = _PROFILE_RE.search(cmd)
+        if m:
+            return m.group(1), cmd
+        if fallback is None:
+            fallback = ("default", cmd)
+    return fallback
 
 
 def hermes_panes() -> list[dict]:
     """Every tmux pane running a Hermes REPL chat, with its profile.
 
     Excludes gateway/serve processes (their command lines can also carry
-    'chat'); a pane running ``hermes -p X chat`` is the operator's REPL.
+    'chat'); a pane running ``hermes -p X chat`` is the operator's REPL. The
+    profile comes from the pane line that actually names one, so a pane whose
+    first process is a launcher wrapper still resolves to its real profile
+    (:func:`_pane_chat_command`).
     """
     try:
         out = run_tmux("list-panes", "-a", "-F",
@@ -127,16 +213,10 @@ def hermes_panes() -> list[dict]:
             pane_id, target, tty = line.split("\t")
         except ValueError:
             continue
-        ps = run_ps(tty)
-        for cmd in ps.splitlines():
-            if "hermes" not in cmd or " chat" not in f" {cmd}":
-                continue
-            if "gateway" in cmd:
-                continue
-            m = _PROFILE_RE.search(cmd)
+        hit = _pane_chat_command(run_ps(tty).splitlines())
+        if hit:
             panes.append({"pane": pane_id, "target": target, "tty": tty,
-                          "profile": m.group(1) if m else "default", "cmd": cmd})
-            break
+                          "profile": hit[0], "cmd": hit[1]})
     return panes
 
 
@@ -144,10 +224,17 @@ def screen(pane: str, lines: int = 60) -> str:
     return run_tmux("capture-pane", "-p", "-t", pane, "-S", f"-{lines}")
 
 
+def busy_from_screen(text: str) -> bool:
+    """True when the last non-empty lines of a captured screen carry the
+    busy prompt marker. One rule, shared by :func:`is_busy` and
+    :func:`plan_pane` so the two can never disagree about what busy means."""
+    tail = [l for l in text.splitlines() if l.strip()]
+    return any(BUSY_MARK in l for l in tail[-4:])
+
+
 def is_busy(pane: str) -> bool:
     """True while the pane's last lines show the busy prompt marker."""
-    tail = [l for l in screen(pane, 12).splitlines() if l.strip()]
-    return any(BUSY_MARK in l for l in tail[-4:])
+    return busy_from_screen(screen(pane, 12))
 
 
 def last_reply(text: str) -> str:
@@ -185,6 +272,55 @@ def resolve_pane(profile: str, panes: list[dict] | None = None,
 
 
 # --------------------------------------------------------------------------- #
+# Planning — the dry-run / preview path (sends nothing)
+# --------------------------------------------------------------------------- #
+
+def plan_pane(pane: dict, mode: str = "auto", busy_fn=None) -> dict:
+    """Decide how a message WOULD go to an already-resolved pane. Sends nothing.
+
+    One shared decision for the dry-run path and the real delivery: the pane's
+    busy state, the resolved mode and the verb prefix are computed here and
+    nowhere else, so a preview can never disagree with what delivery does.
+    Raises InjectError on a bad mode (pane resolution errors come from
+    :func:`resolve_pane` / :func:`plan`).
+
+    Plan: {pane, target, profile, busy, mode, verb, interrupts}.
+    """
+    busy_fn = busy_fn or is_busy
+    busy = bool(busy_fn(pane["pane"]))
+    eff = resolve_mode(mode, busy)
+    return {"pane": pane["pane"], "target": pane["target"],
+            "profile": pane["profile"], "busy": busy, "mode": eff,
+            "verb": VERB_PREFIX[eff],
+            # The one combination that cuts off a running turn: an explicit
+            # no-verb send while busy. A human-readable target must say so.
+            "interrupts": eff == "plain" and busy}
+
+
+def plan(profile: str, mode: str = "auto",
+         pane_override: str | None = None, busy_fn=None) -> dict:
+    """Resolve + plan for ``profile`` without touching the pane.
+
+    Raises InjectError exactly as :func:`inject` does for a bad mode, no pane
+    or an ambiguous pane — never sends, so it is what ``--dry-run`` renders and
+    what a CLI verb can print as a receipt without duplicating pane logic. A
+    bad mode is refused BEFORE any pane work, matching :func:`deliver`.
+    """
+    normalize_mode(mode)      # refuse up front, before touching any pane
+    pane = resolve_pane(profile, pane_override=pane_override)
+    return plan_pane(pane, mode=mode, busy_fn=busy_fn)
+
+
+def format_plan(p: dict) -> str:
+    """The reference tool's one-line target rendering of a plan."""
+    line = (f"target: {p['profile']} @ {p['target']} "
+            f"({'busy' if p['busy'] else 'idle'}) -> {p['mode']}")
+    if p.get("interrupts"):
+        line += " (interrupts the running turn)"
+    return line
+
+
+# --------------------------------------------------------------------------- #
 # Delivery
 # --------------------------------------------------------------------------- #
 
@@ -197,7 +333,8 @@ def paste(pane: str, text: str) -> None:
 
 
 def deliver(pane: dict, text: str, mode: str = "auto",
-            sleep_fn=time.sleep) -> dict:
+            sleep_fn=time.sleep, dry_run: bool = False,
+            busy_fn=None) -> dict:
     """Deliver to an ALREADY-RESOLVED pane dict (no re-discovery).
 
     Splits resolve from delivery so callers that resolved the pane earlier
@@ -206,37 +343,42 @@ def deliver(pane: dict, text: str, mode: str = "auto",
     without re-checking ambiguity. Raises InjectError on empty text, bad
     mode, or tmux failure.
 
-    Receipt: {pane, target, profile, busy, mode, sent_text}.
+    ``dry_run=True`` decides and returns but sends NOTHING: no ``send-keys``,
+    no buffer, no Enter. Input validation still applies, so a dry run of an
+    empty message or a bad mode refuses exactly as a real send would.
+
+    Receipt: {pane, target, profile, busy, mode, verb, interrupts, sent_text}.
+    A dry-run receipt adds {dry_run: True, text, chars}.
     """
-    if mode not in MODES:
-        raise InjectError("empty", f"unknown mode {mode!r} (want one of {MODES})")
+    normalize_mode(mode)      # bad mode refuses BEFORE any pane work
     if not text or not text.strip():
         raise InjectError("empty", "empty message")
     text = text.rstrip("\n")
-    busy = is_busy(pane["pane"])
-    eff = ("queue" if busy else "plain") if mode == "auto" else mode
-    prefix = _PREFIX[eff]
+    decision = plan_pane(pane, mode=mode, busy_fn=busy_fn)
+    if dry_run:
+        return {**decision, "dry_run": True, "text": text, "chars": len(text)}
+    prefix = decision["verb"]
     if prefix:
         run_tmux("send-keys", "-t", pane["pane"], "-l", prefix)
     paste(pane["pane"], text)
     sleep_fn(0.5)
     run_tmux("send-keys", "-t", pane["pane"], "Enter")
-    return {"pane": pane["pane"], "target": pane["target"],
-            "profile": pane["profile"], "busy": busy, "mode": eff,
-            "sent_text": (prefix + text) if prefix else text}
+    return {**decision, "sent_text": (prefix + text) if prefix else text}
 
 
 def inject(profile: str, text: str, mode: str = "auto",
            pane_override: str | None = None,
-           sleep_fn=time.sleep) -> dict:
+           sleep_fn=time.sleep, dry_run: bool = False) -> dict:
     """Deliver ``text`` to the profile's REPL pane. Returns a receipt dict.
 
     ``mode``: auto (plain if idle, /queue if busy — NEVER interrupts a
-    running turn), or explicit queue/steer/interrupt. Raises InjectError on
-    no/ambiguous pane, empty text, or tmux failure.
+    running turn), or explicit plain/queue/steer (``interrupt`` accepted as the
+    legacy name of ``plain``). ``dry_run=True`` resolves the pane, reports the
+    target / busy state / chosen verb and sends nothing. Raises InjectError on
+    no/ambiguous pane, empty text, bad mode, or tmux failure.
     """
     pane = resolve_pane(profile, pane_override=pane_override)
-    return deliver(pane, text, mode=mode, sleep_fn=sleep_fn)
+    return deliver(pane, text, mode=mode, sleep_fn=sleep_fn, dry_run=dry_run)
 
 
 def wait_for_reply(pane: str, before: str, timeout: float = 900.0,
