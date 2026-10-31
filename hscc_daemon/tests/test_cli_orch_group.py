@@ -166,12 +166,24 @@ class TestOrchGroupDispatch:
         assert "light" not in eng.calls[0]
         assert "--dry-run" in eng.calls[0]
 
+    def test_non_inject_result_prints_as_is(self, monkeypatch):
+        """A future orch verb (e.g. `orch waker status`, t_2b34b5c7) returns
+        a dict that is NOT an inject receipt. The renderer must print it as
+        it is — fabricating "target: None @ None (idle) -> None" would lie."""
+        eng = StubEngine(result={"enabled": True, "last_tick": "2026-10-31T10:00:00+02:00"})
+        _with_engine(monkeypatch, eng)
+        rc, out = _main(monkeypatch, ["orch", "waker", "status"])
+        assert rc == 0
+        assert "target:" not in out
+        assert json.loads(out) == {"enabled": True,
+                                   "last_tick": "2026-10-31T10:00:00+02:00"}
+
     @pytest.mark.parametrize("exc,needle", [
         (_InjectError("no_panes", "no pane for profile demo-orch"),
          "no pane for profile"),
         (_InjectError("ambiguous", "2 panes match demo-orch"), "2 panes"),
         (_InjectError("empty", "empty message"), "empty message"),
-        (ValueError("unknown orch subcommand: waker (available: inject)"),
+        (ValueError("unknown orch subcommand: frobnicate (available: inject)"),
          "unknown orch subcommand"),
     ])
     def test_refusals_exit_1(self, monkeypatch, exc, needle):
@@ -450,8 +462,11 @@ class TestRealEngineVerbReach:
         assert repl.calls == []
 
     def test_unknown_verb_refuses_with_exit_1(self, monkeypatch, real_engine):
+        # A verb NO sibling card plans to add (`waker` is orch-waker W3's
+        # verb and will become routable — pinning it here would hand that
+        # child a guaranteed failure). A nonsense verb stays nonsense.
         rc, out, repl = self._drive(monkeypatch, real_engine,
-                                    ["orch", "waker", "status"])
+                                    ["orch", "frobnicate", "status"])
         assert rc == 1
         assert "unknown orch subcommand" in out
         assert repl.calls == []

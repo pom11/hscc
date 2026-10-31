@@ -1188,6 +1188,12 @@ def _orch_receipt_line(receipt):
     if not isinstance(receipt, dict):
         return str(receipt)
     line = receipt.get("line")
+    if line is None and ("target" not in receipt or "mode" not in receipt):
+        # Not an inject receipt — a future orch verb (e.g. `orch waker
+        # status`, t_2b34b5c7) whose dict has no pane target. Fabricating
+        # "target: None @ None (idle) -> None" would lie; print the result
+        # as it is until that verb owns its own rendering here.
+        return json.dumps(receipt, indent=2, default=str)
     if not line:
         line = (f"target: {receipt.get('profile')} @ {receipt.get('target')} "
                 f"({'busy' if receipt.get('busy') else 'idle'}) "
