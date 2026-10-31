@@ -54,6 +54,15 @@ class TestAutodownLoop:
         from hscc_daemon import autodown, daemon_ops
         monkeypatch.setattr(autodown, "load_config",
                             lambda: {"enabled": True})
+        # This tick reaches the REAL cycle(), whose DEFAULT probes include
+        # probe_prci_activity → the live `gh` PR/CI screen. Stub the SCREEN (not
+        # _has_active_pr_ci — the probe is a separate consumer) so the no-op
+        # assertion cannot depend on this host's GitHub reachability (t_18318fd9:
+        # the GH PROBE FENCE now flags an unstubbed probe instead of letting it
+        # silently run 12 live gh calls on every run).
+        monkeypatch.setattr(autodown, "_screen_prci",
+                            lambda *a, **k: {"open_prs": 0, "active_runs": 0,
+                                             "repos": []})
         # cycle does not exist yet — getattr returns None, tick must not raise.
         daemon_ops._autodown_tick()
 
@@ -177,6 +186,15 @@ class TestNoLiveHsccLeak:
 
         # stop() is never reached because active work blocks teardown, but the
         # probes + record_activity run first — the leak surface.
+        # The DEFAULT probes stay in place (that is this test's subject), but the
+        # PR/CI screen is stubbed: its default implementation fires 12 live `gh`
+        # probes, so an unstubbed run made this test's outcome depend on this
+        # host's GitHub reachability (t_18318fd9 — the GH PROBE FENCE now flags
+        # it). Clear screen ⇒ no "prci" stamp; the kanban probe still stamps, so
+        # record_activity + save_config still run and the leak path is intact.
+        monkeypatch.setattr(autodown, "_screen_prci",
+                            lambda *a, **k: {"open_prs": 0, "active_runs": 0,
+                                             "repos": []})
         autodown.cycle(kanban_db=_Kb(), agents_file=str(tmp_path / "agents.json"),
                        probes=None)
         after = self._real_hash_or_absent(real)

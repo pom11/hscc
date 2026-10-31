@@ -1112,12 +1112,39 @@ def _has_active_pr_ci(prci_checker=None):
     if _prci_screen_active(result):
         # Note WHY (PR vs CI vs unreachable) for ``hscc autodown status``.
         if result is _PRCI_UNREACHABLE:
+            # Unreachable is NOT "active work": record the sentinel as the
+            # blocking signal and DO NOT fall through to _note_prci_active().
+            # _note_prci_active() sets ok=True/reason="" and blocking="PR/CI",
+            # which clobbered the ok=False/reason the WARN just recorded, so
+            # ``autodown status`` told the operator "PR/CI check OK — blocked
+            # by open PR / active CI run" when the source was in fact never
+            # reached. It also made the CLI's sentinel branch
+            # (autodown_cli._cmd_status, ``prci == _PRCI_UNREACHABLE``) dead
+            # code, since ``blocking`` could only ever be "PR/CI" or None.
+            # This matches the contract documented on prci_blocking_signal().
             _note_prci_unavailable("PR/CI source unreachable — treating as "
                                    "active (fail-safe)")
+            _note_prci_blocking(_PRCI_UNREACHABLE)
+            return True
         _note_prci_active()
         return True
-    _note_prci_blocking(None)
+    _note_prci_clear()
     return False
+
+
+def _note_prci_clear():
+    """Record a positively-clear PR/CI screen and reset the stale failure state.
+
+    Mirrors ``_note_prci_active``. Resetting ``ok``/``reason``/``warned``
+    matters: without it, a screen that went unreachable and later recovered
+    would keep reporting ``ok=False`` with the old reason (the previous
+    ``_note_prci_blocking(None)`` only cleared ``blocking``), so status would
+    claim an unevaluable interlock long after the gh blip had cleared.
+    """
+    _PRCI_LOAD["blocking"] = None
+    _PRCI_LOAD["ok"] = True
+    _PRCI_LOAD["reason"] = ""
+    _PRCI_LOAD["warned"] = False
 
 
 # In-memory bookkeeping so ``hscc autodown status`` can name WHY PR/CI keeps

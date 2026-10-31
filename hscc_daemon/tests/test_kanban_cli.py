@@ -38,20 +38,30 @@ def _no_live_prci_probes(monkeypatch):
 
     ``test_autodown_cli.py`` already stubs this autouse-wide (``_no_active_prci``);
     this file did not, which is why only its two ``cmd_autodown`` tests flaked.
-    Stub it clear, and make the real screen a hard failure so a future test that
-    reaches it fails loudly here instead of flaking on a developer's laptop.
+
+    Two layers, because the fail-safe would swallow a raised guard: the stubs
+    keep every test deterministic and off the network, and a probe that reaches
+    the real screen anyway is RECORDED and reported at teardown — an exception
+    raised there is caught by ``_has_active_pr_ci``'s own ``except Exception``
+    and turned into a fail-safe True, so a raise would have looked like a pass.
     """
+    hits = []
     monkeypatch.setattr(ad, "_has_active_pr_ci", lambda *a, **k: False)
     monkeypatch.setattr(ad, "prci_blocking_signal", lambda: None)
     monkeypatch.setattr(ad, "prci_check_state", lambda: {
         "ok": True, "reason": "", "blocking": None})
 
     def _never_reach_the_network(*a, **k):
-        raise AssertionError(
-            "live gh PR/CI screen reached from a test — stub it "
-            "(see _no_live_prci_probes, t_18318fd9)")
+        hits.append(1)
+        raise AssertionError("live gh PR/CI screen reached from a test")
 
     monkeypatch.setattr(ad, "_screen_prci", _never_reach_the_network)
+    yield
+    assert not hits, (
+        f"{len(hits)} live gh PR/CI probe(s) reached from this test — stub the "
+        "interlock (see _no_live_prci_probes, t_18318fd9). The fail-safe turns "
+        "a screen failure into 'active', so an unstubbed probe means a "
+        "result that depends on this host's GitHub reachability.")
 
 
 # ---------------------------------------------------------------------------
