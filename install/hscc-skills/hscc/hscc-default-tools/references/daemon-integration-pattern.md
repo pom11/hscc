@@ -30,7 +30,7 @@ How to add a new periodic check to the HSCC daemon. Use this when integrating a 
    node as dead). Restart it the supervised way:
    `bash ~/.hermes/plugins/hscc-bootstrap/restart_daemon.sh`, or directly
    `launchctl kickstart -k gui/$(id -u)/com.hermes.hscc_daemon` on macOS /
-   `systemctl --user restart hscc_daemon.service` on Linux.
+   `systemctl --user restart com.hermes.hscc_daemon.service` on Linux.
 
 ## Example: Idle Monitor Integration (2026-05-29)
 
