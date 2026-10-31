@@ -35,10 +35,19 @@ emitting the per-profile loss list in the same non-fatal WARNING row.
 **Trap (a) — a duplicated line must not "survive" by coincidence.** A set
 difference scores a hand-patched bullet as surviving whenever identical text
 appears anywhere in the document. The positional opcode test is the fix, pinned
-by `test_a_duplicated_line_does_not_survive_by_coincidence`. It also forced
-`autojunk=False`: SequenceMatcher's default popular-element heuristic can mark
-repeated lines as junk and manufacture `equal` runs that do not exist, which
-would be a fail-open inside the one test this whole pass depends on.
+by `test_a_duplicated_line_does_not_survive_by_coincidence`.
+
+The same test also required `autojunk=False`, and the reason turned out to be
+the opposite of the one first written here — worth recording because a mutant
+caught it (see below). `difflib`'s popular-element heuristic is **not** a
+fail-open in this pass: measured over ~6000 boilerplate-heavy documents it never
+marked a genuinely novel line as equal (0 hits). What it does is destroy the
+report's usefulness when a repeated line is duplicated — on the pin's fixture it
+flags **713 of 799** live lines instead of the 1 that is actually the patch, and
+the line number the operator needs disappears with them. So the flag buys a
+triageable list and a stable verdict, not catch; `test_autojunk_off_is_what_keeps_the_report_a_list_not_a_wall`
+pins both halves, including the assertion that the fixture still distinguishes
+the two settings.
 
 **Trap (b) — not every differing line is a loss, or the report is untriageable.**
 Each class needs its own rule, and the rules are deliberately different:
