@@ -51,16 +51,28 @@ else
 fi
 
 # 4. daemon auto-start service installed? (launchd on macOS, systemd on Linux)
+#
+# systemd: check BOTH unit names. com.hermes.hscc_daemon.service is canonical
+# since t_d8f13693 (hscc_daemon/unit_name.py, matching the launchd label and the
+# plist); hscc_daemon.service is the retired name that nodes installed by the
+# pre-fix systemd-setup.sh still carry until
+# hscc-bootstrap/migrate_systemd_unit_name.py runs. Missing the legacy name
+# here would report "no service" on a healthy, supervised node and then run
+# `hscc install` on top of a unit systemd already owns.
 DAEMON="$HOME/.hermes/plugins/hscc_daemon/hscc.py"
 if [ "$(uname -s)" = "Darwin" ]; then
-  SERVICE="$HOME/Library/LaunchAgents/com.hermes.hscc_daemon.plist"
+  SERVICE_CANDIDATES="$HOME/Library/LaunchAgents/com.hermes.hscc_daemon.plist"
 else
-  SERVICE="$HOME/.config/systemd/user/hscc_daemon.service"
+  SERVICE_CANDIDATES="$HOME/.config/systemd/user/com.hermes.hscc_daemon.service $HOME/.config/systemd/user/hscc_daemon.service"
 fi
-if [ -f "$SERVICE" ]; then
+SERVICE=""
+for _cand in $SERVICE_CANDIDATES; do
+  if [ -f "$_cand" ]; then SERVICE="$_cand"; break; fi
+done
+if [ -n "$SERVICE" ]; then
   echo "daemon service present ($SERVICE)"
 else
-  python3 "$DAEMON" install >/dev/null 2>&1 && echo "daemon service installed ($SERVICE)" \
+  python3 "$DAEMON" install >/dev/null 2>&1 && echo "daemon service installed" \
     || echo "WARNING: daemon install reported issues — run: python3 $DAEMON install"
 fi
 echo "bootstrap complete"

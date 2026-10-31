@@ -8,6 +8,7 @@ from . import heal
 from . import discovery
 from . import fleet
 from . import template_tools
+from . import orch_message
 
 
 def _stringify(handler):
@@ -90,9 +91,21 @@ _TEMPLATE_TOOLS = [
 ]
 
 
+#: Orchestrator-to-orchestrator messaging (t_a15f3047). Queue-only by design:
+#: the tool never interrupts a running turn and refuses anything but a
+#: `*-orch` sender and a `*-orch` target. See orch_message.py for the rules.
+_ORCH_TOOLS = [
+    ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
+     "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
+     "audited). Both ends must be *-orch; never interrupts a running turn; "
+     "rate-limited per pair per hour."),
+]
+
+
 def register(ctx) -> None:
     for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
-                                                 + _HEAL_TOOLS + _FLEET_TOOLS + _TEMPLATE_TOOLS):
+                                                 + _HEAL_TOOLS + _FLEET_TOOLS
+                                                 + _TEMPLATE_TOOLS + _ORCH_TOOLS):
         ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
                           handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker

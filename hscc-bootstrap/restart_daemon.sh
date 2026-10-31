@@ -98,8 +98,9 @@
 #   HSCC_SYSTEMCTL        the systemctl binary to call (default: systemctl);
 #                         same "explicitly set means present" rule.
 #   HSCC_SYSTEMD_UNIT     the unit to restart (default: probe
-#                         hscc_daemon.service then com.hermes.hscc_daemon.service
-#                         — see systemd_loaded for why both names).
+#                         com.hermes.hscc_daemon.service — canonical, t_d8f13693 —
+#                         then the retired hscc_daemon.service that pre-migration
+#                         nodes still carry; see systemd_loaded for why both).
 #   HSCC_PGREP            the pgrep binary used by the orphan guard (default:
 #                         pgrep). Tests stub it; when it is missing the guard
 #                         finds nothing and fails open (documented below).
@@ -147,14 +148,19 @@ LAUNCHD_TARGET="gui/$(id -u)/${LAUNCHD_LABEL}"
 LAUNCHD_POLL_ATTEMPTS="${LAUNCHD_POLL_ATTEMPTS:-45}"
 LAUNCHD_POLL_INTERVAL="${LAUNCHD_POLL_INTERVAL:-1}"
 
-# systemd --user knobs. Both unit names are probed because the two installers
-# emit different ones (systemd-setup.sh writes hscc_daemon.service, install.py
-# writes com.hermes.hscc_daemon.service). That drift is pre-existing — flagged
-# as its own finding — but here we must not be fooled by it into calling a
-# supervised daemon an orphan and refusing the restart.
+# systemd --user knobs. ONE canonical unit name since t_d8f13693
+# (hscc_daemon/unit_name.py -> com.hermes.hscc_daemon.service, matching the
+# launchd label); the LEGACY name hscc_daemon.service is still probed because
+# nodes installed by the pre-fix systemd-setup.sh keep it until
+# hscc-bootstrap/migrate_systemd_unit_name.py runs. Probing only the canonical
+# name would call a healthy legacy-supervised daemon an orphan and refuse its
+# restart — the failure this helper's supervisor branch exists to prevent.
+# Canonical first: on a half-migrated box that somehow claims both, restart the
+# unit that is meant to win. The candidate list is pinned to unit_name.py by
+# test_systemd_unit_candidates_match_sibling_emitters.
 SYSTEMCTL="${HSCC_SYSTEMCTL:-systemctl}"
 SYSTEMD_UNIT="${HSCC_SYSTEMD_UNIT:-}"
-SYSTEMD_UNIT_CANDIDATES="hscc_daemon.service com.hermes.hscc_daemon.service"
+SYSTEMD_UNIT_CANDIDATES="com.hermes.hscc_daemon.service hscc_daemon.service"
 
 # The pgrep used by the orphan guard (stubbed by tests).
 PGREP_BIN="${HSCC_PGREP:-pgrep}"
