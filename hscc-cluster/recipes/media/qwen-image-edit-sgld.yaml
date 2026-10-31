@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PINNED SOURCE — media unit: IMAGE EDIT tier (ModelOpt NVFP4, SGLang Diffusion)
+#
+# LIVE copy: ~/.sparkrun-local/recipes/media/qwen-image-edit-sgld.yaml
+# Install + first validation are OPERATOR actions (sparkrun recipe validate on
+# the installed path); offline gate: hscc-cluster/tests/test_media_recipes.py.
+# Design contract: docs/design/media-serving.md; tier + format locked by the
+# operator's §8 Q1 ruling: lmsys/qwen-image-edit-2511-modelopt-nvfp4-sglang.
+#
+# ── STAGING LIST — OPERATOR: stage this EXACT HF repo. ────────────────────────
+#   lmsys/qwen-image-edit-2511-modelopt-nvfp4-sglang   (ONE repo, serves all)
+#
+# Measured against the Hub tree API 2026-10-31: model_index.json +
+# processor/ scheduler/ text_encoder/ tokenizer/ transformer/ vae/ — a FULL
+# ModelOpt diffusers repo. That layout is what makes this unit the simplest of
+# the five: the quantization guide's canonical rule — "Direct --model-path
+# loading is the canonical path for full Qwen Image ModelOpt NVFP4 repos" —
+# means NO component overrides, NO base-repo pairing, one staged dir:
+#
+#   /mnt/nas/hub/models--lmsys--qwen-image-edit-2511-modelopt-nvfp4-sglang \
+#       → ~/.cache/huggingface/hub/     (NAS = staging only; local NVMe first —
+#                                         flash-next rule, flash-next-all.yaml:17-45)
+#
+# GATE: repo is license-gated on the Hub (`gated: auto`-family; check the
+# lmsys README) — staging needs the operator's accepted HF account.
+#
+# ── GB10 CAVEATS (M0 matrix C1/C2/C3) ─────────────────────────────────────────
+# UNVERIFIED on GB10 (upstream validated the NVFP4 loader family on B200). The
+# FP4 GEMM backend env below is LOAD-BEARING (diffusion default
+# flashinfer_trtllm rejects capability 120/121). Documented kernel-trouble
+# fallback (matrix C3, explicitly GB10-capable): serve the BF16 sibling
+# Qwen/Qwen-Image-Edit-2511 with online ConvRot INT8 — `--quantization
+# convrot_int8` (real online choice in the v0.5.22 --quantization help). Not
+# the default; same trigger as everywhere else: FP4 misbehaves on sm_121.
+# cudnn FP4 also wants the FlashInfer autotune warmup on sm_121 (matrix C2) —
+# `--warmup-mode server` below pays it at boot.
+#
+# ── CO-TENANCY / GPU BUDGET (§5 + §8 Q6) ──────────────────────────────────────
+# Same image-tier fraction story as qwen-image-gen-sgld.yaml — read its
+# VERIFIED CONSTRAINT note before touching the knob: SGLang Diffusion has NO
+# memory-fraction field (absent from the v0.5.22 diffusion argparse surface)
+# and its CLI SystemExits on unrecognized args (server_args.py:3609
+# @v0.5.22), so the fraction stays a defaults-key-only, SPARKRUN-LEVEL claim
+# (scheduler budget, VRAM check visibility, §5 fraction sum ≤ 0.8) and
+# component residency is what actually bounds the unit. The text encoder
+# (Qwen2.5-VL class) is the offload candidate — it runs once per
+# request, so streaming it costs the unit almost nothing.
+#
+# ── ENDPOINT (§2) ─────────────────────────────────────────────────────────────
+# Serves POST /v1/images/edits (multipart image + prompt) AND
+# /v1/images/generations (the pipeline is T2I+I2I; the server picks task from
+# endpoint + inputs, HTTP 400 on the wrong task). Uploads land in
+# --input-save-path (pinned under the mounted cache root — see the FP8
+# recipe's rationale). One backend per alias; LAN-only; :4000 proxy is the
+# only client path.
+# ─────────────────────────────────────────────────────────────────────────────
+recipe_version: "2"
+name: Qwen-Image-Edit-2511 NVFP4 image editing (SGLang Diffusion)
+description: >-
+  SGLang Diffusion edit unit: full ModelOpt NVFP4 Qwen-Image-Edit-2511 repo
+  served directly from --model-path on one GB10, OpenAI /v1/images/edits
+  surface. Media M1; UNVERIFIED on GB10 (matrix C2) — cudnn FP4 backend pinned.
+
+model: lmsys/qwen-image-edit-2511-modelopt-nvfp4-sglang
+runtime: sglang
+
+container: "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+# Tag spelling: lmsysorg/sglang:v0.5.22-cu130 (multi-arch index, arm64
+# verified 2026-10-31). Same digest as the whole media workstream; pre-pull.
+
+solo_only: true
+mods: []
+
+defaults:
+  port: 30002
+  host: 0.0.0.0
+  num_gpus: 1
+  gpu_memory_utilization: 0.30   # §5 image tier (edit ≈ gen DiT size)
+  served_model_name: qwen-image-edit
+
+distribution_config:
+  models:
+    enabled: false       # operator pre-stages; NAS = staging only
+  containers:
+    enabled: false       # pre-pulled by digest
+
+readiness:
+  inference: false       # REQUIRED — no chat endpoint (see FP8 recipe note)
+
+env:
+  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: "flashinfer_cudnn"  # load-bearing (C1)
+
+command: |
+  sglang serve \
+    --model-path {model} \
+    --served-model-name {served_model_name} \
+    --num-gpus {num_gpus} \
+    --performance-mode manual \
+    --component-residency all=resident text_encoder=component-offload \
+    --pin-cpu-memory \
+    --warmup-mode server \
+    --host {host} \
+    --port {port} \
+    --strict-ports true \
+    --output-path /cache/huggingface/media-scratch/qwen-image-edit \
+    --input-save-path /cache/huggingface/media-scratch/qwen-image-edit/uploads
+
+# No `--quantization`: pre-quantized repos are self-describing and the guide
+# says omit it for modelopt-nvfp4. `--warmup-mode server` (engine default,
+# explicit because it is load-bearing for FP4 autotune, matrix C2).
+# Expected validate findings: none (model flows through {model}; no recipe
+# host paths; no managed-env collisions).
