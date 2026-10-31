@@ -178,6 +178,38 @@ class TestOrchGroupDispatch:
         assert json.loads(out) == {"enabled": True,
                                    "last_tick": "2026-10-31T10:00:00+02:00"}
 
+    def test_dangling_theme_refuses_instead_of_sending(self, monkeypatch):
+        """THE accident this guard exists for: `--theme` eats the token after
+        it as the palette name, so `--theme --dry-run` strips away the dry-run
+        flag and dispatches a REAL SEND while the operator believes they asked
+        for a plan. Must refuse (rc 1) and call the engine ZERO times."""
+        eng = StubEngine()
+        loaded = _with_engine(monkeypatch, eng)
+        rc, out = _main(monkeypatch, ["orch", "inject", "demo-orch", "hi",
+                                      "--theme", "--dry-run"])
+        assert rc == 1, out
+        assert "refusing" in out
+        assert eng.calls == []
+        assert loaded == [], "the refusal must happen before the engine load"
+
+    def test_dangling_theme_form_equals_refuses_too(self, monkeypatch):
+        eng = StubEngine()
+        _with_engine(monkeypatch, eng)
+        rc, out = _main(monkeypatch, ["orch", "inject", "demo-orch", "hi",
+                                      "--theme=--dry-run"])
+        assert rc == 1, out
+        assert eng.calls == []
+
+    def test_valid_theme_still_works(self, monkeypatch):
+        """The guard must not swallow the legitimate path (intercept-off
+        teeth): `--theme light` is a palette, reaches the engine stripped."""
+        eng = StubEngine()
+        _with_engine(monkeypatch, eng)
+        rc, out = _main(monkeypatch, ["orch", "inject", "demo-orch", "hi",
+                                      "--theme", "light", "--dry-run"])
+        assert rc == 0, out
+        assert eng.calls == [["inject", "demo-orch", "hi", "--dry-run"]]
+
     @pytest.mark.parametrize("exc,needle", [
         (_InjectError("no_panes", "no pane for profile demo-orch"),
          "no pane for profile"),
@@ -222,6 +254,11 @@ HELP_SHAPES = [
     ["orch", "inject", "-h"],
     ["orch", "inject", "demo-orch", "msg", "--dry-run", "--help"],
     ["orch", "inject", "demo-orch", "msg", "--help", "--dry-run"],
+    # `--theme` eats the token AFTER it as the palette name, so a help flag in
+    # that slot is swallowed by stripping — the F6 hole. The intercept must
+    # scan the RAW slice (t_5132deb3), exactly like _handle_cluster's up/down.
+    ["orch", "inject", "--theme", "--help"],
+    ["orch", "inject", "demo-orch", "msg", "--theme", "-h"],
 ]
 
 

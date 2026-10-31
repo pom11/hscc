@@ -1206,6 +1206,30 @@ def _orch_receipt_line(receipt):
     return line
 
 
+def _orch_dangling_theme(raw_tail):
+    """The token `--theme` would swallow as its palette name, if flag-shaped.
+
+    A palette name is `dark`/`light`/`auto` — never a flag. So a token that
+    starts with `-` in that slot is not a theme: it is a real flag being eaten
+    by the stripper. `hscc orch inject p msg --theme --dry-run` would otherwise
+    strip `--dry-run` away as the palette and dispatch a REAL SEND while the
+    operator believes they asked for a plan — the F6 hole _handle_cluster
+    refuses for its destructive verbs, and `orch inject` is destructive in the
+    same sense (it types into a live pane). Returns the offending token, or
+    None when the tail is well-formed.
+    """
+    for i, tok in enumerate(raw_tail):
+        if tok == "--theme":
+            nxt = raw_tail[i + 1] if i + 1 < len(raw_tail) else None
+            if nxt is not None and nxt.startswith("-"):
+                return nxt
+        elif tok.startswith("--theme="):
+            val = tok.split("=", 1)[1]
+            if val.startswith("-"):
+                return val
+    return None
+
+
 def _handle_orch(argv):
     """Route `hscc orch <verb>` to the cluster engine's cmd_orch router.
 
@@ -1218,15 +1242,31 @@ def _handle_orch(argv):
     here; `--theme` is stripped (it is a human-view flag the engine does not
     know).
     """
-    tail, _theme_name = _strip_theme_arg(list(argv))
+    raw_tail = list(argv)
+    tail, _theme_name = _strip_theme_arg(raw_tail)
     json_mode = "--json" in tail
 
-    # A help token ANYWHERE in the tail is help — before the engine load, so
-    # `hscc orch inject --help` can never reach a verb that injects (the
-    # t_5132deb3 rule: -h must never execute).
-    if not tail or _help_token_index(tail) is not None:
+    # A help token ANYWHERE in the tail is help — scanned on the RAW slice and
+    # checked BEFORE the engine load, so `hscc orch inject --help` can never
+    # reach a verb that injects (the t_5132deb3 rule: -h must never execute).
+    # Raw, not stripped: `_strip_theme_arg` consumes the token after `--theme`
+    # as the palette name, so `orch inject --theme --help` would otherwise eat
+    # the help flag and dispatch instead (the exact F6 hole _handle_cluster
+    # closes for up/down).
+    if not raw_tail or _help_token_index(raw_tail) is not None:
         _print_orch_group_help()
         return 0
+
+    # Fail CLOSED on a swallowed flag (the F6 rule for a mutating verb).
+    # `orch inject` types into a live pane, so a stripped token that silently
+    # turns a planned send into a real one is exactly the accident this guard
+    # exists for: report and do nothing instead of guessing.
+    swallowed = _orch_dangling_theme(raw_tail)
+    if swallowed is not None:
+        print(f"error: --theme needs a palette name (dark|light|auto), got "
+              f"{swallowed} — refusing instead of dropping it. Put the palette "
+              f"after --theme (e.g. --theme light) and the flags separately.")
+        return 1
 
     eng = _load_cluster_engine()
     if eng is None:

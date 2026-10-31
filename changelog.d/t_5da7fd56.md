@@ -17,8 +17,13 @@ task: t_5da7fd56
   read stay in `repl_inject`, so the two surfaces cannot drift. Also:
   `COMMAND_HELP["orch"]`, the `hscc --help` banner line, the group listing
   (`hscc orch` / `orch --help` / `orch inject --help`, intercepted before the
-  engine loads so help runs nothing) and the unknown-command verb list.
-  `hscc orch waker …` (orch-waker W3) lands on this same branch.
+  engine loads so help runs nothing — on the RAW tail, so `--theme --help`
+  cannot eat the flag) and the unknown-command verb list. A flag-shaped token
+  after `--theme` (e.g. `--theme --dry-run`, which the stripper would swallow
+  and turn a planned send into a real one) refuses with exit 1 before the
+  engine loads — the F6 fail-closed rule `_handle_cluster` uses for its
+  destructive verbs. `hscc orch waker …` (orch-waker W3) lands on this same
+  branch.
 ---
 kind: Verified
 task: t_5da7fd56
