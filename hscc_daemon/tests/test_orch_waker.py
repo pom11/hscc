@@ -431,3 +431,270 @@ def test_boards_list_restricts_scan(tmp_path, state_path):
     assert ow.load_state(state_path)["last"] == {}
     ow.tick(now=NOW, boards={"a": a, "b": b}, state_path=state_path)
     assert set(ow.load_state(state_path)["last"]) == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# W2 — real seams: orch resolution, paused read, repl_inject delivery, audit
+#
+# Delivery is asserted through the parity module's seams ONLY: either a fake
+# `repl` module object (records inject() calls, reports busy like the real
+# mode logic does) or the REAL hscc-api/repl_inject.py with its run_tmux /
+# run_ps seams stubbed. A real tmux server is never touched (repl_inject's
+# own hermeticity guard additionally refuses the unstubbed seams under
+# pytest).
+# ---------------------------------------------------------------------------
+
+class FakeRepl:
+    """Stand-in for the repl_inject parity module — records every inject call.
+
+    `inject(profile, text, mode=...)` mirrors the real signature and mirrors
+    the REAL mode decision: mode="auto" + busy target resolves to "queue"
+    (never an interrupt); idle resolves to "plain". The decision is made here
+    exactly where repl_inject makes it, so a test that expects the queue-mode
+    path exercises the same shape production takes.
+    """
+
+    def __init__(self, busy=True, raises=None):
+        self.calls = []                  # (profile, text, mode)
+        self.receipts = []               # what we returned, for assertion
+        self.busy = busy
+        self.raises = raises             # exception to raise instead
+
+    def inject(self, profile, text, mode="auto"):
+        self.calls.append((profile, text, mode))
+        if self.raises is not None:
+            raise self.raises
+        eff = ("queue" if self.busy else "plain") if mode == "auto" else mode
+        receipt = {"pane": "%1", "target": "s.w.p", "profile": profile,
+                   "busy": self.busy, "mode": eff, "sent_text": text}
+        self.receipts.append(receipt)
+        return receipt
+
+
+class InjectErrorLike(Exception):
+    """Carries `.kind` like repl_inject.InjectError (no import coupling)."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
+
+def make_env(tmp_path, paused=None, profiles=("b-orch",)):
+    """A hermetic W2 environment: profiles dir, paused file, audit path."""
+    pdir = tmp_path / "profiles"
+    for p in profiles:
+        (pdir / p).mkdir(parents=True, exist_ok=True)
+    paused_file = tmp_path / "kanban_paused.json"
+    paused_file.write_text(json.dumps(paused or {}))
+    return {"profiles_dir": str(pdir), "paused_path": str(paused_file),
+            "audit_path": str(tmp_path / "orch_waker.jsonl")}
+
+
+def audit_lines(path):
+    with open(path) as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def _deliver(tmp_path, state_path, env, repl, now=NOW + 100):
+    """Tail-start, drop one event, then run the decision tick with W2 wiring.
+
+    Returns (decisions, db). Debounce/gap are satisfied by now=NOW+100.
+    """
+    db = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_1", "One")])
+    ow.tick(now=NOW, boards={"b": db}, state_path=state_path)
+    add_events(db, [("t_1", 1, "completed", None)])
+    ow.tick(now=NOW + 10, boards={"b": db}, state_path=state_path)
+    dec = ow.run_tick(now=now, boards={"b": db}, state_path=state_path,
+                      repl=repl, **env)
+    return dec, db
+
+
+# ── resolution ──────────────────────────────────────────────────────────────
+
+def test_orch_name_reuses_the_repo_rule():
+    from hscc_daemon import kanban_pause
+    assert ow.orch_name("kronos") == kanban_pause.orchestrator_for("kronos")
+    assert ow.orch_name("kronos") == "kronos-orch"
+
+
+def test_resolve_orch_requires_the_profile_dir(tmp_path):
+    (tmp_path / "profiles" / "b-orch").mkdir(parents=True)
+    assert ow.resolve_orch("b", profiles_dir=str(tmp_path / "profiles")) == "b-orch"
+    assert ow.resolve_orch("c", profiles_dir=str(tmp_path / "profiles")) is None
+    # hermes_home layout resolves to the same <home>/profiles dir:
+    assert ow.resolve_orch("b", hermes_home=str(tmp_path)) == "b-orch"
+
+
+def test_missing_orch_profile_no_delivery_no_audit(tmp_path, state_path):
+    db = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_1", "One")])
+    repl = FakeRepl()
+    env = make_env(tmp_path, profiles=())                  # no b-orch on disk
+    ow.tick(now=NOW, boards={"b": db}, state_path=state_path)
+    add_events(db, [("t_1", 1, "completed", None)])
+    dec = ow.run_tick(now=NOW + 100, boards={"b": db}, state_path=state_path,
+                      repl=repl, **env)
+    assert dec == [] and repl.calls == []                  # nothing delivered
+    assert not os.path.exists(env["audit_path"])           # not even audited
+    st = ow.load_state(state_path)
+    assert st["last"]["b"] == board_id(db)                 # watermark advanced
+    assert not st["pending"].get("b")                      # batch dropped
+
+
+# ── paused skip ─────────────────────────────────────────────────────────────
+
+def test_run_tick_paused_board_drops_pending_no_delivery(tmp_path, state_path):
+    db = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_1", "One")])
+    repl = FakeRepl()
+    env = make_env(tmp_path, paused={"b": {"since": NOW}})  # stopgap rule: keys
+    ow.tick(now=NOW, boards={"b": db}, state_path=state_path)
+    add_events(db, [("t_1", 1, "crashed", None)])
+    dec = ow.run_tick(now=NOW + 100, boards={"b": db}, state_path=state_path,
+                      repl=repl, **env)
+    assert dec == [] and repl.calls == []
+    assert not os.path.exists(env["audit_path"])           # no audit line
+    st = ow.load_state(state_path)
+    assert st["last"]["b"] == board_id(db)                 # last-id still advances
+    assert not st["pending"].get("b")                      # pending dropped
+
+
+def test_read_paused_filters_bookkeeping_keys(tmp_path):
+    f = tmp_path / "kanban_paused.json"
+    f.write_text(json.dumps({"_auto_decompose": True, "b": {}, "c": {}}))
+    assert ow.read_paused(str(f)) == {"b", "c"}
+    assert ow.read_paused(str(tmp_path / "missing.json")) == set()
+    f.write_text("{ not json")
+    assert ow.read_paused(str(f)) == set()                 # unreadable -> none
+
+
+# ── delivery through the parity module ──────────────────────────────────────
+
+def test_delivery_uses_queue_path_while_orch_busy(tmp_path, state_path):
+    repl = FakeRepl(busy=True)
+    env = make_env(tmp_path)
+    dec, _ = _deliver(tmp_path, state_path, env, repl)
+    # the caller asks for auto; the parity module's mode logic resolves busy
+    # -> queue (never interrupt), exactly how orch_message delivers:
+    assert repl.calls == [("b-orch", dec[0]["msg"], "auto")]
+    assert repl.receipts[0]["mode"] == "queue"
+    assert dec[0]["ok"] is True
+
+
+def test_delivery_plain_when_orch_idle(tmp_path, state_path):
+    repl = FakeRepl(busy=False)
+    dec, _ = _deliver(tmp_path, state_path, make_env(tmp_path), repl)
+    assert repl.receipts[0]["mode"] == "plain"
+    assert dec[0]["ok"] is True
+
+
+def test_failed_inject_audits_failed_and_keeps_pending(tmp_path, state_path):
+    env = make_env(tmp_path)
+    repl = FakeRepl(raises=InjectErrorLike("no_panes", "no tmux pane running "
+                                                     "the REPL for 'b-orch'"))
+    dec, db = _deliver(tmp_path, state_path, env, repl)
+    assert dec[0]["ok"] is False
+    st = ow.load_state(state_path)
+    assert len(st["pending"]["b"]) == 1 and "b" not in st["sent"]  # retry later
+    lines = audit_lines(env["audit_path"])
+    assert len(lines) == 1 and lines[0]["ok"] is False
+    assert lines[0]["outcome"].startswith("failed:") and "no tmux pane" in lines[0]["outcome"]
+    assert lines[0]["msg"] == dec[0]["msg"] and lines[0]["profile"] == "b-orch"
+
+
+def test_failed_inject_retry_succeeds_and_clears(tmp_path, state_path):
+    env = make_env(tmp_path)
+    repl = FakeRepl(raises=InjectErrorLike("tmux", "tmux paste-buffer failed"))
+    dec, db = _deliver(tmp_path, state_path, env, repl)
+    assert dec[0]["ok"] is False
+    repl.raises = None
+    dec = ow.run_tick(now=NOW + 250, boards={"b": db}, state_path=state_path,
+                      repl=repl, **env)
+    assert dec[0]["ok"] is True
+    st = ow.load_state(state_path)
+    assert not st["pending"].get("b") and st["sent"]["b"] == NOW + 250
+    lines = audit_lines(env["audit_path"])
+    assert [l["ok"] for l in lines] == [False, True]         # two attempts, two lines
+
+
+def test_success_clears_pending_stamps_sent_and_audits(tmp_path, state_path):
+    env = make_env(tmp_path)
+    repl = FakeRepl(busy=True)
+    dec, db = _deliver(tmp_path, state_path, env, repl)
+    assert dec[0]["ok"] is True
+    st = ow.load_state(state_path)
+    assert not st["pending"].get("b") and st["sent"]["b"] == NOW + 100
+    line, = audit_lines(env["audit_path"])
+    assert line["ok"] is True and line["outcome"] == "sent"
+    assert line["board"] == "b" and line["profile"] == "b-orch"
+    assert line["msg"] == dec[0]["msg"] and isinstance(line["ts"], float)
+
+
+def test_two_send_ticks_two_audit_lines(tmp_path, state_path):
+    env = make_env(tmp_path)
+    repl = FakeRepl(busy=True)
+    dec1, db = _deliver(tmp_path, state_path, env, repl)
+    assert dec1[0]["ok"] is True
+    add_events(db, [("t_2", 1, "completed", None)])          # a new wake
+    ow.tick(now=NOW + 150, boards={"b": db}, state_path=state_path)  # batch it
+    dec2 = ow.run_tick(now=NOW + 700, boards={"b": db}, state_path=state_path,
+                       repl=repl, **env)                     # past min-gap(300)
+    assert dec2[0]["ok"] is True
+    lines = audit_lines(env["audit_path"])
+    assert len(lines) == 2                                   # appended, not rewritten
+    assert lines[0]["msg"] == dec1[0]["msg"] and lines[1]["msg"] == dec2[0]["msg"]
+
+
+# ── the parity module's REAL entry point (seams stubbed, never tmux) ────────
+
+def test_run_tick_wires_the_real_repl_inject_entry_point(tmp_path, state_path,
+                                                         monkeypatch):
+    """The module:function this card actually uses, exercised for real.
+
+    hscc-api/repl_inject.py is the merged t_ff665ff9 parity module; its
+    run_tmux/run_ps seams are stubbed so pane discovery + the busy marker +
+    bracketed paste all run their REAL code against a fake tmux transcript.
+    Asserts the queue path: the fake pane shows the busy marker and the keys
+    the fake tmux receives start with '/queue '.
+    """
+    ri = ow.load_repl_inject()
+    assert ri is not None, "hscc-api/repl_inject.py must import beside hscc_daemon"
+    import os as _os
+    assert _os.path.basename(ri.__file__) == "repl_inject.py"
+    sent = []
+
+    def fake_run_tmux(*args, input_text=None):
+        if args[:2] == ("list-panes", "-a"):
+            return "%1\ts.w.p\t/dev/ttys001\n"
+        if args[0] == "capture-pane":
+            return "prompt msg=interrupt  (turn running)\n"   # busy marker
+        if args[0] == "send-keys":
+            sent.append(args)
+            return ""
+        return ""
+
+    def fake_run_ps(tty):
+        return "/venv/bin/python /u/bin/hermes -p b-orch chat --continue b\n"
+
+    monkeypatch.setattr(ri, "run_tmux", fake_run_tmux)
+    monkeypatch.setattr(ri, "run_ps", fake_run_ps)
+    env = make_env(tmp_path)
+    dec, _ = _deliver(tmp_path, state_path, env, repl=None)   # real module path
+    assert dec[0]["ok"] is True
+    queue_key = [a for a in sent if "-l" in a]                # the /queue prefix
+    assert queue_key and queue_key[0][queue_key[0].index("-l") + 1] == "/queue "
+    assert any(a[0] == "send-keys" and a[-1] == "Enter" for a in sent)
+    line, = audit_lines(env["audit_path"])
+    assert line["ok"] is True and line["profile"] == "b-orch"
+
+
+# ── run_tick survivability ──────────────────────────────────────────────────
+
+def test_run_tick_never_raises(tmp_path, state_path, monkeypatch, caplog):
+    db = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_1", "One")])
+    ow.tick(now=NOW, boards={"b": db}, state_path=state_path)
+    add_events(db, [("t_1", 1, "completed", None)])
+    monkeypatch.setattr(ow, "tick", lambda **kw: (_ for _ in ()).throw(
+        RuntimeError("internal explode")))
+    with caplog.at_level("ERROR"):
+        assert ow.run_tick(now=NOW + 100, boards={"b": db},
+                           state_path=state_path) == []       # swallowed
+    assert "tick failed" in caplog.text
