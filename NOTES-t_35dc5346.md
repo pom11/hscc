@@ -1,9 +1,14 @@
 # t_35dc5346 — wake path must carry per-unit max_num_seqs
 
-Base: branch wt/t_35dc5346 @ fe17597b (PR #118 head — ModelIntent/ResolvedUnit/
-_render_serve_cmd leg already shipped there). NOT rebased on origin/main because
-main does not have PR #118 yet (verified: `git merge-base --is-ancestor fe17597b
-origin/main` => NO).
+Base: branch wt/t_35dc5346, rebased onto origin/main (ac8e5520) in run 2.
+Run 1 branched from fe17597b (PR #118 head) because main did not have PR #118
+yet; PR #118 merged in the meantime (verified `git merge-base --is-ancestor
+fe17597b origin/main` => YES), so the rebase is a clean fast-stack and the
+acceptance stamp below was taken on the rebased tree — what a PR base=main
+will actually merge. Rebase touched nothing of mine: `git diff --stat
+fe17597b origin/main` over the four changed files is empty (main's 46 new
+commits added changelog fragments, orch-waker/cards-monitor suites and the
+systemd-unit-name suite — no overlap with serving.py/template_intent.py).
 
 ## Gap (confirmed by reading the code)
 
