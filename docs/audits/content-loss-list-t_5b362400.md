@@ -133,9 +133,13 @@ operator can triage the classification without wading through it.
 - Snapshot of this host's `~/.hermes/profiles` at run time. It says nothing about
   a future profile or another machine; the permanent guard is the check + tests,
   not these numbers.
-- The 23 excluded SOULs are minted by `orchestrators.py`/`orch_sync.py`, not by
-  `compose_soul()` over a spec, so this pass does not judge them and this card
-  makes no losslessness claim about them.
+- The 23 excluded SOULs are not judged because they are not `compose_soul()`
+  output: 22 carry a `## Role:` heading without the worker signature (the
+  orchestrator family, minted by `orchestrators.py`/`orch_sync.py`) and 1
+  (`probe`) carries neither signature, so it is not an HSCC-generated identity
+  either. This pass makes no losslessness claim about any of them. Counted
+  independently of the check by classifying every `SOUL.md` under the profiles
+  dir: 25 worker + 22 orchestrator + 1 neither + 2 dirs with no SOUL at all.
 - The pass answers "what is lost", not "is the resulting text desirable". After
   `generate`, the constraint text lives under `## Role: <name>` rather than a
   `## Project override:` heading, and the named sandboxes intentionally do not
