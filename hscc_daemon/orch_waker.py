@@ -516,35 +516,34 @@ def _real_time() -> float:
 
 
 # =========================================================================== #
-# W3 — operator config (``orch_waker.*`` in ~/.hscc/config.json) and the
-# status read the CLI/doctor consume.
+# W3 — operator config (``orch_waker.enabled`` + knobs) and the status read
+# the CLI/doctor consume.
 #
-# The waker is a daemon-resident feature, so its knobs follow the shape the
-# daemon's other always-on features use: ONE JSON file under ~/.hscc, a
-# DEFAULTS dict merged over what is on disk, and a load function called
-# fresh on every tick so a mid-run ``hscc orch waker disable`` takes effect
-# on the next tick with no daemon restart (autodown.load_config is the same
-# contract; the file here is read-only at tick time and written only by the
-# CLI verbs).
+# Shape mirrors the daemon's other daemon-resident features exactly —
+# autodown owns ``~/.hscc/autodown.json`` with a DEFAULT_CONFIG dict merged
+# over what is on disk, api_cli owns ``~/.hscc/api.json``; the waker owns
+# ``~/.hscc/orch_waker.json``. One flat JSON object, one loader, one writer,
+# and the config re-read EVERY tick, so a mid-run ``hscc orch waker disable``
+# takes effect on the next tick with no daemon restart (same hot-reload
+# contract as ``_autodown_tick``). The card's dotted key names
+# (``orch_waker.enabled``) are the FEATURE's namespace — the file itself is
+# the namespace, exactly like autodown.json's own keys.
 #
-# ``orch_waker.enabled`` is the ONE deliberate difference from autodown, and
-# it is deliberate in the card, not an oversight: autodown fails CLOSED
+# ``enabled`` defaults ON, and that is the ONE deliberate difference from
+# autodown, called out in the card, not an oversight: autodown fails CLOSED
 # (absent/corrupt config => teardown never happens) because its action is
 # destructive. The waker's action is a nudge into an idle REPL, the operator
-# asked for it to be always-on, and a lost config file that silently stopped
-# the waking is the failure mode the stopgap exists to prevent. So a missing
+# asked for it always-on, and a lost config file that silently stopped the
+# waking is the exact failure the stopgap exists to prevent. So a missing
 # file, a corrupt file, and a non-dict file all resolve to ENABLED.
 # =========================================================================== #
 
-#: The daemon's shared operator config file. Written 0600 (the daemon's
-#: umask(0o077) owns the whole ~/.hscc tree); ``orch_waker`` is one
-#: namespace in it, so a future daemon feature lands beside it instead of
-#: adding another file to reason about.
-DEFAULT_CONFIG_PATH = "~/.hscc/config.json"
-
-#: The config namespace this feature owns. Dotted keys in the card
-#: (``orch_waker.enabled``) are exactly ``[CONFIG_NAMESPACE][key]``.
-CONFIG_NAMESPACE = "orch_waker"
+#: The waker's config file. Written 0600 (the daemon's umask(0o077) owns the
+#: whole ~/.hscc tree). Distinct from the waker's STATE file
+#: (``state/orch_waker.json``) the way autodown.json is distinct from the
+#: daemon's stream-state files: config is operator-owned (the CLI writes it),
+#: state is daemon-owned (the tick writes it).
+DEFAULT_CONFIG_PATH = "~/.hscc/orch_waker.json"
 
 #: Defaults (W3): ON, and the stopgap's tuning verbatim. ``poll_s`` mirrors
 #: ``POLL_S`` — the daemon's stream cadence and this knob are the same number
@@ -586,14 +585,14 @@ def config_path(path=None) -> str:
 
 
 def load_config(path=None) -> dict:
-    """The ``orch_waker`` block of ``~/.hscc/config.json`` merged over defaults.
+    """The waker's config file merged over defaults (always a COMPLETE dict).
 
-    Returns a COMPLETE dict (a partial or hand-edited file still yields every
-    knob). Absent file, unreadable file, invalid JSON, non-object document,
-    and a non-object ``orch_waker`` block all resolve to the defaults — i.e.
-    ENABLED, at the stopgap's tuning (the fail-open rationale is in the header
-    above). Only keys in ``CONFIG_DEFAULTS`` are returned, so an unrelated
-    hand-edit in the file cannot reach the tick.
+    Absent file, unreadable file, invalid JSON and a non-object document all
+    resolve to the defaults — i.e. ENABLED, at the stopgap's tuning (the
+    fail-open rationale is in the header above). Only keys in
+    ``CONFIG_DEFAULTS`` are returned, so a stray hand-edit cannot reach the
+    tick, and a partial file (or one written by an older build) still yields
+    every knob.
     """
     cfg = dict(CONFIG_DEFAULTS)
     file = config_path(path)
@@ -610,26 +609,25 @@ def load_config(path=None) -> dict:
         LOG.warning("orch-waker: config %s is not an object — using defaults",
                     file)
         return cfg
-    block = doc.get(CONFIG_NAMESPACE)
-    if not isinstance(block, dict):
-        return cfg
-    cfg["enabled"] = bool(block.get("enabled", CONFIG_DEFAULTS["enabled"]))
+    cfg["enabled"] = bool(doc.get("enabled", CONFIG_DEFAULTS["enabled"]))
     for key in ("debounce_s", "min_gap_s", "poll_s"):
-        cfg[key] = _coerce_knob(key, block.get(key, CONFIG_DEFAULTS[key]))
+        cfg[key] = _coerce_knob(key, doc.get(key, CONFIG_DEFAULTS[key]))
     return cfg
 
 
 def set_enabled(enabled: bool, path=None) -> dict:
-    """Flip ``orch_waker.enabled`` in the config file. Returns the new block.
+    """Flip ``enabled`` in the waker's config file. Returns the new block.
 
-    This is the ONLY writer of the namespace, and the only way the operator
-    changes it is the CLI verbs — the CLI never edits the file by hand. The
-    read-modify-write preserves every OTHER key in the document (the file is
-    shared with the rest of the daemon), creates the file/parents when
-    missing, and swaps it in atomically (tmp + ``os.replace``), the same
-    discipline ``save_state`` uses. Raises ``OSError`` if the file cannot be
-    read or written — the CLI reports that as a refusal rather than claiming
-    a flip that did not happen.
+    The ONLY writer of this file besides the operator's own editor, and the
+    CLI never rewrites it by hand — the daemon imports this same function, so
+    a flip is visible to the tick on its very next pass with no restart and no
+    second bookkeeping path to drift. Writes the COMPLETE schema (merged over
+    ``CONFIG_DEFAULTS``), keeps any unrelated operator key that is already in
+    the file, creates file/parents when missing, and swaps atomically (tmp +
+    ``os.replace``) — the same discipline ``save_state`` and
+    ``autodown.save_config`` use. Raises ``OSError`` on a failed read/write so
+    the CLI reports a refusal instead of claiming a flip that did not happen,
+    and refuses to clobber a document that is not a JSON object.
     """
     file = config_path(path)
     doc = {}
@@ -642,14 +640,10 @@ def set_enabled(enabled: bool, path=None) -> dict:
                 raise ValueError(
                     f"{file} is not a JSON object — refusing to rewrite it")
             doc = loaded
-    block = doc.get(CONFIG_NAMESPACE)
-    if not isinstance(block, dict):
-        block = {}
-    block["enabled"] = bool(enabled)
-    block.setdefault("poll_s", CONFIG_DEFAULTS["poll_s"])
-    block.setdefault("debounce_s", CONFIG_DEFAULTS["debounce_s"])
-    block.setdefault("min_gap_s", CONFIG_DEFAULTS["min_gap_s"])
-    doc[CONFIG_NAMESPACE] = block
+    merged = dict(CONFIG_DEFAULTS)
+    merged.update({k: v for k, v in doc.items() if k in CONFIG_DEFAULTS})
+    merged["enabled"] = bool(enabled)
+    doc.update(merged)
     parent = os.path.dirname(file)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -658,18 +652,19 @@ def set_enabled(enabled: bool, path=None) -> dict:
         json.dump(doc, f, indent=2, sort_keys=True)
         f.write("\n")
     os.replace(tmp, file)
-    return dict(block)
+    return {k: doc[k] for k in CONFIG_DEFAULTS}
 
 
 def stream_interval(cfg=None, path=None) -> int:
-    """The daemon-loop cadence the waker stream declares, honouring ``poll_s``.
+    """The configured ``poll_s``, clamped to a safe range.
 
-    ``PERIODIC_INTERVALS["orch_waker"]`` is the default (the single source of
-    truth for the loop); an operator who shortens ``poll_s`` gets a stream that
-    really ticks that often — the loop reads this on the tick, and
-    :mod:`hscc_daemon.verify` reads the SAME dict, so cadence and the staleness
-    window cannot drift apart. Bounded to ``[1, 3600]`` so a typo (``0`` => a
-    hot loop; ``100000`` => a stream that never ticks) cannot hurt.
+    Bounded to ``[1, 3600]`` so a typo (``0`` => a hot loop; ``100000`` => a
+    stream that never polls) cannot hurt. NOTE: this is the CONFIG value, not
+    necessarily the scan cadence — the loop ticks the stream at
+    ``PERIODIC_INTERVALS["orch_waker"]`` and the tick only POLLS at
+    ``poll_s`` when that is LONGER than the stream cadence (a poll_s shorter
+    than the cadence cannot make the waker scan faster than the loop wakes;
+    see :func:`effective_scan_interval`).
     """
     cfg = cfg if cfg is not None else load_config(path)
     try:
@@ -679,11 +674,43 @@ def stream_interval(cfg=None, path=None) -> int:
     return max(1, min(3600, interval or POLL_S))
 
 
+#: Fallback for the stream cadence when ``daemon_ops`` cannot be consulted
+#: (kept == its PERIODIC_INTERVALS entry; the card pins both to 30).
+_STREAM_CADENCE_FALLBACK = 30
+
+
+def stream_cadence() -> int:
+    """The daemon loop's cadence for this stream (the SOT, 30 s).
+
+    Reads ``daemon_ops.PERIODIC_INTERVALS`` — the same source
+    ``verify._live_stream_intervals`` reads, so cadence and the staleness math
+    cannot drift. Imported inside the function: daemon_ops owns the import of
+    THIS module (its CHECKS table), and a module-level import in the other
+    direction would only work by accident.
+    """
+    try:
+        from .daemon_ops import PERIODIC_INTERVALS
+        return int(PERIODIC_INTERVALS[STREAM_NAME])
+    except Exception:  # pragma: no cover — defensive; the dict is a constant
+        return _STREAM_CADENCE_FALLBACK
+
+
+def effective_scan_interval(cfg=None, path=None) -> int:
+    """Seconds between real board scans, honouring both cadences.
+
+    ``max(stream cadence, poll_s)``: the loop cannot wake the stream faster
+    than its cadence, and the tick will not scan more often than ``poll_s``.
+    At the defaults (30 s / 30 s) this is exactly the stopgap's cadence.
+    """
+    return max(stream_cadence(), stream_interval(cfg, path))
+
+
 # ── W3: the daemon-loop entry + the status surface ──────────────────────────
 
 #: The daemon's stream name for the waker — the key in PERIODIC_INTERVALS
 #: (daemon_ops), the state file ``~/.hscc/state/orch_waker.json`` (state.py),
 #: the row ``hscc verify`` sees, and the field the doctor check reads.
+#: (Also referenced by ``stream_cadence`` above.)
 STREAM_NAME = "orch_waker"
 
 
@@ -741,7 +768,8 @@ def waker_status(now=None, config_path=None, state_path=None,
         "config": cfg,
         "stream": {
             "name": STREAM_NAME,
-            "interval_s": stream_interval(cfg),
+            "interval_s": stream_cadence(),
+            "scan_every_s": effective_scan_interval(cfg),
             "last_tick": last_tick,
             "tick_age_s": (round(now - last_tick, 1)
                            if isinstance(last_tick, (int, float)) else None),
