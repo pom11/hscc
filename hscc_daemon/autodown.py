@@ -1107,7 +1107,13 @@ def _has_active_pr_ci(prci_checker=None):
         result = prci_checker()
     except Exception as e:
         # A raising checker ⇒ cannot verify ⇒ fail safe active + surface it.
+        # Record the sentinel as the blocking signal here too: this is the same
+        # "could not evaluate the source" case as a returned sentinel, and
+        # without it ``blocking`` keeps whatever a PREVIOUS call left in it
+        # (often None ⇒ the CLI prints "open PR / active CI run", naming work
+        # that does not exist, or "PR/CI" from a stale earlier screen).
         _note_prci_unavailable(f"PR/CI checker raised: {e}")
+        _note_prci_blocking(_PRCI_UNREACHABLE)
         return True
     if _prci_screen_active(result):
         # Note WHY (PR vs CI vs unreachable) for ``hscc autodown status``.

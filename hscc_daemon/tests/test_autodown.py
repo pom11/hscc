@@ -503,7 +503,21 @@ class TestHasActivePrCi:
     True ⇒ active ⇒ not idle ⇒ never tear down. False ONLY when the screen is
     POSITIVELY clear. Every failure/unreachable/ambiguous shape fails safe to
     True — identical direction to the kanban interlock.
+
+    The boolean alone was NOT enough, and that is how the t_18318fd9 defect
+    survived: the fail-safe polarity was correct and pinned, while the
+    DIAGNOSTIC state beside it (``prci_blocking_signal()`` /
+    ``prci_check_state()``, what ``autodown status`` actually shows) was wrong —
+    an unreachable source reported "check OK, blocked by open PR / active CI
+    run". Every case below asserts the diagnosis, not just the boolean.
     """
+
+    @staticmethod
+    def _fresh_prci_load(monkeypatch):
+        """Reset the module-level bookkeeping so one case cannot inherit
+        another's ``warned``/``ok``/``blocking`` (they are process state)."""
+        monkeypatch.setattr(ad, "_PRCI_LOAD", {
+            "blocking": None, "ok": None, "reason": "", "warned": False})
 
     def test_open_pr_is_active(self):
         assert ad._has_active_pr_ci(_PrciOpenPr()) is True
@@ -518,6 +532,48 @@ class TestHasActivePrCi:
 
     def test_unreachable_failsafe_active(self):
         assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+
+    def test_unreachable_reports_unreachable_not_pr_ci(self, monkeypatch):
+        """The t_18318fd9 diagnosis pin: an unreachable source must NOT be
+        reported as a healthy check holding on an open PR."""
+        self._fresh_prci_load(monkeypatch)
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert ad.prci_blocking_signal() is ad._PRCI_UNREACHABLE
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert "unreachable" in state["reason"]
+
+    def test_raising_checker_reports_unreachable(self, monkeypatch):
+        """A checker that RAISES is the same "could not evaluate" case as a
+        returned sentinel — it must not leave ``blocking`` at whatever a
+        previous call set (the CLI would then name work that does not exist)."""
+        self._fresh_prci_load(monkeypatch)
+        assert ad._has_active_pr_ci(_PrciRaises()) is True
+        assert ad.prci_blocking_signal() is ad._PRCI_UNREACHABLE
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert "raised" in state["reason"]
+
+    def test_active_pr_reports_pr_ci_with_ok(self, monkeypatch):
+        """Positive work keeps blocking == "PR/CI" and ok True — the
+        unreachable fix must not swallow the real-work diagnosis."""
+        self._fresh_prci_load(monkeypatch)
+        assert ad._has_active_pr_ci(_PrciOpenPr()) is True
+        assert ad.prci_blocking_signal() == "PR/CI"
+        assert ad.prci_check_state()["ok"] is True
+
+    def test_clear_screen_resets_a_stale_unreachable_state(self, monkeypatch):
+        """Recovery: after a gh blip clears, status must stop claiming an
+        unevaluable interlock. The old ``_note_prci_blocking(None)`` cleared
+        only ``blocking`` and left ``ok=False`` + the old reason behind."""
+        self._fresh_prci_load(monkeypatch)
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+        assert ad.prci_check_state()["ok"] is False
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+        state = ad.prci_check_state()
+        assert state["ok"] is True
+        assert state["reason"] == ""
+        assert ad.prci_blocking_signal() is None
 
     def test_raising_checker_failsafe_active(self):
         assert ad._has_active_pr_ci(_PrciRaises()) is True
