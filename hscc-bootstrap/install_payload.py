@@ -25,6 +25,20 @@ except ImportError:  # pragma: no cover - import-path robustness only
 # Never ship these into the runtime dir.
 _EXCLUDE = {"__pycache__", ".pytest_cache", "tests", ".git"}
 
+# Deploy-location remaps for payload entries whose STAGING path in the repo is
+# not where the runtime needs them. Hermes' plugin scanner
+# (hermes_cli.plugins_discovery.scan_directory) recurses only ONE category
+# level below each plugins dir it scans, so a provider plugin staged at
+# install/hscc-plugins/video_gen/<name>/ would sit four levels under
+# ~/.hermes/plugins and never be discovered. Deploying it at the category
+# level <plugins>/video_gen/<name>/ makes the scanner key it
+# "video_gen/openai_compat" — the exact key plugins.enabled must carry
+# (user-source plugins are opt-in; bundled auto-load does not apply).
+# Keys/values are repo-relative staging path -> plugins_dir-relative dest.
+PAYLOAD_REMAPS = {
+    "install/hscc-plugins/video_gen/openai_compat": "video_gen/openai_compat",
+}
+
 
 def _ignore(_dir, names):
     """shutil.copytree ignore: drop caches/tests/pyc from the runtime copy."""
@@ -62,10 +76,14 @@ def _sweep_old_backups(plugins_dir, backups_dir):
 def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     """Copy each ``payload`` entry from ``repo_root`` into ``plugins_dir``.
 
-    ``payload`` is a list of names (dirs or files) relative to the repo root.
-    Returns a summary dict. If ``repo_root`` and ``plugins_dir`` resolve to the
-    same directory (the old in-place layout, or a clone into the runtime dir),
-    the copy is skipped — there is nothing to install.
+    ``payload`` is a list of names (dirs or files) relative to the repo root;
+    entries listed in ``PAYLOAD_REMAPS`` deploy under a different
+    plugins_dir-relative destination (staging path != runtime location —
+    Hermes provider plugins must land at the scanned category level, see the
+    PAYLOAD_REMAPS comment). Returns a summary dict. If ``repo_root`` and
+    ``plugins_dir`` resolve to the same directory (the old in-place layout, or
+    a clone into the runtime dir), the copy is skipped — there is nothing to
+    install.
 
     Backups are written to the sibling ``plugins-backups/`` directory (never
     inside the scanned ``plugins_dir``) so stale copies can never shadow
@@ -93,12 +111,16 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
         if not src.exists():
             missing.append(name)
             continue
-        dst = plugins_dir / name
+        # Deploy location may differ from the staging path (see PAYLOAD_REMAPS).
+        dst_name = PAYLOAD_REMAPS.get(name, name)
+        dst = plugins_dir / dst_name
         if dst.exists() or dst.is_symlink():
             if backup:
                 bak_dir = _backups_dir(plugins_dir)
                 bak_dir.mkdir(parents=True, exist_ok=True)
-                bak = bak_dir / f"{name}.bak-{stamp}"
+                # Flatten path separators so nested dests (video_gen/openai_compat)
+                # back up as ONE name directly inside bak_dir.
+                bak = bak_dir / f"{dst_name.replace('/', '__')}.bak-{stamp}"
                 shutil.move(str(dst), str(bak))
                 backed_up.append(bak.name)
                 # Retain-limit the pile this stage creates (t_9462260b):
@@ -112,8 +134,9 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
         if src.is_dir():
             shutil.copytree(src, dst, ignore=_ignore, symlinks=False)
         else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-        installed.append(name)
+        installed.append(dst_name)
 
     return {
         "skipped": False,
@@ -199,6 +222,12 @@ DEFAULT_PAYLOAD = [
     "hscc-api",
     "memori", "memori_byodb",
     "install", "docs", "assets", "configs",
+    # Hermes provider plugins the fleet ships (media enablement, t_ec488ce3).
+    # Staged under install/ alongside the bundled skills; PAYLOAD_REMAPS deploys
+    # it at the category level <plugins>/video_gen/openai_compat/ so Hermes'
+    # one-category-level scan discovers it under key "video_gen/openai_compat"
+    # — the key plugins.enabled must carry.
+    "install/hscc-plugins/video_gen/openai_compat",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "VERSION",
 ]
 

@@ -298,6 +298,59 @@ def test_default_payload_ships_hscc_api():
     assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
 
 
+def test_default_payload_ships_media_video_plugin():
+    """The fleet's openai_compat video provider must be in the payload (media
+    enablement t_ec488ce3), and its remap must place it at the ONE-category
+    level Hermes scans (<plugins>/video_gen/<name>/) — a deeper copy is never
+    discovered, so the install would silently no-op."""
+    staged = "install/hscc-plugins/video_gen/openai_compat"
+    assert staged in install_payload.DEFAULT_PAYLOAD
+    assert install_payload.PAYLOAD_REMAPS[staged] == "video_gen/openai_compat"
+
+
+def test_payload_remap_deploys_plugin_at_category_level(tmp_path):
+    """Functionally: an entry in PAYLOAD_REMAPS lands at the remapped dest,
+    with plugin.yaml + __init__.py intact (what Hermes discovery keys on)."""
+    repo = tmp_path / "repo"
+    src = repo / "install" / "hscc-plugins" / "video_gen" / "openai_compat"
+    src.mkdir(parents=True)
+    (src / "plugin.yaml").write_text("name: openai_compat\nkind: backend\n")
+    (src / "__init__.py").write_text("def register(ctx):\n    pass\n")
+    plugins = tmp_path / "plugins"
+
+    res = install_payload.install_payload(repo, plugins,
+                                          ["install/hscc-plugins/video_gen/openai_compat"])
+    assert res["missing"] == []
+    dest = plugins / "video_gen" / "openai_compat"
+    assert (dest / "plugin.yaml").is_file()
+    assert (dest / "__init__.py").is_file()
+    assert "video_gen/openai_compat" in res["installed"]
+    # the staging path itself must NOT also appear under plugins_dir
+    assert not (plugins / "install" / "hscc-plugins" / "video_gen").exists()
+
+
+def test_payload_remap_backup_flattens_name(tmp_path):
+    """A remapped nested dest backs up as ONE flat name in plugins-backups/
+    (never a nested dir — the sweep + prune only see direct children)."""
+    repo = tmp_path / "repo"
+    src = repo / "install" / "hscc-plugins" / "video_gen" / "openai_compat"
+    src.mkdir(parents=True)
+    (src / "plugin.yaml").write_text("name: openai_compat\n")
+    plugins = tmp_path / "plugins"
+
+    install_payload.install_payload(repo, plugins,
+                                    ["install/hscc-plugins/video_gen/openai_compat"], ts="A")
+    (src / "plugin.yaml").write_text("name: openai_compat\nversion: 2\n")
+    res = install_payload.install_payload(repo, plugins,
+                                          ["install/hscc-plugins/video_gen/openai_compat"], ts="B")
+    # backup keeps the PREVIOUS deployed copy (run A's content), flattened name
+    assert res["backed_up"] == ["video_gen__openai_compat.bak-B"]
+    bak_file = plugins.parent / "plugins-backups" / "video_gen__openai_compat.bak-B" / "plugin.yaml"
+    assert bak_file.is_file() and "version" not in bak_file.read_text()
+    # the fresh copy (run B's content) is what lives at the deployed dest
+    assert "version: 2" in (plugins / "video_gen" / "openai_compat" / "plugin.yaml").read_text()
+
+
 def test_install_propagates_to_named_profile_plugin_dirs(tmp_path):
     """Regression (t_9e8732b8): memori_byodb fix deployed only to the root
     ~/.hermes/plugins never reached the profiles that actually load it

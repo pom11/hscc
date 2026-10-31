@@ -1,0 +1,6 @@
+name: openai_compat
+version: 1.0.0
+description: "Video generation against any OpenAI-compatible /v1/videos server (the HSCC LiteLLM proxy at :4000 fronting SGLang-Diffusion). Async job: create -> poll -> content download. No client-side size/seconds/deadline caps (M0 §8 Q5 ruling)."
+author: HSCC fleet
+kind: backend
+provides_tools: []
