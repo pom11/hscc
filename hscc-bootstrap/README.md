@@ -85,6 +85,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | `bootstrap.sh` | the orchestrator script |
 | `doctor.py` | preflight checks |
 | `doctor_node_recovery.py` | the doctor's per-node node-recovery check (watchdog armed + panic sysctls in sync), read-only over sparkrun ssh; reuses `hscc-cluster/node_recovery.py` + `install_autoreboot.py` as its single source of truth |
+| `doctor_role_soul.py` | the doctor's role-SOUL identity check (each worker SOUL's `## Role:` header vs its profile dir name and its spec, plus any heading `compose_soul()` cannot emit). Bridge only — the audit lives in `hscc-roles/role_soul_check.py`, which owns `PROFILES_DIR`/`ROLES_DIR`/`compose_soul`; read-only, WARNING-severity, honest ERROR when the hscc-roles sibling is absent |
 | `detect.py` | parse `sparkrun cluster list` |
 | `install_payload.py` | copy repo → runtime (backup/guard/exclude tests) |
 | `install_cli.py` | durable `hscc` CLI entry-point install (into Hermes venv) — shebang correct by construction, verify/repair on drift |

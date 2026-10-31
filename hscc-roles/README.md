@@ -73,6 +73,31 @@ diff + tests + spec and approves only when all three pass (powers the WS4
 `auto_review` gate). Profiles are build artifacts (not tracked) — regenerate
 with `generate`.
 
+## Role SOUL drift (`role_soul_check.py`)
+
+`generate` loops over **specs**, so a profile dir that was copy-pasted from
+another one keeps the SOURCE's identity and nothing notices: the live
+`ecofire-pontaje-engineer` ran its whole life under `## Role:
+ecofire-bc-engineer` while its spec existed and
+`test_every_hscc_owned_worker_profile_has_role_spec` was green — an existence
+test cannot see identity drift. `role_soul_check.py` reports what an existence
+test cannot: a `## Role:` header that disagrees with its profile dir name or
+with `roles/<name>.yaml`, a missing/invalid spec, and any `## ` heading
+`compose_soul()` cannot emit (a hand-patched block the next `generate` drops —
+fold it into the spec's `identity` first).
+
+It is a **reporter, not a pytest assertion**. Live profile state belongs where
+a fault is surfaced to the operator: `doctor_role_soul.py` registers it as a
+non-fatal WARNING in the bootstrap doctor (`hscc-bootstrap/doctor.py`, which
+`bootstrap.sh` runs as its preflight gate). The repair — `hscc.py generate`
+re-stamps every generated profile and rewrites live profile state — is an
+operator action the check deliberately never takes.
+
+Orchestrator-family SOULs are excluded by design: `orchestrators.py` stamps a
+per-project orch with the name of the SHARED spec it passes (`general-orch`
+legitimately carries `## Role: orchestrator`), so judging it by dir name would
+red-flag a layout that is correct by construction.
+
 ## How to test / Links
 
 `tests/` — from this dir: `python -m pytest tests/ -q`.
