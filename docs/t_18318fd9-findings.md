@@ -98,23 +98,42 @@ so the stdout channel itself was fixed (a) and the tests were made hermetic (b):
    because the test asserts the interlock is ACTIVE, not merely that stdout
    parses. That argv-shape trap is documented in the test.
 
-## Verification so far
+## Verification (all actually executed)
 
-- Deterministic repro of the exact card error before the fix (above).
+- Deterministic repro of the exact card error before the fix (above): the card's
+  verbatim `JSONDecodeError: Expecting ',' delimiter: line 1 column 6 (char 5)`.
 - `test_kanban_cli.py + test_daemon_ops.py` isolated: 75 passed.
-- 4 affected files: 335 passed.
-- Mutation probe of the fence: unstubbed `_screen_prci()` call → teardown
-  AssertionError "GH PROBE FENCE GUARD" (guard proven to bite); blocked run
-  1.2s vs 5.4s of real gh calls.
-- `test_daemon_ops.py + test_no_live_hscc_leak.py` after fence fixes: 50
-  passed, `GH PROBE FENCE: 0` (nothing in the leg touches GitHub).
-- Pending: full `bash scripts/run_tests.sh` ALL GREEN, daemon leg x2
-  consecutive + `address_guard --tracked` clean.
+- 4 affected files: 335 passed (then 284 after the guard consolidation).
+- Mutation probe of the fence, run twice (before and after the final
+  consolidation): a scratch test calling `ad._screen_prci()` unstubbed FAILS at
+  teardown with "GH PROBE FENCE GUARD" — the guard bites. Same probe against a
+  file-scoped guard alone PASSED (5.4s of real `gh` calls), which is why the
+  fence lives in conftest.py and the duplicated local raiser was deleted.
+- `test_daemon_ops.py + test_no_live_hscc_leak.py` after the fence fixes: 50
+  passed, `GH PROBE FENCE: 0` — nothing in that pair touches GitHub.
+- **Full `bash scripts/run_tests.sh`: ALL GREEN, 11/11 legs** (hscc-bootstrap,
+  hscc-commands, hscc-roles, hscc-cluster, hscc-project, hscc_daemon,
+  sparkrun-hermes, hscc-api, memori_byodb, scripts, .github/scripts).
+- **Daemon leg x2 consecutive on the FINAL tree** (79e345ce, origin/main merged
+  in): 2664 passed / 2664 passed, `GH PROBE FENCE: 0` both. Also x2 consecutive
+  on the pre-merge tree 4e945e1f: 2664 / 2664, fence 0 both.
+  The earlier "1 failed" full-suite run was the pre-fix tree mid-flight (it
+  caught the two non-hermetic tests, both since fixed); no unresolved failure
+  remains, and `test_no_live_hscc_leak` is green in every leg since.
+- `python3 scripts/address_guard.py --tracked` → rc=0, no output. The diff was
+  additionally grepped for IPv4 literals and gh token prefixes: clean.
+- `python3 scripts/changelog_fragments.py check` → rc=0 (45 fragment entries
+  consistent); `render` shows all three of this card's entries.
+- Cross-package consumers of `daemon_ops` audited for the stream change:
+  `hscc-api/routes_ops.py` reads the log FILE (`get_daemon_log_tail`), and
+  `hscc-cluster/tests` stub `daemon_ops.log` wholesale. Neither reads the
+  foreground stdout echo, so nothing depended on the old stream.
 
-## Known pre-existing flake (NOT caused by this card)
+## Note on the two "missing" cycle() docstring claims
 
-First full-suite run of this branch: `1 failed, 2663 passed, 2 errors`. The 2
-errors were the two non-hermetic tests named above (now fixed). The 1 failure
-is `test_no_live_hscc_leak.py::test_suite_never_writes_live_hscc` (the
-sandboxed subprocess run). It is being re-verified on the fixed tree; if it
-persists it must be root-caused — this card does not complete with a red leg.
+`TestAutodownLoop.test_tick_missing_cycle_is_noop` and its neighbour still
+carry Phase-2-era comments ("cycle does not exist yet — getattr returns None"),
+but `autodown.cycle` has existed since Phase 3, so that tick runs the REAL
+cycle. The "missing cycle" branch is therefore no longer actually exercised by
+that test. Left as-is: rewriting it is outside this card, and the test still
+passes for the right reason (no raise). Worth a follow-up card.
