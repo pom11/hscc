@@ -39,4 +39,64 @@ origin/main` => NO).
 
 ## Findings (append as I go)
 
-- (pending)
+- STATUS (run 2, resumed after run 1 hit the quota wall mid-work): plan items
+  1-5 were already implemented and partly committed by run 1. Verified, not
+  trusted: `git show 45b748e6` carries the production changes
+  (`to_serving_json` stamp + `_unit_run_cmd` emission + `fleet_up_plan` /
+  `keepalive_units` pass-through + `_option_overrides`/`_max_num_seqs_from`
+  helpers); run 1's UNCOMMITTED work was the test block in
+  `hscc_daemon/tests/test_serving_extra.py` (TestFleetUpMaxNumSeqs), the
+  sharper bidirectional canary messages in `_serve_cmd_mismatch`, and one
+  byte-identity test in hscc-cluster. Committed as eecfb254 so it cannot die
+  with this run.
+- All three `_unit_run_cmd` consumers are covered by the single builder, which
+  is the point of the design: `fleet_up_plan` (serving.py:712), gentle relaunch
+  (health.py:2954) and auto-heal (health.py:2628) all call it. Auto-heal reaches
+  it via `_autoheal_find_unit` -> `keepalive_units`, so the pass-through added in
+  `keepalive_units` (serving.py:371) is what actually gets the cap into the heal
+  command — a pass-through only in `fleet_up_plan` would have left 2 of 3 paths
+  still at the recipe default. Pinned by `test_keepalive_units_carry_the_cap`
+  (a per-unit test alone would not catch a removed pass-through).
+- Auto-heal strips `--ensure` from the derived argv (health.py:2629-2630
+  `recreate_argv`) but keeps every other token, so `-o max_num_seqs=N` rides into
+  the recreate too.
+- `_serve_cmd_mismatch` has exactly ONE non-test consumer (serving.py:717, inside
+  `fleet_up_plan`), where the flag is a WARN and the ISSUED command stays the
+  derived one. So widening the flag list cannot change behaviour beyond the
+  warning, and cannot block a wake. Verified by
+  `test_plan_still_runs_the_derived_command_on_option_drift`.
+- The `-o` comparison is bidirectional and that is deliberate. One-way (record has
+  it, derived lacks it) would catch the bug this card is about but would read a
+  PRE-fix serving.json (written before this change, no `-o`) against a now
+  cap-emitting derived command as agreement — which is exactly the "drift NOT
+  applied" fact the apply path already reports. Both directions are asserted.
+- Risk checked and cleared: no other `-o key=value` pair is emitted anywhere on
+  the apply path (`grep '"-o"'` => only cluster_template.py:461 max_num_seqs and
+  serving.py:645). So the widened comparison has no other live key to
+  false-positive on today; the general code shape is still right for future
+  overrides.
+- serving.json has no key-level schema validator anywhere (`grep max_num_seqs
+  hscc-roles hscc-bootstrap hscc-api hscc-project` => no hits), and readers use
+  `u.get(...)`, so the new optional key is additive: old readers ignore it, and a
+  hand-edited bad value degrades to no-cap (serving._max_num_seqs_from) rather
+  than emitting a malformed override.
+- INTENT-HASH PARITY verified against the real sparkrun source, not the card
+  prose: `/Users/desac/sparkrun/src/sparkrun/orchestration/job_metadata.py:234`
+  `generate_intent_id` hashes runtime + model + image + port + served-model-name +
+  non-default parallelism, and its own docstring states "serve arguments are *not*
+  hashed". So `-o max_num_seqs=N` cannot shift the cluster_id / duplicate a
+  container. NOTE: my first comment cited `sparkrun.core.job_metadata` — the real
+  module is `sparkrun.orchestration.job_metadata`; fixed in serving.py:569.
+- Goldens: `hscc-cluster/tests/_v3_nonuniform_golden.json` +
+  `_v3_nonuniform_apply_golden.json` pass untouched with the change in place (99
+  tests across test_declaration_apply_paths / test_template_declarations /
+  test_apply_overreach_guard). That is the omit-if-absent rule doing its job: the
+  fixture templates declare no cap, so their serving.json is unchanged bytes.
+  Independently pinned by
+  `test_no_cap_serving_json_is_the_exact_pre_change_shape` (key list AND order)
+  so the claim survives even if someone regenerates the goldens.
+- `scripts/changelog_fragments.py check` => OK, 24 entries (was 23; the new
+  fragment is `kind: Fixed`, task t_35dc5346).
+- `scripts/address_guard.py --tracked` => rc=0, clean.
+- Full-suite result: see the completion metadata (recorded from the actual
+  `bash scripts/run_tests.sh` output, not from a per-file run).

@@ -566,7 +566,7 @@ def _serve_cmd_mismatch(u, cmd):
             return f"serve_cmd {flag} {got!r} != derived {want!r}"
     # Recipe overrides (`-o key=value`) are NOT part of the intent hash —
     # sparkrun deliberately does not hash serve args
-    # (sparkrun.core.job_metadata.generate_intent_id hashes runtime/model/
+    # (sparkrun.orchestration.job_metadata.generate_intent_id hashes runtime/model/
     # container/port/served-model-name/parallelism only), so a disagreement here
     # can never spawn a duplicate container. It is still worth being loud,
     # because the recorded command is the only other place the fleet's intended

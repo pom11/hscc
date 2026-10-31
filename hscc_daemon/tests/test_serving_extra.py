@@ -856,7 +856,11 @@ class TestFleetUpMaxNumSeqs:
         cap the derived command lacks means the unit's own fields lost the
         knob, and the wake would restart the unit at the recipe default. That
         must be reported, not swallowed — same contract as the --served-model-
-        name / --tp comparisons above."""
+        name / --tp comparisons above. The WORDING is pinned too: a generic
+        'x != y' that does not say WHICH side carries the cap leaves the
+        operator guessing whether the fleet is over-cap or the record is stale,
+        so the message must name the direction (mutation-probe P6: dropping the
+        directional branch otherwise survives every behavioural assertion)."""
         from hscc_daemon import serving
         u = dict(self.WK)                       # NO max_num_seqs on the unit
         derived = serving._unit_run_cmd(u)
@@ -864,6 +868,7 @@ class TestFleetUpMaxNumSeqs:
         recorded = derived + ["-o", "max_num_seqs=5"]
         mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=recorded), derived)
         assert mism and "max_num_seqs" in mism
+        assert "dropped a knob" in mism and "recipe default" in mism
 
     def test_agreeing_option_is_not_a_mismatch(self):
         """An unchanged fleet stays SILENT: same cap on both sides ⇒ '' (this
@@ -894,6 +899,7 @@ class TestFleetUpMaxNumSeqs:
         recorded = [t for t in derived if t not in ("-o", "max_num_seqs=5")]
         mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=recorded), derived)
         assert "max_num_seqs" in mism
+        assert "the fleet is NOT running it" in mism
 
     def test_long_form_option_spelling_is_not_drift(self):
         """`--option key=value` is the same sparkrun override spelled long-form;
