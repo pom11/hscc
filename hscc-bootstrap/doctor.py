@@ -1206,11 +1206,88 @@ def _refused_role_soul_scan() -> dict:
                    "fixtures; a suite must never read the operator's profiles."}
 
 
+def _load_orch_waker():
+    """Import ``hscc_daemon/orch_waker.py`` for the orch-waker doctor check.
+
+    The check's logic lives with the feature (its config loader, its stream
+    name, its freshness budget) so the doctor cannot drift from what the
+    running daemon means by "enabled" or "last tick"; doctor.py only adapts the
+    result dict to its five Check fields, exactly as it does for
+    ``doctor_node_recovery`` / ``doctor_notifier_mask``. Returns the module, or
+    None when the daemon plugin is not deployed next to this one (the check
+    then reports itself unverifiable rather than vanishing).
+    """
+    try:
+        from hscc_daemon import orch_waker
+        return orch_waker
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import orch_waker
+        return orch_waker
+    except Exception:
+        return None
+
+
+#: Fallback for the check name when the module itself cannot be imported —
+#: same trick as ``_NOTIFIER_CHECK_NAME`` so the row still prints.
+_ORCH_WAKER_CHECK_NAME = "orch-waker (orchestrator waker)"
+
+
+def _refused_orch_waker_check() -> dict:
+    """In-suite stand-in for the orch-waker check when no seam was injected.
+
+    The check's real targets are ``~/.hscc/config.json`` and
+    ``~/.hscc/state/orch_waker.json`` — the OPERATOR's live daemon state when
+    the suite runs from a dispatched worker. Same fence shape as
+    ``_refused_transport`` / ``_refused_role_soul_scan``: an ERROR naming the
+    missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _ORCH_WAKER_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "orch-waker check refused inside a pytest process — "
+                      "inject _orch_waker_check",
+            "fix": "Pass _orch_waker_check=lambda: {...} built from tmp "
+                   "config/state fixtures; a suite must never read the "
+                   "operator's daemon state."}
+
+
+def _orch_waker_check_row(injected=None) -> "Check":
+    """The orch-waker row for the shared check list (five Check fields).
+
+    Three sources, in order of trust: an injected callable (tests pass a
+    fixture-backed lambda), the real :func:`hscc_daemon.orch_waker.doctor_check`
+    (a human CLI run), and the in-suite refusal (pytest with no seam — never a
+    real read of the operator's daemon state). A module that cannot be imported
+    at all reports itself UNVERIFIABLE rather than vanishing from the list, the
+    same honesty rule as the notifier-mask check.
+    """
+    if injected is not None:
+        res = injected()
+    elif "pytest" in sys.modules:
+        res = _refused_orch_waker_check()
+    else:
+        waker = _load_orch_waker()
+        if waker is None:
+            return Check(_ORCH_WAKER_CHECK_NAME, False,
+                         detail="hscc_daemon/orch_waker.py not importable — "
+                                "the waker's health cannot be verified",
+                         fix="Deploy the hscc_daemon plugin next to "
+                             "hscc-bootstrap (re-run bootstrap).",
+                         fatal=False)
+        res = waker.doctor_check()
+    return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
+                 fix=res["fix"], fatal=res["fatal"])
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
-               hscc_dir: Optional[str] = None, _role_soul_scan=None) -> dict:
+               hscc_dir: Optional[str] = None, _role_soul_scan=None,
+               _orch_waker_check=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1261,6 +1338,19 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # hard-stop. It probes each distinct endpoint once; a probe failure is
         # reported as ok (no false alarm), so it never flips preflight `ok`.
         _check_models_served(home, _http_get=_http_get),
+        # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
+        # enabled and ticking? Its own check (hscc_daemon/orch_waker.py) owns
+        # the verdict; only the five Check fields are taken, so `doctor --json`
+        # keeps one shape. A STALE waker is a warning (fatal=False) — drift to
+        # fix, never a reason to abort an install; RED is reserved for
+        # "enabled, daemon running, this stream never stamped".
+        #
+        # Same fence as the role-SOUL audit above: its default target is the
+        # OPERATOR's live ~/.hscc (config + the waker's stream state), so
+        # inside a pytest process it must be injected — without a seam it
+        # renders as an ERROR naming the seam, never a silent pass and never a
+        # real read of the operator's daemon state.
+        _orch_waker_check_row(_orch_waker_check),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh

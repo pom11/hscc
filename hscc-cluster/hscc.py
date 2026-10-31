@@ -15,6 +15,9 @@ Commands:
   info             Detailed cluster configuration
   orch inject <p> "<msg>" [--mode auto|plain|queue|steer] [--dry-run] [--json]
                    Inject a message into a running Hermes REPL pane (repl_inject)
+  orch waker status|enable|disable [--json]
+                   The built-in orchestrator waker (daemon-resident, W3):
+                   status = enabled + last tick + per-board pending + audit tail
 """
 
 import sys
@@ -311,6 +314,31 @@ def _load_daemon_serving():
             from hscc_daemon import serving
             return serving
         except Exception as e:
+            return None
+
+
+def _load_daemon_orch_waker():
+    """Import the daemon's ``orch_waker`` module (hscc_daemon/orch_waker.py).
+
+    The SAME module the daemon loop ticks and the doctor check reads — that is
+    the point of routing the CLI through it rather than parsing a file here:
+    one loader, one writer, no way for `hscc orch waker enable` to disagree
+    with what the running daemon reads. Sibling-plugin import, same rule as
+    :func:`_load_daemon_serving`; returns the module or None when the daemon
+    plugin is not deployed next to this one.
+    """
+    try:
+        from hscc_daemon import orch_waker
+        return orch_waker
+    except Exception:
+        # Standalone fallback: add the repo root (parent of hscc_daemon).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        try:
+            from hscc_daemon import orch_waker
+            return orch_waker
+        except Exception:
             return None
 
 
@@ -788,17 +816,81 @@ def cmd_orch_inject(argv=None, repl=None):
     return receipt
 
 
+def cmd_orch_waker(argv=None, now=None):
+    """``hscc orch waker status|enable|disable`` — the built-in waker's verbs.
+
+    The operator surface for the daemon-resident orchestrator waker (W3). The
+    logic lives in ``hscc_daemon/orch_waker.py``; this function owns only
+    argument parsing and the receipt dict, exactly the way ``cmd_orch_inject``
+    owns none of ``repl_inject``'s. That placement is not cosmetic: the daemon
+    imports the very same ``load_config``/``set_enabled`` pair it ticks against,
+    so the CLI, the loop and the doctor read and write ONE file through ONE
+    loader — a hand-edited config could disagree with nothing else, and a CLI
+    that rewrote YAML itself would.
+
+    * ``status`` reads (never writes): enabled, last tick ts + age, per-board
+      last-id + pending count, and the last 5 audit lines.
+    * ``enable`` / ``disable`` flip ``orch_waker.enabled`` through the module's
+      own atomic writer — no hand-editing a config file from the CLI, the same
+      posture ``hscc autodown enable`` takes with ``autodown.save_config``.
+
+    ``now=`` injects the clock for the status view (tests); it is otherwise the
+    wall clock, because "how long since the daemon last ticked" is a question
+    about wall time. Refusals raise ``ValueError`` (bad verb/argv) or
+    ``RuntimeError`` (the daemon module is not importable), which both entries
+    render as one reported line + exit 1.
+    """
+    argv = list(sys.argv[2:] if argv is None else argv)
+    # --json is the machine contract of BOTH entries; rendering is main()'s (or
+    # _emit_result's standalone), so the verb only accepts + ignores the flag,
+    # exactly like cmd_orch_inject does. --theme is stripped by the unified
+    # entry and never reaches here.
+    argv = [a for a in argv if a != "--json"]
+    verb = argv[0] if argv else ""
+    if verb in ("", "-h", "--help"):
+        raise ValueError(
+            "usage: hscc orch waker status [--json] | enable | disable")
+
+    waker = _load_daemon_orch_waker()
+    if waker is None:
+        raise RuntimeError(
+            "orch_waker not importable — the hscc_daemon plugin must be "
+            "deployed next to hscc-cluster for `hscc orch waker`")
+
+    if verb == "status":
+        status = dict(waker.waker_status(now=now))
+        status["verb"] = "waker status"
+        return status
+    if verb in ("enable", "disable"):
+        block = waker.set_enabled(verb == "enable")
+        return {
+            "verb": f"waker {verb}",
+            "enabled": bool(block.get("enabled")),
+            "config": waker.config_path(),
+            "note": ("tick resumes on the next daemon tick (~"
+                     f"{waker.stream_interval(waker.load_config())}s)"
+                     if block.get("enabled") else
+                     "tick is a no-op from the next daemon tick; the stream "
+                     "keeps stamping so staleness stays quiet"),
+        }
+    raise ValueError(f"unknown waker subcommand: {verb} "
+                     "(available: status, enable, disable)")
+
+
 def cmd_orch(argv=None):
-    """``hscc orch <verb>`` group router. Only ``inject`` exists today.
+    """``hscc orch <verb>`` group router: ``inject`` and ``waker``.
 
     The card-title surface is `hscc orch inject ...`; COMMANDS also maps
     `orch-inject`/`inject` directly, so every spelling reaches cmd_orch_inject.
+    ``waker`` (orch-waker W3, t_2b34b5c7) routes to cmd_orch_waker.
     """
     argv = list(sys.argv[2:] if argv is None else argv)
     if argv and argv[0] == "inject":
         return cmd_orch_inject(argv[1:])
+    if argv and argv[0] == "waker":
+        return cmd_orch_waker(argv[1:])
     raise ValueError(f"unknown orch subcommand: {argv[0] if argv else '(none)'} "
-                     "(available: inject)")
+                     "(available: inject, waker)")
 
 
 # ── Command Map ───────────────────────────────────────────────────────────
@@ -910,6 +1002,37 @@ def _human_lines(cmd: str, result) -> list:
         return lines
 
     if cmd in ("orch", "orch-inject", "inject"):
+        # orch-waker W3 (t_2b34b5c7): a waker receipt is not a pane receipt —
+        # the same facts the unified entry prints, escaped for the themed view.
+        if str(result.get("verb") or "").startswith("waker "):
+            head = ("orch-waker " +
+                    ("ENABLED" if result.get("enabled") else "DISABLED")
+                    if "enabled" in result else esc(str(result.get("verb"))))
+            lines.append(f"[label]{head}[/label]")
+            cfg = result.get("config") or {}
+            if cfg:
+                lines.append(
+                    f"  poll={esc(str(cfg.get('poll_s')))}s "
+                    f"debounce={esc(str(cfg.get('debounce_s')))}s "
+                    f"min_gap={esc(str(cfg.get('min_gap_s')))}s")
+            stream = result.get("stream") or {}
+            if stream.get("last_tick") is None:
+                lines.append("  last tick: [error]never[/error]")
+            else:
+                lines.append(f"  last tick: {stream['last_tick']:.0f} "
+                             f"({stream.get('tick_age_s'):.0f}s ago)")
+            for slug, b in sorted((result.get("boards") or {}).items()):
+                lines.append(f"  {esc(str(slug))}: last-id "
+                             f"{esc(str(b.get('last_id')))} pending "
+                             f"{esc(str(b.get('pending')))}")
+            for entry in (result.get("audit") or [])[-5:]:
+                tag = "ok" if entry.get("ok") else "error"
+                lines.append(f"  [{tag}]{esc(str(entry.get('board')))} -> "
+                             f"{esc(str(entry.get('profile')))}: "
+                             f"{esc(str(entry.get('outcome')))}[/{tag}]")
+            if result.get("note"):
+                lines.append(f"[dim]{esc(str(result['note']))}[/dim]")
+            return lines or ["[dim]command completed[/dim]"]
         # The inject receipt: one target line, plus what was/wasn't sent.
         if result.get("line"):
             lines.append(esc(str(result["line"])))

@@ -413,6 +413,10 @@ def _get_help_text():
         # rule: a live command must not hide from the primary help surface).
         *_entry('orch inject <p> "<msg>"',
                 "Inject into a running Hermes REPL pane (tmux)"),
+        # orch-waker W3 (t_2b34b5c7): the same F5 rule — `hscc orch waker …`
+        # is live, so it is advertised on the primary surface too.
+        *_entry("orch waker status|enable|disable",
+                "The built-in orchestrator waker (daemon-resident)"),
     ])
 
     util = _section("Utility", [
@@ -561,6 +565,9 @@ COMMAND_HELP = {
             "  inject flags: [--mode auto|plain|queue|steer]\n"
             "  [--dry-run] [--json] [--pane <target>]\n"
             "  --dry-run resolves the pane and sends nothing.\n"
+            "  Subcommands: waker status|enable|disable\n"
+            "  (the daemon-resident orchestrator waker; status also\n"
+            "  takes [--json])\n"
             "  Usage: hscc orch <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
@@ -1155,6 +1162,15 @@ _ORCH_GROUP_ENTRIES = [
      "[--mode auto|plain|queue|steer] [--dry-run] [--pane <target>] [--json]. "
      "--dry-run resolves the pane and reports target/busy/verb, sending "
      "nothing."),
+    # orch-waker W3 (t_2b34b5c7): the operator surface for the daemon-resident
+    # waker. Three verbs on one line — the group entry is the help for all of
+    # them, so the F5 surface-honesty rule (a live verb must not hide from the
+    # primary help surface) is satisfied without three near-identical rows.
+    ('hscc orch waker status|enable|disable',
+     "The built-in orchestrator waker (daemon-resident, ticks every 30 s): "
+     "status prints enabled, last tick + age, per-board last-id/pending and "
+     "the last 5 audit lines; enable/disable flip orch_waker.enabled through "
+     "the daemon's own config writer (no hand-editing). Flags: [--json]."),
 ]
 
 
@@ -1175,6 +1191,55 @@ def _print_orch_group_help():
             print(line)
 
 
+def _waker_status_lines(receipt) -> str:
+    """The human view of `hscc orch waker status` (and enable/disable).
+
+    Data comes from ``orch_waker.waker_status`` verbatim — this function adds
+    no judgement of its own (no "is this healthy" verdict, no recomputed age),
+    so the CLI, the doctor and the daemon cannot disagree about what the state
+    means. The layout is deliberately plain text lines, one fact per line:
+    `--json` stays the machine contract and this is what a human reads.
+    """
+    verb = str(receipt.get("verb") or "")
+    if verb in ("waker enable", "waker disable"):
+        lines = [f"orch-waker {'enabled' if receipt.get('enabled') else 'disabled'}"
+                 f" — wrote {receipt.get('config')}"]
+        if receipt.get("note"):
+            lines.append(f"  {receipt['note']}")
+        return "\n".join(lines)
+
+    cfg = receipt.get("config") or {}
+    stream = receipt.get("stream") or {}
+    age = stream.get("tick_age_s")
+    lines = [
+        f"orch-waker: {'ENABLED' if receipt.get('enabled') else 'DISABLED'}"
+        f"  (poll {cfg.get('poll_s')}s, debounce {cfg.get('debounce_s')}s, "
+        f"min gap {cfg.get('min_gap_s')}s)",
+        ("  last tick: never" if stream.get("last_tick") is None else
+         f"  last tick: {stream['last_tick']:.0f} ({age:.0f}s ago)"),
+    ]
+    boards = receipt.get("boards") or {}
+    if boards:
+        lines.append("  boards:")
+        for slug in sorted(boards):
+            b = boards[slug]
+            lines.append(f"    {slug}: last-id {b.get('last_id')} "
+                         f"pending {b.get('pending')}")
+    else:
+        lines.append("  boards: none tracked yet (first tick tail-starts)")
+    audit = receipt.get("audit") or []
+    if audit:
+        lines.append("  last audit:")
+        for entry in audit[-5:]:
+            ok = "sent" if entry.get("ok") else "FAILED"
+            lines.append(f"    {entry.get('ts')} {entry.get('board')} -> "
+                         f"{entry.get('profile')}: {ok} "
+                         f"{str(entry.get('outcome') or '')[:80]}")
+    else:
+        lines.append("  last audit: no deliveries yet")
+    return "\n".join(lines)
+
+
 def _orch_receipt_line(receipt):
     """The one-line human view of an inject receipt.
 
@@ -1187,6 +1252,11 @@ def _orch_receipt_line(receipt):
     """
     if not isinstance(receipt, dict):
         return str(receipt)
+    if str(receipt.get("verb") or "").startswith("waker "):
+        # orch-waker W3 (t_2b34b5c7): a waker receipt is not a pane receipt —
+        # it gets its own multi-line human view instead of a fabricated
+        # "target: None @ None" line.
+        return _waker_status_lines(receipt)
     line = receipt.get("line")
     if line is None and ("target" not in receipt or "mode" not in receipt):
         # Not an inject receipt — a future orch verb (e.g. `orch waker
