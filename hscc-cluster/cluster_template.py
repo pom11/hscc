@@ -1569,7 +1569,7 @@ _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
                    "routing", "uniform_pool", "endpoints", "proxy", "caps",
                    "reasoning"}
 _KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization",
-                     "max_num_seqs"}
+                     "max_num_seqs", "kind"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
 
