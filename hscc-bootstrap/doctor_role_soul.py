@@ -110,7 +110,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="doctor_role_soul.py",
         description="Read-only doctor view of role_soul_check: every HSCC "
                     "worker-signature profile SOUL's '## Role:' header vs its dir "
-                    "name and spec, plus any heading compose_soul() cannot emit.")
+                    "name and spec, any heading compose_soul() cannot emit, and "
+                    "the content lines compose_soul() cannot reproduce (what "
+                    "generate would delete).")
     ap.add_argument("--profiles-dir", default=None,
                     help="profiles root (default: hscc-roles' rolelib.PROFILES_DIR)")
     ap.add_argument("--roles-dir", default=None,

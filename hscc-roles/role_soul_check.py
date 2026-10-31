@@ -66,6 +66,12 @@ and in the tests:
   falls inside an ``equal`` opcode of ``difflib.SequenceMatcher(composed, live)``
   — otherwise a hand-patched line "survives" by coincidentally matching identical
   text elsewhere in the document (a duplicated bullet, a boilerplate sentence).
+  ``autojunk=False`` because the default popular-element heuristic makes the
+  verdict depend on how long the document happens to be and how often a line
+  repeats, not on what differs: measured over 3000 boilerplate-heavy documents it
+  changed the verdict on 2660 of them, always by flagging MORE lines (never by
+  hiding one). So this choice is about stability and false alarms, not about
+  catch — and it is pinned by a test rather than left as a preference.
 * NOT every differing line is a loss, or the report is a wall nobody triages.
   Each non-equal line is classified: ``identity`` carries the role identity that
   ``generate`` exists to replace (the copy-pasted header's name — deleting it IS

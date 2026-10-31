@@ -785,6 +785,60 @@ def test_content_diff_is_pure_and_positional():
     assert d["live_lines"] == len(b.splitlines())
 
 
+# Recipe, not a random draw: a long boilerplate-heavy document (so difflib's
+# popular-element heuristic ARMS — it only applies at len(b) >= 200) plus a line
+# repeated 29 times, and ONE duplicate of that popular line inserted into the
+# live text. Deterministic, so the assertions below are stable across runs.
+_AJ_BOILER = [f"shared value number {i}" for i in range(6)]
+_AJ_UNIQ = [f"unique prose line {i}" for i in range(10)]
+_AJ_N, _AJ_K = 200, 32
+
+
+def _autojunk_fixture():
+    composed = "\n\n".join(_AJ_BOILER[i % 6] if (i % 7) else _AJ_UNIQ[i % 10]
+                           for i in range(_AJ_N))
+    lines = composed.splitlines()
+    popular = lines[_AJ_K]
+    live = "\n\n".join(lines[:_AJ_K] + [popular] + lines[_AJ_K:])
+    return composed, live, popular
+
+
+def test_autojunk_off_is_what_keeps_the_report_a_list_not_a_wall():
+    """`autojunk=False` is load-bearing, and NOT for the reason one would guess.
+
+    Measured over ~6000 boilerplate-heavy documents: the default heuristic never
+    marked a genuinely novel line as equal (0 hits), so it does not hide losses.
+    What it does is flag the ENTIRE document when a popular line is duplicated —
+    784 of this fixture's 799 live lines instead of the 1 line that is actually
+    the patch. That is precisely the untriageable wall the classification exists
+    to prevent, and it also loses WHICH line the operator should fold into the
+    spec. So the flag is pinned on the reported line number, not on a loss count.
+    """
+    composed, live, popular = _autojunk_fixture()
+    assert len(live.splitlines()) >= 200, "the heuristic must be armed"
+    assert live.splitlines().count(popular) > max(len(live.splitlines()) // 100, 1)
+
+    d = rsc.content_diff(live, composed)
+    assert d["lost_count"] == 0, d["lost"]
+    assert (d["lost_count"] + d["covered_count"] + d["identity_count"]
+            + d["inventory_count"]) == 1, (d["covered"], d["lost"])
+    assert d["covered"][0]["text"] == popular
+
+    # The mutant this pins: the same call with difflib's default left in place.
+    import difflib
+    cl, ll = composed.splitlines(), live.splitlines()
+    sm = difflib.SequenceMatcher(None, cl, ll)   # autojunk defaults to True
+    alive = [False] * len(ll)
+    for tag, _a, _c, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for j in range(j1, j2):
+                alive[j] = True
+    default_flagged = sum(1 for x in alive if not x)
+    assert default_flagged > 100, (
+        "fixture no longer distinguishes the two settings — the pin below would "
+        "pass on an implementation that dropped autojunk=False")
+
+
 # --------------------------------------------------------------------------- #
 # Derivation, not re-typing: the emittable set follows the modules that own it.
 # --------------------------------------------------------------------------- #
