@@ -24,6 +24,7 @@ The template **format reference** is
 | `provision_model` / `stop_model` / `model_health` | Model lifecycle (guarded: `confirm=true`). Correct sparkrun invocation (`--cluster/--port/--ensure`). |
 | `vllm_logs` / `node_diagnostics` / `nas_diagnose` | Debug a node / NAS. |
 | `restart_model` / `remount_nas` / `repair_nas_export` / `reap_orphans` | Self-heal (guarded). |
+| `orch_message` | Orchestrator-to-orchestrator **nudge** (queue-only, signed, audited) — see [Orchestrator-to-orchestrator messaging](#orchestrator-to-orchestrator-messaging). |
 
 ## Modules
 
@@ -95,13 +96,15 @@ with `--json`, themed panel otherwise, exit 1). Registered as `orch` (group),
 `orch-inject` and `inject` in `COMMANDS`; needs `hscc-api` deployed next to
 `hscc-cluster`, since `repl_inject` lives there.
 
-> **Unified-CLI status:** the verb dispatches from this plugin's entry point
-> today. The `orch` group branch in the merged `hscc` CLI
+> **Unified-CLI status (as of this writing):** the verb dispatches from this
+> plugin's entry point today. The `orch` group branch in the merged `hscc` CLI
 > (`hscc_daemon/hscc.py`, the sibling of `cluster`/`template`) is owned by
-> follow-up card `t_5da7fd56`; until it lands the unified spelling in the block
-> above is rejected by the top-level dispatcher as an unknown command, so use
-> the engine entry point shown with it. Facts above are from the merged engine
-> source, not from that pending wiring.
+> follow-up card `t_5da7fd56`; while that wiring is absent the unified spelling
+> in the block above is rejected by the top-level dispatcher as an unknown
+> command, so use the engine entry point shown with it. If `hscc help` now lists
+> `orch`, that card has landed and this note (plus the fallback line above) is
+> stale — drop both. Facts in this section are from the merged engine source,
+> not from that pending wiring.
 
 ### The tool (`orch_message` in `orch_message.py`)
 
@@ -150,9 +153,11 @@ Refusals are machine-readable `reason` values: `bad_args`, `empty_message`,
 `repl_inject_missing`, `audit_unwritable` (`sent` on success). A refusal never
 touches a pane.
 
-The matching policy line lives in the orchestrator SOUL standard: `orch_message`
-is the nudge ("look at t_xxx on <board>, it's done/needs you"), never the work
-order — work itself always goes on a card on the right board.
+The matching policy line is generated, not prose in this file: rule 11 of the
+`## How you manage work` block in `hscc-roles/generator.py` puts it into every
+`<project>-orch` SOUL — `orch_message` is the nudge ("look at t_xxx on <board>,
+it's done/needs you"), never the work order; work itself always goes on a card
+on the right board.
 
 ## Tests
 
