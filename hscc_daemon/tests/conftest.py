@@ -111,6 +111,93 @@ def pytest_terminal_summary(terminalreporter):
 
 
 # ---------------------------------------------------------------------------
+# Live `gh` PR/CI probe fence (t_18318fd9)
+# ---------------------------------------------------------------------------
+#
+# `autodown._screen_prci` shells out to `gh` twelve times over
+# DEFAULT_PRCI_REPOS, and TWO read-only CLI paths reach it without any
+# injection point: `autodown_cli._cmd_status` evaluates `_has_active_pr_ci()`
+# to report the interlock, and `hscc kanban stale` shares the same enumeration.
+# A single transient GitHub API failure on this host then flipped test results
+# — the ~1-in-2 `test_status_json_names_blocking_tasks` flake — and the WARN
+# the fail-safe logs used to land on stdout and corrupt the `--json` payload.
+#
+# A test suite whose result depends on the operator's GitHub reachability is not
+# a test suite. This fence makes that structurally impossible, mirroring the
+# sparkrun fence directly above: a probe that would exec the real `gh`
+# (no injected `run`) is BLOCKED and reported at teardown, while a probe given
+# an injected runner — hermetic by construction, the pattern
+# test_autodown.py's `_screen_prci` stubs use — passes through untouched.
+#
+# Blocked probes return `_PRCI_UNREACHABLE` rather than raising: that is the
+# production fail-safe value, so a test that trips the fence still sees the
+# honest "cannot verify ⇒ treat as active" behaviour instead of an exception
+# swallowed by `_has_active_pr_ci`'s `except Exception`.
+
+# Teardown-guard bookkeeping, module-level so it survives across tests in the
+# session (same shape as the sparkrun fence's _fence_reported above).
+_gh_probe_avoids = 0
+_gh_probe_reported = set()
+
+
+@pytest.fixture(autouse=True)
+def _fence_live_gh_probes(request, monkeypatch):
+    """Block any test that would exec the real `gh` PR/CI probes (t_18318fd9).
+
+    Mirrors _fence_sparkrun_argv/_fence_guard directly above: install during
+    setup, enforce in teardown. The currently-bound ``_screen_prci`` is
+    captured BEFORE this fixture's patch, so a probe with an injected ``run``
+    (hermetic by construction) still runs the real screen logic byte-for-byte.
+    """
+    global _gh_probe_avoids
+    from hscc_daemon import autodown
+    # Whatever is bound now is the most-real available: conftest autouse
+    # fixtures run before module-level ones, so a module stub (test_autodown.py)
+    # still wins for its own tests, and this fence never double-wraps.
+    real = autodown._screen_prci
+
+    hits = []
+
+    def fenced(repos=None, run=None, _now=None):
+        global _gh_probe_avoids
+        if run is not None:
+            # Hermetic by construction — an injected runner never touches the
+            # network, so the real screen is passed straight through.
+            return real(repos=repos, run=run, _now=_now)
+        hits.append(tuple(repos) if repos else "DEFAULT_PRCI_REPOS")
+        _gh_probe_avoids += 1
+        return autodown._PRCI_UNREACHABLE  # fail-safe, and no network I/O
+
+    monkeypatch.setattr(autodown, "_screen_prci", fenced)
+    yield
+    if hits:
+        key = request.node.nodeid
+        if key not in _gh_probe_reported:
+            _gh_probe_reported.add(key)
+            raise AssertionError(
+                f"GH PROBE FENCE GUARD: this test reached the live `gh` PR/CI "
+                f"screen ({len(hits)} unstubbed probe call(s) over "
+                f"{hits[0]}). Stub the interlock — "
+                "monkeypatch autodown._has_active_pr_ci / _screen_prci — so the "
+                "result cannot depend on this host's GitHub reachability "
+                "(t_18318fd9)."
+            )
+
+
+def pytest_terminal_summary(terminalreporter):
+    """The fence reports are part of the visible output, every run."""
+    lines = _sparkrun_fence.report().splitlines()
+    terminalreporter.write_sep("=", lines[0])
+    for line in lines[1:]:
+        terminalreporter.write_line(line)
+    terminalreporter.write_line(
+        f"GH PROBE FENCE: {_gh_probe_avoids} live `gh` PR/CI probe call(s) "
+        "blocked from reaching the network in this run "
+        "(0 = no test depended on GitHub)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Autouse ~/.hscc isolation (RELEASE BLOCKER regression)
 # ---------------------------------------------------------------------------
 

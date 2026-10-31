@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import datetime
@@ -513,15 +514,32 @@ def log(msg, level="INFO", log_file=None, pid_file=None):
 
     Writes go through a stdlib RotatingFileHandler (see append_rotating) with
     gzip compression, so the log is size-capped and cannot grow unbounded.
+
+    The foreground echo goes to **stderr**, never stdout. stdout is the machine
+    channel for every HSCC CLI (`--json` is a raw `json.dumps` on stdout; the
+    repo routes every diagnostic to stderr — `doctor.py`, `cluster_live.py`,
+    `api_cli.py`, `autodown_cli._error`). A diagnostic echoed to stdout can
+    therefore splice itself into a JSON document a caller is about to parse:
+    `hscc autodown status --json` evaluates the PR/CI interlock inline, and one
+    blipping `gh` probe made `_note_prci_unavailable()` prepend a WARN line to
+    the JSON, so `json.loads` died with "Expecting ',' delimiter: line 1
+    column 6" on any host with an intermittent GitHub API (t_18318fd9).
+
+    Nothing loses visibility: the file write above is unconditional, and the
+    launchd unit sends StandardOutPath and StandardErrorPath to the same
+    `~/.hscc/daemon.log` (install.py), so the daemon's log is byte-identical
+    either way. Only an interactive foreground run notices, and stderr is where
+    it belongs.
     """
     log_file = log_file or LOG_FILE
     pid_file = pid_file or PID_FILE
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [{level:>5s}] {msg}"
     append_rotating(log_file, line)
-    # Also print if daemon is running in foreground mode
+    # Also print if daemon is running in foreground mode — on stderr, so a
+    # diagnostic can never corrupt a `--json` payload on stdout (see docstring).
     if not os.path.exists(pid_file):
-        print(line)
+        print(line, file=sys.stderr)
 
 
 def _run_periodic(stop_event, check_fn, interval, stream_name):
