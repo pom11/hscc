@@ -27,6 +27,7 @@ task: t_ec488ce3
   stdlib server — fixture job lifecycle per M0 §2, no live media) and
   `test_video_gen_openai_compat_e2e.py` (5 cases against the REAL
   `agent.video_gen_provider` ABC + real `openai` SDK over the same fake);
-  `test_install_payload.py` 20 → **23** cases (remap deploy location +
-  flattened backup name + payload membership). `bash scripts/run_tests.sh`
-  ALL GREEN; `python3 scripts/address_guard.py --tracked` exit 0.
+  `test_install_payload.py` 20 → **23** cases (extra-dest deploy at both
+  locations + flattened backup names + payload membership).
+  `bash scripts/run_tests.sh` ALL GREEN; `python3 scripts/address_guard.py
+  --tracked` exit 0.
