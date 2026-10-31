@@ -300,17 +300,19 @@ def test_default_payload_ships_hscc_api():
 
 def test_default_payload_ships_media_video_plugin():
     """The fleet's openai_compat video provider must be in the payload (media
-    enablement t_ec488ce3), and its remap must place it at the ONE-category
-    level Hermes scans (<plugins>/video_gen/<name>/) — a deeper copy is never
-    discovered, so the install would silently no-op."""
+    enablement t_ec488ce3), and the extra-dest map must ALSO deploy it at the
+    ONE-category level Hermes scans (<plugins>/video_gen/<name>/) — a copy
+    buried under install/ is never discovered, so enablement would silently
+    no-op."""
     staged = "install/hscc-plugins/video_gen/openai_compat"
     assert staged in install_payload.DEFAULT_PAYLOAD
-    assert install_payload.PAYLOAD_REMAPS[staged] == "video_gen/openai_compat"
+    assert "video_gen/openai_compat" in install_payload.PAYLOAD_EXTRA_DESTS[staged]
 
 
-def test_payload_remap_deploys_plugin_at_category_level(tmp_path):
-    """Functionally: an entry in PAYLOAD_REMAPS lands at the remapped dest,
-    with plugin.yaml + __init__.py intact (what Hermes discovery keys on)."""
+def test_payload_extra_dest_deploys_plugin_at_category_level(tmp_path):
+    """Functionally: an entry in PAYLOAD_EXTRA_DESTS lands BOTH at its staging
+    path and at the extra dest, with plugin.yaml + __init__.py intact (what
+    Hermes discovery keys on)."""
     repo = tmp_path / "repo"
     src = repo / "install" / "hscc-plugins" / "video_gen" / "openai_compat"
     src.mkdir(parents=True)
@@ -321,17 +323,17 @@ def test_payload_remap_deploys_plugin_at_category_level(tmp_path):
     res = install_payload.install_payload(repo, plugins,
                                           ["install/hscc-plugins/video_gen/openai_compat"])
     assert res["missing"] == []
-    dest = plugins / "video_gen" / "openai_compat"
-    assert (dest / "plugin.yaml").is_file()
-    assert (dest / "__init__.py").is_file()
-    assert "video_gen/openai_compat" in res["installed"]
-    # the staging path itself must NOT also appear under plugins_dir
-    assert not (plugins / "install" / "hscc-plugins" / "video_gen").exists()
+    for dest in (plugins / "install" / "hscc-plugins" / "video_gen" / "openai_compat",
+                 plugins / "video_gen" / "openai_compat"):
+        assert (dest / "plugin.yaml").is_file()
+        assert (dest / "__init__.py").is_file()
+    assert res["installed"] == ["install/hscc-plugins/video_gen/openai_compat",
+                                "video_gen/openai_compat"]
 
 
-def test_payload_remap_backup_flattens_name(tmp_path):
-    """A remapped nested dest backs up as ONE flat name in plugins-backups/
-    (never a nested dir — the sweep + prune only see direct children)."""
+def test_payload_extra_dest_backup_flattens_name(tmp_path):
+    """A nested dest backs up as ONE flat name in plugins-backups/ (never a
+    nested dir — the sweep + prune only see direct children of bak_dir)."""
     repo = tmp_path / "repo"
     src = repo / "install" / "hscc-plugins" / "video_gen" / "openai_compat"
     src.mkdir(parents=True)
@@ -343,11 +345,16 @@ def test_payload_remap_backup_flattens_name(tmp_path):
     (src / "plugin.yaml").write_text("name: openai_compat\nversion: 2\n")
     res = install_payload.install_payload(repo, plugins,
                                           ["install/hscc-plugins/video_gen/openai_compat"], ts="B")
-    # backup keeps the PREVIOUS deployed copy (run A's content), flattened name
-    assert res["backed_up"] == ["video_gen__openai_compat.bak-B"]
-    bak_file = plugins.parent / "plugins-backups" / "video_gen__openai_compat.bak-B" / "plugin.yaml"
+    # both the staging dest and the extra dest back up with flattened names
+    assert res["backed_up"] == [
+        "install__hscc-plugins__video_gen__openai_compat.bak-B",
+        "video_gen__openai_compat.bak-B",
+    ]
+    bak_dir = plugins.parent / "plugins-backups"
+    bak_file = bak_dir / "video_gen__openai_compat.bak-B" / "plugin.yaml"
+    # backup keeps the PREVIOUS deployed copy (run A's content)
     assert bak_file.is_file() and "version" not in bak_file.read_text()
-    # the fresh copy (run B's content) is what lives at the deployed dest
+    # the fresh copy (run B's content) is what lives at the deployed dests
     assert "version: 2" in (plugins / "video_gen" / "openai_compat" / "plugin.yaml").read_text()
 
 
