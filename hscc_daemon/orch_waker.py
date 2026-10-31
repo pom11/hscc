@@ -1,4 +1,4 @@
-"""orch-waker W1 — the PURE CORE of the built-in orchestrator waker.
+"""orch-waker — the built-in orchestrator waker (W1 core + W2 delivery).
 
 Card events (a card completing, blocking, crashing, asking for review) never
 wake an orchestrator REPL today: ``kanban notify+wake`` only reaches gateway
@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 LOG = logging.getLogger(__name__)
@@ -337,3 +338,218 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
 
     save_state(st, state_path)
     return decisions
+
+
+# =========================================================================== #
+# W2 — the real seams: orch resolution, paused read, repl_inject delivery,
+# JSONL audit, and the ``run_tick`` entry the daemon loop (W3) calls.
+#
+# ``tick`` above stays pure (injected seams only). Everything BELOW the line
+# is the wiring: it reads the two stopgap rule-files, resolves the
+# ``<board>-orch`` profile on disk, and delivers through the in-process
+# ``repl_inject`` parity module (t_ff665ff9, hscc-api/repl_inject.py) — the
+# same entry point ``orch_message`` (t_a15f3047) and the flightdeck CLI
+# (hscc-project/flightdeck/core/repl_delivery.py) use. NEVER a shell-out to
+# ~/bin/hermes-inject, NEVER raw tmux from here: pane discovery, the
+# exactly-one-pane rule and the busy→/queue mode decision all belong to
+# repl_inject and are inherited, not reimplemented.
+# =========================================================================== #
+
+#: JSONL audit log — one line per delivery ATTEMPT, append-only.
+DEFAULT_AUDIT_PATH = "~/.hscc/state/orch_waker.jsonl"
+#: Paused-board file (the ``hscc kanban pause`` state; keys are board slugs).
+DEFAULT_PAUSED_PATH = "~/.hscc/state/kanban_paused.json"
+#: How much of the failure text the audit ``outcome`` keeps (stopgap log tail).
+ERROR_TAIL = 200
+#: Longest nudge text kept in the audit ``msg`` (stopgap logged msg[:300]).
+AUDIT_MSG_MAX = 300
+
+
+def orch_name(board: str) -> str:
+    """Board -> orchestrator profile NAME by convention (no disk check).
+
+    Reuses the repo's single naming rule — ``kanban_pause.orchestrator_for``
+    (``<board>-orch``), the same convention ``kanban_live`` renders and
+    ``hscc kanban pause`` steers. If that helper is somehow unavailable the
+    rule is reproduced verbatim, so the fallback cannot drift from it.
+    """
+    try:
+        from . import kanban_pause
+        return kanban_pause.orchestrator_for(board)
+    except Exception:  # pragma: no cover — same-package import, defensive only
+        return f"{board}-orch"
+
+
+def resolve_orch(board: str, profiles_dir=None, hermes_home=None):
+    """Board -> ``<board>-orch`` when that profile exists on disk, else None.
+
+    The stopgap's existence rule (``~/.hermes/profiles/<board>-orch`` is a
+    directory), fed by the repo-wide naming rule above — no hardcoded board
+    list anywhere. A board without an orch profile is never nudged and never
+    audited (there is no REPL to reach).
+    """
+    home = _resolve(hermes_home or DEFAULT_HERMES_HOME)
+    pdir = _resolve(profiles_dir) if profiles_dir else os.path.join(home, "profiles")
+    name = orch_name(board)
+    return name if os.path.isdir(os.path.join(pdir, name)) else None
+
+
+def read_paused(paused_path=None) -> set:
+    """Paused board slugs from the ``hscc kanban pause`` state file.
+
+    The stopgap rule (file keys = paused boards), but read through
+    ``kanban_pause`` so the ``_``-prefixed bookkeeping keys the pause tool
+    stores alongside boards (e.g. its saved ``auto_decompose`` value) are
+    filtered exactly the way the pause tool filters them. A missing or
+    unreadable file means nothing is paused — the waker never dies on it.
+    """
+    try:
+        from . import kanban_pause
+        state = kanban_pause.load_state(_resolve(paused_path or DEFAULT_PAUSED_PATH))
+    except Exception as e:  # noqa: BLE001 — a waker never dies reading a rule file
+        LOG.warning("orch-waker: paused file unreadable (%s) — treating as none", e)
+        return set()
+    return set(kanban_pause.paused_boards(state))
+
+
+def load_repl_inject():
+    """Import the in-process ``repl_inject`` parity module, or None.
+
+    Same sibling-dir loader as ``api_cli._load_api_server`` /
+    ``orch_message._load_repl_inject`` / ``repl_delivery._repl_inject``: the
+    ``hscc-api`` dir sits beside ``hscc_daemon`` in the repo AND in the
+    deployed ``~/.hermes/plugins`` layout, so one rule covers both. On a
+    failed import the sys.path entry is removed again (a missing sibling
+    must not leave the process with a polluted path).
+    """
+    try:
+        import repl_inject  # noqa: F401  (already importable)
+        return repl_inject
+    except ImportError:
+        pass
+    api_dir = str(Path(__file__).resolve().parent.parent / "hscc-api")
+    added = None
+    if os.path.isdir(api_dir) and api_dir not in sys.path:
+        sys.path.insert(0, api_dir)
+        added = 0
+    try:
+        import repl_inject  # noqa: F401
+        return repl_inject
+    except ImportError:
+        return None
+    finally:
+        if added is not None and added < len(sys.path) and sys.path[added] == api_dir:
+            sys.path.pop(added)
+
+
+def append_audit(entry: dict, audit_path=None) -> bool:
+    """Append one JSONL audit line. True on success, False on failure.
+
+    One line per attempt, never rewritten — the file is the operator's
+    evidence trail (same posture as orch_message's audit log). A failure to
+    write is logged but never raises: losing the audit line must never stop
+    the waker mid-tick and must never lose a delivery attempt that already
+    happened.
+    """
+    path = _resolve(audit_path or DEFAULT_AUDIT_PATH)
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        return True
+    except OSError as e:
+        LOG.warning("orch-waker: cannot append audit line to %s (%s)", path, e)
+        return False
+
+
+def _outcome_text(exc) -> str:
+    """Audit ``outcome`` tail for a failed attempt (bounded, one line)."""
+    text = " ".join(str(exc or "delivery error").split())
+    return f"failed: {text[-ERROR_TAIL:]}"
+
+
+def make_inject(repl=None, mode="auto", profiles_dir=None, hermes_home=None,
+                audit_path=None, clock=None):
+    """Build the ``tick(inject=...)`` callable that delivers for real.
+
+    ``(board, msg) -> bool``: resolves the board's orch profile, hands the
+    text to ``repl_inject.inject(profile, msg, mode="auto")`` — the parity
+    module's mode logic sends ``/queue`` while the orch is busy and a plain
+    message when idle, so a nudge never cuts off a running turn — and
+    appends the audit line for the attempt either way. Exceptions (InjectError
+    kinds included) become ``ok=False`` + a failed audit line; the core's
+    pending-retry rule then redelivers on a later tick, auditing that
+    attempt too. ``repl``/``clock``/paths are injectable so tests never touch
+    tmux; ``mode`` stays injectable but the built-in always uses ``auto``.
+    """
+    def inject(board, msg):
+        profile = resolve_orch(board, profiles_dir, hermes_home) or orch_name(board)
+        module = repl if repl is not None else load_repl_inject()
+        if module is None:
+            ok, detail = False, _outcome_text(
+                RuntimeError("repl_inject not importable (hscc-api plugin missing)"))
+        else:
+            try:
+                module.inject(profile, msg, mode=mode)
+                ok, detail = True, "sent"
+            except Exception as e:  # noqa: BLE001 — InjectError kinds + any tmux fail
+                ok, detail = False, _outcome_text(e)
+        append_audit({
+            "ts": round((clock or _real_time)(), 3),
+            "board": board,
+            "profile": profile,
+            "ok": ok,
+            "outcome": detail,
+            "msg": (msg or "")[:AUDIT_MSG_MAX],
+        }, audit_path)
+        if not ok:
+            LOG.warning("orch-waker %s -> %s: %s", board, profile, detail)
+        return ok
+    return inject
+
+
+def _real_time() -> float:
+    import time
+    return time.time()
+
+
+#: One shared ``warned`` set for the daemon loop: "unreadable board" warns once
+#: per board per *run*, matching the stopgap (tick's fresh set would re-warn
+#: every 30 s tick forever).
+_WARNED_ONCE = set()
+
+
+def run_tick(now=None, boards=None, state_path=None, paused_path=None,
+             profiles_dir=None, hermes_home=None, boards_dir=None,
+             inject=None, has_orch=None, repl=None, mode="auto",
+             audit_path=None, warned=None,
+             debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S):
+    """One waker pass wired end to end: scan -> decide -> inject -> audit.
+
+    The public entry (W3 calls it every ~30 s from the daemon loop). Defaults
+    plug in the real seams — paused file, ``<board>-orch`` disk resolution,
+    in-process repl_inject delivery at ``mode="auto"`` and the JSONL audit —
+    while every one of them stays injectable for tests. Returns ``tick``'s
+    decision list; NEVER raises: any unexpected failure is logged and
+    swallowed, because the daemon calls this forever and a waker that dies
+    silently stops waking every orchestrator.
+    """
+    try:
+        return tick(
+            now=now,
+            boards=boards,
+            paused=read_paused(paused_path),
+            has_orch=has_orch if has_orch is not None else (
+                lambda b: resolve_orch(b, profiles_dir, hermes_home)),
+            inject=inject if inject is not None else make_inject(
+                repl=repl, mode=mode, profiles_dir=profiles_dir,
+                hermes_home=hermes_home, audit_path=audit_path),
+            state_path=state_path, boards_dir=boards_dir,
+            hermes_home=hermes_home,
+            warned=_WARNED_ONCE if warned is None else warned,
+            debounce_s=debounce_s, min_gap_s=min_gap_s)
+    except Exception:  # noqa: BLE001 — the daemon loop must survive anything
+        LOG.exception("orch-waker: tick failed — will retry next tick")
+        return []
