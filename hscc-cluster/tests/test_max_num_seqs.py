@@ -378,3 +378,111 @@ class TestFlashNextAllShipsCap:
         for fam in tpl.families:
             for m in fam.models:
                 assert m.max_num_seqs == 5
+
+
+# ── 7. serving.json carry-through (the wake path's only source) ──────────────
+
+class TestServingJsonCarriesCap:
+    """The cap must survive into serving.json, or the wake path loses it.
+
+    serving.json is the ONLY record the daemon's restart path reads — the
+    template is never re-read by ``hscc cluster up``, autodown's wake, health's
+    gentle relaunch, or auto-heal. Every one of them rebuilds the launch argv
+    from these unit entries via ``hscc_daemon/serving._unit_run_cmd``, so a cap
+    that is applied but not recorded here silently comes back at the RECIPE
+    default after an autodown/reboot/heal cycle. (t_35dc5346.)
+    """
+
+    def _plan(self, orch_cap=None, worker_cap=None):
+        d = {
+            "name": "cap-plan", "version": 3,
+            "orchestrator": _model_dict(**({"max_num_seqs": orch_cap}
+                                           if orch_cap is not None else {})),
+            "families": [{"name": "coding",
+                          "models": [_model_dict(**(
+                              {"max_num_seqs": worker_cap}
+                              if worker_cap is not None else {}))],
+                          "workers": 2}],
+        }
+        return ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(2),
+                          _coster=_coster())
+
+    def _worker(self, sj):
+        return [u for u in sj["units"] if u["role"] == "worker"][0]
+
+    def test_worker_unit_carries_the_cap(self):
+        sj = ti.to_serving_json(self._plan(worker_cap=5))
+        assert self._worker(sj)["max_num_seqs"] == 5
+
+    def test_orchestrator_unit_carries_the_cap(self):
+        sj = ti.to_serving_json(self._plan(orch_cap=7))
+        orch = [u for u in sj["units"] if u["role"] == "orchestrator"][0]
+        assert orch["max_num_seqs"] == 7
+
+    def test_both_caps_survive_one_resolve(self):
+        # The apply path is resolve() → to_serving_json(); the cap rides from
+        # the ModelIntent through ResolvedUnit into the record in one hop.
+        sj = ti.to_serving_json(self._plan(orch_cap=7, worker_cap=5))
+        orch = [u for u in sj["units"] if u["role"] == "orchestrator"][0]
+        assert orch["max_num_seqs"] == 7
+        assert self._worker(sj)["max_num_seqs"] == 5
+
+    def test_absent_cap_omitted_not_nulled(self):
+        """Omit-if-absent (the ``uniform_pool`` rule), NOT an explicit null:
+        a template that never mentions the key must keep its serving.json
+        byte-identical to the pre-change form, which is what the _v3_* and
+        _capture_apply_golden goldens pin. An ``"max_num_seqs": null`` here
+        would be a visible diff to every existing record."""
+        sj = ti.to_serving_json(self._plan())
+        for u in sj["units"]:
+            assert "max_num_seqs" not in u, (
+                f"cap key leaked into a no-cap unit {u['id']!r}")
+
+    def test_no_cap_serving_json_is_the_exact_pre_change_shape(self):
+        """The byte-identity claim stated independently of the goldens: a no-cap
+        plan's serialization is exactly the pre-PR-#118 record — same keys, same
+        order, nothing appended. The goldens pin the same thing end-to-end; this
+        names the shape so a reviewer can read the contract off one assertion,
+        and it fails if anyone appends the key unconditionally (the mistake the
+        ``uniform_pool`` omit-if-absent rule exists to prevent)."""
+        sj = ti.to_serving_json(self._plan())
+        assert list(sj) == ["version", "units"]
+        orch, w1, w2 = sj["units"]
+        assert list(orch) == ["id", "role", "model", "recipe", "nodes", "port"]
+        for w in (w1, w2):
+            assert list(w) == ["id", "role", "keepalive", "model", "recipe",
+                               "nodes", "port", "tp", "pp", "family"]
+        assert json.dumps(sj, sort_keys=False) == json.dumps(
+            {"version": 2, "units": [orch, w1, w2]})
+
+    def test_every_worker_of_a_replicated_family_carries_it(self):
+        # workers: 2 replicates the model; each resolved unit keeps the cap so
+        # neither node comes back over the operator's per-node limit.
+        sj = ti.to_serving_json(self._plan(worker_cap=5))
+        workers = [u for u in sj["units"] if u["role"] == "worker"]
+        assert len(workers) == 2
+        assert all(w["max_num_seqs"] == 5 for w in workers)
+
+    def test_key_order_appended_last_after_family(self):
+        # Position matters for byte-identity of everything BEFORE it: the cap
+        # is appended after the pre-existing keys so no existing unit's
+        # serialization shifts.
+        sj = ti.to_serving_json(self._plan(worker_cap=5))
+        assert list(self._worker(sj).keys())[-1] == "max_num_seqs"
+
+    def test_the_record_is_what_the_wake_builder_reads(self):
+        """The contract this leg owns, stated as data: the cap must be a plain
+        int on the unit dict under exactly the key the daemon's wake builder
+        looks for (``hscc_daemon/serving.py:_max_num_seqs_from``). The
+        end-to-end read-back (record → `-o max_num_seqs=N` on the start
+        command) is pinned from the OTHER side in
+        hscc_daemon/tests/test_serving_extra.py::TestFleetUpMaxNumSeqs, so the
+        two legs are pinned against each other without this suite importing the
+        daemon package (which is not importable in every leg — see
+        test_apply.py's "without hscc_daemon importable" case)."""
+        sj = ti.to_serving_json(self._plan(worker_cap=5))
+        w = self._worker(sj)
+        assert w["max_num_seqs"] == 5
+        assert type(w["max_num_seqs"]) is int
+
+

@@ -120,8 +120,14 @@ class TestKeepaliveUnits:
         # derive BOTH aliases for a uniform pool (else a gentle relaunch
         # collapses the pool one node at a time). False when absent/not a pool.
         assert all(u["uniform_pool"] is False for u in units)
+        # max_num_seqs is carried too (None when the unit declares no cap) —
+        # health's gentle relaunch and auto-heal both hand these entries to
+        # serving._unit_run_cmd, which needs the cap to re-issue the unit's
+        # declared concurrency limit instead of the recipe default.
+        assert all(u["max_num_seqs"] is None for u in units)
         assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes",
-                                     "tp", "model", "role", "uniform_pool"}
+                                     "tp", "model", "role", "uniform_pool",
+                                     "max_num_seqs"}
                    for u in units)
 
     def test_dedupes_dup_nodes_same_unit(self, monkeypatch):
@@ -697,3 +703,260 @@ class TestUniformPoolWakePath:
             dict(u, serve_cmd=stale), derived)
         assert serving._serve_cmd_mismatch(
             dict(u, serve_cmd=derived), derived) == ""
+
+
+class TestFleetUpMaxNumSeqs:
+    """A unit applied with a ``max_num_seqs`` cap must WAKE with that cap.
+
+    The template-side leg (t_fd56b3ee / PR #118) renders ``-o max_num_seqs=N``
+    on the apply path. This is the wake leg: ``_unit_run_cmd`` is the SINGLE
+    start-command builder for ``hscc cluster up``, autodown's wake, health's
+    gentle relaunch and auto-heal, and it builds purely from serving.json
+    entries — the template file is never re-read. So the cap has to (a) be
+    recorded in serving.json (pinned from the other side in
+    hscc-cluster/tests/test_max_num_seqs.py::TestServingJsonCarriesCap) and
+    (b) be emitted here. Without (b) a capped unit comes back at its RECIPE
+    default after any autodown/reboot/heal cycle: flash-next ships 8 while the
+    operator's rule for this fleet is <=5 running requests per node, so the
+    rule silently breaks exactly at the moment nobody is watching.
+
+    INTENT-HASH PARITY (why this is a value-fidelity bug, not a duplicate
+    hazard): sparkrun deliberately does NOT hash serve args into the intent id
+    — ``generate_intent_id`` hashes runtime/model/container/port/served-model-
+    name/parallelism only. So an added ``-o`` pair cannot change the
+    ``cluster_id`` and ``--ensure`` cannot launch a parallel duplicate the way
+    the historical ``--served-model-name`` / ``--tp`` divergences did
+    (t_e1ff0e8e). The wake command and the apply command therefore need NOT be
+    token-identical here; what must not diverge is the VALUE.
+    """
+
+    ORCH = {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.244"],
+            "port": 8000, "recipe": "/abs/recipes/orch.yaml",
+            "model": "lab/Orch-Flash"}
+    WK = {"id": "wk1", "role": "worker", "keepalive": True,
+          "nodes": ["10.0.0.247"], "port": 8000,
+          "recipe": "/abs/recipes/wk.yaml", "model": "lab/Flash-NVFP4"}
+
+    def _serving(self, orch_cap=None, wk_cap=None):
+        orch = dict(self.ORCH)
+        wk = dict(self.WK)
+        if orch_cap is not None:
+            orch["max_num_seqs"] = orch_cap
+        if wk_cap is not None:
+            wk["max_num_seqs"] = wk_cap
+        return {"version": 2, "units": [orch, wk]}
+
+    def _opt(self, cmd, key="max_num_seqs"):
+        """The value of `-o key=…` in cmd, or None when the pair is absent."""
+        from hscc_daemon import serving
+        return serving._option_overrides(cmd).get(key)
+
+    # ── the builder itself ───────────────────────────────────────────────────
+
+    def test_cap_emitted_as_option_pair(self):
+        from hscc_daemon import serving
+        cmd = serving._unit_run_cmd(dict(self.WK, max_num_seqs=5))
+        assert self._opt(cmd) == "5"
+        # exactly the two tokens `-o`, `max_num_seqs=5` — sparkrun has no
+        # dedicated concurrency flag (verified against `sparkrun run --help`:
+        # "-o, --option TEXT  Override any recipe default … (repeatable)").
+        i = cmd.index("-o")
+        assert cmd[i + 1] == "max_num_seqs=5"
+
+    def test_absent_cap_emits_no_option(self):
+        """No cap declared ⇒ no `-o` at all: the recipe default must win, which
+        is the pre-change behaviour for every existing serving.json."""
+        from hscc_daemon import serving
+        cmd = serving._unit_run_cmd(dict(self.WK))
+        assert "-o" not in cmd and "--option" not in cmd
+
+    def test_cap_rides_after_tp(self):
+        """Position mirrors cluster_template._render_serve_cmd (…--tp N, then
+        the override pairs), so a recorded serve_cmd and a derived wake command
+        for the same unit read alike."""
+        from hscc_daemon import serving
+        cmd = serving._unit_run_cmd(dict(self.WK, tp=2, max_num_seqs=5))
+        assert cmd.index("-o") > cmd.index("--tp")
+
+    def test_bad_values_degrade_to_no_cap(self):
+        """serving.json is operator-editable: a bool / non-numeric / <=0 value
+        must not reach sparkrun as a malformed override. These degrade to
+        "no cap" (the recipe default — the old behaviour) rather than launching
+        garbage or refusing the wake outright."""
+        from hscc_daemon import serving
+        for bad in (True, False, 0, -1, "five", None, [5], {}):
+            cmd = serving._unit_run_cmd(dict(self.WK, max_num_seqs=bad))
+            assert "-o" not in cmd, f"{bad!r} emitted an -o pair"
+            assert serving._max_num_seqs_from(dict(self.WK,
+                                                   max_num_seqs=bad)) is None
+
+    def test_int_like_values_still_cap(self):
+        """A hand-edited `"max_num_seqs": "5"` or `5.0` is harmless and the
+        operator plainly meant a cap of 5 — honor it rather than dropping the
+        cap (dropping it fails toward the recipe default, which is the
+        over-the-limit direction this card exists to close). The STRICT
+        validation that rejects such values lives at template parse time
+        (template_intent._max_num_seqs_from), where it can be reported."""
+        from hscc_daemon import serving
+        for good, want in (("5", 5), (5.0, 5), (5, 5)):
+            assert serving._max_num_seqs_from(
+                dict(self.WK, max_num_seqs=good)) == want
+            assert self._opt(serving._unit_run_cmd(
+                dict(self.WK, max_num_seqs=good))) == str(want)
+
+    # ── the two entry builders (removed call sites hide from unit tests) ─────
+
+    def test_fleet_up_plan_carries_the_cap_on_both_roles(self):
+        """`hscc cluster up` + autodown's wake build from these entries."""
+        from hscc_daemon import serving
+        plan = serving.fleet_up_plan(self._serving(orch_cap=7, wk_cap=5))
+        by_id = {e["unit_id"]: e for e in plan}
+        assert self._opt(by_id["orch"]["cmd"]) == "7"
+        assert self._opt(by_id["wk1"]["cmd"]) == "5"
+
+    def test_fleet_up_plan_omits_it_when_not_stamped(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        plan = serving.fleet_up_plan(self._serving())
+        assert plan, "fixture produced no plan"
+        for e in plan:
+            assert "-o" not in e["cmd"]
+
+    def test_keepalive_units_carry_the_cap(self):
+        """health.check_workers' gentle relaunch and auto-heal feed
+        ``keepalive_units`` entries straight into ``_unit_run_cmd``; if the cap
+        is dropped in THAT builder, only a per-node relaunch loses it."""
+        from hscc_daemon import serving
+        units = serving.keepalive_units(self._serving(wk_cap=5))
+        assert len(units) == 1
+        assert units[0]["max_num_seqs"] == 5
+        assert self._opt(serving._unit_run_cmd(units[0])) == "5"
+
+    def test_keepalive_units_none_when_unit_has_no_cap(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        units = serving.keepalive_units(self._serving())
+        assert len(units) == 1
+        assert units[0]["max_num_seqs"] is None
+        assert "-o" not in serving._unit_run_cmd(units[0])
+
+    def test_env_derived_keepalive_entries_have_no_cap(self, monkeypatch):
+        """The env-fallback branch has no serving.json unit behind it, so it
+        must not invent a cap key with a bogus value."""
+        from hscc_daemon import serving
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.9")
+        units = serving.keepalive_units({"version": 2, "units": []})
+        assert len(units) == 1
+        assert "-o" not in serving._unit_run_cmd(units[0])
+
+    # ── the mismatch canary ──────────────────────────────────────────────────
+
+    def test_recorded_option_the_derived_cmd_lacks_is_loud(self):
+        """THE canary this card asked for: a recorded serve_cmd that carries a
+        cap the derived command lacks means the unit's own fields lost the
+        knob, and the wake would restart the unit at the recipe default. That
+        must be reported, not swallowed — same contract as the --served-model-
+        name / --tp comparisons above. The WORDING is pinned too: a generic
+        'x != y' that does not say WHICH side carries the cap leaves the
+        operator guessing whether the fleet is over-cap or the record is stale,
+        so the message must name the direction (mutation-probe P6: dropping the
+        directional branch otherwise survives every behavioural assertion)."""
+        from hscc_daemon import serving
+        u = dict(self.WK)                       # NO max_num_seqs on the unit
+        derived = serving._unit_run_cmd(u)
+        assert self._opt(derived) is None
+        recorded = derived + ["-o", "max_num_seqs=5"]
+        mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=recorded), derived)
+        assert mism and "max_num_seqs" in mism
+        assert "dropped a knob" in mism and "recipe default" in mism
+
+    def test_agreeing_option_is_not_a_mismatch(self):
+        """An unchanged fleet stays SILENT: same cap on both sides ⇒ '' (this
+        is the half of the contract that keeps a healthy wake from warning)."""
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        assert serving._serve_cmd_mismatch(dict(u, serve_cmd=derived),
+                                           derived) == ""
+
+    def test_differing_value_is_a_mismatch(self):
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        stale = list(derived)
+        stale[stale.index("max_num_seqs=5")] = "max_num_seqs=8"
+        mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=stale), derived)
+        assert "max_num_seqs" in mism and "'8'" in mism and "'5'" in mism
+
+    def test_record_without_the_option_while_derived_has_it_is_loud(self):
+        """The opposite direction: the record predates the cap (or was written
+        by the pre-fix apply) while the unit now declares one. The running
+        fleet is NOT at the declared cap — the same 'drift NOT applied' fact
+        the apply path reports — so it must not read as agreement."""
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        recorded = [t for t in derived if t not in ("-o", "max_num_seqs=5")]
+        mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=recorded), derived)
+        assert "max_num_seqs" in mism
+        assert "the fleet is NOT running it" in mism
+
+    def test_long_form_option_spelling_is_not_drift(self):
+        """`--option key=value` is the same sparkrun override spelled long-form;
+        a record using it must not read as drift (mirrors the normalization
+        cluster_template._serve_cmd_flags already does for the apply path)."""
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        long_form = [("--option" if t == "-o" else t) for t in derived]
+        assert serving._serve_cmd_mismatch(dict(u, serve_cmd=long_form),
+                                           derived) == ""
+
+    def test_unrelated_option_pair_does_not_trip_the_unit_fields(self):
+        """The canary stays scoped: an `-o` in the record with a key the derived
+        command never claims (a recipe tweak recorded from elsewhere) does not
+        make a healthy unit's recipe/hosts/port comparison fail — it is reported
+        for that key only, and the wake still runs the derived command."""
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        extra = derived + ["-o", "seed=1"]
+        mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=extra), derived)
+        assert mism and "seed" in mism and "max_num_seqs" not in mism
+
+    def test_option_drift_does_not_suppress_the_intent_hash_flags(self):
+        """Order-independence: the intent-hash flags are checked BEFORE the
+        option pairs, so an option disagreement can never mask an alias/tp
+        divergence (that class causes duplicate containers; this one does not)."""
+        from hscc_daemon import serving
+        u = dict(self.WK, max_num_seqs=5)
+        derived = serving._unit_run_cmd(u)
+        stale = [t.replace("lab/Flash-NVFP4 worker-model",
+                           "lab/Flash-NVFP4 orchestrator-model")
+                 for t in derived]
+        mism = serving._serve_cmd_mismatch(dict(u, serve_cmd=stale), derived)
+        assert "--served-model-name" in mism
+
+    def test_plan_still_runs_the_derived_command_on_option_drift(
+            self, monkeypatch, capsys):
+        """The refuse-but-proceed rule holds for the new flag class too: a
+        corrupt record is warned about, and the ISSUED command is the derived
+        one (correct recipe/hosts/port), never the record's argv."""
+        from hscc_daemon import serving
+        sd = {"version": 2, "units": [dict(
+            self.WK, serve_cmd=["sparkrun", "run", "/abs/recipes/wk.yaml",
+                                "--cluster", "hscc", "--hosts", "10.0.0.247",
+                                "--port", "8000", "--no-follow", "--ensure",
+                                "--served-model-name",
+                                "lab/Flash-NVFP4 worker-model", "--tp", "1",
+                                "-o", "max_num_seqs=8"])]}
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        plan = serving.fleet_up_plan(sd)
+        assert len(plan) == 1
+        cmd = plan[0]["cmd"]
+        # No cap on the unit ⇒ nothing issued…
+        assert self._opt(cmd) is None
+        # …and the record's cap did NOT leak into the command that gets run.
+        assert "max_num_seqs=8" not in cmd
+        err = capsys.readouterr().err
+        assert "serve_cmd" in err and "max_num_seqs" in err
