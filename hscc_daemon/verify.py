@@ -1328,10 +1328,11 @@ def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
 # origin/main: that would false-alarm on every pre-release deploy (main is
 # allowed to be ahead of the deployed tree between releases).
 #
-# Read-only: never modifies the deployed tree. Files the operator pinned via
-# GAP-E-1's preservation guard (the preserve manifest under
-# ``<plugins_dir>/../plugins-backups/preserved.json``) are reported as
-# KNOWN-PRESERVED and do not fail the check.
+# Read-only: never modifies the deployed tree. The intentional-preserve case
+# — files the GAP-E-1 guard (install_payload.py) captured into
+# ``plugins-backups/<plugin>.drifted.bak-<stamp>/``, plus any explicit pins in
+# ``plugins-backups/preserved.json`` — is reported as KNOWN-PRESERVED and does
+# NOT fail the check.
 
 _RELEASED_KEG_GLOBS = (
     "/opt/homebrew/Cellar/hscc",   # Apple Silicon brew
@@ -1441,12 +1442,44 @@ def _load_default_payload(root):
         return []
 
 
-def _preserve_manifest_keys(preserve_manifest, plugins_dir):
-    """Set of ``("<plugin>", "<relpath>")`` pins from GAP-E-1's preserve manifest.
+def _preserved_backup_shas(plugins_dir):
+    """GAP-E-1's real preservation artifact: ``{("<plugin>", rel): {sha,...}}``.
 
-    Default location: ``<plugins_dir>/../plugins-backups/preserved.json`` (the
-    same sibling backup dir install_payload already writes to). Accepted
-    shapes (all optional, missing → empty set → no pins):
+    The GAP-E-1 guard (install_payload.py, t_9fbc8abd) copies every drifted
+    deployed file into ``plugins-backups/<label>.drifted.bak-<stamp>/`` where
+    ``label`` is the payload entry name (``/`` → ``__``) and the tree mirrors
+    the deployed layout one-for-one. A deployed file whose bytes match one of
+    those preserved copies is a KNOWN-PRESERVED file: the operator edit that
+    the guard already captured and named — the exact intentional-preserve case
+    this check must report without failing. Merge every drifted collection per
+    plugin (drift can recur across installs).
+    """
+    backups = os.path.join(os.path.dirname(os.path.abspath(plugins_dir)),
+                           "plugins-backups")
+    out = {}
+    if not os.path.isdir(backups):
+        return out
+    try:
+        names = os.listdir(backups)
+    except OSError:
+        return out
+    for name in sorted(names):
+        if ".drifted.bak-" not in name:
+            continue
+        label = name.split(".drifted.bak-", 1)[0]
+        plugin = label.replace("__", "/")
+        for rel, sha in _payload_snapshot(os.path.join(backups, name)).items():
+            out.setdefault((plugin, rel), set()).add(sha)
+    return out
+
+
+def _preserve_manifest_keys(preserve_manifest, plugins_dir):
+    """Operator pins from an explicit manifest (secondary to the backup scan).
+
+    Default location: ``<plugins_dir>/../plugins-backups/preserved.json``
+    (the same sibling backup dir install_payload writes to);
+    ``$HSCC_PRESERVE_MANIFEST`` or the ``preserve_manifest`` arg override.
+    Accepted shapes (all optional, missing → empty → no pins):
 
       * ``{"preserved": [ {"plugin": "hscc_daemon", "path": "kanban_cli.py",
                             "sha256": "...", "reason": "..."}, ... ]}``
@@ -1544,7 +1577,49 @@ def check_deployed_vs_released(deployed_dir=None, released_root=None,
                              "in the deployed plugin tree"}
 
     pins = _preserve_manifest_keys(preserve_manifest, deployed_dir)
+    # GAP-E-1's real artifact: drifted copies already preserved into
+    # plugins-backups/<plugin>.drifted.bak-<stamp>/ (bytes-identical to what
+    # the operator deployed at preserve time).
+    known = _preserved_backup_shas(deployed_dir)
     version = _released_payload_version(released_root)
+
+    def _known(plugin, rel, full, pinned_sha=None):
+        """(is_preserved_case, annotation) for one deployed drifted file.
+
+        Preserved means either (a) an operator pin in the manifest names it,
+        or (b) GAP-E-1 already captured this exact content in a
+        ``.drifted.bak-*`` collection — the file's deployed bytes hash-match a
+        preserved copy.
+        """
+        if (plugin, rel) in pins or (plugin is None and _pinned(pins, rel)):
+            want = pins.get((plugin, rel))
+            note = ""
+            if want:
+                try:
+                    if _sha256(full) != want:
+                        note = " [deployed changed since pin]"
+                except OSError:
+                    note = " [unreadable]"
+            return True, note
+        shas = known.get((plugin, rel)) if plugin is not None else None
+        if shas:
+            try:
+                if _sha256(full) in shas:
+                    return True, ""
+            except OSError:
+                pass
+            return False, ""
+        # Single-file payload entry (VERSION, README.md, ...): GAP-E-1
+        # preserves it under <name>.drifted.bak-<ts>/<name>.
+        if plugin is None:
+            shas = known.get((rel, os.path.basename(rel)))
+            if shas:
+                try:
+                    if _sha256(full) in shas:
+                        return True, ""
+                except OSError:
+                    pass
+        return False, ""
 
     changed, missing, extra, preserved = [], [], [], []
     checked = 0
@@ -1553,15 +1628,18 @@ def check_deployed_vs_released(deployed_dir=None, released_root=None,
         rel_path = os.path.join(released_root, name)
         if os.path.isfile(rel_path) or os.path.isfile(dep_path):
             # Single-file payload entry (VERSION, README.md, ...).
-            if os.path.isfile(rel_path) and not os.path.isfile(dep_path):
+            dep_is_file = os.path.isfile(dep_path)
+            rel_is_file = os.path.isfile(rel_path)
+            if rel_is_file and not dep_is_file:
                 missing.append(name)
-            elif os.path.isfile(dep_path) and not os.path.isfile(rel_path):
-                (preserved if (None, name) in pins or _pinned(pins, name)
-                 else extra).append(name)
-            else:
+            elif dep_is_file and not rel_is_file:
+                ok_k, note = _known(None, name, dep_path)
+                (preserved if ok_k else extra).append(name + note)
+            elif dep_is_file and rel_is_file:
                 try:
                     if _sha256(dep_path) != _sha256(rel_path):
-                        _classify(pins, name, dep_path, changed, preserved)
+                        ok_k, note = _known(None, name, dep_path)
+                        (preserved if ok_k else changed).append(name + note)
                 except OSError:
                     continue
             checked += 1
@@ -1573,21 +1651,18 @@ def check_deployed_vs_released(deployed_dir=None, released_root=None,
             # files — same skip rule check_plugin_payload uses). But if the
             # DEPLOYED side has source files there, that IS extra drift.
             for relf in sorted(dep):
-                full = f"{name}/{relf}"
-                (preserved if (name, relf) in pins else extra).append(full)
+                ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+                (preserved if ok_k else extra).append(f"{name}/{relf}{note}")
             continue
         checked += len(rel)
         for relf in sorted(set(rel) - set(dep)):
             missing.append(f"{name}/{relf}")
         for relf in sorted(set(dep) - set(rel)):
-            full = f"{name}/{relf}"
-            if (name, relf) in pins:
-                preserved.append(full)
-            else:
-                extra.append(full)
+            ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+            (preserved if ok_k else extra).append(f"{name}/{relf}{note}")
         for relf in sorted(r for r in rel if r in dep and rel[r] != dep[r]):
-            _classify(pins, relf, os.path.join(dep_path, relf), changed,
-                      preserved, prefix=name + "/")
+            ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+            (preserved if ok_k else changed).append(f"{name}/{relf}{note}")
 
     def _fmt(items, label):
         if not items:
@@ -1630,28 +1705,6 @@ def check_deployed_vs_released(deployed_dir=None, released_root=None,
 def _pinned(pins, name):
     """True if single-file payload entry ``name`` carries any pin."""
     return any(p == name or p.endswith("/" + name) for (p, _r) in pins)
-
-
-def _classify(pins, relf, dep_full, changed, preserved, prefix=""):
-    """Route one changed content-diff into changed or KNOWN-PRESERVED."""
-    plugin = prefix.rstrip("/") if prefix else None
-    pinned = (plugin, relf) in pins
-    if not pinned and plugin is None:
-        # Single-file payload entry (VERSION, README.md, ...): tolerate a pin
-        # that names the entry in either field.
-        pinned = _pinned(pins, relf)
-    if pinned:
-        want = pins.get((plugin, relf))
-        note = ""
-        if want:
-            try:
-                if _sha256(dep_full) != want:
-                    note = " [deployed changed since pin]"
-            except OSError:
-                note = " [unreadable]"
-        preserved.append(f"{prefix}{relf}{note}")
-    else:
-        changed.append(f"{prefix}{relf}")
 
 
 def check_project_chat_ready(registry_path=None, profiles_dir=None):
