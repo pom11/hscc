@@ -394,7 +394,7 @@ _GATEWAY_PROBE_UNAVAILABLE = None
 
 
 def _gateway_job_alive():
-    """Return True if the Hermes gateway supervisor job is loaded.
+    """Is the Hermes gateway job alive? True / False, or None when UNKNOWN.
 
     The verdict is NOT computed here. It comes from the single implementation
     in ``hscc-bootstrap/gateway_liveness.py`` (see
