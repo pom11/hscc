@@ -31,10 +31,11 @@ FAILS LOUD, NOT SILENT
 ----------------------
 If the sibling file cannot be found or loaded, `load_gateway_liveness()` raises
 ``GatewayLivenessSourceError`` naming the paths it tried. `check_gateway()`
-catches that and reports the stream DEGRADED with the reason in the state entry
-— never as "gateway down" (that is the false negative GAP-F-3 is about) and
-never as a silent pass (a check that cannot see the gateway must not advertise
-that it can).
+catches that, publishes the reason in the state entry and does NOT claim the
+gateway is healthy — a check that cannot see the gateway must not advertise
+that it can. The stream goes not-ok with `gateway_job: null` (nothing was
+verified) rather than a bare "gateway down" that would blame the gateway for a
+broken probe.
 """
 
 from __future__ import annotations

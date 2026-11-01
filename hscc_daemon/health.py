@@ -385,11 +385,10 @@ def check_dgx():
     return serving_ok
 
 
-#: Reason the last gateway check could NOT reach the liveness transports
-#: (None = the transports answered). Read by check_gateway() so the stream
-#: says "degraded" instead of "gateway down" when the probe itself broke —
-#: GAP-F-3's lesson is that a check which fails open looks green forever, and
-#: a check which fails CLOSED kills a live gateway's stream.
+#: Reason the last gateway check could NOT verify the job (None = a transport
+#: answered). Read by check_gateway() so the stream says WHICH probe broke
+#: instead of printing a bare "gateway down" — GAP-F-3's lesson is that the
+#: only signal which can never print the truth is the one nobody notices.
 _GATEWAY_PROBE_UNAVAILABLE = None
 
 
@@ -412,44 +411,34 @@ def _gateway_job_alive():
     gateway is installed under (launchctl / systemctl), then a token scan of
     ``ps`` argv for when no supervisor can answer.
 
-    A probe that cannot RUN is UNKNOWN, and this function must not turn UNKNOWN
-    into "dead": when the shared module itself cannot be loaded we keep the last
-    answer we ever got (fail-open on the STREAM bit — an auto-heal relaunch of a
-    healthy gateway is worse than one missed cycle) and record the reason in
-    ``_GATEWAY_PROBE_UNAVAILABLE`` so the state entry says DEGRADED rather than
-    pretending we know.
+    Returns None only when NO transport could answer (every probe failed to
+    run). That is UNKNOWN, and check_gateway() treats it as NOT healthy — the
+    same fail-closed rule check_dgx applies to UNKNOWN workloads two functions
+    above. There is deliberately no "keep the last answer" cache here: a
+    liveness signal that quietly repeats its previous verdict is precisely how
+    GAP-F-3 stayed green through two doctor runs, and the watchdog that reads
+    this value (lifecycle.pipeline_watchdog, which blocks the pipeline after 3
+    non-ok gateway reads in 10min) should see a degraded read rather than a
+    borrowed green. The reason is recorded in ``_GATEWAY_PROBE_UNAVAILABLE`` so
+    the state entry can say WHICH probe broke.
     """
-    global _GATEWAY_PROBE_UNAVAILABLE, _GATEWAY_LAST_ANSWER
+    global _GATEWAY_PROBE_UNAVAILABLE
     try:
         from .gateway_probe import load_gateway_liveness
         mod = load_gateway_liveness()
     except Exception as exc:
         _GATEWAY_PROBE_UNAVAILABLE = f"liveness module unavailable: {exc}"
-        log(f"Gateway liveness probe DEGRADED: {exc} — keeping last known "
-            f"gateway_job value rather than reporting a live gateway dead",
-            "ERROR")
-        return _GATEWAY_LAST_ANSWER
-    _GATEWAY_PROBE_UNAVAILABLE = None
-    # Read the answer AS GIVEN, including None: `bool(None)` would silently turn
-    # "no transport could answer" into a confident "dead", which is the same
-    # false negative this card is about.
+        log(f"Gateway liveness check UNVERIFIED: {exc}", "ERROR")
+        return None
     alive, detail = mod.job_is_alive()
     if alive is None:
-        # Every transport was silent (missing binary / timeout / exec error):
-        # nothing was read, so there is no verdict to publish. Apply the same
-        # rule as the unloadable-module path above — keep the last answer the
-        # transports really gave, and say out loud that this cycle did not
-        # verify anything.
+        # Every transport was silent (missing binary / timeout / exec error).
+        # Nothing was read, so there is no verdict to publish as if there were.
         _GATEWAY_PROBE_UNAVAILABLE = f"no liveness transport answered: {detail}"
-        return _GATEWAY_LAST_ANSWER
-    _GATEWAY_LAST_ANSWER = alive
+        log(f"Gateway liveness check UNVERIFIED: {detail}", "ERROR")
+    else:
+        _GATEWAY_PROBE_UNAVAILABLE = None
     return alive
-
-
-#: Last verdict the transports actually returned (True/False), or None when no
-#: check has ever run. Only consulted when the probe cannot run at all — see
-#: :func:`_gateway_job_alive` for the why.
-_GATEWAY_LAST_ANSWER = None
 
 
 def _check_multiplex_profiles():
@@ -533,13 +522,16 @@ def check_gateway():
     probe_degraded = _GATEWAY_PROBE_UNAVAILABLE
     vllm = http_check(serving.VLLM_HEALTH_URL, timeout=5)
     vllm_ok = vllm.get("ok", False)
-    # ``job_ok`` is None only when the transports could not answer at all AND
-    # there was no previous answer to fall back on. An UNKNOWN job is not
-    # evidence that the gateway is down, and the response to a red gateway
-    # stream is an auto-heal relaunch — so unknown does not force the stream
-    # red. It publishes as ``gateway_job: null`` plus a named degradation below,
-    # so nothing here can claim the job was verified when it was not.
-    ok = (job_ok is not False) and vllm_ok
+    # Only a verified True counts as healthy. `job_ok` is None when no
+    # transport could answer, and an unverified job is not a healthy read —
+    # the same fail-closed rule check_dgx applies above for UNKNOWN workloads
+    # ("an empty workload list we could not verify is not a healthy read",
+    # t_b543e530), which exists because a liveness check that fails open never
+    # prints red. What is NEW versus a bare failure is that the stream says
+    # WHY: `gateway_job: null` plus a named `gateway_job_degraded`, so "could
+    # not look" is never mistaken for "looked, and it is down" — or, in the
+    # other direction, for a verified green.
+    ok = bool(job_ok) and vllm_ok
 
     # Multiplex-profile check (best-effort, never blocks basic gateway health)
     mux = _check_multiplex_profiles()
@@ -551,11 +543,10 @@ def check_gateway():
         "multiplex_ok": mux["ok"], "multiplex_message": mux["message"],
     }
     if probe_degraded:
-        # The liveness transports could not run, so `gateway_job` above is the
-        # LAST answer they gave, not this cycle's. Publish that as a named
-        # degradation (same shape as check_dgx's FLEET VISIBILITY DEGRADED) —
-        # a stream built from a stale read must say so instead of looking like
-        # a fresh verification.
+        # No transport answered, so this cycle verified nothing about the job.
+        # Publish that as a named degradation in the same shape check_dgx uses
+        # for UNKNOWN workloads — `gateway_job: null` (JSON null, not a False
+        # that reads as "we checked and it is down") plus the reason.
         state_data["gateway_job_degraded"] = probe_degraded
     if not ok and _intentional_window():
         # Serving layer in an intentional-autodown window (down by design or
@@ -563,11 +554,19 @@ def check_gateway():
         # fails. Tag so verify treats it as expected, not a fault.
         state_data["intentional"] = "autodown"
         state_data["message"] = "intentional autodown — serving layer down by design"
+    if probe_degraded:
+        # Surface the reason on the surface that already reads `message`
+        # (`hscc check gateway` prints it as Detail). setdefault, so an
+        # intentional-autodown explanation above — the more actionable one when
+        # both apply — is never replaced by "we could not look".
+        state_data.setdefault(
+            "message",
+            f"gateway job UNVERIFIED this cycle — {probe_degraded}")
     write_state("gateway", state_data)
     log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok} mux={mux['ok']}) "
         f"{mux['message']}"
         + ("" if not probe_degraded
-           else f" — gateway_job DEGRADED (last known value): {probe_degraded}"))
+           else f" — gateway job UNVERIFIED: {probe_degraded}"))
     return ok
 
 

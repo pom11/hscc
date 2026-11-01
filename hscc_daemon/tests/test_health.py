@@ -44,16 +44,14 @@ class TestGatewayJobAlive:
 
     @pytest.fixture(autouse=True)
     def _clean_probe_globals(self, monkeypatch):
-        """Reset the two module globals every case touches.
+        """Reset the module-global degradation reason before every case.
 
-        `_gateway_job_alive()` caches the last real answer and the degradation
-        reason on the MODULE (that caching is the point of the fail-open path).
-        Cached module state is exactly what leaks between tests and makes a
+        `_gateway_job_alive()` records WHY a cycle could not verify the job on
+        the module. Cached module state is what leaks between tests and lets a
         later case pass only because of collection order, so every case starts
-        from "no check has run yet".
+        from "nothing has failed yet".
         """
         from hscc_daemon import health
-        monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None, raising=False)
         monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None, raising=False)
         yield
 
@@ -204,14 +202,13 @@ class TestGatewayJobAlive:
         })
         assert health._gateway_job_alive() is False
 
-    # ── a probe that cannot run is UNKNOWN, never "dead" ─────────────────────
-    def test_unloadable_probe_keeps_last_answer_and_flags_degraded(self, monkeypatch):
-        """The failure this card exists to prevent, in the other direction.
+    # ── a probe that cannot run is UNKNOWN, never a silent green ─────────────
+    def test_unloadable_probe_is_unknown_not_a_verdict(self, monkeypatch):
+        """If the shared module cannot be loaded, there is no answer.
 
-        If the shared module cannot be loaded, reporting "gateway down" would be
-        the same GAP-F-3 false negative wearing a different hat (and here it
-        would drive an auto-heal relaunch). The function keeps the last answer
-        the transports really gave and names the degradation instead.
+        Fabricating True here would be GAP-F-3's failure mode exactly — a
+        liveness signal that can never print red. The job bit is None and the
+        reason is recorded; check_gateway() publishes both.
         """
         from hscc_daemon import health, gateway_probe
         import sys
@@ -223,22 +220,11 @@ class TestGatewayJobAlive:
         def boom():
             raise gateway_probe.GatewayLivenessSourceError("sibling not deployed")
         monkeypatch.setattr(gateway_probe, "load_gateway_liveness", boom)
-        assert health._gateway_job_alive() is True            # last known answer
-        assert health._GATEWAY_PROBE_UNAVAILABLE              # and it says why
-
-    def test_first_check_with_unloadable_probe_is_not_claimed_alive(self, monkeypatch):
-        """No previous answer -> None ("unknown"), never a fabricated True."""
-        from hscc_daemon import health, gateway_probe
-        monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None)
-
-        def boom():
-            raise gateway_probe.GatewayLivenessSourceError("sibling not deployed")
-        monkeypatch.setattr(gateway_probe, "load_gateway_liveness", boom)
-        assert health._gateway_job_alive() is None
-        assert health._GATEWAY_PROBE_UNAVAILABLE
+        assert health._gateway_job_alive() is None          # unknown, not True
+        assert health._GATEWAY_PROBE_UNAVAILABLE            # and it says why
 
     def test_degraded_flag_clears_when_the_probe_works_again(self, monkeypatch):
-        """A recovery must not leave a stale DEGRADED marker on the stream."""
+        """A recovery must not leave a stale UNVERIFIED marker on the stream."""
         from hscc_daemon import health, gateway_probe
         import sys
         monkeypatch.setattr(sys, "platform", "darwin")
@@ -249,8 +235,7 @@ class TestGatewayJobAlive:
 
     def test_probe_that_raises_is_unknown_not_dead(self, monkeypatch):
         """Every transport silent (missing binary / timeout / exec error) means
-        no verdict was earned. The job bit is then None — never a fabricated
-        False — and the cycle is published as degraded rather than RED.
+        no verdict was earned: the job bit is None, with the reason recorded.
         """
         from hscc_daemon import health
         import sys
@@ -259,37 +244,39 @@ class TestGatewayJobAlive:
         def raise_all(args, *a, **kw):
             raise OSError("no launchctl here")
         monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None)
         monkeypatch.setattr(subprocess, "run", raise_all)
         assert health._gateway_job_alive() is None
         assert health._GATEWAY_PROBE_UNAVAILABLE
 
-    def test_silent_transports_keep_last_good_answer(self, monkeypatch):
-        """A probe outage must not knock a verified-alive gateway off the stream.
+    def test_probe_timeout_is_unknown_not_the_old_truthy_timeout(self, monkeypatch):
+        """The leg this card removed had a second, quieter bug.
 
-        This is the direction that would otherwise hurt: a red gateway stream is
-        what the auto-heal / kickstart path reacts to, so 'we could not look'
-        has to keep the previous answer instead of conjuring a relaunch.
+        `run_cmd` turns a timeout into ``{"ok": False, "output": "Command timed
+        out after 5s"}``, and the old fallback tested the OUTPUT — so a hung
+        pgrep returned True and the gateway read alive no matter what. The
+        shared module treats a probe timeout as UNKNOWN instead.
         """
         from hscc_daemon import health
         import sys
         import subprocess
-
         monkeypatch.setattr(sys, "platform", "darwin")
-        seen = self._drive(monkeypatch, {"launchctl": self._R(0, self.LAUNCHD_OUT)})
-        assert health._gateway_job_alive() is True
-        assert len(seen) == 1
 
-        def raise_all(args, *a, **kw):
-            raise OSError("launchctl hung out")
-        monkeypatch.setattr(subprocess, "run", raise_all)
-        assert health._gateway_job_alive() is True          # last known answer
+        def hang(args, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd=list(args), timeout=kw.get("timeout", 5))
+        monkeypatch.setattr(subprocess, "run", hang)
+        assert health._gateway_job_alive() is None
         assert health._GATEWAY_PROBE_UNAVAILABLE
 
-    def test_degraded_cycle_publishes_the_reason_not_a_verdict(self, tmp_hfcc_dir,
-                                                                monkeypatch):
-        """check_gateway() must not write a fresh-looking `gateway_job: False`
-        for a cycle that verified nothing."""
+    def test_unknown_publishes_unverified_not_a_green(self, tmp_hfcc_dir, monkeypatch):
+        """check_gateway() must not write a healthy-looking entry for a cycle
+        that verified nothing — and must not pretend it checked the job either.
+
+        Fail-closed here is the same rule check_dgx already applies to UNKNOWN
+        workloads (t_b543e530): a check that fails open never prints red, which
+        is exactly how GAP-F-3 survived two doctor runs. The stream does go
+        not-ok, so the pipeline watchdog sees a degraded read rather than a
+        false green; what is new is that it says WHY.
+        """
         from hscc_daemon import health
         from hscc_daemon import state as state_mod
         import subprocess
@@ -300,18 +287,19 @@ class TestGatewayJobAlive:
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": True})
-        monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None)
         monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None)
 
         def raise_all(args, *a, **kw):
             raise OSError("no supervisor readable")
         monkeypatch.setattr(subprocess, "run", raise_all)
 
-        health.check_gateway()
+        assert health.check_gateway() is False              # never a false green
         state = state_mod.read_state("gateway")
         assert state is not None
         assert state["gateway_job"] is None                 # unknown, published as such
         assert state["gateway_job_degraded"]                # and it says why
+        # ...and the reason reaches the surface that prints a Detail line.
+        assert "UNVERIFIED" in state["message"]
 
 
 class TestCheckIdleMonitor:

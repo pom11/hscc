@@ -287,9 +287,9 @@ def gateway_verdict(*, _run=None, _ps_lines=None):
     running — it gets its own verdict and a kickstart/restart hint instead of
     collapsing into "not running". When no transport could answer at all the
     row prints "not running" because the doctor row is informational and its
-    contract is one of exactly two verdicts; the daemon's stream, where a false
-    "down" triggers an auto-heal relaunch, uses `job_is_alive` instead and
-    keeps UNKNOWN as a third state.
+    contract is one of exactly two verdicts (as #148 shipped it). The daemon's
+    stream has no such constraint and keeps UNKNOWN as a third state — see
+    `job_is_alive`.
     """
     st = gateway_states(_run=_run, _ps_lines=_ps_lines)
     if st.pid is not None:
@@ -313,22 +313,21 @@ def job_is_alive(*, _run=None, _ps_lines=None):
     """``(alive, detail)`` for the daemon's gateway stream.
 
     ``alive`` is True / False, or **None when the state is UNKNOWN** — no
-    transport could run. Callers must not read None as "down": here a red
-    gateway stream drives an auto-heal relaunch (see
-    ``hscc_daemon/dispatcher_wedge.py`` and ``hscc-cluster/gateway_restart.py``
-    for the kickstart path), so a probe hiccup answered as "down" would kick a
-    healthy gateway. None keeps the stream honest and untriggered.
+    transport could run. None is not a verdict: nothing was read. The consumer
+    (``hscc_daemon.health.check_gateway``) treats UNKNOWN as NOT healthy, the
+    way ``check_dgx`` treats an unverifiable workload list — a liveness check
+    that fails open can never print red, which is how GAP-F-3 hid.
 
     The job question this answers is "should the fleet consider the gateway job
     present?", and it deliberately matches what ``_gateway_job_alive`` has
     always meant: a supervisor that reports the job as loaded answers "yes"
-    (that job is what the kickstart path restarts to bring the process back),
-    and when no supervisor can answer, a `ps` argv match answers "yes". The
-    stricter "loaded but no process" reading lives in `gateway_verdict`, which
-    is the one that prints the operator a fix hint.
+    (that job is what ``hscc-cluster/gateway_restart.py`` kickstarts to bring
+    the process back), and when no supervisor can answer, a `ps` argv match
+    answers "yes". The stricter "loaded but no process" reading lives in
+    `gateway_verdict`, which is the one that prints the operator a fix hint.
 
-    Detail text is included so a stream that goes RED, or that could not be
-    verified, can say WHICH transport said so instead of guessing.
+    Detail text is included so a stream that goes not-ok, or that could not be
+    verified at all, can say WHICH transport said so instead of guessing.
     """
     st = gateway_states(_run=_run, _ps_lines=_ps_lines)
     if st.pid is not None:

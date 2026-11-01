@@ -124,9 +124,10 @@ def test_broken_file_raises_instead_of_importing_partially(tmp_path, monkeypatch
 def test_health_check_treats_a_raising_loader_as_unknown(tmp_path, monkeypatch):
     """The contract that makes the loader safe to put on a check path.
 
-    A raise must never escape `check_gateway()`, and must never be written out
-    as `gateway_job: False` — the daemon's auto-heal reacts to that bit, so an
-    unreachable implementation has to surface as a named degradation instead.
+    A raise must never escape `check_gateway()`, and must never be published as
+    a healthy read: the stream goes not-ok with `gateway_job: null` (nothing was
+    verified) plus the named reason, so a broken probe is never mistaken for a
+    verified green — nor blamed on the gateway itself.
     """
     from hscc_daemon import health, state as state_mod
 
@@ -135,14 +136,15 @@ def test_health_check_treats_a_raising_loader_as_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
     monkeypatch.setattr(health, "log", lambda *a, **kw: None)
     monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
-    monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None)
     monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None)
 
     def boom():
         raise gateway_probe.GatewayLivenessSourceError("sibling not deployed")
     monkeypatch.setattr(gateway_probe, "load_gateway_liveness", boom)
 
-    assert health.check_gateway() is not False
+    # Fail CLOSED on an unverifiable job (never a false green), and the entry
+    # says the job was not verified rather than that it is down.
+    assert health.check_gateway() is False
     state = state_mod.read_state("gateway")
     assert state is not None
     assert state["gateway_job"] is None

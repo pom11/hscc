@@ -389,16 +389,10 @@ except ImportError:  # pragma: no cover - import-path robustness only
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gateway_liveness as _gateway_liveness
 
-# The two supervisor identities, for fix hints.
-_GATEWAY_LAUNCHD_LABEL = _gateway_liveness.GATEWAY_LAUNCHD_LABEL
-_GATEWAY_SYSTEMD_UNIT = _gateway_liveness.GATEWAY_SYSTEMD_UNIT
-
-# Thin forwards kept so the row's existing tests and any sibling caller address
-# the same names; the logic is entirely in gateway_liveness.
-_gateway_probe_run = _gateway_liveness.gateway_probe_run
-_gateway_launchd_state = _gateway_liveness.gateway_launchd_state
-_gateway_systemd_state = _gateway_liveness.gateway_systemd_state
-_gateway_ps_lines = _gateway_liveness.gateway_ps_lines
+# The two forwards the row's existing tests and sibling callers address
+# directly. Everything else in gateway_liveness is reached through
+# `_gateway_running` below — no alias is kept for a name nothing calls, so a
+# removed helper cannot leave a dangling forward behind.
 _argv_is_gateway = _gateway_liveness.argv_is_gateway
 _gateway_argv_pid = _gateway_liveness.gateway_argv_pid
 
