@@ -392,6 +392,56 @@ def test_no_coverage_findings(report):
         f"  [{f['kind']}] {f['command']} :: {f['detail']}" for f in cov)
 
 
+def test_coverage_gate_fires_when_a_verb_is_lost(monkeypatch, tmp_path):
+    """RED test for the RED gate: a verb the walk stops probing MUST be a COV
+    finding (GAP-A-2's whole failure mode was a hole nobody could see).
+
+    Simulates the exact rot — a registry that no longer names a verb the live
+    dispatcher still accepts — by trimming ``kanban_cli.VALID_SUBCOMMANDS``,
+    then rebuilding the surface and re-running the coverage check. Without the
+    (COV) class this passes silently, which is precisely the bug being fixed.
+    """
+    from hscc_daemon import kanban_cli
+
+    monkeypatch.setattr(kanban_cli, "VALID_SUBCOMMANDS",
+                        tuple(v for v in kanban_cli.VALID_SUBCOMMANDS
+                              if v != "enforce"), raising=True)
+    # the orch engine probe is a subprocess and irrelevant to this leg
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: ({"inject", "waker"}, None),
+                        raising=True)
+    canary = audit_mod.make_canary_dir(tmp_path)
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+
+    found = []
+    paths, _fd = audit_mod.build_surface()
+    table = audit_mod._coverage(tmp_path, canary, paths,
+                                lambda g, c, k, d, f: found.append((k, c, d)))
+    assert "enforce" not in table["kanban"]["walked"], (
+        "the trimmed registry did not actually remove the verb from the walk "
+        "— this test would pass without the coverage check")
+    hits = [d for k, _c, d in found if k == "COV" and "enforce" in d]
+    assert hits, (
+        "a verb the dispatcher advertises but the walk dropped produced NO "
+        f"COV finding — the gate cannot see GAP-A-2-class rot: {found}")
+
+
+def test_coverage_gate_fires_on_an_unaskable_dispatcher(monkeypatch, tmp_path):
+    """A dispatcher whose refusal names no verb list is reported, not skipped."""
+    monkeypatch.setattr(audit_mod, "_verbs_from_text", lambda _t: set(),
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: (set(), "engine missing"),
+                        raising=True)
+    canary = audit_mod.make_canary_dir(tmp_path)
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    found = []
+    audit_mod._coverage(tmp_path, canary, audit_mod.build_surface()[0],
+                        lambda g, c, k, d, f: found.append((k, c, d)))
+    assert [f for f in found if f[0] == "COV"], (
+        "an unaskable dispatcher produced no finding")
+
+
 def test_verb_text_parser():
     """The parser that reads a dispatcher's refusal inventory (both spellings).
 
