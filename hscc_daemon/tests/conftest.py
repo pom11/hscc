@@ -444,6 +444,61 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_kanban_root(tmp_path, monkeypatch):
+    """Pin the KANBAN root so no test can reach the operator's live boards.
+
+    GAP-C-1 (audit C) moved board discovery to Hermes' own
+    ``kanban_db.list_boards()`` (reached through ``autodown.board_db_paths``),
+    which resolves its root from ``HERMES_KANBAN_HOME`` / the real ``~/.hermes``.
+    The waker used to be hermetic by accident — it listdir'd a path the test
+    monkeypatched — so from that change on, EVERY test in this package needs the
+    root pinned, exactly like ``_hermetic_sparkrun_resolution`` pins sparkrun.
+
+    The pinned root is EMPTY (no ``kanban.db`` anywhere under it), so:
+      * enumeration through the real Hermes lib returns no live board, and a
+        test that wants boards plants its own under ``hermes_kanban_root()``;
+      * a test that forgot to inject/stub cannot read, write, or nudge the
+        operator's real boards.
+    ``HERMES_KANBAN_DB`` is cleared too: it pins a *worker's* board and would
+    otherwise override the root for the ``default`` slug.
+
+    ``hermes_kanban_root`` (below) is the fixture tests use to plant boards and
+    get the root they need already in the environment.
+    """
+    root = tmp_path / "kanban-home"
+    (root / "kanban" / "boards").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    # ``get_default_hermes_root`` memoises on (native_home, HERMES_HOME); the
+    # kanban root itself reads the env every call, but clear the memo anyway so
+    # a test that patches HERMES_HOME cannot inherit an earlier test's root.
+    try:
+        import hermes_constants
+        hermes_constants._default_hermes_root_memo = None
+    except Exception:  # pragma: no cover — hermes_constants always importable here
+        pass
+    yield str(root)
+
+
+@pytest.fixture
+def hermes_kanban_root(tmp_path):
+    """A throwaway multi-board kanban root, pinned via ``HERMES_KANBAN_HOME``.
+
+    Yields ``(root, boards_dir)``. Boards planted as
+    ``<root>/kanban/boards/<slug>/kanban.db`` are then visible to Hermes' own
+    ``list_boards()`` — i.e. to ``autodown.board_db_paths`` and therefore to
+    ``orch_waker`` — with no monkeypatching of private constants. The legacy
+    ``default`` board is ``<root>/kanban.db`` (Hermes' resolution rule).
+
+    Used by the tests that must drive REAL board enumeration (GAP-C-1); the
+    autouse fixture above already set the env var to the same directory.
+    """
+    root = tmp_path / "kanban-home"
+    (root / "kanban" / "boards").mkdir(parents=True, exist_ok=True)
+    return root, root / "kanban" / "boards"
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_topology():
     """Pin serving's LAZY topology to the documented defaults for every test.
 

@@ -313,6 +313,93 @@ def _enum_board_names(kanban_db):
     return boards, True
 
 
+#: Slug the legacy flat DB answers to (hermes' own ``DEFAULT_BOARD``). Kept as a
+#: module constant so :func:`board_db_paths` never has to import hermes just to
+#: name the one board that is guaranteed to exist.
+DEFAULT_BOARD_NAME = "default"
+
+
+def board_db_paths(kanban_db=None, *, include_archived: bool = False) -> dict:
+    """``{slug: kanban.db path}`` for every board — the PATH view of the seam.
+
+    GAP-C-1 (audit C). ``_enum_board_names`` is the SINGLE enumeration, and
+    every consumer so far could work with NAMES: it hands a slug to
+    ``kanban_db.connect_closing(board=...)`` and lets hermes resolve the file.
+    The one consumer that cannot is ``orch_waker``, which must NOT go through
+    ``connect_closing`` (that opens read-write and runs schema-init/migrations;
+    the waker's purity contract forbids mutating a board, so it opens
+    ``file:...?mode=ro`` URIs itself) and therefore needs the DB *path* of each
+    board. A name-only seam pushed that consumer to listdir ``kanban/boards/``
+    and re-derive hermes' path rules — i.e. a second enumeration. So the seam
+    gains the path view here and the waker calls it; there is still exactly one
+    enumeration, and no hscc module globs ``kanban/boards`` again.
+
+    Where the rules live: enumeration is ``_enum_board_names`` (hermes
+    ``list_boards``), and each board's file comes from hermes' own
+    ``kanban_db_path(board=...)`` — which is what keeps ``default`` at the
+    legacy ``<root>/kanban.db`` while a ``default`` *directory* stays
+    metadata-only. A lib that predates ``kanban_db_path`` falls back to the
+    ``db_path`` hermes already puts on every ``list_boards`` entry. hscc never
+    re-derives a path.
+
+    ``include_archived`` defaults to False: ``remove_board(archive=True)`` (or
+    ``update_board_metadata(archived=True)``) flags a board in its
+    ``board.json``, and hermes surfaces that flag as ``entry["archived"]`` —
+    exactly how hermes' own ``list_boards(include_archived=False)`` drops it.
+    The flag is filtered HERE rather than by passing hermes the keyword, so the
+    seam keeps one calling convention (``list_boards()`` with no args, like
+    :func:`_enum_board_names`) and works unchanged against a lib that predates
+    the keyword or an injected fake that does not take it. An entry with no
+    ``archived`` key is a live board.
+
+    FAILS CLOSED to ``{}`` — the opposite of ``_has_active_work``'s fail-safe to
+    True, and for a reason worth stating: this function reports *which boards
+    exist*, it does not decide anything. ``{}`` means "I could not enumerate",
+    NOT "there are no boards", and callers that would take an action on a board
+    must treat it as unevaluable (the waker skips the scan and stamps itself
+    ``ok: False`` so doctor/verify see a degraded waker instead of a healthy
+    one that quietly stopped watching). The unreachable-lib reason is recorded
+    in ``_KANBAN_LOAD`` (surfaced by ``hscc autodown status``) via
+    :func:`_load_kanban_db_or_default` itself.
+
+    A lib that raises mid-enumeration propagates — same posture as
+    :func:`_enum_board_names`: the caller decides how to fail.
+    """
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+    if kanban_db is None:
+        return {}
+    if hasattr(kanban_db, "list_boards"):
+        entries = list(kanban_db.list_boards())
+    elif include_archived:
+        return {}
+    else:
+        # Minimal injected lib (back-compat shape of _enum_board_names): the one
+        # board hermes always reports. Named explicitly rather than left as
+        # ``None`` so the resolver below takes ``default``'s legacy path
+        # deterministically — ``kanban_db_path(board=None)`` would honour
+        # ``HERMES_KANBAN_DB``, which pins a *worker's* board and must never
+        # steer which boards the waker scans.
+        entries = [{"slug": DEFAULT_BOARD_NAME}]
+    resolve = getattr(kanban_db, "kanban_db_path", None)
+    out: dict = {}
+    for entry in entries:
+        if not include_archived and entry.get("archived"):
+            continue
+        slug = entry.get("slug")
+        path = None
+        if resolve is not None:
+            try:
+                path = str(resolve(board=slug))
+            except Exception:  # pragma: no cover — resolver is pure path math
+                path = None
+        if not path:
+            path = str(entry.get("db_path") or "")
+        if path:
+            out[str(slug) if slug else DEFAULT_BOARD_NAME] = path
+    return out
+
+
 def _has_active_work(kanban_db=None):
     """True if ANY live/imminent kanban task exists across ALL boards.
 
