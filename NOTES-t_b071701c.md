@@ -53,5 +53,9 @@
 - [x] RED confirmed (13 tests fail pre-fix: TypeError no repo_root seam).
 - [x] Implementation GREEN: new file 13 passed; + test_verify.py 104 passed.
 - [x] Real-run acceptance (above) + before/after row diff.
-- [x] Commit early (2024dcce tests; impl commit follows).
-- [ ] Full suite ALL GREEN + guard rc 0; PR; never merge.
+- [x] Commit early (2024dcce tests; 96cdc670 fix).
+- [x] Full suite scripts/run_tests.sh ALL GREEN (12/12 legs, rc 0);
+      address_guard --tracked rc 0; changelog check OK (77 fragments);
+      git status --short empty.
+- [x] PR #157 opened (base main, MERGEABLE/CLEAN, address-guard CI SUCCESS),
+      NOT merged per card.
