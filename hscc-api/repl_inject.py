@@ -16,7 +16,7 @@ Mechanism (identical to the proven tool):
     starts ``kronos-orch``, or ``hscc project chat <p>``) with the real
     ``hermes -p X chat`` child underneath it, so every line of the pane is
     scanned and the one that NAMES a profile wins (see
-    :func:`_pane_chat_command`).
+    :func:`pane_chat_command`).
   * resolution: EXACTLY ONE pane for the profile, or refuse. Never guess —
     a wrong injection target is worse than no injection (the operator's rule:
     never inject a REPL you did not pick).
@@ -31,6 +31,17 @@ Mechanism (identical to the proven tool):
     ``send-keys``.
   * delivery: tmux bracketed paste (load-buffer + ``paste-buffer -p -d``) so
     a multi-line message arrives as ONE message, then Enter.
+
+THE ONE PANE MATCHER LIVES HERE. :func:`pane_chat_command` /
+:func:`pane_chat_profile` are public for the WHOLE repo, not just this
+module: any consumer that asks "is this command line a Hermes REPL chat, and
+under which profile?" calls them (today:
+hscc-project/flightdeck/core/tmux_chat.py — the project-chat launch door,
+doctor's REPL-visibility panel and the bootstrap REPL report). A consumer that
+copies the predicate drifts from it, and GAP-C-3 is the measured proof: the
+copy had grown a per-line ``default`` rule that contradicted the
+prefer-profiled-sibling rule below. When a copy and this rule disagree, THIS
+is the one that wins — so call it instead of re-deriving it.
 
 All tmux/ps calls go through module-level seams (``run_tmux`` / ``run_ps``)
 so unit tests never touch a real tmux server or the operator's panes.
@@ -128,8 +139,14 @@ _ORIG_RUN_PS = run_ps
 # Pane discovery + busy detection (reference-identical parsing)
 # --------------------------------------------------------------------------- #
 
-_PROFILE_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
+#: The ONE profile-flag pattern in the repo — a chat command line's profile is
+#: whatever ``-p/--profile`` names (space or ``=`` form). Exported so a consumer
+#: that reads the flag off a *launch* argv (tmux_chat.target_profile) reuses
+#: this instead of copying the regex: two copies of a pattern drift (GAP-C-3).
+PROFILE_FLAG_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
 _CHAT_MARK = " chat"
+_GATEWAY_MARK = "gateway"            # never a REPL target (see pane_chat_command)
+DEFAULT_PROFILE = "default"          # the reference tool's no-flag fallback
 
 
 def normalize_mode(mode: str) -> str:
@@ -163,9 +180,11 @@ def resolve_mode(mode: str, busy: bool) -> str:
     return mode
 
 
-def _pane_chat_command(cmds) -> tuple[str, str] | None:
+def pane_chat_command(cmds) -> tuple[str, str] | None:
     """The ``(profile, command)`` of a pane's Hermes REPL, or None.
 
+    THE canonical pane matcher — the ONE predicate in the repo that decides
+    "is this command line a Hermes REPL chat, and under which profile".
     ``cmds`` are the ``ps -t <tty>`` command lines for that pane. A pane can
     hold BOTH a wrapper (a launcher script, or ``hscc project chat <p>``) AND
     the real ``hermes -p <profile> chat`` child, and the wrapper is frequently
@@ -175,21 +194,54 @@ def _pane_chat_command(cmds) -> tuple[str, str] | None:
     that was actually right.
 
     Rule: scan every line; prefer the chat line that NAMES a profile; fall
-    back to ``default`` only when none of them does. Gateway/serve command
+    back to ``default`` only when NONE of them does. Gateway/serve command
     lines are never a REPL target.
+
+    PUBLIC on purpose, and public to the whole repo: tmux_chat (the project
+    chat launch door, doctor's REPL-visibility panel, the bootstrap REPL
+    report) calls THIS function instead of re-deriving the rule. GAP-C-3 was
+    exactly that re-derivation drifting — a per-line ``default`` in tmux_chat
+    contradicted the prefer-profiled-sibling rule right here, so the launch
+    door could attribute a wrapper pane to ``default`` while injection here
+    attributed the same pane to its real profile. When the two disagree,
+    THIS is the one that wins: every consumer resolves panes through it.
     """
     fallback: tuple[str, str] | None = None
     for cmd in cmds:
         if "hermes" not in cmd or _CHAT_MARK not in f" {cmd}":
             continue
-        if "gateway" in cmd:
+        if _GATEWAY_MARK in cmd:
             continue
-        m = _PROFILE_RE.search(cmd)
+        m = PROFILE_FLAG_RE.search(cmd)
         if m:
             return m.group(1), cmd
         if fallback is None:
-            fallback = ("default", cmd)
+            fallback = (DEFAULT_PROFILE, cmd)
     return fallback
+
+
+def pane_chat_profile(cmds) -> str | None:
+    """The profile a set of command lines resolves to, or None.
+
+    One-liner over :func:`pane_chat_command` for consumers that only need the
+    profile (the pane attribution), not the line that justified it. Same rule,
+    so the launch door and the injection path can never disagree about which
+    profile a pane belongs to.
+    """
+    hit = pane_chat_command(cmds)
+    return hit[0] if hit else None
+
+
+def profile_flag(cmdline: str) -> str | None:
+    """The profile a LAUNCH command line names via ``-p/--profile``.
+
+    Not a pane matcher — this makes no chat/gateway judgement; it reads the
+    flag off an argv we are about to exec (tmux_chat.target_profile). It lives
+    here so the flag pattern itself has exactly one compiled copy: two copies
+    of a pattern drift exactly like two copies of a predicate did (GAP-C-3).
+    """
+    m = PROFILE_FLAG_RE.search(cmdline)
+    return m.group(1) if m else None
 
 
 def hermes_panes() -> list[dict]:
@@ -199,7 +251,7 @@ def hermes_panes() -> list[dict]:
     'chat'); a pane running ``hermes -p X chat`` is the operator's REPL. The
     profile comes from the pane line that actually names one, so a pane whose
     first process is a launcher wrapper still resolves to its real profile
-    (:func:`_pane_chat_command`).
+    (:func:`pane_chat_command`).
     """
     try:
         out = run_tmux("list-panes", "-a", "-F",
@@ -213,7 +265,7 @@ def hermes_panes() -> list[dict]:
             pane_id, target, tty = line.split("\t")
         except ValueError:
             continue
-        hit = _pane_chat_command(run_ps(tty).splitlines())
+        hit = pane_chat_command(run_ps(tty).splitlines())
         if hit:
             panes.append({"pane": pane_id, "target": target, "tty": tty,
                           "profile": hit[0], "cmd": hit[1]})
