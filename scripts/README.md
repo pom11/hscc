@@ -158,7 +158,8 @@ release grows a red X.
 ## README lint (`readme_lint.py`) — R7 gate (audit §3)
 
 `readme_lint.py` enforces the two rules `docs/audits/README_REVIEW_2026-10-15.md`
-§3 defines for this repo's README set:
+§3 defines for this repo's README set, plus the docs/ index-coverage rule
+(t_c2ec721f):
 
 1. **badge == VERSION** — every shields.io badge whose label asserts a
    version (`version`/`v`/`release`) must carry the repo version (root
@@ -169,6 +170,15 @@ release grows a red X.
    exist on the real surface: `hscc …` verbs parse through the CLI-help
    audit's own `ExampleParser` oracle (no second enumeration to stale),
    external CLIs are allow-listed strings, repo scripts must exist.
+4. **docs/ index coverage** (`DOC-UNLISTED`) — every file tracked under
+   `docs/` (`git ls-files docs`) must be referenced by a backtick-quoted
+   path in `docs/README.md`, the index whose own preamble promises exactly
+   this. Directory-heading bullets (entries ending in `/`) are not file
+   entries (b8f05170's counting convention); the claim decayed twice with
+   no gate (3 short, then 10), which is why the rule is a finding, not a
+   note. The leg runs whenever `docs/README.md` exists under `--repo`, so
+   `--files` cannot silence it. (Numbered 4: the audit's rule (3) is
+   flightdeck naming — §3.1's ledger, deliberately not this lint's.)
 
 Fenced blocks are out of scope (covered by the CLI-help audit's (C) pass);
 every skip reason is counted in the report, so the check surface cannot
@@ -183,7 +193,9 @@ Exit codes match `address_guard.py`: `0` clean, `1` a finding, `2` could
 not run (never a silent pass). The pytest gate is
 `scripts/tests/test_readme_lint.py` (runs in the `scripts` leg of
 `run_tests.sh`); `scripts/tests/fixtures/readme_lint/{clean,broken}/` pin
-both directions — a wrong badge and a fake command MUST fail the lint.
+both directions — a wrong badge, a fake command, a deleted script and an
+UNLISTED docs file (plus a fence-only reference that must not count) all
+MUST fail the lint.
 
 ## Customization
 
