@@ -6,9 +6,19 @@
 #   - QNAP export wiped (empty /etc/exports)
 # Silent when healthy.
 #
-# Scheduling note: the daemon's own `nas` check stream is the primary detector
-# and the `nas-down` trigger rule is what alerts on it. This script is the
-# standalone/manual probe — it needs no daemon.
+# Scheduling note (GAP-B-5, integration audit B): SUPERVISION OWNER is the
+# daemon, not cron. The daemon's `nas` check stream is the primary detector —
+# PERIODIC_INTERVALS["nas"] = 900 s (hscc_daemon/daemon_ops.py:34) drives
+# check_nas, and the `nas-down` trigger rule is what alerts on it — so this
+# script is the standalone/manual probe only, and needs no daemon.
+#
+# DO NOT SCHEDULE THIS ON A CRON. It duplicates a stream the daemon already
+# supervises, and its output goes nowhere useful: a cron `--no-agent --deliver
+# local` job writes to run history nobody polls, while the daemon path ends in a
+# real desktop notification. The Hermes cron job that carried it —
+# `hscc-nas-watchdog`, `every 240m`, PAUSED since 2026-06-20 — is RETIRED:
+# delete it, do not resume it. Exact, store-verified retire commands:
+# scripts/README.md §"Retiring the superseded watchdog cron jobs".
 
 set -u
 
