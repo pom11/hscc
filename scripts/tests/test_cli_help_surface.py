@@ -107,6 +107,11 @@ def _sibling_interpreters() -> list[str]:
         path = c if os.path.isabs(c) else _which(c)
         if not path:
             continue
+        # "Candidate" is not "runnable": an entry may point into a HOME that
+        # does not exist (sandboxed-HOME tests, another operator's absolute
+        # path baked into the list). Only a real file is a sibling.
+        if not os.path.exists(path):
+            continue
         real = os.path.realpath(path)
         if real in seen:
             continue

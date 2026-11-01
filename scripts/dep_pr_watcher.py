@@ -68,6 +68,28 @@ def _stamp_module():
         return None
 
 
+def _stamp_pass(cw, **fields):
+    """Best-effort liveness stamp for one pass (GAP-B-4).
+
+    Never raises — a broken stamp module must cost the watcher its liveness
+    signal, never its real work (the watcher creating verification cards
+    outranks the detector that watches it). Failures print to stderr, which
+    hermes keeps in the cron run record.
+    """
+    if cw is None:
+        return False
+    try:
+        if not cw.stamp("dep_pr_watcher", **fields):
+            print("dep_pr_watcher: WARNING - liveness stamp write failed",
+                  file=sys.stderr)
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 - the stamp must never kill the pass
+        print(f"dep_pr_watcher: WARNING - liveness stamp raised: {exc}",
+              file=sys.stderr)
+        return False
+
+
 # Make ``hermes_cli`` importable however this is launched (Hermes cron, launchd,
 # or a bare python3) — the card creation needs the runtime's kanban_db.
 _HERMES = os.path.expanduser("~/.hermes/hermes-agent")
@@ -239,16 +261,10 @@ def main():
     if not prs:
         # Idle pass: STILL stamp. "Ran, nothing to do" advancing the stamp is
         # what separates a healthy watcher from a dead one (GAP-B-4).
-        if cw is not None and not cw.stamp("dep_pr_watcher", prs=0, cards=0,
-                                           idle=True):
-            print("dep_pr_watcher: WARNING - liveness stamp write failed",
-                  file=sys.stderr)
+        _stamp_pass(cw, prs=0, cards=0, idle=True)
         return 0
     created = ensure_cards(prs)
-    if cw is not None and not cw.stamp("dep_pr_watcher", prs=len(prs),
-                                       cards=len(created), idle=False):
-        print("dep_pr_watcher: WARNING - liveness stamp write failed",
-              file=sys.stderr)
+    _stamp_pass(cw, prs=len(prs), cards=len(created), idle=False)
     lines = [f"🔁 HSCC dep-check: PR #{num} → kanban card {tid}"
              for num, tid in created]
     if lines:
@@ -258,19 +274,24 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def run_with_failure_stamp():
+    """main() + the GAP-B-4 crash stamp (the __main__ contract, as a function).
+
+    A crash is a pass that FAILED: stamp it ok=False so the doctor can tell
+    "cron fired and the script raised" from "cron never fired". SystemExit is
+    deliberately NOT caught — a clean exit must never be recorded as a
+    failure — and the original traceback is re-raised untouched.
+    """
     try:
-        _rc = main()
+        return main()
     except Exception as exc:  # noqa: BLE001 - stamp, then re-raise unchanged
-        # A crash is a pass that FAILED: stamp it ok=False so the doctor can
-        # tell "cron fired and the script raised" from "cron never fired"
-        # (GAP-B-4). SystemExit is deliberately NOT caught here — a clean exit
-        # must never be recorded as a failure — and the original traceback is
-        # re-raised untouched.
         try:
-            _cw = _stamp_module()
-            if _cw is not None:
-                _cw.stamp_failure("dep_pr_watcher", exc)
+            cw = _stamp_module()
+            if cw is not None:
+                cw.stamp_failure("dep_pr_watcher", exc)
         finally:
             raise
-    sys.exit(_rc)
+
+
+if __name__ == "__main__":
+    sys.exit(run_with_failure_stamp())

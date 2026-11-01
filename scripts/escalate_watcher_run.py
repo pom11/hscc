@@ -77,6 +77,28 @@ def _stamp_module():
     except Exception:
         return None
 
+
+def _stamp_pass(cw, **fields):
+    """Best-effort liveness stamp for one pass (GAP-B-4).
+
+    Never raises — a broken stamp module must cost the watcher its liveness
+    signal, never its real work (escalating stuck cards outranks the detector
+    that watches it). Failures print to stderr, which hermes keeps in the cron
+    run record.
+    """
+    if cw is None:
+        return False
+    try:
+        if not cw.stamp("escalate_watcher", **fields):
+            print("escalate_watcher: WARNING - liveness stamp write failed",
+                  file=sys.stderr)
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 - the stamp must never kill the pass
+        print(f"escalate_watcher: WARNING - liveness stamp raised: {exc}",
+              file=sys.stderr)
+        return False
+
 FAIL_LIMIT = int(os.environ.get("HSCC_FAIL_LIMIT", "3"))
 # Acting reassign is OPT-IN: only set when the operator explicitly configured a
 # strong profile. Default None (not "architect") — silently reassigning cards to
@@ -163,11 +185,8 @@ def main():
     # Stamp EVERY pass, idle included (GAP-B-4): an action-less tick must
     # advance the liveness stamp or a dead cron job looks identical to a
     # healthy quiet one.
-    if cw is not None and not cw.stamp(
-            "escalate_watcher", actions=len(actions),
-            idle=not actions, fail_limit=FAIL_LIMIT):
-        print("escalate_watcher: WARNING - liveness stamp write failed",
-              file=sys.stderr)
+    _stamp_pass(cw, actions=len(actions), idle=not actions,
+                fail_limit=FAIL_LIMIT)
 
     lines = []
     for a in actions:
@@ -197,23 +216,29 @@ def main():
     return 0
 
 
+def run_with_failure_stamp():
+    """main() + the GAP-B-4 crash stamp (the __main__ contract, as a function).
+
+    A crash is a pass that FAILED: stamp it ok=False so the doctor can tell
+    "cron fired and the script raised" from "cron never fired". SystemExit is
+    deliberately NOT caught — a clean exit must never be recorded as a
+    failure — and the original traceback is re-raised untouched.
+    """
+    try:
+        return main()
+    except Exception as exc:  # noqa: BLE001 - stamp, then re-raise unchanged
+        try:
+            cw = _stamp_module()
+            if cw is not None:
+                cw.stamp_failure("escalate_watcher", exc)
+        finally:
+            raise
+
+
 if __name__ == "__main__":
     # This runs as its own process from the `hscc-escalate-watcher` cron, so it
     # never passes through run_daemon_loop and does not inherit the daemon's
     # private umask. Without this it recreates ~/.hscc/escalated.json 0644 —
     # which is exactly what happened after the daemon-side fix looked complete.
     os.umask(0o077)
-    try:
-        _rc = main()
-    except Exception as exc:  # noqa: BLE001 - stamp, then re-raise unchanged
-        # A crash is a pass that FAILED: stamp it ok=False so the doctor can
-        # tell "cron fired and the script raised" from "cron never fired"
-        # (GAP-B-4). SystemExit is deliberately NOT caught — a clean exit must
-        # never be recorded as a failure — and the traceback is re-raised as-is.
-        try:
-            _cw = _stamp_module()
-            if _cw is not None:
-                _cw.stamp_failure("escalate_watcher", exc)
-        finally:
-            raise
-    sys.exit(_rc)
+    sys.exit(run_with_failure_stamp())
