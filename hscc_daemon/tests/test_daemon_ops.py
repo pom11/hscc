@@ -814,5 +814,221 @@ class TestLogRotation:
         assert not list(tmp_path.glob("daemon.log.*.gz"))  # no premature rollover
 
 
+class TestWatchdogTriggerCadenceSot:
+    """GAP-B-6 (t_2039a319): the watchdog + trigger-engine cadences live in
+    PERIODIC_INTERVALS, the same SOT the CHECKS threads and `hscc verify`'s
+    per-stream staleness math read.
+
+    Before the fix `run_daemon_loop` started both dedicated threads with
+    `stop_event.wait(30)` / `wait(15)` written inline. Both loops DO stamp a
+    stream state file every tick (watchdog.json from lifecycle.pipeline_watchdog,
+    triggers.json from trigger.trigger_engine), so they were streams in every
+    sense verify cares about — yet verify could not see their cadence and fell
+    back to the flat window. These tests pin the three things that must stay
+    true, each from a different angle:
+
+      * the dict carries both keys at the values the loops always used;
+      * the loop BODIES hold no numeric `stop_event.wait()` argument at all and
+        read the SOT instead (AST-scanned — a re-hardcoded literal fails, and so
+        does a `wait(0.5)` retry that a naive "no 30/15" grep would pass);
+      * the cadence actually FLOWS from the dict (re-point the dict and the
+        thread-start log line follows), and neither name spawns a second
+        supervised check thread (a CHECKS row would double-tick the same
+        machinery — that would be the behaviour change the card forbids).
+    """
+
+    @staticmethod
+    def _loop_fn_src(name):
+        """The source text of one nested loop function in daemon_ops.py."""
+        import ast
+        import inspect
+        from hscc_daemon import daemon_ops
+        src = inspect.getsource(daemon_ops.run_daemon_loop)
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return ast.get_source_segment(src, node) or ""
+        raise AssertionError(f"{name} is no longer a function inside run_daemon_loop")
+
+    @staticmethod
+    def _wait_args(name):
+        """Every stop_event.wait(...) arg node inside one loop function."""
+        import ast
+        from hscc_daemon import daemon_ops
+        import inspect
+        tree = ast.parse(inspect.getsource(daemon_ops.run_daemon_loop))
+        out = []
+        for fn in (n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == name):
+            for call in (c for c in ast.walk(fn) if isinstance(c, ast.Call)):
+                f = call.func
+                if (isinstance(f, ast.Attribute) and f.attr == "wait"
+                        and isinstance(f.value, ast.Name)
+                        and f.value.id == "stop_event"):
+                    out.append(call.args[0] if call.args else None)
+        return out
+
+    # ── the SOT itself ────────────────────────────────────────────────────
+    def test_both_cadences_are_sot_entries(self):
+        from hscc_daemon import daemon_ops
+        assert daemon_ops.PERIODIC_INTERVALS["watchdog"] == 30
+        assert daemon_ops.PERIODIC_INTERVALS["triggers"] == 15
+
+    def test_declaring_the_cadences_changes_nothing_about_the_ticks(self):
+        """The cadence VALUES are the ones the hardcoded literals used, so no
+        tick frequency moves — the fix is where they are declared, not how
+        often the loops run."""
+        from hscc_daemon import daemon_ops
+        assert (daemon_ops.PERIODIC_INTERVALS["watchdog"],
+                daemon_ops.PERIODIC_INTERVALS["triggers"]) == (30, 15)
+
+    # ── no literal cadence left at the sites ──────────────────────────────
+    @pytest.mark.parametrize("fn_name,stream",
+                             [("run_watchdog_loop", "watchdog"),
+                              ("run_trigger_loop", "triggers")])
+    def test_loop_body_has_no_numeric_wait_literal_and_reads_the_sot(
+            self, fn_name, stream):
+        import ast
+        src = self._loop_fn_src(fn_name)
+        args = self._wait_args(fn_name)
+        assert args, f"{fn_name} no longer waits on stop_event"
+        for a in args:
+            assert a is not None, f"{fn_name} waits with no interval"
+            # A literal here — 30, 15, or any new number — is the regression.
+            assert not isinstance(a, ast.Constant), (
+                f"{fn_name} still passes a hardcoded interval: {ast.dump(a)}")
+            # The interval must be the local that reads the SOT key.
+            assert isinstance(a, ast.Name), (
+                f"{fn_name} must wait on a variable holding "
+                f"PERIODIC_INTERVALS[{stream!r}], got {type(a).__name__}")
+        assert f'STREAMS["{stream}"]' in src, (
+            f"{fn_name} no longer reads its cadence from the SOT dict")
+
+    # ── the cadence really flows from the dict ────────────────────────────
+    def _run_loop_capturing(self, monkeypatch, intervals):
+        """Boot run_daemon_loop with the supervision + tick bodies stubbed.
+
+        Returns (log_lines, supervised_stream_names). `intervals` is the dict
+        PERIODIC_INTERVALS is re-pointed to, so a value that shows up in the
+        start-up log can only have come from the dict.
+        """
+        from hscc_daemon import daemon_ops, daemon_singleton as ds
+        logs, seen = [], []
+
+        def fake_supervised(stop_event, check_fn, interval, stream_name):
+            seen.append(stream_name)
+            stop_event.set()
+
+        for path in ("hscc_daemon.autodown.resume_from_restart_defensive",
+                     "hscc_daemon.serving.resolve_cluster_config",
+                     "hscc_daemon.sparkrun_bin.ensure_on_path",
+                     "hscc_daemon.recover.recover_engine_wedge",
+                     "hscc_daemon.dispatcher_wedge.recover_dispatcher_wedge",
+                     "hscc_daemon.lifecycle.pipeline_watchdog",
+                     "hscc_daemon.trigger.trigger_engine"):
+            monkeypatch.setattr(path, lambda *a, **k: None)
+        monkeypatch.setattr(ds, "hold_daemon_loop_lock_fail_open",
+                            lambda **k: (True, ""))
+        monkeypatch.setattr(daemon_ops, "log", lambda *a, **k: logs.append(a[0]))
+        monkeypatch.setattr(daemon_ops, "run_autodown_loop", lambda ev, **k: None)
+        monkeypatch.setattr(daemon_ops, "_run_supervised_periodic",
+                            fake_supervised)
+        monkeypatch.setattr(daemon_ops, "run_heartbeat_loop",
+                            lambda ev, **k: ev.wait(2))
+        monkeypatch.setattr(daemon_ops, "write_stopped", lambda: None)
+        monkeypatch.setattr(daemon_ops, "prune_dead_files",
+                            lambda *a, **k: {"removed_dead": 0, "pruned_bak": 0})
+        monkeypatch.setattr(daemon_ops, "PERIODIC_INTERVALS", intervals)
+        daemon_ops.run_daemon_loop()
+        return logs, seen
+
+    def test_start_log_reports_the_sot_value_not_a_literal(self, monkeypatch):
+        """A hardcoded log string would keep saying 30s/15s after the dict moves
+        — proving the line prints the dict value is what ties the two together."""
+        base = dict(__import__("hscc_daemon.daemon_ops", fromlist=["x"])
+                    .PERIODIC_INTERVALS)
+        base.update({"watchdog": 7, "triggers": 3})
+        logs, _ = self._run_loop_capturing(monkeypatch, base)
+        joined = "\n".join(logs)
+        assert "Started watchdog thread (interval=7s)" in joined, joined
+        assert "Started trigger engine thread (interval=3s)" in joined, joined
+        assert "Started watchdog thread (interval=30s)" not in joined, joined
+        assert "Started trigger engine thread (interval=15s)" not in joined, joined
+
+    def test_the_two_streams_do_not_also_start_a_check_thread(self, monkeypatch):
+        """Declaring the cadence in the SOT must NOT route the tick through the
+        CHECKS table too — that would run pipeline_watchdog / trigger_engine on
+        two threads at once (the behaviour change the card forbids)."""
+        base = dict(__import__("hscc_daemon.daemon_ops", fromlist=["x"])
+                    .PERIODIC_INTERVALS)
+        _, seen = self._run_loop_capturing(monkeypatch, base)
+        assert "watchdog" not in seen, seen
+        assert "triggers" not in seen, seen
+        # Sanity: the supervision loop really did run for the other streams.
+        assert "orch_waker" in seen and "dgx" in seen, seen
+
+    # ── verify's per-stream math now covers them ──────────────────────────
+    def test_verify_sees_both_streams(self):
+        from hscc_daemon import daemon_ops, verify
+        intervals = verify._live_stream_intervals()
+        assert intervals.get("watchdog") == daemon_ops.PERIODIC_INTERVALS["watchdog"]
+        assert intervals.get("triggers") == daemon_ops.PERIODIC_INTERVALS["triggers"]
+
+    def test_verify_staleness_uses_the_per_stream_rule_for_both(self, tmp_path):
+        """A stream whose cadence verify knows gets ``max(max_age,
+        2*interval+90)``; one it does not know gets the flat ``max_age`` only.
+
+        With a tightened window the difference is observable, which is the whole
+        point of the fix: a watchdog tick 140 s old is healthy (its own limit is
+        2*30+90 = 150 s) but an unknown stream of the same age is stale at the
+        120 s flat window. Before this card the watchdog stream WAS that unknown
+        stream, so a tightened window cried wolf on a healthy daemon.
+        """
+        import json
+        from datetime import datetime, timedelta, timezone
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        def stamp(stream, age_s):
+            ts = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).isoformat()
+            (state_dir / f"{stream}.json").write_text(json.dumps(
+                {"ok": True, "stream": stream, "last_check": ts, "timestamp": ts}))
+
+        stamp("watchdog", 140)     # inside its own 150 s per-stream limit
+        stamp("unknowable", 140)   # same age, but no cadence => flat 120 s limit
+
+        res = check_daemon_streams(state_dir=str(state_dir), max_age_s=120)
+        assert res["ok"] is False, res["detail"]
+        assert "unknowable.json: stale" in res["detail"], res["detail"]
+        # The control proves the pass is caused by the cadence being declared,
+        # not by the window being loose for everybody.
+        assert "watchdog.json" not in res["detail"], res["detail"]
+
+        # And a watchdog that misses MORE than ~2 of its own cycles is still
+        # caught — declaring a cadence must not hide a genuinely dead stream.
+        stamp("watchdog", 160)     # 160 > 150
+        res = check_daemon_streams(state_dir=str(state_dir), max_age_s=120)
+        assert "watchdog.json: stale" in res["detail"], res["detail"]
+
+        # Fresh stamps for both real streams => clean (and triggers is covered
+        # by the same per-stream rule at its own 15 s cadence).
+        stamp("watchdog", 20)
+        stamp("triggers", 20)
+        (state_dir / "unknowable.json").unlink()
+        res = check_daemon_streams(state_dir=str(state_dir), max_age_s=120)
+        assert res["ok"] is True, res["detail"]
+
+    def test_per_stream_limit_math_is_the_unchanged_rule(self):
+        """The card pins the math: max(600, 2*interval+90). Both new streams are
+        fast, so both land on the 600 s floor like every other fast stream —
+        the rule was not adjusted for them."""
+        _JITTER_S, _EXTRA_CYCLES, FLOOR = 90, 2, 600
+        from hscc_daemon import daemon_ops
+        for stream in ("watchdog", "triggers"):
+            interval = daemon_ops.PERIODIC_INTERVALS[stream]
+            assert max(FLOOR, _EXTRA_CYCLES * interval + _JITTER_S) == 600
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
