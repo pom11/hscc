@@ -72,10 +72,179 @@ def _capture(cmd, timeout=None):
         return (2, str(exc))
 
 
-def check_plugins(plugins_dir=None):
+# ---------------------------------------------------------------------------
+# GAP-F-8 — deployed cluster-tool assertion (the plugins row's second leg)
+# ---------------------------------------------------------------------------
+# The plugins row used to assert only that hscc-commands/__init__.py mentions
+# three strings, so it printed ✓ while the DEPLOYED hscc-cluster payload was
+# missing whole tools (live: orch_message.py absent from the 2.14.0 payload
+# while main registers it — audit F GAP-F-8 == audit A GAP-A-5). "A check
+# that asserts nothing is not green" (GAP-F-2 principle, made cross-cutting):
+# the row now unions the repo-side tool registry (hscc-cluster/__init__.py
+# `_*_TOOLS` tables + `from . import <mod>` handler modules) with the repo
+# plugin.yaml `provides_tools` manifest — t_19dbb9de has not landed, so the
+# manifest alone would inherit its GAP-A-7 under-declaration hole — and
+# requires each declared tool AND its handler module to exist in the
+# DEPLOYED tree. A missing tool is named by name (and its module by file
+# name) under the explicit category "missing vs deployed payload": that is
+# how the KNOWN-pending-release gap (GAP-A-5, closes with the 2.15.0
+# bootstrap) stays distinguishable from every other failure class instead
+# of hiding under a ✓. Read-only: parses files, writes nothing.
+
+_CLUSTER_TOOLS_CATEGORY = "cluster tools missing vs deployed payload"
+# A deployed __init__.py without register() is not a registry at all — the
+# payload sha-diff (check_plugin_payload) owns broken-file content; this row
+# stays unassertive rather than inventing a verdict from garbage.
+_REGISTER_MARKER = "def register("
+
+
+def _registered_tool_names(init_text):
+    """Tool names from `_…_TOOLS = [ ("name", …), … ]` tables in a plugin
+    __init__.py (regex over text — same no-exec safety the file's other
+    parses use). One capture per tuple head: `(` + string literal."""
+    tools = set()
+    for block in re.findall(r"^\w*_TOOLS\s*=\s*\[.*?^\]", init_text,
+                            re.MULTILINE | re.DOTALL):
+        tools.update(re.findall(r'^\s*\(\s*"([^"]+)"', block, re.MULTILINE))
+    return tools
+
+
+def _imported_handler_modules(init_text):
+    """Sibling-module handler files a plugin __init__.py requires: the
+    `from . import mod [as alias]` lines that make register() importable at
+    all, resolved to real module names (aliases mapped back)."""
+    mods, aliases = set(), {}
+    for name, alias in re.findall(
+            r"^from \. import (\w+) as (\w+)", init_text, re.MULTILINE):
+        aliases[alias] = name
+    for name in re.findall(r"^from \. import (\w+)", init_text, re.MULTILINE):
+        mods.add(name)
+    return {aliases.get(m, m) for m in mods}
+
+
+def _manifest_tools(plugin_dir):
+    """`provides_tools` names from a plugin.yaml, via yaml when importable
+    else a line scan (verify must not gain a hard PyYAML dependency)."""
+    path = os.path.join(plugin_dir, "plugin.yaml")
+    try:
+        with open(path, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return set()
+    if yaml is not None:
+        try:
+            data = yaml.safe_load(text)
+            if isinstance(data, dict):
+                declared = data.get("provides_tools") or []
+                if isinstance(declared, list):
+                    return {str(t) for t in declared if t}
+        except Exception:
+            pass  # fall through to the line scan
+    names, inside = set(), False
+    for line in text.splitlines():
+        if line.startswith("provides_tools:"):
+            inside = True
+            continue
+        if inside:
+            m = re.match(r"^\s+-\s*([\w.\-]+)\s*$", line)
+            if m:
+                names.add(m.group(1))
+            elif line.strip() and not line.startswith((" ", "\t")):
+                inside = False
+    return names
+
+
+def _cluster_tools_verdict(plugins_dir, repo_root):
+    """Check repo-declared hscc-cluster tools against the DEPLOYED tree.
+
+    Returns (ok, extra_detail, next_step) where ok is True (asserted clean),
+    False (drift — `extra_detail` names every missing tool/file), or None
+    (UNASSERTIVE — `extra_detail` says why). Never raises, never writes.
+    """
+    deployed_dir = os.path.join(plugins_dir, "hscc-cluster")
+    repo_dir = os.path.join(repo_root, "hscc-cluster") if repo_root else None
+
+    def unassertive(why):
+        return None, f"cluster tools not asserted ({why})", None
+
+    if not os.path.isdir(deployed_dir):
+        return unassertive("hscc-cluster not deployed")
+    if not repo_dir or not os.path.isfile(os.path.join(repo_dir, "__init__.py")):
+        return unassertive("no repo hscc-cluster/__init__.py to assert against")
+    try:
+        same_tree = os.path.realpath(repo_dir) == os.path.realpath(deployed_dir)
+    except OSError:
+        same_tree = False
+    if same_tree:
+        # repo root IS the deployed tree (in-place layout): comparing a tree
+        # with itself is vacuous — a ✓ here would be a fabricated assertion.
+        return unassertive("repo tree is the deployed tree — in-place layout")
+
+    try:
+        with open(os.path.join(repo_dir, "__init__.py"), "r") as f:
+            repo_init = f.read()
+        with open(os.path.join(deployed_dir, "__init__.py"), "r") as f:
+            dep_init = f.read()
+    except (OSError, IOError) as exc:
+        return unassertive(f"unreadable __init__.py: {exc}")
+    if _REGISTER_MARKER not in repo_init or _REGISTER_MARKER not in dep_init:
+        return unassertive("an __init__.py lacks register() — not a registry")
+
+    expected_tools = (_registered_tool_names(repo_init)
+                      | _manifest_tools(repo_dir))
+    if not expected_tools:
+        return unassertive("repo side declares no tools")
+    # Files the deployed payload must carry for the repo-side registry to be
+    # deployable at all: every handler module the repo __init__ imports.
+    expected_files = {m + ".py" for m in _imported_handler_modules(repo_init)}
+
+    deployed_tools = (_registered_tool_names(dep_init)
+                      | _manifest_tools(deployed_dir))
+    missing_tools = sorted(expected_tools - deployed_tools)
+    missing_files = sorted(f for f in expected_files
+                           if not os.path.isfile(os.path.join(deployed_dir, f)))
+    # A tool whose module file is absent counts even if the deployed manifest
+    # name-matched it — the file IS the tool.
+    missing_files = sorted(set(missing_files))
+    if not missing_tools and not missing_files:
+        try:
+            with open(os.path.join(plugins_dir, "VERSION")) as f:
+                ver = f.read().strip()
+        except (OSError, IOError):
+            ver = ""
+        ver_note = f" (deployed payload {ver})" if ver else ""
+        return (True, f"cluster tools asserted against deployed payload: "
+                      f"{len(expected_tools)} tools + {len(expected_files)} "
+                      f"modules all present{ver_note}", None)
+
+    named = [f for f in missing_files] + [t for t in missing_tools]
+    try:
+        with open(os.path.join(plugins_dir, "VERSION")) as f:
+            ver = f.read().strip()
+        ver_note = f" (deployed payload VERSION {ver})" if ver else ""
+    except (OSError, IOError):
+        ver_note = ""
+    detail = (f"{_CLUSTER_TOOLS_CATEGORY}: {', '.join(named)}{ver_note} — "
+              f"declared by repo {repo_dir} (__init__.py registry"
+              f"{' + plugin.yaml' if _manifest_tools(repo_dir) else ''})")
+    next_step = ("deploy the repo payload: hscc-bootstrap/bootstrap.sh (or "
+                 "install_payload.py) then re-run verify. If this is a "
+                 "pending-release gap (deployed payload predates the repo "
+                 "tools — GAP-A-5), it closes with the next release bootstrap.")
+    return False, detail, next_step
+
+
+def check_plugins(plugins_dir=None, repo_root=None):
     """Check that the hscc-commands plugin dir exists and contains core commands.
 
     Looks for \"workers-up\", \"cluster-restart\", \"template\" strings in __init__.py.
+
+    GAP-F-8 second leg: also asserts the DEPLOYED hscc-cluster payload
+    actually carries every tool the repo-side registry/manifest declares
+    (see _cluster_tools_verdict). The core-commands verdict strings are
+    preserved verbatim for existing consumers; the cluster leg can only ADD
+    signal — every unassertive case keeps the row's legacy shape. ``repo_root``
+    defaults to verify.py's own tree (same convention as check_plugin_payload).
     """
     if plugins_dir is None:
         plugins_dir = os.path.expanduser("~/.hermes/plugins")
@@ -100,9 +269,20 @@ def check_plugins(plugins_dir=None):
         return {"name": "plugins", "ok": True, "detail": f"skipped: {exc}"}
 
     missing = [s for s in required if s not in source]
-    if not missing:
-        return {"name": "plugins", "ok": True, "detail": "all core commands found"}
-    return {"name": "plugins", "ok": False, "detail": f"missing: {', '.join(missing)}"}
+    core_ok = not missing
+    detail = ("all core commands found" if core_ok
+              else f"missing: {', '.join(missing)}")
+
+    try:
+        c_ok, c_extra, c_next = _cluster_tools_verdict(
+            plugins_dir, repo_root or _repo_root())
+    except Exception as exc:  # pragma: no cover - defense: never abort the row
+        c_ok, c_extra, c_next = None, f"cluster tools not asserted ({exc})", None
+    result = {"name": "plugins", "ok": core_ok and c_ok is not False,
+              "detail": f"{detail}; {c_extra}"}
+    if c_ok is False:
+        result["next_step"] = c_next
+    return result
 
 
 def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
@@ -248,11 +428,52 @@ def _live_stream_intervals():
         return {}
 
 
+def _json_shape_name(value):
+    """Short, stable name for a JSON value's shape, used when a state file is
+    reported as ``unrecognized schema`` (GAP-F-1): the operator should see
+    ``list`` / ``str`` / ``int`` / ``float`` / ``bool`` / ``null``, not a dump
+    of the file's contents (a ledger can hold 8 days of samples)."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return f"list len={len(value)}"
+    if isinstance(value, bool):
+        return "bool"
+    return type(value).__name__
+
+
+def _watcher_stream_names():
+    """Stamp names owned by the cron watchers (GAP-B-4), as a set.
+
+    Their liveness verdict belongs to the doctor row
+    (``cron_watchers.doctor_check``), NOT to ``check_daemon_streams``: the
+    daily dep-watcher would be RED under the flat 600 s window 23 h of every
+    day, and a dead watcher must warn rather than fail the cluster smoke test.
+    Kept in sync with the cadence map above by the same import-defence rule —
+    an unavailable module means no exclusions, which only restores the
+    pre-GAP-B-4 behaviour for streams that did not exist before it.
+    """
+    try:
+        from .cron_watchers import STREAMS
+        return set(STREAMS)
+    except Exception:
+        return set()
+
+
 def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     """Check all daemon state files are healthy and recent.
 
     OK if every *.json has ok==True and last_check within max_age_s of now,
     EXCEPT streams that are deliberately down by an intentional autodown.
+
+    SCHEMA TOLERANCE (GAP-F-1). The state dir is shared with non-stream
+    writers — cards-monitor's ``kmon_orch_tokens.json`` token ledger is a
+    top-level JSON list — so no file shape may ever crash this check or abort
+    the loop: a non-dict JSON file is reported ``unrecognized schema`` and
+    skipped. A file that is a dict but carries neither ``ok`` nor
+    ``last_check``/``timestamp`` asserts nothing, so it is reported
+    ``not-checked`` and the row goes UNVERIFIED (``ok=None``), never green
+    (GAP-F-2 — an aggregate that asserts nothing must not claim health).
 
     An intentional, operator-configured teardown is not a fault: while the
     whole serving layer is down by design, the serving streams (watchdog, dgx,
@@ -289,6 +510,10 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         max_age_s = 600
     if stream_intervals is None:
         stream_intervals = _live_stream_intervals()
+    # Cron-watcher stamps (GAP-B-4) are judged by the doctor row, not here —
+    # see _watcher_stream_names(). Excluded before the count so the healthy
+    # total stays "streams the daemon owns".
+    watcher_streams = _watcher_stream_names()
 
     # How long each stream may stay silent before it is "stale": at least the
     # caller's flat window, but never less than ~2 full check cycles — so a
@@ -311,12 +536,28 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         return {"name": "daemon_streams", "ok": True, "detail": f"skipped: {exc}"}
 
     json_files = [e for e in entries if e.endswith(".json")]
+    # Cron-watcher stamps are NOT daemon streams: their liveness verdict belongs
+    # to the GAP-B-4 doctor row (cron_watchers.doctor_check), which knows a
+    # daily cadence. Judged here they would be RED 23 hours of every day under
+    # the flat 600 s window, and a dead watcher must warn rather than fail the
+    # cluster smoke test. Excluded before the count so the healthy total stays
+    # "streams the daemon owns".
+    watcher_files = [f for f in json_files if f[:-5] in watcher_streams]
+    json_files = [f for f in json_files if f[:-5] not in watcher_streams]
     if not json_files:
+        if watcher_files:
+            return {"name": "daemon_streams", "ok": True,
+                    "detail": "no daemon stream files yet "
+                              f"({len(watcher_files)} cron-watcher stamp(s) "
+                              "excluded — see the 'cron watchers' check)"}
         return {"name": "daemon_streams", "ok": True, "detail": "no state files found"}
 
     now = datetime.now(timezone.utc)
     issues = []
     expected = []
+    unchecked = []      # GAP-F-2: dict-shaped but nothing assertable
+    unrecognized = []   # GAP-F-1: non-dict JSON (e.g. the cards-monitor ledger)
+    checked = 0
     window_verdict = _intentional_window_verdict()
     window_label = (_intentional_window_label(window_verdict)
                     if window_verdict else None)
@@ -330,7 +571,35 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
             issues.append(f"{fn}: unreadable")
             continue
 
+        # GAP-F-1 (schema tolerance). The state dir is shared with writers
+        # that are NOT daemon streams: cards-monitor's token ledger
+        # (kanban_live.py LEDGER_PATH, kmon_orch_tokens.json) is a top-level
+        # JSON LIST of [ts, in, out] samples. This check used to call
+        # ``data.get("ok")`` unconditionally and die with AttributeError —
+        # which did not just fail the row, it killed the ENTIRE verify table
+        # (every later check, incl. the served-profile endpoint guard, never
+        # ran and `verify --json` printed nothing). A file whose shape this
+        # check does not understand is named and skipped: never crashed on,
+        # never silently counted as healthy, and never aborts the loop.
+        if not isinstance(data, dict):
+            unrecognized.append(
+                f"{fn}: unrecognized schema ({_json_shape_name(data)})")
+            continue
+
         ok = data.get("ok")
+        has_ts = bool(data.get("last_check") or data.get("timestamp"))
+        if ok is None and not has_ts:
+            # GAP-F-2 (assert-nothing is not green). Live shapes this used to
+            # wave through as "healthy" while asserting nothing at all:
+            # orch_waker.json (stopgap {last,pending,sent}), kanban_paused.json
+            # ({}), reasoning_policy.json (config snapshot). No `ok`, no
+            # timestamp ⇒ nothing here is verifiable ⇒ the row goes
+            # UNVERIFIED (ok=None) and names the file — "could not check
+            # this", never a false green.
+            unchecked.append(f"{fn}: not-checked (no ok/timestamp)")
+            continue
+
+        checked += 1
         if ok is False:
             # A stream is excused ONLY when an intentional autodown window is
             # in effect (down by design or waking) AND the stream itself says
@@ -357,6 +626,11 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
             except (ValueError, TypeError):
                 issues.append(f"{fn}: unparseable timestamp ({ts_str})")
 
+    # Everything this check could NOT assert anything about (bad shape or no
+    # ok/timestamp) is surfaced by name on EVERY verdict path, so a real
+    # failure can never hide the un-verifiable files and vice versa.
+    aside = "; ".join(unrecognized + unchecked)
+
     expected_note = (
         f"{window_label}: {'; '.join(expected)}"
         if expected else ""
@@ -365,15 +639,27 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         detail = "; ".join(issues)
         if expected_note:
             detail = f"{expected_note}; REAL FAILURES: {detail}"
+        if aside:
+            detail = f"{detail}; {aside}"
         return {"name": "daemon_streams", "ok": False, "detail": detail}
 
+    # Nothing failed. But a file this check could not assert anything about
+    # makes the row UNVERIFIED (ok=None — run_all's established vocabulary:
+    # "could not check this" is not "this is broken" and not "all green").
+    partial = bool(unchecked or unrecognized)
+    head = (f"checked={checked} healthy" if partial
+            else f"all {len(json_files)} streams healthy")
     if expected_note:
         return {
-            "name": "daemon_streams", "ok": True,
-            "detail": f"ok={len(json_files) - len(expected)} healthy, {expected_note}",
+            "name": "daemon_streams", "ok": None if partial else True,
+            "detail": (f"ok={checked - len(expected)} healthy, {expected_note}"
+                       + (f"; {aside}" if aside else "")),
         }
+    if partial:
+        return {"name": "daemon_streams", "ok": None,
+                "detail": f"{head}; {aside}"}
 
-    return {"name": "daemon_streams", "ok": True, "detail": f"all {len(json_files)} streams healthy"}
+    return {"name": "daemon_streams", "ok": True, "detail": head}
 
 
 def check_proxy(url=None, timeout=None):

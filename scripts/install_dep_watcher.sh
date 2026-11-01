@@ -26,10 +26,26 @@ HERMES_SCRIPTS="$HERMES_HOME/scripts"
 HERMES="$HOME/.hermes/hermes-agent"
 HERMES_BIN="$HERMES/venv/bin/hermes"
 [ -x "$HERMES_BIN" ] || HERMES_BIN="hermes"
+# Liveness marker helper lives in the deployed hscc_daemon payload (GAP-B-4).
+HERMES_PLUGINS="$HERMES_HOME/plugins"
+[ -d "$HERMES_PLUGINS" ] || HERMES_PLUGINS="$HOME/.hermes/plugins"
 
 if [ "${1:-}" = "--uninstall" ]; then
   "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
   rm -f "$HERMES_SCRIPTS/dep_pr_watcher.py"
+  # Drop the liveness install marker too (GAP-B-4), or the doctor keeps
+  # reporting a watcher nobody installed as "installed but never ran".
+  python3 - <<'PY' 2>/dev/null || true
+import os, sys
+p = os.path.expanduser("~/.hermes/plugins")
+if os.path.isdir(p) and p not in sys.path:
+    sys.path.insert(0, p)
+try:
+    from hscc_daemon import cron_watchers as cw
+except ImportError:
+    raise SystemExit(0)
+cw.mark_removed("dep_pr_watcher")
+PY
   echo "removed cron job '$JOB' and the installed poller"
   exit 0
 fi
@@ -44,6 +60,23 @@ cp "$SCRIPT_DIR/dep_pr_watcher.py" "$HERMES_SCRIPTS/dep_pr_watcher.py"
 "$HERMES_BIN" cron create "$SCHEDULE" \
   --no-agent --script dep_pr_watcher.py \
   --name "$JOB"
+
+# Liveness marker (GAP-B-4): the doctor's staleness check must be able to tell
+# "installed, but the cron job never completed a pass" (the 17-consecutive-
+# failures incident, t_3aadd2c0) from "never configured". Written through
+# hscc_daemon/cron_watchers.py so the file schema stays in ONE place. Best-
+# effort: a missing runtime module must not fail the install.
+python3 - "$HERMES_PLUGINS" "$SCHEDULE" <<'PY' || echo "note: could not write the liveness install marker (doctor will report this watcher as never-installed)"
+import os, sys
+plugins, schedule = sys.argv[1], sys.argv[2]
+if os.path.isdir(plugins) and plugins not in sys.path:
+    sys.path.insert(0, plugins)
+try:
+    from hscc_daemon import cron_watchers as cw
+except ImportError:
+    sys.exit(1)
+sys.exit(0 if cw.mark_installed("dep_pr_watcher", schedule) else 1)
+PY
 
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
 echo "inspect:  $HERMES_BIN cron list"

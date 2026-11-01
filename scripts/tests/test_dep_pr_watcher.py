@@ -4,7 +4,9 @@ import io
 import json
 import os
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dep_pr_watcher as w  # noqa: E402
@@ -91,6 +93,119 @@ def test_silent_when_idle(monkeypatch):
     with redirect_stdout(out):
         rc = w.main()
     assert rc == 0 and out.getvalue() == ""  # empty stdout => no delivery
+
+
+# ── liveness stamp on every pass (GAP-B-4, t_87663869) ─────────────────────
+# The dep-watcher once failed 17 consecutive daily runs unnoticed
+# (t_3aadd2c0): an idle run that leaves no trace is indistinguishable from a
+# dead cron job. Every main() path must stamp; the stamp must never be able
+# to break the watcher's real work; stdout must stay exactly as delivery-
+# sensitive as before (hermes cron run history treats stdout as the record).
+
+class _FakeCW:
+    def __init__(self, ok=True):
+        self.calls = []
+        self.fail_calls = []
+        self.ok = ok
+
+    def stamp(self, stream, **fields):
+        self.calls.append((stream, fields))
+        return self.ok
+
+    def stamp_failure(self, stream, error):
+        self.fail_calls.append((stream, str(error)))
+        return True
+
+
+def test_idle_pass_stamps(monkeypatch):
+    """The GAP-B-4 core: 'ran, nothing to do' STILL stamps — that is the only
+    thing separating a healthy idle watcher from a dead one."""
+    fake = _FakeCW()
+    monkeypatch.setattr(w, "_stamp_module", lambda: fake)
+    monkeypatch.setattr(w, "list_review_prs", lambda: [])
+    with redirect_stdout(io.StringIO()):
+        assert w.main() == 0
+    assert fake.calls == [("dep_pr_watcher",
+                           {"prs": 0, "cards": 0, "idle": True})]
+
+
+def test_active_pass_stamps_with_counts(monkeypatch):
+    fake = _FakeCW()
+    monkeypatch.setattr(w, "_stamp_module", lambda: fake)
+    monkeypatch.setattr(w, "list_review_prs", lambda: [_pr(9)])
+    monkeypatch.setattr(w, "ensure_cards", lambda prs: [(9, "t_9")])
+    monkeypatch.setattr(w, "_deliver", lambda body: None)
+    with redirect_stdout(io.StringIO()):
+        assert w.main() == 0
+    assert fake.calls == [("dep_pr_watcher",
+                           {"prs": 1, "cards": 1, "idle": False})]
+
+
+def test_stamp_missing_is_loud_on_stderr_not_stdout(monkeypatch):
+    """No stamp module -> the watcher still does its job silently on stdout,
+    but the lost detector is printed to stderr (run history shows it)."""
+    monkeypatch.setattr(w, "_stamp_module", lambda: None)
+    monkeypatch.setattr(w, "list_review_prs", lambda: [])
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        assert w.main() == 0
+    assert out.getvalue() == ""          # idle delivery semantics unchanged
+    assert "not importable" in err.getvalue()
+
+
+def test_stamp_write_failure_warns(monkeypatch):
+    fake = _FakeCW(ok=False)
+    monkeypatch.setattr(w, "_stamp_module", lambda: fake)
+    monkeypatch.setattr(w, "list_review_prs", lambda: [])
+    err = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err):
+        assert w.main() == 0
+    assert "stamp write failed" in err.getvalue()
+
+
+def test_main_never_raises_from_the_stamp_path(monkeypatch):
+    """A stamp that EXPLODES must not take the watcher down — the watcher's
+    real work outranks its own liveness signal."""
+    class Exploding:
+        def stamp(self, *a, **k):
+            raise RuntimeError("stamp blew up")
+    monkeypatch.setattr(w, "_stamp_module", lambda: Exploding())
+    monkeypatch.setattr(w, "list_review_prs", lambda: [])
+    with redirect_stdout(io.StringIO()):
+        assert w.main() == 0
+
+
+def test_crash_is_stamped_as_a_failed_pass(monkeypatch):
+    """run_with_failure_stamp (the __main__ contract) records 'cron fired and
+    the script raised' (ok=False) — distinct from both 'never fired' (stale)
+    and a healthy idle pass — and re-raises untouched."""
+    fake = _FakeCW()
+    monkeypatch.setattr(w, "_stamp_module", lambda: fake)
+
+    def boom():
+        raise ValueError("gh exploded")
+    monkeypatch.setattr(w, "list_review_prs", boom)
+    with pytest.raises(ValueError, match="gh exploded"):
+        w.run_with_failure_stamp()
+    assert fake.fail_calls == [("dep_pr_watcher", "gh exploded")]
+
+
+def test_clean_exit_never_stamps_a_failure(monkeypatch):
+    """SystemExit/return from main must not leave an ok=False stamp — a clean
+    idle pass must read healthy, not 'failing'."""
+    fake = _FakeCW()
+    monkeypatch.setattr(w, "_stamp_module", lambda: fake)
+    monkeypatch.setattr(w, "list_review_prs", lambda: [])
+    assert w.run_with_failure_stamp() == 0
+    assert fake.fail_calls == []
+
+
+def test_stamp_module_resolves_the_sibling_file(tmp_path, monkeypatch):
+    """_stamp_module must find hscc_daemon/cron_watchers.py in a bare repo
+    checkout (the installed runtime covers the other homes)."""
+    monkeypatch.setitem(sys.modules, "hscc_daemon", None)  # force fallback
+    cw = w._stamp_module()
+    assert cw is not None and cw.CHECK_NAME.startswith("cron watchers")
 
 
 def test_reports_created_card(monkeypatch):

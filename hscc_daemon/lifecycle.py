@@ -421,7 +421,9 @@ def restart_vllm(verify_fn=None):
 
 def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                       restart_vllm_fn=None, send_macos_notification_fn=None):
-    """Watchdog cycle (every 30s): check DGX+gateway, auto-restart vLLM, block on 3 failures."""
+    """Watchdog cycle — one per watchdog tick (cadence =
+    ``PERIODIC_INTERVALS["watchdog"]``, the SOT since GAP-B-6): check
+    DGX+gateway, auto-restart vLLM, block on 3 failures."""
     from .health import check_dgx, check_gateway
     from .desktop import send_macos_notification
     from .state import write_state

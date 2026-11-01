@@ -48,6 +48,24 @@ PERIODIC_INTERVALS = {
     # stays a no-op that STILL stamps, so the stream never goes dark and
     # staleness never false-fires on a deliberately-disabled feature.
     "orch_waker": 30,
+    # GAP-B-6 (t_2039a319): the two loops the daemon runs OUTSIDE the CHECKS
+    # table — pipeline_watchdog (lifecycle.py) and trigger_engine (trigger.py),
+    # each with its own dedicated thread in run_daemon_loop. Their cadences used
+    # to be private `stop_event.wait(30)` / `wait(15)` literals inside the loop
+    # bodies, so the SOT said nothing about them even though BOTH already stamp
+    # a stream state file every tick (watchdog.json / triggers.json). verify's
+    # per-stream rule keys off this dict by STATE-FILE NAME, so those two
+    # streams fell through to the flat `max_age_s` window and a tightened window
+    # could cry wolf on a healthy daemon between ticks. They are keys here now —
+    # read by the two loops (`run_watchdog_loop` / `run_trigger_loop`) instead of
+    # being restated as literals.
+    #
+    # They are deliberately NOT in the CHECKS table: their tick bodies take
+    # arguments and are already supervised by their own dedicated threads, so a
+    # CHECKS row would start a SECOND thread ticking the same machinery (a real
+    # behaviour change). Declaring the cadence here is what the SOT rule asks
+    # for; how the tick is dispatched stays where it was.
+    "watchdog": 30, "triggers": 15,
 }
 
 
@@ -729,15 +747,22 @@ def run_daemon_loop():
         "orch_waker": orch_waker.check_orch_waker,
     }
 
+    # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the
+    # same dict the CHECKS threads and verify's staleness math read. The
+    # previous `wait(30)` / `wait(15)` literals made these two streams
+    # unrepresentable in the SOT even though each stamps its state file every
+    # tick; the cadence values themselves are unchanged.
     def run_watchdog_loop():
+        watchdog_interval = STREAMS["watchdog"]
         while not stop_event.is_set():
             try:
                 pipeline_watchdog()
             except Exception as e:
                 log(f"Watchdog error: {e}", "ERROR")
-            stop_event.wait(30)
+            stop_event.wait(watchdog_interval)
 
     def run_trigger_loop():
+        trigger_interval = STREAMS["triggers"]
         while not stop_event.is_set():
             try:
                 trigger_engine(
@@ -749,7 +774,7 @@ def run_daemon_loop():
                 )
             except Exception as e:
                 log(f"Trigger engine error: {e}", "ERROR")
-            stop_event.wait(15)
+            stop_event.wait(trigger_interval)
 
     def run_engine_wedge_recover_loop():
         """Guarded auto-recovery for a wedged serving unit (E stream).
@@ -820,12 +845,12 @@ def run_daemon_loop():
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
     threads.append(wd)
-    log("Started watchdog thread (interval=30s)")
+    log("Started watchdog thread (interval=%ss)" % STREAMS["watchdog"])
 
     te = threading.Thread(target=run_trigger_loop, daemon=True)
     te.start()
     threads.append(te)
-    log("Started trigger engine thread (interval=15s)")
+    log("Started trigger engine thread (interval=%ss)" % STREAMS["triggers"])
 
     log("All threads started, daemon loop running (polling mode)")
 

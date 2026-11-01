@@ -6,7 +6,7 @@ Pure shell scripts (no LLM) that monitor the HSCC cluster + Mac dispatcher host.
 
 | Script | Purpose |
 |---|---|
-| `hscc_proxy_watchdog.sh` | Probe `localhost:4000` (sparkrun LiteLLM proxy). If unreachable, restart via `sparkrun proxy start --cluster hscc --port 4000`. Covers the stale-PID regression where the proxy dies and sparkrun doesn't auto-restart it. |
+| `hscc_proxy_watchdog.sh` | Probe `localhost:4000` (sparkrun LiteLLM proxy). If unreachable, restart via `sparkrun proxy start --cluster hscc --port 4000`. Covers the stale-PID regression where the proxy dies and sparkrun doesn't auto-restart it. **Manual one-shot only — do not schedule it**; the daemon's `proxy` stream owns this supervision (see *Retiring the superseded watchdog cron jobs*). |
 | `hscc_worker_health.sh` | Probe all 4 vLLM endpoints (`100.64.0.1/.2/.3/.4:8000`). Verifies each serves the expected model id; reports unreachable hosts and model-id mismatches. |
 | `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Output is saved to the job's run history (`hermes cron list`); set `--deliver` to a real gateway target to push it to a channel. |
 | `hscc_nas_watchdog.sh` | NAS health: ping the QNAP NAS (`100.64.0.x`), check Mac `/Volumes/NAS` mount listability. Falls back to project docs for remediation. |
@@ -39,9 +39,7 @@ chmod +x ~/.hermes/scripts/hscc_*.sh
 Then register the cron jobs (Hermes gateway must be running so the cron ticker picks them up):
 
 ```bash
-hermes cron create 'every 5m'   --name 'hscc-proxy-watchdog'  --no-agent --script hscc_proxy_watchdog.sh
-hermes cron create 'every 10m'  --name 'hscc-worker-health'   --no-agent --script hscc_worker_health.sh
-hermes cron create 'every 4h'   --name 'hscc-nas-watchdog'    --no-agent --script hscc_nas_watchdog.sh
+hermes -p default cron create 'every 10m'  --name 'hscc-worker-health'   --no-agent --script hscc_worker_health.sh
 
 # Cluster digest — a periodic summary; its stdout is saved to the job's run
 # history (visible in `hermes cron list` / `hermes cron runs`). For the digest
@@ -49,10 +47,65 @@ hermes cron create 'every 4h'   --name 'hscc-nas-watchdog'    --no-agent --scrip
 # `bot-chat` to inject into a local profile's Bot Chat, or a gateway platform
 # home channel like `--deliver discord`). There is no "desktop" delivery
 # target — `--deliver desktop` is accepted but silently delivers nowhere.
-hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh
+hermes -p default cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh
 ```
 
-Verify with `hermes cron list`.
+Verify with `hermes -p default cron list`.
+
+**Do NOT create `hscc-proxy-watchdog` or `hscc-nas-watchdog` jobs.** The two
+`cron create` lines for them that used to sit in this block are removed, not
+just commented: the daemon already supervises both subjects (see the next
+section), and a cron copy of the proxy probe actively fights the daemon's own
+relaunch logic.
+
+## Retiring the superseded watchdog cron jobs
+
+`hscc-proxy-watchdog` (every 5m) and `hscc-nas-watchdog` (every 240m) are
+superseded by daemon check streams and must be **deleted**, not left paused. A
+paused job still shows as live inventory, still appears in every `cron list`
+that an operator or an auditor reads, and stays one `cron resume` away from
+fighting the daemon again. The repo side is already retired: no `cron create`
+command anywhere on main can bring either one back — the last two such lines
+were removed by t_048fe42e (GAP-B-5), right above.
+
+### Ownership: who supervises what
+
+| subject | cron entry (paused since 2026-06-20) | who owns it now |
+|---|---|---|
+| sparkrun LiteLLM proxy :4000 | `hscc-proxy-watchdog`, `every 5m`, job `42fa8a0b8c0c` | daemon `proxy` stream: `PERIODIC_INTERVALS["proxy"] = 60` (`hscc_daemon/daemon_ops.py:34`) → `check_proxy` (`hscc_daemon/health.py:1326`), which relaunches via `sparkrun proxy start` behind a durable 300 s cooldown and writes the state `hscc verify` reads |
+| NAS reachability + Mac mount | `hscc-nas-watchdog`, `every 240m`, job `06c8e22d00f1` | daemon `nas` stream: `PERIODIC_INTERVALS["nas"] = 900` (`hscc_daemon/daemon_ops.py:34`) → `check_nas` (`hscc_daemon/health.py:1810`), alerting through the `nas-down` trigger rule (`hscc-bootstrap/triggers.default.json:60`) |
+
+The two scripts stay in the tree on purpose: they remain legitimate one-shot,
+manual probes (and `hscc_nas_watchdog.sh` runs with no daemon at all). What is
+retired is their *scheduling*.
+
+### Retire commands (operator-side)
+
+These are the exact, verified commands (2026-11-01) — run them, do not
+paraphrase them. **The entries are Hermes cron jobs in the `default` profile's
+store, not OS crontab lines**: `crontab -l` on the dispatcher host returns `no
+crontab for desac`, so checking the system crontab proves nothing. (Audit B
+filed this gap as "cron entries"; the table above records the accurate store.)
+
+```bash
+# 1. Look before you delete — expect BOTH jobs, [paused], Script: as listed:
+hermes -p default cron list | grep -A3 'hscc-proxy-watchdog\|hscc-nas-watchdog'
+
+# 2. Delete the two stale jobs (job ids from the live `cron list` above):
+hermes -p default cron remove 42fa8a0b8c0c     # hscc-proxy-watchdog
+hermes -p default cron remove 06c8e22d00f1     # hscc-nas-watchdog
+
+# 3. Verify they are gone — expect NO output:
+hermes -p default cron list --all | grep 'watchdog' ; echo "rc=$? (1 = gone)"
+```
+
+If your store shows different job ids, get them from step 1 (`cron remove`
+takes only a job id); never paste an id remembered from another machine.
+
+Do NOT remove `hscc-worker-health` / `hscc-cluster-digest` here — GAP-B-5 names
+only the two watchdogs, and those jobs are out of scope. If you decide they too
+are redundant, that is a separate call (and GAP-B-4 asks for a staleness probe
+before anything else is retired on vibes).
 
 ## Address guard (`address_guard.py`) — runs on every commit
 

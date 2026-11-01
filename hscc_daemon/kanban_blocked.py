@@ -17,8 +17,8 @@ plus block comments) before the operator decides to recover it.
 CRITICAL reuse: like autodown's ``_has_active_work``, this module never
 re-implements board enumeration. It reuses ``autodown._load_kanban_db_or_default``
 for the import and ``autodown._enum_board_names`` (added by card t_e751e652)
-for board slugs, falling back to the same ``list_boards()`` seam inline when
-that helper isn't present yet. So the boards "that block autodown" are exactly
+for board slugs — forwarded to, never copied, so there is exactly one
+enumeration in the tree. So the boards "that block autodown" are exactly
 the boards "that blocked lists" — a divergence would be its own bug.
 
 Recovery is NEVER automatic and NEVER bulk: ``--recover`` takes exactly ONE
@@ -109,24 +109,20 @@ List every BLOCKED task across ALL boards, with why it's blocked
 def _board_names(kanban_db):
     """Enumerate board slugs via the SAME seam autodown._has_active_work uses.
 
-    Prefers ``autodown._enum_board_names`` (added by card t_e751e652) so this
-    module and autodown agree exactly; falls back to the same ``list_boards()``
-    logic inline when that helper isn't merged yet (this card's own window).
-    A lib without ``list_boards`` is treated as the single ``default`` board
-    (back-compat), mirroring autodown.py:172-183.
+    One line, on purpose: this forwards to ``autodown._enum_board_names``
+    (added by card t_e751e652, since merged) exactly the way the other
+    consumers do (kill_switch.py, kanban_live.py, dispatcher_wedge.py). The
+    enumeration — including the "lib that cannot list boards means the single
+    ``default`` board" back-compat rule and the raise-on-failure contract — is
+    owned by that helper, so there is one code path, not two.
+
+    (GAP-C-2: this function used to carry an inline copy of the helper's body
+    as a "not merged yet" fallback. That window closed when t_e751e652 merged,
+    the copy never ran, and a second copy of the enumeration is exactly the
+    divergence this module's CRITICAL reuse note forbids. Guarded by
+    ``tests/test_kanban_blocked.py::TestBoardEnumerationSeam``.)
     """
-    helper = getattr(autodown, "_enum_board_names", None)
-    if callable(helper):
-        return helper(kanban_db)
-    multi = hasattr(kanban_db, "list_boards")
-    if multi:
-        try:
-            boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
-        except Exception:
-            boards = [None]
-    else:
-        boards = [None]
-    return boards, multi
+    return autodown._enum_board_names(kanban_db)
 
 
 def _age_days(created_at, now):

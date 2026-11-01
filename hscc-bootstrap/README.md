@@ -10,7 +10,11 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 2. **Detect + Configure** — reads the cluster from `sparkrun cluster list`; picks
    orchestrator + recipe (defaults under `--yes`); suggests a node-count template.
 3. **Install: plugin files** — copies the plugin tree into `~/.hermes/plugins/`
-   (backup-then-overwrite; `--no-backup` to overwrite in place). The repo is the
+   (backup-then-overwrite; `--no-backup` to overwrite in place). Deployed files
+   that differ from the payload (operator patches) are preserved to
+   `plugins-backups/<entry>.drifted.bak-<ts>/` and flagged loudly — never
+   silently overwritten, never auto-merged; `--force` opts in to a silent
+   overwrite (GAP-E-1). The repo is the
    source of truth; the runtime is a copy. Hard-stops on copy failure.
 3b. **Install: hscc CLI entry point** — installs `hscc-cli` INTO the Hermes venv
    (`install_cli.py`) so the console script's shebang points at the Hermes venv
@@ -87,7 +91,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | `doctor_node_recovery.py` | the doctor's per-node node-recovery check (watchdog armed + panic sysctls in sync), read-only over sparkrun ssh; reuses `hscc-cluster/node_recovery.py` + `install_autoreboot.py` as its single source of truth |
 | `doctor_role_soul.py` | the doctor's role-SOUL identity check (each worker SOUL's `## Role:` header vs its profile dir name and its spec, any heading `compose_soul()` cannot emit, and — since t_5b362400 — the CONTENT loss list: live lines a positional compose-vs-live diff shows `generate` would delete, with sandbox identifiers masked). Bridge only — the audit lives in `hscc-roles/role_soul_check.py`, which owns `PROFILES_DIR`/`ROLES_DIR`/`compose_soul`; read-only, WARNING-severity, honest ERROR when the hscc-roles sibling is absent |
 | `detect.py` | parse `sparkrun cluster list` |
-| `install_payload.py` | copy repo → runtime (backup/guard/exclude tests) |
+| `install_payload.py` | copy repo → runtime (backup/drift-guard/exclude tests); drifted deployed files are preserved to `plugins-backups/*.drifted.bak-*` + flagged, `--force` overwrites silently |
 | `install_cli.py` | durable `hscc` CLI entry-point install (into Hermes venv) — shebang correct by construction, verify/repair on drift |
 | `enable_plugins.py` | idempotent config wiring |
 | `install_soul.py` | SOUL + ops personality (sentinel blocks) |
@@ -98,7 +102,8 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 
 ## Flags
 `--yes` non-interactive · `--dry-run` print every planned write, perform none ·
-`--force` regenerate serving.json · `--no-backup` ·
+`--force` regenerate serving.json AND overwrite operator-drifted plugin files
+without the preserve-and-flag ceremony (GAP-E-1) · `--no-backup` ·
 `--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli`.
 
 ## Running from a brew libexec tree (t_bc5a3fee, real layout pinned t_0f5616fd)

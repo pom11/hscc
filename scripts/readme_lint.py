@@ -214,6 +214,9 @@ EXTERNAL = frozenset({
     # containers / net / observability
     "docker", "tailscale", "ssh", "scp", "rsync", "curl", "wget", "ping",
     "jq", "sqlite3", "nvidia-smi",
+    # scheduler CLIs (scripts/README.md quotes `crontab -l` to prove the
+    # retired watchdog entries are Hermes cron jobs, not OS crontab lines)
+    "crontab",
     # coreutils / shell verbs
     "bash", "sh", "zsh", "cat", "ls", "cp", "mv", "rm", "mkdir", "rmdir",
     "chmod", "chown", "ln", "touch", "echo", "printf", "grep", "rg", "sed",
