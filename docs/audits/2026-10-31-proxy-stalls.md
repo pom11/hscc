@@ -461,3 +461,342 @@ draining" from "wedged before accept".
   the escalation machinery exists and works when reached (proven by the 10-27
   and 10-29 `HOLLOW`/`reaping ORPHAN` lines); the gating logic above it does
   not reach it during these episodes.
+
+---
+
+## Question (b) — escalation forensics (t_cc580973, follow-up)
+
+§2(b) b4 and §4 item 3 left one thing open: **why did window A's three
+escalated repairs log no kill/reap line and end in failure?** This section
+answers it per escalation. Log forensics only — nothing live was touched,
+nothing was restarted, and no code changed.
+
+### b5 — the headline: the kill path WAS reached; it exited through a SILENT branch
+
+The three candidate explanations were (i) kill path never reached, (ii) reached
+but the kill lost its children, (iii) output lost with the timeout. The logs
+separate them cleanly, because the kill/reap lines are written by the **daemon's
+own logger**, not by a child process: `log()` (`hscc_daemon/daemon_ops.py:498`,
+timestamped write to `~/.hscc/daemon.log`) is what emits
+`killing HOLLOW tracked proxy PID` (`health.py:1243-1244`) and
+`reaping ORPHAN proxy listener` (`health.py:1118-1119`). A discarded subprocess
+output cannot suppress those. **So candidate (iii) is REFUTED as the reason the
+kill/reap lines are missing** — it explains only the missing *verdict text*
+(see b8).
+
+Was the kill path reached? The escalation banner at `health.py:1289-1291` fired
+in all three windows (`daemon.log:158956`, `:159090`, `:159266`) and the very
+next statement is an **unconditional** call to `_proxy_kill_hollow_tracked`
+(`health.py:1292`). There is no branch between the banner and the kill. Given
+that call ran and no HOLLOW line appeared, `_proxy_kill_hollow_tracked` must
+have exited through one of its **five exits** — two of which log nothing:
+
+| exit | `health.py` | logs? | count in whole `daemon.log` |
+|---|---|---|---|
+| tracked PID is None → `return False` | `:1227-1228` | **silent** | — |
+| PID already dead (`ProcessLookupError`) → `return True` | `:1231-1232` | **silent** | — |
+| cannot inspect PID | `:1233-1236` | ERROR | 0 |
+| cmdline not litellm → refuse | `:1238-1242` | ERROR | 0 |
+| kill proceeds | `:1243-1244` | WARN | 4 (10-27 ×2, 10-29 ×2) |
+
+The two ERROR-bearing refusals are at **zero occurrences across the entire
+log**, so a refused kill is ruled out. That leaves exactly two shapes: the
+tracked PID was **None**, or it was **already dead**. Both are silent, and the
+same silence infects the other two inputs of the repair:
+
+- `_proxy_tracked_pid()` (`health.py:1076-1090`) returns **`None` with no log
+  line** whenever `sparkrun proxy status --json` fails — the 30 s `run_cmd`
+  timeout, a non-zero exit, and unparseable JSON all collapse into the same
+  `None` (`res["output"]` is dropped on every one of those paths).
+- `_proxy_listener()` (`health.py:1058-1073`) returns `(None, None)` on
+  `except Exception` — **silent** — and `lsof` gets `timeout=5` (`:1066-1067`).
+- `_reap_orphan_proxy_listener()` with no listener returns `True` in silence
+  (`health.py:1107-1108`).
+
+Two sparkrun facts make the two silent shapes decidable (paths in the
+read-only reference checkout `/Users/desac/sparkrun`):
+
+- `is_running()` — what makes `proxy start` print `already running (PID N)` —
+  is state-file PID + `process_exists(pid)` (**correction to §2(b) b1: that is
+  `proxy/_supervisor.py:987-992` in this checkout, not `:570-575`**), and the
+  refusal is raised at `api/proxy/_ops.py:532-535`, *after* the discovery sweep
+  (`:485`) — which is exactly why a refusal line appears below
+  `Discovering inference endpoints…` in #2 rather than above it.
+- When sparkrun's state file is empty/unreadable, `api.proxy.status()` returns
+  `known=False` (`_ops.py:653-654`) and the CLI prints `{"running": false}` —
+  **JSON with no `pid` key** (`cli/_proxy.py:315-318`). A daemon-side
+  `_proxy_tracked_pid` therefore reads `None` from a *successful* command. So
+  `sparkrun tracks None` has two causes the daemon cannot tell apart: the CLI
+  failed (timeout/rc/bad JSON → `health.py:1083-1084`, `:1087-1088`, silent) or
+  the state file was genuinely empty (also silent).
+
+**Verdict for #2 — the read failed, proven by contradiction.** #2's own
+`proxy start` printed `already running (PID 46269)`, and 46269 had printed the
+same line three times earlier in the same stall (`:158335` `22:55Z`,
+`:158706` `23:13Z`, `:158754` `23:15Z`) — a **live** tracked PID across #2's
+kill at `23:41:04Z`. A live tracked PID rules out the dead-PID exit; the
+`refusing to kill` ERROR is at 0 occurrences; and a plain start cannot empty
+the state file (it refuses after saving only `proxy.yaml`). Yet no HOLLOW line
+exists. Therefore `_proxy_tracked_pid()` returned `None` **while the state file
+held a live PID** — i.e. the 30 s `sparkrun proxy status --json` at
+`health.py:1082` itself failed (timeout, non-zero rc, or unparseable stdout) and
+said nothing. Same for the reap: the probe's own `timed out` mode proves a
+listener was accepting (see the paragraph above), so `port owner None` was
+either a wedged `lsof` or a wrong answer — never a free port. #2's kill and reap
+were both silently blind while the port was provably held.
+
+**Verdict for #1 — reached, silent exit through the failed-read shape.** The
+"state file was genuinely empty" option is closed by continuity: 46269 was
+**live in the state file from 22:55:19Z (`:158334`) to 23:44:59Z (`:159143`)** —
+two `is_running()` witnesses six minutes either side of #1's whole repair — and
+**no actor in between could clear it**: a refused `proxy start` writes nothing
+(`_ops.py:532-535` fires before any state write), and `sparkrun proxy stop`
+clears state only when the PID is *already gone* at check time
+(`_supervisor.py:970-978`: with `self._proc is None` the CLI's `_await_exit`
+timeout is 0.0, so a live PID ⇒ state kept; the comment says so: "Keep the PID
+while shutdown is pending"). A PID alive at 23:44:59Z cannot have exited at
+#1's stop ~23:29:30Z. So #1's `sparkrun tracks None` (verify line at
+`23:34:12`) was another failed read, like #2's — the kill saw a live PID it
+could not read. What is PROVEN either way: the kill ran and exited silently,
+and the port was **not** free at that moment — the daemon's probe at
+`23:29:07Z` was `timed out`, i.e. SYN accepted — so the `port owner None` that
+let the reap return True was wrong, and the repair advanced to a plain start
+over a still-held port.
+
+**Verdict for #3 — reached, silent exit, and this is the one where being blind
+did not matter.** Its probe was `[Errno 61] Connection refused` from `23:46:00Z`
+through `23:52:05Z`, so at its kill the port really was free and the tracked PID
+really was either absent or the dead 46269 — both silent, and both *correct*
+outcomes. Its start then succeeded (proofs in b7 #3) and wrote the state file
+that the verify read back as `91693`.
+
+### b6 — the correlation that names the mechanism: on the days the kills logged, every sparkrun shell-out worked
+
+The kill/reap lines are not random. Grouped by date:
+
+| date | escalation banners | kill/reap WARNs (HOLLOW + reap + SIGKILL escalation) | `structured sparkrun status unavailable` WARNs |
+|---|---|---|---|
+| 2026-10-27 | 1 | **2** | **0** |
+| 2026-10-29 | 6 | **13** | **0** |
+| 2026-10-30 (window A) | 3 | **0** | 27 (`FLEET VISIBILITY LOST` ×27) |
+| 2026-10-31 | 0 | 0 | 8 |
+
+`grep -c` over the whole `daemon.log` (coverage `2026-10-26T00:25Z` →
+`2026-11-01T05:04Z`): `killing HOLLOW` 4, `reaping ORPHAN` 7, `survived
+SIGTERM` 4, `refusing to kill` 0, `is the tracked PID` 0, `still present after
+reap` 0, `proxy repaired on` **0**. Every kill/reap line in the log belongs to a
+window where sparkrun's CLI was **reachable** (0 status-unavailable WARNs on
+10-27 and in the 10-29 episode); window A is the window where **every** sparkrun
+shell-out was failing — the daemon logged `structured sparkrun status
+unavailable` continuously through it (`daemon.log:158900, 158915, 158925 …`).
+
+That is the mechanism, and it is the same fault already banked as (c):
+**the repair's kill/reap decisions are driven by two sparkrun/lsof reads that
+fail silently in exactly the conditions that trigger a repair.** The kill path
+is not broken; it is *blind*. Its blindness is not reported because the two
+fail-loud paths (`refusing to kill`, `could not inspect`) only cover a
+recognised-but-unfit process — never an unreadable one.
+
+### b7 — per-escalation verdict
+
+All three in `daemon.log`, with `daemon_proxy_events.txt` line numbers in
+brackets. Hosts in quoted command output are written as `10.0.0.x` per the
+placeholder convention at the head of this doc.
+
+**A fact common to all three — the kernel-level witness the repair ignored.**
+The daemon's own probe changed failure *mode* mid-window, and the two modes are
+not equivalent: `probe failed: timed out` (22:54Z through **23:41:04Z**) means
+`urlopen` to `http://localhost:4000/v1/models` completed the TCP connect and
+nothing answered — the **kernel accepted the SYN, so a listener was present on
+loopback**; `probe failed: <urlopen error [Errno 61] Connection refused>` (first
+at **23:46:00Z**, through 23:52:05Z) means nothing was accepting on loopback
+(the standard caveat: a process bound only to a non-loopback address would read
+as refused there too, but sparkrun binds `--host 0.0.0.0`, visible in `ps.txt`).
+So at escalations #1 and #2 (both `timed out`) something *was* listening on
+:4000 — the b1 alive-but-serving-nothing shape — yet
+`_proxy_listener` reported `port owner None`, took its silent path, and the reap
+returned True. Whether that None is a wedged `lsof` (5 s cap) or a real empty
+result **cannot be separated from the log** (both are silent, `health.py:1069-1070`
+and `:1072-1073`) — but the daemon's *own connect probe already answered the
+question*, and no code reads it. A repair decision driven by lsof while a
+fresher, more reliable answer sits in the same tick is the cheapest available
+FIX-1 addendum.
+
+**#1 — 23:29:07.105Z → failed 23:34:12.099Z (`:158956`→`:159019` [ev 1441→1447])**
+
+```
+[23:29:07] [ERROR] proxy relaunch STALLED after 2 consecutive failures — escalating to orphan repair on :4000 (last error: probe failed: timed out)
+[23:34:12] [ WARN] proxy repair UNVERIFIED on :4000 — port owner None, sparkrun tracks None (None)
+[23:34:12] [ERROR] proxy repair on :4000 FAILED (escalated repair incomplete (unverified)): Command timed out after 90s
+```
+
+Verdict (per-escalation detail for the b5 ruling): **kill reached and exited
+silently; then the start shell-out hit its 90 s cap and its output was
+discarded** (b8 — that loss is why #1 has no `already running` witness and is
+the one escalation whose `None` cannot be attributed). Kill ⇒ `proxy stop` ⇒
+reap ⇒ `proxy start` ⇒ verify consumed **305 s** wall clock (`23:29:07.105` →
+`23:34:12.099`). A fully-serial worst case of the code path is ~240 s (30
+tracked-read + 60 stop + 5 lsof + 90 start + 20 verify-wait + 5 lsof + 30
+tracked-after, `health.py:1157/1167/1175` and `:1082`/`:1066-1067`), so ~65 s of
+the total is scheduler/host slippage on a starved Mac — the same starvation as
+(c); the same minute carries the log's **only** NAS probe timeout (`:159004`
+`NAS probe timed out after 5s`, 1 in the whole log). Note the shape #1 reached
+by *skipping* the kill entirely: it started a proxy over a port the probe says
+was still accepting, and that start is what timed out.
+
+**#2 — 23:41:04.412Z → failed 23:44:59.961Z (`:159090`→`:159142` [ev 1460→1466])**
+
+```
+[23:41:04] [ERROR] proxy relaunch STALLED after 3 consecutive failures — escalating to orphan repair on :4000 (last error: probe failed: timed out)
+[23:44:59] [ WARN] proxy repair UNVERIFIED on :4000 — port owner None, sparkrun tracks 46269 (None)
+[23:44:59] [ERROR] proxy repair on :4000 FAILED (escalated repair incomplete (unverified)): Discovering inference endpoints...
+Error: Proxy is already running (PID 46269) on port 4000. Use --restart to apply new settings, or 'sparkrun proxy stop' first.
+```
+
+Verdict (detail for the b5 ruling): **the read failed, and the failure is
+provable here and nowhere else in the log.** #2's own `proxy start` — run
+*inside this repair*, ~4 min after the silent kill — printed `already running
+(PID 46269)`, while PID 46269 had printed the same refusal three times earlier
+in the same stall (`:158334` 22:55Z, `:158705` 23:13Z, `:158753` 23:15Z). Live
+tracked PID + no HOLLOW line + 0 `refusing to kill` lines ⇒ the 30 s
+`proxy status --json` at `health.py:1082` failed and said nothing (b5). The
+reap was blind the same way: the probe at `23:41:04Z` was `timed out`, i.e. the
+port was still accepting, so `port owner None` was wrong and
+`_reap_orphan_proxy_listener` returned True in silence (`:1107-1108`). The
+start then hit the b1 refusal — the escalation is **blind at both inputs and
+then refuses to act on its only working one**, which is the whole b1×b6
+interaction in four lines of log.
+
+The `sparkrun tracks None` → `sparkrun tracks 46269` difference between #1's and
+#2's verify lines is **not** evidence that anything rewrote the state file: 46269
+was live and tracked for the whole window (five `already running` witnesses from
+22:55Z to 23:44Z), so #1's `None` was a failed read, not an absent state — the
+same asymmetry as #3's, where the pre-start read failed and the post-start read
+of the same file succeeded 55 s later.
+
+**#3 — 23:50:05.943Z → "failed" 23:51:05.052Z (`:159266`→`:159288` [ev 1481→1483])**
+
+```
+[23:50:05] [ERROR] proxy relaunch STALLED after 4 consecutive failures — escalating to orphan repair on :4000 (last error: probe failed: <urlopen error [Errno 61] Connection refused>)
+[23:51:05] [ WARN] proxy repair UNVERIFIED on :4000 — port owner None, sparkrun tracks 91693 (None)
+[23:51:05] [ERROR] proxy repair on :4000 FAILED (escalated repair incomplete (unverified)): Discovering inference endpoints...
+Discovery: hosts 10.0.0.x ×4 (from --hosts)
+Discovered 4 healthy endpoint(s):
+  10.0.0.x:8000 — local-inference-lab/Qwen3.8-Flash-Next-NVFP4, worker-model, orchestrator-model (vllm-distributed)
+```
+
+Verdict: **this repair SUCCEEDED and could only report failure.** Three
+independent proofs:
+
+1. Its start output takes the **success** path — `Discovery: …` and
+   `Discovered 4 healthy endpoint(s)` are echoed only *after*
+   `api.proxy.start()` **returns** (`cli/_proxy.py:193-215`); a
+   `ProxyAlreadyRunning` refusal prints before them (compare #2's output, which
+   has the `Error:` line and no `Discovery:` line). So sparkrun did **not**
+   refuse #3's start.
+2. `~/fleet-check/proxy-stall-2026-10-31/ps.txt` (captured 15:54 local on
+   10-31) shows `91693 … uv tool uvx --from litellm[proxy]==1.82.6 litellm …
+   --port 4000` with `STARTED Sat Oct 31 01:50:29 2026` = **2026-10-30T23:50:29Z**
+   and child `91757 91693 … bin/litellm … --port 4000` at `01:50:46` =
+   `23:50:46Z` — i.e. the wrapper and its uvicorn child were born **inside
+   escalation #3** (banner at `23:50:05.943Z`), and were still the live proxy
+   ~14 h later. The only proxy-start actor in that minute was this repair (the
+   next attempt at `23:54:16Z` got `already running (PID 91693)`, `:159362-159363`).
+3. `autodiscover.log`'s first line `01:50:40` = `23:50:40Z` — the auto-discover
+   daemon came online in the same second the child did, exactly as a *successful*
+   `proxy start` with `auto_discover` does.
+
+Service outcome agrees: `Worker proxy unhealthy` runs at 3 (23h) / 10 (00h) / 2
+(01h) / 1 (02h) then only 1 at 07h and 2 at 13h before the operator's 13:55Z
+restart — ~700 healthy ticks for 4 unhealthy ones after #3. So the escalated
+repair did what it was designed to do, and the log still calls it `FAILED`.
+
+Why the verdict still reads `port owner None`: that is b3 (`owner ==
+tracked_after` is unsatisfiable under uvx, `health.py:1181-1182`) **plus** an
+unexplained `owner is None`. Two silent shapes fit and cannot be separated:
+`lsof` failing/timing out (`timeout=5`, `except Exception → (None, None)`,
+`health.py:1065, 1072-1073`) versus the port genuinely unbound at
+`23:51:05Z` while the wrapper existed but its child had not yet bound (the
+child appears in `ps.txt` at `23:50:46Z`, and the 20 s `PROXY_REPAIR_VERIFY_WAIT_S`
+loop at `:1175-1179` polls once a second — it should have caught a bind that
+happened by then, which is why the `lsof`-failed reading is the more likely of
+the two). **UNPROVEN which**; both are silent, so the fix card must make them
+distinguishable (b9).
+
+For completeness on #3: the kill/reap lines were absent for the same b6 reason
+(tracked read returned None → silent exit; probe said `Errno 61` refused → no
+listener → silent reap return). Note #3's `sparkrun tracks 91693` is the
+**tracked-after** read at `:1180`, i.e. after the start wrote its state — the
+tracked-before read at `:1156` returned None. Two reads of the same file 55 s
+apart, one None and one correct: the 30 s status read is flaky, not the file.
+
+### b8 — what the timeout *did* lose
+
+Candidate (iii) is real but narrower than it looked: `run_cmd` on timeout
+returns `{"ok": False, "output": "Command timed out after 90s"}` and
+**discards the partial stdout/stderr** (`hscc_daemon/util.py:58-60`,
+`subprocess.TimeoutExpired` carries `.output`/`.stderr` and they are dropped).
+That is the entire difference between #1's bare `Command timed out after 90s`
+and #2/#3's rich `Discovering inference endpoints…` blocks. It cost the operator
+the ability to tell a mid-sweep timeout from a mid-bind timeout — a
+**diagnostics** loss, not the cause of the missing kill/reap lines (those are
+daemon-side log lines, b5). Also note the surfaced `[:400]` cap at
+`health.py:1555-1557`: #3's quoted block is 521 bytes on disk (the `…(vllm-distr`
+cut mid-word) and #2's is 278 — the cap is truncating real diagnostics, and
+`Discovery:` lines are where the host list lives.
+
+### b9 — the exact extra logging the fix card must add
+
+Without these, the next window A is as unanswerable as this one. Four lines,
+all cheap, all on paths the fix cards already touch:
+
+1. **`_proxy_tracked_pid` must say *why* it returned None** (`health.py:1076-1090`)
+   — one WARN with the failure class and elapsed time: `timeout after 30s` /
+   `rc=<n>` / `unparseable json`, never the output's contents (the proxy state
+   file can contain the master key, `_supervisor.py:1003-1005`). This single
+   line is what separates "no proxy is tracked" from "we could not ask", which
+   is the whole difference between the 10-29 behaviour and window A's.
+2. **`_proxy_kill_hollow_tracked` must log its silent exits** (`health.py:1227-1231`)
+   — `WARN: proxy escalation: sparkrun tracks no proxy PID — nothing to retire`
+   and `WARN: proxy escalation: tracked PID <n> already gone — nothing to kill`.
+   Same for `_reap_orphan_proxy_listener`'s no-listener return (`:1107-1108`)
+   and `_proxy_listener`'s `except Exception` (`:1072-1073`, with the elapsed
+   time so a 5 s `lsof` timeout becomes visible).
+3. **The repair must snapshot the port before and after, with the process tree**
+   — §4 item 3 asked for `ps -o pid,ppid,command -g $(pgrep -f litellm)` and
+   `lsof -nP -iTCP:4000 -sTCP:LISTEN` around a repair; make the daemon log both
+   at `_proxy_repair_orphan` entry and at the verify point (`health.py:1156`
+   and `:1176-1184`), including `pid/ppid` and whether the tracked PID is a
+   wrapper (`uv tool uvx …`) or the real server. #3 shows why: a successful
+   repair was recorded as a failure because the only two facts kept were
+   `owner None` and `tracked 91693`, with no evidence of the 91757 child that
+   actually held the port.
+4. **`run_cmd` must keep partial output on timeout** (`hscc_daemon/util.py:58-60`)
+   — return `TimeoutExpired.output`/`.stderr` (decoded) alongside the
+   `Command timed out after Ns` marker, and raise the surfaced-output cap at
+   `health.py:1555-1557` above 400 chars (b8). Then a timeout says *where* it
+   died: `Discovering inference endpoints…` = sweep; `Discovered N healthy
+   endpoint(s)` = bind; nothing = before the sweep.
+
+Two of these (1, 2) are the observability half of FIX-1/FIX-3's file set and
+should ride with them; (3) and (4) are additive diagnostics with no behavioural
+change. **FIX-6 needs one more thing this forensics adds**: an escalated repair
+consumed 305 s of wall clock against a nominal ~240 s serial budget (#1), and
+the whole thing is gated behind a 300 s cooldown — so a repair can burn the
+entire cooldown window in shell-out timeouts while the breaker counts it as one
+attempt. Any `--no-discover`/shorter-cap work must account for the sum of the
+shell-outs (`proxy status --json` 30 s **×2**, `proxy stop` 60 s, `proxy start`
+90 s, verify wait 20 s), not just the 90 s cap.
+
+### b10 — what this changes in §2(b)
+
+b4's closing sentence — "these windows were either never reached or their
+output was lost with the timeout" — resolves to a third option that was not on
+the list: **reached, and exited through a silent branch because both of its
+inputs (sparkrun's tracked PID, and the lsof port owner) failed the way every
+other sparkread shell-out in that window failed.** The kill/reap code needs no
+repair; FIX-1/FIX-2/FIX-3 remain the right gaps, but each of them is
+currently *unfalsifiable from the log* for the reason in b9 — and #3 is the
+counter-example the fix cards must keep: an escalated repair that **worked**
+and started the proxy that served the fleet for the next 14 hours, logged as
+`proxy repair on :4000 FAILED`.
