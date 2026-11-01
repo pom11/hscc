@@ -38,6 +38,16 @@ PERIODIC_INTERVALS = {
     # post-crash recovery tolerates minutes, not seconds (fast per-repair
     # healing stays with engine-wedge recovery / check_workers).
     "post_boot": 180,
+    # t_2b34b5c7 (orch-waker W3): the built-in orchestrator waker tick
+    # (check_orch_waker -> orch_waker.waker_tick -> run_tick). 30 s matches
+    # the stopgap's POLL_S and orch_waker.CONFIG_DEFAULTS["poll_s"]; the
+    # loop's standard per-stream supervision (=_run_supervised_periodic)
+    # gives it the same error isolation every stream gets, and verify's
+    # per-stream staleness rule widens it to max(600, 2*30+90) = the 600 s
+    # floor like any other stream. With orch_waker.enabled=false the tick
+    # stays a no-op that STILL stamps, so the stream never goes dark and
+    # staleness never false-fires on a deliberately-disabled feature.
+    "orch_waker": 30,
 }
 
 
@@ -639,6 +649,7 @@ def run_daemon_loop():
     from .trigger import trigger_engine
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
+    from . import orch_waker
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -709,6 +720,13 @@ def run_daemon_loop():
         "proxy": check_proxy, "engine_wedge": check_engine_wedge,
         "dispatcher": check_dispatcher_wedge,
         "post_boot": check_post_boot_relaunch,
+        # orch-waker W3 (t_2b34b5c7): the stream's check body. Every stream in
+        # this table gets its own supervised _run_supervised_periodic thread,
+        # so the waker inherits the loop's standard error isolation — a waker
+        # failure (or a thread death) is logged and respawned, never able to
+        # take another stream down — and its state file feeds the same
+        # per-stream staleness math as every other stream.
+        "orch_waker": orch_waker.check_orch_waker,
     }
 
     def run_watchdog_loop():
