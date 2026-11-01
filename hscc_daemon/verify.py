@@ -82,8 +82,11 @@ def _capture(cmd, timeout=None):
 # that asserts nothing is not green" (GAP-F-2 principle, made cross-cutting):
 # the row now unions the repo-side tool registry (hscc-cluster/__init__.py
 # `_*_TOOLS` tables + `from . import <mod>` handler modules) with the repo
-# plugin.yaml `provides_tools` manifest — t_19dbb9de has not landed, so the
-# manifest alone would inherit its GAP-A-7 under-declaration hole — and
+# plugin.yaml `provides_tools` manifest — the union stays belt-and-braces
+# even after GAP-A-7 closed (t_19dbb9de reconciled the manifest;
+# hscc_daemon/tests/test_plugin_manifest_drift.py keeps it honest): the
+# registry remains the source of truth, so a manifest that drifts again can
+# only ever ADD to the expectation, never hide a tool — and
 # requires each declared tool AND its handler module to exist in the
 # DEPLOYED tree. A missing tool is named by name (and its module by file
 # name) under the explicit category "missing vs deployed payload": that is

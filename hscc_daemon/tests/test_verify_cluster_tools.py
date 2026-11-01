@@ -2,12 +2,14 @@
 
 Audit F GAP-F-8: ``check_plugins`` printed ✓ while the deployed
 ``~/.hermes/plugins/hscc-cluster/`` lacked ``orch_message.py`` entirely — the
-row grepped only hscc-commands for three strings and asserted nothing about
-the tool registry the plugin actually serves. The row now unions the repo-side
-``hscc-cluster/__init__.py`` registry tables (the source of truth until the
-plugin.yaml manifest reconciliation lands — t_19dbb9de) with the plugin.yaml
-``provides_tools`` manifest, and requires every declared tool AND its handler
-module file to exist in the DEPLOYED tree. Missing entries are named verbatim
+row grepped only hscc-commands for three strings and asserted nothing about the
+tool registry the plugin actually serves. The row now unions the repo-side
+``hscc-cluster/__init__.py`` registry tables (the source of truth; the
+plugin.yaml manifest was reconciled against them in t_19dbb9de, and
+test_plugin_manifest_drift.py keeps the two from separating again) with the
+plugin.yaml ``provides_tools`` manifest, and requires every declared tool AND
+its handler module file to exist in the DEPLOYED tree. Missing entries are
+named verbatim
 under the explicit category "missing vs deployed payload" — a pending-release
 gap (GAP-A-5, closes with the 2.15.0 bootstrap) is reported, never silently
 ✓, and never conflated with a different failure class.
@@ -180,8 +182,8 @@ class TestCheckPluginsClusterTools:
 
     def test_registry_beats_underdeclared_manifest(self, tmp_path):
         """Registry is the source of truth: the repo manifest under-declares
-        (today's 13-name reality, GAP-A-7) yet the registry still demands
-        orch_message. The check must not inherit the manifest's hole."""
+        (the GAP-A-7 shape, as shipped until t_19dbb9de) yet the registry still
+        demands orch_message. The check must not inherit the manifest's hole."""
         from hscc_daemon.verify import check_plugins
         repo = _plant_repo(tmp_path, manifest=False)
         (repo / "hscc-cluster" / "plugin.yaml").write_text(
