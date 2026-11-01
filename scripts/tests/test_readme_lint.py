@@ -12,6 +12,13 @@ anti-vacuity is the contract here (card t_573287aa):
   * the REPO's own README set must be CLEAN (rule (1) badge==VERSION and
     rule (2) quoted-command existence green on the post-R1 README set).
 
+Rule (4), docs/ index coverage (t_c2ec721f), extends all three legs: the
+broken fixture grows a mini docs/ tree whose unlisted file MUST fire
+DOC-UNLISTED (and whose fence-only reference must still fire), the repo leg
+carries a coverage-count floor so a vacuous 0/0 enumeration is red by
+itself, and test_mutation_docs_index_coverage pins the fire→clear pair on a
+tmp copy.
+
 The oracle import is the SAME code-derived CLI enumeration the CLI-help
 audit walks (hscc_cli_help_audit.ExampleParser) — this suite never
 re-implements it, so deleting a real command from the CLI turns
@@ -67,14 +74,20 @@ def test_clean_fixture_passes_every_rule(oracle):
 
 
 def test_broken_fixture_fails_every_rule(oracle):
-    """NEGATIVE leg (the anti-vacuity proof): both rules must FIRE on the
+    """NEGATIVE leg (the anti-vacuity proof): every rule must FIRE on the
     broken fixture —
       * BADGE-VERSION  : badge 1.2.3 vs VERSION 7.7.7 (the audit's
         motivating drift, root README badge vs VERSION);
       * CMD-UNKNOWN    : `hscc frobnicate --now` (the audit X-column
         `hscc doctor` shape) — a fake command must not wave through;
       * PATH-MISSING   : `python3 scripts/ghost_check.py` — a README
-        pointing at a deleted script must not wave through.
+        pointing at a deleted script must not wave through;
+      * DOC-UNLISTED   : docs/ghost.md (tracked under the fixture docs/
+        tree, no index entry) AND docs/fenced-only.md (referenced ONLY
+        from a fenced block — a fence is not an index) — while
+        docs/listed.md and docs/sub/nested.md, both enumerated, must NOT
+        be flagged (selectivity; the `docs/sub/` heading bullet is not a
+        file entry, per b8f05170's counting convention).
     The matching release badge (== VERSION) must NOT be flagged: exactly
     one BADGE-VERSION finding proves the check is selective, and the
     fenced fake command must NOT be flagged (scope discipline)."""
@@ -82,8 +95,9 @@ def test_broken_fixture_fails_every_rule(oracle):
     by_kind = {}
     for f in rep["findings"]:
         by_kind.setdefault(f["kind"], []).append(f)
-    assert set(by_kind) == {"BADGE-VERSION", "CMD-UNKNOWN", "PATH-MISSING"}, (
-        f"expected exactly one finding per rule, got "
+    assert set(by_kind) == {"BADGE-VERSION", "CMD-UNKNOWN", "PATH-MISSING",
+                            "DOC-UNLISTED"}, (
+        f"expected one finding per rule, got "
         f"{ {k: len(v) for k, v in by_kind.items()} }: "
         + "\n".join(f"  [{f['kind']}] {f['quote']}: {f['detail']}"
                     for f in rep["findings"]))
@@ -92,6 +106,13 @@ def test_broken_fixture_fails_every_rule(oracle):
         "proves the check is selective, not blanket")
     assert "frobnicate" in by_kind["CMD-UNKNOWN"][0]["quote"]
     assert "ghost_check.py" in by_kind["PATH-MISSING"][0]["quote"]
+    unlisted = {f["quote"] for f in by_kind["DOC-UNLISTED"]}
+    assert unlisted == {"docs/ghost.md", "docs/fenced-only.md"}, (
+        "the missing-file fixture (docs/ghost.md) and the fence-only file "
+        "(docs/fenced-only.md) must both fire; enumerated files must not")
+    assert rep["docs_index_files"] >= 4 and rep["docs_index_entries"] >= 2, (
+        "the docs-index counters read vacuous — the rule did not actually "
+        "enumerate the fixture tree")
     assert not any("also-made-up" in f["quote"] for f in rep["findings"]), (
         "a fake command inside a FENCED block leaked into the findings — "
         "fenced scope discipline broke")
@@ -119,7 +140,10 @@ def test_repo_readmes_pass_the_lint(oracle):
     """REPO leg: every tracked README must satisfy both rules — every
     version badge equals VERSION, and every quoted command exists on the
     real CLI surface (audit X column included: `hscc doctor` is gone).
-    This is the leg that depends on the R1–R6 README set landing."""
+    This is the leg that depends on the R1–R6 README set landing.
+    Rule (4) rides along automatically (it runs whenever docs/README.md
+    exists): the docs-index floor below makes a vacuous 0/0 count — the
+    exact failure mode that let the index decay by 10 — its own red."""
     rep = lint_mod.lint_repo(REPO, oracle=oracle)
     assert rep["version_expected"] == (REPO / "VERSION").read_text().strip(), \
         "VERSION resolution drifted from the file"
@@ -130,6 +154,11 @@ def test_repo_readmes_pass_the_lint(oracle):
         f"the README set quotes far more commands than "
         f"{rep['commands_checked']} — command extraction regressed and the "
         "gate would be silently vacuous")
+    assert rep["docs_index_files"] >= 180 and rep["docs_index_entries"] >= 180, (
+        f"docs index coverage counters read {rep['docs_index_entries']}/"
+        f"{rep['docs_index_files']} — a collapse to ~0 means rule (4) "
+        "stopped enumerating (git fallback, moved index), NOT that the "
+        "index got healthy")
     assert rep["findings"] == [], (
         f"{len(rep['findings'])} README lint finding(s):\n"
         + "\n".join(f"  [{f['kind']}] {f['file']}:{f['line']} "
@@ -217,6 +246,61 @@ def test_mutation_badge_drift(oracle, tmp_path):
         .replace("badge/version-9.9.9", "badge/version-9.9.10"))
     rep = lint_mod.lint_repo(root, paths=[root / "README.md"], oracle=oracle)
     assert rep["findings"] == []
+
+
+def test_mutation_docs_index_coverage(oracle, tmp_path):
+    """Rule (4) fire→clear pair, live: copy the broken fixture's docs/ tree
+    to tmp, the unlisted ghost fires; ADD the index line, it clears; REMOVE
+    an entry that was listed, it fires again. A rule that only ever fails
+    (or only ever passes) is caught here, not by the static fixtures."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "VERSION").write_text("1.0.0\n")
+    (root / "README.md").write_text("# repo\n\nnothing quoted here.\n")
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text(
+        "# docs\n\n- `docs/README.md` — this index.\n"
+        "- `docs/alpha.md` — the alpha doc. **live**\n")
+    (docs / "alpha.md").write_text("alpha\n")
+    (docs / "ghost.md").write_text("ghost\n")
+
+    rep = lint_mod.check_docs_index_coverage(root)
+    assert [f["quote"] for f in rep[0]] == ["docs/ghost.md"], rep[0]
+
+    # clear it the way an author must: a backtick-quoted entry line
+    (docs / "README.md").write_text(
+        (docs / "README.md").read_text()
+        + "- `docs/ghost.md` — the ghost doc. **record**\n")
+    rep = lint_mod.check_docs_index_coverage(root)
+    assert rep[0] == [] and rep[1] == 3 and rep[2] == 3, rep
+
+    # and a RE-GRAVED removal must fire again (the decay direction)
+    (docs / "README.md").write_text(
+        (docs / "README.md").read_text().replace("- `docs/alpha.md`", "- alpha"))
+    rep = lint_mod.check_docs_index_coverage(root)
+    assert [f["quote"] for f in rep[0]] == ["docs/alpha.md"], rep[0]
+
+
+def test_docs_index_rule_survives_files_narrowing(oracle, tmp_path):
+    """--files cannot silence rule (4): the repo-wide gate passes explicit
+    file sets, and a repo whose docs/README.md exists must still be checked
+    even when the linted set is a single unrelated README."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "VERSION").write_text("1.0.0\n")
+    (root / "README.md").write_text("# repo\n\nno commands quoted.\n")
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text("# docs\n\n- (index lists nothing)\n")
+    (docs / "orphan.md").write_text("orphan\n")
+    rep = lint_mod.lint_repo(root, paths=[root / "README.md"], oracle=oracle)
+    kinds = {f["kind"] for f in rep["findings"]}
+    quotes = {f["quote"] for f in rep["findings"] if f["kind"] == "DOC-UNLISTED"}
+    assert kinds == {"DOC-UNLISTED"}
+    # the mini index does not list itself either (correct: the real one
+    # does), so both docs/README.md and the orphan fire
+    assert quotes == {"docs/README.md", "docs/orphan.md"}, rep["findings"]
 
 
 def test_mutation_dead_command(oracle, tmp_path):

@@ -1406,12 +1406,73 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+#: Fallback for the supervision row's name when the module cannot be imported
+#: — same trick as ``_NOTIFIER_CHECK_NAME`` so the row still prints. A missing
+#: check must never render as absence-of-output.
+_SUPERVISION_CHECK_NAME = "daemon supervision (service manager owns the pid)"
+
+
+def _refused_supervision_check() -> dict:
+    """In-suite stand-in for the supervision check when no seam was injected.
+
+    Its real targets are the live service manager (``launchctl print`` /
+    ``systemctl is-active``) and ``~/.hscc/daemon.pid`` — the OPERATOR's
+    machine when the suite runs from a dispatched worker. Same fence shape as
+    ``_refused_orch_waker_check``: an ERROR naming the missing seam, never a
+    silent pass and never a real probe.
+    """
+    return {"name": _SUPERVISION_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "supervision check refused inside a pytest process — "
+                      "inject _supervision_check",
+            "fix": "Pass _supervision_check=lambda: {...} built from tmp "
+                   "pid-file fixtures plus stubbed _launchd/_systemd probes; "
+                   "a suite must never ask the live service manager."}
+
+
+def _supervision_check_row(injected=None, hscc_dir=None) -> "Check":
+    """The GAP-F-5 supervision row (five Check fields, fatal=False always).
+
+    Why this row exists: the t_61457fbd incident — an unsupervised orphan
+    daemon-loop (``hscc start`` beside the job, or a TCC-blind bootstrap) —
+    keeps stream state fresh, so every other doctor/verify row reads green
+    while NOTHING supervises the daemon. The comparison nothing else makes:
+    the pid file's pid vs the pid the owning service manager reports, using
+    restart_daemon.sh's own probes. Non-fatal on every verdict (the daemon is
+    legitimately not running before the install starts it; doctor is the
+    Stage-1 gate), so it warns (○) like the orch-waker and models-served rows.
+
+    Three sources, same trust order as the waker row: an injected callable
+    (tests), the real ``doctor_supervision.check`` (a human CLI run), and the
+    in-suite refusal (pytest with no seam — never a live probe). A module that
+    cannot be imported reports itself UNVERIFIABLE rather than vanishing.
+    """
+    if injected is not None:
+        res = injected()
+    elif "pytest" in sys.modules:
+        res = _refused_supervision_check()
+    else:
+        try:
+            import doctor_supervision
+        except ImportError:
+            return Check(_SUPERVISION_CHECK_NAME, False,
+                         detail="doctor_supervision.py missing from "
+                                f"{os.path.dirname(os.path.abspath(__file__))}"
+                                " — supervision cannot be verified",
+                         fix="Restore hscc-bootstrap/doctor_supervision.py "
+                             "(re-run bootstrap).",
+                         fatal=False)
+        res = doctor_supervision.check(hscc_dir=hscc_dir)
+    return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
+                 fix=res["fix"], fatal=res["fatal"])
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
                hscc_dir: Optional[str] = None, _role_soul_scan=None,
-               _orch_waker_check=None, _cron_watchers_check=None) -> dict:
+               _orch_waker_check=None, _cron_watchers_check=None,
+               _supervision_check=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1489,6 +1550,18 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # pytest-fenced exactly like the waker row above.
         _cron_watchers_check_row(_cron_watchers_check,
                                  hscc_dir=os.environ.get("HSCC_DIR")),
+        # GAP-F-5 (audit F): is the running daemon loop the process the
+        # service manager OWNS? The t_61457fbd incident class (an orphan
+        # `hscc start` / TCC-blind bootstrap loop with PPID 1) keeps stream
+        # state fresh, so every other row reads green while nothing restarts
+        # the daemon on crash. This row makes the ONE comparison nobody did:
+        # ~/.hscc/daemon.pid's pid vs the pid launchd/systemd reports (the
+        # same probes restart_daemon.sh's pid-turnover poll trusts). Warn,
+        # never fatal — doctor is Stage 1 and runs before the daemon exists.
+        # Same fence as the waker row: inside a pytest process the verdict
+        # must be injected, never probed (live launchctl + live pid file).
+        _supervision_check_row(_supervision_check,
+                               hscc_dir=os.environ.get("HSCC_DIR")),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh

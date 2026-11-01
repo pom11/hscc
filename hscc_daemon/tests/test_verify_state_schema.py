@@ -223,7 +223,10 @@ class TestCheckDaemonStreamsSchemaTolerance:
         )
 
         names = [c["name"] for c in result["checks"]]
-        assert len(result["checks"]) == 13, names
+        # 15 = the 13 pinned at GAP-F-1 landing + autodown_interlock
+        # (GAP-F-6) + dispatcher_self_heal (GAP-F-7); keep in step with
+        # test_verify.py's run_all count pin.
+        assert len(result["checks"]) == 15, names
         assert "daemon_streams" in names
         assert "profile_endpoints" in names
         row = [c for c in result["checks"] if c["name"] == "daemon_streams"][0]

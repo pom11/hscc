@@ -19,7 +19,9 @@ cards.
 ## This index
 
 Every tracked file under `docs/` is enumerated below — one line each: what it
-is, plus a status:
+is, plus a status. The claim is gated, not just declared: `readme_lint.py`
+rule (4) (DOC-UNLISTED) fails when a tracked file under docs/ has no
+backtick-quoted index entry here:
 
 - **live** — current reference; trust it (re-verify claims before acting).
 - **record** — historical record of a card/incident; kept for provenance,
@@ -67,6 +69,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/review_t_8ac9e87c.md` — README review (bootstrap, cluster, roles, api, commands), 2026-09-25. **superseded** by `docs/audits/README_REVIEW_2026-10-15.md`. **record**
 - `docs/review_t_d20fb383.md` — README review (memori, memori_byodb, sparkrun-hermes), 2026-09-25. **superseded** by `docs/audits/README_REVIEW_2026-10-15.md`. **record**
 - `docs/t_f109e7ea-findings.md` — app→CLI two-way findings: working/reasoning indicator + 1:1 session surfacing. **record**
+- `docs/t_18318fd9-findings.md` — findings for the `hscc autodown status --json` flake: a foreground-mode WARN line from `daemon_ops.log` was prefixed to stdout's JSON; the fix is both sides (stderr for diagnostics, machine channel kept clean). **record**
 
 ## design/
 
@@ -81,6 +84,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/design/2026-08-28-ios-app-v1.md` — original iOS operator-console v1 design (three-tab IA). **superseded** by `docs/design/IOS_REDESIGN_2026-10-14.md` (drawer IA). **record**
 - `docs/design/2026-08-30-audit-report.md` — "Monday readiness" audit of the v1 app. **record**
 - `docs/design/telegram-optional.md` — design + implementation log for making Telegram fully optional; the removal then shipped (`docs/audits/telegram-removal-report.md`). **record**
+- `docs/design/cluster-up-launch-hardening-t_be4b94ca.md` — design record for the `hscc cluster up` launch hardening (per-unit launch phase timeout via `HSCC_CLUSTER_UP_LAUNCH_TIMEOUT`, 180s default; already-serving-unit hang fix) + per-unit alias detection; shipped in v2.12.0, written before the code. **record**
 - `docs/design/screens/` (3 PNGs below) — earlier root-tree reviewer proof shots cited by `ios-app/README.md` and the redesign spec; the current full 12-screens × light/dark capture set lives under `ios-app/docs/design/screens/`.
 - `docs/design/screens/appicon-springboard.png` — springboard proof the AppIcon replaced the `H` placeholder. **live** evidence.
 - `docs/design/screens/phase2-home.png` — Phase-2 home reviewer screenshot. **live** evidence.
@@ -135,6 +139,8 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/ci-backstop-address-guard-t_9a4b7687.md` — CI backstop for the address guard (`--tracked` leg). **live**
 - `docs/audits/changelog-decomposition_t_95f1d6e1.md` — why `changelog.d/` exists and the proof it works; companion to `changelog.d/README.md`. **live**
 - `docs/audits/session-continuity-verify-2026-09-30.md` — integration + end-to-end live verification of session continuity. **live** evidence for the design doc.
+- `docs/audits/2026-10-31-proxy-stalls.md` — LiteLLM proxy `:4000` stall investigation (t_447dd0aa, 2026-10-30/31 episodes): investigation only, no fixes applied; §6 (t_c95a2137) names the per-request stall component (LiteLLM router retry `asyncio.sleep`) while magnitude/trigger stay unmeasured and questions (b)/(c) stay banked to follow-up cards. **live** incident record — the current authority on proxy stalls; analysis companions `docs/audits/t_c95a2137_analyze_access.py` / `docs/audits/t_c95a2137_shape_split.py`.
+- `docs/audits/sparkrun_proxy_venv_cutover.sh` — the detached proxy-venv cutover script (stop → swap symlink → start → verify, auto-rollback on any failed gate, bounded drain wait so rollback can restart while the old proxy drains). How the live 0.4.0→0.4.1 cutover ran (cited by `docs/audits/SPARKRUN_041_COMPAT_2026-10-20.md`); edit the config block for the target tag. **live** runbook — run only from a session whose model does not ride `:4000`.
 - `docs/audits/ARTIFACT_t_563350d9.md` — per-project permanent chat sessions (registry-persisted session id, relay/history resolve the same session). **record** of the shipped feature.
 - `docs/audits/GAP_PRIORITISATION_2026-09-26.md` — Phase-3 triage: which missing capabilities deserve an API route / iOS surface vs CLI-only. **record** (decision rationale for the iOS backlog).
 
@@ -172,6 +178,14 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/drift-guard-test-dir-census-t_69a1c9f2.md` — widening the DIRS drift guard to every `tests/` dir.
 - `docs/audits/run-tests-scripts-leg-t_95d864fc.md` — `run_tests.sh` never ran `scripts/tests`: the fix + evidence.
 - `docs/audits/memory-path-resolution-t_7a16aed0.md` — memory endpoint profile-resolution fix.
+- `docs/audits/t_c95a2137_analyze_access.py` — read-only analysis companion to `docs/audits/2026-10-31-proxy-stalls.md`: reconstructs per-connection structure of the uvicorn access capture from the client ephemeral source port.
+- `docs/audits/t_c95a2137_shape_split.py` — read-only analysis companion: shape split (long-lived vs fresh connections, loopback-holder correlation, response-backlog trace) over the operator capture.
+- `docs/audits/node-recovery-watchdog-t_ebbe38d1.md` — node-recovery part 1: arm the GB10 SBSA hardware watchdog cluster-wide via systemd (no BMC on the Spark; a 2h hard-freeze with no panic line was the trigger); shipped v2.14.0.
+- `docs/audits/node-recovery-doctor-t_94598b3a.md` — node-recovery part 3: the doctor's node-recovery check (watchdog + panic-to-reboot) — per-node read-only probes over the sparkrun ssh path answering "would this node come back on its own?"; shipped v2.14.0.
+- `docs/audits/node-recovery-notifier-mask-t_61850b24.md` — node-recovery part 5: mask `snap firmware-updater`'s crash-looping user notifier unit cluster-wide (~7k restarts measured on one Spark); shipped.
+- `docs/audits/t_9a9aeab1_brew_venv_hermes_runtime.md` — the brew keg venv shipped without the hermes runtime deps (`httpx` etc.), so `project new --apply` died mid-import and left an orphan stub profile; root cause + fix design; shipped v2.14.0.
+- `docs/audits/lossless-generate-pontaje-t_0f2ee405.md` — measured report of what `hscc.py generate` dropped from `ecofire-pontaje-engineer/SOUL.md` (one spec-pointer line under an emittable heading); drove the lossless-generate fix.
+- `docs/audits/content-loss-list-t_5b362400.md` — why the role-SOUL doctor check's heading sweep cannot see CONTENT loss (a hand-patched paragraph under an emittable heading reads clean until the next generate deletes it) and the content-loss list that replaced it.
 - `docs/audits/protocol-violation-budget-already-implemented.md` — audit proving the protocol-violation budget was already implemented upstream.
 - `docs/audits/analyze.py` — scratch log-analysis script used by the daemon-log investigations.
 - `docs/audits/overnight-2026-09-22.md` — overnight report: project session linking + digests epic.

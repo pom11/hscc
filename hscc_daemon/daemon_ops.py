@@ -912,17 +912,34 @@ def _autodown_tick():
     never touch the serving layer. When enabled, we call ``autodown.cycle()``
     lazily — ``cycle`` is Phase 3 and does not exist yet, so a missing cycle is
     a no-op, and a raising cycle is caught, logged, and the thread lives on.
+
+    GAP-F-6 (audit F): every path — disabled short-circuit, normal cycle, and
+    raising cycle — persists the interlock snapshot (``finally``) before
+    returning, so ``hscc verify`` / ``hscc doctor`` in their OWN processes can
+    see whether the interlocks are clear, holding on real work, or UNEVALUABLE
+    (the #135 fail-safe-to-up that silently keeps the cluster scaled up).
+    Before this, that truth lived only in this thread's module memory and the
+    only surface that showed it re-evaluated everything itself
+    (``hscc autodown status``).
     """
     from . import autodown
 
     cfg = autodown.load_config()
-    if not cfg.get("enabled"):
-        # OFF by default — do nothing, never touch the serving layer.
-        return
-
     try:
-        cycle = getattr(autodown, "cycle", None)
-        if cycle is not None:
-            cycle()
-    except Exception as e:
-        log(f"Autodown cycle error: {e}", "ERROR")
+        if not cfg.get("enabled"):
+            # OFF by default — do nothing, never touch the serving layer.
+            return
+
+        try:
+            cycle = getattr(autodown, "cycle", None)
+            if cycle is not None:
+                cycle()
+        except Exception as e:
+            log(f"Autodown cycle error: {e}", "ERROR")
+    finally:
+        # Best-effort diagnostics write — must never break the tick, and must
+        # never be the reason the loop dies (the outer loop also guards).
+        try:
+            autodown.write_interlock_snapshot(cfg=cfg)
+        except Exception as e:  # noqa: BLE001 - diagnostics never break safety
+            log(f"Autodown interlock snapshot error: {e}", "ERROR")
