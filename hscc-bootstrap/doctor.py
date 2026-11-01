@@ -1488,12 +1488,89 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+def _load_cron_watchers():
+    """Import ``hscc_daemon/cron_watchers.py`` for the GAP-B-4 doctor check.
+
+    Same rule as :func:`_load_orch_waker`: the verdict lives with the feature
+    (its cadence SOT, its stamp format, its freshness budget) so doctor cannot
+    drift from what the watcher means by "last pass"; doctor.py only adapts the
+    result dict to its five Check fields. Returns the module, or None when the
+    daemon plugin is not deployed next to this one (the check then reports
+    itself unverifiable rather than vanishing from the list).
+    """
+    try:
+        from hscc_daemon import cron_watchers
+        return cron_watchers
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import cron_watchers
+        return cron_watchers
+    except Exception:
+        return None
+
+
+#: Fallback for the check name when the module itself cannot be imported —
+#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
+_CRON_WATCHERS_CHECK_NAME = "cron watchers (dep_pr/escalate)"
+
+
+def _refused_cron_watchers_check() -> dict:
+    """In-suite stand-in for the cron-watcher check when no seam was injected.
+
+    The check's real targets are ``~/.hscc/state/dep_pr_watcher.json``,
+    ``~/.hscc/state/escalate_watcher.json`` and the install marker beside them
+    — the OPERATOR's live tree when the suite runs from a dispatched worker.
+    Same fence shape as ``_refused_orch_waker_check``: an ERROR naming the
+    missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _CRON_WATCHERS_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "cron-watcher check refused inside a pytest process — "
+                      "inject _cron_watchers_check",
+            "fix": "Pass _cron_watchers_check=lambda: {...} built from tmp "
+                   "state fixtures; a suite must never read the operator's "
+                   "watcher stamps."}
+
+
+def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
+    """The GAP-B-4 row for the shared check list (five Check fields).
+
+    Three sources, in order of trust: an injected callable (tests pass a
+    fixture-backed lambda), the real :func:`hscc_daemon.cron_watchers.doctor_check`
+    (a human CLI run), and the in-suite refusal (pytest with no seam — never a
+    real read of the operator's watcher stamps). ``hscc_dir`` is forwarded to
+    the real check exactly like ``doctor_notifier_mask.check`` takes it, so a
+    sandboxed bootstrap reads the SANDBOX's ~/.hscc root; the check itself is
+    warn-only (fatal=False always) — GAP-B-4 asks for detection, not for a
+    bootstrap that dies over an out-of-band cron job.
+    """
+    if injected is not None:
+        res = injected()
+    elif "pytest" in sys.modules:
+        res = _refused_cron_watchers_check()
+    else:
+        cw = _load_cron_watchers()
+        if cw is None:
+            return Check(_CRON_WATCHERS_CHECK_NAME, False,
+                         detail="hscc_daemon/cron_watchers.py not importable — "
+                                "the cron watchers' liveness cannot be verified",
+                         fix="Deploy the hscc_daemon plugin next to "
+                             "hscc-bootstrap (re-run bootstrap).",
+                         fatal=False)
+        res = cw.doctor_check(hscc_dir=hscc_dir)
+    return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
+                 fix=res["fix"], fatal=res["fatal"])
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
                hscc_dir: Optional[str] = None, _role_soul_scan=None,
-               _orch_waker_check=None) -> dict:
+               _orch_waker_check=None, _cron_watchers_check=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1561,6 +1638,16 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # HSCC_DIR, and doctor runs there as the Stage-1 gate.
         _orch_waker_check_row(_orch_waker_check,
                               hscc_dir=os.environ.get("HSCC_DIR")),
+        # GAP-B-4 (audit B): the dep_pr / escalate Hermes-cron watchers run
+        # OUTSIDE the daemon, so no stream notices when they stop firing —
+        # the dep-watcher once failed 17 consecutive daily runs unnoticed
+        # (t_3aadd2c0). Each pass stamps into ~/.hscc/state through the
+        # daemon's own state writer; this row warns when a stamp passes 3x its
+        # cadence and says "not configured" cleanly when nobody installed the
+        # watcher. Warn-only by construction (fatal=False always) and
+        # pytest-fenced exactly like the waker row above.
+        _cron_watchers_check_row(_cron_watchers_check,
+                                 hscc_dir=os.environ.get("HSCC_DIR")),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh

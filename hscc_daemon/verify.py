@@ -262,6 +262,24 @@ def _json_shape_name(value):
     return type(value).__name__
 
 
+def _watcher_stream_names():
+    """Stamp names owned by the cron watchers (GAP-B-4), as a set.
+
+    Their liveness verdict belongs to the doctor row
+    (``cron_watchers.doctor_check``), NOT to ``check_daemon_streams``: the
+    daily dep-watcher would be RED under the flat 600 s window 23 h of every
+    day, and a dead watcher must warn rather than fail the cluster smoke test.
+    Kept in sync with the cadence map above by the same import-defence rule —
+    an unavailable module means no exclusions, which only restores the
+    pre-GAP-B-4 behaviour for streams that did not exist before it.
+    """
+    try:
+        from .cron_watchers import STREAMS
+        return set(STREAMS)
+    except Exception:
+        return set()
+
+
 def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     """Check all daemon state files are healthy and recent.
 
@@ -312,6 +330,10 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         max_age_s = 600
     if stream_intervals is None:
         stream_intervals = _live_stream_intervals()
+    # Cron-watcher stamps (GAP-B-4) are judged by the doctor row, not here —
+    # see _watcher_stream_names(). Excluded before the count so the healthy
+    # total stays "streams the daemon owns".
+    watcher_streams = _watcher_stream_names()
 
     # How long each stream may stay silent before it is "stale": at least the
     # caller's flat window, but never less than ~2 full check cycles — so a
@@ -334,7 +356,20 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         return {"name": "daemon_streams", "ok": True, "detail": f"skipped: {exc}"}
 
     json_files = [e for e in entries if e.endswith(".json")]
+    # Cron-watcher stamps are NOT daemon streams: their liveness verdict belongs
+    # to the GAP-B-4 doctor row (cron_watchers.doctor_check), which knows a
+    # daily cadence. Judged here they would be RED 23 hours of every day under
+    # the flat 600 s window, and a dead watcher must warn rather than fail the
+    # cluster smoke test. Excluded before the count so the healthy total stays
+    # "streams the daemon owns".
+    watcher_files = [f for f in json_files if f[:-5] in watcher_streams]
+    json_files = [f for f in json_files if f[:-5] not in watcher_streams]
     if not json_files:
+        if watcher_files:
+            return {"name": "daemon_streams", "ok": True,
+                    "detail": "no daemon stream files yet "
+                              f"({len(watcher_files)} cron-watcher stamp(s) "
+                              "excluded — see the 'cron watchers' check)"}
         return {"name": "daemon_streams", "ok": True, "detail": "no state files found"}
 
     now = datetime.now(timezone.utc)

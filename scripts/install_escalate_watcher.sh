@@ -27,10 +27,26 @@ HERMES_SCRIPTS="$HERMES_HOME/scripts"
 HERMES="$HOME/.hermes/hermes-agent"
 HERMES_BIN="$HERMES/venv/bin/hermes"
 [ -x "$HERMES_BIN" ] || HERMES_BIN="hermes"
+# Liveness marker helper lives in the deployed hscc_daemon payload (GAP-B-4).
+HERMES_PLUGINS="$HERMES_HOME/plugins"
+[ -d "$HERMES_PLUGINS" ] || HERMES_PLUGINS="$HOME/.hermes/plugins"
 
 if [ "${1:-}" = "--uninstall" ]; then
   "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
   rm -f "$HERMES_SCRIPTS/escalate_watcher_run.py"
+  # Drop the liveness install marker too (GAP-B-4), or the doctor keeps
+  # reporting a watcher nobody installed as "installed but never ran".
+  python3 - <<'PY' 2>/dev/null || true
+import os, sys
+p = os.path.expanduser("~/.hermes/plugins")
+if os.path.isdir(p) and p not in sys.path:
+    sys.path.insert(0, p)
+try:
+    from hscc_daemon import cron_watchers as cw
+except ImportError:
+    raise SystemExit(0)
+cw.mark_removed("escalate_watcher")
+PY
   echo "removed cron job '$JOB' and the installed runner"
   exit 0
 fi
