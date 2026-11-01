@@ -33,7 +33,7 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 # `.github/scripts` is registered for the same reason and by the same argument
 # (t_9a4b7687): it is CI tooling, not a deployed plugin, and its tests are the
 # only thing that executes the address-guard workflow's real step script.
-DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts .github/scripts)
+DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts .github/scripts comfyui-sparkrun)
 
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
