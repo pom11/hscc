@@ -29,7 +29,7 @@ is, plus a status:
 
 Find a file by what it is: [Reference](#reference) · [Roadmap &
 handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigations--top-level-audits)
-· [design/](#design) · [template-examples/](#template-examples) ·
+· [design/](#design) · [ops/](#ops) · [template-examples/](#template-examples) ·
 [verification/](#verification) · [audits/](#audits).
 
 ## Reference
@@ -42,7 +42,6 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/PROJECT-COMMANDS.md` — old↔new command mapping (`flightdeck …` → `hscc project …`) and naming notes; the sanctioned survival list for the legacy name. **live**
 - `docs/FLEET.md` — how the fleet is organised: role specs and the profile generator (layered SOUL), the review loop, the autonomy flag, failure escalation, and the launchctl ops lore. Linked from the root README. **live**
 - `docs/WHY.md` — why HSCC exists: the gaps stock Hermes leaves open (cluster control, role roster, review dispatch, autonomy, bootstrap) against what HSCC adds, plus a worked end-to-end example. Linked from the root README. **live**
-- `docs/ops/hermes-media.md` — media workstream M6 enablement recipe: how a Hermes instance *calls* fleet media through the `:4000` proxy — `image_gen` config-only (`provider: openai` + proxy `base_url`, model id sent verbatim) and `video_gen` via the fleet's `openai_compat` plugin — plus the revert. Client-side companion to `docs/design/media-serving.md`; no fleet action lives here. **live**
 - `docs/COMPAT-7.30.md` — compat audit of hermes-agent upstream v2026.7.30 (v0.19.1) vs the HSCC fork+patches (patches 0001–0006). **superseded** by `docs/audits/NOTES_t_507108a7.md` (patches re-carried onto v2026.9.11); the live pins live in `hscc-bootstrap/runtime-versions.json`. **record**
 - `docs/hermes-017-new-features.md` — feature digest of hermes-agent 0.17.0 (kanban lifecycle hooks etc.) as adopted by HSCC. **superseded** by later runtime bumps (pin is v2026.9.24 per `hscc-bootstrap/runtime-versions.json`). **record**
 
@@ -86,6 +85,24 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/design/screens/appicon-springboard.png` — springboard proof the AppIcon replaced the `H` placeholder. **live** evidence.
 - `docs/design/screens/phase2-home.png` — Phase-2 home reviewer screenshot. **live** evidence.
 - `docs/design/screens/phase2-home-first-run-notifications-prompt.png` — Phase-2 first-run notifications-prompt reviewer screenshot. **live** evidence.
+
+## ops/
+
+Operator-facing runbooks: how to turn a shipped feature on, drive it, and retire
+what it replaced. (Design rationale stays in `design/`; this directory is the
+"what do I actually type" layer.)
+
+- `docs/ops/hermes-media.md` — media workstream M6 enablement recipe: how a Hermes
+  instance *calls* fleet media through the `:4000` proxy — `image_gen` config-only
+  (`provider: openai` + proxy `base_url`, model id sent verbatim) and `video_gen`
+  via the fleet's `openai_compat` plugin — plus the revert. Client-side companion
+  to `docs/design/media-serving.md`; no fleet action lives here. **live**
+- `docs/ops/orch-waker.md` — the built-in orchestrator waker: the eight wake-worthy
+  events, batch/debounce/rate rules, skip rules, `~/.hscc/orch_waker.json` config,
+  `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
+  row, and the retirement procedure for the `~/bin/orch-waker` stopgap — including
+  the known blocker that currently makes the built-in inert (state-file /
+  stream-state collision). **live**
 
 ## template-examples/
 
