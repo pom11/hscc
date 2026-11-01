@@ -288,13 +288,15 @@ def test_orch_message_source_carries_no_verb_prefix_literal():
 
     The pre-fix state proves the point: the copy was behaviourally reachable
     against a deployed 2.14.0 hscc-api and was already missing `steer`. Prose
-    about /queue is fine — a quoted prefix is not. Proven to fire: restoring the
-    deleted line verbatim fails this test and nothing else.
+    about /queue is fine (a quoted string that merely STARTS with the verb is
+    what the guard catches, so `'send /queue now'` passes and `"/queue "` does
+    not). Proven to fire: restoring the deleted line verbatim fails this test
+    and nothing else.
     """
     import re
     from pathlib import Path
     src = Path(om.__file__).read_text()
-    offenders = re.findall(r"""['"]/(?:queue|steer)\s['"]""", src)
+    offenders = re.findall(r"""['"]/(?:queue|steer)""", src)
     assert not offenders, (
         f"orch_message.py hardcodes {offenders} — the mode→verb table belongs "
         "to hscc-api/repl_inject.py (VERB_PREFIX); read it from the loaded "

@@ -388,10 +388,17 @@ def _verb_for_mode(repl, mode: str):
 
     The table's VALUES are never restated here (a source guard in
     tests/test_orch_message.py forbids a verb-prefix literal in this file), so a
-    canonical change to either table lands here for free. An unknown mode
-    answers ``None`` exactly as the previous ``table.get(mode)`` did, and a
-    module that answers neither name is the same "repl_inject too old to report
-    a verb" case as before: ``None``, never a guessed verb.
+    canonical change to either table lands here for free.
+
+    No behaviour change on any mode this tool can produce: it injects with
+    ``mode="auto"`` only, and ``auto`` resolves to ``queue``/``plain`` in both
+    the current and the pre-parity module, so those are the only values a
+    receipt's ``mode`` can hold — and both answer identically to the deleted
+    copy against either table. An unknown mode still answers ``None``. The one
+    difference is fidelity on modes the tool never asks for: against a
+    pre-parity module ``steer`` and ``interrupt`` used to answer ``None`` (the
+    copy did not know them) and now answer what that module says — which is the
+    staleness GAP-C-4 files, not a regression.
     """
     for attr in ("VERB_PREFIX", LEGACY_VERB_TABLE_ATTR):
         table = getattr(repl, attr, None)
