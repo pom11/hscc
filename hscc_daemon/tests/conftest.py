@@ -450,6 +450,110 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_kanban_root(tmp_path, monkeypatch):
+    """Pin the KANBAN root so no test can reach the operator's live boards.
+
+    GAP-C-1 (audit C) moved board discovery to Hermes' own
+    ``kanban_db.list_boards()`` (reached through ``autodown.board_db_paths``),
+    which resolves its root from ``HERMES_KANBAN_HOME`` / the real ``~/.hermes``.
+    The waker used to be hermetic by accident — it listdir'd a path the test
+    monkeypatched — so from that change on, EVERY test in this package needs the
+    root pinned, exactly like ``_hermetic_sparkrun_resolution`` pins sparkrun.
+
+    The pin is a path UNDER ``tmp_path`` that is deliberately NOT created here:
+    an absent root enumerates as "no boards", and a test that wants boards gets
+    them by asking for ``hermes_kanban_root`` (which creates it). Not creating it
+    keeps this fixture's promise to tests like
+    ``test_update_check.test_only_write_is_the_cache``, which assert that the ONE
+    thing a test may add to ``tmp_path`` is the file under test.
+    ``HERMES_KANBAN_DB`` is cleared too: it pins a *worker's* board and would
+    otherwise override the root for the ``default`` slug.
+    """
+    root = tmp_path / "kanban-home"
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    # ``get_default_hermes_root`` memoises on (native_home, HERMES_HOME); the
+    # kanban root itself reads the env every call, but clear the memo anyway so
+    # a test that patches HERMES_HOME cannot inherit an earlier test's root.
+    try:
+        import hermes_constants
+        hermes_constants._default_hermes_root_memo = None
+    except Exception:  # pragma: no cover — hermes_constants always importable here
+        pass
+    yield str(root)
+
+
+def _evict_planted_hermes_cli():
+    """Drop any ``hermes_cli`` module planted under a pytest tmp dir.
+
+    ``test_autodown.TestLoadKanbanDb`` writes a FAKE ``hermes_cli/kanban_db.py``
+    into a tmp tree and imports it through the real resolver; the class
+    finalizer below evicts it again, but this is belt-and-braces for any other
+    planted fake: a leaked one stays in ``sys.modules`` for the rest of the
+    process and every LATER real-library consumer silently gets the fake (which
+    exposes only ``connect_closing``). Before GAP-C-1 no consumer of that seam
+    needed the real module after a leak — ``_has_active_work`` works with the
+    fake by contract (a lib without ``list_boards`` is the documented
+    single-board shape). Board ENUMERATION genuinely needs hermes'
+    ``list_boards``/``kanban_db_path``, so a leaked fake would make the waker
+    see one board instead of every board.
+
+    The rule is narrow — only a module whose file lives under a pytest temp
+    root is a planted fake; the real ``~/.hermes/hermes-agent`` tree is never
+    evicted.
+    """
+    import sys
+    import tempfile
+
+    markers = (os.path.realpath(tempfile.gettempdir()),
+               os.path.realpath("/private/var/folders"))
+    for name in [n for n in sys.modules if n.startswith("hermes_cli")]:
+        mod = sys.modules.get(name)
+        origin = str(getattr(mod, "__file__", "") or "")
+        if origin and origin.startswith(markers):
+            del sys.modules[name]
+
+
+@pytest.fixture
+def real_hermes_cli():
+    """The REAL ``hermes_cli`` kanban library, or a loud skip.
+
+    For the tests that must drive the actual seam chain
+    (``board_enumeration`` -> ``autodown.board_db_paths`` -> hermes
+    ``list_boards``/``kanban_db_path``) — GAP-C-1's enumeration proof. Evicts a
+    planted fake first (see ``_evict_planted_hermes_cli``), resolves through the
+    production loader, and skips when hermes is not installed here (same
+    posture as ``test_autodown.TestLoadKanbanDb.test_calls_real_kanban_connect``).
+    """
+    _evict_planted_hermes_cli()
+    from hscc_daemon import autodown
+    lib = autodown._load_kanban_db_or_default()
+    if lib is None:
+        pytest.skip("real hermes_cli not present in this environment")
+    if not hasattr(lib, "list_boards") or not hasattr(lib, "kanban_db_path"):
+        pytest.skip("resolved kanban lib predates list_boards/kanban_db_path")
+    return lib
+
+
+@pytest.fixture
+def hermes_kanban_root(tmp_path):
+    """A throwaway multi-board kanban root, pinned via ``HERMES_KANBAN_HOME``.
+
+    Yields ``(root, boards_dir)`` and CREATES both. Boards planted as
+    ``<root>/kanban/boards/<slug>/kanban.db`` are then visible to Hermes' own
+    ``list_boards()`` — i.e. to ``autodown.board_db_paths`` and therefore to
+    ``orch_waker`` — with no monkeypatching of private constants. The legacy
+    ``default`` board is ``<root>/kanban.db`` (Hermes' resolution rule).
+
+    Used by the tests that must drive REAL board enumeration (GAP-C-1); the
+    autouse fixture above already set the env var to the same directory.
+    """
+    root = tmp_path / "kanban-home"
+    (root / "kanban" / "boards").mkdir(parents=True, exist_ok=True)
+    return root, root / "kanban" / "boards"
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_topology():
     """Pin serving's LAZY topology to the documented defaults for every test.
 

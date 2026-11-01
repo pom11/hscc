@@ -44,6 +44,11 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import hscc_cli_help_audit as audit_mod  # noqa: E402
 
+# The gate asserts against the SAME registries the audit derives from, so these
+# imports are the point of the assertions, not decoration (t_a95a67df).
+import hscc_daemon.hscc as daemon_hscc            # noqa: E402
+from hscc_daemon import kanban_blocked            # noqa: E402
+
 EXPECTED_PATH = HERE / "cli_help_expected.json"
 A_COUNTS_PATH = HERE / "cli_help_a_counts.json"
 
@@ -61,8 +66,17 @@ A_COUNTS_PATH = HERE / "cli_help_a_counts.json"
 # (LAUNCH_PROBE_EXEMPT — their --help probes still run). 299 is EXACTLY what
 # a healthy surface measures with both flags — zero slack, so any further
 # shrink trips this gate.
+# Probe floor amended 299 -> 331 by t_a95a67df (audit A GAP-A-2/A-3): the walk
+# now covers the kanban verbs it used to hardcode away (+5 paths/+10 probes),
+# reaches the `orch` group router (+3 paths/+7 probes: router --help/-h plus
+# inject and waker) and the `cards` group at all (+2 paths/+5 probes). The
+# router paths' `hscc help <group>` invocation repeats the one the COMMAND_HELP
+# blurb path already issues — the Prober caches by (argv, width) so it costs no
+# second subprocess, but it is still counted here, as it was for every other
+# group before this change. 331 is EXACTLY what a healthy surface measures —
+# zero slack, same rule as above.
 MIN_SURFACE_PATHS = 150
-MIN_PROBES = 299
+MIN_PROBES = 331
 MIN_EXAMPLES = 60
 
 
@@ -322,6 +336,184 @@ def test_styles_recorded(report):
     styles = set(report["styles"].values())
     assert {"rich", "argparse", "print"} <= styles, (
         f"expected all three help styles present, got {styles}")
+
+
+# ── (COV) the walk covers the group verbs (GAP-A-2 / GAP-A-3) ────────────
+#
+# Audit A proved the kanban group had been enumerated from two literals in the
+# audit ({"blocked","stale"}) while the CLI grew monitor/pause/resume/paused/
+# enforce, and that `orch` / `cards` were never walked at all — so the (D)
+# "a --help must not execute" guarantee was unenforced for exactly the newest,
+# most mutating verbs. These pins fail if that coverage is ever lost again:
+# the first asserts the audit's OWN coverage table is clean and names the
+# verbs; the second pins the enumeration seam itself (no new hardcoded list).
+
+def test_group_verbs_are_walked(report):
+    """Every verb kanban/orch/cards advertise is actually probed."""
+    cov = report["coverage"]
+    # The registries are the source of truth here ON PURPOSE: this assertion is
+    # independent of the audit's derivation, so a registry the audit reads and
+    # a registry this test reads must agree or the walk silently shrank.
+    from hscc_daemon import kanban_cli
+
+    assert set(cov["kanban"]["walked"]) == (
+        set(kanban_blocked.SUBCOMMAND_HELP) | set(kanban_cli.VALID_SUBCOMMANDS)), (
+        "hscc kanban verbs walked != the modules' registries — the enumeration "
+        f"lost verbs: {sorted(cov['kanban']['walked'])}")
+    # The verbs audit A found unprobed, named explicitly so a regression that
+    # drops exactly these is obvious in the failure message.
+    for verb in ("pause", "resume", "paused", "enforce", "monitor"):
+        assert verb in cov["kanban"]["walked"], f"kanban {verb} not walked"
+    assert set(cov["orch"]["walked"]) == set(audit_mod.orch_group_verbs()), (
+        f"hscc orch verbs walked != _ORCH_GROUP_ENTRIES: {cov['orch']}")
+    assert {"inject", "waker"} <= set(cov["orch"]["walked"]), (
+        f"orch group router verbs missing: {cov['orch']}")
+    assert set(cov["cards"]["walked"]) == set(audit_mod.cards_group_verbs()), (
+        f"hscc cards verbs walked != the dispatcher's inventory: {cov['cards']}")
+    assert "monitor" in cov["cards"]["walked"]
+    for group, row in cov.items():
+        assert row["walked"] == row["advertised"], (
+            f"hscc {group}: walked {row['walked']} != dispatcher advertises "
+            f"{row['advertised']}")
+    # And the probes must really have run, not just been enumerated.
+    probed = set(report["styles"])
+    for verb in ("pause", "resume", "paused", "enforce"):
+        assert f"hscc kanban {verb} --help" in probed, f"{verb} --help never ran"
+        assert f"hscc kanban {verb} -h" in probed, f"{verb} -h never ran"
+    assert "hscc orch --help" in probed and "hscc orch -h" in probed
+    assert "hscc cards --help" in probed and "hscc cards monitor --help" in probed
+
+
+def test_no_coverage_findings(report):
+    """COV findings are the audit telling us its own walk has a hole."""
+    cov = [f for f in report["findings"] if f["kind"] == "COV"]
+    assert not cov, "\\n" + "\\n".join(
+        f"  [{f['kind']}] {f['command']} :: {f['detail']}" for f in cov)
+
+
+def test_coverage_gate_fires_when_a_verb_is_lost(monkeypatch, tmp_path):
+    """RED test for the RED gate: a verb the walk stops probing MUST be a COV
+    finding (GAP-A-2's whole failure mode was a hole nobody could see).
+
+    Simulates the exact rot — a registry that no longer names a verb the live
+    dispatcher still accepts — by trimming ``kanban_cli.VALID_SUBCOMMANDS``,
+    then rebuilding the surface and re-running the coverage check. Without the
+    (COV) class this passes silently, which is precisely the bug being fixed.
+    """
+    from hscc_daemon import kanban_cli
+
+    monkeypatch.setattr(kanban_cli, "VALID_SUBCOMMANDS",
+                        tuple(v for v in kanban_cli.VALID_SUBCOMMANDS
+                              if v != "enforce"), raising=True)
+    # the orch engine probe is a subprocess and irrelevant to this leg
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: ({"inject", "waker"}, None),
+                        raising=True)
+    canary = audit_mod.make_canary_dir(tmp_path)
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+
+    found = []
+    paths, _fd = audit_mod.build_surface()
+    table = audit_mod._coverage(tmp_path, canary, paths,
+                                lambda g, c, k, d, f: found.append((k, c, d)))
+    assert "enforce" not in table["kanban"]["walked"], (
+        "the trimmed registry did not actually remove the verb from the walk "
+        "— this test would pass without the coverage check")
+    hits = [d for k, _c, d in found if k == "COV" and "enforce" in d]
+    assert hits, (
+        "a verb the dispatcher advertises but the walk dropped produced NO "
+        f"COV finding — the gate cannot see GAP-A-2-class rot: {found}")
+
+
+def test_coverage_gate_fires_on_an_unaskable_dispatcher(monkeypatch, tmp_path):
+    """A dispatcher whose refusal names no verb list is reported, not skipped."""
+    monkeypatch.setattr(audit_mod, "_verbs_from_text", lambda _t: set(),
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: (set(), "engine missing"),
+                        raising=True)
+    canary = audit_mod.make_canary_dir(tmp_path)
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    found = []
+    audit_mod._coverage(tmp_path, canary, audit_mod.build_surface()[0],
+                        lambda g, c, k, d, f: found.append((k, c, d)))
+    assert [f for f in found if f[0] == "COV"], (
+        "an unaskable dispatcher produced no finding")
+
+
+def test_verb_text_parser():
+    """The parser that reads a dispatcher's refusal inventory (both spellings).
+
+    This is the seam that turns a dispatcher's error line into a verb set; a
+    silent mis-parse here shrinks the walk, which is what the coverage check is
+    built to catch — so it is pinned directly, on text, with no CLI involved.
+    """
+    parse = audit_mod._verbs_from_text
+    assert parse("Error: unknown kanban subcommand: x\n"
+                 "Valid subcommands: blocked, stale, monitor, pause") == {
+                     "blocked", "stale", "monitor", "pause"}
+    assert parse("unknown cards subcommand: x\nValid subcommands: monitor") == {
+        "monitor"}
+    assert parse("ValueError: unknown orch subcommand: x "
+                 "(available: inject, waker)") == {"inject", "waker"}
+    # a refusal that names no list is "no inventory", never a guessed set
+    assert parse("Error: unknown kanban subcommand: x") == set()
+    assert parse("") == set()
+
+
+def test_enumeration_probes_cannot_execute_a_verb(monkeypatch):
+    """Landmine pin: the bogus-verb enumeration probes must reach NO verb body.
+
+    The audit derives verb sets by calling each hand-rolled dispatcher with
+    :data:`audit_mod.BOGUS_VERB` (an unknown verb → refusal). That is only safe
+    because the refusal path returns before any verb runs — the exact class of
+    assumption that broke as BROKEN B10 in kanban_cli. So the verb bodies are
+    patched to RAISE and the probe is re-run: a bogus-verb call that ever
+    reaches a verb fails HERE, with zero real side effects, instead of shipping
+    an audit that mutates state while "reading help".
+    """
+    def trip(*_a, **_k):
+        raise AssertionError("enumeration probe reached a verb body")
+
+    from hscc_daemon import cards_live, kanban_blocked, kanban_cli
+
+    home_at_entry = os.environ.get("HOME")
+
+    for name in ("cmd_blocked",):
+        monkeypatch.setattr(kanban_blocked, name, trip, raising=True)
+    for name in ("_cmd_stale", "_cmd_monitor", "_cmd_pause"):
+        monkeypatch.setattr(kanban_cli, name, trip, raising=True)
+    for name in ("snapshot", "run_live"):
+        monkeypatch.setattr(cards_live, name, trip, raising=True)
+
+    assert audit_mod._ask_dispatcher(kanban_blocked.cmd_kanban) == (
+        {"blocked", "stale", "monitor", "pause", "resume", "paused", "enforce"},
+        [])
+    assert audit_mod._ask_dispatcher(cards_live.cmd_cards) == ({"monitor"}, [])
+    # And the probe must leave HOME exactly where it found it: it swaps HOME to
+    # a throwaway dir for the call, so a refusal path that grew a state write is
+    # caught by the second tuple slot instead of being paid for in whatever HOME
+    # the caller had (scripts/tests/conftest.py redirects HOME for the leg).
+    assert os.environ.get("HOME") == home_at_entry, (
+        "the enumeration probe did not restore HOME")
+
+
+def test_group_verb_sets_are_derived_not_listed():
+    """The enumeration seam must not regress into a literal verb list.
+
+    GAP-A-2's root cause was a list in THIS file that the CLI outgrew. These
+    assertions read the same registries the audit reads, so a new verb lands in
+    the walk automatically — and if someone reintroduces a hardcoded set, the
+    comparison against the registry stops being tautological and fails.
+    """
+    from hscc_daemon import kanban_cli
+
+    assert set(audit_mod.kanban_group_verbs()) == (
+        set(kanban_blocked.SUBCOMMAND_HELP) | set(kanban_cli.VALID_SUBCOMMANDS))
+    assert set(audit_mod.orch_group_verbs()) == {
+        usage.split()[2].split("|")[0]
+        for usage, _d in daemon_hscc._ORCH_GROUP_ENTRIES}
+    assert set(audit_mod.cards_group_verbs()) == {"monitor"}
 
 
 def test_findings_match_expected(report, rules):

@@ -485,9 +485,10 @@ board · card · worker │ run · heartbeat · tokens (as space allows).
   --board <slug>  only this board
   --tools         start in tools-only view (t toggles in --live)
 
-Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · +/- bigger or
-smaller panels (fewer/more columns; 0 = auto) · t full/tools · p pause · q quit.
-Font size itself is the terminal's (iTerm: Cmd +/-). Read-only: never claims, promotes or archives.
+Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · +/- bigger
+  or smaller panels (fewer/more columns; 0 = auto) · t full/tools · p
+  pause · q quit. Font size itself is the terminal's (iTerm: Cmd +/-).
+  Read-only: never claims, promotes or archives.
 """
 
 

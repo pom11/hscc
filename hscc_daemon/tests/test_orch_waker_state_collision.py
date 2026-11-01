@@ -29,6 +29,7 @@ writes back the dict it loaded, so the stamp's fields survive a scan write.
 import json
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -37,15 +38,19 @@ from hscc_daemon import orch_waker as ow
 T0 = 1_800_000_000
 
 
-def make_tree(tmp_path):
+def make_tree(tmp_path, boards):
     """A throwaway ~/.hermes: one board with a completed event + its orch.
 
-    Returns ``(home_dir, boards_dir, db_path)``. The board DB is the shape
-    ``scan_board`` reads (task_events joined to tasks); the event is inserted
-    later by ``add_event`` so the first tick can first-sight an empty board.
+    ``boards`` is the KANBAN BOARDS ROOT (``<kanban-home>/kanban/boards``) the
+    conftest pins via ``HERMES_KANBAN_HOME`` — GAP-C-1 moved board discovery to
+    Hermes' own ``list_boards()``, so a board is only visible to the waker when
+    it sits under that root. Returns ``(home_dir, boards_dir, db_path)``. The
+    board DB is the shape ``scan_board`` reads (task_events joined to tasks);
+    the event is inserted later by ``add_event`` so the first tick can
+    first-sight an empty board.
     """
     home = tmp_path / "hermes"
-    boards = home / "kanban" / "boards"
+    boards = Path(boards)
     (boards / "demo").mkdir(parents=True)
     (home / "profiles" / "demo-orch").mkdir(parents=True)
     db = boards / "demo" / "kanban.db"
@@ -86,7 +91,7 @@ class FakeRepl:
 
 
 @pytest.fixture
-def deployed(tmp_path, monkeypatch):
+def deployed(tmp_path, monkeypatch, hermes_kanban_root):
     """The waker as the daemon actually runs it: zero injected seams.
 
     Only the three things a hermetic test MUST replace are replaced: the clock
@@ -94,9 +99,14 @@ def deployed(tmp_path, monkeypatch):
     roots (never read the operator's live boards). The config, the state path
     and the audit path all stay at their DEFAULTS, and ``state.write_state`` /
     ``state.read_state`` are the real ones — that pairing is the defect.
+
+    GAP-C-1: the board is planted under the kanban root the conftest pins via
+    ``HERMES_KANBAN_HOME``, because discovery is now Hermes' (there is no
+    ``DEFAULT_BOARDS_DIR`` to monkeypatch any more); profiles still resolve
+    through ``DEFAULT_HERMES_HOME`` — that half is the waker's own.
     """
-    home, boards, db = make_tree(tmp_path)
-    monkeypatch.setattr(ow, "DEFAULT_BOARDS_DIR", str(boards))
+    _, boards = hermes_kanban_root
+    home, boards, db = make_tree(tmp_path, boards)
     monkeypatch.setattr(ow, "DEFAULT_HERMES_HOME", str(home))
     repl = FakeRepl()
     monkeypatch.setattr(ow, "load_repl_inject", lambda: repl)
@@ -217,13 +227,14 @@ def test_audit_trail_lands_on_the_default_path(deployed):
     assert tail[0]["ok"] is True and tail[0]["profile"] == "demo-orch"
 
 
-def test_stale_counters_are_not_resurrected_by_the_merge(tmp_path, monkeypatch):
+def test_stale_counters_are_not_resurrected_by_the_merge(
+        tmp_path, monkeypatch, hermes_kanban_root):
     """A ``poll_gate``/``disabled`` stamp must not carry the PREVIOUS scan's
     ``nudged``/``decisions`` forward: the merge carries only {last,pending,
     sent}, so the stamp section is rewritten clean every tick.
     """
-    home, boards, db = make_tree(tmp_path)
-    monkeypatch.setattr(ow, "DEFAULT_BOARDS_DIR", str(boards))
+    _, boards = hermes_kanban_root
+    home, boards, db = make_tree(tmp_path, boards)
     monkeypatch.setattr(ow, "DEFAULT_HERMES_HOME", str(home))
     repl = FakeRepl()
     monkeypatch.setattr(ow, "load_repl_inject", lambda: repl)
