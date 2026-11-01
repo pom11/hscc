@@ -220,7 +220,8 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
 
     elif action_type == "auto_restart":
         # §5 C2: an intentional autodown must suppress automated restarts from
-        # EVERY path. This trigger engine runs every 15s and its ``vllm_down``
+        # EVERY path. This trigger engine runs every `triggers` tick
+        # (PERIODIC_INTERVALS["triggers"]) and its ``vllm_down``
         # / ``failed_dgx`` metrics read True while the orchestrator is down, so
         # an auto_restart rule on those would otherwise resurrect a
         # deliberately-down layer — independent of the watchdog. Gate on the
