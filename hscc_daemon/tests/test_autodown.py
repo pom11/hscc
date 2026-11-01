@@ -749,6 +749,27 @@ class TestLoadKanbanDb:
         )
         return agent
 
+    @pytest.fixture(autouse=True)
+    def _evict_planted_hermes_cli(self, tmp_path):
+        """Never leak the planted fake into the rest of the process.
+
+        The resolver ``import``s whatever ``HERMES_AGENT_PATH`` points at, so a
+        fake planted here lands in ``sys.modules`` and stays for the whole
+        pytest run. ``_has_active_work`` tolerates that (a lib without
+        ``list_boards`` is the documented single-board shape), which is why the
+        leak was invisible — but GAP-C-1 added a consumer that genuinely needs
+        hermes' ``list_boards``/``kanban_db_path`` (``autodown.board_db_paths``,
+        used by ``orch_waker``), and a leaked fake silently shrinks the board
+        set to one. So the class that plants the fake removes it again.
+        """
+        yield
+        import sys
+        for name in [n for n in sys.modules if n.startswith("hermes_cli")]:
+            origin = str(getattr(sys.modules[name], "__file__", "") or "")
+            if str(tmp_path).rstrip("/") in origin or (
+                    origin and "pytest-of-" in origin):
+                del sys.modules[name]
+
     def test_resolves_from_hermes_agent_path(self, tmp_path, monkeypatch):
         """HERMES_AGENT_PATH points at a dir with hermes_cli ⇒ it resolves and
         works, even though the dir is not on sys.path by default."""
