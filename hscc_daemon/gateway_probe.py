@@ -54,18 +54,26 @@ class GatewayLivenessSourceError(RuntimeError):
     """The shipped ``gateway_liveness.py`` could not be located/loaded."""
 
 
-def _candidate_paths():
-    """Where ``gateway_liveness.py`` may live, best match first."""
-    root = Path(__file__).resolve().parents[1]
+def _candidate_paths(root=None, home=None):
+    """Where ``gateway_liveness.py`` may live, best match first.
+
+    ``root`` / ``home`` are injectable so a test can pin BOTH deployment
+    layouts (repo checkout and deployed plugin tree) without touching the
+    caller's real filesystem. Defaults are the real layouts, not a guess:
+    ``root`` is two levels up from this file, which is ``<repo>`` in a checkout
+    and ``<plugins_dir>`` once installed.
+    """
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     yield root.joinpath(*LIVENESS_REL)
     # Last-resort runtime location, for a deployment where hscc_daemon was
     # installed without its sibling (should not happen; reported, not guessed).
-    yield Path(os.path.expanduser("~")) / ".hermes" / "plugins" / Path(*LIVENESS_REL)
+    home = Path(home) if home is not None else Path(os.path.expanduser("~"))
+    yield home / ".hermes" / "plugins" / Path(*LIVENESS_REL)
 
 
-def liveness_source():
+def liveness_source(root=None, home=None):
     """Absolute path to the shipped ``gateway_liveness.py``, or None."""
-    for p in _candidate_paths():
+    for p in _candidate_paths(root=root, home=home):
         if p.is_file():
             return p
     return None
