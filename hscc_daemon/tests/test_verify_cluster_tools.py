@@ -74,7 +74,7 @@ CORE_COMMANDS = ('register("workers-up")\n'
 
 def _plant_core(plugins):
     core = plugins / "hscc-commands"
-    core.mkdir(parents=True)
+    core.mkdir(parents=True, exist_ok=True)
     (core / "__init__.py").write_text(CORE_COMMANDS)
 
 
@@ -248,7 +248,10 @@ class TestCheckPluginsClusterToolsNeverAssertsFalsely:
 
     def test_empty_registry_tables_is_unassertive(self, tmp_path):
         from hscc_daemon.verify import check_plugins
-        repo = _plant_repo(tmp_path, init="def register(ctx):\n    pass\n")
+        # No tool tables AND no manifest: nothing to assert, so the row must
+        # not invent a drift verdict from an empty expectation set.
+        repo = _plant_repo(tmp_path, init="def register(ctx):\n    pass\n",
+                           manifest=False)
         _plant_deployed(tmp_path / "plugins", DEPLOYED_INIT_NO_ORCH,
                         with_orch_module=False)
         r = check_plugins(plugins_dir=str(tmp_path / "plugins"),
@@ -277,27 +280,44 @@ class TestRunAllCarriesTheRow:
 
     def test_run_all_single_plugins_row_hermetic(self, tmp_path, monkeypatch):
         from hscc_daemon.verify import run_all
+        from hscc_daemon.tests.test_verify import _hermetic_new_checks_overrides
         plugins = tmp_path / "plugins"
         _plant_core(plugins)
         _plant_deployed(plugins, DEPLOYED_INIT_NO_ORCH,
                         with_orch_module=False)  # drift planted...
-        repo = _plant_repo(tmp_path)
+        # ...but the hermetic repo_root override (tmp/repo, no hscc-cluster
+        # tree) keeps the row unassertive — the suite can never inherit live
+        # deploy drift through the repo side either.
         result = run_all(plugins_dir=str(plugins),
-                         repo_root=str(tmp_path / "empty-repo"))  # ...but the
-        # hermetic repo_root override has NO hscc-cluster tree, so the row
-        # stays unassertive and the suite never inherits live deploy drift.
+                         profiles_dir=str(tmp_path / "profiles"),
+                         **_hermetic_new_checks_overrides(tmp_path))
         rows = [c for c in result["checks"] if c["name"] == "plugins"]
         assert len(rows) == 1
         assert rows[0]["ok"] is True
+        assert "not asserted" in rows[0]["detail"]
 
     def test_run_all_surfaces_live_shape_drift(self, tmp_path):
+        """run_all under a repo_root override whose tree registers
+        orch_message (like the real repo) against a deployed tree that lacks
+        it (like the live 2.14.0 payload) surfaces the row as RED naming
+        orch_message.py — the GAP-F-8 acceptance shape. External-surface
+        checks stay hermetically stubbed (same override set the existing
+        run_all tests use)."""
         from hscc_daemon.verify import run_all
+        from hscc_daemon.tests.test_verify import _hermetic_new_checks_overrides
+        # repo FIRST: the helper reuses tmp/repo (adds only hscc-commands),
+        # so one overrides call plants both sides of the assertion.
+        _plant_repo(tmp_path)
+        overrides = _hermetic_new_checks_overrides(tmp_path)
+        assert overrides["repo_root"].endswith(str(tmp_path / "repo"))
         plugins = tmp_path / "plugins"
         _plant_deployed(plugins, DEPLOYED_INIT_NO_ORCH,
                         with_orch_module=False)
-        repo = _plant_repo(tmp_path)
-        result = run_all(plugins_dir=str(plugins), repo_root=str(repo))
+        result = run_all(plugins_dir=str(plugins),
+                         profiles_dir=str(tmp_path / "profiles"),
+                         **overrides)
         row = _plugins_row(result)
         assert row["ok"] is False
+        assert "missing vs deployed payload" in row["detail"]
         assert "orch_message.py" in row["detail"]
         assert result["ok"] is False
