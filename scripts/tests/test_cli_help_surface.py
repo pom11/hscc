@@ -79,12 +79,6 @@ MIN_SURFACE_PATHS = 150
 MIN_PROBES = 331
 MIN_EXAMPLES = 60
 
-#: The HOME this pytest leg started with. The audit's enumeration probes swap
-#: HOME for the duration of an in-process dispatcher call and must restore it —
-#: pinned against this constant, so a leaked sandbox HOME can never be mistaken
-#: for a passing run.
-HOME_BEFORE = os.path.expanduser("~")
-
 
 @pytest.fixture(scope="module")
 def report():
@@ -483,6 +477,8 @@ def test_enumeration_probes_cannot_execute_a_verb(monkeypatch):
 
     from hscc_daemon import cards_live, kanban_blocked, kanban_cli
 
+    home_at_entry = os.environ.get("HOME")
+
     for name in ("cmd_blocked",):
         monkeypatch.setattr(kanban_blocked, name, trip, raising=True)
     for name in ("_cmd_stale", "_cmd_monitor", "_cmd_pause"):
@@ -494,12 +490,12 @@ def test_enumeration_probes_cannot_execute_a_verb(monkeypatch):
         {"blocked", "stale", "monitor", "pause", "resume", "paused", "enforce"},
         [])
     assert audit_mod._ask_dispatcher(cards_live.cmd_cards) == ({"monitor"}, [])
-    # the probe must also be HOME-inert: it points HOME at a throwaway dir and
-    # reports what it wrote, so a refusal path that grew a state write can only
-    # ever be caught (the second tuple slot), not paid for under the operator's
-    # real ~/.hscc.
-    assert os.path.expanduser("~") == HOME_BEFORE, (
-        "HOME was not restored by the probe")
+    # And the probe must leave HOME exactly where it found it: it swaps HOME to
+    # a throwaway dir for the call, so a refusal path that grew a state write is
+    # caught by the second tuple slot instead of being paid for in whatever HOME
+    # the caller had (scripts/tests/conftest.py redirects HOME for the leg).
+    assert os.environ.get("HOME") == home_at_entry, (
+        "the enumeration probe did not restore HOME")
 
 
 def test_group_verb_sets_are_derived_not_listed():
