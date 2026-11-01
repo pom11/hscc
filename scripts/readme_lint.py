@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""R7 README lint — badge==VERSION + quoted-command existence (audit §3).
+"""R7 README lint — badge==VERSION + quoted-command existence + docs/ index
+coverage (audit §3 + t_c2ec721f).
 
-Rules (``docs/audits/README_REVIEW_2026-10-15.md`` §3, "R7 lint rules"):
+Rules (``docs/audits/README_REVIEW_2026-10-15.md`` §3, "R7 lint rules",
+plus rule (3) below):
 
   (1) badge == VERSION   every shields.io badge whose label asserts a
       version (``version``/``v``/``release``) must carry the repo's own
@@ -59,6 +61,24 @@ Documented boundaries — never silently ignored; every skip is counted in
   * ``flightdeck*`` tokens are left to audit rule (3) + the §3.1 survival
     ledger (naming, not existence): ``flightdeck-rule3``;
   * data names (``autodown.json``, ``.stale``): ``data-name``.
+
+Rule (4) — ``docs/`` INDEX COVERAGE (t_c2ec721f) — is a property of
+``docs/README.md`` alone, not of quoted tokens, and runs whenever that file
+exists under ``--repo``: every file tracked under ``docs/`` (``git ls-files
+docs``, worktree-tracked — a file an author just added with ``git add`` is
+already covered) must be referenced by a backtick-quoted ``docs/<path>``
+anywhere in the index. The index's own preamble claims "Every tracked file
+under ``docs/`` is enumerated below"; the claim held by measurement, not by
+good intentions — it silently decayed twice (3 files short after the R6
+rewrite, repaired manually by b8f05170; 10 short again by t_684caf31)
+because nothing compared the claim against ``git ls-files docs``. Bullets
+whose quoted target ends in ``/`` are DIRECTORY HEADINGS, not file entries,
+and are excluded from the index side (b8f05170's recipe; their files are
+listed individually below the heading). Numbered (4) because the audit's
+own rule (3) is flightdeck naming — handled by §3.1, not by this lint.
+When git reports no applicable tracked files (a fixture/tmp repo) the leg
+falls back to a filesystem walk of ``docs/`` so fixtures can pin the rule
+without a repo.
 
 Safety: this module NEVER executes a command quoted in a README. A quoted
 mutating verb (``hscc cluster down --dry-run``) is linted as a STRING; the
@@ -302,6 +322,103 @@ def default_readme_set(repo: Path) -> list:
              if "/fixtures/" not in f.relative_to(repo).as_posix()
              and f.is_file()]
     return sorted(set(files))
+
+
+# ── (4) docs/ index coverage ────────────────────────────────────────────
+
+#: the index file whose preamble promises full enumeration of docs/
+DOCS_INDEX = "docs/README.md"
+
+#: a backtick-quoted docs path inside a markdown line: `docs/foo.md`,
+#: ``docs/foo.md``, `docs/dir/`. Captures the path only (the quotes are the
+#: delimiters, so a heading entry is exactly a captured path ending in "/").
+_QUOTED_DOC_PATH = re.compile(r"(?<!`)(`{1,2})(docs/[^`\s]+)\1")
+
+
+def quoted_doc_paths(text: str) -> set:
+    """Every backtick-quoted ``docs/…`` path in ``text``, unmodified.
+
+    Line-based and fence-aware (the same fence scan as ``iter_inline_code``)
+    so a fenced transcript that quotes a deleted path cannot satisfy the
+    index; the index's own bullets are inline-code by construction.
+    """
+    out = set()
+    fence = None
+    for ln in text.splitlines():
+        m = _FENCE.match(ln)
+        if m:
+            if fence is None:
+                fence = m.group(1)
+            elif m.group(1) == fence:
+                fence = None
+            continue
+        if fence:
+            continue
+        for mm in _QUOTED_DOC_PATH.finditer(ln):
+            out.add(mm.group(2))
+    return out
+
+
+def tracked_docs_files(repo: Path) -> list:
+    """Files tracked under ``docs/`` (relative posix paths, sorted).
+
+    ``git ls-files docs`` is the ground truth the index's preamble is a
+    claim about, so the claim is checked against the SAME enumeration the
+    claim names. ``--full-name`` keeps paths repo-root-relative (the shape
+    the index's references use) even when cwd sits in a subdirectory. The
+    git result is only trusted when EVERY line actually starts with
+    ``docs/``: a fixture repo living inside the real checkout is tracked by
+    the parent git, and its enumeration would come back under the fixture
+    prefix — the same inapplicable-input situation as a git-less tmp repo,
+    so both fall to a filesystem walk (mirrors ``tracked_basenames``).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--full-name", "docs"],
+            capture_output=True, text=True, timeout=60)
+        lines = sorted(p for p in out.stdout.split() if p)
+        if (out.returncode == 0 and lines
+                and all(p.startswith("docs/") for p in lines)):
+            return lines
+    except Exception:
+        pass
+    root = repo / "docs"
+    if not root.is_dir():
+        return []
+    return sorted(p.relative_to(repo).as_posix()
+                  for p in root.rglob("*") if p.is_file()
+                  and ".git" not in p.parts)
+
+
+def check_docs_index_coverage(repo: Path):
+    """(findings, files_checked, entries_in_index) for rule (4).
+
+    Runs against ``docs/README.md`` only. Directory-heading bullets (a
+    quoted path ending in ``/``) are NOT file entries and are excluded from
+    the index side — per b8f05170's recipe, the files under such a heading
+    are still listed individually (the three `docs/design/screens/` PNGs
+    each have their own bullet), so the file side stays "every tracked
+    file" and a new untracked-by-the-index file never hides behind a
+    heading.
+    """
+    index = repo / DOCS_INDEX
+    if not index.is_file():
+        return [], 0, 0
+    files = tracked_docs_files(repo)
+    refs = quoted_doc_paths(index.read_text(encoding="utf-8",
+                                            errors="replace"))
+    listed = {r for r in refs if not r.endswith("/")}
+    findings = []
+    for miss in (f for f in files if f not in listed):
+        findings.append(_finding(
+            "DOC-UNLISTED", index, 1, miss, repo,
+            f"`{miss}` is tracked under docs/ but has no backtick-quoted "
+            f"entry in {DOCS_INDEX} — the index's preamble claims every "
+            "tracked docs/ file is enumerated",
+            f"add a one-line entry (what it is + **live**/**record**/"
+            "**superseded**) under the fitting section of "
+            f"{DOCS_INDEX}"))
+    return findings, len(files), len(listed)
 
 
 # ── oracle wrapper (CLI-audit reuse, never a second enumeration) ────────
@@ -689,6 +806,11 @@ def lint_repo(repo, paths=None, oracle=None) -> dict:
                 skipped[payload] = skipped.get(payload, 0) + 1
             else:
                 checked_commands += 1
+    # Rule (4) is a property of the REPO (docs/ vs its index), not of the
+    # quoted-token surface, so it is evaluated whenever docs/README.md
+    # exists under --repo — narrowing --files cannot silence it.
+    idx_findings, idx_files, idx_entries = check_docs_index_coverage(repo)
+    findings.extend(idx_findings)
     report_files = []
     for f in files:
         try:
@@ -701,6 +823,8 @@ def lint_repo(repo, paths=None, oracle=None) -> dict:
         "files": sorted(report_files),
         "badges_checked": checked_badges,
         "commands_checked": checked_commands,
+        "docs_index_files": idx_files,
+        "docs_index_entries": idx_entries,
         "skipped": skipped,
         "findings": findings,
     }
@@ -728,6 +852,8 @@ def main(argv=None) -> int:
     print(f"files: {len(report['files'])}   version: "
           f"{report['version_expected']}   badges: {report['badges_checked']}   "
           f"commands: {report['commands_checked']}   "
+          f"docs-index: {report['docs_index_entries']}/"
+          f"{report['docs_index_files']}   "
           f"skipped: {sum(report['skipped'].values())}   "
           f"findings: {len(report['findings'])}")
     for f in report["findings"]:
