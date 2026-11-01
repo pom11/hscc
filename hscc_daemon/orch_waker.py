@@ -132,6 +132,82 @@ def load_state(state_path=None) -> dict:
     return st
 
 
+def _stream_state_path() -> str:
+    """The daemon stream-state file this stream writes its stamp into.
+
+    Read through ``state.STATE_DIR`` AT CALL TIME (not the import-time value)
+    so the suite's per-test redirect is honoured, exactly like the writers.
+    """
+    from . import state as _state
+    return os.path.join(_state.STATE_DIR, f"{STREAM_NAME}.json")
+
+
+def _owned_state_keys(state_path=None) -> dict:
+    """The waker's OWN keys ({last,pending,sent}) currently on disk.
+
+    ``{}`` when the file is absent, unreadable or not an object — the stamp
+    then lands alone, which is what it would have been anyway.
+    """
+    try:
+        with open(_resolve(state_path or DEFAULT_STATE_PATH)) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: doc[k] for k in _STATE_KEYS if isinstance(doc.get(k), dict)}
+
+
+def stamp_entry(state_path=None, entry=None) -> dict:
+    """The document the stream stamp writes: the stamp OVER the scan state.
+
+    THE COLLISION (t_fa9a2faf). ``DEFAULT_STATE_PATH`` and the daemon's stream
+    file for ``STREAM_NAME`` are the SAME path — ``~/.hscc/state/orch_waker.json``
+    — and :func:`hscc_daemon.state.write_state` writes the whole document, so a
+    bare ``write_state(STREAM_NAME, entry)`` erased the scan state's
+    ``last``/``pending``/``sent`` every tick. Consequence: every board
+    re-first-sighted (and tail-started) on every tick, batches never aged into
+    a nudge, and the stream + doctor still read healthy — a silently inert
+    waker.
+
+    So the stamp is MERGED, not dropped in: this returns the scan-state keys
+    read from the file plus the stamp fields on top. The reverse half is
+    already free — :func:`load_state` ignores unknown top-level keys and
+    :func:`save_state` writes back the dict it loaded, so the stamp's
+    ``last_tick``/``ok``/``message`` survive the scan write untouched. One
+    document, both readers, and the stopgap takeover file
+    (``state/orch_waker.json``) stays the hand-off format W1 promised.
+
+    Only the three scan keys are carried forward, never a previous stamp's
+    fields: a ``disabled``/``poll_gate`` tick must not keep advertising the
+    ``nudged``/``decisions`` counters of the last real scan.
+
+    The read-modify-write is racey by construction (two writers, last one
+    wins per key set), and that is acceptable here: this stream's thread is
+    the ONLY writer of the stamp keys and the only writer of the scan keys
+    (through :func:`save_state`), and they are the same thread — so it cannot
+    race itself. An external writer (a still-running stopgap) can interleave;
+    the loss is bounded to keys that process owns and is strictly smaller than
+    what the pre-fix clobber destroyed.
+
+    When the two paths do NOT resolve to the same file there is nothing to
+    merge (merging would only copy scan state into a second file), so the
+    stamp goes out alone.
+    """
+    entry = dict(entry or {})
+    stream_path = _stream_state_path()
+    own_path = _resolve(state_path or DEFAULT_STATE_PATH)
+    try:
+        same_file = os.path.realpath(stream_path) == os.path.realpath(own_path)
+    except OSError:  # pragma: no cover — realpath on a valid path
+        same_file = False
+    if not same_file:
+        return entry
+    merged = _owned_state_keys(own_path)
+    merged.update(entry)
+    return merged
+
+
 def save_state(st: dict, state_path=None) -> None:
     """tmp + os.replace atomic write of the state file (stopgap mechanism)."""
     path = _resolve(state_path or DEFAULT_STATE_PATH)
@@ -513,6 +589,595 @@ def make_inject(repl=None, mode="auto", profiles_dir=None, hermes_home=None,
 def _real_time() -> float:
     import time
     return time.time()
+
+
+# =========================================================================== #
+# W3 — operator config (``orch_waker.enabled`` + knobs) and the status read
+# the CLI/doctor consume.
+#
+# Shape mirrors the daemon's other daemon-resident features exactly —
+# autodown owns ``~/.hscc/autodown.json`` with a DEFAULT_CONFIG dict merged
+# over what is on disk, api_cli owns ``~/.hscc/api.json``; the waker owns
+# ``~/.hscc/orch_waker.json``. One flat JSON object, one loader, one writer,
+# and the config re-read EVERY tick, so a mid-run ``hscc orch waker disable``
+# takes effect on the next tick with no daemon restart (same hot-reload
+# contract as ``_autodown_tick``). The card's dotted key names
+# (``orch_waker.enabled``) are the FEATURE's namespace — the file itself is
+# the namespace, exactly like autodown.json's own keys.
+#
+# ``enabled`` defaults ON, and that is the ONE deliberate difference from
+# autodown, called out in the card, not an oversight: autodown fails CLOSED
+# (absent/corrupt config => teardown never happens) because its action is
+# destructive. The waker's action is a nudge into an idle REPL, the operator
+# asked for it always-on, and a lost config file that silently stopped the
+# waking is the exact failure the stopgap exists to prevent. So a missing
+# file, a corrupt file, and a non-dict file all resolve to ENABLED.
+# =========================================================================== #
+
+#: The waker's config file. Written 0600 (the daemon's umask(0o077) owns the
+#: whole ~/.hscc tree). Distinct from the waker's STATE file
+#: (``state/orch_waker.json``) the way autodown.json is distinct from the
+#: daemon's stream-state files: config is operator-owned (the CLI writes it),
+#: state is daemon-owned (the tick writes it).
+DEFAULT_CONFIG_PATH = "~/.hscc/orch_waker.json"
+
+#: Defaults (W3): ON, and the stopgap's tuning verbatim. ``poll_s`` mirrors
+#: ``POLL_S`` — the daemon's stream cadence and this knob are the same number
+#: on purpose (see ``stream_interval``), and doctor derives its freshness
+#: budget from HERE so the two cannot drift.
+CONFIG_DEFAULTS = {
+    "enabled": True,      # default ON (W3 card) — see the fail-open note above
+    "debounce_s": DEBOUNCE_S,
+    "min_gap_s": MIN_GAP_S,
+    "poll_s": POLL_S,
+}
+
+#: Hard floors for the numeric knobs. Zero/negative would turn the debounce
+#: into "nudge on every event" and the rate limit into "nudge every tick",
+#: i.e. exactly the flood the batching rules exist to prevent.
+_KNOB_FLOOR = {"debounce_s": 0, "min_gap_s": 0, "poll_s": 1}
+
+
+def _coerce_knob(key, value):
+    """A sane numeric value for ``key``, or the default.
+
+    Booleans are rejected (``True`` is an ``int`` in Python; a bool in a
+    seconds field is a typo, not a value). Non-finite values too — an
+    ``Infinity`` rate limit would silence the board forever.
+    """
+    default = CONFIG_DEFAULTS[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
+        return default
+    if value < _KNOB_FLOOR[key]:
+        return default
+    return value
+
+
+def config_path(path=None) -> str:
+    """Resolved path of the daemon operator config file (expanduser at call)."""
+    return _resolve(path or DEFAULT_CONFIG_PATH)
+
+
+def load_config(path=None) -> dict:
+    """The waker's config file merged over defaults (always a COMPLETE dict).
+
+    Absent file, unreadable file, invalid JSON and a non-object document all
+    resolve to the defaults — i.e. ENABLED, at the stopgap's tuning (the
+    fail-open rationale is in the header above). Only keys in
+    ``CONFIG_DEFAULTS`` are returned, so a stray hand-edit cannot reach the
+    tick, and a partial file (or one written by an older build) still yields
+    every knob.
+    """
+    cfg = dict(CONFIG_DEFAULTS)
+    file = config_path(path)
+    try:
+        with open(file) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return cfg
+    except (OSError, ValueError) as e:
+        LOG.warning("orch-waker: config %s unreadable (%s) — using defaults",
+                    file, e)
+        return cfg
+    if not isinstance(doc, dict):
+        LOG.warning("orch-waker: config %s is not an object — using defaults",
+                    file)
+        return cfg
+    cfg["enabled"] = bool(doc.get("enabled", CONFIG_DEFAULTS["enabled"]))
+    for key in ("debounce_s", "min_gap_s", "poll_s"):
+        cfg[key] = _coerce_knob(key, doc.get(key, CONFIG_DEFAULTS[key]))
+    return cfg
+
+
+def set_enabled(enabled: bool, path=None) -> dict:
+    """Flip ``enabled`` in the waker's config file. Returns the new block.
+
+    The ONLY writer of this file besides the operator's own editor, and the
+    CLI never rewrites it by hand — the daemon imports this same function, so
+    a flip is visible to the tick on its very next pass with no restart and no
+    second bookkeeping path to drift. Writes the COMPLETE schema (merged over
+    ``CONFIG_DEFAULTS``), keeps any unrelated operator key that is already in
+    the file, creates file/parents when missing, and swaps atomically (tmp +
+    ``os.replace``) — the same discipline ``save_state`` and
+    ``autodown.save_config`` use. Raises ``OSError`` on a failed read/write so
+    the CLI reports a refusal instead of claiming a flip that did not happen,
+    and refuses to clobber a document that is not a JSON object.
+    """
+    file = config_path(path)
+    doc = {}
+    if os.path.exists(file):
+        with open(file) as f:
+            raw = f.read()
+        if raw.strip():
+            loaded = json.loads(raw)
+            if not isinstance(loaded, dict):
+                raise ValueError(
+                    f"{file} is not a JSON object — refusing to rewrite it")
+            doc = loaded
+    merged = dict(CONFIG_DEFAULTS)
+    merged.update({k: v for k, v in doc.items() if k in CONFIG_DEFAULTS})
+    merged["enabled"] = bool(enabled)
+    doc.update(merged)
+    parent = os.path.dirname(file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, file)
+    return {k: doc[k] for k in CONFIG_DEFAULTS}
+
+
+def stream_interval(cfg=None, path=None) -> int:
+    """The configured ``poll_s``, clamped to a safe range.
+
+    Bounded to ``[1, 3600]`` so a typo (``0`` => a hot loop; ``100000`` => a
+    stream that never polls) cannot hurt. NOTE: this is the CONFIG value, not
+    necessarily the scan cadence — the loop ticks the stream at
+    ``PERIODIC_INTERVALS["orch_waker"]`` and the tick only POLLS at
+    ``poll_s`` when that is LONGER than the stream cadence (a poll_s shorter
+    than the cadence cannot make the waker scan faster than the loop wakes;
+    see :func:`effective_scan_interval`).
+    """
+    cfg = cfg if cfg is not None else load_config(path)
+    try:
+        interval = int(cfg.get("poll_s", CONFIG_DEFAULTS["poll_s"]))
+    except (TypeError, ValueError):
+        interval = POLL_S
+    return max(1, min(3600, interval or POLL_S))
+
+
+#: Fallback for the stream cadence when ``daemon_ops`` cannot be consulted
+#: (kept == its PERIODIC_INTERVALS entry; the card pins both to 30).
+_STREAM_CADENCE_FALLBACK = 30
+
+
+def stream_cadence() -> int:
+    """The daemon loop's cadence for this stream (the SOT, 30 s).
+
+    Reads ``daemon_ops.PERIODIC_INTERVALS`` — the same source
+    ``verify._live_stream_intervals`` reads, so cadence and the staleness math
+    cannot drift. Imported inside the function: daemon_ops owns the import of
+    THIS module (its CHECKS table), and a module-level import in the other
+    direction would only work by accident.
+    """
+    try:
+        from .daemon_ops import PERIODIC_INTERVALS
+        return int(PERIODIC_INTERVALS[STREAM_NAME])
+    except Exception:  # pragma: no cover — defensive; the dict is a constant
+        return _STREAM_CADENCE_FALLBACK
+
+
+def effective_scan_interval(cfg=None, path=None) -> int:
+    """Seconds between real board scans, honouring both cadences.
+
+    ``max(stream cadence, poll_s)``: the loop cannot wake the stream faster
+    than its cadence, and the tick will not scan more often than ``poll_s``.
+    At the defaults (30 s / 30 s) this is exactly the stopgap's cadence.
+    """
+    return max(stream_cadence(), stream_interval(cfg, path))
+
+
+# ── W3: the daemon-loop entry + the status surface ──────────────────────────
+
+#: The daemon's stream name for the waker — the key in PERIODIC_INTERVALS
+#: (daemon_ops), the state file ``~/.hscc/state/orch_waker.json`` (state.py),
+#: the row ``hscc verify`` sees, and the field the doctor check reads.
+#: (Also referenced by ``stream_cadence`` above.)
+STREAM_NAME = "orch_waker"
+
+
+def read_audit_tail(audit_path=None, lines=5) -> list:
+    """Last ``lines`` audit entries as dicts (newest last), [] when absent.
+
+    The JSONL file is the operator's evidence trail; the CLI prints the last
+    few lines. Broken lines are skipped (never a crash — a half-written audit
+    line must not blind the status view), a missing file reads as empty.
+    """
+    path = _resolve(audit_path or DEFAULT_AUDIT_PATH)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.readlines()[-max(0, int(lines)):] if lines else []
+    except (FileNotFoundError, OSError):
+        return []
+    out = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+def waker_status(now=None, config_path=None, state_path=None,
+                 audit_path=None, audit_lines=5) -> dict:
+    """Everything ``hscc orch waker status`` and the doctor check render from.
+
+    Reads (never writes): the config block, the daemon stream state file
+    (last tick stamp), the waker's own state file (per-board last-id +
+    pending count) and the audit tail. Pure file reads — safe to call from
+    a CLI process while the daemon ticks, and it never touches a board DB.
+    """
+    if now is None:
+        now = _real_time()
+    cfg = load_config(config_path)
+    from . import state as _state
+    stream = _state.read_state(STREAM_NAME) or {}
+    st = load_state(state_path)
+    boards = {}
+    for b in sorted(set(st["last"]) | set(st["pending"])):
+        boards[b] = {
+            "last_id": st["last"].get(b),
+            "pending": len(st["pending"].get(b) or []),
+        }
+    last_tick = stream.get("last_tick")
+    return {
+        "enabled": bool(cfg["enabled"]),
+        "config": cfg,
+        "stream": {
+            "name": STREAM_NAME,
+            "interval_s": stream_cadence(),
+            "scan_every_s": effective_scan_interval(cfg),
+            "last_tick": last_tick,
+            "tick_age_s": (round(now - last_tick, 1)
+                           if isinstance(last_tick, (int, float)) else None),
+            "ok": stream.get("ok"),
+            "message": stream.get("message"),
+        },
+        "boards": boards,
+        "audit": read_audit_tail(audit_path, audit_lines),
+    }
+
+
+def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
+               profiles_dir=None, hermes_home=None, boards_dir=None,
+               audit_path=None, inject=None, read=None, write=None) -> dict:
+    """One supervised daemon tick: read config -> (scan | skip) -> stamp stream.
+
+    The body of :func:`check_orch_waker` below — i.e. what the ``orch_waker``
+    stream in ``daemon_ops.PERIODIC_INTERVALS`` runs every 30 s. The config is
+    re-read EVERY tick — that is the whole hot-reload story, exactly like
+    ``_autodown_tick``: an ``hscc orch waker disable`` from another process
+    takes effect on the next tick without restarting the daemon, and so does a
+    knob change.
+
+    Three outcomes, all of which STAMP the stream (that is the point — a
+    stream the daemon is deliberately idling must not read as a dead one to
+    ``verify``'s staleness math):
+      * disabled  -> no scan, no board read, no injection; ``skipped=disabled``.
+      * poll gate -> the stream ticks every 30 s (the loop's cadence, the SOT
+        verify's per-stream window is built from) but the waker only POLLS at
+        ``poll_s``: when less than ``poll_s`` has elapsed since the last scan
+        the tick stamps and returns without touching a board. At the default
+        ``poll_s=30`` the gate never fires, so the built-in behaves exactly
+        like the stopgap.
+      * scan      -> :func:`run_tick` (scan -> decide -> inject -> audit) with
+        the configured ``debounce_s``/``min_gap_s``.
+
+    Returns the stamped stream entry. NEVER raises: a waker failure must not
+    take the stream thread down (:func:`run_tick` already swallows its own
+    errors; the guard here also covers the config/state seams around it), and
+    a failed tick still stamps — with ``ok: False`` — so the failure is
+    VISIBLE instead of looking like a stalled stream.
+    """
+    if now is None:
+        now = _real_time()
+    if write is None:
+        from .state import write_state as write
+    if read is None:
+        from .state import read_state as read
+    cfg = load_config(config_path)
+    entry: dict = {"enabled": bool(cfg["enabled"]), "last_tick": now}
+    try:
+        if not cfg["enabled"]:
+            entry.update(ok=True, skipped="disabled",
+                         message="orch-waker disabled (orch_waker.enabled=false)")
+            return entry
+        poll_s = stream_interval(cfg)
+        prev = read(STREAM_NAME) or {}
+        # The scan gate compares against the last SCAN, falling back to the
+        # last TICK (a restart-adjacent tick still honours the cadence).
+        ref = prev.get("last_scan")
+        if not isinstance(ref, (int, float)):
+            ref = prev.get("last_tick")
+        if not isinstance(ref, (int, float)):
+            ref = 0.0
+        since_scan = now - float(ref)
+        if since_scan < poll_s:
+            entry.update(ok=True, skipped="poll_gate", last_scan=prev.get("last_scan"),
+                         message=f"skipped (poll {poll_s}s, {since_scan:.0f}s since scan)")
+            return entry
+        decisions = run_tick(
+            now=now, state_path=state_path, paused_path=paused_path,
+            profiles_dir=profiles_dir, hermes_home=hermes_home,
+            boards_dir=boards_dir, audit_path=audit_path, inject=inject,
+            debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"])
+        nudged = sum(1 for d in decisions if d.get("ok") is True)
+        failed = sum(1 for d in decisions if d.get("ok") is False)
+        entry.update(ok=True, decisions=len(decisions), nudged=nudged,
+                     delivery_failed=failed, last_scan=now,
+                     message=(f"{nudged} nudged, {failed} failed, "
+                              f"{len(decisions)} decided" if decisions
+                              else "steady"))
+        return entry
+    except Exception as e:  # noqa: BLE001 — the stream must survive anything
+        LOG.exception("orch-waker: daemon tick failed")
+        entry.update(ok=False, message=f"tick failed: {e}")
+        return entry
+    finally:
+        # The stamp is what keeps the stream non-stale; write_state adds its
+        # own ISO `timestamp` (what verify parses), `last_tick` is the numeric
+        # wall-clock this feature's status/doctor read.
+        #
+        # It goes through `stamp_entry` because this stream's stamp file and the
+        # waker's own scan-state file are the SAME path (t_fa9a2faf): a bare
+        # write_state would erase {last,pending,sent} and make every board
+        # re-tail-start forever — see that helper's docstring for the full
+        # collision and why merging is the right half of the fix.
+        try:
+            write(STREAM_NAME, stamp_entry(state_path, entry))
+        except Exception:  # pragma: no cover — write_state itself never raises
+            LOG.exception("orch-waker: stream state write failed")
+
+
+def check_orch_waker() -> bool:
+    """The daemon's ``orch_waker`` stream check (PERIODIC_INTERVALS body).
+
+    The CHECKS-table entry in ``daemon_ops.run_daemon_loop`` — so the waker
+    rides the loop's standard per-stream machinery: its own supervised
+    thread, error isolation from every other stream (a raising check is
+    logged and the thread respawned, never taken down), and the same
+    per-stream staleness math in ``hscc verify``. ``waker_tick`` stamps the
+    stream itself on every path; this wrapper only converts the entry to the
+    check-fn truth convention (``ok``) and guarantees a raise cannot escape
+    even if the tick's own guard did (defence in depth, matching
+    ``post_boot.check_post_boot_relaunch``).
+    """
+    try:
+        return bool(waker_tick().get("ok"))
+    except Exception as e:  # pragma: no cover — waker_tick swallows internally
+        LOG.exception("orch-waker: stream check raised")
+        log_waker_failure(e)
+        return False
+
+
+def log_waker_failure(exc) -> None:
+    """Best-effort daemon-log line for a stream-check failure."""
+    try:
+        from .daemon_ops import log
+        log(f"orch-waker check error: {exc}", "ERROR")
+    except Exception:  # pragma: no cover — logging must never raise here
+        pass
+
+
+# ── W3: the doctor check ────────────────────────────────────────────────────
+#
+# ``hscc doctor``'s orch-waker verdict lives HERE rather than in
+# ``hscc-bootstrap/doctor.py`` for the same reason ``doctor_node_recovery`` and
+# ``doctor_notifier_mask`` are self-contained: the check reads the feature's
+# OWN files through the feature's OWN loader, so the doctor can never disagree
+# with the daemon about what "enabled" or "last tick" means. doctor.py adapts
+# the returned dict to its five Check fields and nothing else.
+
+#: The check name as it prints in the doctor checklist and in ``--json``.
+CHECK_NAME = "orch-waker (orchestrator waker)"
+
+#: Freshness budget: the stream must have ticked within ``2 * poll_s + this``.
+#: Two full missed ticks is the same tolerance verify uses for any stream; the
+#: +60 absorbs a slow tick (the daemon may be mid-sweep) without crying wolf.
+DOCTOR_SLACK_S = 60
+
+#: The daemon's pid file, as a ``~``-template resolved AT CALL TIME (never at
+#: import, matching DEFAULT_STATE_PATH): the suite's autouse fixture redirects
+#: ``~/.hscc`` at runtime, and a baked-in path would read the operator's live
+#: daemon instead of the per-test one.
+DAEMON_PID_PATH = "~/.hscc/daemon.pid"
+
+
+def _daemon_pid_alive(pid_file=None) -> bool:
+    """Is a daemon process alive? (pid file + ``os.kill(pid, 0)``, read-only).
+
+    Deliberately NOT ``daemon_ops.daemon_liveness``: importing daemon_ops from
+    here would be a cycle (daemon_ops imports this module for its CHECKS
+    table), and the doctor only needs the one bit — is anything ticking.
+    Never raises; an unreadable/absent pid file reads "not running".
+    """
+    path = _resolve(pid_file or DAEMON_PID_PATH)
+    try:
+        with open(path) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def tick_freshness_limit_s(poll_s) -> float:
+    """The doctor's freshness budget for a stream ticking every ``poll_s``."""
+    return 2 * float(poll_s) + DOCTOR_SLACK_S
+
+
+def _daemon_predates_build(pid_file=None, build_file=None) -> bool:
+    """Did the RUNNING daemon start before this build of the waker landed?
+
+    The upgrade race the fatal verdict must never mis-fire on: doctor is
+    bootstrap's Stage-1 gate and the daemon restart is a LATER stage, so
+    during an upgrade the live daemon was started from code that has no
+    waker stream at all. "Enabled + daemon alive + never stamped" only proves
+    broken wiring when the running process is newer than the module — the
+    signal available out-of-process is file mtimes: the pid file is written at
+    daemon start, so ``pid mtime >= orch_waker.py mtime`` means the daemon
+    could have stamped and did not (broken); an older pid means it never could
+    (upgrade). Either stat failing answers False — an unverdictable check must
+    not sink an install (the same fail-open posture as the not-running case).
+    """
+    try:
+        path = _resolve(pid_file or DAEMON_PID_PATH)
+        started = os.path.getmtime(path)
+        built = os.path.getmtime(build_file or __file__)
+    except OSError:
+        return False
+    return started < built
+
+
+def doctor_check(now=None, config_path=None, state_dir=None,
+                 stream_state=None, _daemon_running=None,
+                 hscc_dir=None, _predates_build=None) -> dict:
+    """Doctor verdict: is the built-in waker alive and doing its job?
+
+    * ``disabled``                -> ok, detail says ``disabled`` (the operator
+      turned it off; that is a choice, not a fault, and must not read red).
+    * enabled + fresh tick        -> ok, detail names the age and the budget.
+    * enabled + stale tick        -> ok=False, ``fatal=False`` → doctor prints
+      it as a WARNING (○): the loop is alive but this stream is behind.
+    * enabled + never ticked AND the daemon is running -> ok=False,
+      ``fatal=True`` → doctor prints RED (✗): the feature is on, something is
+      ticking, and this stream has never stamped, so the wiring itself is
+      broken (a daemon older than this build, an import failure, wrong dir).
+    * enabled + never ticked AND no daemon running -> ok=False,
+      ``fatal=False``: the honest verdict is "nothing is ticking", NOT a broken
+      waker. It must not be fatal: ``doctor`` is bootstrap's Stage-1 hard gate
+      and runs before the daemon has ever started, so a fatal here would stop
+      an install over a service that has not had a chance to run.
+
+    Reads only (config + the stream state file), so it is safe to run while the
+    daemon ticks and it never touches a board DB. ``stream_state=`` injects the
+    stream entry and ``_daemon_running=`` the liveness probe (tests); otherwise
+    they read ``<state_dir>/orch_waker.json`` / ``<root>/daemon.pid``.
+    ``hscc_dir=`` (the ``doctor_notifier_mask`` convention — run_doctor passes
+    ``os.environ.get("HSCC_DIR")``) relocates the WHOLE ``~/.hscc`` root for
+    this read: config, stream state and the daemon pid file all resolve under
+    it. That is what keeps a sandboxed bootstrap (HSCC_DIR = tmp, HOME = the
+    operator's real one — bootstrap.sh never fakes HOME) from reading the
+    OPERATOR's live daemon.pid while looking at the sandbox's missing stream
+    state and firing the fatal verdict over someone else's machine. Without
+    the env var every path is the plain ``~/.hscc`` default.
+    ``_predates_build=`` injects the upgrade-race probe (tests; the real one
+    is :func:`_daemon_predates_build`, which needs NO injection because the
+    pid file it stats is the same file the default liveness probe read).
+    Never raises: an unreadable state file is "never ticked", an unreadable
+    config falls back to the defaults exactly as the daemon's tick does, so
+    doctor and daemon always agree.
+    """
+    if now is None:
+        now = _real_time()
+    pid_file = None
+    if hscc_dir:
+        root = _resolve(hscc_dir)
+        if config_path is None:
+            config_path = os.path.join(root, "orch_waker.json")
+        if state_dir is None:
+            state_dir = os.path.join(root, "state")
+        pid_file = os.path.join(root, "daemon.pid")
+        if _daemon_running is None:
+            _daemon_running = lambda: _daemon_pid_alive(pid_file)  # noqa: E731
+    if _daemon_running is None:
+        _daemon_running = _daemon_pid_alive
+    if _predates_build is None:
+        _predates_build = lambda: _daemon_predates_build(pid_file)  # noqa: E731
+    cfg = load_config(config_path)
+    limit = tick_freshness_limit_s(stream_interval(cfg))
+    fix = ("start/restart the hscc daemon (`hscc start`) and re-run; if it "
+           "stays red check ~/.hscc/daemon.log for an orch-waker error")
+
+    if not cfg["enabled"]:
+        return {"name": CHECK_NAME, "ok": True, "fatal": False,
+                "detail": "disabled (orch_waker.enabled=false)",
+                "fix": "re-enable with `hscc orch waker enable` when you want "
+                       "orchestrators woken again"}
+
+    if stream_state is None:
+        stream_state = _read_stream_state(state_dir)
+    last_tick = (stream_state or {}).get("last_tick")
+    if not isinstance(last_tick, (int, float)):
+        state_hint = (os.path.join(_resolve(state_dir), f"{STREAM_NAME}.json")
+                      if state_dir else "~/.hscc/state/orch_waker.json")
+        running = _daemon_running()   # probe ONCE: a restart mid-check must
+        # not flip the verdict between the liveness bit and the age comparison.
+        if running and not _predates_build():
+            return {"name": CHECK_NAME, "ok": False, "fatal": True,
+                    "detail": f"ENABLED but never ticked while the daemon runs "
+                              f"(no stream state at {state_hint})",
+                    "fix": fix}
+        if _daemon_running():
+            # Upgrade race, not broken wiring: doctor is Stage 1, the daemon
+            # restart is a LATER stage, so this live daemon was started from
+            # code without the waker stream. Warn; it goes green on its own
+            # after the restart.
+            return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                    "detail": "enabled but the RUNNING daemon predates this "
+                              "build (never ticked yet) — the daemon restart "
+                              "later in bootstrap starts the stream",
+                    "fix": fix}
+        return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                "detail": "enabled but the daemon is not running — nothing "
+                          "ticks (start it with `hscc start`)",
+                "fix": fix}
+
+    age = now - float(last_tick)
+    if age > limit:
+        return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                "detail": f"stale: last tick {age:.0f}s ago "
+                          f"(budget {limit:.0f}s = 2*{cfg['poll_s']}s+{DOCTOR_SLACK_S}s)",
+                "fix": fix}
+    return {"name": CHECK_NAME, "ok": True, "fatal": False,
+            "detail": (f"enabled, last tick {age:.0f}s ago "
+                       f"(budget {limit:.0f}s, poll {cfg['poll_s']}s)"),
+            "fix": ""}
+
+
+def _read_stream_state(state_dir=None) -> dict:
+    """The waker stream's state entry ({} when absent/unreadable).
+
+    Uses the daemon's own ``state`` reader when no explicit dir is given — the
+    same funnel the check function writes through, including its test-time
+    redirect — and a plain JSON read otherwise (doctor may be pointed at a
+    throwaway tree). Never raises.
+    """
+    if state_dir is None:
+        try:
+            from .state import read_state
+            return read_state(STREAM_NAME) or {}
+        except Exception:  # pragma: no cover — defensive, read_state is local
+            return {}
+    path = os.path.join(_resolve(state_dir), f"{STREAM_NAME}.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 #: One shared ``warned`` set for the daemon loop: "unreadable board" warns once

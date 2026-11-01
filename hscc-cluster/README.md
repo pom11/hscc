@@ -55,6 +55,7 @@ Merged into the main `hscc` CLI (this plugin also exposes the same engine as a
 library the merged CLI imports):
 - `hscc template <list|status|validate|preview|apply> [name] [--confirm]`
 - `hscc cluster <status|hosts|monitor|jobs|info|stop|down|up>`
+- `hscc orch inject <profile> "<message>" [--mode auto|plain|queue|steer] [--pane PANE] [--dry-run] [--json]`
 
 ## Orchestrator-to-orchestrator messaging
 
@@ -69,10 +70,6 @@ never runs `tmux` itself.
 ```
 hscc orch inject <profile> "<message>" \
     [--mode auto|plain|queue|steer] [--pane PANE] [--dry-run] [--json]
-
-# engine entry point (works today; the unified `orch` group branch is pending —
-# see the status note below, so use this spelling until it lands):
-python3 hscc-cluster/hscc.py orch inject <profile> "<message>" --dry-run
 ```
 
 It is a thin wrapper over `repl_inject.inject`: `--mode` goes straight through
@@ -91,20 +88,14 @@ so a dry run cannot disagree with a real send.
 Receipt keys: `pane`, `target`, `profile`, `busy`, `mode`, `verb`,
 `interrupts`, `chars`, plus `text` on a dry run and `sent_text` on a real send.
 A refusal **raises** — `InjectError` (`no_panes` / `ambiguous` / `tmux` /
-`empty`) or `ValueError` for bad argv — and the entry point renders it (raw JSON
-with `--json`, themed panel otherwise, exit 1). Registered as `orch` (group),
-`orch-inject` and `inject` in `COMMANDS`; needs `hscc-api` deployed next to
-`hscc-cluster`, since `repl_inject` lives there.
-
-> **Unified-CLI status (as of this writing):** the verb dispatches from this
-> plugin's entry point today. The `orch` group branch in the merged `hscc` CLI
-> (`hscc_daemon/hscc.py`, the sibling of `cluster`/`template`) is owned by
-> follow-up card `t_5da7fd56`; while that wiring is absent the unified spelling
-> in the block above is rejected by the top-level dispatcher as an unknown
-> command, so use the engine entry point shown with it. If `hscc help` now lists
-> `orch`, that card has landed and this note (plus the fallback line above) is
-> stale — drop both. Facts in this section are from the merged engine source,
-> not from that pending wiring.
+`empty`) or `ValueError` for bad argv — and the dispatching entry point renders
+it (raw JSON with `--json`, one reported line otherwise, exit 1). `hscc orch …`
+routes through the unified CLI's `orch` group branch (`hscc_daemon/hscc.py`,
+the sibling of `cluster`/`template`), which loads this engine and owns only
+rendering + exit codes; the engine also registers the verb in its own
+`COMMANDS` (`orch` group, `orch-inject`, `inject`) for the standalone entry.
+Needs `hscc-api` deployed next to `hscc-cluster`, since `repl_inject` lives
+there.
 
 ### The tool (`orch_message` in `orch_message.py`)
 

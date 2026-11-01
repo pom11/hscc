@@ -575,6 +575,94 @@ class TestHasActivePrCi:
         assert state["reason"] == ""
         assert ad.prci_blocking_signal() is None
 
+    # -- WARN-ONCE guarantee (the t_4f42fb87 acceptance residue) -----------
+    #
+    # The fail-safe polarity and the DIAGNOSIS above were both pinned by #135;
+    # the WARN-ONCE cadence was the one acceptance clause of t_4f42fb87 that
+    # landed unpinned. It regressed once already: the unreachable path used to
+    # fall through to ``_note_prci_active()`` AFTER ``_note_prci_unavailable()``,
+    # and ``_note_prci_active()`` clears ``warned`` — so every 30s daemon tick
+    # re-armed the WARN and the daemon log filled with an identical line per
+    # cycle. #135 removed the clobber, so once-only now holds *by construction*
+    # — which is exactly the kind of guarantee that silently rots when someone
+    # "tidies" the two ``_note_*`` calls back together. These two pins are the
+    # tripwire.
+    #
+    # Captured at ``ad.log`` (the module-level name ``_note_prci_unavailable``
+    # resolves), not via ``caplog``: ``daemon_ops._get_logger`` pins its rotating
+    # logger with ``propagate = False``, so a caplog handler on the root logger
+    # would see ZERO records no matter how many WARNs were emitted — the count
+    # assertion would be vacuous. Patching the name the emitter actually calls
+    # (the convention every other log-count pin in this file uses, e.g.
+    # ``test_raising_probe_logs_once_and_returns_not_ok``) sees the real calls;
+    # patching ``daemon_ops.log`` instead would NOT, since autodown holds a
+    # direct reference from ``from .daemon_ops import log``.
+
+    @staticmethod
+    def _capture_prci_log(monkeypatch):
+        """Capture every ``ad.log`` call as ``(level, msg)`` and return the list."""
+        emitted = []
+        monkeypatch.setattr(
+            ad, "log",
+            lambda msg, level="INFO", **kw: emitted.append((level, msg)))
+        return emitted
+
+    def test_unreachable_warns_exactly_once_across_repeated_calls(
+            self, monkeypatch):
+        """A source that stays unreachable WARNs ONCE, not once per tick.
+
+        Four consecutive cycles (more than one daemon tick's worth) must produce
+        exactly one WARN line; the repeated calls still fail safe (True) and the
+        reported state stays ``ok=False`` + the ``_PRCI_UNREACHABLE`` sentinel,
+        so suppressing the repeat never degrades the diagnosis.
+        """
+        self._fresh_prci_load(monkeypatch)
+        emitted = self._capture_prci_log(monkeypatch)
+
+        checker = _PrciUnreachable()
+        for _ in range(4):
+            assert ad._has_active_pr_ci(checker) is True
+
+        warn_lines = [(lvl, m) for lvl, m in emitted if lvl == "WARN"]
+        assert len(warn_lines) == 1, (
+            "WARN-ONCE violated: %d WARN lines across 4 unreachable cycles — "
+            "something re-armed _PRCI_LOAD['warned'] (the pre-#135 "
+            "_note_prci_active() clobber) — %r" % (len(warn_lines), emitted))
+        assert "PR/CI interlock unevaluable" in warn_lines[0][1]
+        # No other level leaked either — the repeat is silent, not re-worded.
+        assert len(emitted) == 1
+        # And the repeat is silent WITHOUT degrading the reported state.
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert "unreachable" in state["reason"]
+        assert ad.prci_blocking_signal() is ad._PRCI_UNREACHABLE
+
+    def test_unreachable_warn_rearms_after_a_clear_screen(self, monkeypatch):
+        """A clear screen RE-ARMS the WARN — the next outage must be loud again.
+
+        ``_note_prci_clear()`` resets ``warned`` on a positively-clear screen.
+        That is the intended re-arm, not a leak: an operator who watched gh
+        recover and then break again must see the second outage. So the sequence
+        unreachable → clear → unreachable emits exactly two WARNs (one per
+        outage), and the middle clear emits none.
+        """
+        self._fresh_prci_load(monkeypatch)
+        emitted = self._capture_prci_log(monkeypatch)
+
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True   # outage 1
+        assert ad._has_active_pr_ci(_PrciClear()) is False        # recovered
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True   # outage 2
+
+        assert [lvl for lvl, _ in emitted] == ["WARN", "WARN"], (
+            "expected exactly one WARN per outage (2 across the cycle, none "
+            "from the clear screen) — got %r" % (emitted,))
+        # Both WARNs are the PR/CI interlock line, and the state after the
+        # second outage is the same fail-safe diagnosis as after the first.
+        assert all("PR/CI interlock unevaluable" in m for _, m in emitted)
+        state = ad.prci_check_state()
+        assert state["ok"] is False
+        assert ad.prci_blocking_signal() is ad._PRCI_UNREACHABLE
+
     def test_raising_checker_failsafe_active(self):
         assert ad._has_active_pr_ci(_PrciRaises()) is True
 
