@@ -30,12 +30,13 @@ order: 1
   (`AttributeError` at verify.py:333), the GAP-F-2 legs assert the
   not-checked/unverified semantics pre-fix fails. Fixtures are shape-for-shape
   copies of the real live `~/.hscc/state` (IPs redacted to the sanctioned
-  placeholder), all under pytest `tmp_path` — the live dir is read-only-never.
+  placeholder), all under pytest `tmp_path` — the live dir is never touched.
 - Acceptance probe `probe_verify_live_fixture.py` (card workspace): real
   `hscc verify --json` from the worktree under a fake HOME seeded with an
   exact copy of the live 17-file state dir — post-fix prints all 13 rows,
   `daemon_streams` names all four unverifiable files, pre-fix printed zero
   JSON at rc 1.
-- `hscc_daemon` suite green (existing `test_verify.py` + `test_lifecycle.py`
-  intentional-autodown round-trips unchanged: 126 passed); full
-  `scripts/run_tests.sh` ALL GREEN + `scripts/address_guard.py` rc 0.
+- `hscc_daemon` suite green with the fix (956 passed / 1 skipped, incl. the
+  intentional-autodown writer/reader round-trips in `test_lifecycle.py`,
+  untouched); full `scripts/run_tests.sh`: **ALL GREEN** (12 dirs);
+  `scripts/address_guard.py --staged` rc 0; `changelog_fragments.py check` OK.
