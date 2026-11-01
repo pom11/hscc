@@ -14,6 +14,7 @@ EXPLICIT task id; there is no path that flips a card without one.
 
 import contextlib
 import datetime
+import inspect
 import json
 import sqlite3
 import time
@@ -354,3 +355,71 @@ class TestCmdKanban:
         rc = kbx.cmd_kanban(["bogus"])
         err = capsys.readouterr().err
         assert rc == 1 and "unknown kanban subcommand" in err
+
+
+# ---------------------------------------------------------------------------
+# GAP-C-2 — board enumeration is ONE seam, never a second copy
+# ---------------------------------------------------------------------------
+
+class TestBoardEnumerationSeam:
+    """``_board_names`` must FORWARD to autodown._enum_board_names.
+
+    Audit C GAP-C-2: the function carried a verbatim copy of the helper's body
+    as a "helper not merged yet" fallback. Card t_e751e652 merged, so the copy
+    was unreachable dead code — and a second copy of board enumeration is
+    precisely the divergence this module's own docstring forbids (the boards
+    "that block autodown" must be EXACTLY the boards "that blocked lists").
+    These tests pin the seam structurally so the copy cannot come back.
+    """
+
+    def test_forwards_to_the_canonical_seam(self, monkeypatch):
+        calls = []
+
+        def _sentinel(kanban_db):
+            calls.append(kanban_db)
+            return (["alpha", "beta"], True)
+
+        monkeypatch.setattr(autodown, "_enum_board_names", _sentinel)
+        kb = object()
+        assert kbx._board_names(kb) == (["alpha", "beta"], True)
+        assert calls == [kb]
+
+    def test_no_inline_enumeration_left_in_the_source(self):
+        """No ``list_boards`` logic may survive in the forwarding function."""
+        src = inspect.getsource(kbx._board_names)
+        assert "list_boards" not in src, (
+            "GAP-C-2 regression: board enumeration duplicated in "
+            "kanban_blocked instead of forwarded to autodown._enum_board_names")
+        assert "_enum_board_names" in src
+
+    def test_backcompat_shape_comes_from_the_seam(self):
+        """A lib without ``list_boards`` still resolves to the single default
+        board — but via the seam, so the rule lives in exactly one place."""
+        class _NoListBoards:
+            @contextlib.contextmanager
+            def connect_closing(self, board=None):
+                raise AssertionError("not reached")
+
+        assert kbx._board_names(_NoListBoards()) == ([None], False)
+
+    def test_enumeration_failure_propagates(self):
+        """The seam's raise-on-failure contract is not swallowed here: the
+        caller decides how to fail (same as autodown / kanban_live)."""
+        class _Boom:
+            def list_boards(self):
+                raise RuntimeError("enumeration exploded")
+
+        with pytest.raises(RuntimeError, match="enumeration exploded"):
+            kbx._board_names(_Boom())
+
+    def test_verbs_consume_the_seam_end_to_end(self, monkeypatch):
+        """list_blocked_tasks / recover_blocked_task read boards through
+        _board_names, so pinning the seam pins the verbs too."""
+        kb = _FakeKb({"alpha": [{"id": "a1", "status": "blocked"}],
+                      "beta": [{"id": "b1", "status": "blocked"}]})
+        monkeypatch.setattr(autodown, "_load_kanban_db_or_default",
+                            lambda: kb, raising=False)
+        out = kbx.list_blocked_tasks()
+        assert out["boards"] == 2
+        assert {t["board"] for t in out["tasks"]} == {"alpha", "beta"}
+        assert kb.opened == ["alpha", "beta"]
