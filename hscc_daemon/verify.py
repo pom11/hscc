@@ -7,6 +7,7 @@ ok=None means the check could not be verified (not a pass, not a hard fail).
 import json
 import os
 import re
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -1712,7 +1713,15 @@ def _load_default_payload(root):
         if spec is None or spec.loader is None:
             return []
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # install_payload.py inserts its own dir on sys.path at import time
+        # (its backup_util fallback import). Restore afterwards — verify must
+        # not leave a foreign tree's bootstrap dir shadowing later imports in
+        # the running process.
+        saved_path = list(sys.path)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path[:] = saved_path
         return list(getattr(mod, "DEFAULT_PAYLOAD", []) or [])
     except Exception:
         return []
