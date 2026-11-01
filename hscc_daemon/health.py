@@ -385,29 +385,71 @@ def check_dgx():
     return serving_ok
 
 
+#: Reason the last gateway check could NOT reach the liveness transports
+#: (None = the transports answered). Read by check_gateway() so the stream
+#: says "degraded" instead of "gateway down" when the probe itself broke —
+#: GAP-F-3's lesson is that a check which fails open looks green forever, and
+#: a check which fails CLOSED kills a live gateway's stream.
+_GATEWAY_PROBE_UNAVAILABLE = None
+
+
 def _gateway_job_alive():
-    """Return True if the Hermes gateway supervisor job is loaded."""
-    if sys.platform == "darwin":
-        try:
-            r = run_cmd(["launchctl", "list", "ai.hermes.gateway"], timeout=5)
-            if r.get("ok", False):
-                return True
-        except Exception:
-            pass
-    elif shutil.which("systemctl"):
-        try:
-            r = run_cmd(["systemctl", "--user", "is-active", "hermes-gateway"], timeout=5)
-            if r.get("output", "").strip() == "active":
-                return True
-        except Exception:
-            pass
-    
-    # Last resort on any platform: is a gateway process running?
+    """Return True if the Hermes gateway supervisor job is loaded.
+
+    The verdict is NOT computed here. It comes from the single implementation
+    in ``hscc-bootstrap/gateway_liveness.py`` (see
+    :mod:`hscc_daemon.gateway_probe` for why it is loaded, not imported),
+    because this function used to be the SECOND gateway-liveness implementation
+    in the tree and it kept the transport the first one was rewritten to drop:
+    ``pgrep -f "hermes.*gateway"``. Measured on the operator machine (t_f766ddd5),
+    macOS pgrep cannot SEE the gateway at all — ``pgrep -f .`` lists 1210 pids
+    while ``ps -axww`` lists 1216, and the gateway's pid is in the second set
+    and not the first. A pattern cannot match a pid the matcher never receives,
+    so that last-resort leg returned False for a live gateway; it was hidden
+    only because the launchctl leg above it answered first. It is gone.
+
+    Trust order now (same as the doctor's gateway row): the supervisor the
+    gateway is installed under (launchctl / systemctl), then a token scan of
+    ``ps`` argv for when no supervisor can answer.
+
+    A probe that cannot RUN is UNKNOWN, and this function must not turn UNKNOWN
+    into "dead": when the shared module itself cannot be loaded we keep the last
+    answer we ever got (fail-open on the STREAM bit — an auto-heal relaunch of a
+    healthy gateway is worse than one missed cycle) and record the reason in
+    ``_GATEWAY_PROBE_UNAVAILABLE`` so the state entry says DEGRADED rather than
+    pretending we know.
+    """
+    global _GATEWAY_PROBE_UNAVAILABLE, _GATEWAY_LAST_ANSWER
     try:
-        r = run_cmd(["pgrep", "-f", "hermes.*gateway"], timeout=5)
-        return bool(r.get("output", "").strip())
-    except Exception:
-        return False
+        from .gateway_probe import load_gateway_liveness
+        mod = load_gateway_liveness()
+    except Exception as exc:
+        _GATEWAY_PROBE_UNAVAILABLE = f"liveness module unavailable: {exc}"
+        log(f"Gateway liveness probe DEGRADED: {exc} — keeping last known "
+            f"gateway_job value rather than reporting a live gateway dead",
+            "ERROR")
+        return _GATEWAY_LAST_ANSWER
+    _GATEWAY_PROBE_UNAVAILABLE = None
+    # Read the answer AS GIVEN, including None: `bool(None)` would silently turn
+    # "no transport could answer" into a confident "dead", which is the same
+    # false negative this card is about.
+    alive, detail = mod.job_is_alive()
+    if alive is None:
+        # Every transport was silent (missing binary / timeout / exec error):
+        # nothing was read, so there is no verdict to publish. Apply the same
+        # rule as the unloadable-module path above — keep the last answer the
+        # transports really gave, and say out loud that this cycle did not
+        # verify anything.
+        _GATEWAY_PROBE_UNAVAILABLE = f"no liveness transport answered: {detail}"
+        return _GATEWAY_LAST_ANSWER
+    _GATEWAY_LAST_ANSWER = alive
+    return alive
+
+
+#: Last verdict the transports actually returned (True/False), or None when no
+#: check has ever run. Only consulted when the probe cannot run at all — see
+#: :func:`_gateway_job_alive` for the why.
+_GATEWAY_LAST_ANSWER = None
 
 
 def _check_multiplex_profiles():
@@ -488,9 +530,16 @@ def check_gateway():
     """Gateway check (every 10s): Hermes gateway supervisor job + vLLM backend + multiplex."""
     log("Running gateway check")
     job_ok = _gateway_job_alive()
+    probe_degraded = _GATEWAY_PROBE_UNAVAILABLE
     vllm = http_check(serving.VLLM_HEALTH_URL, timeout=5)
     vllm_ok = vllm.get("ok", False)
-    ok = job_ok and vllm_ok
+    # ``job_ok`` is None only when the transports could not answer at all AND
+    # there was no previous answer to fall back on. An UNKNOWN job is not
+    # evidence that the gateway is down, and the response to a red gateway
+    # stream is an auto-heal relaunch — so unknown does not force the stream
+    # red. It publishes as ``gateway_job: null`` plus a named degradation below,
+    # so nothing here can claim the job was verified when it was not.
+    ok = (job_ok is not False) and vllm_ok
 
     # Multiplex-profile check (best-effort, never blocks basic gateway health)
     mux = _check_multiplex_profiles()
@@ -501,6 +550,13 @@ def check_gateway():
         "ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok,
         "multiplex_ok": mux["ok"], "multiplex_message": mux["message"],
     }
+    if probe_degraded:
+        # The liveness transports could not run, so `gateway_job` above is the
+        # LAST answer they gave, not this cycle's. Publish that as a named
+        # degradation (same shape as check_dgx's FLEET VISIBILITY DEGRADED) —
+        # a stream built from a stale read must say so instead of looking like
+        # a fresh verification.
+        state_data["gateway_job_degraded"] = probe_degraded
     if not ok and _intentional_window():
         # Serving layer in an intentional-autodown window (down by design or
         # waking) — vLLM being stopped/loading is why the gateway backend probe
@@ -509,7 +565,9 @@ def check_gateway():
         state_data["message"] = "intentional autodown — serving layer down by design"
     write_state("gateway", state_data)
     log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok} mux={mux['ok']}) "
-        f"{mux['message']}")
+        f"{mux['message']}"
+        + ("" if not probe_degraded
+           else f" — gateway_job DEGRADED (last known value): {probe_degraded}"))
     return ok
 
 
