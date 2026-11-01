@@ -301,6 +301,12 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (hscc_cli, "_START_VERDICT_TIMEOUT", 0),
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
+            # GAP-F-6 (audit F) — the interlock snapshot. The read/write
+            # helpers resolve via _interlock_state_path() at CALL time (the
+            # (a) expanduser redirect covers them), but the constant is the
+            # audited surface: keep it redirected so no reader that picks up
+            # INTERLOCK_STATE_FILE ever hits the operator's real ~/.hscc.
+            (autodown, "INTERLOCK_STATE_FILE", p("autodown_interlock.json")),
             # Hermes cron jobs.json is Hermes' source of truth (feat
             # t_2b711a94) — redirect so no test ever reads the real host's
             # scheduled jobs. A missing tmp file yields CRON_UNREADABLE (fail-
