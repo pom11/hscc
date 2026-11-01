@@ -168,19 +168,3 @@ def video_bytes_to_output(blob: bytes):
         except Exception:
             return blob
     return InputImpl.VideoFromFile(_io.BytesIO(blob))
-
-
-def parse_size(value, default=(1024, 1024)):
-    """``"1024x1024"`` -> ``(1024, 1024)``. Anything else -> ``default``.
-
-    Used for logging/validation only — the proxy/backend parses the same
-    string, so the pack never rewrites the caller's value.
-    """
-    try:
-        w, _, h = str(value).casefold().partition("x")
-        wi, hi = int(w.strip()), int(h.strip())
-        if wi > 0 and hi > 0:
-            return wi, hi
-    except (TypeError, ValueError):
-        pass
-    return default

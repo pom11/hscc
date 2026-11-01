@@ -163,7 +163,7 @@ def test_poll_interval_and_timeout_are_honoured(proxy, base):
     assert meta["polls"] == 4
 
 
-def test_video_node_refuses_image_models(proxy, base):
+def test_video_node_refuses_image_models(proxy, base, live_discovery):
     with pytest.raises(nodes.SparkrunProxyError) as ei:
         make_video(base_url=base, model="sd-diffusion-t2i")
     assert "video_generation" in str(ei.value)

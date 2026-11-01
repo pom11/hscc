@@ -49,9 +49,10 @@ export SPARKRUN_PROXY_BASE_URL=http://<your-proxy-host>:4000
 Options come from `GET /v1/models` filtered on `model_info.mode` —
 `image_generation` for the two image nodes, `video_generation` for the video
 node. Those two strings are the LiteLLM mode enum owned by hscc's
-`hscc-cluster/media_registration.py` (`KIND_TO_MODE`, media M3); when that
-module is present in the tree, a repo test binds the pack's copy to it so the
-client side and the registration side cannot drift apart.
+media-registration contract (`KIND_TO_MODE` in hscc-cluster's
+`media_registration` module, media M3); when that module is present in the
+checkout, a repo test binds the pack's copy to it so the client side and the
+registration side cannot drift apart.
 
 Consequences worth knowing:
 

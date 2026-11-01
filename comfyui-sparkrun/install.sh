@@ -51,7 +51,22 @@ if [ ! -d "$TARGET" ]; then
 fi
 TARGET="$(cd "$TARGET" && pwd)"
 
+# --name is a single path LEAF, and that is load-bearing rather than fussy:
+# --force removes an existing install with rm -rf, so a name like '../..' would
+# turn an "install a pack" command into a recursive delete several levels up.
+# Reject anything that is not one safe component before DEST is ever built.
+case "$DEST_NAME" in
+  ''|.|..) echo "--name must be a plain directory name, got '$DEST_NAME'" >&2; exit 2 ;;
+  */*) echo "--name must be a single path component (no '/'): '$DEST_NAME'" >&2; exit 2 ;;
+esac
+
 DEST="$TARGET/$DEST_NAME"
+
+# Belt and braces after the lexical check: the destination must still be a
+# direct child of the custom_nodes dir once everything is resolved.
+case "$DEST" in
+  "$TARGET"/*/*|"$TARGET"/../*) echo "refusing: destination resolves outside $TARGET" >&2; exit 1 ;;
+esac
 
 run() {
   if [ "$DRY" -eq 1 ]; then

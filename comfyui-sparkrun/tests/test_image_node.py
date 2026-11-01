@@ -97,8 +97,11 @@ def test_proxy_400_surfaces_the_proxy_message(proxy):
 
 
 # ── the mode pre-flight (M3 contract enforcement at the node) ────────────────
+# These ask the guard a question, so they need the /v1/models read to be ON:
+# the guard shares the dropdown's discovery fetch, and the autouse guard turns
+# that off by default (see conftest.discovery_guard).
 
-def test_model_registered_for_the_wrong_mode_is_refused_before_the_post(proxy):
+def test_model_registered_for_the_wrong_mode_is_refused_before_the_post(proxy, live_discovery):
     """Chat/untagged models must never be POSTed to an image endpoint: the proxy
     would reject them, and the error would arrive as an opaque 400."""
     with pytest.raises(nodes.SparkrunProxyError) as ei:
@@ -109,12 +112,12 @@ def test_model_registered_for_the_wrong_mode_is_refused_before_the_post(proxy):
         "the node must not send the doomed request"
 
 
-def test_video_model_on_the_image_node_is_refused(proxy):
+def test_video_model_on_the_image_node_is_refused(proxy, live_discovery):
     with pytest.raises(nodes.SparkrunProxyError):
         make_image(proxy, model="wan-diffusion-t2v")
 
 
-def test_unregistered_model_is_refused_with_the_registered_list(proxy):
+def test_unregistered_model_is_refused_with_the_registered_list(proxy, live_discovery):
     with pytest.raises(nodes.SparkrunProxyError) as ei:
         make_image(proxy, model="does-not-exist")
     msg = str(ei.value)
@@ -122,6 +125,8 @@ def test_unregistered_model_is_refused_with_the_registered_list(proxy):
 
 
 def test_sentinel_selection_names_the_cause(proxy):
+    """The sentinel is refused without needing discovery — its whole meaning is
+    "there was nothing to select", so this works even with the proxy dead."""
     catalog = load_pack("catalog")
     with pytest.raises(nodes.SparkrunProxyError) as ei:
         make_image(proxy, model=catalog.NO_MODELS_SENTINEL)
@@ -134,7 +139,7 @@ def test_blank_model_is_refused(proxy):
         make_image(proxy, model="   ")
 
 
-def test_guard_steps_aside_when_discovery_itself_failed(proxy):
+def test_guard_steps_aside_when_discovery_itself_failed(proxy, live_discovery):
     """If /v1/models cannot be read, the pre-flight must not invent a refusal —
     the real request reports the outage instead (fail-open on the guard,
     fail-closed on the request)."""
@@ -142,6 +147,37 @@ def test_guard_steps_aside_when_discovery_itself_failed(proxy):
     tensor, _ = make_image(proxy, model="anything-at-all")
     assert tensor.shape[0] == 1
     assert proxy.last_call("POST", "/v1/images/generations") is not None
+
+
+def test_guard_does_not_block_when_discovery_is_disabled(proxy, monkeypatch):
+    """SPARKRUN_DISABLE_MODEL_DISCOVERY means "do not ask the proxy anything".
+    A guard that still asked would make that switch unusable on an air-gapped
+    authoring box, so refusing when we have no evidence is a bug, not caution."""
+    monkeypatch.setenv("SPARKRUN_DISABLE_MODEL_DISCOVERY", "1")
+    tensor, _ = make_image(proxy, model="some-model-i-typed-by-hand")
+    assert tensor.shape[0] == 1
+    assert proxy.last_call("POST", "/v1/images/generations") is not None
+    assert proxy.last_call("GET", "/v1/models") is None, "must not ask at all"
+
+
+def test_a_run_costs_one_models_request_not_two(proxy, live_discovery):
+    """The pre-flight and the dropdown share one cached fetch, so the guard is
+    not a second HTTP round-trip per node run."""
+    make_image(proxy)
+    hits = [c for c in proxy.calls if c["path"].startswith("/v1/models")]
+    assert len(hits) == 1, f"expected one /v1/models request, got {len(hits)}"
+
+
+def test_a_failed_discovery_is_not_cached(proxy, live_discovery):
+    """A 5xx must not be remembered: a proxy that recovers between two runs
+    should be believed on the second one, or a blip would look like a broken
+    node for the whole TTL."""
+    proxy.state["models_status"] = 500
+    make_image(proxy, model="anything")
+    proxy.state["models_status"] = None
+    make_image(proxy)
+    hits = [c for c in proxy.calls if c["path"].startswith("/v1/models")]
+    assert len(hits) >= 2, "the failure must not have been cached as an answer"
 
 
 def test_last_payload_is_what_was_sent(proxy):

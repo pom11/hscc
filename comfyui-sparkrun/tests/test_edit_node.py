@@ -98,7 +98,7 @@ def test_response_decodes_to_an_image_tensor(proxy):
     assert tensor.numpy().max() <= 1.0
 
 
-def test_edited_image_mode_guard_applies(proxy):
+def test_edited_image_mode_guard_applies(proxy, live_discovery):
     with pytest.raises(nodes.SparkrunProxyError):
         make_edit(proxy, model="wan-diffusion-t2v")
     assert proxy.last_call("POST", "/v1/images/edits") is None
@@ -144,9 +144,10 @@ def test_unusable_frame_shape_is_rejected_not_garbled():
         media.image_tensor_to_png(FakeImageTensor(np.zeros((5, 7, 9), dtype="float32")))
 
 
-def test_parse_size_accepts_the_widget_spelling():
-    assert media.parse_size("1024x1536") == (1024, 1536)
-    assert media.parse_size(" 512 X 512 ") == (512, 512)
-    assert media.parse_size("nonsense") == (1024, 1024)
-    assert media.parse_size("0x0") == (1024, 1024)
-    assert media.parse_size(None) == (1024, 1024)
+def test_size_widget_value_reaches_the_proxy_verbatim(proxy):
+    """The pack never rewrites the size — it forwards the widget's string so the
+    proxy/backend stays the single parser. A silent normalisation here would
+    make the node and the proxy disagree about what was asked for."""
+    make_edit(proxy, size="768x1152")
+    body = proxy.last_call("POST", "/v1/images/edits")["body"].decode("latin-1")
+    assert 'name="size"\r\n\r\n768x1152' in body

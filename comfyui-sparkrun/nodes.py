@@ -82,18 +82,20 @@ _DISCOVERY_CACHE = {}
 _DISCOVERY_TTL_S = float(os.environ.get("SPARKRUN_MODEL_TTL_SECONDS", "30"))
 
 
-def _model_options(base_url: str, mode: str):
-    """Combo options for a LiteLLM ``mode`` at ``base_url`` — never raises.
+def _fetch_media_names(base_url: str, mode: str):
+    """Model names on ``base_url`` carrying ``mode`` — or ``None`` if unknown.
 
-    ``SPARKRUN_DISABLE_MODEL_DISCOVERY=1`` skips the request entirely (the repo
-    suite sets it; air-gapped authoring can too). Empty/unreachable yields the
-    sentinel, so the dropdown always has a valid value and the node's own
-    runtime guard turns a selected sentinel into an actionable error.
+    ``None`` means discovery itself failed (unreachable, 5xx, non-JSON); the
+    caller must NOT read that as "no models". Successful answers are cached
+    for ``_DISCOVERY_TTL_S`` so a node run costs one ``/v1/models`` request
+    total, not one per dropdown plus one per pre-flight. Failures are NOT
+    cached: a proxy that comes back up should be seen immediately, and caching
+    the failure is how a transient blip turns into a node that looks broken.
     """
     import time
 
     if os.environ.get("SPARKRUN_DISABLE_MODEL_DISCOVERY"):
-        return [_catalog.NO_MODELS_SENTINEL]
+        return None
     key = (str(base_url), mode)
     now = time.monotonic()
     hit = _DISCOVERY_CACHE.get(key)
@@ -104,10 +106,21 @@ def _model_options(base_url: str, mode: str):
                               timeout=_http.DISCOVERY_TIMEOUT_S)
         names = _catalog.models_for_mode(body, mode)
     except Exception:
-        names = []
-    options = names or [_catalog.NO_MODELS_SENTINEL]
-    _DISCOVERY_CACHE[key] = (now, list(options))
-    return options
+        return None
+    _DISCOVERY_CACHE[key] = (now, list(names))
+    return names
+
+
+def _model_options(base_url: str, mode: str):
+    """Combo options for a LiteLLM ``mode`` at ``base_url`` — never raises.
+
+    ``SPARKRUN_DISABLE_MODEL_DISCOVERY=1`` skips the request entirely (the repo
+    suite sets it; air-gapped authoring can too). Empty or unreachable yields
+    the sentinel, so the dropdown always holds a valid value and the node's own
+    runtime guard turns a selected sentinel into an actionable error.
+    """
+    names = _fetch_media_names(base_url, mode)
+    return (names or [_catalog.NO_MODELS_SENTINEL])
 
 
 def _model_widget(base_url: str, mode: str):
@@ -130,9 +143,10 @@ class _SparkrunBase:
         """Turn "the dropdown was empty when this graph was built" into a message.
 
         The proxy is the authority on what it serves, so this is a pre-flight
-        against a cached, cheap ``/v1/models`` — it fires only when the answer
-        is already known to contradict the request, and stays out of the way
-        when discovery itself failed (the real request reports that instead).
+        against the same cached ``/v1/models`` the dropdown uses (one request
+        per node run, not two). It fires only when the answer is already known
+        to contradict the request, and stays out of the way whenever discovery
+        itself was unavailable or disabled — the real request reports that.
         """
         name = (model or "").strip()
         if not name:
@@ -144,12 +158,7 @@ class _SparkrunBase:
                 f"Register the unit through hscc (the mode tag also needs the "
                 f"sparkrun fork patch from media M3), or type the model name "
                 f"into the dropdown.")
-        try:
-            body = _http.get_json(_http.join_url(base_url, "/models"),
-                                  timeout=_http.DISCOVERY_TIMEOUT_S)
-            allowed = _catalog.models_for_mode(body, mode)
-        except SparkrunProxyError:
-            return  # discovery failed: let the actual request tell the truth
+        allowed = _fetch_media_names(base_url, mode)
         if allowed and name not in allowed:
             raise SparkrunProxyError(
                 f"{name!r} is not registered as {mode!r} on {base_url} "
