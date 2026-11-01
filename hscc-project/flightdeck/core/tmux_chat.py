@@ -39,6 +39,7 @@ branch-C refusal / UNVERIFIED row — never as a private fallback predicate.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -74,40 +75,68 @@ _MATCHER_UNAVAILABLE = (
     "beside hscc-project (the hscc-api plugin must be deployed next to "
     "hscc-project; it owns the one REPL matcher)")
 
-_MATCHER = None  # cached after the first successful sibling import
+_MATCHER = None  # cached after the first successful resolution
+
+#: The canonical matcher module must expose all of these (a module that does
+#: not is not the matcher — never accepted, see _pane_matcher).
+_MATCHER_API = ("pane_chat_command", "pane_chat_profile", "profile_flag",
+                "PROFILE_FLAG_RE")
+
+
+def _is_matcher(mod) -> bool:
+    return all(hasattr(mod, name) for name in _MATCHER_API)
+
+
+def _load_matcher_from_sibling_dir():
+    """Load <repo_or_plugins_root>/hscc-api/repl_inject.py BY PATH, or None.
+
+    importlib with a private module name (no sys.path insert, no sharing the
+    name ``repl_inject`` in sys.modules): the resolution is deterministic —
+    the matcher IS the sibling file — and it cannot be poisoned by, or
+    poison, an unrelated module cached under that name.
+    """
+    src = Path(__file__).resolve().parents[3] / "hscc-api" / "repl_inject.py"
+    if not src.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "_hscc_canonical_pane_matcher", src)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _pane_matcher():
     """The canonical matcher module ``repl_inject`` — THE owner of the rule.
 
-    Lazy sibling-dir import (same layout trick as flightdeck/core/
-    repl_delivery._repl_inject, so this stdlib-only module stays loadable by
-    path from hscc-bootstrap): ``parents[3]`` of this file is the repo root
-    in a checkout and the plugins dir when installed, and hscc-api sits
-    beside hscc-project in BOTH layouts. Raises PaneMatcherMissing rather
-    than keeping a fallback copy of the predicate (install_payload deploys
-    hscc-project and hscc-api as one payload, so a deployed tree always
-    resolves it).
+    Resolution order: (1) an already-importable ``repl_inject`` that carries
+    the full matcher API (the in-process module the iOS/CLI inject path uses,
+    when this process can see it); (2) the sibling ``hscc-api/repl_inject.py``
+    loaded by path — ``parents[3]`` of this file is the repo root in a
+    checkout and the plugins dir when installed, and hscc-api sits beside
+    hscc-project in BOTH layouts (same shape as flightdeck/core/
+    repl_delivery._repl_inject and hscc-bootstrap/tmux_repl_report's
+    by-path load of THIS module). A module lacking the matcher API is
+    rejected, not trusted; if neither route yields the matcher, raise
+    PaneMatcherMissing instead of falling back to a private predicate
+    (install_payload deploys hscc-project and hscc-api as one payload, so a
+    deployed tree always resolves it).
     """
     global _MATCHER
     if _MATCHER is not None:
         return _MATCHER
     try:
-        import repl_inject
-        _MATCHER = repl_inject
-        return _MATCHER
-    except ImportError:
-        pass
-    api_dir = Path(__file__).resolve().parents[3] / "hscc-api"
-    if (api_dir / "repl_inject.py").is_file():
-        if str(api_dir) not in sys.path:
-            sys.path.insert(0, str(api_dir))
-        try:
-            import repl_inject  # noqa: F401
+        import repl_inject  # noqa: F401
+        if _is_matcher(repl_inject):
             _MATCHER = repl_inject
             return _MATCHER
-        except ImportError:
-            pass
+    except ImportError:
+        pass
+    mod = _load_matcher_from_sibling_dir()
+    if mod is not None and _is_matcher(mod):
+        _MATCHER = mod
+        return _MATCHER
     raise PaneMatcherMissing(_MATCHER_UNAVAILABLE)
 
 
@@ -247,17 +276,27 @@ def chat_processes() -> list:
     panes in the first place), so ttyless rows are excluded: a worker is
     not the operator's chat and must never be reported as one outside tmux.
 
-    Each tty's full ``ps`` line set goes through the canonical matcher
-    (:func:`pane_profile`), so a tty whose first line is a wrapper and whose
-    child names a profile is reported under that profile — the same answer
-    repl_inject gives when it resolves the injection target.
+    ``ps`` prints one row PER PROCESS, so a pane's wrapper and its
+    ``hermes -p X chat`` child arrive as two rows of the SAME tty. They are
+    grouped and resolved as ONE pane through the canonical matcher
+    (:func:`pane_profile`) — the same whole-line-set resolution repl_inject
+    applies with ``ps -t``. The old per-line rule double-reported such a tty
+    (once mislabelled ``default`` by the wrapper row); the canonical rule
+    reports it exactly once, under its real profile (GAP-C-3).
     """
-    rows = []
+    by_tty: dict = {}
+    order = []
     for line in run_ps_all().splitlines():
         tty, _, cmd = line.strip().partition(" ")
-        if not tty or tty.startswith("?"):
+        if not tty or tty.startswith("?") or not cmd:
             continue
-        prof = pane_profile([cmd]) if cmd else None
+        if tty not in by_tty:
+            by_tty[tty] = []
+            order.append(tty)
+        by_tty[tty].append(cmd)
+    rows = []
+    for tty in order:
+        prof = pane_profile(by_tty[tty])
         if prof:
             rows.append((tty, prof))
     return rows

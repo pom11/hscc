@@ -251,7 +251,7 @@ def hermes_panes() -> list[dict]:
     'chat'); a pane running ``hermes -p X chat`` is the operator's REPL. The
     profile comes from the pane line that actually names one, so a pane whose
     first process is a launcher wrapper still resolves to its real profile
-    (:func:`_pane_chat_command`).
+    (:func:`pane_chat_command`).
     """
     try:
         out = run_tmux("list-panes", "-a", "-F",

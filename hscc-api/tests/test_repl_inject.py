@@ -577,3 +577,56 @@ def test_wait_for_reply_timeout_returns_none():
         "%1", "same", timeout=0.05, poll=0.01, sleep_fn=lambda s: None,
         busy_fn=lambda p: True, screen_fn=lambda p, l: "same")
     assert out is None
+
+
+# --------------------------------------------------------------------------- #
+# GAP-C-3 — the matcher is PUBLIC and canonical for the whole repo
+#
+# tmux_chat (project-chat launch door, doctor's REPL panel, the bootstrap REPL
+# report) calls these instead of owning a predicate. These tests pin the
+# canonical contract itself so the single predicate has ONE pinned behaviour:
+# prefer the profiled sibling; `default` only when NO line names a profile.
+# --------------------------------------------------------------------------- #
+
+def test_public_matcher_prefers_profiled_sibling_over_default_line():
+    """The rule GAP-C-3's twin contradicted, pinned at its owner."""
+    hit = repl_inject.pane_chat_command(
+        ["/bin/zsh", _LAUNCHER, _CHILD])
+    assert hit == ("kronos-orch", _CHILD)
+
+
+def test_public_matcher_default_only_when_no_line_names_a_profile():
+    assert repl_inject.pane_chat_command([_LAUNCHER])[0] == "default"
+    assert repl_inject.pane_chat_command(["hermes chat"]) == \
+        ("default", "hermes chat")
+
+
+def test_public_matcher_rejects_non_chat_and_gateway_lines():
+    for cmds in ([ "/usr/bin/python3 app.py"],
+                 ["hermes gateway run --chat-ish"],
+                 ["hermes -p alpha serve"],
+                 []):
+        assert repl_inject.pane_chat_command(cmds) is None
+        assert repl_inject.pane_chat_profile(cmds) is None
+
+
+def test_pane_chat_profile_is_the_command_helpers_profile():
+    cmds = ["/bin/zsh", _LAUNCHER, _CHILD]
+    assert repl_inject.pane_chat_profile(cmds) == \
+        repl_inject.pane_chat_command(cmds)[0] == "kronos-orch"
+
+
+def test_profile_flag_reads_launch_argv_without_chat_rule():
+    """profile_flag() is NOT the pane matcher — it reads the flag off any
+    launch argv (tmux_chat.target_profile) with the ONE compiled pattern."""
+    assert repl_inject.profile_flag(
+        "hermes -p pom-orch chat --continue pom") == "pom-orch"
+    assert repl_inject.profile_flag("hermes --profile=beta chat") == "beta"
+    assert repl_inject.profile_flag("hermes chat") is None
+    # A line that is no chat at all still yields its flag — by design.
+    assert repl_inject.profile_flag("hermes -p delta serve") == "delta"
+
+
+def test_profile_flag_re_is_the_single_compiled_pattern():
+    """The pattern tmux_chat used to copy: one compiled object, exported."""
+    assert repl_inject.PROFILE_FLAG_RE.pattern == r"(?:^|\s)(?:-p|--profile)[ =](\S+)"
