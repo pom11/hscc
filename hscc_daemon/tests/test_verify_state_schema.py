@@ -210,6 +210,7 @@ class TestCheckDaemonStreamsSchemaTolerance:
         _tvmod = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(_tvmod)
         _hermetic_new_checks_overrides = _tvmod._hermetic_new_checks_overrides
+        assert_run_all_rows = _tvmod.assert_run_all_rows
 
         state_dir = build_live_state_dir(tmp_path / "state")
 
@@ -222,11 +223,13 @@ class TestCheckDaemonStreamsSchemaTolerance:
             **_hermetic_new_checks_overrides(tmp_path),
         )
 
-        names = [c["name"] for c in result["checks"]]
-        # 15 = the 13 pinned at GAP-F-1 landing + autodown_interlock
-        # (GAP-F-6) + dispatcher_self_heal (GAP-F-7); keep in step with
-        # test_verify.py's run_all count pin.
-        assert len(result["checks"]) == 15, names
+        # Roster-based presence assertion (test_verify.EXPECTED_RUN_ALL_ROWS),
+        # not a bare count: this test once hard-asserted len == 13 and the
+        # combined stamp for GAP-E-2 (row 14) broke it — a count pin on a
+        # table whose rows other cards legitimately add is a collision
+        # generator. GAP-F-1's actual failure class — the whole table missing
+        # or a row losing its shape — is what this asserts now.
+        names = assert_run_all_rows(result)
         assert "daemon_streams" in names
         assert "profile_endpoints" in names
         row = [c for c in result["checks"] if c["name"] == "daemon_streams"][0]

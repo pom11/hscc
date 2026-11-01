@@ -18,6 +18,62 @@ _CANON_PLUGIN = ('register("workers-up")\n'
                  'register("template")\n')
 
 
+# run_all() emits one row per check; these are the row NAMES the suite
+# guarantees are present. This roster — not a bare len(...) count — is the
+# assertion of record for run_all's row coverage. A bare integer pinned the
+# count in FOUR places across two files (three here, one in
+# test_verify_state_schema.py) and every new check added to run_all had to
+# hunt down and bump all of them; the combined stamp for PRs #152+#154+#155+
+# #156 caught exactly that class of collision (this branch added
+# deployed_vs_released while #147 had landed a second count pin on main).
+#
+# Adding a check to run_all: add its row name HERE if you want it covered by
+# _hermetic_new_checks_overrides stubs, and write its own behaviour tests.
+# The presence-assertion below does NOT break on new rows — it breaks only
+# when an expected row vanishes, is duplicated, or loses its shape, which is
+# the GAP-F-1 failure class these tests were written for (one crashing check
+# took the whole table down with it).
+EXPECTED_RUN_ALL_ROWS = (
+    "plugins",
+    "multiplex",
+    "daemon_streams",
+    "proxy",
+    "proxy_router_settings",
+    "config_wiring",
+    "profile_endpoints",
+    "provider_routing",
+    "declaration_agreement",
+    "api_routes",
+    "chat_roundtrip",
+    "plugin_payload",
+    "deployed_vs_released",  # GAP-E-2
+    "project_chat_ready",
+    "autodown_interlock",    # GAP-F-6 (#161)
+    "dispatcher_self_heal",  # GAP-F-7 (#161)
+)
+
+
+def assert_run_all_rows(result):
+    """Assert run_all returned every expected check row, exactly once, each
+    with the {name, ok, detail} contract. Returns the row-name list.
+
+    Presence + uniqueness + shape, NOT a bare count: robust to a future check
+    joining run_all (the author adds it to the roster and writes its tests),
+    still catches a dropped/renamed/duplicated row or a malformed row — the
+    ways run_all has actually broken.
+    """
+    checks = result["checks"]
+    names = [c["name"] for c in checks]
+    missing = [n for n in EXPECTED_RUN_ALL_ROWS if names.count(n) == 0]
+    assert not missing, f"run_all dropped expected row(s) {missing}; got {names}"
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, f"run_all emitted duplicate row(s) {dupes}: {names}"
+    for c in checks:
+        assert "name" in c and "ok" in c and "detail" in c, \
+            f"row violates the name/ok/detail contract: {c}"
+    return names
+
+
 def _hermetic_new_checks_overrides(tmp_path, healthy=True):
     """Hermetic overrides for the api_routes / chat_roundtrip / plugin_payload
     checks added to hscc verify.
@@ -885,11 +941,10 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        # 16 = the 15 pinned by #161 on main (12 from the dep-bump guard +
-        # declaration_agreement + autodown_interlock + dispatcher_self_heal)
-        # + deployed_vs_released (GAP-E-2). Union of all check sets, not any
-        # one alone.
-        assert len(result["checks"]) == 16
+        # Roster-based presence assertion (EXPECTED_RUN_ALL_ROWS): every
+        # expected row present exactly once with the row contract intact —
+        # no magic count for the next added check to bump (see roster comment).
+        assert_run_all_rows(result)
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -919,9 +974,8 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 16
         # At least the proxy check passes here — overall ok depends on individual checks
-        names = [c["name"] for c in result["checks"]]
+        names = assert_run_all_rows(result)
         assert "plugins" in names
         assert "proxy" in names
         assert "profile_endpoints" in names
@@ -947,7 +1001,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 16
+        assert_run_all_rows(result)
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),

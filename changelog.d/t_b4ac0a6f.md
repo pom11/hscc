@@ -24,4 +24,13 @@ task: t_b4ac0a6f
   missing / extra / known-preserved via backup + manifest / pin annotation /
   no-keg ⇒ `ok=None` / redirected-HOME acceptance / read-only proof / the
   self-approval regression that documents the old check green-lighting real
-  drift). `run_all` check-count pin 13 → 14.
+  drift). `run_all` row-coverage assertions are now roster-based
+  (`EXPECTED_RUN_ALL_ROWS` + `assert_run_all_rows` in test_verify.py, consumed
+  by test_verify_state_schema.py too) instead of four bare count pins across
+  two files — the count pins broke on every added check (the combined stamp
+  caught the #147 13-pin vs GAP-E-2 row-14 collision, and #161 then bumped
+  the same pins 13→15 for autodown_interlock + dispatcher_self_heal; this
+  branch's rebase re-solved them to the 16-row union once, then deleted the
+  pin class entirely); the roster asserts the
+  expected row NAMES are present exactly once with the row contract intact,
+  so the next added check no longer forces a cross-file pin hunt.
