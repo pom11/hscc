@@ -71,6 +71,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 ## design/
 
 - `docs/design/2026-10-15-template-declarations.md` — spec: template-declared `endpoints:`, `proxy:` and caps ("the template is the declaration, apply is the writer"). **live** — and the doc's own **2026-10-19 addendum** supersedes its §2.3/§6.2 details (nested `gateways.litellm.router_settings` read order, engine file moved to `src/sparkrun/plugins/litellm/engine.py`, blessed defaults).
+- `docs/design/media-serving.md` — media workstream M0 design: image/video model servers on the Sparks behind the `:4000` proxy (runtime per model, OpenAI facade contract, LiteLLM registration, template `kind`, VRAM co-tenancy, NAS staging, LAN-only boundary). **proposed** — depends on the support matrix of PR #117 (`docs/design/media-serving-support-matrix.md`, branch `wt/t_165c208f`).
 - `docs/design/2026-09-30-project-session-continuity.md` — design: project session continuity across surfaces (Approach 1); verified live in `docs/audits/session-continuity-verify-2026-09-30.md`. **live**
 - `docs/design/2026-10-02-session-ownership-handoff.md` — design: session-ownership handoff between app and CLI ("remote-control" continuity); consumed by `docs/TASK_t_7cc2e7d5_handoff-consume.md`. **record**
 - `docs/design/idle-autodown.md` — design for the serving-layer idle autodown/autoup (the autodown feature's authoritative design; operator-facing summaries also live in the root README and `hscc_daemon/README.md`). **live**

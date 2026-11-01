@@ -81,6 +81,31 @@ class ModelIntent:
     # second fails to start. VRAM-sum checks do not catch it, because the sum of
     # the WEIGHTS fits; it is the reservation fraction that does not.
     gpu_memory_utilization: Optional[float] = None
+    # v4 (PR #106 precedent — a model-level key, no schema-version bump):
+    # per-unit vLLM concurrency cap, passed to sparkrun as `-o max_num_seqs=N`
+    # (sparkrun's repeatable `-o key=value` override — there is no dedicated
+    # flag). None = not specified → the recipe's own default wins.
+    #
+    # This exists for THROUGHPUT SHAPING. Recipes write their own
+    # max_num_seqs assuming the unit is the only thing that matters (the
+    # flash-next solo recipe ships 8); the operator rule for this fleet is
+    # <=5 running requests per node, and several recipes pin 1. A template
+    # could state neither until this key existed — `sparkrun run` accepts the
+    # override, but ModelIntent had no field to carry it.
+    max_num_seqs: Optional[int] = None
+    # media M4 (docs/design/media-serving.md §4): what this unit SERVES.
+    # "chat" (default) = an LLM unit — the whole pre-media fleet. "image" /
+    # "video" = a media unit (an SGLang-Diffusion server; recipe lives under
+    # recipes/media/, M1). Model-level key, no schema-version bump (the #106
+    # max_num_seqs precedent), and — like every addition since v2 — omit-on-
+    # default in to_dict() so every pre-media template round-trips byte-identically.
+    #
+    # `chat` is spelled out (rather than None) because "is this a media unit" is
+    # a question three consumers ask (placement §5, proxy registration §3, the
+    # M5/M6 client packs) — an explicit default beats absence-checking at every
+    # call site. kind NEVER enters the serve argv (§4: drift compare stays
+    # zero-impact by construction); it is carried for the consumers above.
+    kind: str = "chat"
 
     @staticmethod
     def from_dict(d: Union[str, dict]) -> "ModelIntent":
@@ -92,7 +117,9 @@ class ModelIntent:
             recipe=d["recipe"], tp=int(d.get("tp", 1)),
             pp=int(d.get("pp", 1)),
             nodes=_nodes_from(d),
-            gpu_memory_utilization=_gpu_mem_from(d))
+            gpu_memory_utilization=_gpu_mem_from(d),
+            max_num_seqs=_max_num_seqs_from(d),
+            kind=_kind_from(d))
 
     def to_dict(self) -> dict:
         """Canonical round-trip form. Omits default/absent v3 keys so a v2
@@ -106,7 +133,35 @@ class ModelIntent:
             out["nodes"] = list(self.nodes)
         if self.gpu_memory_utilization is not None:
             out["gpu_memory_utilization"] = self.gpu_memory_utilization
+        if self.max_num_seqs is not None:
+            out["max_num_seqs"] = self.max_num_seqs
+        # media M4: emitted only when non-chat (the uniform_pool/serve_cmd
+        # omit-if-default convention) — a pre-media template's dict is untouched
+        # by this line, which is what tests/_v2_parsed_golden.json pins.
+        if self.kind != "chat":
+            out["kind"] = self.kind
         return out
+
+
+def _max_num_seqs_from(d: dict) -> Optional[int]:
+    """Extract ``max_num_seqs``. Absent → None (the recipe's own default wins).
+
+    Validated here rather than at apply: a non-integer, a bool, or a value
+    below 1 is always a template bug (vLLM rejects all three at startup), and
+    catching it in parsing means `validate` reports it offline instead of the
+    fleet refusing mid-provision. Mirrors :func:`_gpu_mem_from`.
+    """
+    raw = d.get("max_num_seqs")
+    if raw is None:
+        return None
+    # bools are ints in Python but never a sequence count — reject explicitly.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise TemplateIntentError(
+            f"max_num_seqs must be an integer >= 1, got {raw!r}")
+    if raw < 1:
+        raise TemplateIntentError(
+            f"max_num_seqs must be >= 1, got {raw}")
+    return raw
 
 
 def _gpu_mem_from(d: dict) -> Optional[float]:
@@ -138,6 +193,32 @@ def _nodes_from(d: dict) -> Optional[List[str]]:
     if raw is None:
         return None
     return [str(x) for x in raw]
+
+
+# media M4 (docs/design/media-serving.md §4): the ONLY legal ``kind`` values.
+# chat = LLM unit (the whole pre-media fleet); image / video = media units
+# (SGLang-Diffusion servers, recipes/media/ — M1). The kind→LiteLLM-mode
+# mapping (image→image_generation etc.) is owned by media_registration, NOT
+# here: this module only answers "what vocabulary is legal in the template".
+UNIT_KINDS = ("chat", "image", "video")
+
+
+def _kind_from(d: dict) -> str:
+    """Extract ``kind``. Absent → "chat" (every pre-media unit is a chat unit).
+
+    Validated at parse like :func:`_max_num_seqs_from` / :func:`_gpu_mem_from`:
+    a value outside UNIT_KINDS is always a template bug (a typo'd kind would
+    silently register a diffusion server as a chat backend — §3 fail-closed
+    doctrine), so ``hscc template validate`` reports it offline instead of the
+    fleet serving nonsense. Case-sensitive on purpose: the vocabulary is exact.
+    """
+    raw = d.get("kind")
+    if raw is None:
+        return "chat"
+    if not isinstance(raw, str) or raw not in UNIT_KINDS:
+        raise TemplateIntentError(
+            f"kind must be one of {'|'.join(UNIT_KINDS)}, got {raw!r}")
+    return raw
 
 
 @dataclass
@@ -336,7 +417,9 @@ class ResolvedUnit:
 
     def __init__(self, role: str, family: Optional[str], recipe: str,
                  model: str, nodes: List[str], port: int, tp: int, pp: int,
-                 gpu_memory_utilization: Optional[float] = None):
+                 gpu_memory_utilization: Optional[float] = None,
+                 max_num_seqs: Optional[int] = None,
+                 kind: str = "chat"):
         self.role = role
         self.family = family
         self.recipe = recipe
@@ -347,6 +430,15 @@ class ResolvedUnit:
         self.pp = pp
         # None = not specified by the template → recipe default wins.
         self.gpu_memory_utilization = gpu_memory_utilization
+        # None = not specified by the template → recipe default wins. The
+        # per-unit vLLM concurrency cap, rendered as `-o max_num_seqs=N`.
+        self.max_num_seqs = max_num_seqs
+        # media M4 (M0 §4): the ModelIntent kind, plumbed through resolve()
+        # unchanged. "chat" default = every pre-media unit and every hand-built
+        # ResolvedUnit (tests, heal paths) behave exactly as before. Placement
+        # rules (§5), proxy registration (§3) and the media client packs read
+        # THIS, never a recipe-path guess. Never enters the serve argv.
+        self.kind = kind
 
     @property
     def node(self) -> str:
@@ -479,7 +571,9 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
         role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
         model=orch_model, nodes=orch_span, port=8000,
         tp=orch_tp, pp=tpl.orchestrator.pp,
-        gpu_memory_utilization=tpl.orchestrator.gpu_memory_utilization)
+        gpu_memory_utilization=tpl.orchestrator.gpu_memory_utilization,
+        max_num_seqs=tpl.orchestrator.max_num_seqs,
+        kind=tpl.orchestrator.kind)
 
     claimed: set = set(orch_span[1:])  # workers claimed by orchestrator span
     if applied_explicit:
@@ -515,7 +609,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                     role="worker", family=fam.name, recipe=m.recipe,
                     model=_model_name(m.recipe), nodes=list(explicit),
                     port=8000 + i, tp=m.tp, pp=m.pp,
-                    gpu_memory_utilization=m.gpu_memory_utilization))
+                    gpu_memory_utilization=m.gpu_memory_utilization,
+                    max_num_seqs=m.max_num_seqs, kind=m.kind))
             for ip in explicit:
                 claimed.add(ip)
             resolved_families.append(ResolvedFamily(
@@ -581,7 +676,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                         role="worker", family=fam.name, recipe=m.recipe,
                         model=_model_name(m.recipe), nodes=span, port=8000 + i,
                         tp=m.tp, pp=m.pp,
-                        gpu_memory_utilization=m.gpu_memory_utilization))
+                        gpu_memory_utilization=m.gpu_memory_utilization,
+                        max_num_seqs=m.max_num_seqs, kind=m.kind))
                 for node_ip in span:
                     claimed.add(node_ip)
         else:
@@ -605,7 +701,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                         role="worker", family=fam.name, recipe=m.recipe,
                         model=_model_name(m.recipe), nodes=[ip], port=8000 + i,
                         tp=m.tp, pp=m.pp,
-                        gpu_memory_utilization=m.gpu_memory_utilization))
+                        gpu_memory_utilization=m.gpu_memory_utilization,
+                        max_num_seqs=m.max_num_seqs, kind=m.kind))
                 claimed.add(ip)
 
         resolved_families.append(ResolvedFamily(
@@ -684,7 +781,18 @@ def _model_name(recipe_path: str) -> str:
 
 def to_serving_json(plan: ResolvedPlan) -> dict:
     """Resolved plan → serving.json (one keepalive unit per worker unit, on its
-    assigned port; the orchestrator on 8000)."""
+    assigned port; the orchestrator on 8000).
+
+    ``max_num_seqs`` is carried onto every unit that has one — it MUST be,
+    because serving.json is the ONLY record the daemon's wake path reads
+    (``hscc_daemon/serving.py:_unit_run_cmd`` builds every ``hscc cluster up`` /
+    autodown-wake / gentle-relaunch command from these entries). A cap that was
+    applied but not recorded here comes back at the RECIPE default after any
+    autodown, reboot or heal cycle — silently breaking a per-node concurrency
+    rule the operator stated in the template. Omitted when None (the same
+    omit-if-absent rule as ``uniform_pool`` below), so serving.json for a
+    template that never mentions the key stays byte-identical.
+    """
     units = [{
         "id": "orch",
         "role": "orchestrator",
@@ -693,11 +801,20 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
         "nodes": plan.orchestrator.nodes,
         "port": plan.orchestrator.port,
     }]
+    if plan.orchestrator.max_num_seqs is not None:
+        units[0]["max_num_seqs"] = plan.orchestrator.max_num_seqs
+    # media M4 (M0 §4): kind rides onto the unit record ONLY when non-chat —
+    # mirrors the max_num_seqs / uniform_pool omit-if-default rule, so every
+    # pre-media template's serving.json stays byte-identical (keepalive,
+    # watchdog, engine-wedge read this file; they must see nothing new until
+    # someone declares a media unit).
+    if getattr(plan.orchestrator, "kind", "chat") != "chat":
+        units[0]["kind"] = plan.orchestrator.kind
     for fam in plan.families:
         for u in fam.units:
             short = u.model.split("/")[-1]
             suffix = u.nodes[0].rsplit(".", 1)[-1]
-            units.append({
+            entry = {
                 "id": f"family-{fam.name}-{short}-{suffix}-{u.port}",
                 "role": "worker",
                 "keepalive": True,
@@ -708,7 +825,17 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
                 "tp": u.tp,
                 "pp": u.pp,
                 "family": fam.name,
-            })
+            }
+            if u.max_num_seqs is not None:
+                entry["max_num_seqs"] = u.max_num_seqs
+            # media M4: non-chat only (see the orchestrator note above). The
+            # kind is what proxy registration (§3, media_registration) and the
+            # §5 fraction-sum rule read — a unit whose media kind was applied
+            # but not recorded here would lose its mode tag after any
+            # autodown/wake rebuild of serving.json.
+            if getattr(u, "kind", "chat") != "chat":
+                entry["kind"] = u.kind
+            units.append(entry)
     out = {"version": 2, "units": units}
     # Record the pool shape so downstream consumers that only read serving.json
     # (hscc-roles' profile generator, bootstrap) can tell a role-agnostic pool

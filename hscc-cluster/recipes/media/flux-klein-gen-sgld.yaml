@@ -1,0 +1,141 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PINNED SOURCE — media unit: image generation, SPEED BACKUP tier (NVFP4)
+#
+# LIVE copy: ~/.sparkrun-local/recipes/media/flux-klein-gen-sgld.yaml
+# Install + first validation are OPERATOR actions (sparkrun recipe validate on
+# the installed path); offline gate: hscc-cluster/tests/test_media_recipes.py.
+# Design contract: docs/design/media-serving.md (§1, §2, §5, §6, §7); tier +
+# format locked by the operator's §8 Q1 ruling: FLUX.2-klein-9b NVFP4.
+#
+# ── STAGING LIST — OPERATOR: stage these EXACT HF repos. ──────────────────────
+#   black-forest-labs/FLUX.2-klein-9b-nvfp4   (the quantized DiT — SINGLE FILE)
+#   black-forest-labs/FLUX.2-klein-9B         (the BASE — full diffusers repo)
+#
+# Measured against the Hub tree API 2026-10-31 (the loader flags follow from
+# this, do not "simplify"):
+#   * ...-nvfp4 repo: 7 files, NO model_index.json, one weight file
+#     `flux-2-klein-9b-nvfp4.safetensors` → it is a RAW single-file NVFP4
+#     export, i.e. exactly the documented `--transformer-weights-path` shape
+#     ("raw exports such as black-forest-labs/FLUX.2-dev-NVFP4 use the
+#     weights-path flow", quantization guide). The repo name the operator
+#     ruled ends in lower-case `nvfp4`; that is the real repo id (checked).
+#   * FLUX.2-klein-9B base repo: model_index.json + scheduler/ text_encoder/
+#     tokenizer/ transformer/ vae/ + flux-2-klein-9b.safetensors. Full pipeline
+#     parts (Mistral-3 text encoder shards) come from here.
+#
+# GATE: the base repo is `gated: auto` (license-accepted download) under the
+# FLUX Non-Commercial License. Staging therefore requires the operator's
+# accepted HF account; an unauthenticated pull 401s. Recorded because the
+# boot failure it causes (weights absent) is otherwise mysterious.
+#
+#   /mnt/nas/hub/models--black-forest-labs--FLUX.2-klein-9b-nvfp4 → ~/.cache/huggingface/hub/
+#   /mnt/nas/hub/models--black-forest-labs--FLUX.2-klein-9B       → ~/.cache/huggingface/hub/
+#   (NAS = staging source ONLY; local NVMe before boot — flash-next rule,
+#    templates/4node/flash-next-all.yaml:17-45.)
+#
+# ── UNVERIFIED, AND WHY THIS RECIPE IS STILL SHIPPED (M0 matrix C2) ───────────
+# NVFP4 load on GB10 has NEVER been run — upstream validated the FP4 kernels
+# on GB10 (sgl#30705) but no end-to-end NVFP4 image run on sm_121 exists
+# anywhere, and the matrix rates this row "runs-with-work (likely)". The
+# operator locked it as the speed backup anyway. Consequences written into the
+# recipe:
+#   * the FP4 GEMM backend env is LOAD-BEARING here (it is inert on the FP8
+#     sibling): the diffusion default is flashinfer_trtllm, which REJECTS
+#     capability 120/121 (matrix C1) — `flashinfer_cudnn` is the only spell
+#     that works on GB10, and it is set below.
+#   * cudnn FP4 regresses BELOW BF16 without a FlashInfer autotune warmup pass
+#     on sm_121 (matrix C2). `--warmup-mode server` (the diffusion default,
+#     left explicit below) is what pays that autotune at boot rather than on
+#     the first request — deliberate here, unlike the FP8 unit.
+#   * if the first GB10 smoke test trips on FP4 kernels, the tier's fallback is
+#     the FP8 recipe, not a knob on this one (never-plain-BF16 rule).
+#
+# ── CO-TENANCY / GPU BUDGET (§5 + §8 Q6 free co-tenancy) ──────────────────────
+# ~6 GB NVFP4 DiT = the cheapest image tier on the node. Fraction is a
+# DEFAULTS KNOB (visible to sparkrun's VRAM check, overridable per template via
+# --gpu-mem); the SAME HONEST GAP applies as on qwen-image-gen-sgld.yaml:
+# SGLang Diffusion has no memory-fraction field (verified absent from the
+# v0.5.22 diffusion argparse surface), so the fraction is a sparkrun-side
+# claim and the enforcement on the node is component residency. §5's only hard
+# rule — per-node fraction sum ≤ 0.8 — is what `validate` enforces. The small
+# footprint is the point: this is the unit that can sit next to an LLM AND the
+# FP8 image unit without breaking the sum. (And it is NEVER emitted as a CLI
+# flag: the diffusion parser SystemExits on unrecognized args —
+# server_args.py:3609 @v0.5.22 — see the FP8 recipe's VERIFIED CONSTRAINT.)
+#
+# ── MODE / PROXY (§3) ─────────────────────────────────────────────────────────
+# One backend per alias (image cache is process-local); /v1/models advertises
+# task_type/supported_task_types for the mode tag; LAN-only; proxy :4000 stays
+# the only entry point.
+# ─────────────────────────────────────────────────────────────────────────────
+recipe_version: "2"
+name: FLUX.2-klein-9b NVFP4 image generation (SGLang Diffusion)
+description: >-
+  SGLang Diffusion image unit, speed-backup tier: black-forest-labs NVFP4
+  FLUX.2-klein DiT over the FLUX.2-klein-9B base, one GB10. UNVERIFIED on
+  GB10 (M0 matrix C2) — first smoke test owns the outcome. Media M1.
+
+model: black-forest-labs/FLUX.2-klein-9B
+runtime: sglang
+
+container: "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+# Same digest as every media unit (single image for the whole workstream).
+# Tag spelling: lmsysorg/sglang:v0.5.22-cu130; multi-arch index verified
+# arm64-capable 2026-10-31. Pre-pull on every serving node.
+
+solo_only: true
+mods: []
+
+defaults:
+  port: 30001
+  host: 0.0.0.0
+  num_gpus: 1
+  gpu_memory_utilization: 0.25   # §5 image tier floor; ~6 GB DiT (see header)
+  served_model_name: flux-klein-gen
+
+distribution_config:
+  models:
+    enabled: false       # operator pre-stages (gated repo — accepted account)
+  containers:
+    enabled: false       # image pre-pulled by digest
+
+readiness:
+  inference: false       # no chat endpoint on a diffusion server; see the FP8
+                         # recipe's note — same reason, same required value.
+
+env:
+  # LOAD-BEARING on this unit (matrix C1): diffusion NVFP4 defaults to
+  # flashinfer_trtllm, which rejects sm_120/121. Variable + allowed values are
+  # real (multimodal_gen/envs.py:126 @v0.5.22).
+  SGLANG_DIFFUSION_FLASHINFER_FP4_GEMM_BACKEND: "flashinfer_cudnn"
+
+command: |
+  sglang serve \
+    --model-path {model} \
+    --transformer-weights-path black-forest-labs/FLUX.2-klein-9b-nvfp4/flux-2-klein-9b-nvfp4.safetensors \
+    --served-model-name {served_model_name} \
+    --num-gpus {num_gpus} \
+    --performance-mode manual \
+    --component-residency all=resident text_encoder=component-offload \
+    --pin-cpu-memory \
+    --warmup-mode server \
+    --host {host} \
+    --port {port} \
+    --strict-ports true \
+    --output-path /cache/huggingface/media-scratch/flux-klein-gen \
+    --input-save-path /cache/huggingface/media-scratch/flux-klein-gen/uploads
+
+# `--transformer-weights-path` is the documented compatibility spelling for raw
+# NVFP4 exports, resolved by the same dynamic-map extractor as
+# --component-weights-paths.* (server_args.py:3415 @v0.5.22, alias_suffix
+# "-weights-path") — it maps to component `transformer`. `--quantization` is
+# deliberately NOT set: pre-quantized checkpoints are self-describing and the
+# guide says "omit --quantization" for modelopt-nvfp4.
+# `--warmup-mode server` is the engine default (@v0.5.22:533 sets None → serve
+# defaults warmup_mode=server, entrypoints/cli/serve.py) and is written
+# explicitly because on THIS unit the autotune it triggers is a correctness/
+# latency requirement, not an optimization (matrix C2).
+#
+# Expected `sparkrun recipe validate` findings: restated-managed-path
+# (SUGGESTION) for the repo-relative weight spec — kept, see the FP8 recipe's
+# note. No errors expected.

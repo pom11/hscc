@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import yaml
 import pytest
 import rolelib
@@ -25,6 +26,30 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "your own git worktree" not in soul.lower()
     # ...but it MUST get its own gateway/authority operational block.
     assert "gateway node" in soul.lower()
+
+
+def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
+    """t_1d284d82: `orch_message` is a NUDGE channel, not a work order.
+
+    The rule has to live INSIDE the generated "## How you manage work" list (an
+    orch reads that list as its work-management contract), so it is asserted on
+    the text that follows the heading — not merely somewhere in the SOUL.
+    """
+    spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+            "preload_skills": []}
+    soul = generator.compose_soul(spec, base_identity="BASE")
+    assert "## How you manage work" in soul
+    section = soul.split("## How you manage work", 1)[1]
+    assert "`orch_message`" in section
+    assert "11. **`orch_message` is a nudge, not a work order.**" in section
+    assert "never by commenting on DONE cards" in section
+    assert "on a CARD on the right board (`--board` explicit)" in section
+    # Workers cannot send orch_message at all (the tool refuses a non-orch
+    # sender), so the rule belongs to the orchestrator block only.
+    worker = generator.compose_soul(
+        {"name": "coder", "identity": "You build.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert "orch_message" not in worker
 
 
 def test_generate_profile_writes_files(tmp_path, monkeypatch):
@@ -876,3 +901,113 @@ def test_live_orchestrator_endpoint_uniform_false_is_pinned(tmp_path, monkeypatc
     monkeypatch.setattr(os.path, "expanduser",
                         lambda p: str(serving) if p.endswith("serving.json") else p)
     assert generator._live_orchestrator_endpoint() == "http://10.9.9.7:8123/v1"
+
+
+# ── generate must be LOSSLESS for a spec-carried project block (t_0f2ee405) ──
+#
+# `ecofire-pontaje-engineer`'s live SOUL carried a hand-appended `## Project
+# override: ecofire-pontaje` block. compose_soul() emits only base + spec identity
+# + ops, so anything in that block that is NOT in the spec identity is deleted by
+# the next `hscc.py generate` — silently, because the generator reports success.
+# t_8d22ec81 folded the branch/ID/prefix/publish constraints into the spec
+# identity; t_0f2ee405 measured (whole-document positional diff, all 25
+# worker-signature profiles) that exactly ONE line was still lost: the pointer to
+# the module's spec/plan docs. These tests pin the CONTENT of the block against
+# the composed text of the REAL tracked spec.
+#
+# Token-level on purpose: compose_soul reflows the identity to its own line
+# wrapping, so a line-level pin would fail on a rewrap that loses nothing. A
+# token-level pin fails only when the information itself is gone — the exact
+# regression class (spec text narrowed by an unrelated edit, generate then drops
+# a constraint) this guards.
+#
+# Deliberately NO read of ~/.hermes/profiles here (PR #115's ruling): live state
+# belongs to the doctor, not pytest — a live-reading test is red on the operator
+# machine and vacates in CI. The spec is the tracked source of truth; the doctor
+# is the live-state surface.
+
+_PONTAJE_SPEC = os.path.join(rolelib.ROLES_DIR, "ecofire-pontaje-engineer.yaml")
+
+# The constraints the live `## Project override:` block carried (measured, lines
+# 130-133 of that SOUL), minus the named shared/prod sandboxes, which t_8d22ec81
+# ruled must NOT be reproduced in-tree ("the constraint is preserved, the
+# inventory is not" — changelog.d/t_8d22ec81.md).
+_PONTAJE_LOSSLESS_TOKENS = (
+    "feat/pontaje",      # branch: from AND into, never main
+    "70600-70699",       # BC object ID range
+    "Pontaje/",          # file prefix
+    "POM_PONTAJE",       # the project's own sandbox
+    "docs/superpowers",  # the module's spec/plan live here
+    "2026-10-26-pontaje",
+)
+
+
+def test_compose_soul_pontaje_carries_every_project_override_token():
+    """Nothing the hand-appended block carried is dropped by `generate`.
+
+    If this fails, `hscc.py generate` would delete a live constraint or the doc
+    pointer from the pontaje worker's SOUL — the failure the operator would only
+    discover after the profile was re-stamped.
+    """
+    base = open(rolelib.BASE_IDENTITY_PATH, encoding="utf-8").read()
+    soul = generator.compose_soul(rolelib.load_spec(_PONTAJE_SPEC), base)
+    missing = [t for t in _PONTAJE_LOSSLESS_TOKENS if t not in soul]
+    assert not missing, (
+        "generate would DROP " + ", ".join(missing) + " from "
+        "ecofire-pontaje-engineer's SOUL — the live profile carried these in a "
+        "hand-appended `## Project override:` block that compose_soul() cannot "
+        "re-emit; fold them back into the spec's `identity` (compose_soul emits "
+        "it verbatim)."
+    )
+
+
+def test_compose_soul_pontaje_keeps_publish_constraint_without_naming_others():
+    """The publish guardrail is a CONSTRAINT, not a sandbox INVENTORY.
+
+    Two halves, both measured failures of a plausible 'fix':
+      - drop the guardrail -> the worker may publish to a shared/prod sandbox;
+      - 'restore' the live block verbatim -> the named shared/prod inventory
+        lands in a PUBLIC repo (the leak class scripts/address_guard.py
+        documents; no tracked file names them today).
+
+    The guardrail is pinned as the CONTIGUOUS normalized phrase, not as the
+    words 'shared'/'production': mutation M3 (guardrail sentence deleted from
+    the spec) SURVIVED the first version of this test, because base-identity.md
+    carries 'shows up in production' and the identity's own closing carries
+    'shared values' — word-level assertions were fail-open. Whitespace
+    normalization keeps it robust against compose_soul's reflow, which raw
+    substring-on-source would not be.
+    """
+    base = open(rolelib.BASE_IDENTITY_PATH, encoding="utf-8").read()
+    soul = generator.compose_soul(rolelib.load_spec(_PONTAJE_SPEC), base)
+    flat = " ".join(soul.split())
+    assert "POM_PONTAJE" in soul
+    assert "never a shared or production sandbox" in flat, (
+        "the publish guardrail (never a shared or production sandbox) was lost "
+        "from the composed SOUL — generate would drop the constraint that keeps "
+        "this worker off shared/prod BC sandboxes")
+
+
+def test_role_specs_name_no_shared_sandbox_inventory():
+    """Structural guard for 'constraint, not inventory' — no blocklist needed.
+
+    A blocklist naming the forbidden sandboxes would itself reproduce the leak
+    class it polices, so the rule is inverted: across every tracked role spec,
+    the ONLY `POM_`-prefixed sandbox token allowed is the pontaje project's OWN
+    sandbox. Any other sandbox name appearing in-tree fails here, whatever it
+    is called, without this file ever naming it.
+    """
+    offenders = {}
+    for spec_path in rolelib.list_spec_files():
+        text = open(spec_path, encoding="utf-8").read()
+        bad = {t for t in re.findall(r"POM_[A-Za-z0-9_]+", text)
+               if t != "POM_PONTAJE"}
+        if bad:
+            offenders[os.path.basename(spec_path)] = sorted(bad)
+    assert not offenders, (
+        "role specs must carry the publish CONSTRAINT, never the sandbox "
+        "INVENTORY (t_8d22ec81 ruling; the named shared/prod sandboxes are "
+        "deliberately not reproduced in-tree — see changelog.d/t_8d22ec81.md "
+        "and scripts/address_guard.py's leak-class docs): " + repr(offenders)
+    )
+

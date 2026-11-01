@@ -1,0 +1,54 @@
+# 3-node DRAFT media template (media M4) — PREVIEW ONLY, never applied.
+#
+# Declares the two M1-staged SGLang-Diffusion units as MEDIA units via the new
+# `kind:` key (docs/design/media-serving.md §4): the FLUX.2-klein-9b NVFP4
+# image unit and the LTX-2.5 FP8 video unit, alongside the standard chat
+# orchestrator. This file exists so the media schema path has a real shipped
+# template to validate against — it has never been applied to the fleet and
+# must not be until a live media smoke test is authorized (operator ruling:
+# no live media tests). Validation = unit tests + `hscc template validate`
+# dry mode (structural layer); the placement layer needs the live cluster and
+# was not run for this card.
+#
+# ── WHY THE UNITS ARE NAMED THE WAY THEY ARE ─────────────────────────────────
+# The M4 card example said "flux2-dev-nvfp4 + ltx-2.5-nvfp4". M1 shipped
+# FLUX.2-klein-9b-nvfp4 (the §8-Q1 speed tier), and LTX-2.5 is served FP8 —
+# NEVER NVFP4 (no SGLang kernel path for LTX NVFP4 on either server; see
+# recipes/media/ltx-video-sgld.yaml header). The template therefore references
+# the recipes that actually exist under recipes/media/.
+#
+# ── WHY ONE UNIT PER WORKER, NOT "1 node" BOTH ON ─────────────────────────────
+# §5 rule 1's single hard rule is the per-node fraction sum ≤ 0.8. The image
+# unit declares 0.25 and the video unit 0.70 (both are the recipes' own
+# declared tiers; the video fraction is already the large-tier number and
+# cannot shrink below its declared working set). 0.25 + 0.70 = 0.95 > 0.8 on
+# one Spark, so the draft keeps each media unit on its own worker. Free
+# co-tenancy with LLM units (§8 Q6) still applies: the fractions, not
+# exclusivity, are what bound the node.
+name: 3node-flux2-media
+version: 3
+description: "DRAFT (preview only): orchestrator + image unit (FLUX.2-klein NVFP4) + video unit (LTX-2.5 FP8), one media unit per worker. Never applied — media M4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+
+families:
+  # Image generation unit. Fraction 0.25 = the recipe's own declared image
+  # tier (§5 rule 2 floor; ~6 GB NVFP4 DiT, see the recipe header).
+  - name: image
+    models:
+      - recipe: "~/.sparkrun-local/recipes/media/flux-klein-gen-sgld.yaml"
+        kind: image
+        gpu_memory_utilization: 0.25
+    workers: 1
+    proxy: true
+
+  # Video generation unit. Fraction 0.70 = the recipe's declared video tier
+  # (derived from §5's video working set; first boot owns the number).
+  - name: video
+    models:
+      - recipe: "~/.sparkrun-local/recipes/media/ltx-video-sgld.yaml"
+        kind: video
+        gpu_memory_utilization: 0.70
+    workers: remaining
+    proxy: true

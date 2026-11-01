@@ -34,6 +34,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 BOOT = Path(__file__).resolve().parent.parent
 RESTART = BOOT / "restart_daemon.sh"
 
@@ -559,20 +561,33 @@ def test_systemd_unit_active_restarts_through_systemctl_not_the_cli(tmp_path):
     assert not any(c.startswith("kickstart") for c in _launchd_calls(env))
 
 
-def test_systemd_alternative_unit_name_is_recognised(tmp_path):
-    """The two installers emit different unit names (systemd-setup.sh writes
-    hscc_daemon.service, install.py writes com.hermes.hscc_daemon.service). If
-    the helper recognised only one, a daemon installed by the other would look
-    unsupervised — and the orphan guard would then REFUSE the restart, silently
-    skipping the reload. Both names must be probed."""
+@pytest.mark.parametrize("unit", [
+    # canonical name (t_d8f13693) — what install.py and systemd-setup.sh write now
+    "com.hermes.hscc_daemon.service",
+    # retired name — what every node installed by the pre-fix systemd-setup.sh
+    # still carries until migrate_systemd_unit_name.py runs
+    "hscc_daemon.service",
+])
+def test_either_unit_name_is_recognised_by_the_candidate_probe(tmp_path, unit):
+    """The probe list must contain BOTH the canonical and the retired unit name.
+
+    A single name here used to be an installer-drift bug (the two install paths
+    wrote different names for one daemon). t_d8f13693 ruled the canonical name and
+    retired the other, but the retired name stays in the probe list deliberately:
+    until the operator runs hscc-bootstrap/migrate_systemd_unit_name.py, every
+    Linux node in the fleet is still supervised under it. Recognising only the
+    canonical name would make a healthy legacy-supervised daemon look unsupervised
+    — and the orphan guard would then REFUSE the restart, silently skipping the
+    reload. Both names must be probed until the migration is scheduled.
+    """
     env, calls = _setup(tmp_path,
-                        systemd_unit="com.hermes.hscc_daemon.service",
+                        systemd_unit=unit,
                         systemd_pid_before="6001", systemd_pid_after="6002")
     del env["HSCC_SYSTEMD_UNIT"]  # exercise the candidate-list probe, not the override
     res = _run(env)
 
     assert res.returncode == 0
-    assert "restart com.hermes.hscc_daemon.service" in " ".join(_systemd_calls(env))
+    assert f"restart {unit}" in " ".join(_systemd_calls(env))
     assert calls.exists() is False or calls.read_text() == ""
     assert "pid 6001 -> 6002" in res.stdout
 
@@ -979,35 +994,109 @@ def test_launchd_label_constant_matches_sibling_emitters():
 
 
 def test_systemd_unit_candidates_match_sibling_emitters():
-    """The helper probes a fixed candidate list of unit names, and the two
-    installers emit DIFFERENT ones (pre-existing drift): systemd-setup.sh writes
-    `hscc_daemon.service`, install.py writes `com.hermes.hscc_daemon.service`.
-    If either changes and the candidate list is not updated, the helper stops
-    seeing the service as supervised on that box — and then the orphan guard
-    refuses the restart (rc 4) and freshly-installed code silently never loads.
-    Pin every emitted unit name to appear in the probe list, so the drift can
-    only ever be caught here, never in production."""
+    """The helper probes a fixed candidate list, and the names it must contain are
+    declared in ONE place: hscc_daemon/unit_name.py.
+
+    t_d8f13693 unified the drift this pin used to record: `com.hermes.
+    hscc_daemon.service` is the canonical name (matches the launchd label and the
+    plist) and `hscc_daemon.service` is the LEGACY name that pre-fix installs left
+    behind. Both stay in the probe list on purpose:
+
+      * drop the canonical name -> the helper stops seeing a fresh install as
+        supervised, the orphan guard refuses the restart (rc 4) and newly
+        installed code silently never loads;
+      * drop the legacy name -> the SAME failure on every node that has not run
+        migrate_systemd_unit_name.py yet, which is the whole fleet until the
+        operator schedules that run.
+
+    So the canary is kept, and it now pins the candidate list to unit_name.py
+    rather than to two independently-typed literals: a rename has one edit site
+    and any reader that misses it fails HERE, never in production.
+    """
     helper = RESTART.read_text()
     m = re.search(r'SYSTEMD_UNIT_CANDIDATES="([^"]+)"', helper)
     assert m, "helper must keep its unit-name probe list declarative"
     candidates = m.group(1).split()
 
-    setup = (BOOT.parent / "hscc_daemon" / "systemd-setup.sh").read_text()
-    install = (BOOT.parent / "hscc_daemon" / "install.py").read_text()
-    emitted = set()
-    for pat, src in ((r'UNIT_NAME="([^"]+)"', setup),
-                     (r'SYSTEMD_UNIT_NAME = "([^"]+)"', install)):
-        found = re.search(pat, src)
-        assert found, f"could not read the unit name out of {pat!r}"
-        emitted.add(found.group(1))
-    assert emitted == {"hscc_daemon.service", "com.hermes.hscc_daemon.service"}, (
-        f"unit-name drift between the two installers: {sorted(emitted)}"
-    )
-    missing = emitted - set(candidates)
+    unit_names = _read_unit_name_constants()
+    declared = [unit_names["UNIT_NAME"], unit_names["LEGACY_UNIT_NAME"]]
+
+    # The names unit_name.py declares must all be probed...
+    missing = set(declared) - set(candidates)
     assert not missing, (
         f"helper would treat a supervised daemon as an orphan; add to "
         f"SYSTEMD_UNIT_CANDIDATES: {sorted(missing)}"
     )
+    # ...and the helper must not probe a name nobody declares (a stale literal
+    # here would mask a rename in unit_name.py).
+    extra = set(candidates) - set(declared)
+    assert not extra, (
+        f"helper probes unit names no emitter declares — update unit_name.py "
+        f"or drop them from the list: {sorted(extra)}"
+    )
+    # Canonical first: a half-migrated box that claims both gets the restart on
+    # the name that is meant to win.
+    assert candidates[0] == unit_names["UNIT_NAME"], (
+        f"probe order must lead with the canonical {unit_names['UNIT_NAME']}, "
+        f"got {candidates}"
+    )
+    # The legacy name is retired, never re-typed as something to WRITE: the only
+    # emitters of a unit FILE are install.py (imports UNIT_NAME) and the
+    # migration script (imports both names).
+    install = (BOOT.parent / "hscc_daemon" / "install.py").read_text()
+    setup = (BOOT.parent / "hscc_daemon" / "systemd-setup.sh").read_text()
+    assert re.search(r'SYSTEMD_UNIT_NAME = UNIT_NAME\b', install), (
+        "install.py must take its unit name from unit_name.py, not re-type it"
+    )
+    assert f'UNIT_NAME="{unit_names["LEGACY_UNIT_NAME"]}"' not in setup, (
+        "systemd-setup.sh must not write the legacy unit name any more"
+    )
+    assert f'UNIT_NAME="{unit_names["UNIT_NAME"]}"' not in setup, (
+        "systemd-setup.sh must take the unit name from the unit-emit JSON, not "
+        "re-type it — the two install paths drifted precisely because each typed "
+        "its own"
+    )
+    assert "unit-emit" in setup, (
+        "systemd-setup.sh must write the unit through the daemon's own emitter; "
+        "`hscc.py plist > UNIT_FILE` redirected a RENDERED Rich console view "
+        "(borders + soft-wrapped assignments) into a unit file systemd could not "
+        "parse"
+    )
+
+
+def _read_unit_name_constants() -> dict:
+    """UNIT_NAME / LEGACY_UNIT_NAME straight out of hscc_daemon/unit_name.py.
+
+    Parsed from source (not imported) so the pin keeps working when the suite
+    runs from a deployed plugin dir and cannot import a sibling package.
+    """
+    src = (BOOT.parent / "hscc_daemon" / "unit_name.py").read_text()
+    out = {}
+    for key in ("UNIT_NAME", "LEGACY_UNIT_NAME"):
+        m = re.search(rf'^{key} = "([^"]+)"', src, re.M)
+        assert m, f"unit_name.py must declare {key} as a plain literal"
+        out[key] = m.group(1)
+    assert out["UNIT_NAME"] != out["LEGACY_UNIT_NAME"], (
+        "the canonical and legacy names must differ or the twin purge is a no-op"
+    )
+    return out
+
+
+def test_unit_name_helper_candidate_list_is_ordered_canonical_first():
+    """A unit_name.py rename must not be able to flip the probe order behind the
+    helper's back: `detect_supervisor` takes the FIRST active candidate, so a
+    list that led with the legacy name would restart the unit that is about to be
+    retired on a half-migrated box.
+    """
+    unit_names = _read_unit_name_constants()
+    helper = RESTART.read_text()
+    m = re.search(r'SYSTEMD_UNIT_CANDIDATES="([^"]+)"', helper)
+    assert m, "helper must keep its unit-name probe list declarative"
+    candidates = m.group(1).split()
+    assert candidates.index(unit_names["UNIT_NAME"]) \
+        < candidates.index(unit_names["LEGACY_UNIT_NAME"])
+    # And the loop that consumes it must keep the same-first-match semantics.
+    assert "for u in $SYSTEMD_UNIT_CANDIDATES" in helper
 
 
 def test_helper_only_reads_and_kicks_launchd_never_reinstalls():

@@ -29,6 +29,14 @@ from hscc_daemon.autodown_cli import (cmd_autodown, _parse_idle_minutes,
 # Tests that want the production active/inactive filtering restore this.
 _REAL_LIST_ACTIVE_CRON_JOBS = ad.list_active_cron_jobs
 
+# The REAL PR/CI seams, captured at import for the same reason — the autouse
+# _no_active_prci fixture replaces these with stubs per test, and a test that
+# wants the production fail-safe chain must restore the originals (NOT
+# monkeypatch.undo(), which would also unwind conftest's live-path redirects).
+_REAL_HAS_ACTIVE_PRCI = ad._has_active_pr_ci
+_REAL_PRCI_BLOCKING_SIGNAL = ad.prci_blocking_signal
+_REAL_PRCI_CHECK_STATE = ad.prci_check_state
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -311,6 +319,95 @@ class TestStatus:
         assert data["prci_active"] is True
         assert "unreachable" in data["blocked_by"]
         assert data["prci_ok"] is False
+
+    def test_status_json_survives_a_real_gh_blip(self, capsys, autodown_file,
+                                                 block_file, tmp_path,
+                                                 monkeypatch):
+        """THE t_18318fd9 regression test, on the real production chain.
+
+        Everything below the ``gh`` binary is real here: the real
+        ``_screen_prci_uncached`` probe loop, the real fail-safe sentinel, the
+        real ``_note_prci_unavailable`` WARN, the real ``_cmd_status`` JSON. Only
+        ``subprocess.run`` is stubbed — to exit 1 on one repo's CI probe, exactly
+        the intermittent ``failed to get runs: Get https://api.github.com/...``
+        blip that made this test flake ~1 run in 2.
+
+        It asserts the machine contract: stdout is EXACTLY one JSON document
+        (so any caller's ``json.loads`` works), while the WARN is still visible
+        on stderr and in the log file. A fix that silenced the WARN instead of
+        moving it would fail the stderr/log assertions; a fix that left the echo
+        on stdout fails the ``json.loads``.
+        """
+        from hscc_daemon import autodown, daemon_ops
+
+        # Restore the REAL PR/CI predicates over the autouse hermetic stub
+        # (module-attr capture, the _REAL_LIST_ACTIVE_CRON_JOBS pattern — NOT
+        # monkeypatch.undo(), which would also unwind conftest's live-path
+        # redirects and let the test write into the operator's real ~/.hscc).
+        monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: [])
+        monkeypatch.setattr(ad, "_has_active_work", lambda kanban_db=None: False)
+        monkeypatch.setattr(ad, "_has_active_pr_ci", _REAL_HAS_ACTIVE_PRCI)
+        monkeypatch.setattr(ad, "prci_blocking_signal",
+                            _REAL_PRCI_BLOCKING_SIGNAL)
+        monkeypatch.setattr(ad, "prci_check_state", _REAL_PRCI_CHECK_STATE)
+
+        # The blip: every probe is clean except the first repo's in_progress CI
+        # probe, which exits nonzero like a transient GitHub API failure.
+        # NOTE the argv shape: _gh_count passes verb.split(), so "run" and
+        # "list" are SEPARATE tokens — matching on the literal "run list" in
+        # argv never fires and the fake silently reports "clear" (a stub that
+        # passes for the wrong reason; caught because this test asserts the
+        # fail-safe is ACTIVE, not merely that stdout parses).
+        blipping = [ad.DEFAULT_PRCI_REPOS[0]]
+
+        def fake_run(cmd, **kw):
+            repo = cmd[cmd.index("--repo") + 1]
+            is_run_list = cmd[1] == "run" and cmd[2] == "list"
+            status = cmd[cmd.index("--status") + 1] if "--status" in cmd else None
+            bad = (repo in blipping and is_run_list and status == "in_progress")
+            code = 1 if bad else 0
+            return type("P", (), {"returncode": code,
+                                  "stdout": "0\n" if code == 0 else "",
+                                  "stderr": "" if code == 0 else
+                                  "failed to get runs: Get "
+                                  "https://api.github.com/...: connection reset"}
+                        )()
+
+        real_screen = autodown._screen_prci_uncached
+        monkeypatch.setattr(autodown, "_screen_prci",
+                            lambda *a, **k: real_screen(
+                                list(ad.DEFAULT_PRCI_REPOS), fake_run))
+        # Once-only WARN state + TTL cache must start clean, or a prior test in
+        # the same process could swallow the very WARN under test.
+        monkeypatch.setattr(autodown, "_PRCI_LOAD", {
+            "blocking": None, "ok": None, "reason": "", "warned": False})
+        monkeypatch.setattr(autodown, "_prci_cache",
+                            {"at": 0.0, "key": None, "result": None})
+
+        # Foreground mode (no PID file) — the mode the WARN echo fires in.
+        monkeypatch.setattr(daemon_ops, "PID_FILE",
+                            str(tmp_path / "absent" / "daemon.pid"))
+        monkeypatch.setattr(daemon_ops, "LOG_FILE",
+                            str(tmp_path / "daemon.log"))
+
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "up",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+        }))
+
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        # stdout must be PURE JSON — this is the assertion that failed.
+        data = json.loads(captured.out)
+        assert data["prci_active"] is True
+        assert "unreachable" in data["blocked_by"]
+        # The WARN is still surfaced — just on the diagnostic stream, and in
+        # the log file. Silence here would mean the fail-safe went quiet.
+        assert "Autodown PR/CI interlock unevaluable" in captured.err
+        assert "Autodown PR/CI interlock unevaluable" \
+            in (tmp_path / "daemon.log").read_text()
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):

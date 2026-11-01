@@ -106,6 +106,81 @@ def test_hermes_panes_tmux_absent_is_empty_not_crash(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# discovery — WRAPPER panes (the 2026-10-29 reference-tool fix)
+#
+# A launcher (e.g. the one that starts kronos-orch) can be the pane's FIRST
+# chat-looking process, with the real `hermes -p <profile> chat` underneath it.
+# The wrapper line carries no -p/--profile, so taking the first match labelled
+# the pane `default` and an inject by profile name refused on the one pane
+# that was actually the right one.
+# --------------------------------------------------------------------------- #
+
+# Realistic wrapper: a launcher script living under ~/.hermes/bin (so it
+# contains "hermes") invoked as `... chat --project ...` (so it contains " chat")
+# with NO profile flag — it is the child that names the profile.
+_LAUNCHER = "/Users/x/.hermes/bin/orch-launch chat --project alpha"
+_CHILD = "/Users/x/.hermes/hermes-agent/venv/bin/hermes -p kronos-orch chat"
+
+
+def test_wrapper_pane_resolves_the_childs_profile_not_default(fake, monkeypatch):
+    """Wrapper FIRST, real chat SECOND: the profile-named line wins."""
+    fake.responses["list-panes"] = PANE_LINES
+    monkeypatch.setattr(repl_inject, "run_ps",
+                        lambda tty: f"/bin/zsh\n{_LAUNCHER}\n{_CHILD}\n")
+    panes = repl_inject.hermes_panes()
+    assert len(panes) == 1
+    assert panes[0]["profile"] == "kronos-orch"
+    assert panes[0]["cmd"] == _CHILD            # the command that justified it
+
+
+def test_wrapper_pane_child_first_ordering_also_resolves(fake, monkeypatch):
+    """Order must not matter — the rule is 'the line that names a profile'."""
+    fake.responses["list-panes"] = PANE_LINES
+    monkeypatch.setattr(repl_inject, "run_ps",
+                        lambda tty: f"{_CHILD}\n{_LAUNCHER}\n")
+    assert repl_inject.hermes_panes()[0]["profile"] == "kronos-orch"
+
+
+def test_wrapper_only_pane_falls_back_to_default(fake, monkeypatch):
+    """No line names a profile -> `default` (the reference tool's fallback)."""
+    fake.responses["list-panes"] = PANE_LINES
+    monkeypatch.setattr(repl_inject, "run_ps",
+                        lambda tty: f"/bin/zsh\n{_LAUNCHER}\n")
+    panes = repl_inject.hermes_panes()
+    assert len(panes) == 1 and panes[0]["profile"] == "default"
+
+
+def test_wrapper_pane_never_picks_a_gateway_line(fake, monkeypatch):
+    """A gateway line before the real chat must not become the target."""
+    fake.responses["list-panes"] = PANE_LINES
+    monkeypatch.setattr(
+        repl_inject, "run_ps",
+        lambda tty: ("hermes gateway run --chat-ish\n" + _LAUNCHER + "\n"
+                     + _CHILD + "\n"))
+    panes = repl_inject.hermes_panes()
+    assert panes[0]["profile"] == "kronos-orch"
+    assert "gateway" not in panes[0]["cmd"]
+
+
+def test_wrapper_pane_ambiguous_still_refuses_and_sends_nothing(monkeypatch,
+                                                                fake):
+    """Two wrapper panes resolving to ONE profile: exactly-one rule holds."""
+    fake.responses["list-panes"] = PANE_LINES + "\n" + OTHER
+    monkeypatch.setattr(repl_inject, "run_ps",
+                        lambda tty: f"{_LAUNCHER}\n{_CHILD}\n")
+    panes = repl_inject.hermes_panes()
+    assert [p["profile"] for p in panes] == ["kronos-orch", "kronos-orch"]
+    assert [p["pane"] for p in panes] == ["%1", "%2"]
+    with pytest.raises(InjectError) as ei:
+        repl_inject.inject("kronos-orch", "x", sleep_fn=lambda s: None)
+    assert ei.value.kind == "ambiguous"
+    assert "2 tmux pane" in ei.value.message
+    assert fake.loaded() == []                 # nothing pasted
+    assert fake.pasted() == []
+    assert fake.sent_keys() == []              # nothing typed
+
+
+# --------------------------------------------------------------------------- #
 # resolution — refuse on 0 or >1, never guess
 # --------------------------------------------------------------------------- #
 
@@ -215,7 +290,9 @@ def test_explicit_modes(monkeypatch, fake):
     fake.calls.clear()
     r = repl_inject.inject("pom-orch", "x", mode="interrupt",
                            sleep_fn=lambda s: None)
-    assert r["mode"] == "interrupt"          # explicit: no prefix, even busy
+    # `interrupt` is the reference tool's old name for a no-verb send; the
+    # receipt reports the canonical name, never the legacy alias.
+    assert r["mode"] == "plain"
     assert not [c for c in fake.sent_keys() if c[0][-1].startswith("/")]
 
 
@@ -260,6 +337,173 @@ def test_ambiguous_pane_blocks_inject_entirely(monkeypatch, fake):
     assert ei.value.kind == "ambiguous"
     assert fake.loaded() == []               # nothing was pasted
     assert fake.sent_keys() == []
+
+
+# --------------------------------------------------------------------------- #
+# mode table — the operator naming contract (plain / queue / steer / auto)
+# --------------------------------------------------------------------------- #
+
+def test_mode_table_is_the_naming_contract():
+    """plain = NO verb prefix; queue/steer carry theirs; auto resolves."""
+    assert repl_inject.MODES == ("auto", "plain", "queue", "steer")
+    assert repl_inject.VERB_PREFIX == {"plain": "", "queue": "/queue ",
+                                       "steer": "/steer "}
+    # auto is resolved against busy, never delivered verbatim.
+    assert repl_inject.resolve_mode("auto", True) == "queue"
+    assert repl_inject.resolve_mode("auto", False) == "plain"
+    for m in ("plain", "queue", "steer"):
+        assert repl_inject.resolve_mode(m, True) == m
+        assert repl_inject.resolve_mode(m, False) == m
+    # legacy alias, in both directions of busy.
+    assert repl_inject.resolve_mode("interrupt", True) == "plain"
+    assert repl_inject.normalize_mode("interrupt") == "plain"
+
+
+def test_resolve_mode_rejects_unknown():
+    with pytest.raises(InjectError) as ei:
+        repl_inject.resolve_mode("explode", False)
+    assert ei.value.kind == "empty"
+    assert "unknown mode" in ei.value.message
+
+
+def test_plain_while_busy_sends_no_prefix_and_reports_interrupts(monkeypatch,
+                                                                  fake):
+    """The one combination that cuts off a turn — it must be visible, not quiet."""
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    r = repl_inject.inject("pom-orch", "x", mode="plain", sleep_fn=lambda s: None)
+    assert r["mode"] == "plain" and r["busy"] is True
+    assert r["interrupts"] is True and r["verb"] == ""
+    # Enter only — no verb prefix typed first (FakeTmux records (args, input)).
+    assert fake.sent_keys() == [(("send-keys", "-t", "%1", "Enter"), None)]
+    assert fake.loaded()[0][1] == "x"
+
+
+def test_idle_plain_reports_no_interrupt(monkeypatch, fake):
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: False)
+    r = repl_inject.inject("pom-orch", "x", mode="plain", sleep_fn=lambda s: None)
+    assert r["mode"] == "plain" and r["interrupts"] is False
+
+
+def test_receipt_carries_verb_for_every_mode(monkeypatch, fake):
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    for mode, want_mode, want_verb in [
+        ("auto", "queue", "/queue "),
+        ("queue", "queue", "/queue "),
+        ("steer", "steer", "/steer "),
+        ("plain", "plain", ""),
+    ]:
+        fake.calls.clear()
+        r = repl_inject.inject("pom-orch", "hi", mode=mode,
+                               sleep_fn=lambda s: None)
+        assert (r["mode"], r["verb"]) == (want_mode, want_verb)
+
+
+# --------------------------------------------------------------------------- #
+# dry-run / planning — prints the decision, sends nothing
+# --------------------------------------------------------------------------- #
+
+def test_dry_run_sends_nothing_and_reports_the_target(monkeypatch, fake):
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    r = repl_inject.inject("pom-orch", "do the thing", dry_run=True,
+                           sleep_fn=lambda s: None)
+    assert r["dry_run"] is True
+    assert (r["pane"], r["target"], r["profile"]) == ("%1", "s1:0.0", "pom-orch")
+    assert r["busy"] is True and r["mode"] == "queue" and r["verb"] == "/queue "
+    assert r["text"] == "do the thing" and r["chars"] == len("do the thing")
+    # THE point of --dry-run: not one keystroke, not one buffer.
+    assert fake.loaded() == [] and fake.pasted() == [] and fake.sent_keys() == []
+    assert fake.calls == []            # no tmux call at all beyond discovery
+
+
+def test_dry_run_idle_chooses_plain(monkeypatch, fake):
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: False)
+    r = repl_inject.inject("pom-orch", "x", dry_run=True, sleep_fn=lambda s: None)
+    assert r["busy"] is False and r["mode"] == "plain" and r["verb"] == ""
+    assert fake.calls == []
+
+
+def test_dry_run_reports_interrupt_when_plain_meets_busy(monkeypatch, fake):
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    r = repl_inject.inject("pom-orch", "x", mode="plain", dry_run=True,
+                           sleep_fn=lambda s: None)
+    assert r["mode"] == "plain" and r["interrupts"] is True
+    assert fake.calls == []
+
+
+def test_dry_run_reads_busy_from_the_real_screen_and_still_sends_nothing(
+        monkeypatch, fake):
+    """The --dry-run contract: the idle/busy it prints is the REAL one.
+
+    is_busy is NOT stubbed here — only the seams are — so this pins that a dry
+    run really captures the pane (one capture-pane, no send-keys), rather than
+    printing a made-up state.
+    """
+    fake.responses["list-panes"] = PANE_LINES
+    fake.responses["capture-pane"] = (
+        "history line\nmsg=interrupt · /queue · /steer\n\n")
+    monkeypatch.setattr(repl_inject, "run_ps",
+                        lambda tty: "/Users/x/hermes -p pom-orch chat\n")
+    r = repl_inject.inject("pom-orch", "x", dry_run=True, sleep_fn=lambda s: None)
+    assert r["busy"] is True and r["mode"] == "queue"
+    assert [c[0][0] for c in fake.calls] == ["list-panes", "capture-pane"]
+
+
+def test_dry_run_still_validates(monkeypatch, fake):
+    """A dry run must refuse exactly what a real send would refuse."""
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: False)
+    with pytest.raises(InjectError) as ei:      # empty text
+        repl_inject.inject("pom-orch", "  \n", dry_run=True,
+                           sleep_fn=lambda s: None)
+    assert ei.value.kind == "empty"
+    with pytest.raises(InjectError) as ei:      # unknown mode
+        repl_inject.inject("pom-orch", "x", mode="explode", dry_run=True,
+                           sleep_fn=lambda s: None)
+    assert ei.value.kind == "empty"
+    with pytest.raises(InjectError) as ei:      # ambiguous pane
+        monkeypatch.setattr(repl_inject, "hermes_panes", lambda: _two_panes())
+        repl_inject.inject("pom-orch", "x", dry_run=True,
+                           sleep_fn=lambda s: None)
+    assert ei.value.kind == "ambiguous"
+    assert fake.calls == []
+
+
+def test_plan_rejects_bad_mode_before_touching_a_pane(monkeypatch, fake):
+    """No capture-pane, no send: a bad mode is refused up front."""
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    with pytest.raises(InjectError):
+        repl_inject.plan("pom-orch", mode="explode")
+    assert fake.calls == []
+
+
+def test_plan_pane_and_inject_agree_on_the_decision(monkeypatch, fake):
+    """One shared decision: the preview cannot drift from what delivery does."""
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    planned = repl_inject.plan("pom-orch")
+    sent = repl_inject.deliver(_two_panes()[0], "x", sleep_fn=lambda s: None)
+    for key in ("pane", "target", "profile", "busy", "mode", "verb",
+                "interrupts"):
+        assert sent[key] == planned[key], key
+
+
+def test_format_plan_lines():
+    busy_queue = repl_inject.plan_pane(_two_panes()[0], busy_fn=lambda p: True)
+    assert repl_inject.format_plan(busy_queue) == (
+        "target: pom-orch @ s1:0.0 (busy) -> queue")
+    idle = repl_inject.plan_pane(_two_panes()[0], busy_fn=lambda p: False)
+    assert repl_inject.format_plan(idle) == (
+        "target: pom-orch @ s1:0.0 (idle) -> plain")
+    interrupt = repl_inject.plan_pane(_two_panes()[0], mode="plain",
+                                      busy_fn=lambda p: True)
+    assert repl_inject.format_plan(interrupt) == (
+        "target: pom-orch @ s1:0.0 (busy) -> plain (interrupts the running turn)")
 
 
 # --------------------------------------------------------------------------- #
