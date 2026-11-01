@@ -414,25 +414,188 @@ class TestSparkrunCheck:
 
 
 class TestGatewayCheck:
-    def test_running(self):
-        with patch("subprocess.run", return_value=type("R", (),
-                                                       {"returncode": 0})()):
-            check = doctor._gateway_running()
+    """GAP-F-3 (t_f766ddd5): the row must not print "not running" on a LIVE gateway.
+
+    The old probe was `pgrep -f "hermes_cli.main gateway"`. Measured on the
+    operator machine while the gateway was up as launchd pid 74857: `pgrep -f .`
+    — which matches any command line — returned 1210 pids and 74857 was NOT one
+    of them (ps lists 1216; pgrep skips pid 1, the gateway, and four
+    argv-unreadable helpers). So no pattern could ever match, and the row was
+    structurally incapable of reporting the truth. These tests pin the two
+    transports that CAN see it, and pin that unrelated processes stay unmatched.
+    """
+
+    # The gateway's real argv on this fleet, read back verbatim from the launchd
+    # job's ProgramArguments (`launchctl list ai.hermes.gateway`).
+    REAL_ARGV = ("/Users/desac/.hermes/hermes-agent/venv/bin/python "
+                 "-m hermes_cli.main gateway run --replace")
+    LAUNCHD_OUT = (
+        '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
+        '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
+        '\t"Program" = "/Users/desac/.hermes/hermes-agent/venv/bin/python";\n};\n')
+
+    class _R:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def _runner(self, results):
+        """Fake probe runner keyed by argv[0]; records every argv it saw."""
+        seen: list = []
+
+        def run(argv, timeout):
+            seen.append(list(argv))
+            return results[argv[0]]
+        run.seen = seen  # type: ignore[attr-defined]
+        return run
+
+    # ── the live-box false negative ──────────────────────────────────────────
+    def test_launchd_pid_reports_running(self):
+        """The acceptance case: job loaded with a PID -> running, not ○."""
+        run = self._runner({"launchctl": self._R(0, self.LAUNCHD_OUT)})
+        check = doctor._gateway_running(_run=run)
         assert check.ok is True
-        assert check.detail == "running"
+        assert check.detail == "running (launchd pid 74857)"
         assert check.fatal is False
 
-    def test_not_running(self):
-        with patch("subprocess.run", return_value=type("R", (),
-                                                       {"returncode": 1})()):
-            check = doctor._gateway_running()
+    def test_no_longer_uses_pgrep(self):
+        """pgrep is the proven-wrong transport; it must not be invoked."""
+        run = self._runner({"launchctl": self._R(0, self.LAUNCHD_OUT)})
+        doctor._gateway_running(_run=run)
+        assert not any("pgrep" in a for argv in run.seen for a in argv)
+
+    def test_pgrep_invisible_process_still_detected_via_ps(self):
+        """Supervisor can't answer (pre-launchd bootstrap) -> argv scan decides.
+
+        This is the GAP-F-3 shape: the process is invisible to pgrep but ps
+        shows its argv, so the fallback transport must carry the verdict.
+        """
+        run = self._runner({"launchctl": self._R(1, "Could not find service."),
+                            "ps": self._R(0, f"74857 {self.REAL_ARGV}\n")})
+        check = doctor._gateway_running(_run=run)
+        assert check.ok is True
+        assert "74857" in check.detail
+
+    def test_supervisor_says_live_even_when_ps_shows_nothing(self):
+        """launchd is the authority: a live job wins over an empty scan."""
+        run = self._runner({"launchctl": self._R(0, self.LAUNCHD_OUT),
+                            "ps": self._R(0, "")})
+        assert doctor._gateway_running(_run=run).ok is True
+
+    # ── argv matching: the shapes this fleet actually launches ───────────────
+    @pytest.mark.parametrize("argv", [
+        REAL_ARGV,                                              # launchd form
+        "python -m hermes_cli.main gateway run",                # no flags
+        "/opt/homebrew/bin/hermes gateway run --replace",       # CLI wrapper
+        "/venv/bin/python -m hermes_cli.main --replace gateway run",  # flags first
+        "/venv/bin/python -m hermes_cli.main gateway serve",    # serve variant
+        "/venv/bin/python -m hermes_cli.main gateway start",    # start variant
+        "python3 -m hermes_cli.main gateway run --replace -p qa",   # trailing flags
+    ])
+    def test_matches_gateway_shaped_argv(self, argv):
+        assert doctor._argv_is_gateway(argv) is True
+
+    @pytest.mark.parametrize("argv", [
+        # A python running doctor (or any hermes CLI work) — must NOT match,
+        # or doctor would report a gateway it is itself pretending to be.
+        "python /Users/desac/.hermes/plugins/hscc_daemon/doctor.py --json",
+        "/venv/bin/python -m hermes_cli.main -p qa --cli chat -q work kanban task t_x",
+        # A prompt that merely says the words: every token is present and
+        # adjacent, but a gateway server never takes a chat prompt.
+        '/venv/bin/python -m hermes_cli.main chat -q "why did the gateway run fail"',
+        # A shell running a grep ABOUT the gateway is not the gateway.
+        '/bin/bash -c pgrep -f "hermes_cli.main gateway run --replace"',
+        "grep gateway run --replace",
+        # Unrelated processes that share one token.
+        "/usr/sbin/httpd -D FOREGROUND",
+        "python -m venv /tmp/gateway",
+        "/Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
+        "",
+        "   ",
+    ])
+    def test_does_not_match_unrelated_argv(self, argv):
+        assert doctor._argv_is_gateway(argv) is False
+
+    def test_scanner_skips_pid1_and_self(self):
+        """Never report launchd or doctor's own pid as the gateway."""
+        mine = os.getpid()
+        lines = [f"1 {doctor.__file__} gateway run --replace",
+                 f"{mine} python -m hermes_cli.main gateway run --replace"]
+        assert doctor._gateway_argv_pid(_lines=lines) is None
+
+    def test_scanner_returns_the_real_pid(self):
+        lines = ["1 /sbin/launchd",
+                 "400 /usr/sbin/httpd -D FOREGROUND",
+                 f"74857 {self.REAL_ARGV}"]
+        assert doctor._gateway_argv_pid(_lines=lines) == 74857
+
+    # ── verdicts when the gateway is genuinely down ─────────────────────────
+    def test_not_running_when_nothing_matches(self):
+        run = self._runner({"launchctl": self._R(1, "Could not find service."),
+                            "ps": self._R(0, "400 /usr/sbin/httpd -D FOREGROUND\n")})
+        check = doctor._gateway_running(_run=run)
         assert check.ok is False
         assert check.detail == "not running"
+        assert check.fatal is False          # informational, never hard-stops
 
-    def test_handles_exception(self):
-        with patch("subprocess.run", side_effect=subprocess.SubprocessError("err")):
-            check = doctor._gateway_running()
+    def test_job_loaded_but_no_process_is_distinct_verdict(self):
+        """'Loaded, no PID' is not 'not running' — the fix hint differs."""
+        no_pid = self.LAUNCHD_OUT.replace('\t"PID" = 74857;\n', "")
+        run = self._runner({"launchctl": self._R(0, no_pid),
+                            "ps": self._R(0, "")})
+        check = doctor._gateway_running(_run=run)
         assert check.ok is False
+        assert check.detail == "job loaded but no running process"
+        assert "kickstart" in check.fix
+
+    def test_probe_errors_are_unknown_not_not_running(self):
+        """A probe that cannot run must not fabricate a verdict it can't back.
+
+        GAP-F-3's real lesson: a check that fails open looks green forever.
+        Here the argv scan still gets its chance, so the row only reports
+        "not running" when a transport actually answered "nothing there".
+        """
+        def boom(argv, timeout):
+            raise OSError("no launchctl here")
+        check = doctor._gateway_running(_run=boom)
+        assert check.ok is False
+        assert check.detail == "not running"      # nothing answered at all
+        assert check.fatal is False
+
+    def test_probe_exception_never_crashes_the_row(self):
+        """doctor must still render a row if a probe raises anything."""
+        class NoStdout:                        # CompletedProcess lookalike
+            returncode = 0
+        check = doctor._gateway_running(_run=lambda argv, timeout: NoStdout())
+        assert check.name == "gateway"
+        assert check.ok is False               # degraded, not an exception
+
+    def test_linux_supervisor_active_reports_running(self, monkeypatch):
+        monkeypatch.setattr(doctor.sys, "platform", "linux")
+        monkeypatch.setattr(doctor.shutil, "which",
+                            lambda n: "/bin/systemctl" if n == "systemctl" else None)
+        run = self._runner({"systemctl": self._R(0, "active\n"),
+                            "ps": self._R(0, "")})
+        check = doctor._gateway_running(_run=run)
+        assert check.ok is True
+        assert "systemd" in check.detail
+
+    def test_linux_unit_inactive_reports_not_running(self, monkeypatch):
+        monkeypatch.setattr(doctor.sys, "platform", "linux")
+        monkeypatch.setattr(doctor.shutil, "which",
+                            lambda n: "/bin/systemctl" if n == "systemctl" else None)
+        run = self._runner({"systemctl": self._R(3, "inactive\n"),
+                            "ps": self._R(0, "")})
+        assert doctor._gateway_running(_run=run).ok is False
+
+    # ── the row itself ───────────────────────────────────────────────────────
+    def test_row_shape_is_stable(self):
+        """Name/fatal are part of the doctor contract (preflight + --json)."""
+        run = self._runner({"launchctl": self._R(0, self.LAUNCHD_OUT)})
+        check = doctor._gateway_running(_run=run)
+        assert check.name == "gateway"
+        assert check.fatal is False
+
 
 
 class TestDiskCheck:
