@@ -26,16 +26,16 @@ Purity contract (this module and nothing else in W1):
   * No delivery, no paused-file reading, no profile resolution HERE: W2
     owns those (it passes them in as arguments).
 
-Board enumeration mirrors ``kanban_live``/``autodown`` in covering EVERY
-board that holds a ``kanban.db`` under ``~/.hermes/kanban/boards/`` PLUS the
-legacy ``default`` board (``~/.hermes/kanban.db``), which the stopgap missed
-— per Hermes' own resolution rules ``default``'s dir only holds board
-metadata, its DB stays at the legacy path. It does not reuse
-``kanban_db.connect_closing`` because that opens read-write and runs
-schema-init/migrations: a pure waker must not be able to mutate a board, so
-this module enumerates the same board dirs and opens read-only URIs directly.
-Board resolution stays injectable (``boards=`` dict or slug list) so tests
-and W2 fully control the target set.
+Board enumeration is NOT owned here (GAP-C-1, audit C): discovery goes through
+the repo's single enumeration seam — ``autodown.board_db_paths``, the read-only
+PATH view of Hermes' own ``kanban_db.list_boards()`` — so this module never
+listdirs ``~/.hermes/kanban/boards`` or re-derives hermes' path rules. What it
+DOES own is how it then opens what the seam reported: it does not reuse
+``kanban_db.connect_closing``, because that opens read-write and runs
+schema-init/migrations — a pure waker must not be able to mutate a board, so it
+opens the reported paths as read-only URIs itself. Board resolution stays
+injectable (``boards=`` dict or slug list) so tests and W2 fully control the
+target set.
 """
 
 from __future__ import annotations
@@ -92,7 +92,10 @@ DEFAULT_BOARD = "default"
 #: ``~/.hscc`` at runtime and rebinds module constants; baking expanduser in
 #: here would defeat both halves of that isolation.
 DEFAULT_STATE_PATH = "~/.hscc/state/orch_waker.json"
-DEFAULT_BOARDS_DIR = "~/.hermes/kanban/boards"
+#: Where orchestrator PROFILES live (``resolve_orch``). Board DB discovery is NOT
+#: derived from this any more — GAP-C-1 moved enumeration to Hermes' own
+#: ``list_boards`` via ``autodown.board_db_paths``, which resolves its root
+#: through ``hermes_cli.kanban_db.kanban_home()`` (``HERMES_KANBAN_HOME``).
 DEFAULT_HERMES_HOME = "~/.hermes"
 
 _STATE_KEYS = ("last", "pending", "sent")
@@ -220,32 +223,60 @@ def save_state(st: dict, state_path=None) -> None:
     os.replace(tmp, path)
 
 
-def enumerate_boards(boards_dir=None, hermes_home=None) -> dict:
-    """``{slug: kanban.db path}`` for every board the waker scans.
+def board_enumeration(boards_dir=None, hermes_home=None) -> dict:
+    """``{"boards": {slug: kanban.db path}, "unevaluable": bool}``.
 
-    Named boards = sub-dirs of ``~/.hermes/kanban/boards`` holding a
-    ``kanban.db`` (the stopgap rule). The legacy ``default`` board is added
-    with its own last-id key at ``~/.hermes/kanban.db``; a ``default`` SUBDIR
-    never wins (per hermes ``kanban_db_path`` it only holds board metadata).
-    Missing/unreadable dirs enumerate to nothing rather than raising.
+    GAP-C-1 (audit C): this no longer enumerates. Board discovery is owned by
+    Hermes (``hermes_cli.kanban_db.list_boards``) reached through the repo's
+    single seam — :func:`hscc_daemon.autodown.board_db_paths`, the read-only
+    PATH view of ``_enum_board_names``. What stays here is only the waker's own
+    *policy* on top of that enumeration:
+
+      * every board the seam reports (``default`` included — Hermes resolves it
+        to the legacy ``~/.hermes/kanban.db``, which is why the stopgap missed
+        it and this module never may);
+      * only boards whose DB file actually exists — a board hermes reports but
+        whose file is gone would fail every scan, and the waker's rule is to
+        skip an unreadable board, not raise on it;
+      * archived boards are excluded (the seam's default): a board parked under
+        ``boards/_archived/`` has no orchestrator to wake.
+
+    ``unevaluable`` is True when the seam reported NO board because Hermes'
+    kanban library could not be reached at all. That distinction is the whole
+    point of this function: an empty board set is a legitimate state (a fresh
+    install with one empty board) but it is ALSO what an unreachable Hermes
+    looks like, and a waker that reads "no boards" from "cannot see the boards"
+    is the silent-inert failure this feature has already shipped once
+    (t_fa9a2faf). :func:`tick` reports unevaluable instead of scanning nothing;
+    :func:`waker_tick` stamps the stream ``ok: False`` on it so doctor and
+    verify see a degraded waker rather than a healthy one.
+
+    ``boards_dir`` / ``hermes_home`` are accepted and IGNORED (deprecated
+    shims — callers and tests that pinned them no longer control discovery;
+    discovery is Hermes' and cannot be pointed at a second root).
     """
-    bdir = _resolve(boards_dir or DEFAULT_BOARDS_DIR)
-    home = _resolve(hermes_home or DEFAULT_HERMES_HOME)
-    boards: dict = {}
+    from . import autodown
     try:
-        names = sorted(os.listdir(bdir))
-    except OSError:
-        names = []
-    for name in names:
-        if name == DEFAULT_BOARD:
-            continue
-        db = os.path.join(bdir, name, "kanban.db")
-        if os.path.exists(db):
-            boards[name] = db
-    legacy = os.path.join(home, "kanban.db")
-    if os.path.exists(legacy):
-        boards[DEFAULT_BOARD] = legacy
-    return boards
+        paths = autodown.board_db_paths()
+    except Exception as e:  # noqa: BLE001 — a waker never dies on enumeration
+        LOG.warning("orch-waker: board enumeration failed (%s) — treating as "
+                    "unevaluable", e)
+        return {"boards": {}, "unevaluable": True}
+    boards = {str(slug): db for slug, db in paths.items()
+              if db and os.path.exists(_resolve(db))}
+    state = autodown.kanban_check_state()
+    unevaluable = not paths and bool(state) and state.get("ok") is False
+    return {"boards": boards, "unevaluable": unevaluable}
+
+
+def enumerate_boards(boards_dir=None, hermes_home=None) -> dict:
+    """``{slug: kanban.db path}`` — see :func:`board_enumeration`.
+
+    Kept as the name-shaped convenience wrapper (and for callers that already
+    import it); it drops the ``unevaluable`` bit, so use
+    :func:`board_enumeration` when an empty result needs interpreting.
+    """
+    return board_enumeration(boards_dir, hermes_home)["boards"]
 
 
 def scan_board(db_path, after_id):
@@ -317,7 +348,8 @@ def _clean_pending(entries):
 
 def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
          state_path=None, boards_dir=None, hermes_home=None,
-         warned=None, debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S):
+         warned=None, debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
+         report=None):
     """One waker pass: scan every board, batch/debounce/rate-limit, decide.
 
     Applies and PERSISTS the state file (the only side effect); returns the
@@ -345,17 +377,32 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
       * ``warned``       — a caller-owned set for once-per-board warning
                            across ticks; a fresh set (once per board per
                            tick) is used when omitted.
+      * ``report``       — a caller-owned dict filled with the scan's
+                           self-assessment: ``unevaluable=True`` when board
+                           enumeration returned nothing because the kanban
+                           lib was unreachable (empty is NOT the same fact as
+                           blind — GAP-C-1 fail-closed distinction; the daemon
+                           stamps its stream ``ok: False`` on it so a waker
+                           that cannot see the boards never reads healthy).
     """
     if now is None:
         import time
         now = time.time()
     st = load_state(state_path)
+    if report is not None:
+        report["unevaluable"] = False
     if boards is None:
-        targets = enumerate_boards(boards_dir, hermes_home)
+        enum = board_enumeration(boards_dir, hermes_home)
+        targets = enum["boards"]
+        if report is not None and enum["unevaluable"]:
+            report["unevaluable"] = True
     elif isinstance(boards, dict):
         targets = dict(boards)
     else:
-        allb = enumerate_boards(boards_dir, hermes_home)
+        enum = board_enumeration(boards_dir, hermes_home)
+        if report is not None and enum["unevaluable"]:
+            report["unevaluable"] = True
+        allb = enum["boards"]
         targets = {b: allb[b] for b in boards if b in allb}
     paused = set(paused or ())
     if warned is None:
@@ -915,11 +962,24 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
             entry.update(ok=True, skipped="poll_gate", last_scan=prev.get("last_scan"),
                          message=f"skipped (poll {poll_s}s, {since_scan:.0f}s since scan)")
             return entry
+        # GAP-C-1 fail-closed: board enumeration now depends on Hermes' kanban
+        # lib. An EMPTY board set and a BLIND enumeration are different facts —
+        # a waker that cannot see the boards must not stamp a healthy tick
+        # ("steady"), or doctor/verify would certify a waker that is watching
+        # nothing (the silent-inert class t_fa9a2faf just retired).
+        report: dict = {}
         decisions = run_tick(
             now=now, state_path=state_path, paused_path=paused_path,
             profiles_dir=profiles_dir, hermes_home=hermes_home,
             boards_dir=boards_dir, audit_path=audit_path, inject=inject,
+            report=report,
             debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"])
+        if report.get("unevaluable"):
+            entry.update(ok=False, last_scan=now,
+                         boards_unevaluable=True,
+                         message="board enumeration unevaluable — kanban lib "
+                                 "unreachable; no board could be scanned")
+            return entry
         nudged = sum(1 for d in decisions if d.get("ok") is True)
         failed = sum(1 for d in decisions if d.get("ok") is False)
         entry.update(ok=True, decisions=len(decisions), nudged=nudged,
@@ -1151,6 +1211,18 @@ def doctor_check(now=None, config_path=None, state_dir=None,
                 "detail": f"stale: last tick {age:.0f}s ago "
                           f"(budget {limit:.0f}s = 2*{cfg['poll_s']}s+{DOCTOR_SLACK_S}s)",
                 "fix": fix}
+    if stream_state.get("ok") is False:
+        # A tick that stamped itself FAILED (GAP-C-1: e.g. board enumeration was
+        # unevaluable because the kanban lib is unreachable) is a FRESH tick, so
+        # the staleness math above cannot see it. Without this row the doctor
+        # would print "enabled, last tick 5s ago" for a waker that scanned
+        # nothing — exactly the healthy-looking-and-inert read this feature has
+        # already shipped once. Warn, not fatal: the loop is alive.
+        why = str(stream_state.get("message") or "last tick reported ok=False")
+        return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                "detail": f"enabled but the last tick FAILED: {why[:160]}",
+                "fix": ("fix the cause named in the message, then re-run; "
+                        "the stream stamps every tick so this clears on its own")}
     return {"name": CHECK_NAME, "ok": True, "fatal": False,
             "detail": (f"enabled, last tick {age:.0f}s ago "
                        f"(budget {limit:.0f}s, poll {cfg['poll_s']}s)"),
@@ -1189,7 +1261,7 @@ _WARNED_ONCE = set()
 def run_tick(now=None, boards=None, state_path=None, paused_path=None,
              profiles_dir=None, hermes_home=None, boards_dir=None,
              inject=None, has_orch=None, repl=None, mode="auto",
-             audit_path=None, warned=None,
+             audit_path=None, warned=None, report=None,
              debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S):
     """One waker pass wired end to end: scan -> decide -> inject -> audit.
 
@@ -1200,6 +1272,12 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
     decision list; NEVER raises: any unexpected failure is logged and
     swallowed, because the daemon calls this forever and a waker that dies
     silently stops waking every orchestrator.
+
+    ``report`` is passed through to :func:`tick` (see its contract) so the
+    daemon can tell "no boards to scan" apart from "cannot see the boards".
+    A swallowed exception means the scan told us nothing at all, so an
+    injected ``report`` is marked unevaluable here too — a failure must never
+    be reported as a healthy empty pass.
     """
     try:
         return tick(
@@ -1214,7 +1292,10 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
             state_path=state_path, boards_dir=boards_dir,
             hermes_home=hermes_home,
             warned=_WARNED_ONCE if warned is None else warned,
+            report=report,
             debounce_s=debounce_s, min_gap_s=min_gap_s)
     except Exception:  # noqa: BLE001 — the daemon loop must survive anything
         LOG.exception("orch-waker: tick failed — will retry next tick")
+        if report is not None:
+            report["unevaluable"] = True
         return []

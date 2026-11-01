@@ -404,30 +404,116 @@ def test_no_orch_profile_suppresses_delivery(tmp_path, state_path):
 # enumeration (legacy default board + named boards)
 # ---------------------------------------------------------------------------
 
-def test_enumerate_includes_legacy_default_and_named_boards(tmp_path):
-    home = tmp_path / "hermes"
-    (home / "kanban" / "boards" / "beta").mkdir(parents=True)
-    (home / "kanban" / "boards" / "beta" / "kanban.db").write_text("")
-    (home / "kanban" / "boards" / "notaboard").mkdir()      # no kanban.db -> skipped
-    (home / "kanban" / "boards" / "default").mkdir()
-    (home / "kanban" / "boards" / "default" / "kanban.db").write_text("")  # never wins
+def test_enumerate_includes_legacy_default_and_named_boards(
+        tmp_path, hermes_kanban_root):
+    """GAP-C-1: the waker's board set is HERMES' enumeration, end to end.
+
+    Driven through the real seam chain (``board_enumeration`` ->
+    ``autodown.board_db_paths`` -> ``hermes_cli.kanban_db.list_boards``) against
+    the hermetic kanban root conftest pins — no path monkeypatching, so this is
+    the proof that the waker sees exactly what Hermes says exists: every named
+    board, plus ``default`` at the LEGACY flat path (the file the stopgap never
+    watched), and no directory that is not a board.
+    """
+    from hscc_daemon import autodown
+    if autodown._load_kanban_db_or_default() is None:
+        pytest.skip("real hermes_cli not present in this environment")
+    root, boards_dir = hermes_kanban_root
+    (boards_dir / "beta").mkdir(parents=True)
+    (boards_dir / "beta" / "kanban.db").write_text("")
+    (boards_dir / "notaboard").mkdir()      # no kanban.db, no board.json -> skipped
+    (boards_dir / "default").mkdir()
+    (boards_dir / "default" / "kanban.db").write_text("")   # metadata dir: never wins
     # the legacy default DB holds a real board (created here, not write_text)
-    legacy = make_board(home / "kanban.db", tasks=[("t_1", "One")])
-    boards = ow.enumerate_boards(boards_dir=str(home / "kanban" / "boards"),
-                                 hermes_home=str(home))
-    assert boards["beta"] == str(home / "kanban" / "boards" / "beta" / "kanban.db")
-    assert boards["default"] == str(home / "kanban.db")     # legacy path wins
+    legacy = make_board(root / "kanban.db", tasks=[("t_1", "One")])
+    boards = ow.enumerate_boards()
+    assert boards["beta"] == str(boards_dir / "beta" / "kanban.db")
+    assert boards["default"] == str(root / "kanban.db")     # legacy path wins
     assert "notaboard" not in boards
     # default keeps its OWN last-id key and tail-starts like any board:
     ow.tick(now=NOW, boards={"default": legacy}, state_path=str(tmp_path / "st.json"))
     assert ow.load_state(str(tmp_path / "st.json"))["last"]["default"] == 0
 
 
+def test_enumeration_reports_unevaluable_when_hermes_is_unreachable(
+        tmp_path, monkeypatch, hermes_kanban_root):
+    """The fail-closed distinction GAP-C-1 introduces.
+
+    Enumeration now DEPENDS on Hermes' kanban lib; the old listdir needed
+    nothing. So "I cannot see the boards" must not become "there are no boards":
+    an unreachable lib reports ``unevaluable`` and :func:`waker_tick` stamps the
+    stream ``ok: False`` instead of a healthy-looking ``steady`` (the
+    silent-inert class t_fa9a2faf retired). An EMPTY root — a real board set
+    with nothing on it — is NOT unevaluable.
+    """
+    from hscc_daemon import autodown
+
+    # (a) root exists but holds no board => empty, evaluable, healthy.
+    hermes_kanban_root
+    enum = ow.board_enumeration()
+    assert enum == {"boards": {}, "unevaluable": False}
+    assert ow.waker_tick(now=NOW, config_path=str(tmp_path / "cfg.json"),
+                         write=lambda *a: None, read=lambda *a: None)["ok"] is True
+
+    # (b) lib genuinely unreachable (HERMES_AGENT_PATH points at nothing —
+    # the same lever test_autodown uses) => the seam reports nothing AND says
+    # why, through autodown's own _KANBAN_LOAD bookkeeping.
+    monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "no-hermes-agent"))
+    enum = ow.board_enumeration()
+    assert enum["boards"] == {} and enum["unevaluable"] is True
+
+    entry = ow.waker_tick(now=NOW, config_path=str(tmp_path / "cfg.json"),
+                          write=lambda *a: None, read=lambda *a: None)
+    assert entry["ok"] is False, "a blind scan must not stamp a healthy tick"
+    assert entry["boards_unevaluable"] is True
+    assert "unreachable" in entry["message"]
+
+    # ...and the doctor says so rather than printing a fresh-and-green row.
+    res = ow.doctor_check(now=NOW, config_path=str(tmp_path / "cfg.json"),
+                          stream_state=entry, _daemon_running=lambda: True)
+    assert res["ok"] is False and res["fatal"] is False
+    assert "FAILED" in res["detail"]
+
+    # (c) a lib that RAISES mid-enumeration is unevaluable too, and the waker
+    # still never raises.
+    monkeypatch.setattr(
+        autodown, "board_db_paths",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("enum boom")))
+    enum = ow.board_enumeration()
+    assert enum == {"boards": {}, "unevaluable": True}
+
+
+def test_tick_report_marks_unevaluable(tmp_path, monkeypatch):
+    """``tick(report=...)`` — the signal reaches the caller, default False."""
+    rep = {}
+    ow.tick(now=NOW, boards={"b": make_board(tmp_path / "b.db",
+                                             tasks=[("t", "T")])},
+            state_path=str(tmp_path / "s.json"), report=rep)
+    assert rep == {"unevaluable": False}
+
+    monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "no-hermes-agent"))
+    rep = {}
+    ow.tick(now=NOW, state_path=str(tmp_path / "s2.json"), report=rep)
+    assert rep["unevaluable"] is True
+    assert ow.tick(now=NOW, state_path=str(tmp_path / "s3.json")) == []
+
+
+def test_run_tick_report_survives_a_swallowed_failure(tmp_path, monkeypatch):
+    """run_tick swallows exceptions (the daemon calls it forever) — a swallowed
+    failure must never be reported as a healthy empty pass."""
+    monkeypatch.setattr(ow, "tick",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    rep = {}
+    assert ow.run_tick(now=NOW, report=rep) == []
+    assert rep["unevaluable"] is True
+
+
 def test_boards_list_restricts_scan(tmp_path, state_path):
     a = make_board(tmp_path / "a" / "kanban.db", tasks=[("t_a", "A")])
     b = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_b", "B")])
-    ow.tick(now=NOW, boards=["a"], state_path=state_path,
-            boards_dir=str(tmp_path / "unused"))            # slugs, no matching dir
+    ow.tick(now=NOW, boards=["a"], state_path=state_path)
+    # slug list against the (empty) pinned root: 'a' is not an enumerated
+    # board, so nothing is scanned (GAP-C-1: discovery is Hermes', not an arg)
     assert ow.load_state(state_path)["last"] == {}
     ow.tick(now=NOW, boards={"a": a, "b": b}, state_path=state_path)
     assert set(ow.load_state(state_path)["last"]) == {"a", "b"}
