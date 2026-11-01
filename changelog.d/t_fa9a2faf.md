@@ -34,6 +34,10 @@ task: t_fa9a2faf
   **no** injected `write`/`read`, **no** injected `state_path`, the real
   `run_tick` chain and the real `state.write_state`, under a redirected
   `~/.hscc` — and asserts a nudge is actually delivered across ticks plus the
-  per-board watermark and audit line that must accompany it. All 11 previous
-  W3 tick tests inject a stub stream writer *and* a private `state_path`,
-  which is how this survived two cards and a green 12-leg suite.
+  per-board watermark and audit line that must accompany it. Of the seven
+  existing tests that mention `waker_tick`, two replace the function itself
+  and five stub `run_tick` — and all five of those inject `write=StreamSpy().write`
+  instead of the real writer, one of them also passing a private `state_path`.
+  So no test ever drove the deployed combination (real `state.write_state`
+  writing the DEFAULT path), which is how this survived two cards and a green
+  12-leg suite.

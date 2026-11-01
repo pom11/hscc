@@ -66,27 +66,43 @@ events). A healthy waker shows, twice a minute apart, `last-id` values that have
 board is missing from the list, or while `last-id` never moves, means the waker
 is **not waking anyone** — do not retire the stopgap on a fresh tick alone.
 
-### Known blocker (open as of this writing): the built-in is currently inert
+### Resolved blocker: the built-in was inert (card `t_fa9a2faf`)
 
-(tracked as card `t_fa9a2faf`; the fix also has to update this section)
+**Fixed before the built-in ever shipped** — the installed release (2.14.0) has
+no waker stream at all, so no operator has run a build that had this defect.
+This section stays because anyone reading a pre-fix commit, or reviewing a
+2.15.0 build, needs to know which behaviour is correct.
 
 The waker's own state file and the daemon's per-stream state file are **the same
 file** — both resolve to `~/.hscc/state/orch_waker.json` (`DEFAULT_STATE_PATH`
 vs `state.STATE_DIR/<STREAM_NAME>.json`, and `STREAM_NAME == "orch_waker"`).
-Every tick, `waker_tick`'s finally-block stamps the stream through
-`state.write_state`, which **overwrites** the `{"last","pending","sent"}` state
-the scan just wrote. Consequence: `load_state` reads the stamp-shaped document,
-finds no `last` key, and every board re-tail-starts on **every** tick — so no
-event is ever batched, no nudge is ever sent, and the audit JSONL stays empty.
-Reproduced offline: 6 ticks over a board holding a `completed` event → **0
-nudges**, file content = the stream stamp. The suites do not catch it because
-every W3 test injects a stream spy (`write=StreamSpy().write`) and a
-*separate* `state_path`, so the deployed combination is never exercised.
+That is now deliberate, not an accident: the stamp is **merged** onto the scan
+state instead of replacing it, so one document serves both readers and the
+stopgap hand-over keeps working. Before the fix, `waker_tick`'s finally-block
+stamped the stream through a bare `state.write_state`, which **overwrote** the
+`{"last","pending","sent"}` the scan had just written; `load_state` then read a
+stamp-shaped document with no `last` key, so every board re-tail-started on
+**every** tick, no event was ever batched, no nudge was ever sent, and the audit
+JSONL stayed empty — all while the tick stamp and the doctor row read healthy.
+Reproduced offline before the fix: 6 ticks over a board holding a `completed`
+event → **0 nudges**, file content = the stream stamp.
 
-Until that is fixed (see the blocker card), the **stopgap is the thing that
-actually wakes orchestrators. Leave it running.** The built-in's own doctor row
-and `status` tick stamp both read healthy while it delivers nothing, so
-neither is a sufficient retirement gate — check the board watermarks.
+Why merge rather than rename one of the two owners: this file *is* the stopgap's
+state file, and the seamless hand-over documented at the top of this page
+depends on the built-in continuing from exactly that path. A rename would have
+dropped in-flight `pending` batches at hand-over — the precise failure the
+takeover promise exists to prevent. The merge carries only `{last, pending,
+sent}` forward, never a previous stamp's fields, so a disabled or poll-gated
+tick cannot inherit the last real scan's counters.
+
+**Proof the fix is in, and the gate is still the boards:** run the retirement
+check in the section above — `last-id` must **increase** across two ticks and a
+`pending` batch must appear and then clear. The one-line discriminator: on a
+fixed build `hscc orch waker status` prints the board with a moving `last-id`;
+on an unfixed build the `boards:` list stays permanently empty even though the
+tick stamp and the doctor row read healthy. The test that pins this drives
+`check_orch_waker()` with no injected writer and the default state path
+(`hscc_daemon/tests/test_orch_waker_state_collision.py`).
 
 ---
 
@@ -223,17 +239,27 @@ orch-waker: ENABLED  (poll 30s, debounce 90s, min gap 300s)
 | file | owner | shape |
 |---|---|---|
 | `~/.hscc/orch_waker.json` | **operator** | the config block above |
-| `~/.hscc/state/orch_waker.json` | **daemon** | the waker state below — ⚠️ also the stream stamp today, see the blocker |
+| `~/.hscc/state/orch_waker.json` | **daemon** | the waker state below **plus** the stream stamp, merged into one document (see the resolved blocker) |
 | `~/.hscc/state/orch_waker.jsonl` | **daemon** | audit, one JSON line per delivery *attempt*, append-only |
 | `~/.hscc/state/kanban_paused.json` | `hscc kanban pause` | read-only input (the skip rule) |
 
-Waker state — the stopgap's schema, verbatim, nothing more (`empty_state()`):
+Waker state — the stopgap's schema, verbatim (`empty_state()`), and the only
+keys `load_state` reads:
 
 ```json
 { "last":    { "<board>": 76173 },
   "pending": { "<board>": [[1793500000.0, "t_a1b2c3d4 done — Fix the waker"]] },
   "sent":    { "<board>": 1793500090.5 } }
 ```
+
+The same file also carries the stream stamp (`timestamp`, `stream`, `last_tick`,
+`ok`, `message`, plus that tick's `nudged`/`decisions`/`last_scan`), written by
+`state.write_state` merged on top of the three keys above — so `hscc verify`,
+`hscc orch waker status` and the doctor row can all read the one document. The
+three scan keys are what `load_state` consumes; the stamp fields are foreign to
+it and are preserved across a scan write, exactly as the scan keys are preserved
+across a stamp (see the resolved blocker above for why this is merged rather
+than split).
 
 `last` = the per-board event-id watermark; `pending` = `[ts, line]` batches not
 yet delivered; `sent` = the last successful delivery time (what `min_gap_s`
@@ -293,15 +319,19 @@ staleness.
 ## Testing this feature offline
 
 `hscc_daemon/tests/test_orch_waker.py` (core, 37 collected), `test_orch_waker_w3.py`
-(52), `test_cli_orch_waker.py` (18) + `hscc-cluster/tests/test_orch_waker_cli.py`
-(14), `hscc-bootstrap/tests/test_doctor_orch_waker.py` (8) — 129 cases, counts
+(52), `test_orch_waker_state_collision.py` (7), `test_cli_orch_waker.py` (18) +
+`hscc-cluster/tests/test_orch_waker_cli.py` (14),
+`hscc-bootstrap/tests/test_doctor_orch_waker.py` (8) — 136 cases, counts
 re-verified with `--collect-only`. All offline: the core takes
 the clock, the board set, the paused set, the orch resolver and the delivery
 callable as **injected arguments**, so nothing in the core touches tmux, a real
 `~/.hscc`, or a board DB.
 
-⚠️ When you change state-file handling, add a test that drives
+⚠️ When you change state-file handling, drive
 `check_orch_waker()` (the real loop entry) with the **real** `state.write_state`
-and the **default** `state_path`. Every existing W3 test injects a stream spy and
-a separate `state_path`, which is precisely why the path collision above stayed
-green through two cards and a full 11-leg suite.
+and the **default** `state_path` — that is what `test_orch_waker_state_collision.py`
+does. Every older W3 test that reaches `waker_tick` stubs at least one of
+`waker_tick`, `run_tick` or the stream writer, so the deployed pairing — real
+`state.write_state` writing the default path — was driven by nothing. That gap is
+precisely why the path collision above stayed green through two cards and a full
+12-leg suite.
