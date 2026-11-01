@@ -374,13 +374,17 @@ class TestBoardEnumerationSeam:
 
     def test_forwards_to_the_canonical_seam(self, monkeypatch):
         calls = []
+        # An object the dead fallback could NOT consume (no board-listing
+        # attribute at all): if the copy ever comes back, it resolves this to
+        # the single default board instead of forwarding, and BOTH this test
+        # and the source guard below fire.
+        kb = object()
 
         def _sentinel(kanban_db):
             calls.append(kanban_db)
             return (["alpha", "beta"], True)
 
         monkeypatch.setattr(autodown, "_enum_board_names", _sentinel)
-        kb = object()
         assert kbx._board_names(kb) == (["alpha", "beta"], True)
         assert calls == [kb]
 
