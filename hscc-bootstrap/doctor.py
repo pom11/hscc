@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -365,16 +366,217 @@ def _detect_nas(_cluster_raw=None):
         return None
 
 
-def _gateway_running() -> Check:
+# ── gateway liveness (GAP-F-3, t_f766ddd5) ──────────────────────────────────
+# WHY NOT pgrep. The first version of this row asked
+# `pgrep -f "hermes_cli.main gateway"`. On the operator machine that probe does
+# not merely have the wrong PATTERN — pgrep cannot SEE the gateway at all.
+# Measured 2026-11-01 while the gateway was live as launchd pid 74857
+# (`launchctl list ai.hermes.gateway` -> PID = 74857;
+# `ps -p 74857 -o command=` -> `.../venv/bin/python -m hermes_cli.main gateway
+# run --replace`):
+#
+#   pgrep -f "hermes_cli.main gateway"  -> rc 1
+#   pgrep -f "gateway"                  -> rc 1
+#   pgrep -f "run --replace"            -> rc 1
+#   pgrep -f .                          -> 1210 pids, and 74857 is NOT one of
+#                                         them (`ps -axww` lists 1216; the six
+#                                         pgrep skips are pid 1 /sbin/launchd,
+#                                         the gateway, and four argv-unreadable
+#                                         helpers — argv read fails for them).
+#
+# A pattern cannot match a pid the matcher never receives, so re-calibrating
+# the pattern alone could never fix this: the row printed "○ not running"
+# against a live gateway, and because the row is non-fatal, preflight still
+# said OK — the only signal for "gateway down" was one that can never print
+# red on this box. Transports, in trust order:
+#
+#   1. the SUPERVISOR the gateway is installed under — `launchctl list
+#      ai.hermes.gateway` on macOS, `systemctl --user is-active
+#      hermes-gateway` on Linux. This is the transport hscc_daemon/health.py:392
+#      and hscc-cluster/gateway_restart.py:37 already trust, and the only one
+#      that answers the real question ("is the job the fleet launched alive?")
+#      rather than "does some argv happen to resemble mine?".
+#   2. a TOKEN SCAN of `ps` argv lines, for the cases with no usable supervisor:
+#      bootstrap runs before the launchd job is installed, and a Linux box may
+#      have no user session. `ps -axww` DOES show 74857's full argv, so this
+#      path sees what pgrep cannot.
+#
+# pgrep is no longer used here at all — it is the proven-wrong transport above.
+_GATEWAY_LAUNCHD_LABEL = "ai.hermes.gateway"
+_GATEWAY_SYSTEMD_UNIT = "hermes-gateway"
+# The gateway's command form as this fleet launches it (read back from the
+# launchd job's ProgramArguments on the operator machine):
+#     <venv>/bin/python -m hermes_cli.main gateway run --replace
+# and the CLI-wrapper shape `<...>/bin/hermes gateway run --replace`.
+# We match TOKENS, not a full-line literal: flags and their position are free
+# (`-p qa`, `--replace`, `--foreground` may land before or after the
+# subcommand), which is exactly what a literal substring match gets wrong. The
+# two subcommand tokens must stay ADJACENT — argparse subparsers cannot parse
+# `gateway` / `run` any other way — and adjacency is what keeps a prompt-
+# carrying invocation that merely mentions the words from matching.
+_GATEWAY_SUBCOMMANDS = ("run", "serve", "start")
+# Tokens only a prompt-carrying / non-server invocation has. The gateway is a
+# server: it never takes a chat prompt, so `hermes chat -q "why did the gateway
+# run twice"` — which contains every token above, adjacent — is not it.
+_GATEWAY_NON_GATEWAY_TOKENS = frozenset(
+    {"chat", "-q", "--query", "--continue", "--create-if-missing"})
+# A shell or a text tool running `grep "gateway run"` is an argv line that
+# describes the gateway without being it.
+_GATEWAY_NOT_A_SERVER = frozenset(
+    {"sh", "bash", "zsh", "dash", "ksh", "csh", "fish", "grep", "egrep", "ag",
+     "awk", "sed", "ps", "pgrep", "pkill", "xargs", "tail", "less", "vim"})
+_GATEWAY_LAUNCHD_PID_RE = re.compile(r'^\s*"PID"\s*=\s*(\d+)\s*;', re.M)
+
+
+def _gateway_probe_run(argv, *, timeout=5, _run=None):
+    """Run a liveness probe; return ``(returncode, stdout)`` or None.
+
+    None means the probe COULD NOT RUN (binary missing, timeout, exec error) —
+    never a verdict. Callers must treat it as UNKNOWN, not as "not running":
+    a probe that fails open is how GAP-F-3's false negative hid.
+    """
+    runner = _run or (
+        lambda a, t: subprocess.run(a, capture_output=True, text=True, timeout=t))
     try:
-        r = subprocess.run(["pgrep", "-f", "hermes_cli.main gateway"],
-                           capture_output=True, timeout=5)
-        running = r.returncode == 0
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        running = False
-    # informational only — bootstrap can run before the gateway is up
-    return Check("gateway", running,
-                 detail="running" if running else "not running",
+        r = runner(list(argv), timeout)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError, ValueError):
+        return None
+    except Exception:                       # a probe that ERRORS is UNKNOWN
+        return None                         # — never a "not running" verdict
+    if r is None:
+        return None
+    return getattr(r, "returncode", 1), (getattr(r, "stdout", "") or "")
+
+
+def _gateway_launchd_state(*, _run=None):
+    """``(loaded, pid)`` for the gateway's launchd job, on macOS.
+
+    ``(None, None)`` — UNKNOWN, launchd is not usable here (not macOS, or the
+    probe could not run); ``(False, None)`` — job not loaded; ``(True, None)``
+    — job loaded with no process right now (an OnDemand job between
+    invocations); ``(True, pid)`` — the job's process is up.
+    """
+    if sys.platform != "darwin":
+        return (None, None)
+    out = _gateway_probe_run(["launchctl", "list", _GATEWAY_LAUNCHD_LABEL],
+                             _run=_run)
+    if out is None:
+        return (None, None)
+    rc, stdout = out
+    if rc != 0:                      # "Could not find service" -> not loaded
+        return (False, None)
+    m = _GATEWAY_LAUNCHD_PID_RE.search(stdout)
+    return (True, int(m.group(1)) if m else None)
+
+
+def _gateway_systemd_state(*, _run=None):
+    """``(loaded, pid)`` for the gateway's user service, on Linux.
+
+    Same UNKNOWN convention as `_gateway_launchd_state`; pid is never known
+    from `is-active`, so a live service reports ``(True, None)``.
+    """
+    if sys.platform == "darwin" or not shutil.which("systemctl"):
+        return (None, None)
+    out = _gateway_probe_run(["systemctl", "--user", "is-active",
+                              _GATEWAY_SYSTEMD_UNIT], _run=_run)
+    if out is None:
+        return (None, None)
+    rc, stdout = out
+    state = stdout.strip()
+    if state == "active":
+        return (True, None)
+    if state in ("inactive", "failed"):
+        return (False, None)
+    return (None, None)              # activating / unknown / unit missing
+
+
+def _gateway_ps_lines(*, _run=None):
+    """``ps`` argv lines as ``["<pid> <command>", ...]``, or None if unusable."""
+    out = _gateway_probe_run(["ps", "-axww", "-o", "pid=,command="], _run=_run)
+    if out is None or out[0] != 0:
+        return None
+    return (out[1] or "").splitlines()
+
+
+def _argv_is_gateway(line: str) -> bool:
+    """True if a command line is the Hermes gateway server process.
+
+    Token-based, tolerant of flag order (see `_GATEWAY_SUBCOMMANDS`). Never
+    matches: a shell/text tool that merely quotes the pattern, or a
+    prompt-carrying Hermes invocation whose prompt happens to contain the
+    words (both are excluded by construction, and pinned by tests).
+    """
+    toks = (line or "").split()
+    if not toks:
+        return False
+    if toks[0].rsplit("/", 1)[-1] in _GATEWAY_NOT_A_SERVER:
+        return False
+    if _GATEWAY_NON_GATEWAY_TOKENS.intersection(toks):
+        return False
+    # Identity: the Hermes CLI itself, as a module (`-m hermes_cli.main`) or as
+    # the wrapper script (`/…/bin/hermes`). `doctor.py` running this probe has
+    # neither, so the checker can never match its own process.
+    if not any("hermes_cli" in t or t.rsplit("/", 1)[-1] == "hermes"
+               for t in toks):
+        return False
+    return any(a == "gateway" and b in _GATEWAY_SUBCOMMANDS
+               for a, b in zip(toks, toks[1:]))
+
+
+def _gateway_argv_pid(*, _lines=None, _run=None):
+    """First pid whose argv looks like the gateway, or None. None-safe."""
+    lines = _gateway_ps_lines(_run=_run) if _lines is None else _lines
+    if lines is None:
+        return None
+    mine = os.getpid()
+    for line in lines:
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        if pid <= 1 or pid == mine:      # never launchd, never ourselves
+            continue
+        if _argv_is_gateway(parts[1]):
+            return pid
+    return None
+
+
+def _gateway_running(*, _run=None, _ps_lines=None) -> Check:
+    """Is the Hermes gateway alive? See the GAP-F-3 note above for the why.
+
+    ``_run`` injects the probe runner (``fn(argv, timeout) -> CompletedProcess``)
+    and ``_ps_lines`` injects raw ``ps`` output, so tests never touch the live
+    process table. Informational either way — bootstrap can legitimately run
+    before the gateway is up — so the row stays non-fatal.
+    """
+    loaded, pid = _gateway_launchd_state(_run=_run)
+    via = "launchd"
+    if loaded is None:
+        loaded, pid = _gateway_systemd_state(_run=_run)
+        via = "systemd"
+    if pid is not None:
+        return Check("gateway", True, detail=f"running ({via} pid {pid})",
+                     fatal=False)
+    if loaded and via == "systemd":
+        # `is-active` answers the question directly and never names a pid, so
+        # "active" IS the verdict — do not second-guess it with an argv scan.
+        return Check("gateway", True, detail="running (systemd unit active)",
+                     fatal=False)
+    # Supervisor says no pid (or could not answer) — fall back to the argv scan
+    # before claiming anything, so an unsupervised gateway still reads running.
+    apid = _gateway_argv_pid(_lines=_ps_lines, _run=_run)
+    if apid is not None:
+        return Check("gateway", True,
+                     detail=f"running (pid {apid}, argv match; "
+                            f"{'job loaded, no pid' if loaded else 'supervisor not confirmed'})",
+                     fatal=False)
+    if loaded:
+        restart = (f"launchctl kickstart -k gui/$UID/{_GATEWAY_LAUNCHD_LABEL}"
+                   if via == "launchd" else
+                   f"systemctl --user restart {_GATEWAY_SYSTEMD_UNIT}")
+        return Check("gateway", False, detail="job loaded but no running process",
+                     fix=f"Start it: {restart}", fatal=False)
+    return Check("gateway", False, detail="not running",
                  fix="Start it after bootstrap.", fatal=False)
 
 

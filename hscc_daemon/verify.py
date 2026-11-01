@@ -248,6 +248,20 @@ def _live_stream_intervals():
         return {}
 
 
+def _json_shape_name(value):
+    """Short, stable name for a JSON value's shape, used when a state file is
+    reported as ``unrecognized schema`` (GAP-F-1): the operator should see
+    ``list`` / ``str`` / ``int`` / ``float`` / ``bool`` / ``null``, not a dump
+    of the file's contents (a ledger can hold 8 days of samples)."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return f"list len={len(value)}"
+    if isinstance(value, bool):
+        return "bool"
+    return type(value).__name__
+
+
 def _watcher_stream_names():
     """Stamp names owned by the cron watchers (GAP-B-4), as a set.
 
@@ -271,6 +285,15 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
 
     OK if every *.json has ok==True and last_check within max_age_s of now,
     EXCEPT streams that are deliberately down by an intentional autodown.
+
+    SCHEMA TOLERANCE (GAP-F-1). The state dir is shared with non-stream
+    writers — cards-monitor's ``kmon_orch_tokens.json`` token ledger is a
+    top-level JSON list — so no file shape may ever crash this check or abort
+    the loop: a non-dict JSON file is reported ``unrecognized schema`` and
+    skipped. A file that is a dict but carries neither ``ok`` nor
+    ``last_check``/``timestamp`` asserts nothing, so it is reported
+    ``not-checked`` and the row goes UNVERIFIED (``ok=None``), never green
+    (GAP-F-2 — an aggregate that asserts nothing must not claim health).
 
     An intentional, operator-configured teardown is not a fault: while the
     whole serving layer is down by design, the serving streams (watchdog, dgx,
@@ -352,6 +375,9 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     now = datetime.now(timezone.utc)
     issues = []
     expected = []
+    unchecked = []      # GAP-F-2: dict-shaped but nothing assertable
+    unrecognized = []   # GAP-F-1: non-dict JSON (e.g. the cards-monitor ledger)
+    checked = 0
     window_verdict = _intentional_window_verdict()
     window_label = (_intentional_window_label(window_verdict)
                     if window_verdict else None)
@@ -365,7 +391,35 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
             issues.append(f"{fn}: unreadable")
             continue
 
+        # GAP-F-1 (schema tolerance). The state dir is shared with writers
+        # that are NOT daemon streams: cards-monitor's token ledger
+        # (kanban_live.py LEDGER_PATH, kmon_orch_tokens.json) is a top-level
+        # JSON LIST of [ts, in, out] samples. This check used to call
+        # ``data.get("ok")`` unconditionally and die with AttributeError —
+        # which did not just fail the row, it killed the ENTIRE verify table
+        # (every later check, incl. the served-profile endpoint guard, never
+        # ran and `verify --json` printed nothing). A file whose shape this
+        # check does not understand is named and skipped: never crashed on,
+        # never silently counted as healthy, and never aborts the loop.
+        if not isinstance(data, dict):
+            unrecognized.append(
+                f"{fn}: unrecognized schema ({_json_shape_name(data)})")
+            continue
+
         ok = data.get("ok")
+        has_ts = bool(data.get("last_check") or data.get("timestamp"))
+        if ok is None and not has_ts:
+            # GAP-F-2 (assert-nothing is not green). Live shapes this used to
+            # wave through as "healthy" while asserting nothing at all:
+            # orch_waker.json (stopgap {last,pending,sent}), kanban_paused.json
+            # ({}), reasoning_policy.json (config snapshot). No `ok`, no
+            # timestamp ⇒ nothing here is verifiable ⇒ the row goes
+            # UNVERIFIED (ok=None) and names the file — "could not check
+            # this", never a false green.
+            unchecked.append(f"{fn}: not-checked (no ok/timestamp)")
+            continue
+
+        checked += 1
         if ok is False:
             # A stream is excused ONLY when an intentional autodown window is
             # in effect (down by design or waking) AND the stream itself says
@@ -392,6 +446,11 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
             except (ValueError, TypeError):
                 issues.append(f"{fn}: unparseable timestamp ({ts_str})")
 
+    # Everything this check could NOT assert anything about (bad shape or no
+    # ok/timestamp) is surfaced by name on EVERY verdict path, so a real
+    # failure can never hide the un-verifiable files and vice versa.
+    aside = "; ".join(unrecognized + unchecked)
+
     expected_note = (
         f"{window_label}: {'; '.join(expected)}"
         if expected else ""
@@ -400,15 +459,27 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
         detail = "; ".join(issues)
         if expected_note:
             detail = f"{expected_note}; REAL FAILURES: {detail}"
+        if aside:
+            detail = f"{detail}; {aside}"
         return {"name": "daemon_streams", "ok": False, "detail": detail}
 
+    # Nothing failed. But a file this check could not assert anything about
+    # makes the row UNVERIFIED (ok=None — run_all's established vocabulary:
+    # "could not check this" is not "this is broken" and not "all green").
+    partial = bool(unchecked or unrecognized)
+    head = (f"checked={checked} healthy" if partial
+            else f"all {len(json_files)} streams healthy")
     if expected_note:
         return {
-            "name": "daemon_streams", "ok": True,
-            "detail": f"ok={len(json_files) - len(expected)} healthy, {expected_note}",
+            "name": "daemon_streams", "ok": None if partial else True,
+            "detail": (f"ok={checked - len(expected)} healthy, {expected_note}"
+                       + (f"; {aside}" if aside else "")),
         }
+    if partial:
+        return {"name": "daemon_streams", "ok": None,
+                "detail": f"{head}; {aside}"}
 
-    return {"name": "daemon_streams", "ok": True, "detail": f"all {len(json_files)} streams healthy"}
+    return {"name": "daemon_streams", "ok": True, "detail": head}
 
 
 def check_proxy(url=None, timeout=None):
