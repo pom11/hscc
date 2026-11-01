@@ -52,6 +52,32 @@ def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
     assert "orch_message" not in worker
 
 
+def test_card_budget_rules_reach_workers_and_orchs():
+    """Operator 2026-11-01: cards ran 6h+ because workers ground on at 100-200K
+    context (93-100% of wall time inside model calls). Workers carry the
+    hand-off rule; project orchs carry the sizing budget and act on handoffs.
+    """
+    worker = generator.compose_soul(
+        {"name": "coder", "identity": "You build.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert "## Stay small — commit slices, hand off early" in worker
+    rules = worker.split("## Stay small", 1)[1]
+    assert "`[budget]` note" in rules and "about 40 tool calls" in rules
+    assert "DONE (the shas), LEFT (file:line" in rules
+    assert "wip: ..." in rules
+
+    orch = generator.compose_soul(
+        {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    section = orch.split("## How you manage work", 1)[1]
+    assert "about 40 model calls" in section and "~120K tokens" in section
+    assert "**Handoffs are normal.**" in section
+    assert "**Rebase-only cards get one attempt.**" in section
+    # The orchestrator is not a kanban worker: no worker hand-off section.
+    assert "## Stay small" not in orch
+
+
 def test_generate_profile_writes_files(tmp_path, monkeypatch):
     # PROFILES_DIR covers the fallback path; HERMES_HOME covers the native API
     # path (create_profile reads HERMES_HOME, not PROFILES_DIR), so the test is
