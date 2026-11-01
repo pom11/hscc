@@ -18,6 +18,7 @@ import json
 import os
 
 import pytest
+import yaml
 
 import cluster_template as ct
 import template_intent as ti
@@ -373,6 +374,57 @@ class TestCaps:
     def test_non_mapping_caps(self):
         errs, _ = _check(_v4(caps=[6]))
         assert any("caps: expected a mapping, got list" in e for e in errs)
+
+
+class TestShippedTemplateCapsMatchSOT:
+    """GAP-E-3 (audit E t_f7d94a76): template and operator SOT must not diverge.
+
+    ``_apply_caps_declaration`` (cluster_template.py:4009) writes whatever the
+    template DECLARES, so a shipped template whose caps differ from the
+    operator's live config turns one ``hscc template apply --confirm`` into a
+    silent rewrite of the live values. That was real: flash-next-all shipped
+    declaring per-profile 2 (77be50d1, 2026-10-29) while the operator's live
+    kanban caps had moved to 12/3 — apply would have stomped 3 back to 2.
+
+    The SOT pair is pinned explicitly below — it is NOT CAPS_MIGRATION_DEFAULTS
+    (30/10), which is the bootstrap fill-if-absent default (enable_plugins.py,
+    own test above) and a different thing entirely. If the operator moves the
+    live caps again, move BOTH the template's caps block and OPERATOR_CAPS_SOT
+    together; this test is the tripwire that forces that to be a conscious,
+    atomic change instead of a silent divergence.
+    """
+
+    OPERATOR_CAPS_SOT = {"max_in_progress": 12, "max_in_progress_per_profile": 3}
+
+    def _shipped_caps(self):
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(os.path.dirname(tests_dir),
+                            "templates", "4node", "flash-next-all.yaml")
+        return (yaml.safe_load(open(path)) or {}).get("caps") or {}
+
+    def test_declared_caps_equal_the_operator_sot(self):
+        caps = self._shipped_caps()
+        assert {k: caps.get(k) for k in self.OPERATOR_CAPS_SOT} == \
+            self.OPERATOR_CAPS_SOT, (
+            "flash-next-all caps diverged from the operator SOT 12/3 — "
+            "`hscc template apply` would rewrite the live config to the "
+            "template's numbers (GAP-E-3 footgun)")
+
+    def test_apply_against_live_sot_config_rewrites_nothing(self, tmp_path):
+        """The footgun itself, made unmissable: apply the SHIPPED template
+        against a config seeded with the live 12/3 and nothing may move."""
+        conf = tmp_path / "config.yaml"
+        yaml.safe_dump({"kanban": dict(self.OPERATOR_CAPS_SOT),
+                        "model": {"default": "m"}}, conf.open("w"))
+        tpl = ct._load_intent("4node-flash-next-all")
+        res = ct._apply_caps_declaration(tpl, config_yaml=conf)
+        assert res["declared"] == self.OPERATOR_CAPS_SOT
+        assert res["changed"] is False, (
+            "template apply would have rewritten the live caps — template and "
+            "SOT diverged (GAP-E-3)")
+        on_disk = yaml.safe_load(conf.read_text())
+        assert on_disk["kanban"] == self.OPERATOR_CAPS_SOT
+        assert on_disk["model"] == {"default": "m"}  # siblings untouched
 
 
 class TestCapsDerivation:
