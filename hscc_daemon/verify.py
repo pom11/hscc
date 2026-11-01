@@ -72,10 +72,179 @@ def _capture(cmd, timeout=None):
         return (2, str(exc))
 
 
-def check_plugins(plugins_dir=None):
+# ---------------------------------------------------------------------------
+# GAP-F-8 — deployed cluster-tool assertion (the plugins row's second leg)
+# ---------------------------------------------------------------------------
+# The plugins row used to assert only that hscc-commands/__init__.py mentions
+# three strings, so it printed ✓ while the DEPLOYED hscc-cluster payload was
+# missing whole tools (live: orch_message.py absent from the 2.14.0 payload
+# while main registers it — audit F GAP-F-8 == audit A GAP-A-5). "A check
+# that asserts nothing is not green" (GAP-F-2 principle, made cross-cutting):
+# the row now unions the repo-side tool registry (hscc-cluster/__init__.py
+# `_*_TOOLS` tables + `from . import <mod>` handler modules) with the repo
+# plugin.yaml `provides_tools` manifest — t_19dbb9de has not landed, so the
+# manifest alone would inherit its GAP-A-7 under-declaration hole — and
+# requires each declared tool AND its handler module to exist in the
+# DEPLOYED tree. A missing tool is named by name (and its module by file
+# name) under the explicit category "missing vs deployed payload": that is
+# how the KNOWN-pending-release gap (GAP-A-5, closes with the 2.15.0
+# bootstrap) stays distinguishable from every other failure class instead
+# of hiding under a ✓. Read-only: parses files, writes nothing.
+
+_CLUSTER_TOOLS_CATEGORY = "cluster tools missing vs deployed payload"
+# A deployed __init__.py without register() is not a registry at all — the
+# payload sha-diff (check_plugin_payload) owns broken-file content; this row
+# stays unassertive rather than inventing a verdict from garbage.
+_REGISTER_MARKER = "def register("
+
+
+def _registered_tool_names(init_text):
+    """Tool names from `_…_TOOLS = [ ("name", …), … ]` tables in a plugin
+    __init__.py (regex over text — same no-exec safety the file's other
+    parses use). One capture per tuple head: `(` + string literal."""
+    tools = set()
+    for block in re.findall(r"^\w*_TOOLS\s*=\s*\[.*?^\]", init_text,
+                            re.MULTILINE | re.DOTALL):
+        tools.update(re.findall(r'^\s*\(\s*"([^"]+)"', block, re.MULTILINE))
+    return tools
+
+
+def _imported_handler_modules(init_text):
+    """Sibling-module handler files a plugin __init__.py requires: the
+    `from . import mod [as alias]` lines that make register() importable at
+    all, resolved to real module names (aliases mapped back)."""
+    mods, aliases = set(), {}
+    for name, alias in re.findall(
+            r"^from \. import (\w+) as (\w+)", init_text, re.MULTILINE):
+        aliases[alias] = name
+    for name in re.findall(r"^from \. import (\w+)", init_text, re.MULTILINE):
+        mods.add(name)
+    return {aliases.get(m, m) for m in mods}
+
+
+def _manifest_tools(plugin_dir):
+    """`provides_tools` names from a plugin.yaml, via yaml when importable
+    else a line scan (verify must not gain a hard PyYAML dependency)."""
+    path = os.path.join(plugin_dir, "plugin.yaml")
+    try:
+        with open(path, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return set()
+    if yaml is not None:
+        try:
+            data = yaml.safe_load(text)
+            if isinstance(data, dict):
+                declared = data.get("provides_tools") or []
+                if isinstance(declared, list):
+                    return {str(t) for t in declared if t}
+        except Exception:
+            pass  # fall through to the line scan
+    names, inside = set(), False
+    for line in text.splitlines():
+        if line.startswith("provides_tools:"):
+            inside = True
+            continue
+        if inside:
+            m = re.match(r"^\s+-\s*([\w.\-]+)\s*$", line)
+            if m:
+                names.add(m.group(1))
+            elif line.strip() and not line.startswith((" ", "\t")):
+                inside = False
+    return names
+
+
+def _cluster_tools_verdict(plugins_dir, repo_root):
+    """Check repo-declared hscc-cluster tools against the DEPLOYED tree.
+
+    Returns (ok, extra_detail, next_step) where ok is True (asserted clean),
+    False (drift — `extra_detail` names every missing tool/file), or None
+    (UNASSERTIVE — `extra_detail` says why). Never raises, never writes.
+    """
+    deployed_dir = os.path.join(plugins_dir, "hscc-cluster")
+    repo_dir = os.path.join(repo_root, "hscc-cluster") if repo_root else None
+
+    def unassertive(why):
+        return None, f"cluster tools not asserted ({why})", None
+
+    if not os.path.isdir(deployed_dir):
+        return unassertive("hscc-cluster not deployed")
+    if not repo_dir or not os.path.isfile(os.path.join(repo_dir, "__init__.py")):
+        return unassertive("no repo hscc-cluster/__init__.py to assert against")
+    try:
+        same_tree = os.path.realpath(repo_dir) == os.path.realpath(deployed_dir)
+    except OSError:
+        same_tree = False
+    if same_tree:
+        # repo root IS the deployed tree (in-place layout): comparing a tree
+        # with itself is vacuous — a ✓ here would be a fabricated assertion.
+        return unassertive("repo tree is the deployed tree — in-place layout")
+
+    try:
+        with open(os.path.join(repo_dir, "__init__.py"), "r") as f:
+            repo_init = f.read()
+        with open(os.path.join(deployed_dir, "__init__.py"), "r") as f:
+            dep_init = f.read()
+    except (OSError, IOError) as exc:
+        return unassertive(f"unreadable __init__.py: {exc}")
+    if _REGISTER_MARKER not in repo_init or _REGISTER_MARKER not in dep_init:
+        return unassertive("an __init__.py lacks register() — not a registry")
+
+    expected_tools = (_registered_tool_names(repo_init)
+                      | _manifest_tools(repo_dir))
+    if not expected_tools:
+        return unassertive("repo side declares no tools")
+    # Files the deployed payload must carry for the repo-side registry to be
+    # deployable at all: every handler module the repo __init__ imports.
+    expected_files = {m + ".py" for m in _imported_handler_modules(repo_init)}
+
+    deployed_tools = (_registered_tool_names(dep_init)
+                      | _manifest_tools(deployed_dir))
+    missing_tools = sorted(expected_tools - deployed_tools)
+    missing_files = sorted(f for f in expected_files
+                           if not os.path.isfile(os.path.join(deployed_dir, f)))
+    # A tool whose module file is absent counts even if the deployed manifest
+    # name-matched it — the file IS the tool.
+    missing_files = sorted(set(missing_files))
+    if not missing_tools and not missing_files:
+        try:
+            with open(os.path.join(plugins_dir, "VERSION")) as f:
+                ver = f.read().strip()
+        except (OSError, IOError):
+            ver = ""
+        ver_note = f" (deployed payload {ver})" if ver else ""
+        return (True, f"cluster tools asserted against deployed payload: "
+                      f"{len(expected_tools)} tools + {len(expected_files)} "
+                      f"modules all present{ver_note}", None)
+
+    named = [f for f in missing_files] + [t for t in missing_tools]
+    try:
+        with open(os.path.join(plugins_dir, "VERSION")) as f:
+            ver = f.read().strip()
+        ver_note = f" (deployed payload VERSION {ver})" if ver else ""
+    except (OSError, IOError):
+        ver_note = ""
+    detail = (f"{_CLUSTER_TOOLS_CATEGORY}: {', '.join(named)}{ver_note} — "
+              f"declared by repo {repo_dir} (__init__.py registry"
+              f"{' + plugin.yaml' if _manifest_tools(repo_dir) else ''})")
+    next_step = ("deploy the repo payload: hscc-bootstrap/bootstrap.sh (or "
+                 "install_payload.py) then re-run verify. If this is a "
+                 "pending-release gap (deployed payload predates the repo "
+                 "tools — GAP-A-5), it closes with the next release bootstrap.")
+    return False, detail, next_step
+
+
+def check_plugins(plugins_dir=None, repo_root=None):
     """Check that the hscc-commands plugin dir exists and contains core commands.
 
     Looks for \"workers-up\", \"cluster-restart\", \"template\" strings in __init__.py.
+
+    GAP-F-8 second leg: also asserts the DEPLOYED hscc-cluster payload
+    actually carries every tool the repo-side registry/manifest declares
+    (see _cluster_tools_verdict). The core-commands verdict strings are
+    preserved verbatim for existing consumers; the cluster leg can only ADD
+    signal — every unassertive case keeps the row's legacy shape. ``repo_root``
+    defaults to verify.py's own tree (same convention as check_plugin_payload).
     """
     if plugins_dir is None:
         plugins_dir = os.path.expanduser("~/.hermes/plugins")
@@ -100,9 +269,20 @@ def check_plugins(plugins_dir=None):
         return {"name": "plugins", "ok": True, "detail": f"skipped: {exc}"}
 
     missing = [s for s in required if s not in source]
-    if not missing:
-        return {"name": "plugins", "ok": True, "detail": "all core commands found"}
-    return {"name": "plugins", "ok": False, "detail": f"missing: {', '.join(missing)}"}
+    core_ok = not missing
+    detail = ("all core commands found" if core_ok
+              else f"missing: {', '.join(missing)}")
+
+    try:
+        c_ok, c_extra, c_next = _cluster_tools_verdict(
+            plugins_dir, repo_root or _repo_root())
+    except Exception as exc:  # pragma: no cover - defense: never abort the row
+        c_ok, c_extra, c_next = None, f"cluster tools not asserted ({exc})", None
+    result = {"name": "plugins", "ok": core_ok and c_ok is not False,
+              "detail": f"{detail}; {c_extra}"}
+    if c_ok is False:
+        result["next_step"] = c_next
+    return result
 
 
 def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
