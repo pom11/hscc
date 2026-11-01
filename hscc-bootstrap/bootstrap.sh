@@ -144,12 +144,40 @@ elif [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
   warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
 else
   COPY_FLAG=""; $NO_BACKUP && COPY_FLAG="--no-backup"
+  # GAP-E-1: --force also means "overwrite operator-drifted plugin files
+  # without the preserve-and-flag ceremony". Without it, install_payload.py
+  # preserves every deployed file that differs from the payload into
+  # plugins-backups/<entry>.drifted.bak-<ts>/ and exits 3 to flag it.
+  $FORCE && COPY_FLAG="$COPY_FLAG --force"
   # The copy is the FOUNDATION — every later stage runs from $PLUGINS/... A failed
   # copy cascades into a half-wired install, so surface the error and HARD-STOP
   # here rather than degrading to a yellow warning (H3). stderr is shown, not
-  # swallowed.
-  if COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG); then
+  # swallowed. rc 3 is NOT a failure: the install succeeded and drifted operator
+  # files were preserved + reported — it must surface as a loud warning.
+  COPY_RC=0
+  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG) || COPY_RC=$?
+  if [ "$COPY_RC" -eq 0 ]; then
     ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
+  elif [ "$COPY_RC" -eq 3 ]; then
+    ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
+    DRIFT_LIST=$(DRIFT_JSON="$COPY" "$PYBIN" -c "
+import json, os
+try:
+    r = json.loads(os.environ['DRIFT_JSON'])
+    paths = [d['path'] for d in r.get('drifted', [])]
+    for p in (r.get('profiles') or []):
+        paths += [d['path'] for d in (p.get('drifted') or [])]
+except Exception:
+    paths = []
+for p in paths[:20]:
+    print('    - ' + p)
+if len(paths) > 20:
+    print('    ... and %d more' % (len(paths) - 20))
+" 2>/dev/null)
+    warn "OPERATOR DRIFT: deployed plugin file(s) differed from the payload —"
+    warn "  preserved to $PLUGINS/../plugins-backups/*.bak-*-drifted/ and overwritten."
+    [ -n "$DRIFT_LIST" ] && printf '%s\n' "$DRIFT_LIST"
+    warn "  Restore yours from the -drifted backup, or re-run with --force to accept the payload silently next time."
   else
     echo "$COPY" >&2
     die "plugin copy FAILED — aborting (later stages depend on $PLUGINS being populated)"

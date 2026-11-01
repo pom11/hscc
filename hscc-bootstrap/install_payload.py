@@ -8,8 +8,21 @@ Backup-then-overwrite: an existing runtime ``<dir>`` is moved aside to a
 sibling ``plugins-backups/<dir>.bak-<ts>`` (never inside the scanned
 plugins_dir) before the fresh copy lands. Build artifacts and tests are
 not shipped to the runtime dir.
+
+Operator-drift guard (GAP-E-1, audit E t_f7d94a76): before the tree moves,
+every deployed file whose content differs from the incoming payload (or that
+exists only on the deployed side) is MOVED into
+``plugins-backups/<dir>.drifted.bak-<ts>/`` and reported in the summary's
+``drifted`` key — operator-modified plugin files must never be silently
+overwritten at bootstrap. Files are never auto-merged: the payload wins the
+live path, the operator copy survives in plugins-backups, and the drift is
+flagged. An operator who has decided the payload should simply win passes
+``force=True`` (``--force``), which skips detection and overwrites as before.
+The generalises the preserve precedent that previously covered only
+``autodown.json`` (bootstrap.sh + preserve_autodown.py).
 """
 
+import hashlib
 import os
 import shutil
 from datetime import datetime
@@ -78,7 +91,133 @@ def _sweep_old_backups(plugins_dir, backups_dir):
             pass
 
 
-def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
+# ── operator-drift guard (GAP-E-1, audit E t_f7d94a76) ───────────────────────
+# The copy below moves the whole deployed tree to plugins-backups and lands a
+# fresh payload over it. Before this guard the ONLY filter was _EXCLUDE, so a
+# file the operator patched directly in ~/.hermes/plugins/ (the exact scenario
+# audit E flagged for hscc.py / kanban_cli.py / kanban_blocked.py) was destroyed
+# with zero signal. The precedent (bootstrap.sh + preserve_autodown.py, which
+# protected autodown.json alone) is now generalised: detect deployed files that
+# differ from the incoming payload by content hash, keep the operator's copy in
+# plugins-backups, flag every one of them in the summary. NEVER auto-merge —
+# the payload always wins the live path; the operator's version survives only
+# as a preserved, named backup until the operator decides otherwise.
+
+#: Sentinel returned by ``_detect_entry_drift`` when the deployed entry and the
+#: incoming payload entry are different *shapes* (dir vs file, or a symlink) —
+#: the whole old entry is destroyed, so the whole old entry is preserved.
+_WHOLE_ENTRY = "*"
+
+#: Suffix shape for the per-install collection of drifted files:
+#: ``<label>.drifted.bak-<stamp>``. The ``.drifted`` marker sits BEFORE the
+#: ``.bak-`` infix so backup_util groups it as its OWN family
+#: (``<label>.drifted``) instead of sharing the whole-tree backup's retain
+#: window — persistent drift then cannot halve the whole-tree backup history,
+#: and the drift evidence keeps its own keep-N window (still machine-stamped,
+#: so the pile stays self-limiting, t_9462260b).
+_DRIFTED_MARK = ".drifted"
+
+
+def _sha_file(path):
+    """sha256 of a file's bytes; ``None`` if it cannot be read.
+
+    An unreadable file is treated as drifted (fail-safe: preserve-and-flag,
+    never silently overwrite something we could not even verify).
+    """
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _iter_shipped_files(root):
+    """Relative paths of every file the copy would ship under ``root``.
+
+    Mirrors ``_ignore`` (the copytree filter) exactly — the drift comparison
+    and the copy must never disagree about what "covered by the payload"
+    means, or caches would surface as phantom drift. Only regular files: a
+    symlinked dir is not descended (os.walk's default), matching how caches/
+    pyc noise is excluded; the fleet payload ships no symlinked dirs.
+    """
+    base = Path(root)
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDE)
+        rel_dir = Path(dirpath).relative_to(base)
+        for fn in sorted(filenames):
+            if fn.endswith(".pyc"):
+                continue
+            rel = Path(fn) if str(rel_dir) == "." else rel_dir / fn
+            yield rel.as_posix()
+
+
+def _detect_entry_drift(src, dst):
+    """Posix paths (relative to ``dst``) the copy would silently destroy.
+
+    A deployed file is *drifted* when its content differs from the incoming
+    payload file (hash compare) or it exists only on the deployed side. An
+    empty list means the deployed tree is identical to what is about to be
+    copied — that install overwrites silently (acceptance: a clean tree must
+    not cry drift). Caller passes dirs/files as they will be copied.
+    """
+    if not (dst.exists() or dst.is_symlink()):
+        return []
+    if src.is_dir() and dst.is_dir() and not dst.is_symlink():
+        incoming = {rel: _sha_file(src / rel)
+                    for rel in _iter_shipped_files(src)}
+        drifted = []
+        for rel in _iter_shipped_files(dst):
+            if rel not in incoming or _sha_file(dst / rel) != incoming[rel]:
+                drifted.append(rel)
+        return drifted
+    if src.is_file() and dst.is_file() and not dst.is_symlink():
+        return [] if _sha_file(src) == _sha_file(dst) else [_WHOLE_ENTRY]
+    # dir vs file, or either side is a symlink: nothing to compare per-file;
+    # the entire old entry is replaced, so the entire old entry is drifted.
+    return [_WHOLE_ENTRY]
+
+
+def _preserve_drifted(label, stamp, drifted, bak, bak_dir):
+    """Copy the drifted deployed files out of the whole-tree backup ``bak``.
+
+    They already live inside ``bak`` (the whole-tree move ran first), so this
+    is a pure *additional* collection:
+    ``plugins-backups/<label>.drifted.bak-<stamp>/`` mirrors the deployed
+    layout one-for-one. Additive by design — the whole-tree backup stays
+    byte-identical to what it was before this guard existed.
+
+    Never raises: a file that cannot be preserved is still reported
+    (``preserved: False``) so the operator learns it was destroyed anyway.
+    """
+    dest = bak_dir / f"{label.replace('/', '__')}{_DRIFTED_MARK}.bak-{stamp}"
+    records = []
+    for rel in drifted:
+        rec = {"path": f"{label}/{rel}" if rel != _WHOLE_ENTRY else label,
+               "backup": dest.name, "preserved": False}
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            if rel == _WHOLE_ENTRY:
+                if Path(bak).is_dir():
+                    shutil.copytree(bak, str(dest), symlinks=False)
+                else:
+                    shutil.copy2(bak, dest / Path(label).name)
+            else:
+                src_in_bak = Path(bak) / rel
+                target = dest / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_in_bak, target)
+            rec["preserved"] = True
+        except (OSError, shutil.Error):
+            pass  # flagged with preserved=False below — never fail the install
+        records.append(rec)
+    return records
+
+
+def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
+                    force=False):
     """Copy each ``payload`` entry from ``repo_root`` into ``plugins_dir``.
 
     ``payload`` is a list of names (dirs or files) relative to the repo root.
@@ -93,6 +232,14 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     Backups are written to the sibling ``plugins-backups/`` directory (never
     inside the scanned ``plugins_dir``) so stale copies can never shadow
     freshly-installed plugins.
+
+    Drift guard (GAP-E-1): unless ``force`` is set, deployed files that differ
+    from the incoming payload are detected by hash, preserved into
+    ``plugins-backups/<entry>.drifted.bak-<ts>/`` and reported under the
+    summary's ``drifted`` key. ``force=True`` skips detection entirely — the
+    operator's explicit opt-in to "the payload wins, no ceremony". A clean
+    (identical) deployed tree is never reported as drift, so the normal
+    reinstall path stays silent.
     """
     repo_root = Path(repo_root).expanduser().resolve()
     plugins_dir = Path(plugins_dir).expanduser().resolve()
@@ -101,7 +248,8 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
         return {
             "skipped": True,
             "reason": "repo_root == plugins_dir (in-place layout); nothing to copy",
-            "installed": [], "backed_up": [], "missing": [],
+            "installed": [], "backed_up": [], "missing": [], "drifted": [],
+            "drift_detected": False,
         }
 
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -110,11 +258,15 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     # Sweep stale .bak-* entries out of the scanned plugins_dir (best effort).
     _sweep_old_backups(plugins_dir, _backups_dir(plugins_dir))
 
-    installed, backed_up, missing = [], [], []
+    installed, backed_up, missing, drifted = [], [], [], []
 
     def _copy_into(src, dst, label):
         """One backup-then-overwrite copy (dir or file) into ``dst``."""
         if dst.exists() or dst.is_symlink():
+            # Detect operator drift BEFORE the tree moves — after the move the
+            # deployed files are no longer at dst. force=True is the operator's
+            # opt-in to skip detection and let the payload overwrite silently.
+            entry_drift = [] if force else _detect_entry_drift(src, dst)
             if backup:
                 bak_dir = _backups_dir(plugins_dir)
                 bak_dir.mkdir(parents=True, exist_ok=True)
@@ -124,13 +276,28 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
                 bak = bak_dir / f"{label.replace('/', '__')}.bak-{stamp}"
                 shutil.move(str(dst), str(bak))
                 backed_up.append(bak.name)
+                if entry_drift:
+                    # Additional, explicitly-named preservation of exactly the
+                    # files that differ (see _preserve_drifted); the whole-tree
+                    # backup above is left byte-identical to its pre-guard form.
+                    drifted.extend(
+                        _preserve_drifted(label, stamp,
+                                          entry_drift, bak, bak_dir))
                 # Retain-limit the pile this stage creates (t_9462260b):
                 # plugins-backups/ grew to 3,385 entries / 1.2 GB here.
                 # Default stamped_only keeps operator-labelled bookmarks alive.
                 backup_util.prune_backup_dir(bak_dir)
-            elif dst.is_dir() and not dst.is_symlink():
+            elif entry_drift:
+                # backup=False AND drift: the old files are about to be gone
+                # with NO backup anywhere. Still detected, still flagged —
+                # preserved=False records the destruction honestly.
+                drifted.extend(
+                    {"path": f"{label}/{r}" if r != _WHOLE_ENTRY else label,
+                     "backup": None, "preserved": False}
+                    for r in entry_drift)
+            if dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
-            else:
+            elif dst.exists() or dst.is_symlink():
                 dst.unlink()
         if src.is_dir():
             shutil.copytree(src, dst, ignore=_ignore, symlinks=False)
@@ -155,6 +322,11 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
         "installed": installed,
         "backed_up": backed_up,
         "missing": missing,
+        # GAP-E-1: every deployed file that differed from the payload and was
+        # therefore preserved (or destroyed) by this install. Empty list =
+        # nothing was silently overwritten.
+        "drifted": drifted,
+        "drift_detected": bool(drifted),
         "plugins_dir": str(plugins_dir),
     }
 
@@ -194,20 +366,30 @@ def _named_profile_plugins_dirs(plugins_dir):
 
 
 def install_payload_profiles(
-    repo_root, plugins_dir, payload, *, backup=True, ts=None
+    repo_root, plugins_dir, payload, *, backup=True, ts=None, force=False
 ):
     """Install ``payload`` into the root home AND every named profile's plugin
     dir under the same home, so the runtime code is current for every profile
     that loads it. Returns the primary summary with a ``profiles`` child list
     (one summary per profile plugin dir; a failing profile is recorded, not
     fatal).
+
+    The GAP-E-1 drift guard runs per destination: every profile plugin dir gets
+    its own drift detection + preserve-to-backup (an operator patch inside
+    ``profiles/<p>/plugins`` was previously overwritten with zero signal,
+    GAP-E-4's second half). ``force`` applies to every destination.
+    ``drift_detected`` on the returned primary summary is True when ANY
+    destination (primary or profile) flagged drift, so a caller that only
+    reads the primary summary still sees profile drift.
     """
-    primary = install_payload(repo_root, plugins_dir, payload, backup=backup, ts=ts)
+    primary = install_payload(repo_root, plugins_dir, payload,
+                              backup=backup, ts=ts, force=force)
     profile_results = []
     for p_dir in _named_profile_plugins_dirs(plugins_dir):
         try:
             profile_results.append(
-                install_payload(repo_root, p_dir, payload, backup=backup, ts=ts)
+                install_payload(repo_root, p_dir, payload,
+                                backup=backup, ts=ts, force=force)
             )
         except Exception as exc:  # a bad profile must never sink the whole deploy
             profile_results.append(
@@ -215,6 +397,8 @@ def install_payload_profiles(
                  "error": f"{type(exc).__name__}: {exc}"}
             )
     primary["profiles"] = profile_results
+    if any(r.get("drift_detected") for r in profile_results):
+        primary["drift_detected"] = True
     return primary
 
 
@@ -253,7 +437,15 @@ if __name__ == "__main__":
     repo_root = os.environ.get("REPO_ROOT") or str(boot_dir.parent)
     plugins_dir = os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
     no_backup = "--no-backup" in sys.argv
+    # Operator opt-in: overwrite drifted deployed files without the
+    # preserve-and-flag ceremony (mirrors bootstrap.sh --force).
+    force = "--force" in sys.argv
 
     result = install_payload_profiles(repo_root, plugins_dir, DEFAULT_PAYLOAD,
-                                      backup=not no_backup)
+                                      backup=not no_backup, force=force)
     print(json.dumps(result, indent=2))
+    # Non-zero exit when drift was flagged and not forced: bootstrap turns this
+    # into a loud operator warning without failing the install (the copy and
+    # the fresh payload already succeeded).
+    if result.get("drift_detected"):
+        sys.exit(3)
