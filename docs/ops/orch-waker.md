@@ -194,6 +194,10 @@ with `--json` for the machine contract. The verbs own only argv parsing +
 rendering; the logic is `orch_waker.py`'s, so the CLI, the loop and the doctor
 read and write one file through one loader.
 
+Shape of `status` — every field and column below comes from
+`hscc_daemon/hscc.py::_waker_status_lines` (the ids are fictional; the double
+`sent` on the audit line is real: the ok label followed by the outcome text):
+
 ```
 $ hscc orch waker status
 orch-waker: ENABLED  (poll 30s, debounce 90s, min gap 300s)
