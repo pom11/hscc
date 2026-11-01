@@ -30,12 +30,29 @@ and 500 columns, and checks the operator's four invariants plus a style log:
       canaries, LaunchAgent existence, api-port tripwire.
   (E) the help STYLE of every surface path (rich / argparse / print), so the
       fix cards can converge on one.
+  (COV) the WALK COVERS the surface: for every hand-rolled group verb (kanban,
+      orch, cards) the audit re-checks, against the live dispatcher itself,
+      that each verb the dispatcher advertises is actually walked. GAP-A-2
+      proved a hardcoded verb list rots silently (kanban lost pause/resume/
+      paused/enforce); COV makes the next such loss a red gate instead of an
+      unprobed verb. The dispatcher is asked by calling it with a verb that
+      cannot exist (:data:`BOGUS_VERB`) — the refusal path prints the group's
+      own verb inventory and executes nothing.
 
 Safety model (the operator was burned by a "green" test that RAN a destructive
 command; this module must never execute a mutating verb):
 
   * only ``--help``/``help`` argv is executed, and only for names the
     enumeration proves are real registered commands;
+  * the two exceptions are enumeration probes, never verbs: each hand-rolled
+    group dispatcher is called ONCE with :data:`BOGUS_VERB` (a name no verb
+    can match) to read its refusal-time inventory, in-process under a
+    throwaway HOME; and the cluster engine's ``cmd_orch`` router is loaded in
+    a SUBPROCESS (so its bare-name imports never touch this process's
+    ``sys.path``) and only ever called with that same bogus verb. Both are
+    refusal paths; both run under the sandbox HOME + canary PATH, and
+    scripts/tests/test_cli_help_surface.py pins with landmine-raise patches
+    that a bogus-verb call cannot reach a real verb;
   * every probe runs with HOME at a throwaway sandbox, so every ``~/.hscc``,
     ``~/.flightdeck`` and ``~/Library/LaunchAgents`` path resolves under the
     sandbox; a NEW file appearing in the sandbox during a help probe is a
@@ -147,6 +164,11 @@ import hscc_daemon.hscc as daemon_hscc  # noqa: E402  (module import is side-eff
 import flightdeck.cli as fd_cli          # noqa: E402
 
 from hscc_daemon import api_cli, autodown_cli  # noqa: E402
+# GAP-A-2/A-3 (card t_a95a67df): the kanban + cards groups and the orch group
+# router. Imported for their REGISTRIES only; every call made into them below is
+# a refusal path (an unknown verb), proven inert under sandbox HOME + canary
+# PATH — see _ask_dispatcher.
+from hscc_daemon import cards_live, kanban_blocked, kanban_cli  # noqa: E402
 
 
 # ── Surface enumeration (CODE-DERIVED) ───────────────────────────────────
@@ -164,6 +186,192 @@ def flightdeck_commands():
                         subs = dict(a2.choices)
                 top[name] = subs
     return top
+
+
+# ── Group verb sets (DERIVED — never listed here; GAP-A-2 / GAP-A-3) ─────
+#
+# The kanban group used to be enumerated from two literals in this file
+# ("blocked", "stale" at the old :216 and {"blocked","stale"} at the old :707).
+# Every verb added to the group afterwards — monitor, pause, resume, paused,
+# enforce — was then invisible to the gate, so "the audit proves --help
+# executes nothing" silently stopped covering the newest, most mutating verbs
+# (audit A GAP-A-2). Same story for `orch` and `cards`, which the walk never
+# reached at all (GAP-A-3). Each set below therefore reads a registry that
+# lives WITH the verbs, and :func:`_coverage` re-checks the derived set against
+# what the live dispatcher itself advertises, so a registry that rots fails the
+# gate instead of shrinking the walk.
+
+#: A verb no dispatcher can accept. Used to ASK a dispatcher which verbs it
+#: does accept — the refusal line is the dispatcher's own inventory.
+BOGUS_VERB = "__audit_probe__"
+
+_VERB_LIST_RES = (
+    re.compile(r"[Vv]alid subcommands?:\s*([^\n]+)"),   # kanban / cards / api
+    re.compile(r"available:\s*([^)\n]+)"),               # orch engine
+)
+
+
+@contextlib.contextmanager
+def _sandbox_home(sandbox: Path):
+    """Point HOME at the sandbox for the duration of an in-process call.
+
+    The dispatcher-advertised probes below run IN the audit process (they only
+    reach a refusal branch), and the modules they touch resolve ``~/.hscc`` at
+    call time. Sandboxing HOME around them keeps the audit's own safety model
+    true for its own tooling: a derivation must not be able to write the
+    operator's HOME even if the refusal path it relies on ever grows a write.
+    """
+    old = os.environ.get("HOME")
+    os.environ["HOME"] = str(sandbox)
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old
+
+
+def _verbs_from_text(text: str) -> set:
+    """Verb names a dispatcher's refusal text advertises; empty set if none.
+
+    Matches the two spellings in use in this repo — ``Valid subcommands: a, b``
+    (the hand-rolled hscc_daemon groups) and ``(available: a, b)`` (the cluster
+    engine's router) — and nothing else, so a refusal that names no list
+    degrades to "no inventory" (which :func:`_coverage_findings` then reports)
+    rather than to a guessed set.
+    """
+    for rx in _VERB_LIST_RES:
+        m = rx.search(text)
+        if m:
+            return {t.strip(" .\t") for t in m.group(1).split(",")
+                    if t.strip(" .\t")}
+    return set()
+
+
+def _ask_dispatcher(fn, argv=None) -> tuple[set, list]:
+    """The verbs a hand-rolled dispatcher advertises, by asking it.
+
+    Calls ``fn([BOGUS_VERB])`` — the REFUSAL path, which prints the group's own
+    ``Valid subcommands:`` line and returns (or raises) without touching a verb,
+    a board, a config file or a subprocess. Proven inert under sandbox HOME +
+    canary PATH (zero new files, zero trips), and pinned as an in-process
+    landmine test in scripts/tests/test_cli_help_surface.py.
+
+    The call runs IN this process, so HOME is pointed at a throwaway dir for its
+    duration: this audit must never be able to write the operator's HOME, not
+    even through its own enumeration (a refusal path that grew a state write in
+    the future then shows up as a finding, not as state under ~/.hscc).
+
+    Returns ``(verbs, side_effects)`` — ``side_effects`` is the list of files the
+    call created under its throwaway HOME, so the derivation is measured by the
+    same (D) discipline the help probes are, never trusted.
+    """
+    ask_home = Path(tempfile.mkdtemp(prefix="hscc-cli-help-ask-"))
+    buf = io.StringIO()
+    try:
+        with _sandbox_home(ask_home):
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                try:
+                    fn([BOGUS_VERB] if argv is None else list(argv))
+                except Exception as e:  # router that raises instead of printing
+                    buf.write(f"{type(e).__name__}: {e}")
+        wrote = sorted(str(p.relative_to(ask_home)) for p in ask_home.rglob("*"))
+    finally:
+        shutil.rmtree(ask_home, ignore_errors=True)
+    return _verbs_from_text(buf.getvalue()), wrote
+
+
+def kanban_group_verbs() -> tuple:
+    """Every verb ``hscc kanban`` accepts, from the two modules that own them.
+
+    ``blocked`` is owned by kanban_blocked (whose SUBCOMMAND_HELP keys are its
+    verbs); the rest by ``kanban_cli.VALID_SUBCOMMANDS`` (kanban_cli owns the
+    group, t_e751e652). Neither module's list is duplicated here.
+    """
+    return tuple(sorted(set(kanban_blocked.SUBCOMMAND_HELP)
+                        | set(kanban_cli.VALID_SUBCOMMANDS)))
+
+
+def orch_group_verbs() -> tuple:
+    """Every verb ``hscc orch`` advertises, from the group's own help table.
+
+    ``_ORCH_GROUP_ENTRIES`` is the single source for all three orch help paths
+    (hscc.py:1177 docstring), so an advertised-but-unrouted verb and a
+    routed-but-unadvertised verb are both caught: this set is what gets walked,
+    and :func:`_orch_router_verbs` is what the live engine router says.
+    """
+    out = set()
+    for usage, _desc in daemon_hscc._ORCH_GROUP_ENTRIES:
+        toks = usage.split()
+        if len(toks) >= 3 and toks[0] == "hscc" and toks[1] == "orch":
+            out.add(toks[2].split("|")[0])
+    return tuple(sorted(out))
+
+
+def cards_group_verbs() -> tuple:
+    """Every verb ``hscc cards`` accepts. cards_live has no verb constant, so
+    the dispatcher's refusal line IS its registry."""
+    verbs, _wrote = _ask_dispatcher(cards_live.cmd_cards)
+    return tuple(sorted(verbs))
+
+
+def _orch_router_verbs(tmp: Path, canary: Path) -> tuple[set, str | None]:
+    """Ask the cluster engine's ``cmd_orch`` router which verbs it resolves.
+
+    A SUBPROCESS probe, not an in-process import: hscc-cluster is a hyphenated
+    plugin dir whose submodules import each other by BARE name (``import
+    _theme``), so loading the engine here would put that dir on the gate
+    process's ``sys.path`` for the rest of the pytest leg and let those bare
+    names shadow real modules. The probe runs under the same sandbox HOME +
+    canary PATH the help probes use, and only ever calls the router with
+    :data:`BOGUS_VERB` — a refusal that raises before any verb runs.
+
+    Returns ``(verbs, error)``; ``error`` is the failure text when the engine
+    could not be loaded or the router answered in a shape we cannot parse.
+    """
+    script = tmp / "orch_router_probe.py"
+    script.write_text(
+        "import importlib.util, json, os, sys\n"
+        "d = sys.argv[1]\n"
+        "sys.path.insert(0, d)\n"
+        "spec = importlib.util.spec_from_file_location(\n"
+        "    'hscc_cluster_engine_audit_probe', os.path.join(d, 'hscc.py'))\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "try:\n"
+        "    mod.cmd_orch([sys.argv[2]])\n"
+        "    print(json.dumps({'verbs': '', 'note': 'router accepted a bogus"
+        " verb'}))\n"
+        "except Exception as exc:\n"
+        "    print(json.dumps({'verbs': f'{type(exc).__name__}: {exc}'}))\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CONDA_")
+           and k not in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE",
+                         "HERMES_DELEGATED_CHILD_CONTEXT",
+                         "HSCC_SPARKRUN_BIN", "COLUMNS")}
+    env.update({"HOME": str(tmp / "cover-home"),
+                "PYTHONPATH": os.pathsep.join([str(REPO), str(PROJECT_DIR)]),
+                "COLUMNS": "100", "NO_COLOR": "1", "TERM": "dumb",
+                "HSCC_THEME": "dark",
+                "PATH": os.pathsep.join([str(canary), env.get("PATH", "")])})
+    try:
+        proc = subprocess.run([PY, str(script), str(REPO / "hscc-cluster"),
+                               BOGUS_VERB], env=env, cwd=str(tmp),
+                              capture_output=True, text=True, timeout=60)
+    except Exception as e:  # noqa: BLE001 — probe failure is a finding, not a crash
+        return set(), f"probe error: {type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        return set(), (f"engine probe rc={proc.returncode}: "
+                       f"{(proc.stderr or proc.stdout).strip()[:200]}")
+    try:
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception as e:  # noqa: BLE001
+        return set(), f"engine probe unparseable: {e}: {proc.stdout[:200]}"
+    text = payload.get("verbs", "")
+    if payload.get("note"):
+        return set(), f"{text} {payload['note']}"
+    return _verbs_from_text(text), None
 
 
 def build_surface():
@@ -211,10 +419,23 @@ def build_surface():
     for sub in autodown_cli.VALID_SUBCOMMANDS:
         add("api-autodown-kanban", ["autodown", sub], "print", "flag2")
 
-    # ── kanban group (Rich console prints)
+    # ── kanban group (Rich console prints) — verbs DERIVED (GAP-A-2)
     add("api-autodown-kanban", ["kanban"], "rich", "flag")
-    for sub in ("blocked", "stale"):
+    for sub in kanban_group_verbs():
         add("api-autodown-kanban", ["kanban", sub], "rich", "flag2")
+
+    # ── orch group (print help from _ORCH_GROUP_ENTRIES) — walked at all only
+    # since GAP-A-3: the group router (`hscc orch --help`, hscc.py:1177) and
+    # each verb's --help were a blind spot, reached before this only via the
+    # top-level `hscc help orch` blurb.
+    add("orch-cards", ["orch"], "print", "flag")
+    for sub in orch_group_verbs():
+        add("orch-cards", ["orch", sub], "print", "flag2")
+
+    # ── cards group (print HELP) — same blind spot (cards_live.py:520)
+    add("orch-cards", ["cards"], "print", "flag")
+    for sub in cards_group_verbs():
+        add("orch-cards", ["cards", sub], "print", "flag2")
 
     # ── project group — flightdeck argparse surface
     add("project", ["project"], "argparse", "flag")
@@ -704,7 +925,12 @@ class ExampleParser:
             "template": daemon_hscc.TEMPLATE_SUBCOMMANDS,
             "api": set(api_cli.VALID_SUBCOMMANDS),
             "autodown": set(autodown_cli.VALID_SUBCOMMANDS),
-            "kanban": {"blocked", "stale"},
+            # DERIVED, same registries build_surface walks (GAP-A-2/A-3): the
+            # (C) oracle must know exactly the verbs the surface actually has,
+            # or a documented example for a real verb fails to parse.
+            "kanban": set(kanban_group_verbs()),
+            "orch": set(orch_group_verbs()),
+            "cards": set(cards_group_verbs()),
         }
         # (cmd,) / (cmd, sub) -> raw epilog, from the live parser tree
         self.epilogs = {}
@@ -836,6 +1062,98 @@ def _norm(argv):
     return "hscc " + " ".join(argv)
 
 
+def _coverage(tmp: Path, canary: Path, paths, add) -> dict:
+    """(Coverage) walked verbs vs what each group's live dispatcher advertises.
+
+    ``add`` is the audit's own finding emitter (group, command, kind, detail,
+    fix) so COV holes join the same bipartite expectation table as A/B/C/D and
+    get the same <SANDBOX> detail normalisation. Returns
+    ``{"group": {"walked": [...], "advertised": [...]}}``. A group whose
+    dispatcher cannot be asked (engine missing, refusal text with no list) is
+    reported, never skipped: an unaskable dispatcher is exactly how a group
+    ends up walked by nothing at all.
+    """
+    walked: dict[str, set] = {"kanban": set(), "orch": set(), "cards": set()}
+    routers = {"kanban": False, "orch": False, "cards": False}
+    for _g, argv, _style, _kind in paths:
+        if argv and argv[0] in walked:
+            if len(argv) == 1:
+                routers[argv[0]] = True
+            else:
+                walked[argv[0]].add(argv[1])
+
+    # (D) discipline applied to the audit's OWN enumeration: the in-process
+    # bogus-verb calls and the engine probe must write nothing and shell out to
+    # nothing. A refusal path that ever grows a write trips this, not the
+    # operator's ~/.hscc.
+    home_cover = tmp / "cover-home"
+    home_cover.mkdir(parents=True, exist_ok=True)
+    trips_before = len((canary / "trips.log").read_text().splitlines())
+    kanban_verbs, kanban_wrote = _ask_dispatcher(kanban_blocked.cmd_kanban)
+    cards_verbs, cards_wrote = _ask_dispatcher(cards_live.cmd_cards)
+    orch_verbs, orch_err = _orch_router_verbs(tmp, canary)
+    trips = (canary / "trips.log").read_text().splitlines()[trips_before:]
+    advertised = {"kanban": kanban_verbs, "cards": cards_verbs,
+                  "orch": orch_verbs}
+    for group, wrote in (("kanban", kanban_wrote), ("cards", cards_wrote)):
+        if wrote:
+            add(group, f"hscc {group}", "COV",
+                f"the enumeration probe wrote {', '.join(wrote[:6])} under "
+                f"its throwaway HOME — a --help-style call must write nothing",
+                "make the unknown-verb refusal path pure (print, return)")
+    if trips:
+        add("coverage", "hscc (enumeration probes)", "COV",
+            "the enumeration probes shelled out: " + "; ".join(trips[:3])[:200],
+            "the unknown-verb / bogus-verb path must not shell out")
+
+    derived = {"kanban": set(kanban_group_verbs()),
+               "orch": set(orch_group_verbs()),
+               "cards": set(cards_group_verbs())}
+    table = {}
+
+    for group in ("kanban", "orch", "cards"):
+        adv, walk = advertised[group], walked[group]
+        table[group] = {"walked": sorted(walk), "advertised": sorted(adv)}
+        if not routers[group]:
+            add(group, f"hscc {group}", "COV",
+                f"the group router itself is not walked "
+                f"(`hscc {group} --help` is missing from the surface)",
+                f"enumerate the {group} group router in build_surface")
+        if not adv:
+            add(group, f"hscc {group}", "COV",
+                "dispatcher could not be asked which verbs it accepts"
+                + (f" ({orch_err})" if group == "orch" and orch_err else
+                   " (its refusal text names no verb list)"),
+                "make the unknown-verb refusal enumerate the group's verbs "
+                "on one line, the kanban/cards convention")
+            continue
+        missing = adv - walk
+        if missing:
+            add(group, f"hscc {group}", "COV",
+                f"verbs the dispatcher advertises but the walk never probes: "
+                f"{', '.join(sorted(missing))} — the (D) 'a --help must not "
+                f"execute' guarantee is unenforced for them",
+                f"enumerate them from the group's own registry "
+                f"(kanban_cli.VALID_SUBCOMMANDS / _ORCH_GROUP_ENTRIES / "
+                f"the dispatcher's refusal line), never a literal")
+        extra = walk - adv
+        if extra:
+            add(group, f"hscc {group}", "COV",
+                f"verbs walked but not advertised by the dispatcher: "
+                f"{', '.join(sorted(extra))} — the registry the walk trusts "
+                f"disagrees with the running dispatcher",
+                "reconcile the registry and the dispatcher's "
+                "unknown-verb inventory")
+        if adv != derived[group]:
+            add(group, f"hscc {group}", "COV",
+                f"the audit's derived set {sorted(derived[group])} != the "
+                f"dispatcher's {sorted(adv)} — the enumeration seam has "
+                f"rotted away from the CLI",
+                "point the derived set at the registry that actually owns "
+                "the verbs")
+    return table
+
+
 def audit(repo=None) -> dict:
     """Run the full surface audit; returns the findings report (see module doc)."""
     global REPO
@@ -876,6 +1194,12 @@ def audit(repo=None) -> dict:
         seen_findings.add(key)
         findings.append({"group": group, "command": command, "kind": kind,
                          "detail": detail, "fix": fix})
+
+    # Coverage of the walk itself, measured against the live dispatchers, so a
+    # registry that rots (GAP-A-2's root cause) fails the gate as a COV finding
+    # instead of quietly shrinking the walk. Runs through `add`, so a COV detail
+    # gets the same <SANDBOX> normalisation as every other class.
+    coverage = _coverage(tmp, canary, paths, add)
 
     # systemic regression probe: importing the CLI must execute NOTHING.
     # (B11 — the import-time resolve_cluster_config sparkrun fallback — was
@@ -1045,6 +1369,7 @@ def audit(repo=None) -> dict:
         "a_counts": a_count_table(findings),
         "skips": skips,
         "styles": styles,
+        "coverage": coverage,
         "examples_total": examples_total,
         "examples_failed": examples_failed,
         "widths": list(WIDTHS_ALL),
