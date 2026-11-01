@@ -1657,8 +1657,8 @@ class TestCheckDeployedVsReleased:
         assert "differs from released payload" not in r["detail"]
 
     def test_preserved_manifest_default_location(self, tmp_path):
-        """Default manifest path is <plugins_dir>/../plugins-backups/preserved.json
-        — the dir install_payload (GAP-E-1) already writes to."""
+        """An explicit manifest at <plugins_dir>/../plugins-backups/preserved.json
+        pins files even when no .drifted.bak-* copy matches."""
         from hscc_daemon.verify import check_deployed_vs_released
         keg = self._keg(tmp_path, payload=("hscc_daemon",),
                         files={"hscc_daemon/kanban_cli.py": "RELEASED\n"})
@@ -1671,6 +1671,31 @@ class TestCheckDeployedVsReleased:
         r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
         assert r["ok"] is True
         assert "known-preserved" in r["detail"]
+
+    def test_gap_e1_drifted_backup_is_known_preserved_without_manifest(
+            self, tmp_path):
+        """The real GAP-E-1 artifact: the guard preserved this exact content
+        into plugins-backups/hscc_daemon.drifted.bak-<ts>/ — the deployed file
+        hash-matches the preserved copy ⇒ KNOWN-PRESERVED, ok stays True, no
+        manifest required."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=("hscc_daemon",),
+                        files={"hscc_daemon/kanban_cli.py": "RELEASED\n"})
+        dep = self._deployed(tmp_path,
+                             {"hscc_daemon/kanban_cli.py": "OPERATOR\n"})
+        bak = tmp_path / "plugins-backups" / "hscc_daemon.drifted.bak-20261101-120000"
+        (bak / "kanban_cli.py").parent.mkdir(parents=True)
+        (bak / "kanban_cli.py").write_text("OPERATOR\n")  # what was preserved
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is True
+        assert "known-preserved" in r["detail"]
+        # Drifted AFTER the preserve (content no longer matches any preserved
+        # copy) ⇒ real drift again, must fail.
+        (tmp_path / "plugins" / "hscc_daemon" / "kanban_cli.py").write_text(
+            "OPERATOR-v2\n")
+        r2 = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r2["ok"] is False
+        assert "hscc_daemon/kanban_cli.py" in r2["detail"]
 
     def test_pin_with_hash_drifted_since_pin_still_preserved_but_annotated(
             self, tmp_path):
