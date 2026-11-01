@@ -194,6 +194,116 @@ def test_legacy_receipt_without_verb_still_reports_a_verb(repl):
     assert out["mode"] == "queue" and out["verb"] == "/queue "
 
 
+# ── GAP-C-4: the mode→verb table is repl_inject's, never copied here ────────
+#
+# Before this card, orch_message carried its own fallback table
+# (`{"plain": "", "queue": "/queue "}`) for the case where the loaded
+# repl_inject exposes no table. A second source of truth that is already stale
+# — the real one has a `steer` entry the copy never did. The four tests below
+# pin the two against diverging again: two read the CANONICAL table and compare
+# (one through the tool, one against the helper), one pins the pre-parity
+# (v2.14.0) table name, and one forbids a verb-prefix literal in the module's
+# source at all.
+
+@pytest.fixture(scope="session")
+def real_repl():
+    """The REAL ``hscc-api/repl_inject`` module, loaded by file path.
+
+    By path (not ``import repl_inject``) so it is independent of sys.path and
+    of the monkeypatched ``_load_repl_inject`` seam, and NOT a stub: these
+    tests compare against the module that owns the verb table. Import only —
+    nothing here resolves a pane or calls tmux, so the hermeticity contract
+    above still holds.
+    """
+    import importlib.util
+    from pathlib import Path
+    path = (Path(om.__file__).resolve().parent.parent
+            / "hscc-api" / "repl_inject.py")
+    assert path.exists(), f"canonical repl_inject not found at {path}"
+    spec = importlib.util.spec_from_file_location("_repl_inject_canonical", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_legacy_receipt_verb_equals_the_canonical_entry(repl, real_repl):
+    """e2e through the tool: a receipt without `verb` reports exactly what
+    repl_inject's own table says for the resolved mode — the assertion reads
+    from the canonical table, so it cannot drift with it."""
+    repl.legacy = True
+    for busy, mode in ((True, "queue"), (False, "plain")):
+        repl.busy = busy
+        out = send(message="heads up")
+        assert out["mode"] == mode
+        assert out["verb"] == real_repl.VERB_PREFIX[mode]
+
+
+def test_verb_for_mode_matches_the_canonical_table_for_every_entry(real_repl):
+    """Helper-level pin: every key of the canonical table answers identically
+    through `_verb_for_mode`, so the two cannot disagree."""
+    for mode, canonical in real_repl.VERB_PREFIX.items():
+        assert om._verb_for_mode(real_repl, mode) == canonical, mode
+    # An unresolvable mode answers None (what the pre-fix code did too) — the
+    # tool never invents a verb for a mode repl_inject does not know.
+    assert om._verb_for_mode(real_repl, "auto") is None
+    assert om._verb_for_mode(real_repl, "teleport") is None
+    assert om._verb_for_mode(real_repl, "") is None
+
+
+def test_pre_parity_table_is_read_by_name_not_reimplemented(real_repl):
+    """A deployed PRE-PARITY hscc-api (the shipped 2.14.0 payload) exposes the
+    verb table as `_PREFIX` and its receipts carry no `verb` — which is exactly
+    when this path runs in production. The derived verbs must equal the
+    canonical ones, including `steer`, which the deleted copy lacked."""
+    class PreParityRepl:
+        # v2.14.0's private table, verbatim shape (extra `interrupt` key).
+        _PREFIX = {"queue": "/queue ", "steer": "/steer ",
+                   "interrupt": "", "plain": ""}
+
+    for mode, canonical in real_repl.VERB_PREFIX.items():
+        assert om._verb_for_mode(PreParityRepl(), mode) == canonical, mode
+    # And the legacy `interrupt` alias resolves the way that table says,
+    # rather than being guessed at here.
+    assert om._verb_for_mode(PreParityRepl(), "interrupt") == ""
+
+
+def test_module_without_a_table_reports_no_verb_rather_than_a_guess():
+    """A repl_inject too old to expose either table name yields no verb — same
+    answer as before the fix, and never a verb invented in this module."""
+    class NoTable:
+        pass
+    assert om._verb_for_mode(NoTable(), "queue") is None
+    assert om._verb_for_mode(object(), "queue") is None
+
+    class NotADict:
+        VERB_PREFIX = "/queue-ish"
+        _PREFIX = None
+    assert om._verb_for_mode(NotADict(), "queue") is None
+
+
+def test_orch_message_source_carries_no_verb_prefix_literal():
+    """Structural guard (GAP-C-4): a quoted verb prefix in this module's source
+    IS a second source of truth, whether or not it is reached.
+
+    The pre-fix state proves the point: the copy was behaviourally reachable
+    against a deployed 2.14.0 hscc-api and was already missing `steer`. Prose
+    about /queue is fine (a quoted string that merely STARTS with the verb is
+    what the guard catches, so `'send /queue now'` passes and `"/queue "` does
+    not). Proven to fire: restoring the deleted line verbatim fails this test
+    and nothing else.
+    """
+    import re
+    from pathlib import Path
+    src = Path(om.__file__).read_text()
+    offenders = re.findall(r"""['"]/(?:queue|steer)""", src)
+    assert not offenders, (
+        f"orch_message.py hardcodes {offenders} — the mode→verb table belongs "
+        "to hscc-api/repl_inject.py (VERB_PREFIX); read it from the loaded "
+        "module via _verb_for_mode instead of copying it (GAP-C-4)."
+    )
+
+
 def test_missing_pane_refused(monkeypatch):
     """No pane at all for the target profile: refuse, deliver nothing."""
     monkeypatch.setattr(om, "_load_repl_inject", lambda: FakeRepl(panes=[]))
