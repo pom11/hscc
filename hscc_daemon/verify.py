@@ -7,6 +7,7 @@ ok=None means the check could not be verified (not a pass, not a hard fail).
 import json
 import os
 import re
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -1597,6 +1598,401 @@ def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
                       f"plugins ({checked} payload files)"}
 
 
+# ---------------------------------------------------------------------------
+# Deployed-vs-RELEASED drift detector (GAP-E-2, audit E t_f7d94a76)
+# ---------------------------------------------------------------------------
+#
+# ``check_plugin_payload`` above diffs the deployed tree against ``_repo_root()``
+# — two levels up from verify.py itself. When verify runs from the DEPLOYED
+# tree (or the keg) that side IS the deployed tree, so the check compares the
+# tree against ITSELF and can never see deployed drift: 288 lines of live
+# deployed-vs-released drift coexisted with green gates (audit E). This check
+# closes that hole honestly: it diffs the deployed plugins tree against the
+# RELEASED payload — the installed brew keg's install payload
+# (``<Cellar>/hscc/<ver>/libexec/hscc``), which is the source of truth for what
+# the release SAYS should be deployed. It deliberately does NOT diff against
+# origin/main: that would false-alarm on every pre-release deploy (main is
+# allowed to be ahead of the deployed tree between releases).
+#
+# Read-only: never modifies the deployed tree. The intentional-preserve case
+# — files the GAP-E-1 guard (install_payload.py) captured into
+# ``plugins-backups/<plugin>.drifted.bak-<stamp>/``, plus any explicit pins in
+# ``plugins-backups/preserved.json`` — is reported as KNOWN-PRESERVED and does
+# NOT fail the check.
+
+_RELEASED_KEG_GLOBS = (
+    "/opt/homebrew/Cellar/hscc",   # Apple Silicon brew
+    "/usr/local/Cellar/hscc",      # Intel brew
+)
+
+
+def _released_payload_root(keg_root=None):
+    """Absolute path to the RELEASED payload root, or None.
+
+    The released payload is the tree the installed release ships for deployment
+    — ``<Cellar>/hscc/<version>/libexec/hscc`` (where ``install_payload.py``
+    lives, so its ``DEFAULT_PAYLOAD`` is the release's own deploy manifest).
+
+      * ``keg_root`` given → authoritative: returned iff it is a directory
+        (never silently falls back — tests and operator overrides must be
+        able to force the "no released payload" answer),
+      * else ``$HSCC_RELEASED_PAYLOAD`` (authoritative the same way),
+      * else a ``Cellar/hscc/<ver>`` ancestor of this very file — when verify
+         runs FROM the keg, the keg payload IS the released payload,
+      * else ``brew --prefix`` and the known Homebrew Cellar roots, newest
+        version first.
+    """
+    if keg_root is not None:
+        return keg_root if os.path.isdir(keg_root) else None
+    env = os.environ.get("HSCC_RELEASED_PAYLOAD")
+    if env:
+        return env if os.path.isdir(env) else None
+
+    def _pick(cellar_base):
+        """Newest ``<cellar_base>/<ver>/libexec/hscc`` that exists, or None."""
+        if not cellar_base or not os.path.isdir(cellar_base):
+            return None
+        try:
+            vers = sorted(os.listdir(cellar_base), reverse=True)
+        except OSError:
+            return None
+        for v in vers:
+            cand = os.path.join(cellar_base, v, "libexec", "hscc")
+            if os.path.isdir(cand):
+                return cand
+        return None
+
+    found = None
+    try:
+        # verify.py itself may live inside a keg (that is the case that
+        # today self-approves): <Cellar>/hscc/<ver>/libexec/hscc/hscc_daemon/verify.py
+        here = os.path.abspath(__file__)
+        marker = os.sep + "Cellar" + os.sep + "hscc" + os.sep
+        idx = here.find(marker)
+        if idx != -1:
+            cellar_ver = here[:idx + len(marker)].rstrip(os.sep)
+            cand = os.path.join(cellar_ver, "libexec", "hscc")
+            if os.path.isdir(cand):
+                found = cand
+        if found is None and subprocess is not None:
+            rc, out = _capture(["brew", "--prefix"], timeout=15)
+            if rc == 0 and out.strip():
+                found = _pick(os.path.join(out.strip(), "Cellar", "hscc"))
+        if found is None:
+            for base in _RELEASED_KEG_GLOBS:
+                found = _pick(base)
+                if found:
+                    break
+    except OSError:
+        found = None
+    return found
+
+
+def _released_payload_version(released_root):
+    """Version string of the released payload (its VERSION file), or '?'."""
+    try:
+        with open(os.path.join(released_root, "VERSION")) as f:
+            return f.read().strip() or "?"
+    except OSError:
+        return "?"
+
+
+def _load_default_payload(root):
+    """``DEFAULT_PAYLOAD`` from ``<root>/hscc-bootstrap/install_payload.py``.
+
+    Loaded by file path (never imported as a module of the running tree) so
+    the deployed side's own deploy manifest can be read from ANY tree — repo,
+    deployed, or keg — exactly like ``check_plugin_payload`` does for the repo
+    side. Empty list when absent/unreadable (caller reports unverified).
+    """
+    py = os.path.join(root, "hscc-bootstrap", "install_payload.py")
+    if not os.path.isfile(py):
+        return []
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hscc_released_payload", py)
+        if spec is None or spec.loader is None:
+            return []
+        mod = importlib.util.module_from_spec(spec)
+        # install_payload.py inserts its own dir on sys.path at import time
+        # (its backup_util fallback import). Restore afterwards — verify must
+        # not leave a foreign tree's bootstrap dir shadowing later imports in
+        # the running process.
+        saved_path = list(sys.path)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path[:] = saved_path
+        return list(getattr(mod, "DEFAULT_PAYLOAD", []) or [])
+    except Exception:
+        return []
+
+
+def _preserved_backup_shas(plugins_dir):
+    """GAP-E-1's real preservation artifact: ``{("<plugin>", rel): {sha,...}}``.
+
+    The GAP-E-1 guard (install_payload.py, t_9fbc8abd) copies every drifted
+    deployed file into ``plugins-backups/<label>.drifted.bak-<stamp>/`` where
+    ``label`` is the payload entry name (``/`` → ``__``) and the tree mirrors
+    the deployed layout one-for-one. A deployed file whose bytes match one of
+    those preserved copies is a KNOWN-PRESERVED file: the operator edit that
+    the guard already captured and named — the exact intentional-preserve case
+    this check must report without failing. Merge every drifted collection per
+    plugin (drift can recur across installs).
+    """
+    backups = os.path.join(os.path.dirname(os.path.abspath(plugins_dir)),
+                           "plugins-backups")
+    out = {}
+    if not os.path.isdir(backups):
+        return out
+    try:
+        names = os.listdir(backups)
+    except OSError:
+        return out
+    for name in sorted(names):
+        if ".drifted.bak-" not in name:
+            continue
+        label = name.split(".drifted.bak-", 1)[0]
+        plugin = label.replace("__", "/")
+        for rel, sha in _payload_snapshot(os.path.join(backups, name)).items():
+            out.setdefault((plugin, rel), set()).add(sha)
+    return out
+
+
+def _preserve_manifest_keys(preserve_manifest, plugins_dir):
+    """Operator pins from an explicit manifest (secondary to the backup scan).
+
+    Default location: ``<plugins_dir>/../plugins-backups/preserved.json``
+    (the same sibling backup dir install_payload writes to);
+    ``$HSCC_PRESERVE_MANIFEST`` or the ``preserve_manifest`` arg override.
+    Accepted shapes (all optional, missing → empty → no pins):
+
+      * ``{"preserved": [ {"plugin": "hscc_daemon", "path": "kanban_cli.py",
+                            "sha256": "...", "reason": "..."}, ... ]}``
+      * a bare top-level list of those dicts
+      * bare ``"plugin/relpath"`` strings (pin without a content hash)
+      * a top-level dict keyed by ``"plugin/relpath"`` → metadata (or null)
+
+    A pin matches on (plugin, relpath); a pinned entry whose ``sha256`` is
+    present and differs from the deployed file's hash is still treated as
+    pinned (the operator's intent is the pin itself) but annotated.
+    """
+    path = preserve_manifest
+    if path is None:
+        path = os.environ.get("HSCC_PRESERVE_MANIFEST")
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(plugins_dir)),
+                            "plugins-backups", "preserved.json")
+    keys = {}  # (plugin, rel) -> sha256-or-None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return keys
+    entries = []
+    if isinstance(data, dict):
+        if "preserved" in data:
+            entries = data.get("preserved") or []
+        else:
+            # dict-keyed form: {"hscc_daemon/kanban_cli.py": {...}|null}
+            for k, meta in data.items():
+                if "/" not in k:
+                    continue
+                plugin, rel = k.split("/", 1)
+                sha = meta.get("sha256") if isinstance(meta, dict) else None
+                keys[(plugin, rel)] = sha
+            return keys
+    elif isinstance(data, list):
+        entries = data
+    for e in entries:
+        if isinstance(e, str) and "/" in e:
+            plugin, rel = e.split("/", 1)
+            keys[(plugin, rel)] = None
+        elif isinstance(e, dict) and e.get("plugin") and e.get("path"):
+            keys[(e["plugin"], e["path"])] = e.get("sha256")
+    return keys
+
+
+def check_deployed_vs_released(deployed_dir=None, released_root=None,
+                               preserve_manifest=None):
+    """Check the DEPLOYED plugin tree matches the RELEASED payload (GAP-E-2).
+
+    ``check_plugin_payload`` can only diff against the tree verify.py itself
+    lives in — from the deployed/keg tree that is a self-diff, so real drift
+    (live hscc.py == the 2.14.0 keg while other files sit on newer code) never
+    fails a gate. This check compares each deployed payload file's sha256
+    against the installed release's payload (``<Cellar>/hscc/<ver>/libexec/hscc``)
+    and names every drifted, missing, or extra file.
+
+    Classification (path scope = the deployed tree's own
+    ``install_payload.DEFAULT_PAYLOAD``, falling back to the released tree's):
+
+      * ``changed`` — same path, different sha256
+      * ``missing`` — released payload ships it, deployed tree does not
+      * ``extra``   — deployed tree ships it, released payload does not
+      * ``known-preserved`` — a changed/extra file pinned by GAP-E-1's
+        preserve manifest: reported, NOT a failure
+
+    Any non-preserved drifted/missing/extra file ⇒ ok=False with the file list.
+    No release payload installed (no keg — e.g. dev checkout only) ⇒ ok=None
+    (UNVERIFIED, per verify's contract: not-evaluable is not-a-failure).
+    Read-only: this check never writes anything, anywhere.
+    """
+    if deployed_dir is None:
+        deployed_dir = os.path.expanduser("~/.hermes/plugins")
+    deployed_dir = os.path.abspath(os.path.expanduser(deployed_dir))
+    released_root = _released_payload_root(released_root)
+    if released_root is None:
+        return {"name": "deployed_vs_released", "ok": None,
+                "detail": "unverified: no released payload found (no brew keg "
+                          "for hscc and $HSCC_RELEASED_PAYLOAD unset) — "
+                          "deployed-vs-released drift cannot be evaluated",
+                "next_step": "install the release (brew install hscc) or point "
+                             "$HSCC_RELEASED_PAYLOAD at the released payload root"}
+
+    # Deploy scope: prefer the DEPLOYED tree's own manifest (this is the tree
+    # whose drift we measure, and the only one guaranteed to exist when verify
+    # runs from a deployed install); fall back to the released tree's.
+    payload = _load_default_payload(deployed_dir) or \
+        _load_default_payload(released_root)
+    if not payload:
+        return {"name": "deployed_vs_released", "ok": None,
+                "detail": "unverified: DEFAULT_PAYLOAD not loadable from the "
+                          "deployed or released tree",
+                "next_step": "ensure hscc-bootstrap/install_payload.py exists "
+                             "in the deployed plugin tree"}
+
+    pins = _preserve_manifest_keys(preserve_manifest, deployed_dir)
+    # GAP-E-1's real artifact: drifted copies already preserved into
+    # plugins-backups/<plugin>.drifted.bak-<stamp>/ (bytes-identical to what
+    # the operator deployed at preserve time).
+    known = _preserved_backup_shas(deployed_dir)
+    version = _released_payload_version(released_root)
+
+    def _known(plugin, rel, full, pinned_sha=None):
+        """(is_preserved_case, annotation) for one deployed drifted file.
+
+        Preserved means either (a) an operator pin in the manifest names it,
+        or (b) GAP-E-1 already captured this exact content in a
+        ``.drifted.bak-*`` collection — the file's deployed bytes hash-match a
+        preserved copy.
+        """
+        if (plugin, rel) in pins or (plugin is None and _pinned(pins, rel)):
+            want = pins.get((plugin, rel))
+            note = ""
+            if want:
+                try:
+                    if _sha256(full) != want:
+                        note = " [deployed changed since pin]"
+                except OSError:
+                    note = " [unreadable]"
+            return True, note
+        shas = known.get((plugin, rel)) if plugin is not None else None
+        if shas:
+            try:
+                if _sha256(full) in shas:
+                    return True, ""
+            except OSError:
+                pass
+            return False, ""
+        # Single-file payload entry (VERSION, README.md, ...): GAP-E-1
+        # preserves it under <name>.drifted.bak-<ts>/<name>.
+        if plugin is None:
+            shas = known.get((rel, os.path.basename(rel)))
+            if shas:
+                try:
+                    if _sha256(full) in shas:
+                        return True, ""
+                except OSError:
+                    pass
+        return False, ""
+
+    changed, missing, extra, preserved = [], [], [], []
+    checked = 0
+    for name in payload:
+        dep_path = os.path.join(deployed_dir, name)
+        rel_path = os.path.join(released_root, name)
+        if os.path.isfile(rel_path) or os.path.isfile(dep_path):
+            # Single-file payload entry (VERSION, README.md, ...).
+            dep_is_file = os.path.isfile(dep_path)
+            rel_is_file = os.path.isfile(rel_path)
+            if rel_is_file and not dep_is_file:
+                missing.append(name)
+            elif dep_is_file and not rel_is_file:
+                ok_k, note = _known(None, name, dep_path)
+                (preserved if ok_k else extra).append(name + note)
+            elif dep_is_file and rel_is_file:
+                try:
+                    if _sha256(dep_path) != _sha256(rel_path):
+                        ok_k, note = _known(None, name, dep_path)
+                        (preserved if ok_k else changed).append(name + note)
+                except OSError:
+                    continue
+            checked += 1
+            continue
+        rel = _payload_snapshot(rel_path)
+        dep = _payload_snapshot(dep_path)
+        if not rel:
+            # Resource-only payload on the released side (no diffable source
+            # files — same skip rule check_plugin_payload uses). But if the
+            # DEPLOYED side has source files there, that IS extra drift.
+            for relf in sorted(dep):
+                ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+                (preserved if ok_k else extra).append(f"{name}/{relf}{note}")
+            continue
+        checked += len(rel)
+        for relf in sorted(set(rel) - set(dep)):
+            missing.append(f"{name}/{relf}")
+        for relf in sorted(set(dep) - set(rel)):
+            ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+            (preserved if ok_k else extra).append(f"{name}/{relf}{note}")
+        for relf in sorted(r for r in rel if r in dep and rel[r] != dep[r]):
+            ok_k, note = _known(name, relf, os.path.join(dep_path, relf))
+            (preserved if ok_k else changed).append(f"{name}/{relf}{note}")
+
+    def _fmt(items, label):
+        if not items:
+            return None
+        shown = ", ".join(items[:12])
+        more = f" (+{len(items) - 12} more)" if len(items) > 12 else ""
+        return f"{label} {len(items)}: {shown}{more}"
+
+    parts = [p for p in (_fmt(missing, "missing from deployed"),
+                         _fmt(changed, "deployed differs from released payload"),
+                         _fmt(extra, "extra vs released payload")) if p]
+    if preserved:
+        parts.append(f"known-preserved {len(preserved)} (operator-pinned via "
+                     f"GAP-E-1 preserve manifest): " + ", ".join(preserved[:12])
+                     + (f" (+{len(preserved) - 12} more)"
+                        if len(preserved) > 12 else ""))
+    summary = (f"deployed vs released hscc {version} across "
+               f"{len(payload)} payload entries ({checked} files): ")
+
+    if parts:
+        fail = [p for p in parts if not p.startswith("known-preserved")]
+        if fail:
+            return {"name": "deployed_vs_released", "ok": False,
+                    "detail": summary + "; ".join(parts),
+                    "next_step": "deployed tree differs from the INSTALLED "
+                                 f"release (hscc {version}). Re-deploy the "
+                                 "release with hscc-bootstrap/bootstrap.sh, or "
+                                 "pin intentional operator edits in "
+                                 "plugins-backups/preserved.json so they "
+                                 "report as known-preserved"}
+        # Only operator-pinned drift remains: report it, do NOT fail (the
+        # pin IS the operator's decision — GAP-E-1's preserve manifest).
+        return {"name": "deployed_vs_released", "ok": True,
+                "detail": summary + "; ".join(parts)}
+    return {"name": "deployed_vs_released", "ok": True,
+            "detail": summary + f"all {checked} deployed payload files match "
+                                f"the released payload (hscc {version})"}
+
+
+def _pinned(pins, name):
+    """True if single-file payload entry ``name`` carries any pin."""
+    return any(p == name or p.endswith("/" + name) for (p, _r) in pins)
+
+
 def check_project_chat_ready(registry_path=None, profiles_dir=None):
     """Check every registered project is still chattable.
 
@@ -2045,6 +2441,11 @@ def run_all(**overrides):
         check_api_routes,
         check_chat_roundtrip,
         check_plugin_payload,
+        # GAP-E-2: deployed-vs-released drift (the check_plugin_payload
+        # self-diff hole) — a different check, not check_plugin_payload with
+        # a different argument: its reference tree is the RELEASED keg
+        # payload, never this file's own tree.
+        check_deployed_vs_released,
         check_project_chat_ready,
         # GAP-F-6 (audit F): the autodown idle interlocks — clear / holding /
         # UNEVALUABLE (the #135 fail-safe-to-up that silently keeps the
