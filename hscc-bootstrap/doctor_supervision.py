@@ -81,12 +81,15 @@ def _pid_file_path(hscc_dir=None) -> str:
     Same rule as ``orch_waker.doctor_check(hscc_dir=...)``: a sandboxed
     bootstrap keeps HOME real and relocates only HSCC_DIR, so every read must
     resolve under the sandbox or doctor fires verdicts over the OPERATOR's
-    live daemon while looking at the sandbox's absent state. Resolved at CALL
-    time via expanduser so the suite's tmp redirect moves it.
+    live daemon while looking at the sandbox's absent state. The env fallback
+    (never a baked path — test_bootstrap_isolated's static guard) is what
+    makes a direct ``check()`` call in a sandboxed bootstrap read the sandbox
+    too. Resolved at CALL time via expanduser so the suite's tmp redirect
+    moves it.
     """
-    if hscc_dir:
-        return os.path.join(os.path.expanduser(hscc_dir), "daemon.pid")
-    return os.path.expanduser("~/.hscc/daemon.pid")
+    root = (hscc_dir or os.environ.get("HSCC_DIR")
+            or os.path.expanduser("~/.hscc"))
+    return os.path.join(os.path.expanduser(root), "daemon.pid")
 
 
 def read_pid_file_pid(pid_file) -> Optional[int]:
