@@ -3,7 +3,11 @@
 Distinct from ``install_payload`` which handles plugin directories. Scripts live
 in a separate Hermes runtime dir (``~/.hermes/scripts/``) so they can be
 referenced from cron jobs by short name (``hermes cron create ... --script
-hscc_proxy_watchdog.sh``).
+hscc_worker_health.sh``). Note: installing a script here does NOT schedule it —
+and two of these scripts must NOT be scheduled (``hscc_proxy_watchdog.sh``,
+``hscc_nas_watchdog.sh``; the daemon's own proxy/nas streams own that
+supervision — see ``scripts/README.md`` §"Retiring the superseded watchdog cron
+jobs", GAP-B-5).
 
 Only files matching ``hscc_*.sh`` are installed — user-added scripts in the
 runtime dir are preserved. README files in the repo's ``scripts/`` are not
