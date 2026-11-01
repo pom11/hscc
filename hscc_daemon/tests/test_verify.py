@@ -84,6 +84,20 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "model_list: []\nlitellm_settings:\n  drop_params: true\n"
         "router_settings:\n  routing_strategy: simple-shuffle\n")
 
+    # deployed_vs_released (GAP-E-2) — hermetic fake RELEASED payload (a mini
+    # keg): its DEFAULT_PAYLOAD manifest plus a hscc-commands payload identical
+    # to the deployed bytes planted above, so the healthy fixture reports
+    # clean. Without these the check would resolve the operator's real brew
+    # keg and diff it against the real ~/.hermes/plugins — every run_all test
+    # would inherit whatever drift the live deploy happens to carry.
+    keg = tmp_path / "keg"
+    (keg / "hscc-bootstrap").mkdir(parents=True)
+    (keg / "hscc-bootstrap" / "install_payload.py").write_text(
+        "DEFAULT_PAYLOAD = ['hscc-commands']\n")
+    (keg / "VERSION").write_text("9.9.9\n")
+    (keg / "hscc-commands").mkdir()
+    (keg / "hscc-commands" / "__init__.py").write_text(_CANON_PLUGIN)
+
     # declaration_agreement (spec §6, C3) — the hermetic applied state above is
     # NON-uniform with no `declarations` record, so all four legs resolve to
     # "not applicable / no expectation" (ok True) without reading the live
@@ -104,6 +118,13 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "proxy_config": str(proxy_yaml),
         "litellm_config": str(litellm_yaml),
         "balancer_module": str(tmp_path / "sparkrun_balancer.py"),
+        # deployed_vs_released pins (GAP-E-2): deployed side is the plugins
+        # dir every run_all test already plants; released side is the fake
+        # keg above; the preserve manifest points at a deliberately absent
+        # file so no test ever reads a real plugins-backups/preserved.json.
+        "deployed_dir": str(tmp_path / "plugins"),
+        "released_root": str(keg),
+        "preserve_manifest": str(tmp_path / "no-preserved.json"),
     }
 
 
@@ -842,11 +863,12 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        # 13 = the 12 pinned by the dep-bump guard (main's 11 incl.
-        # provider_routing from #36, + proxy_router_settings) +
-        # declaration_agreement from the template-declarations C3 doctor
-        # (spec §6). Union of all check sets, not any one alone.
-        assert len(result["checks"]) == 13
+        # 14 = the 13 union pinned before GAP-E-2 (12 from the dep-bump guard
+        # — main's 11 incl. provider_routing from #36, + proxy_router_settings
+        # — + declaration_agreement from the template-declarations C3 doctor,
+        # spec §6) + deployed_vs_released (GAP-E-2). Update this pin whenever
+        # a check joins run_all's list.
+        assert len(result["checks"]) == 14
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -876,7 +898,7 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 13
+        assert len(result["checks"]) == 14
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -904,7 +926,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 13
+        assert len(result["checks"]) == 14
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
@@ -1492,6 +1514,254 @@ class TestCheckPluginPayload:
         r = check_plugin_payload(repo_root=repo, plugins_dir=inst,
                                  names=["hscc-commands"])
         assert r["ok"] is True
+
+
+    def test_deployed_vs_released_still_fires_where_plugin_payload_self_approves(
+            self, tmp_path):
+        """GAP-E-2 regression: verify run FROM the deployed tree self-approves
+        in check_plugin_payload (its repo side == _repo_root() == the same
+        tree) yet the deployed-vs-released check still names the drift."""
+        from hscc_daemon.verify import check_deployed_vs_released, check_plugin_payload
+        deployed = tmp_path / "plugins"
+        self._tree(deployed, "hscc-commands", {"__init__.py": "OLD\n"})
+        keg = tmp_path / "keg"
+        (keg / "hscc-bootstrap").mkdir(parents=True)
+        (keg / "hscc-bootstrap" / "install_payload.py").write_text(
+            "DEFAULT_PAYLOAD = ['hscc-commands']\n")
+        (keg / "VERSION").write_text("2.15.0\n")
+        self._tree(keg, "hscc-commands", {"__init__.py": "NEW\n"})
+        # The old check, run with repo_root == deployed tree: self-diff ⇒ green.
+        self_approves = check_plugin_payload(
+            repo_root=str(deployed), plugins_dir=str(deployed),
+            names=["hscc-commands"])
+        assert self_approves["ok"] is True  # documents the self-approval hole
+        # The new check compares against the RELEASED payload ⇒ names the file.
+        r = check_deployed_vs_released(deployed_dir=str(deployed),
+                                       released_root=str(keg))
+        assert r["ok"] is False
+        assert "hscc-commands/__init__.py" in r["detail"]
+        assert "2.15.0" in r["detail"]
+
+
+class TestCheckDeployedVsReleased:
+    """GAP-E-2 (audit E t_f7d94a76): deployed-vs-RELEASED drift detector.
+
+    The released side is a fake keg tree (tmp_path) whose
+    hscc-bootstrap/install_payload.py declares DEFAULT_PAYLOAD — exactly the
+    shape of <Cellar>/hscc/<ver>/libexec/hscc. Nothing here touches the real
+    ~/.hermes tree or the real brew keg: deployed_dir/released_root/
+    preserve_manifest are pinned per-test, and the acceptance test redirects
+    HOME so the check's default paths resolve under tmp.
+    """
+
+    def _keg(self, tmp_path, payload=("hscc-commands",), files=None,
+             version="2.15.0"):
+        keg = tmp_path / "keg"
+        (keg / "hscc-bootstrap").mkdir(parents=True)
+        (keg / "hscc-bootstrap" / "install_payload.py").write_text(
+            f"DEFAULT_PAYLOAD = {list(payload)!r}\n")
+        (keg / "VERSION").write_text(version + "\n")
+        for rel, content in (files or {}).items():
+            p = keg / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        return str(keg)
+
+    def _deployed(self, tmp_path, files):
+        d = tmp_path / "plugins"
+        for rel, content in files.items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        return str(d)
+
+    def test_matching_tree_is_clean(self, tmp_path):
+        from hscc_daemon.verify import check_deployed_vs_released
+        body = 'register("workers-up")\n'
+        keg = self._keg(tmp_path, files={"hscc-commands/__init__.py": body})
+        dep = self._deployed(tmp_path, {"hscc-commands/__init__.py": body})
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is True
+        assert r["name"] == "deployed_vs_released"
+
+    def test_drifted_file_is_named(self, tmp_path):
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path,
+                        files={"hscc-commands/__init__.py": "NEW\n"})
+        dep = self._deployed(tmp_path, {"hscc-commands/__init__.py": "OLD\n"})
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is False
+        assert "hscc-commands/__init__.py" in r["detail"]
+        assert "2.15.0" in r["detail"]
+        assert r["next_step"]
+
+    def test_missing_file_is_named(self, tmp_path):
+        """The audit-E shape: released payload ships a file the deployed tree
+        lacks (orch_waker.py vs the 2.14.0 deploy) — must be named, not waved."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=("hscc_daemon",), files={
+            "hscc_daemon/__init__.py": "x = 1\n",
+            "hscc_daemon/orch_waker.py": "def wake():\n    pass\n"})
+        dep = self._deployed(tmp_path, {"hscc_daemon/__init__.py": "x = 1\n"})
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is False
+        assert "hscc_daemon/orch_waker.py" in r["detail"]
+
+    def test_extra_file_is_named(self, tmp_path):
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, files={"hscc-commands/__init__.py": "A\n"})
+        dep = self._deployed(tmp_path, {
+            "hscc-commands/__init__.py": "A\n",
+            "hscc-commands/operator_hack.py": "hack\n"})
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is False
+        assert "hscc-commands/operator_hack.py" in r["detail"]
+        assert "extra" in r["detail"]
+
+    def test_preserved_file_reports_known_preserved_not_fail(self, tmp_path):
+        """GAP-E-1 pin ⇒ reported as KNOWN-PRESERVED and ok stays True."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=("hscc_daemon",),
+                        files={"hscc_daemon/kanban_cli.py": "RELEASED\n"})
+        dep = self._deployed(tmp_path,
+                             {"hscc_daemon/kanban_cli.py": "OPERATOR\n"})
+        manifest = tmp_path / "preserved.json"
+        manifest.write_text(json.dumps({"preserved": [
+            {"plugin": "hscc_daemon", "path": "kanban_cli.py"}]}))
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg,
+                                       preserve_manifest=str(manifest))
+        assert r["ok"] is True
+        assert "known-preserved" in r["detail"]
+        assert "hscc_daemon/kanban_cli.py" in r["detail"]
+        assert "differs from released payload" not in r["detail"]
+
+    def test_preserved_manifest_default_location(self, tmp_path):
+        """Default manifest path is <plugins_dir>/../plugins-backups/preserved.json
+        — the dir install_payload (GAP-E-1) already writes to."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=("hscc_daemon",),
+                        files={"hscc_daemon/kanban_cli.py": "RELEASED\n"})
+        dep = self._deployed(tmp_path,
+                             {"hscc_daemon/kanban_cli.py": "OPERATOR\n"})
+        backups = tmp_path / "plugins-backups"
+        backups.mkdir()
+        (backups / "preserved.json").write_text(
+            json.dumps(["hscc_daemon/kanban_cli.py"]))  # bare string form
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is True
+        assert "known-preserved" in r["detail"]
+
+    def test_pin_with_hash_drifted_since_pin_still_preserved_but_annotated(
+            self, tmp_path):
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=("hscc_daemon",),
+                        files={"hscc_daemon/k.py": "RELEASED\n"})
+        dep = self._deployed(tmp_path, {"hscc_daemon/k.py": "OPERATOR2\n"})
+        manifest = tmp_path / "p.json"
+        manifest.write_text(json.dumps({"preserved": [
+            {"plugin": "hscc_daemon", "path": "k.py",
+             "sha256": "0" * 64}]}))
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg,
+                                       preserve_manifest=str(manifest))
+        assert r["ok"] is True
+        assert "deployed changed since pin" in r["detail"]
+
+    def test_no_release_installed_is_unverified_not_fail(self, tmp_path,
+                                                         monkeypatch):
+        """Dev checkout without a brew keg ⇒ ok=None (UNVERIFIED), never a
+        false failure — verify's contract for not-evaluable."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        monkeypatch.delenv("HSCC_RELEASED_PAYLOAD", raising=False)
+        dep = self._deployed(tmp_path, {"hscc-commands/__init__.py": "A\n"})
+        r = check_deployed_vs_released(deployed_dir=dep,
+                                       released_root=str(tmp_path / "nope"))
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+    def test_env_override_authoritative(self, tmp_path, monkeypatch):
+        """$HSCC_RELEASED_PAYLOAD points the check at any released payload."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        body = "SAME\n"
+        keg = self._keg(tmp_path, files={"hscc-commands/__init__.py": body})
+        dep = self._deployed(tmp_path, {"hscc-commands/__init__.py": body})
+        monkeypatch.setenv("HSCC_RELEASED_PAYLOAD", keg)
+        r = check_deployed_vs_released(deployed_dir=dep)
+        assert r["ok"] is True
+
+    def test_deployed_side_manifest_is_scoped(self, tmp_path):
+        """Path scope comes from the DEPLOYED tree's manifest — the deployed
+        install_payload.py is what actually deployed these files, so whatever
+        it lists is what gets diffed (the audit-E split-tree shape)."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=["hscc-commands"],
+                        files={"hscc-commands/__init__.py": "A\n"})
+        dep = self._deployed(tmp_path, {
+            "hscc-commands/__init__.py": "A\n",
+            # NOT in the keg manifest, but IS in the deployed manifest below:
+            "hscc_daemon/extra.py": "deployed-only\n"})
+        boot = tmp_path / "plugins" / "hscc-bootstrap"
+        boot.mkdir(parents=True)
+        (boot / "install_payload.py").write_text(
+            "DEFAULT_PAYLOAD = ['hscc-commands', 'hscc_daemon']\n")
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        # hscc_daemon/extra.py is now in scope ⇒ named as extra drift.
+        assert r["ok"] is False
+        assert "hscc_daemon/extra.py" in r["detail"]
+
+    def test_acceptance_under_redirected_home(self, tmp_path, monkeypatch):
+        """Card acceptance: under a REDIRECTED HOME, a deployed file that has
+        drifted from the payload is NAMED by the detector using only the
+        check's own defaults (no explicit deployed_dir), and a matching tree
+        is clean. The fake released payload is injected via the env override
+        — never the real keg."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        fake_home = tmp_path / "home"
+        plugins = fake_home / ".hermes" / "plugins"
+        body = "released bytes\n"
+        (plugins / "hscc-commands").mkdir(parents=True)
+        (plugins / "hscc-commands" / "__init__.py").write_text(body)
+        (plugins / "hscc-bootstrap").mkdir()
+        (plugins / "hscc-bootstrap" / "install_payload.py").write_text(
+            "DEFAULT_PAYLOAD = ['hscc-commands']\n")
+        keg = self._keg(tmp_path, files={"hscc-commands/__init__.py": body})
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("HSCC_RELEASED_PAYLOAD", keg)
+        clean = check_deployed_vs_released()
+        assert clean["ok"] is True
+        # Operator edits one deployed file ⇒ the check NAMES it.
+        (plugins / "hscc-commands" / "__init__.py").write_text("edited!\n")
+        r = check_deployed_vs_released()
+        assert r["ok"] is False
+        assert "hscc-commands/__init__.py" in r["detail"]
+
+    def test_single_file_payload_entry_drift(self, tmp_path):
+        """VERSION/README-style single-file payload entries are compared too."""
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, payload=["VERSION"],
+                        files={"VERSION": "2.15.0\n"})
+        dep = self._deployed(tmp_path, {"VERSION": "2.14.0\n"})
+        r = check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        assert r["ok"] is False
+        assert "VERSION" in r["detail"]
+
+    def test_read_only_never_writes_deployed_tree(self, tmp_path):
+        """The check must not modify the deployed tree (card: read-only)."""
+        import hashlib
+        from hscc_daemon.verify import check_deployed_vs_released
+        keg = self._keg(tmp_path, files={"hscc-commands/__init__.py": "N\n"})
+        dep = self._deployed(tmp_path, {"hscc-commands/__init__.py": "O\n"})
+        before = sorted(
+            (os.path.relpath(os.path.join(dp, f), dep),
+             hashlib.sha256(open(os.path.join(dp, f), 'rb').read()).hexdigest())
+            for dp, _d, fs in os.walk(dep) for f in fs)
+        check_deployed_vs_released(deployed_dir=dep, released_root=keg)
+        after = sorted(
+            (os.path.relpath(os.path.join(dp, f), dep),
+             hashlib.sha256(open(os.path.join(dp, f), 'rb').read()).hexdigest())
+            for dp, _d, fs in os.walk(dep) for f in fs)
+        assert before == after
+        # ...and no manifest/backups were created anywhere under tmp root.
+        assert not (tmp_path / "plugins-backups").exists()
 
 
 def _registry_yaml(projects):
