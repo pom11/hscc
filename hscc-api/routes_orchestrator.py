@@ -469,6 +469,20 @@ def _ensure_repo_root_on_path():
     return root
 
 
+def _busy_warn(reason):
+    """Log one WARN line naming why the busy signal degraded (never raises).
+
+    A fail-safe ``busy`` is correct but not free: the operator deserves to know
+    it came from an unreadable board rather than from real running work. Logging
+    must never break the fail-safe, so the logger call itself is guarded.
+    """
+    try:
+        logging.getLogger("hscc-api").warning(
+            "orchestrator busy signal degraded to BUSY: %s", reason)
+    except Exception:  # pragma: no cover — logging can never own the path
+        pass
+
+
 def _busy_kanban_db():
     """The Hermes kanban lib, through the canonical loader — or None.
 
@@ -532,17 +546,20 @@ def _backing_busy_tasks(profile: str) -> int:
     the payload is not the shape ``collect()`` documents, or ``errors`` is
     non-empty (one per reported board, so the notice's count stays honest).
     Behaving as idle on an unresolvable signal is a step back toward the silent
-    timeout.
+    timeout. Each such degradation is logged WARN — the operator sees WHY the
+    notice said busy, instead of a bare count that hides an unreadable board.
     """
     try:
         kanban_db = _busy_kanban_db()
-    except Exception:
-        return 1   # cannot verify idleness — fail safe toward busy
+    except Exception as e:  # noqa: BLE001 — fail-safe path, reported not raised
+        _busy_warn(f"board enumeration unreachable: {e!r}")
+        return 1
     if kanban_db is None:
         # The canonical loader already failed to reach hermes_cli.kanban_db.
         # Handing None to collect() would only make it retry the same import and
         # report one generic error, so the reason stays where it was recorded
         # (``hscc autodown status``) and we fail safe here.
+        _busy_warn("kanban lib unreachable (see 'hscc autodown status')")
         return 1
     box = {}
 
@@ -559,8 +576,10 @@ def _backing_busy_tasks(profile: str) -> int:
     worker.start()
     worker.join(_BUSY_COLLECT_TIMEOUT_S)
     if worker.is_alive():
-        return 1   # deadline exceeded — cannot verify idleness
+        _busy_warn(f"board scan exceeded {_BUSY_COLLECT_TIMEOUT_S}s deadline")
+        return 1
     if "error" in box:
+        _busy_warn(f"board scan failed: {box['error']!r}")
         return 1
     data = box.get("data")
     if (not isinstance(data, dict)
@@ -568,10 +587,17 @@ def _backing_busy_tasks(profile: str) -> int:
             or not isinstance(data.get("errors"), list)):
         # Not the payload collect() documents (both lists always present): a
         # missing errors key could hide a skipped board, so it proves nothing.
+        _busy_warn("board scan returned an unexpected payload")
         return 1
+    errors = data["errors"]
     boards = {row.get("board") or "?" for row in data["running"]
               if isinstance(row, dict) and row.get("worker") == profile}
-    return len(boards) + len(data["errors"])
+    if errors:
+        # Each unreadable board still counts as busy (+1 each); the count is
+        # real here, so this is a WARN about the boards we could not read.
+        _busy_warn(f"{len(errors)} board(s) unreadable: "
+                   + "; ".join(str(e)[:160] for e in errors[:3]))
+    return len(boards) + len(errors)
 
 
 def _busy_notice(profile: str, count: int) -> str:

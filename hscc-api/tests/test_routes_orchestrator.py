@@ -1319,6 +1319,37 @@ def test_backing_busy_tasks_deadline_failsafe(monkeypatch):
     release.set()
 
 
+def test_backing_busy_tasks_degradation_is_logged(monkeypatch, caplog):
+    """A fail-safe busy is not silent — the WARN names WHY it degraded.
+
+    Without this, "busy (1 kanban task)" caused by a board nobody could read is
+    indistinguishable in the log from a real running card, which is exactly the
+    kind of unexplainable state the Bug 1 notice exists to remove.
+    """
+    kb = busy_tasks_fakes.FakeKanbanDb({"hscc": lambda c: None},
+                                       broken={"lockedboard"})
+    _busy_fakes(monkeypatch, kb)
+    with caplog.at_level("WARNING", logger="hscc-api"):
+        assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+    assert any("busy signal degraded" in r.getMessage()
+               and "lockedboard" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+    # The WARN must never own the path: a logger that cannot log still yields
+    # the fail-safe answer (the guard is INSIDE _busy_warn, so break the logger).
+    class _ExplodingLogger:
+        def warning(self, *a, **k):
+            raise RuntimeError("logging is down")
+
+    class _FakeLoggingModule:
+        @staticmethod
+        def getLogger(name):
+            return _ExplodingLogger()
+
+    monkeypatch.setattr(routes_orchestrator, "logging", _FakeLoggingModule)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+
+
 def test_backing_busy_tasks_has_no_second_board_query(monkeypatch):
     """Source guard: this module must not read a board DB itself (GAP-C-5).
 
