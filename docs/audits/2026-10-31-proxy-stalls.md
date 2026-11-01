@@ -582,7 +582,8 @@ stronger, and it changes what the file can be asked:
 
 Access lines carry the client's ephemeral source port, which identifies the
 HTTP/1.1 connection. §2 used only path-gap analysis. Re-running the capture
-through `analyze_access.py` + `shape_split.py` (in the card workspace):
+through the two scripts that ship beside this doc — `docs/audits/t_c95a2137_analyze_access.py`
+and `docs/audits/t_c95a2137_shape_split.py` (read-only over the capture, report to stdout):
 
 | Path | lines | distinct client ports | max reqs/conn | conns with >1 |
 |---|---|---|---|---|
@@ -836,4 +837,5 @@ FIX-1/FIX-2-adjacent) and must not be fixed by one card.
 per-connection analysis of `litellm.log` (17,376 access lines, 8513 client
 ports); the port→PID correlation of the four `tcp_states.txt` holders; and a
 live 0.2 s × 400 socket sample identifying every long-lived :4000 holder as a
-Hermes process. Analysis scripts: `analyze_access.py`, `shape_split.py`.*
+Hermes process. Analysis scripts: `docs/audits/t_c95a2137_analyze_access.py`,
+`docs/audits/t_c95a2137_shape_split.py`.*
