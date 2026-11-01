@@ -1,3 +1,4 @@
+import os
 import pathlib
 import re
 
@@ -504,4 +505,279 @@ def test_test_dir_census_helper_sees_every_registered_leg():
         "exactly what test_run_tests_sh_covers_every_tested_dir_not_just_packages "
         "fails on; this meta-check must not be where it first surfaces"
     )
+
+
+# ── GAP-E-1: operator-drift guard (audit E t_f7d94a76) ───────────────────────
+# The install used to move the deployed tree to plugins-backups and copytree
+# over it with _EXCLUDE as the ONLY filter: an operator patch inside
+# ~/.hermes/plugins/ was silently destroyed at bootstrap (audit E flagged it
+# for hscc.py / kanban_cli.py / kanban_blocked.py; the same unprotected path
+# ran into every profiles/<p>/plugins via install_payload_profiles). These
+# tests pin the generalised preserve-to-backup + --force contract.
+
+def _make_drift_repo(tmp_path):
+    """repo + deployed tree where ONE deployed file was operator-patched and
+    ONE deployed file exists only on the deployed side."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    # operator patch to a shipped file
+    (plugins / "hscc-cluster" / "__init__.py").write_text("OPERATOR PATCH\n")
+    # operator-only file (payload never ships it)
+    (plugins / "hscc-cluster" / "local_hack.py").write_text("mine\n")
+    return repo, plugins
+
+
+def test_drifted_deployed_file_is_preserved_to_backup_and_flagged(tmp_path):
+    """Acceptance: a drifted deployed file is preserved-to-backup + flagged."""
+    repo, plugins = _make_drift_repo(tmp_path)
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
+
+    # flagged in the summary, per file, with the backup location
+    assert res["drift_detected"] is True
+    paths = {d["path"] for d in res["drifted"]}
+    assert paths == {"hscc-cluster/__init__.py", "hscc-cluster/local_hack.py"}
+    assert all(d["preserved"] for d in res["drifted"])
+    assert all(d["backup"] == "hscc-cluster.drifted.bak-B" for d in res["drifted"])
+
+    # the operator's version survives verbatim in the drifted collection
+    bak_dir = tmp_path / "plugins-backups"
+    assert (bak_dir / "hscc-cluster.drifted.bak-B" / "__init__.py").read_text() \
+        == "OPERATOR PATCH\n"
+    assert (bak_dir / "hscc-cluster.drifted.bak-B" / "local_hack.py").read_text() \
+        == "mine\n"
+    # ...and the whole-tree backup still exists untouched (additive guard)
+    assert (bak_dir / "hscc-cluster.bak-B" / "__init__.py").read_text() \
+        == "OPERATOR PATCH\n"
+    # the payload wins the LIVE path: never auto-merge
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+    assert not (plugins / "hscc-cluster" / "local_hack.py").exists()
+
+
+def test_force_overwrites_drifted_file_without_preserving(tmp_path):
+    """Acceptance: --force (force=True) overwrites and skips the ceremony."""
+    repo, plugins = _make_drift_repo(tmp_path)
+    res = install_payload.install_payload(
+        repo, plugins, ["hscc-cluster"], ts="B", force=True)
+
+    assert res["drift_detected"] is False
+    assert res["drifted"] == []
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+    bak_dir = tmp_path / "plugins-backups"
+    # no drifted collection is written at all; whole-tree backup still runs
+    assert not list(bak_dir.glob("*.drifted.*"))
+    assert (bak_dir / "hscc-cluster.bak-B").is_dir()
+
+
+def test_clean_deployed_tree_overwrites_silently(tmp_path):
+    """Acceptance: a clean (identical) deployed tree overwrites silently —
+    the normal reinstall path must not cry drift. This is also the exact
+    scenario the idempotence guard in test_reinstalls_are_retain_limited...
+    relies on: five identical reinstalls, zero drift flags."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
+
+    assert res["drift_detected"] is False
+    assert res["drifted"] == []
+    bak_dir = tmp_path / "plugins-backups"
+    assert not list(bak_dir.glob("hscc-cluster.drifted.*"))
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_drifted_standalone_file_entry_is_preserved(tmp_path):
+    """A payload entry that is a single drifted FILE (not a dir) preserves the
+    whole old file (the shape-compare branch of _detect_entry_drift)."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["README.md"], ts="A")
+    (plugins / "README.md").write_text("operator edited the readme\n")
+
+    res = install_payload.install_payload(repo, plugins, ["README.md"], ts="B")
+    assert [d["path"] for d in res["drifted"]] == ["README.md"]
+    assert (plugins / "README.md").read_text() == "# hscc\n"
+    bak = tmp_path / "plugins-backups" / "README.md.drifted.bak-B" / "README.md"
+    assert bak.read_text() == "operator edited the readme\n"
+
+
+def test_dir_replacing_a_file_and_symlink_are_whole_entry_drift(tmp_path):
+    """Shape changes (file -> dir, symlink in the way) destroy the whole old
+    entry: flagged as one drift record for the entry, preserved wholesale."""
+    repo = tmp_path / "repo"
+    src = repo / "thing"
+    src.mkdir(parents=True)
+    (src / "a.py").write_text("payload\n")
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+
+    # deployed `thing` is a FILE, payload ships a DIR
+    (plugins / "thing").write_text("operator single-file hack\n")
+    res = install_payload.install_payload(repo, plugins, ["thing"], ts="B")
+    assert [d["path"] for d in res["drifted"]] == ["thing"]
+    assert (plugins / "thing" / "a.py").read_text() == "payload\n"
+    preserved = (tmp_path / "plugins-backups" / "thing.drifted.bak-B" / "thing")
+    assert preserved.read_text() == "operator single-file hack\n"
+
+
+def test_drift_guard_never_ships_excluded_dirs_as_phantom_drift(tmp_path):
+    """__pycache__/tests/pyc in the DEPLOYED tree are not operator work —
+    the guard must not flag them (mirrors _ignore exactly)."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    # runtime noise appears AFTER the first install
+    (plugins / "hscc-cluster" / "__pycache__").mkdir()
+    (plugins / "hscc-cluster" / "__pycache__" / "x.pyc").write_text("bc")
+    (plugins / "hscc-cluster" / "stale.pyc").write_text("bc")
+
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
+    assert res["drift_detected"] is False
+    assert res["drifted"] == []
+
+
+def test_drift_guard_applies_inside_profile_plugin_dirs(tmp_path):
+    """GAP-E-4 second half: install_payload_profiles must guard EVERY
+    profiles/<p>/plugins, and profile drift must surface on the primary
+    summary's drift_detected so a caller reading only that key still sees it."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    plugins = root / "plugins"
+    prof = root / "profiles" / "hscc-orch" / "plugins"
+    prof.mkdir(parents=True)
+
+    # first fan-out installs everywhere
+    install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A")
+    # operator patches ONLY the profile copy
+    (prof / "hscc-cluster" / "__init__.py").write_text("profile-local patch\n")
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="B")
+
+    assert res["drift_detected"] is True          # surfaces on the primary
+    assert res["drifted"] == []                   # root tree was clean
+    prof_summaries = [p for p in res["profiles"] if p.get("drifted")]
+    assert len(prof_summaries) == 1
+    assert prof_summaries[0]["drifted"][0]["path"] == "hscc-cluster/__init__.py"
+    # preserved where it lived — the profile's OWN plugins-backups sibling
+    prof_bak = prof.parent / "plugins-backups" / "hscc-cluster.drifted.bak-B" / "__init__.py"
+    assert prof_bak.read_text() == "profile-local patch\n"
+    # payload wins the live profile path too (no merge)
+    assert (prof / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_force_flag_reaches_profile_dirs(tmp_path):
+    """--force must clear the guard for the fan-out destinations as well,
+    not just the root plugins dir (same opt-in, every destination)."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    plugins = root / "plugins"
+    prof = root / "profiles" / "hscc-orch" / "plugins"
+    prof.mkdir(parents=True)
+    install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A")
+    (prof / "hscc-cluster" / "__init__.py").write_text("profile-local patch\n")
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="B", force=True)
+    assert res["drift_detected"] is False
+    assert all(not p.get("drifted") for p in res["profiles"])
+    assert not (prof.parent / "plugins-backups").exists() or \
+        not list((prof.parent / "plugins-backups").glob("*.drifted.*"))
+
+
+def test_no_backup_plus_drift_flags_destruction_without_lying_preserved(tmp_path):
+    """backup=False destroys old files with NO backup anywhere. The guard
+    still detects and still flags — but must honestly report preserved=False,
+    never claim a preservation it did not perform."""
+    repo, plugins = _make_drift_repo(tmp_path)
+    res = install_payload.install_payload(
+        repo, plugins, ["hscc-cluster"], backup=False, ts="B")
+
+    assert res["drift_detected"] is True
+    assert {d["path"] for d in res["drifted"]} == {
+        "hscc-cluster/__init__.py", "hscc-cluster/local_hack.py"}
+    assert all(d["preserved"] is False and d["backup"] is None
+               for d in res["drifted"])
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_main_cli_flags_drift_with_rc3_and_force_clears_it(tmp_path):
+    """The __main__ contract bootstrap.sh consumes: drift => rc 3 + JSON on
+    stdout; --force => rc 0, no drifted records. Runs the real CLI module
+    against a tmp repo/plugins pair (redirected paths only; the live
+    ~/.hermes tree is never touched)."""
+    import json
+    import subprocess
+    import sys
+
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    script = pathlib.Path(install_payload.__file__)
+    env = {**os.environ, "REPO_ROOT": str(repo), "PLUGINS": str(plugins)}
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE"):
+        env.pop(k, None)
+
+    run = lambda *flags: subprocess.run(
+        [sys.executable, str(script), *flags],
+        capture_output=True, text=True, env=env, timeout=120)
+
+    r1 = run()                       # fresh install: clean
+    assert r1.returncode == 0, r1.stderr[-800:]
+    (plugins / "hscc-cluster" / "__init__.py").write_text("OPERATOR PATCH\n")
+
+    r2 = run()                       # drift: rc 3 + flagged JSON
+    assert r2.returncode == 3, f"expected rc 3, got {r2.returncode}: {r2.stderr[-800:]}"
+    payload_res = json.loads(r2.stdout)
+    assert payload_res["drift_detected"] is True
+    assert any(d["path"] == "hscc-cluster/__init__.py" for d in payload_res["drifted"])
+
+    r3 = run("--force")              # --force: rc 0, silent overwrite
+    assert r3.returncode == 0, f"--force failed: {r3.stderr[-800:]}"
+    forced = json.loads(r3.stdout)
+    assert forced["drift_detected"] is False
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_unreadable_deployed_file_counts_as_drift(tmp_path, monkeypatch):
+    """Fail-safe: a deployed file we cannot hash is preserved+flagged, not
+    silently overwritten (we must not destroy what we could not verify)."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+
+    real_sha = install_payload._sha_file
+    deployed_init = (plugins / "hscc-cluster" / "__init__.py").resolve()
+
+    def flaky_sha(path):
+        if pathlib.Path(path).resolve() == deployed_init:
+            return None  # simulate unreadable deployed file
+        return real_sha(path)
+
+    monkeypatch.setattr(install_payload, "_sha_file", flaky_sha)
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
+    assert "hscc-cluster/__init__.py" in {d["path"] for d in res["drifted"]}
+
+
+def test_drifted_family_keeps_its_own_retain_window(tmp_path):
+    """The drifted collection is its OWN backup family (<label>.drifted), so
+    persistent drift cannot eat the whole-tree backup's keep-N window — both
+    piles stay self-limiting on their own stamps (t_9462260b discipline)."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    stamps = [f"2026010{i}-000000" for i in range(1, 7)]
+    for ts in stamps:
+        # persistent drift: mutate after every install so every run flags
+        install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts=ts)
+        (plugins / "hscc-cluster" / "__init__.py").write_text(f"drift {ts}\n")
+
+    bak_dir = tmp_path / "plugins-backups"
+    whole = sorted(p.name for p in bak_dir.glob("hscc-cluster.bak-*")
+                   if ".drifted." not in p.name)
+    drifted = sorted(p.name for p in bak_dir.glob("hscc-cluster.drifted.bak-*"))
+    # keep-N (default 3) on EACH family independently, newest stamps survive
+    assert len(whole) == 3 and len(drifted) == 3
+    assert whole[-1] == "hscc-cluster.bak-20260106-000000"
+    assert drifted[-1] == "hscc-cluster.drifted.bak-20260106-000000"
 
