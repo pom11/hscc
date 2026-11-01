@@ -11,15 +11,20 @@ Both scripts are still legitimate as one-shot manual probes. What is retired is
 their *scheduling* — so what this test pins is the scheduling surface, not the
 scripts' existence:
 
-1. no doc or script header anywhere in the repo recommends registering either
-   watchdog on a cron, and
-2. the two scripts still exist and still work as manual probes, and
-3. the README carries the exact retire commands for the two live cron jobs.
+1. no tracked file contains a line that registers a cron job AND names a
+   retired watchdog (structural: rewording the command does not evade it),
+2. neither script header carries a scheduling recipe at all,
+3. both headers name the actual owner by interval key and check function,
+4. the two probes still exist and stay runnable as manual tools, and
+5. the README carries a retire command per retired job and says which store
+   they live in.
 
 If someone re-adds a ``cron create`` line for either job, this fails — that is
 the regression GAP-B-5 is about.
 """
 
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,14 +38,10 @@ SCRIPTS_README = SCRIPTS / "README.md"
 #: The two Hermes cron job names that are retired (audit B, GAP-B-5).
 RETIRED_JOBS = ("hscc-proxy-watchdog", "hscc-nas-watchdog")
 
-#: What a "schedule me" recommendation looks like, in prose or in a shell line.
-SCHEDULING_PATTERNS = (
-    "cron create 'every 5m'   --name 'hscc-proxy-watchdog'",
-    "cron create 'every 4h'   --name 'hscc-nas-watchdog'",
-    "cron create '5m' --no-agent --script hscc_proxy_watchdog.sh",
-    "cron create '4h' --no-agent --script hscc_nas_watchdog.sh",
-    "Run via: hermes cron create",
-)
+#: A line that both registers a cron job and names a retired watchdog is a
+#: recommendation, whatever shape it takes. Literal command strings are too
+#: brittle (reword the quoting and they pass), so the check is structural.
+CREATE_LINE = re.compile(r"cron\s+(create|add)\b")
 
 
 def _read(path: Path) -> str:
@@ -55,15 +56,49 @@ def test_scripts_still_exist_as_manual_probes():
         assert path.read_text(encoding="utf-8").startswith("#!/bin/bash")
 
 
-@pytest.mark.parametrize("path", [PROXY_SCRIPT, NAS_SCRIPT, SCRIPTS_README])
-def test_no_recommended_cron_schedule_for_retired_watchdogs(path):
+@pytest.mark.parametrize("path", [PROXY_SCRIPT, NAS_SCRIPT])
+def test_script_headers_carry_no_scheduling_recipe(path):
+    """A script header is a recipe — anything shaped like `cron create ...`
+    there is advice a reader runs, so headers get the literal-string check and
+    the repo-wide structural check both."""
     text = _read(path)
-    for pattern in SCHEDULING_PATTERNS:
-        assert pattern not in text, (
-            f"{path.relative_to(REPO_ROOT)} recommends scheduling a retired "
-            f"watchdog ({pattern!r}). The daemon owns this supervision — see "
-            f"scripts/README.md 'Retiring the superseded watchdog cron jobs'."
+    for job in RETIRED_JOBS:
+        assert f"--name '{job}'" not in text, (
+            f"{path.name} still carries a create line naming {job}"
         )
+    for forbidden in ("Run via: hermes cron create", "cron create", "cron add"):
+        assert forbidden not in text, f"{path.name} recommends cron scheduling: {forbidden!r}"
+
+
+def test_no_tracked_file_registers_a_retired_watchdog():
+    """Repo-wide structural sweep over TRACKED files: no line may BOTH register
+    a cron job (`cron create|add`) and name a retired watchdog. Literal-string
+    checks pass if the command is merely reworded, so this checks shape instead
+    of spelling — it is what stops the schedule creeping back in another form.
+
+    The retire section in scripts/README.md passes because its mentions and its
+    `cron create` lines are disjoint: it names the retired jobs in prose and
+    commands that REMOVE them, and its two remaining create lines name only the
+    jobs that stay scheduled."""
+    files = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    offenders = []
+    for rel in files:
+        path = REPO_ROOT / rel
+        if not path.is_file():          # deleted-in-worktree or symlink oddity
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            if CREATE_LINE.search(line) and any(j in line for j in RETIRED_JOBS):
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:120]}")
+    assert not offenders, (
+        "these lines would re-register a retired watchdog:\n" + "\n".join(offenders)
+    )
 
 
 def test_proxy_header_states_daemon_owns_supervision():
