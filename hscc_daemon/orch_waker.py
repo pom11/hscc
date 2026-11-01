@@ -132,6 +132,82 @@ def load_state(state_path=None) -> dict:
     return st
 
 
+def _stream_state_path() -> str:
+    """The daemon stream-state file this stream writes its stamp into.
+
+    Read through ``state.STATE_DIR`` AT CALL TIME (not the import-time value)
+    so the suite's per-test redirect is honoured, exactly like the writers.
+    """
+    from . import state as _state
+    return os.path.join(_state.STATE_DIR, f"{STREAM_NAME}.json")
+
+
+def _owned_state_keys(state_path=None) -> dict:
+    """The waker's OWN keys ({last,pending,sent}) currently on disk.
+
+    ``{}`` when the file is absent, unreadable or not an object — the stamp
+    then lands alone, which is what it would have been anyway.
+    """
+    try:
+        with open(_resolve(state_path or DEFAULT_STATE_PATH)) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: doc[k] for k in _STATE_KEYS if isinstance(doc.get(k), dict)}
+
+
+def stamp_entry(state_path=None, entry=None) -> dict:
+    """The document the stream stamp writes: the stamp OVER the scan state.
+
+    THE COLLISION (t_fa9a2faf). ``DEFAULT_STATE_PATH`` and the daemon's stream
+    file for ``STREAM_NAME`` are the SAME path — ``~/.hscc/state/orch_waker.json``
+    — and :func:`hscc_daemon.state.write_state` writes the whole document, so a
+    bare ``write_state(STREAM_NAME, entry)`` erased the scan state's
+    ``last``/``pending``/``sent`` every tick. Consequence: every board
+    re-first-sighted (and tail-started) on every tick, batches never aged into
+    a nudge, and the stream + doctor still read healthy — a silently inert
+    waker.
+
+    So the stamp is MERGED, not dropped in: this returns the scan-state keys
+    read from the file plus the stamp fields on top. The reverse half is
+    already free — :func:`load_state` ignores unknown top-level keys and
+    :func:`save_state` writes back the dict it loaded, so the stamp's
+    ``last_tick``/``ok``/``message`` survive the scan write untouched. One
+    document, both readers, and the stopgap takeover file
+    (``state/orch_waker.json``) stays the hand-off format W1 promised.
+
+    Only the three scan keys are carried forward, never a previous stamp's
+    fields: a ``disabled``/``poll_gate`` tick must not keep advertising the
+    ``nudged``/``decisions`` counters of the last real scan.
+
+    The read-modify-write is racey by construction (two writers, last one
+    wins per key set), and that is acceptable here: this stream's thread is
+    the ONLY writer of the stamp keys and the only writer of the scan keys
+    (through :func:`save_state`), and they are the same thread — so it cannot
+    race itself. An external writer (a still-running stopgap) can interleave;
+    the loss is bounded to keys that process owns and is strictly smaller than
+    what the pre-fix clobber destroyed.
+
+    When the two paths do NOT resolve to the same file there is nothing to
+    merge (merging would only copy scan state into a second file), so the
+    stamp goes out alone.
+    """
+    entry = dict(entry or {})
+    stream_path = _stream_state_path()
+    own_path = _resolve(state_path or DEFAULT_STATE_PATH)
+    try:
+        same_file = os.path.realpath(stream_path) == os.path.realpath(own_path)
+    except OSError:  # pragma: no cover — realpath on a valid path
+        same_file = False
+    if not same_file:
+        return entry
+    merged = _owned_state_keys(own_path)
+    merged.update(entry)
+    return merged
+
+
 def save_state(st: dict, state_path=None) -> None:
     """tmp + os.replace atomic write of the state file (stopgap mechanism)."""
     path = _resolve(state_path or DEFAULT_STATE_PATH)
@@ -860,8 +936,14 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
         # The stamp is what keeps the stream non-stale; write_state adds its
         # own ISO `timestamp` (what verify parses), `last_tick` is the numeric
         # wall-clock this feature's status/doctor read.
+        #
+        # It goes through `stamp_entry` because this stream's stamp file and the
+        # waker's own scan-state file are the SAME path (t_fa9a2faf): a bare
+        # write_state would erase {last,pending,sent} and make every board
+        # re-tail-start forever — see that helper's docstring for the full
+        # collision and why merging is the right half of the fix.
         try:
-            write(STREAM_NAME, entry)
+            write(STREAM_NAME, stamp_entry(state_path, entry))
         except Exception:  # pragma: no cover — write_state itself never raises
             LOG.exception("orch-waker: stream state write failed")
 
