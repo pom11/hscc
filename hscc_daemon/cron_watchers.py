@@ -38,6 +38,11 @@ Stdlib-only (same rule as the daemon's ``state.py``, which this module loads
 standalone by path when the package import fails -- ``scripts/`` is not a
 deployed plugin package, and dep_pr_watcher.py deliberately imports nothing
 from ``hscc_daemon`` at module scope).
+
+Test seams: every read accepts an explicit ``directory`` (the stamp dir; the
+install marker lives one level above it), threaded through as a parameter
+rather than resolved from a mutated environment -- see :func:`state_dir` and
+:func:`doctor_check`.
 """
 
 import datetime
@@ -79,25 +84,14 @@ STREAMS = tuple(WATCHERS)
 # Statuses that mean "nothing to warn about".
 HEALTHY_STATUSES = ("ok", "not-configured")
 
+#: Name of the doctor row this module owns. A fallback for doctor.py lives
+#: next to its other _*_CHECK_NAME constants so the row still prints when this
+#: module cannot be imported at all (same honesty rule as the notifier mask).
+CHECK_NAME = "cron watchers (dep_pr/escalate)"
 
-def state_dir():
-    """Where the stamps live -- must match ``hscc_daemon.state.STATE_DIR``.
-
-    ``HSCC_DIR`` (the dir holding ``cluster.json``, honoured the same way by
-    the bootstrap doctor) relocates it wholesale; otherwise ``~/.hscc/state``
-    through ``expanduser``, which already follows ``HOME`` in a redirected-home
-    test. A test that monkeypatches ``hscc_daemon.state.STATE_DIR`` still wins:
-    :func:`_state_writer` prefers the package module when importable, and
-    :func:`read_stamp` asks that module for the directory when it is present.
-    """
-    try:
-        s = _state_writer()
-    except Exception:
-        pass
-    else:
-        return s.STATE_DIR
-    base = os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc")
-    return os.path.join(base, "state")
+#: Install marker file name, kept ONE LEVEL ABOVE the stamp dir (see
+#: :func:`install_marker_path`).
+MARKER_FILENAME = "watcher-installs.json"
 
 
 def _state_writer():
@@ -124,94 +118,28 @@ def _state_writer():
         return mod
 
 
-def _hscc_base():
-    """The dir one level above the stamp dir, so ONE test seam moves both.
+def state_dir():
+    """Default stamp dir: the canonical state module's STATE_DIR.
 
-    Prefers ``dirname(state_dir())`` -- which follows ``hscc_daemon.state``'s
-    ``STATE_DIR`` when a test patched it -- and falls back to ``HSCC_DIR`` /
-    ``~/.hscc`` when the state module is not importable.
+    Reads go exactly where ``write_state`` writes -- the ``hscc_daemon.state``
+    package module when importable (deployed runtime, and tests that patch its
+    STATE_DIR), else the sibling ``state.py`` loaded standalone. Callers that
+    must read a DIFFERENT root (the doctor's ``hscc_dir`` seam: bootstrap
+    sandboxes keep HOME real and relocate only HSCC_DIR) thread an explicit
+    ``directory`` through :func:`read_stamp` / :func:`verdict` instead of
+    mutating the environment, so a redirected read can never split from where
+    writes landed -- and can never accidentally read the operator's live tree.
     """
-    try:
-        return os.path.dirname(state_dir())
-    except Exception:
-        pass
-    return os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc")
+    return _state_writer().STATE_DIR
 
 
-def install_marker_path():
-    """Path of the install marker file (ONE LEVEL ABOVE the state dir).
-
-    Deliberately OUTSIDE ~/.hscc/state: everything in the state dir is globbed
-    by ``verify.check_daemon_streams`` as a daemon stream, and the marker is
-    not a stream -- it is the record that an installer registered the cron job.
-    """
-    return os.path.join(_hscc_base(), "watcher-installs.json")
-
-
-def mark_installed(stream, schedule=None):
-    """Record that install_<...>_watcher.sh registered this cron job.
-
-    Called by the installer, not by the watcher. The marker lets the doctor
-    tell "installed, but the job has never completed a pass" (the
-    17-consecutive-failures incident class, t_3aadd2c0) from "never
-    configured". Best-effort; returns True when the marker was written.
-    """
-    if stream not in WATCHERS:
-        return False
-    path = install_marker_path()
-    data = {}
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
-    data[stream] = {
-        "cron_job": WATCHERS[stream]["cron_job"],
-        "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "schedule": schedule or "",
-    }
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-
-
-def mark_removed(stream):
-    """Drop a stream's install marker (installer --uninstall). Best-effort."""
-    path = install_marker_path()
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or stream not in data:
-            return True
-        data.pop(stream, None)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def read_install_marker(stream):
-    """Install marker row for a stream, or None."""
-    try:
-        with open(install_marker_path()) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    row = data.get(stream)
-    return row if isinstance(row, dict) else None
+def _dirs(directory=None):
+    """(stamp_dir, marker_dir) -- honours an explicit stamp-dir seam."""
+    if directory:
+        directory = os.path.expanduser(directory)
+        return directory, os.path.dirname(directory)
+    d = state_dir()
+    return d, os.path.dirname(d)
 
 
 def cadence_s(stream, env=None):
@@ -298,9 +226,10 @@ def stamp_failure(stream, error):
         return False
 
 
-def read_stamp(stream):
-    """Read a watcher's stamp dict from the state dir; None if absent/broken."""
-    path = os.path.join(state_dir(), stream + ".json")
+def read_stamp(stream, directory=None):
+    """Read a watcher's stamp dict; None when absent or unreadable-as-dict."""
+    stamp_dir, _ = _dirs(directory)
+    path = os.path.join(stamp_dir, stream + ".json")
     try:
         with open(path) as f:
             data = json.load(f)
@@ -309,7 +238,85 @@ def read_stamp(stream):
     return data if isinstance(data, dict) else None
 
 
-def verdict(stream, *, now=None, state=None, env=None):
+def install_marker_path(directory=None):
+    """Path of the install marker file (ONE LEVEL ABOVE the stamp dir).
+
+    Deliberately OUTSIDE the stamp dir: everything under ``~/.hscc/state`` is
+    globbed by ``verify.check_daemon_streams`` as a daemon stream, and the
+    marker is not a stream -- it is the record that an installer registered the
+    cron job.
+    """
+    _, marker_dir = _dirs(directory)
+    return os.path.join(marker_dir, MARKER_FILENAME)
+
+
+def mark_installed(stream, schedule=None, directory=None):
+    """Record that install_<...>_watcher.sh registered this cron job.
+
+    Called by the installer, not by the watcher. The marker lets the doctor
+    tell "installed, but the job never completed a pass" (the
+    17-consecutive-failures incident class, t_3aadd2c0) from "never
+    configured". Best-effort; returns True when the marker was written.
+    """
+    if stream not in WATCHERS:
+        return False
+    path = install_marker_path(directory)
+    data = {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[stream] = {
+        "cron_job": WATCHERS[stream]["cron_job"],
+        "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "schedule": schedule or "",
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def mark_removed(stream, directory=None):
+    """Drop a stream's install marker (installer --uninstall). Best-effort."""
+    path = install_marker_path(directory)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or stream not in data:
+            return True
+        data.pop(stream, None)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def read_install_marker(stream, directory=None):
+    """Install marker row for a stream, or None."""
+    try:
+        with open(install_marker_path(directory)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    row = data.get(stream)
+    return row if isinstance(row, dict) else None
+
+
+def verdict(stream, *, now=None, state=None, env=None, directory=None):
     """Liveness verdict for one watcher -- RAW status, no surface-specific ok.
 
     Returns {stream, status, warn, detail, age_s, window_s} where ``status`` is:
@@ -340,7 +347,7 @@ def verdict(stream, *, now=None, state=None, env=None):
     row = WATCHERS[stream]
     window = stale_window_s(stream, env=env)
     if state is None:
-        state = read_stamp(stream)
+        state = read_stamp(stream, directory=directory)
 
     base = {"stream": stream, "age_s": None, "window_s": window}
 
@@ -350,8 +357,7 @@ def verdict(stream, *, now=None, state=None, env=None):
         # marker means the job WAS registered, so silence means it never
         # completed a pass (a warning); no marker means it was never installed
         # (clean, no warning).
-        marker = read_install_marker(stream)
-        if marker:
+        if read_install_marker(stream, directory=directory):
             return {**base, "status": "never-ran", "warn": True,
                     "detail": (f"WARN: {stream} ({row['cron_job']}) was "
                                f"installed ({row['install_script']}) but has "
@@ -388,9 +394,55 @@ def verdict(stream, *, now=None, state=None, env=None):
                        f"({int(age)}s old, window {window}s)")}
 
 
-def all_verdicts(*, now=None, env=None):
+def all_verdicts(*, now=None, env=None, directory=None):
     """Verdicts for every registered watcher, in stable order."""
-    return [verdict(s, now=now, env=env) for s in STREAMS]
+    return [verdict(s, now=now, env=env, directory=directory) for s in STREAMS]
+
+
+def doctor_check(hscc_dir=None, *, now=None, env=None):
+    """The GAP-B-4 doctor row: are the cron watchers still firing?
+
+    The verdict lives with the feature (this module owns the cadence SOT and
+    the stamp format) and the bootstrap doctor only adapts the dict to its
+    five Check fields, exactly as it does for ``orch_waker.doctor_check``.
+
+    ``hscc_dir`` is the ~/.hscc ROOT (where cluster.json lives), matching the
+    doctor_notifier_mask convention: the stamp dir is ``<hscc_dir>/state`` and
+    the install marker sits at ``<hscc_dir>/watcher-installs.json``. Redirected
+    by parameter, never by mutating os.environ -- a check whose seam is ignored
+    (because the state module resolves its dir from HOME at import) would read
+    the operator's live tree from a sandboxed bootstrap, which is exactly the
+    bug class that took down the live daemon-pid verdict before. Passing the
+    directory down keeps read and marker on ONE root, always.
+
+    Warn-only: ``ok`` is False for any stale/failing/never-ran/bad-stamp
+    watcher, but ``fatal`` is ALWAYS False -- an out-of-band Hermes cron job
+    must never hard-stop a bootstrap or flip the doctor's overall verdict.
+    "not configured" is clean ok=True with a plain detail, never a warning.
+    """
+    directory = (os.path.join(os.path.expanduser(hscc_dir), "state")
+                 if hscc_dir else None)
+    rows = all_verdicts(now=now, env=env, directory=directory)
+
+    problems = [r["detail"] for r in rows if r["warn"]
+                or r["status"] not in HEALTHY_STATUSES]
+    notes = [r["detail"] for r in rows if not r["warn"]
+             and r["status"] in HEALTHY_STATUSES]
+    if problems:
+        return {
+            "name": CHECK_NAME, "ok": False, "fatal": False, "rows": rows,
+            "detail": "; ".join(problems + notes),
+            "fix": ("check `hermes cron list` (job paused? ticker down? the "
+                    "script moved out of <bound home>/scripts? -- the "
+                    "t_3aadd2c0 failure class), then `hermes cron run <job>` "
+                    "to prove a pass; reinstall with "
+                    + " / ".join(sorted({r['install_script']
+                                         for r in WATCHERS.values()}))
+                    + " if a job is gone"),
+        }
+    return {"name": CHECK_NAME, "ok": True, "fatal": False, "rows": rows,
+            "detail": "; ".join(notes) or "no watchers configured",
+            "fix": ""}
 
 
 def fmt_age(seconds):
