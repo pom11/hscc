@@ -1821,6 +1821,211 @@ def check_declaration_agreement(applied_state_path=None, config=None,
     return out
 
 
+def check_autodown_interlock(interlock_state_file=None, now=None):
+    """GAP-F-6: surface the autodown idle interlocks — clear, holding, UNEVALUABLE.
+
+    The kanban and PR/CI interlocks are fail-safe toward "never tear down":
+    when the source cannot be evaluated (gh auth expired, one board
+    unreadable), the interlock stays ACTIVE (autodown.py keeps the cluster
+    scaled up). That is the safe direction, but it is also a silent cost-drift
+    mode — the cluster never scales down and nothing in ``hscc verify`` /
+    ``hscc doctor`` ever said so. Before this check the sentinel was visible
+    only inside ``hscc autodown status``, and only because that command
+    re-evaluates the screens in its own process; the daemon's verdict lived in
+    daemon-process memory no other reader could see.
+
+    The daemon's autodown tick persists that verdict
+    (``autodown.write_interlock_snapshot``); this check reads it
+    (``read_interlock_snapshot``) and never evaluates any interlock itself —
+    no board read, no ``gh`` call, no mutation.
+
+    Three states, never blended (ok=None is verify's established third state,
+    rendered ○ / UNVERIFIED, and lands in run_all's ``unverified`` list):
+
+      * UNEVALUABLE  — a source could not be resolved (kanban lib/board
+        unreadable, PR/CI screen failed) ⇒ ok=None naming WHICH interlock and
+        WHY, plus the cost warning: fail-safe keeps the cluster UP.
+      * holding / clear — every signal resolved ⇒ ok=True naming what holds
+        (or "all clear"). A positively-known blocking board is not a fault:
+        it is the interlock working.
+      * cannot tell  — no snapshot ever written, or older than
+        ``autodown.INTERLOCK_SNAPSHOT_MAX_AGE_S`` ⇒ ok=None. "The daemon has
+        never reported" and "the daemon says unevaluable" are different facts.
+
+    ``interlock_state_file`` / ``now`` are test seams (the real path resolves
+    at call time, so the suite's ~/.hscc redirect already isolates it).
+    """
+    from . import autodown
+
+    snap = autodown.read_interlock_snapshot(state_file=interlock_state_file)
+    if snap is None:
+        return {"name": "autodown_interlock", "ok": None,
+                "detail": "UNVERIFIED: no interlock snapshot at "
+                          + (interlock_state_file
+                             or autodown._interlock_state_path())
+                          + " — the daemon's autodown tick has never "
+                            "persisted one (not yet running, or predates "
+                            "this check)",
+                "next_step": "start/restart the hscc daemon and re-run; the "
+                             "row fills in after the next autodown tick"}
+
+    age = None
+    if now is not None:
+        at = snap.get("at")
+        if isinstance(at, (int, float)):
+            age = now - at
+    elif isinstance(snap.get("at"), (int, float)):
+        import time as _time
+        age = _time.time() - snap["at"]
+    max_age = getattr(autodown, "INTERLOCK_SNAPSHOT_MAX_AGE_S", 600)
+    if age is not None and age > max_age:
+        return {"name": "autodown_interlock", "ok": None,
+                "detail": f"UNVERIFIED: interlock snapshot is stale "
+                          f"({age:.0f}s old > {max_age}s) — the autodown "
+                          f"tick (30s cadence) has not written recently; the "
+                          f"verdict below is NOT current",
+                "next_step": "check the daemon's autodown thread "
+                             "(~/.hscc/daemon.log)"}
+
+    if not snap.get("enabled"):
+        return {"name": "autodown_interlock", "ok": True,
+                "detail": "skipped: autodown is disabled — no interlocks "
+                          "are being evaluated"}
+
+    unevaluable = []
+    if snap.get("kanban_ok") is False:
+        unevaluable.append(f"kanban: {snap.get('kanban_reason') or 'unreadable'}")
+    if snap.get("prci_ok") is False:
+        unevaluable.append(
+            "PR/CI: " + (snap.get("prci_reason") or "source unreachable")
+            + f" (sentinel {snap.get('prci_unreachable_sentinel') or autodown._PRCI_UNREACHABLE})")
+    if unevaluable:
+        return {
+            "name": "autodown_interlock", "ok": None,
+            "detail": "UNEVALUABLE interlock(s) — " + "; ".join(unevaluable)
+                      + " — the fail-safe keeps the interlock ACTIVE, so "
+                        "idle teardown can NEVER fire (cluster stays scaled "
+                        "up until this clears)",
+            "next_step": "fix the named source (gh auth / the unreadable "
+                         "board); until then autodown is permanently "
+                         "fail-safe-to-up",
+        }
+
+    holders = []
+    kb = snap.get("kanban_blocking")
+    if kb:
+        holders.append(f"kanban work on board '{kb}'")
+    pb = snap.get("prci_blocking")
+    if pb:
+        holders.append("open PR / active CI run"
+                       if pb == "PR/CI" else f"PR/CI ({pb})")
+    if holders:
+        return {"name": "autodown_interlock", "ok": True,
+                "detail": "holding (interlocks working): " + ", ".join(holders)
+                          + " — idle teardown correctly suppressed"}
+    return {"name": "autodown_interlock", "ok": True,
+            "detail": "all clear — every interlock resolved and none holds; "
+                      "idle teardown may fire when the window elapses"}
+
+
+def check_dispatcher_self_heal(recover_state_file=None, now=None):
+    """GAP-F-7: make the dispatcher wedge self-heal LATCH observable.
+
+    ``dispatcher_wedge.recover_dispatcher_wedge()`` keeps its guard state in
+    ``~/.hscc/dispatcher_recover.json`` — cooldown window, attempt count,
+    gave-up cap, per-incident restart latch — persisted so it survives daemon
+    restart, and read by nobody else. The 2026-10-15 incident (four gateway
+    SIGTERMs in two hours) and the gave-up cap both live entirely in that
+    file; when it says ``gave_up`` the self-heal has STOPPED acting while
+    wedges continue, and no doctor/verify row said so.
+
+    This check READS the latch (no mutation, no restart, no board read) and
+    reports its state — the card's armed / fired / cooling, plus the two
+    states the incident history proved matter:
+
+      * armed      — no restart recorded yet; self-heal will act on a
+        confirmed wedge. ok=True.
+      * fired/cooling — a restart happened within the cooldown window;
+        ok=True, detail names the age, the attempt count and the remaining
+        cooldown (this is the feature working; visibility, not alarm).
+      * latched    — an incident signature already got its restart and was
+        NOT dispatcher-fixable: further restarts for it are refused. ok=True
+        with the signature named (a deliberate suppression, per the
+        per-incident latch semantics).
+      * gave-up    — the attempt cap is reached: self-heal is NOT acting.
+        ok=None (○ UNVERIFIED — the wedge itself is red elsewhere via the
+        dispatcher stream; this row must not double-page, but it must never
+        vanish).
+      * absent/corrupt — no latch file is normal (never fired); a corrupt one
+        is ok=None naming the path, never treated as "armed".
+
+    ``recover_state_file`` / ``now`` are test seams; the real path resolves at
+    call time through the module's expanduser, so the suite's ~/.hscc redirect
+    already isolates it.
+    """
+    from . import dispatcher_wedge as _dw
+
+    path = recover_state_file or _dw._recover_state_path()
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return {"name": "dispatcher_self_heal", "ok": True,
+                "detail": "armed — no restart recorded yet "
+                          "(self-heal will act on a confirmed wedge)"}
+    except (OSError, ValueError) as exc:
+        return {"name": "dispatcher_self_heal", "ok": None,
+                "detail": f"UNVERIFIED: latch at {path} unreadable: {exc}",
+                "next_step": "restore or remove ~/.hscc/dispatcher_recover.json"}
+    if not isinstance(state, dict):
+        return {"name": "dispatcher_self_heal", "ok": None,
+                "detail": f"UNVERIFIED: latch at {path} is not a JSON object",
+                "next_step": "remove ~/.hscc/dispatcher_recover.json so the "
+                             "wedge recovery can re-arm"}
+
+    parts = []
+    attempts = state.get("attempts")
+    if isinstance(attempts, int) and attempts:
+        parts.append(f"{attempts} restart(s) attempted")
+
+    if state.get("gave_up"):
+        cap_detail = ", ".join(parts) if parts else "attempt cap reached"
+        return {"name": "dispatcher_self_heal", "ok": None,
+                "detail": f"GAVE UP — {cap_detail}; self-heal is NOT acting, "
+                          "only alerting. A green dispatcher stream tick "
+                          "renews the budget",
+                "next_step": "fix the underlying wedge; the cap clears "
+                             "itself on the first green tick"}
+
+    last = state.get("last_recovery_at")
+    cooldown = getattr(_dw, "DISPATCHER_RECOVER_COOLDOWN_SECONDS", 1800)
+    if isinstance(last, (int, float)):
+        if now is not None:
+            age = now - last
+        else:
+            import time as _time
+            age = _time.time() - last
+        parts.insert(0, f"last restart {age:.0f}s ago")
+        if 0 <= age < cooldown:
+            parts.append(f"cooling ({cooldown - age:.0f}s cooldown left)")
+        else:
+            parts.append("cooldown expired — armed for the next wedge")
+
+    last_incident = state.get("last_incident")
+    if isinstance(last_incident, dict) and last_incident and \
+            last_incident.get("dispatchable") is False:
+        parts.append(f"incident latch SET for non-dispatchable stall "
+                     f"'{last_incident.get('signature')}' (no further "
+                     f"restarts for it)")
+
+    if not last and not parts:
+        detail = "armed — no restart recorded yet (self-heal will act on a " \
+                 "confirmed wedge)"
+    else:
+        detail = "; ".join(parts)
+    return {"name": "dispatcher_self_heal", "ok": True, "detail": detail}
+
+
 def run_all(**overrides):
     """Run all checks, returning aggregated results.
 
@@ -1841,6 +2046,14 @@ def run_all(**overrides):
         check_chat_roundtrip,
         check_plugin_payload,
         check_project_chat_ready,
+        # GAP-F-6 (audit F): the autodown idle interlocks — clear / holding /
+        # UNEVALUABLE (the #135 fail-safe-to-up that silently keeps the
+        # cluster scaled up) — read from the daemon's persisted snapshot.
+        check_autodown_interlock,
+        # GAP-F-7 (audit F): the dispatcher wedge self-heal latch
+        # (armed / fired / cooling / gave-up) — read-only off
+        # ~/.hscc/dispatcher_recover.json.
+        check_dispatcher_self_heal,
     ]
 
     results = []

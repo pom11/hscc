@@ -1215,6 +1215,115 @@ def prci_check_state():
             "blocking": _PRCI_LOAD["blocking"]}
 
 
+# ── cross-process interlock snapshot (GAP-F-6, audit F) ────────────────────
+# ``kanban_check_state()`` and ``prci_check_state()`` above are the truth, but
+# they are MODULE STATE in the process that evaluated them — the daemon. That
+# is exactly why ``hscc verify`` / ``hscc doctor`` could never see an
+# unevaluable interlock: a fresh CLI process has ``_PRCI_LOAD["ok"] is None``
+# and ``_KANBAN_LOAD["ok"] is None``, so the #135 sentinel (PR/CI unreachable,
+# fail-safe toward "never tear down") was visible ONLY inside
+# ``hscc autodown status``, which re-evaluates the screens itself. A cluster
+# that never scales down because gh auth expired — or because one board went
+# unreadable — cost money in silence.
+#
+# So the daemon persists what it last knew. ONE writer (the autodown tick,
+# daemon_ops._autodown_tick — a finally-block call, so it fires on every path
+# including the disabled short-circuit and a raising cycle), ONE reader
+# (``read_interlock_snapshot`` → verify's ``autodown_interlock`` row). The
+# file is a snapshot of the LAST evaluation, stamped with the writing pid and
+# wall clock, so a reader can tell "the daemon says it is unevaluable" from
+# "nobody has ever evaluated it" and from "this is stale — the daemon stopped
+# ticking". Those three must never share a rendering.
+INTERLOCK_STATE_FILE = os.path.expanduser("~/.hscc/autodown_interlock.json")
+
+#: How old the snapshot may be before a reader must stop trusting it. The tick
+#: cadence is 30 s (daemon_ops.run_autodown_loop), so this is ~20 missed ticks
+#: — room for a slow tick or a restart, tight enough that a dead autodown
+#: thread stops passing as healthy within minutes.
+INTERLOCK_SNAPSHOT_MAX_AGE_S = 600
+
+
+def _interlock_state_path():
+    """The snapshot path, resolved at CALL time via expanduser.
+
+    Resolving per call (not once at import) is what lets the suite's
+    ``_isolate_hscc`` expanduser redirect move every test onto a tmp path, so
+    no test can read or write the operator's real ``~/.hscc``. Same convention
+    as ``dispatcher_wedge._recover_state_path``.
+    """
+    return os.path.expanduser("~/.hscc/autodown_interlock.json")
+
+
+def interlock_snapshot_payload(cfg=None, now=None):
+    """Build the snapshot document from this process's last interlock knowledge.
+
+    Pure read of the module state the interlocks already maintain — it does NOT
+    re-evaluate anything, so building it costs no board read and no ``gh``
+    call. ``cfg`` is the tick's already-loaded config (never re-read here: the
+    caller owns the config read). Returns the dict ``write_interlock_snapshot``
+    persists.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    kc = kanban_check_state()
+    pci = prci_check_state()
+    return {
+        "pid": os.getpid(),
+        "at": now if now is not None else time.time(),
+        "enabled": bool(cfg.get("enabled")),
+        "state": cfg.get("state"),
+        # None = this process has never resolved the signal (distinct from
+        # True/False). A reader must not collapse it into either.
+        "kanban_ok": kc["ok"] if kc else None,
+        "kanban_reason": (kc or {}).get("reason", ""),
+        "kanban_blocking": kanban_blocking_board(),
+        "prci_ok": (pci or {}).get("ok"),
+        "prci_reason": (pci or {}).get("reason", ""),
+        "prci_blocking": (pci or {}).get("blocking"),
+        # The sentinel spelled out, so a reader never has to import the
+        # private constant to recognise the unevaluable case.
+        "prci_unreachable_sentinel": _PRCI_UNREACHABLE,
+    }
+
+
+def write_interlock_snapshot(cfg=None, state_file=None, now=None):
+    """Persist the interlock snapshot. Best-effort: never raises.
+
+    Atomic (tmp + ``os.replace``) so a reader never sees a half-written
+    document. An unwritable path (read-only fs, missing dir) is swallowed —
+    this runs in the daemon's autodown thread, where a diagnostics write must
+    never break the tick that owns teardown safety.
+    """
+    path = state_file or _interlock_state_path()
+    payload = interlock_snapshot_payload(cfg=cfg, now=now)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return payload
+
+
+def read_interlock_snapshot(state_file=None):
+    """The persisted interlock snapshot, or None. Never raises.
+
+    None means "no snapshot exists" — distinct from a snapshot whose fields
+    are None, which means "evaluated as unresolved". A non-dict / corrupt
+    document is also None: an unreadable snapshot must not be reported as an
+    interlock verdict (honest-signal rule — an environment fault is never
+    rendered as a data fact; the reader renders it as unverifiable).
+    """
+    path = state_file or _interlock_state_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
              keepalive_ok=None, prci_checker=None):
     """Evaluate the FULL idle conjunction (§1/§6) — all must hold.

@@ -93,6 +93,26 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
     # "module present" answer.
     (tmp_path / "sparkrun_balancer.py").write_text("# stub balancer module\n")
 
+    # autodown_interlock (GAP-F-6) — hermetic snapshot: an ENABLED autodown
+    # whose every interlock resolved and none holds (the check only ever READS
+    # this document — never evaluates the real boards/gh). Without the planted
+    # file the row would be UNVERIFIED (ok None), which is the honest live
+    # verdict but fails this fixture's all-green assertion. The unevaluable /
+    # holding / stale paths are pinned in TestCheckAutodownInterlock.
+    interlock = tmp_path / "autodown_interlock.json"
+    import time as _time
+    interlock.write_text(json.dumps({
+        "pid": 1, "at": _time.time(), "enabled": True, "state": "up",
+        "kanban_ok": True, "kanban_reason": "", "kanban_blocking": None,
+        "prci_ok": True, "prci_reason": "", "prci_blocking": None,
+        "prci_unreachable_sentinel": "<prci-unreachable>",
+    }))
+
+    # dispatcher_self_heal (GAP-F-7) — NO latch file is the armed state
+    # (ok True). The path is passed explicitly so the check never resolves
+    # the real ~/.hscc/dispatcher_recover.json even if the redirect misses.
+    recover_absent = tmp_path / "nope_dispatcher_recover.json"
+
     return {
         "script": str(sweep),
         "python": sys.executable,
@@ -104,6 +124,8 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "proxy_config": str(proxy_yaml),
         "litellm_config": str(litellm_yaml),
         "balancer_module": str(tmp_path / "sparkrun_balancer.py"),
+        "interlock_state_file": str(interlock),
+        "recover_state_file": str(recover_absent),
     }
 
 
@@ -842,11 +864,12 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        # 13 = the 12 pinned by the dep-bump guard (main's 11 incl.
+        # 15 = the 12 pinned by the dep-bump guard (main's 11 incl.
         # provider_routing from #36, + proxy_router_settings) +
         # declaration_agreement from the template-declarations C3 doctor
-        # (spec §6). Union of all check sets, not any one alone.
-        assert len(result["checks"]) == 13
+        # (spec §6) + autodown_interlock (GAP-F-6) + dispatcher_self_heal
+        # (GAP-F-7). Union of all check sets, not any one alone.
+        assert len(result["checks"]) == 15
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -876,7 +899,7 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 13
+        assert len(result["checks"]) == 15
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -904,7 +927,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 13
+        assert len(result["checks"]) == 15
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
