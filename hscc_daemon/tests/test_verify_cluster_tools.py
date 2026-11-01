@@ -182,8 +182,8 @@ class TestCheckPluginsClusterTools:
 
     def test_registry_beats_underdeclared_manifest(self, tmp_path):
         """Registry is the source of truth: the repo manifest under-declares
-        (today's 13-name reality, GAP-A-7) yet the registry still demands
-        orch_message. The check must not inherit the manifest's hole."""
+        (the GAP-A-7 shape, as shipped until t_19dbb9de) yet the registry still
+        demands orch_message. The check must not inherit the manifest's hole."""
         from hscc_daemon.verify import check_plugins
         repo = _plant_repo(tmp_path, manifest=False)
         (repo / "hscc-cluster" / "plugin.yaml").write_text(
