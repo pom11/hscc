@@ -366,6 +366,40 @@ def _load_repl_inject():
             sys.path.pop(added)
 
 
+#: The pre-parity name of repl_inject's verb table (v2.14.0 and earlier), used
+#: only by :func:`_verb_for_mode` when the loaded module predates ``VERB_PREFIX``.
+LEGACY_VERB_TABLE_ATTR = "_PREFIX"
+
+
+def _verb_for_mode(repl, mode: str):
+    """The verb prefix for a resolved ``mode``, read from repl_inject's own table.
+
+    GAP-C-4: this module used to carry its own copy of the mode→verb mapping as
+    the fallback when the loaded repl_inject exposed no table — a second source
+    of truth that had already gone stale (it omitted ``steer``). It is gone: the
+    verb always comes out of the module that owns it, so the two cannot diverge.
+
+    Two table names, both belonging to ``repl_inject``:
+
+    * ``VERB_PREFIX`` — the canonical table (parity release onwards), and
+    * ``_PREFIX`` — the pre-parity private table on an *older* deployed
+      hscc-api (the shipped 2.14.0 payload still has it, and its receipts carry
+      ``mode`` but no ``verb``, which is exactly when this runs in production).
+
+    The table's VALUES are never restated here (a source guard in
+    tests/test_orch_message.py forbids a verb-prefix literal in this file), so a
+    canonical change to either table lands here for free. An unknown mode
+    answers ``None`` exactly as the previous ``table.get(mode)`` did, and a
+    module that answers neither name is the same "repl_inject too old to report
+    a verb" case as before: ``None``, never a guessed verb.
+    """
+    for attr in ("VERB_PREFIX", LEGACY_VERB_TABLE_ATTR):
+        table = getattr(repl, attr, None)
+        if isinstance(table, dict) and table:
+            return table.get(mode)
+    return None
+
+
 # ── Guards ──────────────────────────────────────────────────────────────────
 
 def _loop_guard_refusal(user_task) -> bool:
@@ -526,9 +560,7 @@ def orch_message(args, *, user_task=None, session_id=None, task_id=None,
     verb = receipt.get("verb")
     if verb is None:
         # Older repl_inject (pre-parity) receipts carry `mode` but no `verb`.
-        mode = receipt.get("mode") or ""
-        table = getattr(repl, "VERB_PREFIX", None) or {"plain": "", "queue": "/queue "}
-        verb = table.get(mode)
+        verb = _verb_for_mode(repl, receipt.get("mode") or "")
     remaining = max(limit - (used + 1), 0)
     return outcome(True, REASON_SENT,
                    f"queued to {to}" if receipt.get("mode") == "queue"
