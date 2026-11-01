@@ -654,7 +654,9 @@ def _tmux_repl_checks(*, projects=None, _which=None, _pane_ttys=None,
       problem   — REPL found but OUTSIDE tmux (consequence named); or no
                   REPL running at all (iOS falls back — hint at the fix).
       unverified— tmux itself cannot be consulted (not installed / broken
-                  server): we refuse to claim the REPL is unreachable.
+                  server), or the ONE pane matcher (hscc-api/repl_inject,
+                  which tmux_chat delegates to) cannot be loaded: we refuse
+                  to claim the REPL is unreachable.
 
     ``_which`` / ``_pane_ttys`` / ``_chat_procs`` are injectable seams so the
     check is hermetically testable (the guarded tmux_chat seams refuse to run
@@ -680,6 +682,13 @@ def _tmux_repl_checks(*, projects=None, _which=None, _pane_ttys=None,
             pane_fn = _pane_ttys or tc.pane_ttys
             proc_fn = _chat_procs or tc.chat_processes
             ttys, procs = pane_fn(), proc_fn()
+        except tc.PaneMatcherMissing as exc:
+            # The ONE pane matcher (hscc-api/repl_inject) is not loadable —
+            # this module no longer owns a REPL rule (GAP-C-3), so a rule it
+            # cannot consult is UNVERIFIED, never a private fallback verdict.
+            _add("tmux", "unverified",
+                 f"{exc} — REPL visibility from the iOS app is unknown")
+            return checks
         except Exception as exc:  # tmux/ps refused or broke — never claim ok
             _add("tmux", "unverified",
                  f"tmux cannot be consulted ({exc}) — REPL visibility from "

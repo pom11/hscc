@@ -25,6 +25,17 @@ subprocess/exec/prompt seams raise under pytest unless a test replaced the
 module attribute, so no suite run can exec a chat, touch a live tmux server,
 or block on input(). Entry points inject ``exec_seam``/``env`` like the
 existing chat tests already inject ``exec_seam``.
+
+Pane matching (GAP-C-3): deciding "is this ``ps`` line a Hermes REPL chat,
+and under which profile" is NOT this module's job — the ONE matcher is
+``repl_inject.pane_chat_command`` / ``pane_chat_profile`` in the sibling
+hscc-api plugin dir, and every question here (``chat_cmd_profile``,
+``_session_profiles``, ``_live_profile_panes``) is a thin delegation to it.
+The former local copy had already drifted (its per-line ``default``
+contradicted the canonical prefer-profiled-sibling rule), which is exactly
+why the rule is imported, never re-derived. If hscc-api is not deployed
+beside hscc-project the matcher cannot answer, and that surfaces as a NAMED
+branch-C refusal / UNVERIFIED row — never as a private fallback predicate.
 """
 from __future__ import annotations
 
@@ -33,11 +44,11 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 CONSEQUENCE = ("Without tmux, messages from the iOS app will NOT reach this "
                "chat (they go to a hidden background session).")
 
-_PROFILE_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
 _INVALID_TMUX_NAME = re.compile(r"[^A-Za-z0-9_-]")
 
 
@@ -47,6 +58,57 @@ class TmuxChatRefused(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class PaneMatcherMissing(RuntimeError):
+    """The ONE canonical pane matcher (hscc-api/repl_inject) cannot be loaded.
+
+    Raised instead of silently falling back to a private predicate: a world
+    where the rule is unanswerable must be reported (branch-C reason /
+    UNVERIFIED), never guessed at with a copy that can drift (GAP-C-3).
+    """
+
+
+_MATCHER_UNAVAILABLE = (
+    "pane matcher unavailable — hscc-api/repl_inject.py is not importable "
+    "beside hscc-project (the hscc-api plugin must be deployed next to "
+    "hscc-project; it owns the one REPL matcher)")
+
+_MATCHER = None  # cached after the first successful sibling import
+
+
+def _pane_matcher():
+    """The canonical matcher module ``repl_inject`` — THE owner of the rule.
+
+    Lazy sibling-dir import (same layout trick as flightdeck/core/
+    repl_delivery._repl_inject, so this stdlib-only module stays loadable by
+    path from hscc-bootstrap): ``parents[3]`` of this file is the repo root
+    in a checkout and the plugins dir when installed, and hscc-api sits
+    beside hscc-project in BOTH layouts. Raises PaneMatcherMissing rather
+    than keeping a fallback copy of the predicate (install_payload deploys
+    hscc-project and hscc-api as one payload, so a deployed tree always
+    resolves it).
+    """
+    global _MATCHER
+    if _MATCHER is not None:
+        return _MATCHER
+    try:
+        import repl_inject
+        _MATCHER = repl_inject
+        return _MATCHER
+    except ImportError:
+        pass
+    api_dir = Path(__file__).resolve().parents[3] / "hscc-api"
+    if (api_dir / "repl_inject.py").is_file():
+        if str(api_dir) not in sys.path:
+            sys.path.insert(0, str(api_dir))
+        try:
+            import repl_inject  # noqa: F401
+            _MATCHER = repl_inject
+            return _MATCHER
+        except ImportError:
+            pass
+    raise PaneMatcherMissing(_MATCHER_UNAVAILABLE)
 
 
 # --------------------------------------------------------------------------- #
@@ -134,23 +196,37 @@ def session_name(project: str) -> str:
 
 
 def target_profile(argv: list) -> str | None:
-    """The ``-p/--profile`` the chat will run under (foreign-session check)."""
-    m = _PROFILE_RE.search(" ".join(argv))
-    return m.group(1) if m else None
+    """The ``-p/--profile`` the chat will run under (foreign-session check).
+
+    Delegates the flag pattern itself to the canonical matcher module
+    (:func:`repl_inject.profile_flag`) — one compiled copy of the pattern,
+    never a second copy that can drift (GAP-C-3)."""
+    return _pane_matcher().profile_flag(" ".join(argv))
 
 
 def chat_cmd_profile(cmdline: str) -> str | None:
-    """Profile of a RUNNING Hermes REPL chat process, else None.
+    """Profile of ONE running Hermes REPL chat command line, else None.
 
-    The same matcher hscc-api/repl_inject uses for pane discovery (the rule's
-    owner; kept in sync deliberately — a chat process is "``hermes ... chat``
-    without ``gateway``"), applied to a raw ``ps`` command line instead of a
-    pane tty. This is how doctor sees REPLs that live OUTSIDE tmux.
+    Thin delegation to the canonical matcher (:func:`repl_inject.
+    pane_chat_command`) applied to a single raw ``ps`` line — this module
+    owns no predicate of its own. The former local copy contradicted the
+    canonical rule for multi-line panes; pane-level questions must ask
+    :func:`pane_profile` with the pane's whole line set instead, so the
+    prefer-profiled-sibling rule decides exactly once, in repl_inject.
     """
-    if "hermes" not in cmdline or " chat" not in f" {cmdline}" or "gateway" in cmdline:
-        return None
-    m = _PROFILE_RE.search(cmdline)
-    return m.group(1) if m else "default"
+    hit = _pane_matcher().pane_chat_command([cmdline])
+    return hit[0] if hit else None
+
+
+def pane_profile(cmds) -> str | None:
+    """Profile of a pane/tty from ALL its ``ps`` command lines, else None.
+
+    THE canonical matcher (:func:`repl_inject.pane_chat_profile`) verbatim:
+    the line that NAMES a profile wins; ``default`` only when no line does.
+    This is what makes the launch door, doctor and the iOS inject path agree
+    on which profile a pane runs (the GAP-C-3 reconciliation).
+    """
+    return _pane_matcher().pane_chat_profile(cmds)
 
 
 def pane_ttys() -> set:
@@ -170,29 +246,37 @@ def chat_processes() -> list:
     interactive REPL always has a real tty (that is how repl_inject finds
     panes in the first place), so ttyless rows are excluded: a worker is
     not the operator's chat and must never be reported as one outside tmux.
+
+    Each tty's full ``ps`` line set goes through the canonical matcher
+    (:func:`pane_profile`), so a tty whose first line is a wrapper and whose
+    child names a profile is reported under that profile — the same answer
+    repl_inject gives when it resolves the injection target.
     """
     rows = []
     for line in run_ps_all().splitlines():
         tty, _, cmd = line.strip().partition(" ")
         if not tty or tty.startswith("?"):
             continue
-        prof = chat_cmd_profile(cmd)
+        prof = pane_profile([cmd]) if cmd else None
         if prof:
             rows.append((tty, prof))
     return rows
 
 
 def _session_profiles(session: str) -> set:
-    """Profiles of Hermes REPL chats currently running in ``session``."""
+    """Profiles of Hermes REPL chats currently running in ``session``.
+
+    One pane resolution per tty through the canonical matcher — a pane
+    contributes the profile the matcher resolved for it (wrapper-safe),
+    never a per-line guess (GAP-C-3)."""
     r = run_tmux("list-panes", "-t", f"={session}", "-F", "#{pane_tty}")
     if r.returncode != 0:
         return set()
     found = set()
     for tty in r.stdout.split():
-        for cmd in run_ps(tty).splitlines():
-            if "hermes" in cmd and " chat" in f" {cmd}" and "gateway" not in cmd:
-                m = _PROFILE_RE.search(cmd)
-                found.add(m.group(1) if m else "default")
+        prof = pane_profile(run_ps(tty).splitlines())
+        if prof:
+            found.add(prof)
     return found
 
 
@@ -203,6 +287,11 @@ def _live_profile_panes(profile: str | None) -> list:
     in an ad-hoc session (e.g. ``0``), not in ``hscc-<project>``; opening a
     second chat there would give the iOS path two panes for one profile, and
     repl_inject refuses ambiguity — so the live pane must be reused first.
+
+    The per-pane resolution is the SAME call repl_inject uses for its own pane
+    discovery (:func:`pane_profile`), so "which panes run profile X" has one
+    answer repo-wide — including a wrapper pane, which the old per-line copy
+    classified as ``default`` and therefore nearly double-opened (GAP-C-3).
     """
     if not profile:
         return []
@@ -216,8 +305,7 @@ def _live_profile_panes(profile: str | None) -> list:
             session, pane_id, tty = line.split("\t")
         except ValueError:
             continue
-        if any(chat_cmd_profile(cmd) == profile
-               for cmd in run_ps(tty).splitlines()):
+        if pane_profile(run_ps(tty).splitlines()) == profile:
             found.append((session, pane_id))
     return found
 
@@ -242,9 +330,15 @@ def _ensure_tmux_session(project: str, argv: list, which) -> str | None:
     if not which("tmux"):
         return "tmux is not installed (brew install tmux)"
     session = session_name(project)
-    want = target_profile(argv)
+    try:
+        want = target_profile(argv)
+    except PaneMatcherMissing as exc:
+        return str(exc)
     if run_tmux("has-session", "-t", f"={session}").returncode == 0:
-        profiles = _session_profiles(session)
+        try:
+            profiles = _session_profiles(session)
+        except PaneMatcherMissing as exc:
+            return str(exc)
         if profiles and want not in profiles:
             other = ", ".join(sorted(profiles))
             return (f"a session {session} exists but its REPL is for another "
@@ -293,9 +387,16 @@ def launch_interactive_chat(project: str, argv: list, *,
 
     # B/C. Decide whether tmux can host it.
     reason = None
+    live = []
     if which("tmux"):
-        live = _live_profile_panes(target_profile(argv))
-        if len(live) == 1:
+        try:
+            live = _live_profile_panes(target_profile(argv))
+        except PaneMatcherMissing as exc:
+            # The pane rule itself is unanswerable (hscc-api not deployed
+            # beside hscc-project). Never fall back to a private predicate:
+            # the operator hears the real reason and decides (branch C).
+            reason = str(exc)
+        if reason is None and len(live) == 1:
             # Reuse the operator's existing REPL wherever it lives; never
             # start a second chat for the same profile.
             session, pane_id = live[0]

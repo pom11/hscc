@@ -4,8 +4,9 @@
 Used by bootstrap.sh ("Install: tmux (iOS chat reachability)"). The iOS app
 delivers chat into a tmux PANE (hscc-api/repl_inject), so the operator needs
 to know which of their REPLs the phone can actually reach. Reuses the ONE
-matcher (flightdeck/core/tmux_chat.chat_cmd_profile + pane_ttys) — bootstrap
-never reimplements discovery.
+matcher (flightdeck/core/tmux_chat.chat_processes + pane_ttys — themselves
+thin delegations to repl_inject's canonical pane matcher) — bootstrap never
+reimplements discovery.
 
 Output (stdout, one per line; exit 0 unless the helper itself broke):
   TMUX_MISSING
