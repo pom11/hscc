@@ -17,7 +17,8 @@ COOLDOWN_FILE = os.path.expanduser("~/.hscc/cooldowns.json")
 
 # Repeat-suppression applied to a rule that NEVER declared a cooldown_seconds,
 # for matches that reflect a persisting STATE rather than a discrete event.
-# The trigger loop runs every 15s (daemon_ops.run_trigger_loop) and a state
+# The trigger loop runs every tick of the `triggers` stream (cadence =
+# PERIODIC_INTERVALS["triggers"], the SOT since GAP-B-6; 15 s) and a state
 # check stays ok:False for as long as the fault lasts, so a rule with no
 # cooldown re-notified once per tick: the 2026-10-08 lost NAS mount fired 178
 # macOS notifications in 11 minutes. Shipped defaults now carry cooldowns
@@ -219,7 +220,8 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
 
     elif action_type == "auto_restart":
         # §5 C2: an intentional autodown must suppress automated restarts from
-        # EVERY path. This trigger engine runs every 15s and its ``vllm_down``
+        # EVERY path. This trigger engine runs every `triggers` tick
+        # (PERIODIC_INTERVALS["triggers"]) and its ``vllm_down``
         # / ``failed_dgx`` metrics read True while the orchestrator is down, so
         # an auto_restart rule on those would otherwise resurrect a
         # deliberately-down layer — independent of the watchdog. Gate on the
