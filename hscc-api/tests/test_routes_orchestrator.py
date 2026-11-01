@@ -36,6 +36,7 @@ import types
 import pytest
 
 import api_server
+import busy_tasks_fakes
 import routes_orchestrator
 from routes_orchestrator import _ChatJob, _new_job, _reap_jobs, _run_job
 
@@ -1127,70 +1128,265 @@ def test_busy_notice_singular_and_plural():
     assert "3 kanban tasks running" in many
 
 
-def test_backing_busy_tasks_counts_only_assigned_running(monkeypatch, tmp_path):
-    """Counts exactly the boards' `running` tasks assigned to the profile.
+# --- GAP-C-5 (t_518183b3): the busy signal is collect()'s pass, not a copy ----
+#
+# These three tests used to drive a hand-rolled ``SELECT 1 FROM tasks WHERE
+# status='running' AND assignee=?`` per board, injected through a fake
+# ``hermes_cli`` module. That query was a second implementation of
+# ``hscc_daemon.kanban_live.collect()``'s running scan, so the signal is now the
+# collector's own pass and the tests below drive THAT (real in-memory boards
+# behind a fake lib — see busy_tasks_fakes.py). The fail-safe posture is
+# re-pinned case by case: collect() on its own fails OPEN on an unreadable board
+# (it reports the board in ``errors`` and omits it from ``running``), which is
+# exactly the behaviour the old code refused to have.
 
-    Injects a fake ``hermes_cli`` module exposing a ``kanban_db.list_boards()``
-    that points at real temp SQLite files, so the seam's real SQL runs against
-    controlled data — no live ~/.hermes is touched.
+_BUSY_KBS = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_busy_fakes():
+    """Remove the throwaway board dirs the busy tests create."""
+    yield
+    while _BUSY_KBS:
+        _BUSY_KBS.pop().cleanup()
+
+
+def _busy_fakes(monkeypatch, kb):
+    """Route the busy signal's two seams at ``kb``, and count the collect calls."""
+    calls = []
+    _BUSY_KBS.append(kb)
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db", lambda: kb)
+
+    def _collect(kanban_db):
+        calls.append(kanban_db)
+        from hscc_daemon import kanban_live
+        return kanban_live.collect(kanban_db=kanban_db,
+                                   read_caps=lambda: (None, None))
+
+    monkeypatch.setattr(routes_orchestrator, "_busy_collect", _collect)
+    return calls
+
+
+def test_backing_busy_tasks_counts_only_assigned_running(monkeypatch):
+    """Counts exactly the boards with `running` work for the profile.
+
+    A fake kanban lib over real in-memory SQLite boards, so the collector's real
+    running pass (``tasks`` joined to ``task_runs``) runs against controlled
+    data — no live ~/.hermes is touched.
     """
-    import sqlite3
-
-    boards = []
-    for slug, rows in [
-        ("hscc", [("t_a", "hscc-orch", "running")]),
-        ("flosana", [("t_b", "some-other", "running"),
-                     ("t_c", "hscc-orch", "done")]),
-    ]:
-        path = tmp_path / f"{slug}.db"
-        conn = sqlite3.connect(str(path))
-        conn.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT)")
-        conn.executemany(
-            "INSERT INTO tasks (id, assignee, status) VALUES (?,?,?)", rows
-        )
-        conn.commit()
-        conn.close()
-        boards.append({"slug": slug, "db_path": str(path)})
-
-    fake_kanban = types.SimpleNamespace(list_boards=lambda: boards)
-    fake_hermes_cli = types.SimpleNamespace(kanban_db=fake_kanban)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    kb = busy_tasks_fakes.FakeKanbanDb({
+        "hscc": lambda c: busy_tasks_fakes.running_card(
+            c, "t_a", "hscc-orch", profile="hscc-orch"),
+        "flosana": lambda c: (
+            busy_tasks_fakes.running_card(c, "t_b", "some-other",
+                                          profile="some-other"),
+            busy_tasks_fakes.done_card(c, "t_c", "hscc-orch")),
+    })
+    calls = _busy_fakes(monkeypatch, kb)
 
     count = routes_orchestrator._backing_busy_tasks("hscc-orch")
-    # hscc has 1 running hscc-orch task; flosana's running task is other-assignee
-    # and its done hscc-orch task is not running -> only 1 counts.
+    # hscc has 1 running hscc-orch card; flosana's running card is another
+    # worker's and its hscc-orch card is done -> only 1 board counts.
     assert count == 1
+    # One pass over the boards, through the injected lib — not one per board.
+    assert calls == [kb]
 
-    # A profile with no running tasks anywhere -> 0 (idle).
+    # A profile with no running work anywhere -> 0 (provably idle).
     assert routes_orchestrator._backing_busy_tasks("ghost-profile") == 0
 
 
-def test_backing_busy_tasks_failsafe_to_busy(monkeypatch, tmp_path):
-    """Unreadable boards -> fail safe toward busy (>=1), never idle."""
-    fake_kanban = types.SimpleNamespace(
-        list_boards=lambda: [{"db_path": str(tmp_path / "missing.db")}]
-    )
-    fake_hermes_cli = types.SimpleNamespace(kanban_db=fake_kanban)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+def test_backing_busy_tasks_counts_boards_not_cards(monkeypatch):
+    """Three running cards on one board is still ONE busy board.
+
+    The old per-board ``LIMIT 1`` query could not count more than one per board;
+    the notice's number ("busy with N kanban tasks") has always been a board
+    count. Pinned so delegating to collect() — which returns one row per CARD —
+    cannot silently change what the operator's notice says.
+    """
+    def build(c):
+        for i in ("1", "2", "3"):
+            busy_tasks_fakes.running_card(c, f"t_{i}", "hscc-orch",
+                                          profile="hscc-orch", run_id=int(i))
+    kb = busy_tasks_fakes.FakeKanbanDb({"hscc": build})
+    _busy_fakes(monkeypatch, kb)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") == 1
+
+
+def test_backing_busy_tasks_matches_the_worker_not_the_assignee_column(monkeypatch):
+    """The signal is the WORKER (``task_runs.profile``), not the card's label.
+
+    collect() reports ``worker = task_runs.profile or tasks.assignee``. A card
+    that was dispatched as ``real-worker`` and later had its ``assignee`` column
+    edited to ``hscc-orch`` holds no ``hscc-orch`` process, so it must NOT make
+    the profile look busy — and the reverse (no run row at all) must still fall
+    back to the assignee.
+    """
+    kb = busy_tasks_fakes.FakeKanbanDb({
+        "hscc": lambda c: (
+            # assignee says hscc-orch, the run row says someone else ran it:
+            busy_tasks_fakes.running_card(c, "t_relabel", "hscc-orch",
+                                          profile="real-worker", run_id=7),
+            # a running card with no task_runs row: worker falls back to assignee
+            busy_tasks_fakes.running_card(c, "t_orphan", "hscc-orch")),
+    })
+    _busy_fakes(monkeypatch, kb)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") == 1
+
+
+def test_backing_busy_tasks_failsafe_to_busy(monkeypatch):
+    """An unreadable board -> fail safe toward busy (>=1), NEVER idle.
+
+    This is the case a naive ``len(collect()["running"])`` gets WRONG: collect()
+    appends the unreadable board to ``errors`` and omits it from ``running``, so
+    the naive count is 0 = "provably idle" on a signal we could not read — the
+    fail-open the old code refused and this one must refuse too.
+    """
+    kb = busy_tasks_fakes.FakeKanbanDb(
+        {"hscc": lambda c: None}, broken={"lockedboard"})
+    _busy_fakes(monkeypatch, kb)
     count = routes_orchestrator._backing_busy_tasks("hscc-orch")
     assert count >= 1
 
 
-def test_backing_busy_tasks_import_failure_failsafe(monkeypatch):
-    """If hermes_cli.kanban_db cannot be imported -> fail safe busy (>=1).
+def test_backing_busy_tasks_counts_each_unreadable_board(monkeypatch):
+    """Unreadable boards add one each, so the notice's count stays honest."""
+    kb = busy_tasks_fakes.FakeKanbanDb(
+        {"hscc": lambda c: None}, broken={"b1", "b2", "b3"})
+    _busy_fakes(monkeypatch, kb)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") == 3
 
-    ``_backing_busy_tasks`` imports ``hermes_cli`` lazily inside the function;
-    if that import raises (Hermes not reachable from the API plugin env), it
-    must fail SAFE toward busy so we never claim an orchestrator is idle when we
-    cannot verify.
+
+def test_backing_busy_tasks_unreachable_lib_failsafe(monkeypatch):
+    """The kanban lib cannot be reached -> fail safe busy (>=1).
+
+    ``_backing_busy_tasks`` resolves the lib lazily through the canonical loader
+    (``autodown._load_kanban_db_or_default``). Whether that loader returns None
+    (Hermes not reachable from the API plugin env) or raises outright, we must
+    fail SAFE toward busy rather than claim an orchestrator is idle unverified.
     """
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db", lambda: None)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+
     def boom():
         raise ImportError("no hermes_cli")
-    fake_mod = types.SimpleNamespace()
-    fake_mod.list_boards = boom
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_mod)
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db", boom)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+
+
+def test_backing_busy_tasks_collect_failure_failsafe(monkeypatch):
+    """The collector itself raises -> fail safe busy (>=1)."""
+    def boom(kanban_db):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db",
+                        lambda: object())
+    monkeypatch.setattr(routes_orchestrator, "_busy_collect", boom)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+
+
+def test_backing_busy_tasks_unexpected_payload_failsafe(monkeypatch):
+    """A payload that is not collect()'s documented shape -> busy, not idle.
+
+    ``{"running": []}`` (no ``errors`` key) is the dangerous one: collect always
+    reports both lists, and a payload whose error list cannot be read has not
+    proven that no board was skipped.
+    """
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db", lambda: object())
+    for bad in (None, [], "running", {"running": None}, {"boards": []},
+                {"running": []}, {"running": [], "errors": "board b1 failed"}):
+        monkeypatch.setattr(routes_orchestrator, "_busy_collect",
+                            lambda kb, _b=bad: _b)
+        assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1, bad
+
+
+def test_backing_busy_tasks_deadline_failsafe(monkeypatch):
+    """A wedged collector -> return busy at the deadline, never wait on it.
+
+    hermes' own board connection uses a LONG sqlite busy timeout (it is written
+    for writers), so the bound the old code got from ``connect(timeout=1.0)`` is
+    re-imposed here as one overall budget. A chat POST must not be held open by
+    a board that will not answer.
+    """
+    release = threading.Event()
+    monkeypatch.setattr(routes_orchestrator, "_busy_kanban_db", lambda: object())
+    monkeypatch.setattr(routes_orchestrator, "_BUSY_COLLECT_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(routes_orchestrator, "_busy_collect",
+                        lambda kb: release.wait(5) or {"running": []})
+    started = time.time()
     count = routes_orchestrator._backing_busy_tasks("hscc-orch")
+    elapsed = time.time() - started
     assert count >= 1
+    assert elapsed < 2.0, f"blocked on the collector for {elapsed:.1f}s"
+    release.set()
+
+
+def test_backing_busy_tasks_degradation_is_logged(monkeypatch, caplog):
+    """A fail-safe busy is not silent — the WARN names WHY it degraded.
+
+    Without this, "busy (1 kanban task)" caused by a board nobody could read is
+    indistinguishable in the log from a real running card, which is exactly the
+    kind of unexplainable state the Bug 1 notice exists to remove.
+    """
+    kb = busy_tasks_fakes.FakeKanbanDb({"hscc": lambda c: None},
+                                       broken={"lockedboard"})
+    _busy_fakes(monkeypatch, kb)
+    with caplog.at_level("WARNING", logger="hscc-api"):
+        assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+    assert any("busy signal degraded" in r.getMessage()
+               and "lockedboard" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+    # The WARN must never own the path: a logger that cannot log still yields
+    # the fail-safe answer (the guard is INSIDE _busy_warn, so break the logger).
+    class _ExplodingLogger:
+        def warning(self, *a, **k):
+            raise RuntimeError("logging is down")
+
+    class _FakeLoggingModule:
+        @staticmethod
+        def getLogger(name):
+            return _ExplodingLogger()
+
+    monkeypatch.setattr(routes_orchestrator, "logging", _FakeLoggingModule)
+    assert routes_orchestrator._backing_busy_tasks("hscc-orch") >= 1
+
+
+def test_backing_busy_tasks_has_no_second_board_query(monkeypatch):
+    """Source guard: this module must not read a board DB itself (GAP-C-5).
+
+    The gap was the duplication, not its correctness — so the regression test is
+    structural: restoring the hand-rolled pass (a ``tasks`` SELECT, a
+    ``sqlite3`` connection, or a board enumeration) fails THIS test alone, while
+    the behavioural tests above keep the semantics.
+    """
+    src = (os.path.dirname(routes_orchestrator.__file__))
+    with open(os.path.join(src, "routes_orchestrator.py")) as fh:
+        text = fh.read()
+    # Comments/docstrings may describe the retired query; strip them first so
+    # the guard checks CODE, and cannot be satisfied by rewording a docstring.
+    code = "\n".join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith("#"))
+    import ast
+    tree = ast.parse(code)
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            v = node.value
+            if "FROM tasks" in v or "status='running'" in v:
+                bad.append((node.lineno, "raw board SQL"))
+            if v == "sqlite3":
+                bad.append((node.lineno, "sqlite3 import"))
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = ([a.name for a in node.names]
+                    if isinstance(node, ast.Import)
+                    else [node.module or ""])
+            for m in mods:
+                if m == "sqlite3" or m.endswith(".kanban_db"):
+                    bad.append((node.lineno, f"import {m}"))
+        if isinstance(node, ast.Attribute) and node.attr in (
+                "list_boards", "connect_closing", "connect"):
+            bad.append((node.lineno, f"board access .{node.attr}"))
+    assert not bad, f"routes_orchestrator reads boards directly again: {bad}"
 
 
 def test_chat_post_includes_notice_when_profile_busy(running, token, fakes, monkeypatch):

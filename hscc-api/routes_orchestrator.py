@@ -441,8 +441,73 @@ def _terminate_proc(proc) -> None:
             pass
 
 
+#: Hard deadline for the ONE ``kanban_live.collect()`` pass the busy signal
+#: needs (GAP-C-5). The hand-rolled pass this replaced opened every board DB
+#: with ``sqlite3.connect(..., timeout=1.0)``, so the worst case was bounded per
+#: board; ``collect()`` carries no deadline of its own (it is a monitor pass,
+#: where waiting is fine). A chat POST is not a monitor, so the bound is
+#: re-imposed HERE — as one overall budget — rather than silently dropped.
+_BUSY_COLLECT_TIMEOUT_S = 5.0
+
+#: collect() reads Hermes config for the ``kanban.max_in_progress`` caps, which
+#: the busy signal does not need. Passing caps in avoids a per-POST config read
+#: and keeps the pass to the one question it is being asked.
+_NO_CAPS = (None, None)
+
+
+def _ensure_repo_root_on_path():
+    """Put the repo root on ``sys.path`` so ``hscc_daemon`` imports.
+
+    Same pattern as routes_autodown.py::_REPO_ROOT (module-level there; lazy
+    here, matching routes_activity.py's lazy ``from hscc_daemon import
+    kill_switch`` — the API ships as a hyphenated standalone plugin dir, so
+    the sibling daemon package is not importable without this).
+    """
+    root = str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return root
+
+
+def _busy_warn(reason):
+    """Log one WARN line naming why the busy signal degraded (never raises).
+
+    A fail-safe ``busy`` is correct but not free: the operator deserves to know
+    it came from an unreadable board rather than from real running work. Logging
+    must never break the fail-safe, so the logger call itself is guarded.
+    """
+    try:
+        logging.getLogger("hscc-api").warning(
+            "orchestrator busy signal degraded to BUSY: %s", reason)
+    except Exception:  # pragma: no cover — logging can never own the path
+        pass
+
+
+def _busy_kanban_db():
+    """The Hermes kanban lib, through the canonical loader — or None.
+
+    Thin pass-through of ``hscc_daemon.autodown._load_kanban_db_or_default``
+    (the loader every other kanban consumer uses, including ``collect()`` itself
+    when it resolves the lib). It exists as a module-level seam so this module's
+    tests can inject a fake lib / force the unreachable case WITHOUT patching
+    ``autodown`` (a cross-module patch can be defeated by a reload — see
+    t_9a96d225) and without re-implementing board discovery: nothing here lists
+    boards, globs ``kanban/boards``, or derives a DB path.
+    """
+    _ensure_repo_root_on_path()
+    from hscc_daemon import autodown
+    return autodown._load_kanban_db_or_default()
+
+
+def _busy_collect(kanban_db):
+    """One read-only ``kanban_live.collect()`` pass (tests monkeypatch this)."""
+    _ensure_repo_root_on_path()
+    from hscc_daemon import kanban_live
+    return kanban_live.collect(kanban_db=kanban_db, read_caps=lambda: _NO_CAPS)
+
+
 def _backing_busy_tasks(profile: str) -> int:
-    """Count running kanban tasks assigned to ``profile`` across ALL boards.
+    """Count boards with ``running`` kanban work for ``profile``.
 
     This is the contention signal for Bug 1 (t_5ed5dfa8). Every HSCC chat runs
     ``hermes -p <profile> chat -Q --continue <session>`` against the profile's
@@ -455,44 +520,84 @@ def _backing_busy_tasks(profile: str) -> int:
     busy profile → the silent 600s timeout the card measured). This count is
     how the API reports that contention honestly instead of timing out silently.
 
-    Reuses Hermes' OWN ``list_boards()`` enumeration — the same seam
-    flightdeck/core/kanban.py::list_boards and hscc_daemon.autodown use — and
-    scans each board's ``tasks`` for ``status='running'`` rows whose assignee
-    is ``profile``. Fail-SAFE: any board we cannot enumerate/read is counted as
-    BUSY (+1) rather than silently skipped — behaving as idle on an
-    unresolvable signal is a step back toward the silent timeout.
+    The read is delegated to ``hscc_daemon.kanban_live.collect()`` — GAP-C-5
+    (audit C): this function used to enumerate boards itself and hand-roll its
+    own per-board query over the running status and the assignee column, a
+    second implementation of the exact pass ``collect()``'s running scan is
+    (same enumeration via ``autodown._enum_board_names``, same running-status
+    question, joined to ``task_runs`` for the worker). Now there is one pass
+    over the boards in the codebase. Counting stays per-BOARD (distinct boards
+    with matching running rows), exactly as the old per-board one-row-per-board
+    query did, so the notice's number means what it meant before.
+
+    Matching is against the row's ``worker``, which is what ``collect()`` puts
+    there: ``task_runs.profile`` when the run row exists, else ``tasks.assignee``
+    — so a running task whose dispatching profile differs from the current
+    ``assignee`` column no longer counts. That is the narrower (truer) signal:
+    the contention this notices is the *worker process* sharing the profile's
+    ``state.db``, not a label on the card.
+
+    FAIL-SAFE — never fail-open to "idle" (the card's hard constraint).
+    ``collect()`` alone is NOT fail-safe-shaped: an unreadable board is appended
+    to its ``errors`` and simply omitted from ``running``, so a naive
+    ``len(running)`` reads an unobservable board as idle. Every way this can be
+    unable to prove idleness therefore counts as BUSY (>=1): the lib cannot be
+    loaded, the pass raises, the pass exceeds :data:`_BUSY_COLLECT_TIMEOUT_S`,
+    the payload is not the shape ``collect()`` documents, or ``errors`` is
+    non-empty (one per reported board, so the notice's count stays honest).
+    Behaving as idle on an unresolvable signal is a step back toward the silent
+    timeout. Each such degradation is logged WARN — the operator sees WHY the
+    notice said busy, instead of a bare count that hides an unreadable board.
     """
     try:
-        from hermes_cli import kanban_db
-        import sqlite3
-        boards = kanban_db.list_boards()
-    except Exception:
-        # Cannot verify the profile is idle — fail safe toward busy (>=1).
+        kanban_db = _busy_kanban_db()
+    except Exception as e:  # noqa: BLE001 — fail-safe path, reported not raised
+        _busy_warn(f"board enumeration unreachable: {e!r}")
         return 1
-    count = 0
-    for board in boards:
-        db_path = board.get("db_path")
-        if not db_path:
-            count += 1   # no DB path to inspect — fail safe
-            continue
+    if kanban_db is None:
+        # The canonical loader already failed to reach hermes_cli.kanban_db.
+        # Handing None to collect() would only make it retry the same import and
+        # report one generic error, so the reason stays where it was recorded
+        # (``hscc autodown status``) and we fail safe here.
+        _busy_warn("kanban lib unreachable (see 'hscc autodown status')")
+        return 1
+    box = {}
+
+    def _run():
         try:
-            conn = sqlite3.connect(str(db_path), timeout=1.0)
-        except Exception:
-            count += 1   # fail safe: cannot verify idle
-            continue
-        try:
-            rows = conn.execute(
-                "SELECT 1 FROM tasks "
-                "WHERE status='running' AND assignee=? LIMIT 1",
-                (profile,),
-            ).fetchone()
-            if rows is not None:
-                count += 1
-        except Exception:
-            count += 1   # fail safe: unreadable board => not provably idle
-        finally:
-            conn.close()
-    return count
+            box["data"] = _busy_collect(kanban_db)
+        except BaseException as e:   # noqa: BLE001 — reported to the caller
+            box["error"] = e
+
+    # A wedged board DB must not hold an HTTP handler (or, worse, the chat POST)
+    # open forever. The pass runs on a daemon thread so the caller returns at
+    # the deadline whatever the thread is still doing.
+    worker = threading.Thread(target=_run, name="busy-collect", daemon=True)
+    worker.start()
+    worker.join(_BUSY_COLLECT_TIMEOUT_S)
+    if worker.is_alive():
+        _busy_warn(f"board scan exceeded {_BUSY_COLLECT_TIMEOUT_S}s deadline")
+        return 1
+    if "error" in box:
+        _busy_warn(f"board scan failed: {box['error']!r}")
+        return 1
+    data = box.get("data")
+    if (not isinstance(data, dict)
+            or not isinstance(data.get("running"), list)
+            or not isinstance(data.get("errors"), list)):
+        # Not the payload collect() documents (both lists always present): a
+        # missing errors key could hide a skipped board, so it proves nothing.
+        _busy_warn("board scan returned an unexpected payload")
+        return 1
+    errors = data["errors"]
+    boards = {row.get("board") or "?" for row in data["running"]
+              if isinstance(row, dict) and row.get("worker") == profile}
+    if errors:
+        # Each unreadable board still counts as busy (+1 each); the count is
+        # real here, so this is a WARN about the boards we could not read.
+        _busy_warn(f"{len(errors)} board(s) unreadable: "
+                   + "; ".join(str(e)[:160] for e in errors[:3]))
+    return len(boards) + len(errors)
 
 
 def _busy_notice(profile: str, count: int) -> str:
