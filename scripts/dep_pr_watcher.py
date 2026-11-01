@@ -26,6 +26,48 @@ import os
 import subprocess
 import sys
 
+
+def _stamp_module():
+    """Load ``hscc_daemon/cron_watchers.py``, or None when it cannot be found.
+
+    Every pass stamps through it (GAP-B-4: without a stamp a dead cron job is
+    indistinguishable from a healthy idle one — the dep-watcher failed 17
+    consecutive runs before anyone noticed). Resolved lazily and defensively:
+    a missing stamp module must never stop the watcher's real work, it only
+    loses the liveness signal, and that loss is PRINTED (see ``main()``) rather
+    than kept quiet.
+
+    Importable from both homes: the repo checkout (``scripts/../hscc_daemon``)
+    and the installed runtime (``~/.hermes/plugins``).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(here), "hscc_daemon", "cron_watchers.py"),
+        os.path.expanduser("~/.hermes/plugins/hscc_daemon/cron_watchers.py"),
+    ]
+    plugins = os.path.expanduser("~/.hermes/plugins")
+    if os.path.isdir(plugins) and plugins not in sys.path:
+        sys.path.insert(0, plugins)
+    try:
+        from hscc_daemon import cron_watchers as cw  # deployed package
+        return cw
+    except ImportError:
+        pass
+    try:
+        import importlib.util
+        path = next((p for p in candidates if os.path.isfile(p)), None)
+        if path is None:
+            return None
+        spec = importlib.util.spec_from_file_location("hscc_cron_watchers", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
 # Make ``hermes_cli`` importable however this is launched (Hermes cron, launchd,
 # or a bare python3) — the card creation needs the runtime's kanban_db.
 _HERMES = os.path.expanduser("~/.hermes/hermes-agent")
@@ -184,10 +226,29 @@ def _deliver(body):
 def main():
     # Silent when idle: an idle run sends no notification. Only speak up when
     # a card is (or already was) created for a pending dep-bump PR.
+    cw = _stamp_module()
+    if cw is None:
+        # Loud in run history (this print IS the hermes cron run record):
+        # losing the stamp is losing the detector, and that must be visible.
+        print("dep_pr_watcher: WARNING - liveness stamp module "
+              "hscc_daemon/cron_watchers.py not importable; this pass is NOT "
+              "recorded and the doctor staleness check cannot see it",
+              file=sys.stderr)
+
     prs = list_review_prs()
     if not prs:
+        # Idle pass: STILL stamp. "Ran, nothing to do" advancing the stamp is
+        # what separates a healthy watcher from a dead one (GAP-B-4).
+        if cw is not None and not cw.stamp("dep_pr_watcher", prs=0, cards=0,
+                                           idle=True):
+            print("dep_pr_watcher: WARNING - liveness stamp write failed",
+                  file=sys.stderr)
         return 0
     created = ensure_cards(prs)
+    if cw is not None and not cw.stamp("dep_pr_watcher", prs=len(prs),
+                                       cards=len(created), idle=False):
+        print("dep_pr_watcher: WARNING - liveness stamp write failed",
+              file=sys.stderr)
     lines = [f"🔁 HSCC dep-check: PR #{num} → kanban card {tid}"
              for num, tid in created]
     if lines:
@@ -198,4 +259,18 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        _rc = main()
+    except Exception as exc:  # noqa: BLE001 - stamp, then re-raise unchanged
+        # A crash is a pass that FAILED: stamp it ok=False so the doctor can
+        # tell "cron fired and the script raised" from "cron never fired"
+        # (GAP-B-4). SystemExit is deliberately NOT caught here — a clean exit
+        # must never be recorded as a failure — and the original traceback is
+        # re-raised untouched.
+        try:
+            _cw = _stamp_module()
+            if _cw is not None:
+                _cw.stamp_failure("dep_pr_watcher", exc)
+        finally:
+            raise
+    sys.exit(_rc)

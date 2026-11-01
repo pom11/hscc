@@ -44,6 +44,39 @@ for _p in (os.path.expanduser("~/.hermes/hermes-agent"),
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
+
+def _stamp_module():
+    """Load ``hscc_daemon/cron_watchers.py``, or None when not importable.
+
+    Every pass stamps through it (GAP-B-4: no stamp means a dead cron job is
+    indistinguishable from a healthy idle one). Defensive by design — losing
+    the module must not stop the watcher's real work; it only loses the liveness
+    signal, and ``main()`` PRINTS that loss so it lands in the cron run history.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(here), "hscc_daemon", "cron_watchers.py"),
+        os.path.expanduser("~/.hermes/plugins/hscc_daemon/cron_watchers.py"),
+    ]
+    try:
+        from hscc_daemon import cron_watchers as cw  # deployed package
+        return cw
+    except ImportError:
+        pass
+    try:
+        import importlib.util
+        path = next((p for p in candidates if os.path.isfile(p)), None)
+        if path is None:
+            return None
+        spec = importlib.util.spec_from_file_location("hscc_cron_watchers", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
 FAIL_LIMIT = int(os.environ.get("HSCC_FAIL_LIMIT", "3"))
 # Acting reassign is OPT-IN: only set when the operator explicitly configured a
 # strong profile. Default None (not "architect") — silently reassigning cards to
@@ -101,6 +134,15 @@ def _deliver(body):
 def main():
     from hscc_daemon import escalate_watcher
 
+    cw = _stamp_module()
+    if cw is None:
+        # Loud in run history (this print IS the hermes cron run record):
+        # losing the stamp is losing the detector, and that must be visible.
+        print("escalate_watcher: WARNING - liveness stamp module "
+              "hscc_daemon/cron_watchers.py not importable; this pass is NOT "
+              "recorded and the doctor staleness check cannot see it",
+              file=sys.stderr)
+
     notified = _load_notified()
     before = set(notified)
 
@@ -117,6 +159,15 @@ def main():
     human_now = {a["task"] for a in actions if a["action"] == "human"}
     # Forget tasks no longer stuck-at-strong so a future re-failure re-alerts.
     _save_notified(notified & human_now)
+
+    # Stamp EVERY pass, idle included (GAP-B-4): an action-less tick must
+    # advance the liveness stamp or a dead cron job looks identical to a
+    # healthy quiet one.
+    if cw is not None and not cw.stamp(
+            "escalate_watcher", actions=len(actions),
+            idle=not actions, fail_limit=FAIL_LIMIT):
+        print("escalate_watcher: WARNING - liveness stamp write failed",
+              file=sys.stderr)
 
     lines = []
     for a in actions:
@@ -152,4 +203,17 @@ if __name__ == "__main__":
     # private umask. Without this it recreates ~/.hscc/escalated.json 0644 —
     # which is exactly what happened after the daemon-side fix looked complete.
     os.umask(0o077)
-    sys.exit(main())
+    try:
+        _rc = main()
+    except Exception as exc:  # noqa: BLE001 - stamp, then re-raise unchanged
+        # A crash is a pass that FAILED: stamp it ok=False so the doctor can
+        # tell "cron fired and the script raised" from "cron never fired"
+        # (GAP-B-4). SystemExit is deliberately NOT caught — a clean exit must
+        # never be recorded as a failure — and the traceback is re-raised as-is.
+        try:
+            _cw = _stamp_module()
+            if _cw is not None:
+                _cw.stamp_failure("escalate_watcher", exc)
+        finally:
+            raise
+    sys.exit(_rc)
