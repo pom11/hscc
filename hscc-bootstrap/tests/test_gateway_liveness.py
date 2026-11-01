@@ -220,7 +220,7 @@ class TestJobIsAlive:
             raise OSError("nothing is readable here")
         alive, detail = gl.job_is_alive(_run=boom)
         assert alive is None
-        assert "could not answer" in detail
+        assert "no liveness transport could answer" in detail
 
     def test_systemd_active_answers_alive(self, monkeypatch):
         monkeypatch.setattr(gl.sys, "platform", "linux")

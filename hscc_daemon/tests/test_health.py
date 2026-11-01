@@ -42,6 +42,21 @@ class TestGatewayJobAlive:
             self.returncode = returncode
             self.stdout = stdout
 
+    @pytest.fixture(autouse=True)
+    def _clean_probe_globals(self, monkeypatch):
+        """Reset the two module globals every case touches.
+
+        `_gateway_job_alive()` caches the last real answer and the degradation
+        reason on the MODULE (that caching is the point of the fail-open path).
+        Cached module state is exactly what leaks between tests and makes a
+        later case pass only because of collection order, so every case starts
+        from "no check has run yet".
+        """
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "_GATEWAY_LAST_ANSWER", None, raising=False)
+        monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None, raising=False)
+        yield
+
     def _drive(self, monkeypatch, results):
         """Install a subprocess.run stub keyed by argv[0]; record every argv.
 
