@@ -78,6 +78,16 @@ PERIODIC_INTERVALS = {
     # behaviour change). Declaring the cadence here is what the SOT rule asks
     # for; how the tick is dispatched stays where it was.
     "watchdog": 30, "triggers": 15,
+    # t_fc6926fe (proxy-stall watchdog, incident 2026-11-02): the held-stream
+    # stall detector tick (proxy_stall.check_proxy_stall, registered in the
+    # CHECKS table next to watchdog-class probes).
+    # 30 s matches the watchdog class — a stall burns streams silently, and the
+    # detection rule needs >=120 s of sustained evidence anyway (4 consecutive
+    # qualifying ticks); any faster tick only adds probes. verify's per-stream
+    # staleness rule widens it to max(600, 2*30+90) = the 600 s floor like any
+    # other stream. The tick stamps its state file on EVERY path (healthy,
+    # suspect, unknown, inert, suppressed), so a quiet stream is a live stream.
+    "proxy_stall": 30,
 }
 
 
@@ -681,6 +691,7 @@ def run_daemon_loop():
     from . import recover
     from . import orch_waker
     from . import kanban_pause
+    from .proxy_stall import check_proxy_stall
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -763,6 +774,15 @@ def run_daemon_loop():
         # _run_supervised_periodic thread (error isolation + respawn), and its
         # stamp file feeds the same per-stream staleness math in verify.
         "kanban_enforce": kanban_pause.check_kanban_enforce,
+        # t_fc6926fe (incident 2026-11-02): the held-stream proxy STALL
+        # watchdog. Same supervised machinery as every stream above — its own
+        # _run_supervised_periodic thread and the same per-stream staleness
+        # math. Detection AND remediation live in the tick itself (unlike
+        # engine_wedge/dispatcher, which split probe + recovery loops): the
+        # 30 s cadence is the SOT here and every path through the tick stamps
+        # proxy_stall.json. The tick never raises (fail-open wrapper), so the
+        # respawn path is a belt-and-braces guarantee, not the design.
+        "proxy_stall": check_proxy_stall,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the
