@@ -41,14 +41,16 @@ carve-out so the fix cannot be widened into it later, and
 in progress returns from the backoff fork before any check runs, so it cannot
 feed the breaker either).
 
-One thing this suite pins rather than fixes: the breaker reason says "3
-consecutive failures in 10min", but `cleanup_old_failures()` prunes by TIME only
-and the success path resets `failed_count` without removing failure entries, so
-an interleaved healthy tick does NOT reset the window — on either leg. Verified
-by probe on the DGX path this card does not touch, and locked in by
+One thing this suite pins rather than fixes: the breaker reason reads
+"<N> failures within 10min" (main's wording since PR #192) because
+`cleanup_old_failures()` prunes by TIME only and the success path resets
+`failed_count` without removing failure entries, so an interleaved healthy tick
+does NOT reset the window — on either leg. Verified by probe on the DGX path
+this card does not touch, and locked in by
 `test_dgx_leg_shows_the_same_windowed_behaviour_as_the_gateway_leg` so the two
-legs cannot drift into different reset rules. Whether the breaker *should* mean
-consecutive is a separate policy question with its own card.
+legs cannot drift into different reset rules. The same window semantics are
+pinned on main's side by
+`hscc_daemon/tests/test_watchdog_breaker_window_not_streak_49013b1b.py`.
 """
 
 import datetime
@@ -168,7 +170,9 @@ class TestGatewayOnlyFailuresAccumulate:
         block = block_on_disk()
         assert block.get("blocked") is True, (
             "3 gateway-only failures in 10 min must block the pipeline")
-        assert "3 consecutive failures in 10min" in block.get("reason", "")
+        assert block.get("reason", "").startswith("3 failures within 10min"), (
+            "the breaker reason names the 10-minute WINDOW and the count "
+            "(main's wording since PR #192) — not a streak")
         # The reason names the leg that actually failed, and must not blame
         # the healthy one.
         assert "DGX=OK" in block["reason"] and "GW=FAIL" in block["reason"]
@@ -251,8 +255,8 @@ class TestWindowAndReset:
 
         Corrected while making the suite green: the first draft of this test
         asserted a healthy tick *cleared the streak*, which the code never did
-        on either path — see the follow-up card raised from this one for
-        whether "3 consecutive failures in 10min" *should* mean consecutive.
+        on either path — the breaker is a time window, and PR #192 retitled the
+        reason string to "<N> failures within 10min" to say so honestly.
         """
         tick(wd)
         tick(wd)
