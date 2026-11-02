@@ -1625,13 +1625,142 @@ def _supervision_check_row(injected=None, hscc_dir=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+#: Candidate plugin roots whose ``hscc-cluster`` subdir carries the budget hook.
+#: Same resolution rule the installer uses (install_payload.py: ``PLUGINS`` env
+#: wins, else ``~/.hermes/plugins``) plus the ``--home``/sandbox root, so a
+#: bootstrap run pointed at a throwaway tree checks THAT tree and never the
+#: operator's live one.
+def _budget_plugin_dirs(hermes_home=None) -> list:
+    """Ordered candidate plugin-container roots for the budget-hook check.
+
+    ``budget_watch.doctor_check`` takes ROOTS and joins ``hscc-cluster`` itself,
+    so these are dirs that CONTAIN plugin dirs (``~/.hermes/plugins``), not the
+    plugin dir. A PROFILE-scoped home (``<root>/profiles/<name>`` — the normal
+    worker mode) contributes its own ``plugins`` dir AND the root's, matching
+    ``install_payload.install_payload_profiles``, which writes both.
+    """
+    dirs: List[str] = []
+
+    def _push(path):
+        if not path:
+            return
+        path = os.path.expanduser(str(path))
+        if path not in dirs:
+            dirs.append(path)
+
+    _push(os.environ.get("PLUGINS"))
+    home = os.path.expanduser(str(hermes_home)) if hermes_home else ""
+    if home:
+        _push(os.path.join(home, "plugins"))
+        parent = os.path.dirname(home)
+        if parent and os.path.basename(parent) == "profiles":
+            _push(os.path.join(os.path.dirname(parent), "plugins"))
+    _push(os.path.join(os.path.expanduser("~"), ".hermes", "plugins"))
+    return dirs
+
+
+def _load_budget_watch(hermes_home=None):
+    """Import the DEPLOYED ``hscc-cluster/budget_watch.py`` for the doctor row.
+
+    Same rule as :func:`_load_orch_waker`: the verdict lives with the feature
+    (its thresholds, its wiring markers) so doctor cannot drift from what the
+    hook means by "registered"; doctor.py only adapts the result dict to its
+    five Check fields.
+
+    ``hscc-cluster`` is hyphenated — not an importable package name — and each
+    plugin deploys standalone (see the mirrored-block note at the top of this
+    file), so this resolves the deployed FILE and loads it by path
+    (``importlib.util.spec_from_file_location``, the in-tree precedent at
+    ``enable_plugins.py:375``) rather than importing across plugin boundaries.
+    The module is stdlib-only, so loading it has no side effects.
+
+    Returns the module, or None when no candidate root carries it (the row then
+    reports itself unverifiable rather than vanishing from the list).
+    """
+    import importlib.util
+
+    for root in _budget_plugin_dirs(hermes_home):
+        cand = os.path.join(root, "hscc-cluster", "budget_watch.py")
+        if not os.path.isfile(cand):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "hscc_budget_watch_doctor", cand)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        except Exception:
+            continue
+    return None
+
+
+#: Fallback for the row's name when the module cannot be imported — same trick
+#: as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints. A missing check must
+#: never render as absence-of-output.
+_BUDGET_HOOK_CHECK_NAME = "worker budget hook ([budget] note)"
+
+
+def _refused_budget_hook_check() -> dict:
+    """In-suite stand-in for the budget-hook check when no seam was injected.
+
+    Its real target is the DEPLOYED plugin tree (``~/.hermes/plugins`` or the
+    live profile's ``plugins`` dir) — the OPERATOR's install when the suite runs
+    from a dispatched worker. Same fence shape as ``_refused_orch_waker_check``:
+    an ERROR naming the missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _BUDGET_HOOK_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "budget-hook check refused inside a pytest process — "
+                      "inject _budget_hook_check",
+            "fix": "Pass _budget_hook_check=lambda: {...} built from tmp "
+                   "plugin-tree fixtures, or call _budget_hook_check_row() "
+                   "directly with a fixture tree; a suite must never read the "
+                   "operator's deployed plugin tree."}
+
+
+def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
+    """The t_6c4f38f2 budget-hook row for the shared check list (five fields).
+
+    Why this row exists: the worker SOUL promises a ``[budget]`` note and
+    ``budget_watch.doctor_check`` verifies the two ``ctx.register_hook`` calls
+    that make it real — but until this row was wired, nothing in doctor ever
+    called it, so a deploy that silently lost the wiring still read all-green.
+    The comparison nothing else makes: the DEPLOYED tree (what Hermes actually
+    loads), not the repo copy.
+
+    Three sources, same trust order as the waker row: an injected callable
+    (tests), the real ``budget_watch.doctor_check(plugins_dirs=...)`` (a human
+    CLI run), and the in-suite refusal (pytest with no seam — never a real read
+    of the operator's plugin tree). A module that cannot be imported reports
+    itself UNVERIFIABLE rather than vanishing. Non-fatal on every verdict: a
+    missing hook costs the budget note, never an install.
+    """
+    if injected is not None:
+        res = injected()
+    elif "pytest" in sys.modules:
+        res = _refused_budget_hook_check()
+    else:
+        bw = _load_budget_watch(hermes_home)
+        if bw is None:
+            return Check(_BUDGET_HOOK_CHECK_NAME, False,
+                         detail="hscc-cluster/budget_watch.py not importable — "
+                                "the budget hook's wiring cannot be verified",
+                         fix="Deploy the hscc-cluster plugin next to "
+                             "hscc-bootstrap (re-run bootstrap).",
+                         fatal=False)
+        res = bw.doctor_check(plugins_dirs=_budget_plugin_dirs(hermes_home))
+    return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
+                 fix=res["fix"], fatal=res["fatal"])
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
                hscc_dir: Optional[str] = None, _role_soul_scan=None,
                _orch_waker_check=None, _cron_watchers_check=None,
-               _supervision_check=None) -> dict:
+               _supervision_check=None, _budget_hook_check=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1721,6 +1850,15 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # must be injected, never probed (live launchctl + live pid file).
         _supervision_check_row(_supervision_check,
                                hscc_dir=os.environ.get("HSCC_DIR")),
+        # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note
+        # and budget_watch.doctor_check verifies the two ctx.register_hook calls
+        # that make it fire — but until this row existed nothing in doctor ever
+        # CALLS it, so a deploy that lost the wiring (stale payload, hand-patched
+        # plugin dir) still read all-green. Warn-only by construction: a missing
+        # hook costs the note, never an install. Same fence as the waker row —
+        # its default target is the operator's DEPLOYED plugin tree, so inside a
+        # pytest process the verdict must be injected, never read.
+        _budget_hook_check_row(_budget_hook_check, hermes_home=home),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh
