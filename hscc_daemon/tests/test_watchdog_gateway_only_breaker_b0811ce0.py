@@ -228,10 +228,20 @@ class TestWindowAndReset:
         assert len(_gateway_entries(block)) == 1, (
             "the two expired entries must have been pruned on write")
 
-    def test_healthy_tick_resets_the_gateway_history(self, wd, tmp_hfcc_dir):
-        """2 gateway failures + a healthy tick + 1 gateway failure must NOT
-        block: the success path clears the streak. The reset was already
-        written; this proves it is observable now that the history persists."""
+    def test_healthy_tick_does_not_erase_the_windowed_history_either_leg(
+            self, wd, tmp_hfcc_dir):
+        """A healthy tick resets `failed_count` but does NOT delete the
+        failure entries — `cleanup_old_failures` prunes by TIME only, so a
+        failure still inside the 10-minute window keeps counting toward the
+        breaker. Probed on the pre-existing DGX path (fail, fail, HEALTHY, fail
+        -> blocked), so this is the breaker's real semantics on BOTH legs and
+        the gateway leg must now match it rather than invent its own reset.
+
+        Corrected while making the suite green: the first draft of this test
+        asserted a healthy tick *cleared the streak*, which the code never did
+        on either path — see the follow-up card raised from this one for
+        whether "3 consecutive failures in 10min" *should* mean consecutive.
+        """
         tick(wd)
         tick(wd)
         assert len(_gateway_entries(block_on_disk())) == 2
@@ -240,7 +250,42 @@ class TestWindowAndReset:
         assert block_on_disk()["failed_count"] == 0
 
         tick(wd)
-        assert block_on_disk().get("blocked") is not True
+        # The windowed failures still count: 3 gateway failures inside 10 min,
+        # success interleaved — exactly what the DGX leg does today.
+        assert block_on_disk().get("blocked") is True, (
+            "the gateway leg must share the breaker's windowed semantics")
+
+    def test_dgx_leg_shows_the_same_windowed_behaviour_as_the_gateway_leg(
+            self, wd, tmp_hfcc_dir):
+        """Parity control for the test above, run on the path this card did NOT
+        touch: DGX failure, DGX failure, HEALTHY, DGX failure blocks too. If
+        someone later makes a healthy tick clear the history, this and the
+        gateway case must move together — the two legs are one breaker.
+        """
+        tick(wd, dgx=False, gateway=True)
+        tick(wd, dgx=False, gateway=True)
+        assert tick(wd, dgx=True, gateway=True) is True
+        assert block_on_disk()["failed_count"] == 0
+
+        tick(wd, dgx=False, gateway=True)
+        assert block_on_disk().get("blocked") is True, (
+            "the DGX leg's windowed behaviour is the reference the gateway "
+            "leg was aligned to")
+
+    def test_healthy_streak_after_a_gateway_outage_reports_zero(
+            self, wd, tmp_hfcc_dir):
+        """What the success path DOES owe: once the pipeline is healthy again
+        the counter reads 0 and the stream says healthy, so a recovered gateway
+        is not reported as still-degraded.
+        """
+        tick(wd)
+        assert tick(wd, dgx=True, gateway=True) is True
+
+        block = block_on_disk()
+        assert block["failed_count"] == 0
+        assert block.get("blocked") is not True
+        assert state_on_disk()["ok"] is True
+        assert state_on_disk()["message"] == "Pipeline healthy"
 
     def test_three_gateway_failures_spaced_beyond_the_window_do_not_block(
             self, wd, tmp_hfcc_dir):
@@ -295,6 +340,49 @@ class TestIntentionalAutodownCarveOut:
         assert entry["ok"] is False
         assert entry.get("intentional") == "autodown", (
             "the stamp keeps the marker verify needs to excuse a down stream")
+
+    def test_waking_window_records_nothing(self, wd, tmp_hfcc_dir):
+        """The WAKE half of the intentional window must also stay out of the
+        history. `health._intentional_window()` (which is what tags a failing
+        `check_gateway()` as a non-fault) requires the block to be BOTH
+        `intentional == "autodown"` AND latched, and a latched block returns from
+        the backoff fork at the top of the cycle — before any check runs. So a
+        wake in progress cannot feed the breaker at all. This pins that, because
+        the fix newly makes gateway failures persist and the wake is the window
+        where a false alarm would be loudest.
+        """
+        from hscc_daemon import lifecycle
+        lifecycle.save_watchdog_block({
+            "blocked": True, "reason": "intentional autodown",
+            "blocked_at": (datetime.datetime.now(datetime.timezone.utc)
+                           + datetime.timedelta(minutes=30)).isoformat(),
+            "intentional": "autodown",
+            "auto_restart_count": 0, "failures": [],
+        })
+
+        for _ in range(3):
+            assert tick(wd) is False
+
+        assert _gateway_entries(block_on_disk()) == []
+        assert [n for n in wd["notifications"] if n[2] == "critical"] == []
+
+    def test_a_loading_layer_routes_to_the_dgx_leg_not_the_gateway_leg(
+            self, wd, tmp_hfcc_dir):
+        """Blast-radius pin for the fix. A gateway failure during a model LOAD
+        must not be charged to the new gateway-only accumulation: while the
+        layer is loading the DGX leg fails too, so the tick takes the pre-existing
+        DGX branch (restart attempted) and the gateway entry merely rides along on
+        the path that already persisted. `check_gateway()`'s `ok` is
+        `job_ok and vllm_ok`, so a gateway-only failure means the serving layer
+        IS answering — a real gateway fault, not a wake in progress.
+        """
+        tick(wd, dgx=False, gateway=False)
+
+        assert len(wd["restarts"]) == 1, (
+            "a down serving layer is a DGX-path fault: the restart gate must open")
+        block = block_on_disk()
+        entry = block["failures"][-1]
+        assert entry["dgx"] is False and entry["gateway"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -712,7 +712,14 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                 )
     else:
         if intentional:
-            # Orchestrator down by design — report reality, do NOT restart.
+            # Orchestrator down by design — report reality, do NOT restart, and
+            # do NOT persist the failure entry appended above. §5 / C2: while an
+            # intentional autodown is in effect `check_gateway()` returns False
+            # because vLLM is stopped BY DESIGN, so counting it would block the
+            # pipeline and fire a critical alarm during a deliberate power-save.
+            # The intentional path owns the block lifecycle (autoup clears it);
+            # this tick's in-memory entry is dropped on purpose — pinned by
+            # test_intentional_autodown_gateway_failure_does_not_accumulate.
             write_state("watchdog", {
                 "ok": False,
                 "blocked": False,
@@ -725,6 +732,20 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                            "(auto-restart suppressed)",
             })
         else:
+            # t_b0811ce0 — persist the failure recorded above. The 1-2-failure
+            # path appends `failure_entry` and recomputes `failed_count` before
+            # the fork, and the `recent` filter that gates the breaker counts a
+            # gateway-only entry (`not f.get("gateway", True)`). Until now this
+            # branch was the only failure path that never called
+            # `save_watchdog_block`, so the entry died with the tick: a
+            # persistent gateway outage stamped ok:False every 30 s forever and
+            # could never reach `len(recent) >= 3` — no PIPELINE BLOCKED latch,
+            # no critical notification. The block file, not the stream file, is
+            # the breaker's memory; a failure that must count has to be written.
+            # Note this does NOT open the vLLM restart gate: that stays behind
+            # `not dgx_ok` above, so a gateway-only fault is fatal-but-never
+            # touches the serving layer.
+            save_watchdog_block(block)
             write_state("watchdog", {
                 "ok": False,
                 "blocked": False,
