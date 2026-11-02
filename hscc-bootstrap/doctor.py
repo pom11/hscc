@@ -1460,13 +1460,100 @@ def _supervision_check_row(injected=None, hscc_dir=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+def _load_kanban_pause():
+    """Import ``hscc_daemon/kanban_pause.py`` for the GAP-F-4 doctor check.
+
+    Same rule as :func:`_load_orch_waker`: the verdict lives with the feature
+    (its stream name, its cadence SOT, its freshness budget, its definition of
+    a coherent paused-policy document) so doctor cannot drift from what the
+    running daemon's enforcer stream means by "last enforce". doctor.py only
+    adapts the result dict to its five Check fields. Returns the module, or
+    None when the daemon plugin is not deployed next to this one (the check
+    then reports itself unverifiable rather than vanishing).
+    """
+    try:
+        from hscc_daemon import kanban_pause
+        return kanban_pause
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import kanban_pause
+        return kanban_pause
+    except Exception:
+        return None
+
+
+#: Fallback for the check name when the module itself cannot be imported —
+#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
+_KANBAN_ENFORCE_CHECK_NAME = "kanban enforce (paused-board hold)"
+
+
+def _refused_kanban_enforce_check() -> dict:
+    """In-suite stand-in for the kanban-enforce check when no seam was injected.
+
+    The check's real targets are ``~/.hscc/state/kanban_paused.json``,
+    ``~/.hscc/state/kanban_enforce.json`` and ``~/.hscc/daemon.pid`` — the
+    OPERATOR's live daemon state when the suite runs from a dispatched worker.
+    Same fence shape as ``_refused_orch_waker_check``: an ERROR naming the
+    missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _KANBAN_ENFORCE_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "kanban-enforce check refused inside a pytest process — "
+                      "inject _kanban_enforce_check",
+            "fix": "Pass _kanban_enforce_check=lambda: {...} built from tmp "
+                   "paused-state/stream fixtures; a suite must never read the "
+                   "operator's daemon state."}
+
+
+def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
+    """The GAP-F-4 row for the shared check list (five Check fields).
+
+    Why this row exists (audit F GAP-F-4): `hscc kanban enforce` — the verb
+    that re-holds cards an in-flight orchestrator turn leaves ready/running on
+    a PAUSED board — used to have no scheduler and no coverage at all, so a
+    paused board could silently leak work while every other row stayed green.
+    The verb is now the daemon's ``kanban_enforce`` stream (60 s,
+    PERIODIC_INTERVALS); this row asserts the enforcer is alive and the policy
+    document is coherent (the audit's "N board(s) paused, last enforce Ns
+    ago"). RED is reserved for the orch-waker class: boards policy exists,
+    the daemon runs, and the stream has never stamped.
+
+    Three sources, same trust order as the waker row: an injected callable
+    (tests), the real :func:`hscc_daemon.kanban_pause.doctor_check` (a human
+    CLI run), and the in-suite refusal (pytest with no seam — never a real
+    read of the operator's daemon state). ``hscc_dir`` is forwarded exactly
+    like ``doctor_notifier_mask.check`` takes it, so a sandboxed bootstrap
+    (doctor is Stage 1, HOME stays real) reads the SANDBOX's ~/.hscc root.
+    """
+    if injected is not None:
+        res = injected()
+    elif "pytest" in sys.modules:
+        res = _refused_kanban_enforce_check()
+    else:
+        kp = _load_kanban_pause()
+        if kp is None:
+            return Check(_KANBAN_ENFORCE_CHECK_NAME, False,
+                         detail="hscc_daemon/kanban_pause.py not importable — "
+                                "the paused-board enforcer's health cannot be "
+                                "verified",
+                         fix="Deploy the hscc_daemon plugin next to "
+                             "hscc-bootstrap (re-run bootstrap).",
+                         fatal=False)
+        res = kp.doctor_check(hscc_dir=hscc_dir)
+    return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
+                 fix=res["fix"], fatal=res["fatal"])
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
                _status_runner=None, fleet_checks=None, _ssh_factory=None,
                hscc_dir: Optional[str] = None, _role_soul_scan=None,
                _orch_waker_check=None, _cron_watchers_check=None,
-               _supervision_check=None) -> dict:
+               _supervision_check=None, _kanban_enforce_check=None) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1556,6 +1643,18 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # must be injected, never probed (live launchctl + live pid file).
         _supervision_check_row(_supervision_check,
                                hscc_dir=os.environ.get("HSCC_DIR")),
+        # GAP-F-4 (audit F, t_51931733): is the paused-board policy actually
+        # being ENFORCED? `hscc kanban enforce` used to be a verb nobody called:
+        # an orchestrator turn in flight could leave cards ready/running on a
+        # paused board and nothing noticed (its own docstring said "safe to run
+        # from a loop" — there was no loop). It is the daemon's kanban_enforce
+        # stream now (60 s, PERIODIC_INTERVALS), and this row is the coverage
+        # half: paused-count + last-enforce freshness + policy-document
+        # coherence, with fatal RED reserved for the orch-waker class (policy
+        # live, daemon running, stream never stamped). Same fence as the waker
+        # row: inside pytest the verdict must be injected, never probed.
+        _kanban_enforce_check_row(_kanban_enforce_check,
+                                  hscc_dir=os.environ.get("HSCC_DIR")),
     ]
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh

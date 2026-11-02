@@ -48,6 +48,18 @@ PERIODIC_INTERVALS = {
     # stays a no-op that STILL stamps, so the stream never goes dark and
     # staleness never false-fires on a deliberately-disabled feature.
     "orch_waker": 30,
+    # GAP-F-4 (t_51931733): the paused-board enforcer tick
+    # (check_kanban_enforce -> kanban_pause.enforce_tick -> enforce). 60 s
+    # matches the dispatcher/engine_wedge supervision class: when nothing is
+    # paused the tick costs ZERO subprocesses (enforce() early-returns before
+    # enumerating any board), and when boards ARE paused a runaway orchestrator's
+    # new cards get re-held within a minute — the whole point of the stream is
+    # that the hold is continuous, not remembered (an orchestrator's turn runs
+    # minutes; a slower cadence just delays closing the leak it creates). The
+    # tick stamps its own stream file on every path, so verify's per-stream rule
+    # (max(600, 2*60+90) = the 600 s floor) never cries wolf on an idle-but-
+    # healthy enforcer.
+    "kanban_enforce": 60,
     # GAP-B-6 (t_2039a319): the two loops the daemon runs OUTSIDE the CHECKS
     # table — pipeline_watchdog (lifecycle.py) and trigger_engine (trigger.py),
     # each with its own dedicated thread in run_daemon_loop. Their cadences used
@@ -668,6 +680,7 @@ def run_daemon_loop():
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
     from . import orch_waker
+    from . import kanban_pause
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -745,6 +758,11 @@ def run_daemon_loop():
         # take another stream down — and its state file feeds the same
         # per-stream staleness math as every other stream.
         "orch_waker": orch_waker.check_orch_waker,
+        # GAP-F-4 (t_51931733): the paused-board enforcer's check body. Same
+        # machinery as every stream above: its own supervised
+        # _run_supervised_periodic thread (error isolation + respawn), and its
+        # stamp file feeds the same per-stream staleness math in verify.
+        "kanban_enforce": kanban_pause.check_kanban_enforce,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the
