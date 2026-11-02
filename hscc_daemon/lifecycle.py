@@ -682,7 +682,33 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     block["failures"] = cleanup_old_failures(failures, window_minutes=10)
     block["failed_count"] = len(block["failures"])
 
-    # Count recent failures
+    # Count recent failures. THIS IS A TIME WINDOW, NOT A STREAK — and that is
+    # the intended policy (t_49013b1b, DECIDE FIRST). `cleanup_old_failures()`
+    # prunes purely by timestamp and the success path below appends a success
+    # entry + resets `failed_count` WITHOUT removing failure entries, so a
+    # failure still inside the 10-minute window keeps counting even when the
+    # pipeline recovered in between. A flapping pipeline therefore escalates on
+    # 3 faults-in-10-min rather than needing 3 back-to-back ticks. Probed on
+    # main @ 9bfe6779: DGX fail, fail, HEALTHY, fail -> blocked.
+    #
+    # Why the window is right and the old word was wrong: (a) every canonical
+    # description of this breaker says a window, never a streak — this
+    # function's own docstring ("block on 3 failures"), the 2.14.0 changelog
+    # ("the 3-failures-in-10min pipeline breaker") and the `len(recent) >= 3`
+    # gate itself; (b) the escalation is a backoff, not a dead-end (see
+    # WATCHDOG_BACKOFF_MINUTES — the block auto-clears), so the cost of
+    # escalating on a flapping-but-self-healing pipeline is one notification
+    # plus 10 quiet minutes, while requiring a true streak would let a gateway
+    # that dies for 30 s every 40 s stay un-escalated indefinitely; (c) the
+    # windowed counter escalated correctly on a real 9.5 h outage
+    # (docs/audits/false-fail-streams-t_3fe0cd05.md — "Restarts: 122").
+    #
+    # The only thing that was wrong is the WORD "consecutive" in the reason
+    # below, which reached the desktop notification and `hscc status` and
+    # claimed a streak the counter never required. Pinned by
+    # hscc_daemon/tests/test_watchdog_breaker_window_not_streak_49013b1b.py.
+    # Both legs share this ONE counter — a reset rule change must move the DGX
+    # leg and the gateway leg together, never one leg alone.
     recent = [f for f in block["failures"] if not f.get("dgx", True) or not f.get("gateway", True)]
 
     if len(recent) >= 3:
@@ -696,7 +722,7 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         # component; the block here is justified by the gateway leg alone.
         def _verdict_label(v):
             return "UNKNOWN" if v is None else ("OK" if v else "FAIL")
-        reason = (f"3 consecutive failures in 10min: "
+        reason = (f"{len(recent)} failures within 10min: "
                   f"DGX={_verdict_label(dgx_ok)} GW={_verdict_label(gw_ok)}")
         block["reason"] = reason
         log(f"Watchdog: BLOCKING pipeline — {reason}")

@@ -1350,6 +1350,8 @@ stretch is up to 105× (157.85 s). Something did hang — but the cap design mea
 did not have to hang long to be reported as unavailable.
 
 ### c4 — the starvation signal that IS real: the cap is not a ceiling
+(c9 corrects the caller count in this section's cadence sentence; the cadence
+measurement itself is unchanged.)
 
 `run_cmd`'s `timeout=` is not a wall-clock guarantee once the direct child leaves a
 surviving grandchild holding the stdout pipe — `run_cmd` uses
@@ -1377,8 +1379,9 @@ stream's inter-tick gap, window A vs the two control windows:
 | nas (900 s) | 903.7 s / 940.2 s | 900.1 s / 900.2 s | 900.2 s / 900.2 s |
 
 (`PERIODIC_INTERVALS` declares all three at 60 s (`daemon_ops.py:32-35`); the
-~24 s effective cadence is because `check_dgx` is invoked by **three** callers —
-see c6.) `gateway` slipping 25% matters most: that tick contains only `launchctl`,
+~24 s effective cadence is because `check_dgx` is invoked by **two** callers —
+see c6, and c9 for why this sentence formerly said three.) `gateway` slipping
+25% matters most: that tick contains only `launchctl`,
 `ps` and a local HTTP GET, and **none of them touches the network or the nodes**.
 A purely node-side or network fault cannot slow those. So the Mac was genuinely
 slower in window A. What it was not is *out of* anything: `ps.txt` (15:54 local)
@@ -1414,21 +1417,47 @@ wraps; starvation then made it unrecoverable-looking.
 
 ### c6 — a third amplifier found while measuring (the double-fault the ORCH note asked about)
 
-`check_dgx` is invoked from **four** places, and every one of them runs the full
-body — 8 s SSH + 10 s SSH + 25 s sweep + 10 s sweep — in-process:
+**CALLER COUNT CORRECTED AFTER PUBLICATION (c9).** This section was written
+saying `check_dgx` ran from four places; at the base it was measured against it ran
+from **two** — the count below is stated in the past tense of that base. One further
+change has since landed: PR #182 (c8-3), merged 2026-11-02, made the watchdog read
+the published verdict instead of re-running the check, so on current main `check_dgx`
+has exactly **one** periodic caller (the `dgx` stream thread; `hscc check`/`hscc
+status` CLI paths still run it on demand, and `hscc check watchdog` seeds one sweep
+before its cycle — `cli.py:732`, on purpose, since a CLI process has no stream
+thread to publish a verdict). The measured numbers
+below — the cadence and the WARN overlap — stand unchanged; only the caller list
+was wrong. The "~112 extra checks/day" is left as published but is flagged by c9 as
+not reproducing per-day. c9 records exactly what changed, what
+did not, and how the misreading happened.
+
+`check_dgx` is invoked from **two** places, and both run the full body — 8 s SSH
++ 10 s SSH + 25 s sweep + 10 s sweep — in-process:
 
 - its own thread, `PERIODIC_INTERVALS["dgx"] = 60` (`daemon_ops.py:32,563-621`);
-- `pipeline_watchdog` every 30 s — `dgx_ok = check_dgx_fn()` (`lifecycle.py:523`);
-- `trigger_engine` every 15 s (`trigger.py:254`, wired at `daemon_ops.py:769`).
+- `pipeline_watchdog` every 30 s — `dgx_ok = check_dgx_fn()` (`lifecycle.py:523`;
+  `:582` on today's main).
 
-That is why a 60 s stream ticks at ~24 s median (c4), and it means during an episode
-**the sweeps pile up on the box that is already struggling**: up to ~112 extra
-full-DGX-checks/day, each with two shell-outs, each re-printing the WARN. Log
-evidence they genuinely overlap: **5 ticks carried 2 WARNs**, and two WARNs landed
-**0.50 s apart** (23:18:18) — one tick cannot emit two, so two callers were in
-`check_dgx` at once. `FLEET VISIBILITY LOST` count (35) equals the WARN count (35),
-i.e. the alarm is re-asserted by every caller and is not an independent signal of
-anything.
+A third apparent caller was not one: `trigger_engine`, ticked every 15 s and
+*wired* `check_dgx` (`check_dgx_fn=check_dgx` at `daemon_ops.py:769` as first
+published here; the same wiring sits at `:708` at the `origin/main` `928e1aa3`
+this audit was written against and at `:787` on main immediately before PR #182),
+never invoked it — `grep -c 'check_dgx_fn()' hscc_daemon/trigger.py` = **0**.
+Its DGX metrics are answered from the state file (`trigger.py:129-134`,
+`read_state("dgx")`), not by running the check. The dead kwarg and its wiring are
+gone from main as of PR #182 — see c9.
+
+That multiplication is why a 60 s stream ticks at ~24 s median (c4): `check_dgx`
+stamps the `dgx` state itself (`health.py:381` at this audit's base; `:528` on
+today's main), so the watchdog's 30 s call
+lands in the same stream and the *stamps* interleave far below the declared 60 s.
+It also means during an episode **the sweeps pile up on the box that is already
+struggling**: up to ~112 extra full-DGX-checks/day, each with two shell-outs, each
+re-printing the WARN. Log evidence they genuinely overlap: **5 ticks carried 2
+WARNs**, and two WARNs landed **0.50 s apart** (23:18:18) — one tick cannot emit
+two, so two callers were in `check_dgx` at once. `FLEET VISIBILITY LOST` count
+(35) equals the WARN count (35), i.e. the alarm is re-asserted by every caller and
+is not an independent signal of anything.
 
 ### c7 — what remains UNPROVEN, and the capture that settles it
 
@@ -1487,11 +1516,24 @@ and the daemon's own shell-outs are the load to remove (c8-3).
    atomic JSON file), so **hscc can read that rather than asking sparkrun to build
    anything**. This is what turns the double-fault into one alarm plus a staleness
    stamp.
-3. **One sweep per tick, not four.** Have `pipeline_watchdog` and `trigger_engine`
-   read the DGX *state file* (`read_all_states`) instead of calling `check_dgx_fn()`
-   in-process — or add a short in-process result cache (a tick's verdict is valid
-   for a few seconds) so the 15 s/30 s callers cannot multiply an already-slow
-   shell-out. Removes the c6 pile-up without changing any check's semantics.
+3. **One sweep per tick, not two.** (Corrected — this read "not four"; see c9.)
+   The two real callers are the `dgx` stream thread and `pipeline_watchdog`, and
+   the second of them cannot simply read the DGX *state file*: `check_dgx` writes
+   `ok = publish_ok` but *returns* `serving_ok`, and those two diverge exactly
+   during a FLEET VISIBILITY LOST episode (`health.py:365-367` at this audit's
+   base `928e1aa3`; `:512-514` on today's main), so a watchdog
+   reading the file would drive stop/relaunch cycles against a healthy serving
+   layer whenever sparkrun's status polling fails. What was wanted is a short
+   in-process verdict cache carrying the **returned** value, so the 30 s caller
+   cannot multiply an already-slow shell-out. Removes the c6 pile-up without
+   changing any check's semantics. `trigger_engine` needed nothing: it never ran
+   the check.
+   *Shipped as PR #182 (merged 2026-11-02): `health._DGX_VERDICT` with
+   `publish_dgx_verdict` / `dgx_verdict` (`health.py:380-402` on today's main)
+   and `lifecycle.dgx_verdict_serving_ok` as `pipeline_watchdog`'s default
+   `check_dgx_fn` (`lifecycle.py:435`, `:491`). The published value is the
+   **returned** `serving_ok`, not the file's `publish_ok`, for exactly the reason
+   above.*
 4. **UPSTREAM (restate of FIX-7, now with the arithmetic that makes it urgent).**
    `query_status_for_cluster` should surface per-host elapsed time and the failure
    reason (connect timeout vs non-zero rc vs unreachable) in `to_dict()`, and the
@@ -1501,3 +1543,113 @@ and the daemon's own shell-outs are the load to remove (c8-3).
 *No code was changed by this card. Scripts behind c1/c2/c4/c6 measurements:
 `tick_internals.py`, `leg_timing.py`, `workers_during_lost.py`,
 `orphan_pipe_probe2.py`, `warns_per_tick.py`, `live_sweep_timing.py` (scratch).*
+
+### c9 — correction: `trigger_engine` was never a caller of `check_dgx` (c6 said four; it was two)
+
+Appended by card `t_9e45955c` while c8-3 was being implemented (`t_48206b9d`),
+before any code in that card was written — the same re-check that would have
+shaped c8-3's design. Appended here rather than editing c6/c4/c8-3's prose into
+an unmarked rewrite: those sections are the audit's record of what was measured
+and believed at the time, and the point of this doc is to be honest about how its
+conclusions were reached.
+
+**This is a precision fix to the caller count, not a retraction of the
+measurement.** The ~24 s median cadence is real and the two-WARNs-0.50 s-apart
+overlap is real. Each is measured from the log (tick timestamps, WARN line counts)
+rather than derived from a caller count, so neither moves when the count does — and
+both are equally well explained by the **two** genuine callers (60 s `dgx` stream +
+30 s `pipeline_watchdog`) as they were by the four c6 asserted. The "~112 extra
+full-DGX-checks/day" figure is *directionally* right — the pile-up is real and
+larger than 112/day suggests — but it does not reproduce as a per-day number, and
+it is flagged in its own paragraph at the end of this section rather than being
+asserted here. Nothing in c1–c5, c7, or the value of the c8-1/c8-3 fixes depends on
+the count, and this correction must not be read as discrediting the measurement.
+
+What was wrong: c6 listed `trigger_engine` as a third in-process caller
+("`trigger_engine` every 15 s (`trigger.py:254`, wired at `daemon_ops.py:769`)"),
+and c4's cadence sentence therefore said "three callers". (Note c6's own
+enumeration was already short of its headline: it asserted **four** places and
+listed **three** bullets. The count was never the product of an enumeration — which
+is the second reason to distrust it and the reason c9 re-derives it from call sites
+and from the log's own rate.) In fact `trigger_engine`
+accepted `check_dgx_fn`/`check_gateway_fn` and invoked neither —
+`grep -c 'check_dgx_fn()' hscc_daemon/trigger.py` returns **0** both at this
+audit's own base (`origin/main` `928e1aa3`) and on today's main. Its DGX/gateway/
+NAS signals (`failed_dgx`, `vllm_down`, `watchdog_blocked`, `nas_down`,
+`state.<stream>`) are answered by `evaluate_trigger` reading the stream **state
+files** (`trigger.py:129-146`), which the checks' own threads stamp. It runs no
+probe of its own.
+
+What made the misreading so easy — worth recording, because it cost a card — is
+that the code *looked* wired: `run_trigger_loop` passed `check_dgx_fn=check_dgx`
+straight into the signature (`daemon_ops.py:769` as first published here; `:708`
+at `928e1aa3`; `:787` on main immediately before it was removed), and the
+signature carried the parameter. Wiring is not a call site.
+The same shape still exists for `check_gateway_fn` and `pipeline_watchdog_fn` on
+`trigger_engine`: both are still passed in by `run_trigger_loop` (`daemon_ops.py:796-797`
+on today's main), both are still never invoked — unused parameters, left in place
+as out of scope here.
+The dead `check_dgx_fn` kwarg and its wiring have since been removed by PR #182
+(c8-3), **merged into main on 2026-11-02** (merge commit `d85f054e`). So on current
+main there is no dead wiring left to misread, and `daemon_ops.py:787` — the line
+this correction first cited as the live-looking caller — no longer holds it. When
+quoting the misreading, quote it against a base that still has it (`:769` as
+published, `:708` at `928e1aa3`, `:787` pre-#182) and say which.
+`trigger_engine` has exactly zero in-process health checks before that PR and
+exactly zero after it; its own docstring now says so and names this audit as the
+misreading it prevents, and the call-site comment in `run_trigger_loop` records
+why the kwarg must not come back.
+
+Why the cadence math survives the correction — and, measured, confirms it: the
+stream's timestamp is stamped by `check_dgx` itself (`health.py:381` at this
+audit's base, `write_state("dgx", state_entry)` → `state.write_state` sets
+`timestamp: now_iso()`; `:528` on today's main), so every caller that runs the
+check re-stamps the *same* stream. Two callers at 60 s and 30 s already interleave
+their stamps into the observed ~24 s
+median; a live 15 s caller would have pulled it toward ~15 s, which the log does
+not show. The c4 table carries its own control for exactly this: `gateway` — which
+has the *same* two-caller structure, the 60 s stream plus the same
+`pipeline_watchdog` tick (`gw_ok = check_gateway_fn()`, `lifecycle.py:522` at this
+audit's base; `:583` on today's main) —
+measures 24.1 s in the control window, while the **single-caller** streams in that
+same table hold their declared periods: `workers` 60.1 s against 60, `nas` 900.1 s
+against 900. Two callers ⇒ sub-declared median; one ⇒ exactly the declared
+interval.
+
+Re-measured on the audit's own days with the same marker this section's script
+used (`Running DGX check`, logged inside `check_dgx` — `health.py:304` at this
+audit's base, `:451` on today's main — so it
+counts invocations rather than stream stamps; `scratch/t9e45955c_check_rate.py`
+over `~/.hscc/daemon.log`):
+**3,765 / 3,801 / 3,795 invocations on 2026-10-29 / -30 / -31**, gap median
+**24.6 s** (p25 12.3, p75 33.3). That is the arithmetic that settles the count.
+Two callers predict 1440 (60 s) + 2880 (30 s) = 4320/day, less the loop overhead
+that makes each real period `interval + check duration` ⇒ measured 3800. **Four**
+callers, adding a live 15 s loop, would add 5760/day for a median gap near 8–9 s —
+neither of which the log shows anywhere. The overlap evidence is likewise
+two-caller evidence: two WARNs 0.50 s apart require two callers concurrent in
+`check_dgx`, and two is what there are. The proof never needed a third and does not
+lose force without one.
+
+**One number this correction does NOT resolve, flagged not touched.** The "~112
+extra full-DGX-checks/day" in c6 does not reproduce as a *per-day* figure. Measured
+as above, the per-day excess over a lone 60 s stream is **~2,360/day** (3800 −
+1440); re-cut by hour it is **~98–101/hour** (42 complete hours in the audit window:
+94 / 161 / 163 invocations per hour at min / median / max, i.e. 34 / 101 / 103 above
+the 60/hour a single stream would produce; 33 of 42 hours sit at ≥ 100). The ceiling
+makes this two-loop arithmetic, not three- or four-loop: two callers can produce at
+most 60 + 120 = 180 invocations/hour, and the 161/hour observed median is that
+ceiling less the loop overhead each period absorbs in the check's own duration —
+whereas a live 15 s caller would add up to 240/hour more, which nothing in the
+window reaches. So 112 sits within ~11% of the per-**hour** excess and ~20× below
+the per-**day** one: the most likely reading is a per-hour magnitude carrying a
+per-day label. The script that produced it is not among the c1/c2/c4/c6 scripts
+listed at the end of this section (`warns_per_tick.py` counts WARNs per tick and
+sub-second WARN pairs; it emits no rate at all), and it lives in scratch rather than
+in the repo, so the derivation cannot be re-run from this checkout alone. It is left
+as published — the figure belongs to the card that measured it, and this card's
+scope is the caller count — but as written it understates the pile-up, and the next
+reader should not treat "112/day" as measured. Either way c6's conclusion is
+unaffected: on the two-caller reading the pile-up is real, is roughly one extra full
+check every ~36 s on the box that is already degraded, and that is what justifies
+c8-3. `scratch/t9e45955c_hourly.py` reproduces the hourly cut.
