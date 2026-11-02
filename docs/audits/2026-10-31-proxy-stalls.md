@@ -1575,9 +1575,10 @@ their stamps into the observed ~24 s median; a live 15 s caller would have pulle
 it toward ~15 s, which the log does not show. The c4 table carries its own control
 for exactly this: `gateway` — which has the *same* two-caller structure, the 60 s
 stream plus the same `pipeline_watchdog` tick (`gw_ok = check_gateway_fn()`,
-`lifecycle.py:524`) — measures 24.1 s in the control window, while `workers`, the
-one stream with a **single** caller, holds 60.1 s. Two callers ⇒ sub-60 median; one
-caller ⇒ 60. No third caller is needed to produce either number. The overlap
-evidence is likewise two-caller evidence — two WARNs 0.50 s apart require two
-callers concurrent in `check_dgx`, and two is what there are. The proof never
-needed a third and does not lose force without one.
+`lifecycle.py:524`) — measures 24.1 s in the control window, while the
+**single-caller** streams in that same table hold their declared periods: `workers`
+60.1 s against 60, `nas` 900.1 s against 900. Two callers ⇒ sub-60 median; one
+caller ⇒ exactly the declared interval. The dgx median needs no third caller to be
+explained. The overlap evidence is likewise two-caller evidence — two WARNs 0.50 s
+apart require two callers concurrent in `check_dgx`, and two is what there are.
+The proof never needed a third and does not lose force without one.
