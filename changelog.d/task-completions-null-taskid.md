@@ -23,5 +23,12 @@ task: task-completions-null-taskid
   auto-unblock scan skips `"unknown"` rows instead of chasing them as card ids.
   New payload-shape tests drive the handler through hermes' own
   `PluginDispatchMixin._invoke_hook_callback` binder, so an upstream kwarg drift
-  fails in pytest instead of in the ledger. Verified: the live ledgers' row
-  counts are unchanged across a full post-fix suite run.
+  fails in pytest instead of in the ledger. Verified hermetically: running the
+  whole `hscc-cluster` suite against the fixed tree (1059 passed, 3 skipped)
+  leaves `~/.hscc/task_completions.jsonl` at exactly the same row count — 857
+  before, 857 after — so this suite no longer writes a single row to the
+  operator's ledgers. Null rows did still appear during a later full
+  `run_tests.sh`, from a SIBLING card's concurrent suite leg still running the
+  unfixed code (the deployed `~/.hermes/plugins/hscc-cluster/workflow.py` also
+  still assigns the raw `task_id`); that stops when this lands and the runtime
+  copy is redeployed.

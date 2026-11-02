@@ -83,8 +83,11 @@ process) from the kwarg-shape drift the card assumes. Timestamp cross-check in
    construction, not by each test remembering.
 2. `hscc-cluster/workflow.py` — both handlers now normalise identity fields
    before writing: a genuinely absent task_id logs `"unknown"`, never a silent
-   null, and an entry with no task identity is **not appended at all** (that is
-   what made 799 rows unattributable *and* un-deletable-by-join).
+   null. `summary`/`reason` keep their meaning: `summary` is content, not an
+   identity key, so it stays `null` when the worker passed none (writing the
+   string "unknown" into a human-facing field would be a lie). The row is still
+   appended — dropping it would hide the fact that a transition happened with
+   no context, which is exactly the signal the next reader wants.
 3. `hscc-cluster/tests/test_lifecycle_hooks.py` — fake-payload tests pinning
    (a) the shape hermes ships today, incl. the extra `assignee`/`run_id`/
    `telemetry_schema_version` kwargs and a narrow signature, (b) the
