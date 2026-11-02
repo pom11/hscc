@@ -192,18 +192,90 @@ class TestVerdictConsumedVerbatim:
 
 # ── 3. no-verdict and stale: neutral pass, never a fabricated failure ────────
 
-class TestNoVerdictIsNeutral:
-    """The fail action here is a stop/relaunch then a pipeline block + critical
-    notification. Reading "no signal" as FAILURE manufactures that outage from a
-    thread that is merely behind, so the safe direction is neutral + loud."""
+class TestNoVerdictIsUnknown:
+    """No verdict published = UNKNOWN, which is neither OK nor FAIL. The
+    watchdog's fail action is a vLLM stop/relaunch and then a pipeline block +
+    critical notification, so a startup tick where the 30 s loop outran the 60 s
+    dgx thread must not be counted as a failure it has no evidence for — and a
+    genuine gateway failure must not be swallowed by the missing DGX leg."""
 
-    def test_no_verdict_passes_and_warns(self, wd):
+    def test_no_verdict_with_healthy_gateway_passes_without_restarting(self, wd):
         health.reset_dgx_verdict()
         calls = []
         assert tick(wd, gw=True, restart_calls=calls) is True
         assert calls == [], "no DGX verdict must not restart vLLM on a layer nobody has probed"
-        assert any(lvl == "WARN" and "no dgx verdict" in m.lower()
+        assert any(lvl == "WARN" and "not counting this tick as a failure" in m
                    for lvl, m in wd["logs"]), texts(wd)
+
+    def test_no_verdict_stamps_unknown_not_a_lie_in_the_state_file(self, wd):
+        """The stream file must say it does not KNOW (dgx: None), not dgx: True.
+        `hscc verify` and an operator reading `hscc status` both consume this; a
+        fake True is how a blind spot gets reported as a healthy fleet."""
+        import json
+        health.reset_dgx_verdict()
+        assert tick(wd, gw=True) is True
+        entry = json.loads((wd["state_dir"] / "watchdog.json").read_text())
+        assert entry["dgx"] is None, entry
+        assert entry["ok"] is True          # gateway answered: no failure
+        assert entry["gateway"] is True
+        assert "not yet published" in entry["message"]
+
+    def test_no_verdict_does_not_reset_or_accumulate_breaker_failures(self, wd):
+        """A startup tick is not a success either — writing a success_entry would
+        let the 3-failure breaker's `cleanup_old_failures` reset be driven by a
+        tick that observed nothing. The unknown tick must not touch failures."""
+        health.reset_dgx_verdict()
+        lifecycle.save_watchdog_block({"blocked": False, "reason": "",
+                                       "blocked_at": None,
+                                       "failures": [{"timestamp": lifecycle.now_iso(),
+                                                     "dgx": False, "gateway": True}],
+                                       "auto_restart_count": 0})
+        assert tick(wd, gw=True) is True
+        block = lifecycle.load_watchdog_block()
+        assert len(block["failures"]) == 1, (
+            "an UNKNOWN tick must neither add nor clear breaker history")
+
+    def test_no_verdict_still_counts_a_real_gateway_failure(self, wd):
+        """The asymmetry that makes this fork more than `return True`: a gateway
+        failure is a failure even when the DGX leg is blind — the tick returns
+        False and stamps ok:False. What it must NOT do is restart vLLM: a
+        gateway-only failure never did that before (the old `not dgx_ok` gate
+        could only be True for a REAL DGX failure), and the restart targets the
+        serving layer, so a leg that never reported must not justify a
+        stop/relaunch.
+
+        NOTE, pre-existing and deliberately untouched: this path (gateway-only
+        failure) does not `save_watchdog_block`, so the entry is not persisted
+        and the breaker does not accumulate it — true of the old code too
+        (`dgx_ok=True, gw_ok=False` took this same branch). UNKNOWN is kept
+        behaviour-identical to what a `dgx_ok=True` tick did; whether the
+        gateway leg *should* count toward the breaker is a separate question,
+        filed as a LEFT finding rather than smuggled in here.
+        """
+        health.reset_dgx_verdict()
+        calls = []
+        assert tick(wd, gw=False, restart_calls=calls) is False
+        assert calls == [], "a gateway-only failure must not restart vLLM"
+        entry = json.loads((wd["state_dir"] / "watchdog.json").read_text())
+        assert entry["ok"] is False, "a gateway failure must still stamp unhealthy"
+        assert entry["dgx"] is None, "the record must keep DGX UNKNOWN, not invent a bool"
+        assert entry["gateway"] is False
+        assert any(lvl == "WARN" and "gateway leg FAILED" in m
+                   for lvl, m in wd["logs"]), texts(wd)
+
+    def test_gateway_only_failure_with_a_known_good_dgx_still_does_not_restart(self, wd):
+        """The pre-existing rule this card must not disturb, pinned against the
+        new default signal: DGX healthy + gateway down => no vLLM restart
+        (restart_vllm is gated on a DGX failure, not on any pipeline failure)."""
+        health.publish_dgx_verdict(True, True)
+        calls = []
+        assert tick(wd, gw=False, restart_calls=calls) is False
+        assert calls == []
+
+    def test_dgx_signal_returns_none_for_unknown(self, wd):
+        """The signal itself is honest: None, not a bool."""
+        health.reset_dgx_verdict()
+        assert lifecycle.dgx_verdict_serving_ok() is None
 
     def test_stale_verdict_is_carried_not_inverted(self, wd):
         """A verdict older than the window is reported stale and still used.
