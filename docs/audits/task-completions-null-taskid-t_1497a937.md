@@ -92,6 +92,52 @@ process) from the kwarg-shape drift the card assumes. Timestamp cross-check in
 4. Ledger reader audit (below) — readers are null-tolerant; no format change,
    so no reader migration is needed.
 
+## Second, distinct defect found while verifying (NOT fixed here — see LEFT)
+
+The card assumes real completions DO write a row, just with a null id. They do
+not write a row at all. Cards completed today by this profile — `t_51931733`
+(02:02:32Z), `t_04c35b37` (02:00:09Z), `t_c697278f` (01:10:02Z) — have **no**
+entry in `task_completions.jsonl`; the only rows in that window are the null
+pairs at 01:25:57 / 01:48:09 / 01:55:00 written by suite runs.
+
+Evidence that the hook is not firing for worker profiles at all:
+
+| signal | value |
+| --- | --- |
+| `hermes plugins list` (active profile = `backend-engineer`) | `hscc-cluster … not enabled` |
+| `~/.hermes/profiles/backend-engineer/config.yaml` | no `plugins:` key at all |
+| `~/.hermes/config.yaml:561-567` | `plugins.enabled: [hscc-cluster, hscc-commands, sparkrun-hermes]` |
+| `tool_events.jsonl` last LIVE row (written by the same plugin's `on_pre_tool_call`) | `2026-10-06T11:08:33`, `profile_name: "unknown"` |
+| `task_completions.jsonl` last real row | `t_dc2cf015`, `profile_name: "default"`, 2026-11-01 |
+| profile names ever recorded on real rows | `default` ×50, `reviewer` ×1, `backend-engineer` ×1 |
+
+So `hscc-cluster` is enabled only where the config resolves to the global
+`plugins.enabled` list; the worker profiles do not enable it, and every hook it
+registers — `kanban_task_completed` included — is therefore never subscribed in
+a worker process. The last row the plugin itself wrote from a live session is
+2026-10-06; everything since in its ledgers is test traffic. That is why the
+fleet check has "no attributable completions": not a null task_id, but no write.
+
+**Deliberately not fixed in this card.** Enabling a plugin per profile is an
+operator/deployment decision with blast radius beyond observability (it also
+registers the guarded cluster toolsets, `pre_tool_call` guards, and slash
+commands — `hscc-cluster` is documented as "Orchestrator-only toolset"). Flipping
+it fleet-wide from a worker card would be an unrequested cluster-config change.
+Filed as a follow-up; the fix belongs in `hscc-bootstrap`'s deploy step or the
+operator's profile configs, not here.
+
+## Third, smaller defect spotted in the same pass (NOT fixed here)
+
+`on_pre_tool_call` (workflow.py:464) reads `kwargs.get("profile_name",
+"unknown")`, but hermes' `pre_tool_call` fire site
+(`hermes_cli/plugins.py:1871`) passes
+`tool_name, args, task_id, session_id, tool_call_id, turn_id, api_request_id,
+middleware_trace` — **no `profile_name`**. Every live row in
+`tool_events.jsonl` therefore carries `"profile_name": "unknown"`, and
+`stats.py`'s `tool_calls_by_profile` has exactly one bucket. One-line fix: fall
+back to `hermes_cli.profiles.get_active_profile_name()` the way
+`kanban_db._hook_profile_name()` does, or read it off the session key.
+
 ## Reader audit (done before changing anything)
 
 - `hscc_daemon/stats.py:61` — `record.get("profile_name")`, skips None. Null-safe.
