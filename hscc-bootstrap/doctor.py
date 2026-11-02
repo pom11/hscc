@@ -1643,6 +1643,29 @@ def _load_budget_watch(hermes_home=None):
     return None
 
 
+def _home_has_hscc_cluster_payload(plugin_dirs) -> bool:
+    """True when ANY resolved plugin root carries an ``hscc-cluster`` dir.
+
+    Separates the two RED classes the row can report (t_5720ef53):
+
+      A. the home has no ``hscc-cluster`` payload at all — it was never
+         deployed here, so there is no wiring to have lost;
+      B. the payload is here but the wiring is gone or the module will not
+         load — the failure class this row was written to catch.
+
+    Deliberately a dir-exists test, NOT an import or a wiring test: class A has
+    to be recognised by a caller that has already failed to import the module,
+    and "does the dir exist at all" is precisely the question the two classes
+    answer differently. ``budget_watch.doctor_check`` keeps the verdict on the
+    wiring itself (verdict-with-feature); this only says whether it had
+    anything to judge.
+    """
+    for root in plugin_dirs or ():
+        if os.path.isdir(os.path.join(str(root), "hscc-cluster")):
+            return True
+    return False
+
+
 #: Fallback for the row's name when the module cannot be imported — same trick
 #: as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints. A missing check must
 #: never render as absence-of-output.
@@ -1688,18 +1711,52 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
     elif "pytest" in sys.modules:
         res = _refused_budget_hook_check()
     else:
+        roots = _budget_plugin_dirs(hermes_home)
         bw = _load_budget_watch(hermes_home)
         if bw is None:
-            roots = ", ".join(_budget_plugin_dirs(hermes_home)[:3]) or \
-                "no plugin roots resolved"
+            if not _home_has_hscc_cluster_payload(roots):
+                # CLASS A — this home never carried the payload. Red, because
+                # it is the true verdict: Hermes discovers user plugins at
+                # ``get_hermes_home()/plugins`` only
+                # (``hermes_cli/plugins_discovery.py:184``), so a home whose own
+                # tree has no ``hscc-cluster`` loads NO hscc plugin — not just
+                # the budget hook, no hscc tools either. Measured on this host
+                # (t_5720ef53): every profile home except the two that are
+                # wired reads this way, and the red set includes homes the
+                # kanban dispatcher has really run cards in (ios-engineer,
+                # worker, devops-engineer, reviewer, coder), so "never
+                # deployed" is not a synonym for "not an HSCC home". It stays
+                # red — a warning or a skip would hide the gap — but the detail
+                # says the payload is ABSENT rather than "unverifiable",
+                # because nothing here is broken-but-hidden: there is no wiring
+                # to have lost, so the honest fix is to deploy (or to say on
+                # purpose that this home is not HSCC's).
+                # ``install_payload._named_profile_plugins_dirs`` only writes
+                # into a profile that ALREADY has a ``plugins/`` dir, which is
+                # how a home ends up in this class.
+                searched = ", ".join(str(r) for r in roots[:3]) or \
+                    "no plugin roots resolved"
+                return Check(
+                    _BUDGET_HOOK_CHECK_NAME, False,
+                    detail=f"no hscc-cluster payload in this home: {searched} "
+                           "has no hscc-cluster dir, so this home never "
+                           "received the payload (it loads no hscc plugin at "
+                           "all, not only no budget hook)",
+                    fix="Deploy the payload here (re-run hscc-bootstrap; note "
+                        "install_payload only writes into a profile that "
+                        "already has a plugins/ dir) — or, if this home is "
+                        "deliberately not an HSCC one, that is expected and "
+                        "no fix is needed here.",
+                    fatal=False)
+            searched = ", ".join(roots[:3]) or "no plugin roots resolved"
             return Check(_BUDGET_HOOK_CHECK_NAME, False,
                          detail="hscc-cluster/budget_watch.py not importable "
-                                f"(looked in: {roots}) — the budget hook's "
+                                f"(looked in: {searched}) — the budget hook's "
                                 "wiring cannot be verified",
                          fix="Deploy the hscc-cluster plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = bw.doctor_check(plugins_dirs=_budget_plugin_dirs(hermes_home))
+        res = bw.doctor_check(plugins_dirs=roots)
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 

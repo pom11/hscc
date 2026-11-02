@@ -504,3 +504,108 @@ def test_wired_root_deploy_does_not_rescue_an_unwired_profile_deploy(
         f"the row consulted the root tree: {row.detail}"
     assert str(profile_plugins) in row.detail, \
         f"the row must name the tree it found broken: {row.detail}"
+
+
+# ── a home that NEVER carried the payload: red, and distinguishable (t_5720ef53) ──
+
+def test_home_that_never_carried_the_payload_reads_red_naming_the_absent_payload(
+        tmp_path, monkeypatch):
+    """THE decision this card was filed for (t_5720ef53): a home that has NEVER
+    carried the ``hscc-cluster`` payload reads RED — not skipped, not a warning.
+
+    Measured on this host before anything was changed: 47 of 49 profile dirs
+    have no ``plugins/`` dir at all, and the red set is NOT confined to other
+    projects' profiles. Cross-referenced against `hermes kanban --board hscc
+    assignees`, the homes that read red include ones the dispatcher has really
+    run cards in (ios-engineer done=139, worker done=41, devops-engineer
+    done=25, reviewer done=19, coder done=7). So "never deployed here" is a real
+    deploy gap, not noise, and red is the TRUE verdict: Hermes discovers user
+    plugins at ``get_hermes_home()/plugins`` only
+    (``hermes_cli/plugins_discovery.py:184``), so such a home loads no hscc
+    plugin at all — no budget hook and no hscc tools.
+
+    A WIRED live deploy sits at ``$HOME/.hermes/plugins`` as the trap: the
+    strict rule from t_ba14f77f must still hold here, so the root's health may
+    not rescue a home that has nothing — that would re-open the exact leak the
+    parent card closed, just through a different branch.
+    """
+    live = _live_deploy(tmp_path, monkeypatch)                 # wired root — trap
+    _out_of_pytest(monkeypatch)
+    home = tmp_path / ".hermes" / "profiles" / "ios-engineer"  # no plugins/ at all
+    row = doctor._budget_hook_check_row(None, hermes_home=str(home))
+    assert row.ok is False, \
+        f"a never-deployed home must not read green: {row.detail}"
+    assert row.fatal is False, "an absent payload never aborts an install"
+    assert row.name == CHECK_NAME
+    assert "no hscc-cluster payload in this home" in row.detail, \
+        f"the row must say the payload is ABSENT: {row.detail}"
+    assert str(home / "plugins") in row.detail, \
+        f"the row must name the tree it looked for: {row.detail}"
+    assert "not importable" not in row.detail, \
+        "a never-deployed home must not be reported as a broken import: " \
+        f"{row.detail}"
+    assert "Deploy the payload here" in row.fix
+    assert str(live) not in row.detail, \
+        f"the root deploy answered for a profile home again: {row.detail}"
+
+
+def test_never_deployed_home_is_distinguishable_from_a_lost_wiring(
+        tmp_path, monkeypatch):
+    """The signal-to-noise half of the decision (t_5720ef53).
+
+    The row exists to catch ONE thing: a deploy that silently LOST the
+    ``[budget]`` wiring while everything else keeps working. A home that never
+    received the payload is a different problem with a different fix, and before
+    this card both printed as "budget_watch.py not importable ... cannot be
+    verified" — so an operator reading red across 47 profiles could not tell a
+    lost hook from an undeployed home, and the one red that mattered hid in the
+    noise.
+
+    Both stay RED (the honest verdict); what must differ is the wording. One
+    test, both trees side by side, because the point IS the contrast: any
+    wording change that re-converges the two fails here.
+    """
+    _live_deploy(tmp_path, monkeypatch)          # trap: healthy root, never consulted
+    _deploy(tmp_path, budget_watch=False)        # payload HERE, half-installed
+    _out_of_pytest(monkeypatch)
+
+    never = doctor._budget_hook_check_row(
+        None, hermes_home=str(tmp_path / ".hermes" / "profiles" / "coder"))
+    lost = doctor._budget_hook_check_row(
+        None, hermes_home=str(tmp_path / "deployed"))
+
+    assert never.ok is False and lost.ok is False
+    assert "no hscc-cluster payload in this home" in never.detail
+    assert "not importable" in lost.detail, \
+        f"the lost-wiring class must keep its own wording: {lost.detail}"
+    assert "cannot be verified" in lost.detail
+    assert "cannot be verified" not in never.detail, \
+        f"an undeployed home is not an unverifiable wiring: {never.detail}"
+    assert "never received the payload" not in lost.detail, \
+        f"a half-installed payload must not be called absent: {lost.detail}"
+    assert never.detail != lost.detail
+
+
+def test_payload_dir_presence_is_what_separates_the_two_red_classes(tmp_path):
+    """``_home_has_hscc_cluster_payload`` is the seam the row branches on, so it
+    is pinned directly: a dir-exists test over the RESOLVED roots, nothing
+    stronger.
+
+    It must not grow into an import test or a wiring test — the row calls it
+    precisely when the import already failed, and the wiring verdict belongs to
+    ``budget_watch.doctor_check`` (verdict-with-feature). An unrelated plugin
+    dir must not count as "the payload is here".
+    """
+    assert doctor._home_has_hscc_cluster_payload([]) is False
+    assert doctor._home_has_hscc_cluster_payload(None) is False
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    assert doctor._home_has_hscc_cluster_payload([str(plugins)]) is False
+    (plugins / "hscc-roles").mkdir()            # a sibling plugin, not our payload
+    assert doctor._home_has_hscc_cluster_payload([str(plugins)]) is False
+    (plugins / "hscc-cluster").mkdir()
+    assert doctor._home_has_hscc_cluster_payload([str(plugins)]) is True
+    # ANY root votes, matching doctor_check's scan over the same list: a later
+    # candidate is enough, so the row never calls a multi-root home "empty".
+    assert doctor._home_has_hscc_cluster_payload(
+        [str(tmp_path / "nowhere"), str(plugins)]) is True
