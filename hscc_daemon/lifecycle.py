@@ -419,17 +419,87 @@ def restart_vllm(verify_fn=None):
         heal_lease.release("vllm-auto-restart")
 
 
+def _dgx_signal_max_age():
+    """Seconds a published DGX verdict may be called current by the watchdog.
+
+    Derived from the SOT cadence (`PERIODIC_INTERVALS["dgx"]`), not a new
+    literal — the same rule that keeps `hscc verify` from crying wolf on a
+    healthy-but-slow stream: two full cadences plus a sweep's worth of slack.
+    A sweep legitimately runs long (the 2026-10-31 episode had a 157.85 s one),
+    so this is deliberately looser than the cadence itself.
+    """
+    from .daemon_ops import PERIODIC_INTERVALS
+    return 2 * PERIODIC_INTERVALS.get("dgx", 60) + 30
+
+
+def dgx_verdict_serving_ok():
+    """The watchdog's default DGX signal: the published verdict, no shell-out.
+
+    Returns the `serving_ok` value `check_dgx` returned when the dgx stream last
+    ran it — the identical value the previous `check_dgx_fn = check_dgx` default
+    produced, so every downstream branch (success reset, restart grace, failure
+    count, block) sees exactly what it saw before. Costs one dict read.
+
+    Two cases where there is no verdict to read, both handled the same way
+    (neutral pass + a WARN naming the reason), and why that is the safe
+    direction:
+
+    - **No verdict yet** — the dgx stream has not completed a check in this
+      process yet, i.e. the first few seconds after daemon start, where the
+      watchdog thread and the dgx thread race. Returning False here would
+      immediately call `restart_vllm` on a serving layer nobody has looked at
+      and start a path whose history in this file is stop-then-hollow-launch
+      incidents; returning True costs at most one 30 s tick before the dgx
+      stream publishes, and a block needs three consecutive failures anyway.
+    - **Verdict older than the cadence-derived window** — the dgx stream is
+      behind or dead. Same reasoning: the watchdog's fail action is a
+      stop/relaunch and then a pipeline block, none of which is justified by a
+      signal that is merely old. Stream liveness has its own owner that
+      reports it honestly instead of acting on it: `hscc verify`'s per-stream
+      staleness rule goes RED on a dark dgx stream.
+
+    Either way the WARN says so in daemon.log — an unexplained neutral pass is
+    how a blind spot becomes an outage.
+    """
+    from .health import dgx_verdict
+
+    verdict = dgx_verdict(max_age_s=_dgx_signal_max_age())
+    if verdict is None:
+        log("Watchdog: no DGX verdict published yet (dgx stream has not "
+            "completed a check in this process) — DGX treated as neutral this "
+            "tick, not failed", "WARN")
+        return True
+    if verdict["stale"]:
+        log(f"Watchdog: DGX verdict is {verdict['age_s']:.0f}s old (dgx stream "
+            f"behind or dead) — carrying the last verdict rather than failing "
+            f"on staleness; hscc verify flags the stream if it stays dark",
+            "WARN")
+    return verdict["serving_ok"]
+
+
 def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                       restart_vllm_fn=None, send_macos_notification_fn=None):
     """Watchdog cycle — one per watchdog tick (cadence =
     ``PERIODIC_INTERVALS["watchdog"]``, the SOT since GAP-B-6): check
-    DGX+gateway, auto-restart vLLM, block on 3 failures."""
-    from .health import check_dgx, check_gateway
+    DGX+gateway, auto-restart vLLM, block on 3 failures.
+
+    ``check_dgx_fn`` is a TEST seam only. It no longer defaults to
+    ``health.check_dgx`` (proxy-stall c8-3): the default DGX signal is
+    ``health.dgx_verdict``, the verdict the dgx stream published the last time
+    IT ran the check. This cycle ticks every 30 s and ``check_dgx`` costs up to
+    ~40 s of SSH + sparkrun sweeps, so calling it here multiplied the exact
+    shell-out the daemon was already drowning in — see _DGX_VERDICT in health.py
+    for the full reason, including why the dgx STATE FILE was not used instead
+    (its ``ok`` is ``publish_ok``, a different value from the ``serving_ok``
+    this cycle consumes).
+    """
+    from .health import check_gateway
     from .desktop import send_macos_notification
     from .state import write_state
 
     if not check_dgx_fn:
-        check_dgx_fn = check_dgx
+        # No shell-out: read the verdict the dgx stream published.
+        check_dgx_fn = dgx_verdict_serving_ok
     if not check_gateway_fn:
         check_gateway_fn = check_gateway
     if not restart_vllm_fn:
