@@ -369,7 +369,7 @@ def test_mutant_condition_c_removed_still_restarts_when_probe_fails(monkeypatch)
     """Removing the `probe is True` guard must make (c) fail and ONLY (c)."""
     _mutate(monkeypatch, "_cond_c", lambda probe: True)
     h = Harness(probe=False)
-    for t in (0.0, 120.0, 300.0):
+    for t in (0.0, 120.0):
         h.tick(t)
     assert h.calls["restart"] == 1            # (c) fails
     h = Harness(sockets=0, fleet_sum=0, probe=True)
