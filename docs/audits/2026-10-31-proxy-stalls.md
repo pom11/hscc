@@ -1568,10 +1568,16 @@ caller. `trigger_engine` has exactly zero in-process health checks before that P
 and exactly zero after it.
 
 Why the cadence math survives the correction: the stream's timestamp is stamped by
-`check_dgx` itself (`health.py:429`, `write_state("dgx", state_entry)`), so every
-caller that runs the check re-stamps the *same* stream. Two callers at 60 s and
-30 s already interleave their stamps into the observed ~24 s median; a live 15 s
-caller would have pulled it toward ~15 s, which the log does not show. The overlap
+`check_dgx` itself (`health.py:429`, `write_state("dgx", state_entry)` →
+`state.write_state` sets `timestamp: now_iso()`), so every caller that runs the
+check re-stamps the *same* stream. Two callers at 60 s and 30 s already interleave
+their stamps into the observed ~24 s median; a live 15 s caller would have pulled
+it toward ~15 s, which the log does not show. The c4 table carries its own control
+for exactly this: `gateway` — which has the *same* two-caller structure, the 60 s
+stream plus the same `pipeline_watchdog` tick (`gw_ok = check_gateway_fn()`,
+`lifecycle.py:524`) — measures 24.1 s in the control window, while `workers`, the
+one stream with a **single** caller, holds 60.1 s. Two callers ⇒ sub-60 median; one
+caller ⇒ 60. No third caller is needed to produce either number. The overlap
 evidence is likewise two-caller evidence — two WARNs 0.50 s apart require two
 callers concurrent in `check_dgx`, and two is what there are. The proof never
 needed a third and does not lose force without one.
