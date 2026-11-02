@@ -136,3 +136,22 @@ ecofire-bc-orch hscc-orch ios-engineer qa reviewer technical-writer worker`
 5. `scripts/run_tests.sh` needs no new leg (`hscc-bootstrap` already registered).
 
 Nothing above is implemented. Awaiting STEP-1.
+
+---
+
+## Appendix — dry-run baseline against the live tree (read-only, writes nothing)
+
+Imported `install_payload` from `origin/main` in this checkout and called the real
+`_named_profile_plugins_dirs()` on `~/.hermes/plugins`:
+
+```
+profiles on disk      : 49
+TARGETED today        : 2 ['backend-engineer', 'hscc-orch']
+SKIPPED today         : 47   (reason: no plugins/ dir -> the pdir.is_dir() gate)
+would_create_if_selected: 47
+```
+
+So the "homes that flip from payload-less to payload" list for the post-decision
+real bootstrap run is exactly these 47 (option 1), the 11-new-home seed subset
+(option 3 as seeded), or the subset the operator picks. Verified by the code's
+own selector, not by directory listing alone.
