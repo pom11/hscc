@@ -10,6 +10,7 @@ config.yaml skills.preload list is what drives preloading. HSCC-specific
 config.yaml (model block, compaction, toolsets) is still written manually
 because the native API has no concept of cluster topology.
 """
+import copy
 import json
 import os
 import yaml
@@ -217,24 +218,75 @@ def _compression_block(existing=None):
 def _read_existing_config(pdir):
     """Read an existing on-disk profile config.yaml, if any.
 
-    Returns ``(compression, auxiliary)`` blocks (or ``None`` for each when
-    absent/unreadable) so the generator can MERGE into them instead of
-    clobbering operator values. Never touches anything but the given profile
+    Returns ``(compression, auxiliary, onboarding)`` blocks (or ``None`` for
+    each when absent/unreadable) so the generator can MERGE into them instead
+    of clobbering operator values. Never touches anything but the given profile
     dir; a missing or unparseable file simply yields ``None`` blocks.
+
+    The third slot is the top-level ``onboarding`` block. It is read here
+    because the generator rebuilds config.yaml from the spec and would
+    otherwise drop it — which is exactly the 12:24 fleet-freeze incident: the
+    regeneration removed ``onboarding.seen.tool_progress_prompt`` from every
+    profile, so each worker's first tool call re-fired the one-time progress
+    prompt and hung at "preparing terminal". See ``_onboarding_block``.
     """
     path = os.path.join(pdir, "config.yaml")
     if not os.path.exists(path):
-        return None, None
+        return None, None, None
     try:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except (yaml.YAMLError, OSError, UnicodeDecodeError):
-        return None, None
+        return None, None, None
     if not isinstance(data, dict):
-        return None, None
+        return None, None, None
     comp = data.get("compression") if isinstance(data.get("compression"), dict) else None
     aux = data.get("auxiliary") if isinstance(data.get("auxiliary"), dict) else None
-    return comp, aux
+    onb = data.get("onboarding") if isinstance(data.get("onboarding"), dict) else None
+    return comp, aux, onb
+
+
+# Defaults this generator would like an ``onboarding`` block to carry. It has
+# none today — onboarding state belongs to Hermes, not to HSCC — so the block
+# is pure passthrough. The constant is the documented hook-point: anything
+# added here is filled into a profile that lacks it and NEVER overwrites what
+# is already on disk (see _onboarding_block).
+_ONBOARDING_DEFAULTS: dict = {}
+
+
+def _onboarding_block(existing=None, defaults=None):
+    """Build the ``onboarding`` block for a generated profile, MERGED over an
+    existing block so the profile's own onboarding state survives a
+    regeneration.
+
+    Same polarity as ``_compression_block`` / ``_memory_block`` — operator
+    state wins, the generator only fills what is ABSENT. The merge is deep:
+    an existing ``onboarding.seen.tool_progress_prompt`` survives even if a
+    default for some other ``seen`` flag is added later, and no existing key
+    at any depth is ever deleted or overwritten.
+
+    Returns ``None`` when there is nothing to write (no existing block and no
+    defaults), so a FRESH profile stays byte-identical to what the generator
+    wrote before this merge existed — it emits no ``onboarding`` key at all.
+    Never mutates ``existing``.
+    """
+    defaults = _ONBOARDING_DEFAULTS if defaults is None else defaults
+    if not isinstance(existing, dict):
+        existing = None
+    if not existing and not defaults:
+        return None
+
+    def fill(base, defaults_here):
+        """``base`` wins; only keys MISSING from it are taken from defaults."""
+        out = {k: copy.deepcopy(v) for k, v in base.items()}
+        for key, dv in defaults_here.items():
+            if key not in out:
+                out[key] = copy.deepcopy(dv)
+            elif isinstance(out[key], dict) and isinstance(dv, dict):
+                out[key] = fill(out[key], dv)
+        return out
+
+    return fill(existing or {}, defaults)
 
 
 # Reasoning depth by tier (operator 2026-10-29). The fleet is throughput-bound
@@ -641,12 +693,14 @@ def generate_profile(spec, base_identity):
         "toolsets": _merge_toolsets(existing_toolsets, desired_toolsets),
         "skills": {"preload": spec["preload_skills"]},
     }
-    # Read the profile's EXISTING on-disk compaction blocks (if any) so a
-    # regeneration MERGES into them instead of clobbering operator values —
-    # in particular, an operator-set ``compression.threshold_tokens`` must
-    # survive (see _compression_block). Fresh profiles yield None and start
-    # from the generated defaults.
-    existing_compression, _existing_aux = _read_existing_config(pdir)
+    # Read the profile's EXISTING on-disk blocks (if any) so a regeneration
+    # MERGES into them instead of clobbering operator values — in particular,
+    # an operator-set ``compression.threshold_tokens`` must survive (see
+    # _compression_block) and the profile's ``onboarding.seen.*`` state must
+    # never be dropped (see _onboarding_block; 12:24 fleet freeze). Fresh
+    # profiles yield None and start from the generated defaults.
+    existing_compression, _existing_aux, existing_onboarding = \
+        _read_existing_config(pdir)
     # Every generated profile carries a `memory:` block (ROADMAP
     # profile-provisioning item 1). The desired block is MERGED over any
     # existing on-disk one (see _memory_block) so a hand-set value survives a
@@ -726,6 +780,16 @@ def generate_profile(spec, base_identity):
         # should not compete with their own model for compaction.
         for k, v in _worker_compaction(existing_compression).items():
             config[k] = v
+    # PRESERVE, never drop, the profile's top-level `onboarding` block (the
+    # 12:24 fleet freeze: this regeneration was rebuilding config.yaml from the
+    # spec and silently deleted `onboarding.seen.tool_progress_prompt` from 47
+    # profiles, so every worker's first tool call re-fired the one-time progress
+    # prompt and hung at "preparing terminal"). Existing state wins and the
+    # defaults fill ONLY missing keys (see _onboarding_block); a fresh profile
+    # gets no `onboarding` key at all, exactly as before this merge existed.
+    onboarding = _onboarding_block(existing_onboarding)
+    if onboarding is not None:
+        config["onboarding"] = onboarding
     changed |= _write_if_changed(
         os.path.join(pdir, "config.yaml"),
         yaml.safe_dump(config, default_flow_style=False, sort_keys=False),

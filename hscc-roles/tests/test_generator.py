@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -1036,4 +1037,120 @@ def test_role_specs_name_no_shared_sandbox_inventory():
         "deliberately not reproduced in-tree — see changelog.d/t_8d22ec81.md "
         "and scripts/address_guard.py's leak-class docs): " + repr(offenders)
     )
+
+
+# -- top-level onboarding.* preservation (t_7ef65bf3 / 12:24 fleet freeze) --
+#
+# `hscc bootstrap --yes` regenerates every profile config.yaml through
+# generate_profile, which rebuilds the file from the role spec. Until the
+# onboarding merge existed, the top-level `onboarding` block was NOT part of
+# that rebuild, so a regeneration deleted `onboarding.seen.tool_progress_prompt`
+# from all 47 profiles at once: every worker's first tool call re-fired the
+# one-time progress prompt, hung at "preparing terminal", and the dispatcher
+# stalled (operator restored 47 configs by hand). These tests pin the
+# merge-never-drop contract. Hermetic — tmp_path + monkeypatched HERMES_HOME /
+# PROFILES_DIR, never ~/.hermes/profiles.
+
+_ONBOARDING_SEED = {
+    "seen": {"tool_progress_prompt": True},
+    "extra_custom": 7,
+}
+
+
+def test_regen_preserves_onboarding_block(tmp_path, monkeypatch):
+    """THE incident property: an existing `onboarding.seen.*` flag AND an
+    unrelated custom onboarding key both survive a regeneration verbatim."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    # Seed the block the fleet had on disk (what the regen deleted).
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["onboarding"] = copy.deepcopy(_ONBOARDING_SEED)
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["onboarding"]["seen"]["tool_progress_prompt"] is True
+    assert cfg2["onboarding"]["extra_custom"] == 7
+
+
+def test_regen_onboarding_preserves_rest_of_config(tmp_path, monkeypatch):
+    """Companion to the incident test: the merge is ADDITIVE ONLY — with an
+    onboarding block on disk, every other generated key is byte-for-byte what
+    a profile without one gets. (Deliberately does NOT assert the block's
+    contents: that is `test_regen_preserves_onboarding_block`'s job, so a
+    reverted merge fails that test alone and this one pins only the blast
+    radius.)"""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    # Baseline: profile with NO onboarding block, regenerated twice.
+    base = _gen_config(tmp_path, monkeypatch, spec)
+    base_cfg = _gen_config(tmp_path, monkeypatch, spec)
+    base_cfg.pop("onboarding", None)
+
+    # Same profile, now carrying an onboarding block, regenerated.
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["onboarding"] = copy.deepcopy(_ONBOARDING_SEED)
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    with_onb = _gen_config(tmp_path, monkeypatch, spec)
+    with_onb.pop("onboarding", None)
+
+    assert with_onb == base_cfg, (
+        "the onboarding merge changed generated keys outside `onboarding` — it "
+        "must be additive only (compression/memory/model/toolsets untouched)")
+    assert base == base_cfg  # regen on a fresh profile is byte-stable too
+
+
+def test_fresh_profile_writes_no_onboarding_key(tmp_path, monkeypatch):
+    """A profile with no config.yaml on disk behaves exactly as before the
+    merge: the generator emits no `onboarding` key at all (it does not own
+    that block, so it must not invent one)."""
+    cfg = _gen_config(tmp_path, monkeypatch, {
+        "name": "coder", "identity": "You build.\n",
+        "preload_skills": [], "model_tier": "fast"})
+    assert "onboarding" not in cfg
+
+
+def test_onboarding_merge_is_deep_and_existing_wins():
+    """Unit: the merge fills ONLY missing keys, at any depth, and never
+    overwrites or deletes what is on disk — including a falsy operator value
+    (False / 0), which a `if not existing`-style check would clobber."""
+    out = generator._onboarding_block(
+        {"seen": {"tool_progress_prompt": False}, "keep": None},
+        defaults={"seen": {"tool_progress_prompt": True, "other_prompt": True},
+                  "fresh": 1})
+    assert out["seen"]["tool_progress_prompt"] is False  # existing wins, even falsy
+    assert out["seen"]["other_prompt"] is True           # missing key filled
+    assert out["keep"] is None                           # null survives, not dropped
+    assert out["fresh"] == 1                             # top-level default added
+
+
+def test_onboarding_merge_never_mutates_the_existing_block():
+    """Unit: the caller's dict is not mutated AND not aliased (same contract as
+    _compression_block / _memory_block)."""
+    existing = copy.deepcopy(_ONBOARDING_SEED)
+    out = generator._onboarding_block(existing, defaults={"seen": {"x": 1}, "d": 2})
+    assert out is not None and existing == _ONBOARDING_SEED
+    assert out is not existing
+    assert out["seen"] is not existing["seen"]
+    # A default for an ABSENT key must not make the merge share the caller's
+    # nested dicts: without this the generator would hand back references into
+    # the dict it read from disk, and a later config edit would write through.
+    out2 = generator._onboarding_block(existing, defaults={"brand_new": 1})
+    assert out2 is not None
+    assert out2["seen"] is not existing["seen"]
+    assert out2["seen"] is not out["seen"]
+
+
+def test_onboarding_block_returns_none_when_there_is_nothing_to_write():
+    """Unit: no existing block AND no defaults -> None, which is what keeps the
+    fresh-profile output byte-identical to the pre-merge generator."""
+    assert generator._onboarding_block(None) is None
+    assert generator._onboarding_block({}) is None
+    assert generator._ONBOARDING_DEFAULTS == {}  # generator owns no onboarding state
 
