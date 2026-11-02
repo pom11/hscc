@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 
 from rich.console import Group
@@ -44,6 +45,7 @@ from rich.text import Text
 from hscc_daemon import autodown
 from hscc_daemon.cli_theme import esc
 from hscc_daemon.cluster_live import fmt_tokens
+from hscc_daemon.daemon_ops import log
 
 DEFAULT_INTERVAL = 5
 RECENT_WINDOW_S = 3600
@@ -57,23 +59,89 @@ STATUS_COLS = ("running", "ready", "todo", "review", "blocked", "triage")
 HERMES_HOME = os.path.expanduser("~/.hermes")
 SESSION_MATCH_S = 900        # worker session opens within this of the run claim
 
+# Nominal Hermes agent source tree — the same location (and the same env
+# override) autodown._load_kanban_db_or_default resolves kanban_db from.
+_HERMES_AGENT_PATH = "~/.hermes/hermes-agent"
+
+# Last caps-read failure, mirroring autodown._KANBAN_LOAD / _PRCI_LOAD:
+# ``reason`` says what went wrong, ``warned`` makes the WARN line once per
+# process instead of once per 5 s monitor tick. Empty ``reason`` means the
+# config read fine — so blank caps with an empty reason is "the operator never
+# set a cap", which is a DIFFERENT fact from blank caps with a reason.
+_CAPS_READ = {"reason": "", "warned": False}
+
+
+def _note_caps_unreadable(reason):
+    """Record why the caps config could not be read and log it ONCE.
+
+    Does not raise — the caller still returns ``(None, None)`` (no cap
+    configured and cap unreadable render the same way, so the operator must be
+    able to tell them apart from the log rather than from the value).
+    """
+    _CAPS_READ["reason"] = reason
+    if not _CAPS_READ["warned"]:
+        _CAPS_READ["warned"] = True
+        try:
+            log(f"kanban monitor: fleet caps unreadable: {reason}", "WARN")
+        except Exception:  # noqa: BLE001
+            pass  # logging must never break the monitor
+
+
+def _load_hermes_config():
+    """``hermes_cli.config.load_config()`` result. Raises on any real failure.
+
+    ``hermes_cli`` lives under the Hermes agent tree and is NOT on the daemon's
+    ``sys.path``, so this resolves that tree and inserts it here — the same
+    thing ``autodown._load_kanban_db_or_default`` does for ``kanban_db``.
+    Doing it HERE rather than assuming somebody else already did it is what
+    makes ``_read_caps`` independent of call order (GAP-D-4): previously the
+    import below only worked once the kanban loader had run, and a caller that
+    read the caps first silently got ``(None, None)``.
+    """
+    hermes_path = os.path.expanduser(
+        os.environ.get("HERMES_AGENT_PATH", _HERMES_AGENT_PATH))
+    if os.path.isdir(hermes_path) and hermes_path not in sys.path:
+        sys.path.insert(0, hermes_path)
+    from hermes_cli.config import load_config  # noqa: PLC0415
+    return load_config()
+
 
 def _read_caps():
     """``(max_in_progress, max_in_progress_per_profile)`` from Hermes config.
 
-    Either may be None (unset or unreadable). Read-only; never raises.
+    Either may be None when unset. Read-only; never raises. A config that
+    cannot be read at all is logged once (``_CAPS_READ``) instead of being
+    silently reported as "no caps configured".
     """
     try:
-        from hermes_cli.config import load_config
-        k = (load_config() or {}).get("kanban") or {}
-    except Exception:  # noqa: BLE001
+        cfg = _load_hermes_config() or {}
+    except Exception as e:  # noqa: BLE001
+        # Deliberately broad: this runs every 5 s inside `--live`, and the
+        # module's contract is that the monitor stays renderable — a Hermes
+        # tree that raises at import time must not kill the view. The point of
+        # GAP-D-4 was never to narrow this handler, it was to stop the handler
+        # from making a broken read LOOK like "no caps configured": that is what
+        # _CAPS_READ + the warn-once log carry now.
+        _note_caps_unreadable(f"{type(e).__name__}: {e}")
         return None, None
+    read_error = getattr(cfg, "read_error", None)
+    if read_error is not None:
+        # hermes' own fail-open fallback (FailedConfigRead): config.yaml exists
+        # but could not be read/parsed, so these are defaults or the
+        # last-known-good copy, not the operator's current settings.
+        _note_caps_unreadable(
+            "hermes served its fail-open config fallback (config.yaml unreadable:"
+            f" {read_error})")
+    elif _CAPS_READ["warned"]:
+        _CAPS_READ["reason"] = ""
+        _CAPS_READ["warned"] = False
 
     def _int(v):
         try:
             return None if v is None else int(v)
         except (TypeError, ValueError):
             return None
+    k = cfg.get("kanban") or {}
     return _int(k.get("max_in_progress")), _int(k.get("max_in_progress_per_profile"))
 
 
