@@ -1350,6 +1350,8 @@ stretch is up to 105× (157.85 s). Something did hang — but the cap design mea
 did not have to hang long to be reported as unavailable.
 
 ### c4 — the starvation signal that IS real: the cap is not a ceiling
+(c9 corrects the caller count in this section's cadence sentence; the cadence
+measurement itself is unchanged.)
 
 `run_cmd`'s `timeout=` is not a wall-clock guarantee once the direct child leaves a
 surviving grandchild holding the stdout pipe — `run_cmd` uses
