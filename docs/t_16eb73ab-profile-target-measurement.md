@@ -1,7 +1,8 @@
 # t_16eb73ab — STEP-1 measurement: which profile homes are HSCC homes?
 
 Card: `t_16eb73ab` — "Fix install_payload to write HSCC payload to selected profiles"
-Measured: 2026-11-02 ~22:05 EET, host `Razvans-Mac-Studio.local` (this daemon host).
+Measured: 2026-11-02 ~22:05 EET on the daemon host (Hermes host machine; hostname
+deliberately omitted — see fleet rule on recording infrastructure addresses).
 Base tree: `origin/main` @ `873b2b93` (PR #198 merged).
 
 **This file is the MEASURE-FIRST deliverable only. No installer code has been
