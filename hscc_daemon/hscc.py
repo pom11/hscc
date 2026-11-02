@@ -598,6 +598,39 @@ CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop",
                        "down", "up"}
 TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
 
+# ── unknown-command hint: the single source of the advertised verb list ────
+# (audit A GAP-A-4, card t_7ace2517)
+#
+# main()'s else-branch used to print a hand-maintained literal "Available:
+# start, stop, …". It drifted: `orch` had been added but `cards` and
+# `autodown` never were, although both dispatch a few dozen lines above the
+# hint — so the one moment an operator reads the verb list (after mistyping
+# one) it told them two live commands do not exist. The list is now THIS
+# tuple and main() prints `", ".join(TOP_LEVEL_COMMANDS)`, so adding a
+# dispatch branch and adding the verb here are one edit.
+#
+# Order is intentional, not alphabetical: daemon verbs, then the groups in the
+# order main() resolves them (api, autodown, kanban, cards, orch), then the
+# remaining verbs. A tuple, not a set, because the printed line is a human
+# surface and a set would reorder it on every interpreter hash seed.
+#
+# Contract pinned by tests/test_unknown_command_hint.py — exactly the
+# dispatched verbs minus the two documented exclusions:
+#   * `help` — a help verb, never a "did you mean" candidate;
+#   * `unit-emit` — internal machine verb (t_d8f13693), deliberately absent
+#     from DAEMON_COMMANDS / COMMAND_HELP / every help surface.
+# and the exact complement of COMMAND_HELP minus the two help-only entries
+# (`help`, and `advanced`, which is a help TOPIC and NOT dispatchable —
+# `hscc advanced` without a help token exits 1, so advertising it here would
+# be the F5 dead-command finding pointed the other way).
+TOP_LEVEL_COMMANDS = (
+    "start", "stop", "status", "check", "watch", "triggers", "notify",
+    "plist", "install", "uninstall", "log", "bootstrap", "update",
+    "cluster", "template", "profiles", "project", "api", "autodown",
+    "kanban", "cards", "orch", "verify", "stats", "throughput", "autoscale",
+    "escalate", "start-daemon", "heal-clear", "heal-status",
+)
+
 # ── template group help surface (t_9032f96b) ───────────────────────────────
 # Shared help entries for the template verbs: `hscc template --help` prints
 # the validate/apply entries in the two-line layout (the commands that
@@ -2273,7 +2306,10 @@ def main():
         cmd_heal(status_only=True)
     else:
         print(f"Unknown command: {cmd}")
-        print("Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, bootstrap, update, cluster, template, profiles, project, api, kanban, orch, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
+        # Derived from TOP_LEVEL_COMMANDS (audit A GAP-A-4): the literal this
+        # line used to carry had drifted — `orch` was listed, `cards` and
+        # `autodown` were not, though both dispatch above.
+        print("Available: " + ", ".join(TOP_LEVEL_COMMANDS))
         sys.exit(1)
 
 
