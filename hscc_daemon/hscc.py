@@ -54,7 +54,6 @@ from hscc_daemon.health import (
     check_nas,
     check_idle_monitor,
     check_workers,
-    _gateway_job_alive,
 )
 from hscc_daemon.lifecycle import (
     pipeline_watchdog,
