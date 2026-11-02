@@ -1524,7 +1524,7 @@ and the daemon's own shell-outs are the load to remove (c8-3).
 `tick_internals.py`, `leg_timing.py`, `workers_during_lost.py`,
 `orphan_pipe_probe2.py`, `warns_per_tick.py`, `live_sweep_timing.py` (scratch).*
 
-### c9 — correction: `trigger_engine` was never a caller of `check_dgx` (c6's "four callers" were two)
+### c9 — correction: `trigger_engine` was never a caller of `check_dgx` (c6 said four; it was two)
 
 Appended by card `t_9e45955c` while c8-3 was being implemented (`t_48206b9d`),
 before any code in that card was written — the same re-check that would have
