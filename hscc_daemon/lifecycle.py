@@ -419,17 +419,76 @@ def restart_vllm(verify_fn=None):
         heal_lease.release("vllm-auto-restart")
 
 
+def _dgx_signal_max_age():
+    """Seconds a published DGX verdict may be called current by the watchdog.
+
+    Derived from the SOT cadence (`PERIODIC_INTERVALS["dgx"]`), not a new
+    literal — the same rule that keeps `hscc verify` from crying wolf on a
+    healthy-but-slow stream: two full cadences plus a sweep's worth of slack.
+    A sweep legitimately runs long (the 2026-10-31 episode had a 157.85 s one),
+    so this is deliberately looser than the cadence itself.
+    """
+    from .daemon_ops import PERIODIC_INTERVALS
+    return 2 * PERIODIC_INTERVALS.get("dgx", 60) + 30
+
+
+def dgx_verdict_serving_ok():
+    """The watchdog's default DGX signal: the published verdict, no shell-out.
+
+    Returns the `serving_ok` value `check_dgx` returned when the dgx stream last
+    ran it — the identical value the previous `check_dgx_fn = check_dgx` default
+    produced, so every downstream branch (success reset, restart grace, failure
+    count, block) sees exactly what it saw before. Costs one dict read.
+
+    A MISSING verdict (the dgx stream has not completed a check in this process
+    yet — the first ~60 s after daemon start, where the two threads race) is
+    returned as `None`, the honest UNKNOWN signal, and it is the CALLER's job to
+    fork on it — see the `dgx_ok is None` branch in pipeline_watchdog. Coercing
+    it to a bool here is what would lose the distinction between "the fleet is
+    down" and "nobody has looked yet".
+
+    A STALE verdict (older than the cadence-derived window) is returned as-is
+    with a WARN naming the age — carrying the last fact rather than inventing a
+    failure. See `dgx_verdict`'s docstring for why staleness is not failure; the
+    stream's liveness owner is verify's per-stream staleness rule, which goes
+    RED on a dark dgx stream.
+    """
+    from .health import dgx_verdict
+
+    verdict = dgx_verdict(max_age_s=_dgx_signal_max_age())
+    if verdict is None:
+        return None
+    if verdict["stale"]:
+        log(f"Watchdog: DGX verdict is {verdict['age_s']:.0f}s old (dgx stream "
+            f"behind or dead) — carrying the last verdict rather than failing "
+            f"on staleness; hscc verify flags the stream if it stays dark",
+            "WARN")
+    return verdict["serving_ok"]
+
+
 def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                       restart_vllm_fn=None, send_macos_notification_fn=None):
     """Watchdog cycle — one per watchdog tick (cadence =
     ``PERIODIC_INTERVALS["watchdog"]``, the SOT since GAP-B-6): check
-    DGX+gateway, auto-restart vLLM, block on 3 failures."""
-    from .health import check_dgx, check_gateway
+    DGX+gateway, auto-restart vLLM, block on 3 failures.
+
+    ``check_dgx_fn`` is a TEST seam only. It no longer defaults to
+    ``health.check_dgx`` (proxy-stall c8-3): the default DGX signal is
+    ``health.dgx_verdict``, the verdict the dgx stream published the last time
+    IT ran the check. This cycle ticks every 30 s and ``check_dgx`` costs up to
+    ~40 s of SSH + sparkrun sweeps, so calling it here multiplied the exact
+    shell-out the daemon was already drowning in — see _DGX_VERDICT in health.py
+    for the full reason, including why the dgx STATE FILE was not used instead
+    (its ``ok`` is ``publish_ok``, a different value from the ``serving_ok``
+    this cycle consumes).
+    """
+    from .health import check_gateway
     from .desktop import send_macos_notification
     from .state import write_state
 
     if not check_dgx_fn:
-        check_dgx_fn = check_dgx
+        # No shell-out: read the verdict the dgx stream published.
+        check_dgx_fn = dgx_verdict_serving_ok
     if not check_gateway_fn:
         check_gateway_fn = check_gateway
     if not restart_vllm_fn:
@@ -523,6 +582,62 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     dgx_ok = check_dgx_fn()
     gw_ok = check_gateway_fn()
 
+    # DGX UNKNOWN fork (proxy-stall c8-3). `dgx_ok is None` means there is no
+    # verdict to read at all — the dgx stream has not completed a check in this
+    # process yet, i.e. the race in the first ~60 s after daemon start where
+    # this 30 s loop ticks before the 60 s dgx thread finishes its first run.
+    # UNKNOWN must not be folded into either bool, and the asymmetry is what
+    # makes this fork necessary:
+    #   - folding None into False would count a startup tick as a FULL pipeline
+    #     failure — an immediate vLLM stop/relaunch, and after three such ticks
+    #     (90 s, before dgx has likely ever run) a pipeline block plus a critical
+    #     desktop notification. The old code could not do that: it computed a
+    #     real DGX verdict itself. A fix must not give the watchdog a failure it
+    #     has no evidence for.
+    #   - folding None into True unconditionally would swallow a GENUINE
+    #     gateway failure into a fake "healthy" stamp (dgx True + gw False is a
+    #     counted failure; pretending dgx True here would erase it if anyone
+    #     later "simplified" the count) — so the gateway leg still decides.
+    # gw healthy + dgx unknown => honest no-failure tick: stamp the stream (so
+    # the watchdog file stays fresh and verify cannot call THIS stream stale),
+    # carry dgx: None — the file says it does not know — and return True.
+    # gw failed + dgx unknown => a real failure is still a failure: fall
+    # through to the existing failure path below with the None preserved in the
+    # entry, where `not f.get("dgx", True)` counts it via the gateway leg, which
+    # is the leg that actually answered.
+    if dgx_ok is None:
+        if gw_ok:
+            # Deviation recorded for the reviewer, deliberate and bounded to the
+            # <=60 s startup window: with an intentional autodown in effect the
+            # old code reached here with a real dgx_ok=False and stamped
+            # ok:False + intentional:"autodown". This path stamps ok:True with
+            # "no DGX evidence" instead, because there is genuinely no evidence
+            # that the deliberately-down layer is down. Both are safe for
+            # `hscc verify` — §5 C2's RED alarm fires on ok:False WITHOUT the
+            # intentional tag, and ok:True can never be read as a RED fleet
+            # during a deliberate power-save. Noting it rather than hiding it:
+            # a stricter stamp would be ok:False + the intentional marker, which
+            # would re-introduce "failure without evidence" the fork exists to
+            # avoid. Left as a follow-up question, not silently resolved here.
+            log("Watchdog: DGX verdict unavailable (dgx stream has not "
+                "published a check in this process yet) — gateway leg healthy, "
+                "no DGX evidence either way; not counting this tick as a "
+                "failure and not restarting vLLM blind", "WARN")
+            write_state("watchdog", {
+                "ok": True,
+                "blocked": False,
+                "dgx": None,            # UNKNOWN, honestly stamped
+                "gateway": gw_ok,
+                "last_check": now_iso(),
+                "message": "Gateway healthy — DGX verdict not yet published "
+                           "(dgx stream startup race); no failure detected",
+                "auto_restart_count": block.get("auto_restart_count", 0),
+            })
+            return True
+        log("Watchdog: gateway leg FAILED while the DGX verdict is still "
+            "unavailable (dgx stream has not published yet) — counting the "
+            "gateway failure; DGX stays UNKNOWN in the record", "WARN")
+
     if dgx_ok and gw_ok:
         # Success — reset failure history if within window
         success_entry = {"timestamp": now_iso(), "dgx": True, "gateway": True}
@@ -574,7 +689,15 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         # BLOCK — don't do more checks or restarts
         block["blocked"] = True
         block["blocked_at"] = now_iso()
-        reason = f"3 consecutive failures in 10min: DGX={'OK' if dgx_ok else 'FAIL'} GW={'OK' if gw_ok else 'FAIL'}"
+        # The reason text reaches the desktop notification and
+        # `hscc status`/verify. dgx_ok can be None (UNKNOWN — the dgx leg never
+        # answered) now that the watchdog can tick without a DGX verdict, and
+        # printing FAIL for a leg that never reported is a lie about a second
+        # component; the block here is justified by the gateway leg alone.
+        def _verdict_label(v):
+            return "UNKNOWN" if v is None else ("OK" if v else "FAIL")
+        reason = (f"3 consecutive failures in 10min: "
+                  f"DGX={_verdict_label(dgx_ok)} GW={_verdict_label(gw_ok)}")
         block["reason"] = reason
         log(f"Watchdog: BLOCKING pipeline — {reason}")
         save_watchdog_block(block)
@@ -598,7 +721,14 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     # Skipped while an intentional autodown is in effect (§5): the orchestrator
     # is down by design, so restarting it would resurrect a layer autodown
     # deliberately stopped — independent of whether the block is still latched.
-    if not dgx_ok and not intentional:
+    if dgx_ok is False and not intentional:
+        # `is False`, not `not dgx_ok`: with the verdict cache dgx_ok can be
+        # None (UNKNOWN), and `not None` is True — that would restart vLLM on a
+        # gateway-only failure, which the old code never did (dgx_ok was always
+        # a bool there, so `not dgx_ok` meant a REAL DGX failure). The restart
+        # targets the serving layer; a leg that never answered must never
+        # justify a stop/relaunch. Unknown now behaves like "DGX fine": the
+        # else-branch below stamps the degraded state without acting.
         # t_b72dce57 rule 1 — the ATTEMPT itself is deferred while a heal is in
         # flight, not merely its notification. The incident: engine-wedge
         # recovery held the heal lease (it stopped 'orch' at 01:38:33 and
@@ -735,4 +865,10 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                 "message": "Degraded — gateway not reachable",
             })
 
-    return dgx_ok and gw_ok
+    # Explicit bool: `dgx_ok and gw_ok` would return None (not False) once
+    # dgx_ok can be UNKNOWN, and this return value is a documented bool — the
+    # CLI prints OK/FAIL from it and the pre-existing tests assert `is False`.
+    # Reaching here with dgx_ok is None implies gw_ok is False (the healthy
+    # gateway case returned above), so bool() maps the unknown leg to False
+    # without changing any case where both legs answered.
+    return bool(dgx_ok) and bool(gw_ok)
