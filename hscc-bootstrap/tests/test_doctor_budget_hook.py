@@ -124,6 +124,46 @@ def _deploy(tmp_path, *, init_src=WIRED_INIT, budget_watch=True):
     return plugins
 
 
+#: The operator's own plugin root, captured at IMPORT time — before any test can
+#: redirect ``HOME``. The tripwire the seal below is measured against.
+_REAL_HOME_PLUGINS = os.path.join(os.path.expanduser("~"), ".hermes", "plugins")
+
+
+def _seal_plugin_env(tmp_path, monkeypatch, plugins):
+    """Seal the row's plugin-root resolution to ``tmp_path`` (t_21c5c3a9).
+
+    Why this exists: ``doctor._budget_plugin_dirs`` (the installer's precedence)
+    reads ``PLUGINS`` and ``HOME``, and its LAST candidate is
+    ``~/.hermes/plugins`` — which on every fleet host deployed at 2.15.0 or
+    later carries a wired ``hscc-cluster/budget_watch.py``. A fixture that only
+    passes ``hermes_home=<tmp>/deployed`` therefore still appends the LIVE tree,
+    and ``budget_watch.doctor_check`` — which scans EVERY root it is handed and
+    passes if ANY of them is wired — returned ok=True for the half-installed,
+    the broken-module, and the stale-unwired fixtures. Those three tests failed
+    on every deployed machine and passed on clean CI, i.e. they were testing the
+    operator's install rather than the fixture.
+
+    Sealing = point every env input the resolver reads at the fixture:
+    ``HOME`` → ``tmp_path`` (so the ``~/.hermes/plugins`` tail lands inside the
+    tmp dir and never exists) and no ``PLUGINS`` (an inherited worker value would
+    outrank even the fixture). ``HERMES_HOME`` is deliberately NOT read by
+    ``_budget_plugin_dirs`` — only ``hermes_home`` (the argument) and those two
+    env vars decide the roots, so stubbing it here would be decoration.
+
+    The guard is the assertion at the end: the fixture root must be a resolved
+    candidate and the operator's real root must not be, so a future resolver
+    change that leaks a live root fails HERE instead of flipping a verdict.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PLUGINS", raising=False)
+    dirs = doctor._budget_plugin_dirs(str(tmp_path / "deployed"))
+    assert str(plugins) in dirs, f"fixture tree not resolved: {dirs}"
+    assert _REAL_HOME_PLUGINS not in dirs, (
+        f"plugin-root resolution reached the live operator tree ({dirs}) — "
+        "the degraded fixtures would read the install, not the fixture")
+    return dirs
+
+
 def _out_of_pytest(monkeypatch):
     """Force the row's human-CLI path. monkeypatch.delitem restores
     sys.modules["pytest"] at teardown, so no other test sees it missing."""
@@ -182,6 +222,7 @@ def test_wired_deploy_tree_is_green(tmp_path, monkeypatch):
     """A deployed hscc-cluster that registers both hooks reads GREEN, quoting
     the deployed dir — the row's whole point: it sees the tree Hermes loads."""
     plugins = _deploy(tmp_path)
+    _seal_plugin_env(tmp_path, monkeypatch, plugins)
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
@@ -197,6 +238,7 @@ def test_missing_register_hook_lines_are_red_naming_the_fix(tmp_path,
     budget register_hook calls (stale payload / hand-patched dir). Must be RED
     and its fix must say what to do, never a bare 'no'."""
     _deploy(tmp_path, init_src=UNWIRED_INIT)
+    _seal_plugin_env(tmp_path, monkeypatch, tmp_path / "deployed" / "plugins")
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
@@ -212,6 +254,7 @@ def test_import_failure_is_non_fatal_degraded(tmp_path, monkeypatch):
     'unverifiable', never absence-of-output and never a pass. Same honesty rule
     as the orch-waker / notifier-mask rows."""
     _deploy(tmp_path, budget_watch=False)
+    _seal_plugin_env(tmp_path, monkeypatch, tmp_path / "deployed" / "plugins")
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
@@ -231,6 +274,7 @@ def test_broken_module_is_non_fatal_degraded(tmp_path, monkeypatch):
     plugins = _deploy(tmp_path)
     (plugins / "hscc-cluster" / "budget_watch.py").write_text(
         "raise RuntimeError('cannot load')\n", encoding="utf-8")
+    _seal_plugin_env(tmp_path, monkeypatch, plugins)
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
