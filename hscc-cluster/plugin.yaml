@@ -3,17 +3,41 @@ version: 1.0.0
 description: "DGX Spark cluster control — provision/stop/heal/diagnose vLLM models via sparkrun. Orchestrator-only toolset. Reads live truth (sparkrun status + serving.json), never stale state."
 author: NousResearch
 kind: backend
+# Registry-first manifest (audit A GAP-A-7): the `_*_TOOLS` tables in
+# __init__.py are the source of truth and this list mirrors them exactly —
+# grouped by table so the two stay readable side by side. The manifest must
+# never under-declare (it is what `hermes tools`/plugin_catalog advertise)
+# and never over-declare (hscc_daemon.verify.check_plugins would then demand
+# tools the registry cannot deploy). Both directions are asserted on every
+# suite run by hscc_daemon/tests/test_plugin_manifest_drift.py.
 provides_tools:
+  # _READ_TOOLS
   - cluster_status
   - list_recipes
   - pick_node
+  - discovery_status
+  - nas_status
+  # _OPS_TOOLS
   - provision_model
   - stop_model
   - model_health
+  # _DEBUG_TOOLS
   - vllm_logs
   - node_diagnostics
   - nas_diagnose
+  # _HEAL_TOOLS
   - restart_model
   - remount_nas
   - repair_nas_export
   - reap_orphans
+  # _FLEET_TOOLS
+  - cluster_verify
+  - cluster_throughput
+  - fleet_stats
+  - autoscale_advice
+  # _TEMPLATE_TOOLS
+  - list_templates
+  - preview_template
+  - apply_template
+  # _ORCH_TOOLS
+  - orch_message
