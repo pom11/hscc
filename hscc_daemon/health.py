@@ -112,6 +112,41 @@ _WORKER_CONTAINER_STATE_FILE = os.path.expanduser(
     "~/.hscc/worker_container_state.json")
 
 
+# ── sparkrun status budget (t_614f4cac, from the 2026-10-31 proxy-stall audit §c3/§c8-1) ──
+# RULE: a daemon-side cap must sit ABOVE the worst case of the operation it
+# wraps, or the cap — not the fleet — decides when we go blind. The old caps
+# broke that rule by construction:
+#
+#   * `api.status` → `query_status_for_cluster` walks the host-scope executors
+#     SEQUENTIALLY (docker, then local — `orchestration/executor.py:170`), and
+#     each round fans out with `timeout=ssh_kwargs.get("timeout", 15)`.
+#     `build_ssh_kwargs` emits no `timeout` key, so the sweep's own worst case
+#     was 2 rounds x 15 s = 30 s — against a daemon cap of 25 s.
+#   * the legacy `sparkrun status` text-parse gets no per-host timeout at all
+#     (same 2 x 15 s = 30 s), against a cap of 10 s — under ONE round.
+#
+# So a node that was merely SLOW (no fault anywhere, sparkrun behaving exactly
+# as configured) tripped `FLEET VISIBILITY LOST`. Measured healthy sweep: 1.23 s
+# (audit §c3), so headroom here is free in the normal case.
+#
+# The scheme, both halves: (1) the sweep self-limits UNDER the daemon cap — the
+# structured script passes `ssh_kwargs["timeout"]` so sparkrun's own per-host
+# bound becomes 10 s and the sweep's worst case 2 x 10 s = 20 s; (2) the daemon
+# cap is raised to 40 s, above that 20 s plus interpreter start-up and import
+# cost, so a sweep that completes on its own terms can no longer be clipped.
+# 10 s/host is ~8x the measured healthy per-host cost and equals sparkrun's own
+# SSH `ConnectTimeout` (`orchestration/ssh.py:494`) — a host that cannot connect
+# inside 10 s is unreachable, not slow.
+SPARKRUN_SWEEP_HOST_TIMEOUT = int(os.environ.get("HSCC_SPARKRUN_SWEEP_HOST_TIMEOUT", "10"))
+#: Sweep's own worst case: the two host-scope executor rounds run sequentially.
+SPARKRUN_SWEEP_ROUNDS = 2
+SPARKRUN_SWEEP_WORST_CASE = SPARKRUN_SWEEP_ROUNDS * SPARKRUN_SWEEP_HOST_TIMEOUT
+#: Wall-clock cap on one sparkrun status shell-out (both legs, all callers).
+#: Must stay above SPARKRUN_SWEEP_WORST_CASE + interpreter/import start-up;
+#: tests/test_sparkrun_resolution.py::TestSweepBudgetAlignment pins the
+#: arithmetic so the two cannot drift apart again.
+SPARKRUN_STATUS_TIMEOUT = int(os.environ.get("HSCC_SPARKRUN_STATUS_TIMEOUT", "40"))
+
 # Inline script run under sparkrun's OWN venv python to invoke the structured
 # cluster-status API. We cannot `import sparkrun` in this process: hscc_daemon
 # runs under the Hermes agent venv, and sparkrun is installed (with its
@@ -122,6 +157,11 @@ _WORKER_CONTAINER_STATE_FILE = os.path.expanduser(
 # resolves its own defaults (SparkrunConfig → ClusterManager → resolve_hosts →
 # api.status → classify_cluster_status) but emits structured JSON instead of
 # the human-readable text we used to string-parse.
+#
+# The one deliberate deviation: `ssh_kwargs["timeout"]` is set from
+# SPARKRUN_SWEEP_HOST_TIMEOUT (sparkrun's own CLI does the same thing for its
+# completion sweep — `cli/_common.py:1200`) so the sweep bounds itself under the
+# daemon's cap instead of running past it.
 #
 # sparkrun 0.3.6 REMOVED `query_cluster_status` — `api.status` is now THE status
 # source (owns executor resolution + the merge) and `classify_cluster_status`
@@ -142,6 +182,7 @@ _SPARKRUN_STATUS_SCRIPT = (
     "if not hosts:\n"
     "    print(json.dumps({'host_list':[]})); sys.exit(0)\n"
     "ssh_kwargs=build_ssh_kwargs(config)\n"
+    f"ssh_kwargs['timeout']={SPARKRUN_SWEEP_HOST_TIMEOUT}\n"
     "snapshot=api.status(hosts,ssh_kwargs=ssh_kwargs)\n"
     "result=classify_cluster_status(snapshot,cache_dir=str(config.cache_dir),host_list=hosts)\n"
     "print(json.dumps(result.to_dict()))\n"
@@ -218,7 +259,8 @@ def _sparkrun_workloads():
     venv_py = _sparkrun_venv_python()
     if venv_py:
         try:
-            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT],
+                          timeout=SPARKRUN_STATUS_TIMEOUT)
             if res.get("ok") and res.get("output"):
                 data = json.loads(res["output"])
                 return _workloads_from_cluster_status(data), False
@@ -282,7 +324,13 @@ def _sparkrun_workloads_textparse():
     empty fleet; that fail-open was the whole bug (t_b543e530). The logical
     argv is resolved to the absolute CLI by ``util.run_cmd`` at exec time.
     """
-    spark_result = run_cmd(sparkrun_bin.argv("status"), timeout=10)
+    # Same cap as the structured leg: this is the SAME operation (sparkrun's
+    # own 2-round host sweep), so the same budget rule applies — the cap must
+    # sit above the sweep's worst case, not inside it (t_614f4cac; the old 10 s
+    # was under ONE round, so any node slower than ~10 s was reported as a
+    # fleet-visibility failure).
+    spark_result = run_cmd(sparkrun_bin.argv("status"),
+                           timeout=SPARKRUN_STATUS_TIMEOUT)
     if not spark_result.get("ok"):
         return [], False
     workloads = []
@@ -2313,7 +2361,8 @@ def _sparkrun_created_map():
         if not venv_py:
             return _WORKER_CREATED_CACHE
         try:
-            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT],
+                          timeout=SPARKRUN_STATUS_TIMEOUT)
             if not (res.get("ok") and res.get("output")):
                 return _WORKER_CREATED_CACHE
             data = json.loads(res["output"])
@@ -2398,7 +2447,8 @@ def _sparkrun_cluster_status(force=False):
         venv_py = _sparkrun_venv_python()
         if venv_py:
             try:
-                res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+                res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT],
+                              timeout=SPARKRUN_STATUS_TIMEOUT)
                 if res.get("ok") and res.get("output"):
                     status = json.loads(res["output"])
             except Exception as e:

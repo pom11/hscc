@@ -409,6 +409,237 @@ class TestDegradedFleetVisibility:
         assert entry["details"]["fleet_visibility"] == "degraded"
 
 
+class TestSweepBudgetAlignment:
+    """t_614f4cac — the daemon's caps must sit ABOVE the sweep's own budget.
+
+    Audit §c3/§c8-1: `query_status_for_cluster` runs TWO sequential host-scope
+    rounds, each capped at `ssh_kwargs.get("timeout", 15)` — a 30 s worst case
+    against a 25 s daemon cap, and the legacy `sparkrun status` leg ran under a
+    10 s cap (under ONE round). So a merely SLOW node — no fault anywhere —
+    produced `FLEET VISIBILITY LOST`.
+
+    These tests drive the REAL `util.run_cmd` timeout branch with a subprocess
+    stand-in that reproduces `TimeoutExpired` when the caller's cap is shorter
+    than the sweep needs, so the verdict comes from the code path, not from an
+    assertion about a constant. The negative control lowers the cap to the old
+    value and asserts the alarm DOES fire — without it, every test here would
+    pass even if the constants were reverted.
+    """
+
+    SLOW_SWEEP_SECONDS = 20  # "merely slow node" per the audit's acceptance case
+
+    _PAYLOAD = json.dumps({"groups": {"cid_a": {
+        "meta": {"recipe": "w"}, "containers": [{"host": "10.0.0.2"}]}},
+        "solo_entries": []})
+    _JOBS_TEXT = "Job: w [cid_a]\n"
+
+    def _dgx_setup(self, tmp_path, monkeypatch):
+        from hscc_daemon import health, serving, state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **k: None)
+        monkeypatch.setattr(health, "ssh_cmd",
+                            lambda *a, **k: {"ok": True, "output": "reachable"})
+        monkeypatch.setattr(health, "http_check",
+                            lambda url, timeout=5: {"ok": True, "status": 200})
+        monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
+        monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://10.0.0.2:8000/health")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        return health, state_dir
+
+    def _slow_sweep(self, monkeypatch, slow_seconds=None):
+        """Make every sparkrun status shell-out need `slow_seconds` to finish.
+
+        Replaces `subprocess.run` (what `util.run_cmd` calls) with one that
+        raises `TimeoutExpired` exactly when the caller's cap is below the
+        sweep's need — the same branch the real timeout takes.
+        """
+        import subprocess as _sp
+        from pathlib import Path
+        slow = self.SLOW_SWEEP_SECONDS if slow_seconds is None else slow_seconds
+        calls = []
+
+        class _Completed:
+            def __init__(self, out):
+                self.returncode, self.stdout, self.stderr = 0, out, ""
+
+        def fake_run(args, **kw):
+            cap = kw.get("timeout")
+            calls.append({"argv0": str(args[0]), "cap": cap})
+            if cap is None:
+                raise AssertionError(
+                    "sparkrun status shell-outs must pass an explicit timeout "
+                    f"(audit §c3): {str(args)[:120]}")
+            if slow > cap:
+                raise _sp.TimeoutExpired(cmd=list(args), timeout=cap)
+            name = Path(str(args[0])).name
+            out = self._PAYLOAD if name.startswith("python") else self._JOBS_TEXT
+            return _Completed(out)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        return calls
+
+    # ── the acceptance case ────────────────────────────────────────────────
+    def test_slow_structured_sweep_is_not_visibility_lost(self, tmp_path, monkeypatch):
+        """A 20 s structured sweep (slow node) yields ok=True, not LOST."""
+        health, state_dir = self._dgx_setup(tmp_path, monkeypatch)
+        calls = self._slow_sweep(monkeypatch)
+        monkeypatch.setattr(health, "_sparkrun_venv_python",
+                            lambda: "/fake/sparkrun-venv/bin/python")
+        warns = []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, level="INFO": warns.append((level, msg)))
+
+        ok = health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+
+        assert calls and calls[0]["cap"] >= self.SLOW_SWEEP_SECONDS, (
+            "the structured leg must be given a cap above the sweep's own "
+            f"worst case; got {calls[0]['cap'] if calls else None}")
+        assert entry["details"]["fleet_visibility"] == "ok"
+        assert entry["ok"] is True
+        assert entry["details"]["workloads"] == [{"name": "w (cid_a)",
+                                                  "container": "cid_a"}]
+        assert ok is True
+        assert not any(lvl == "WARN" and "VISIBILITY" in msg.upper()
+                       for lvl, msg in warns), warns
+
+    def test_slow_legacy_sweep_is_not_visibility_lost(self, tmp_path, monkeypatch):
+        """The text-parse leg gets the same budget — a 20 s sweep is not LOST.
+
+        The old leg capped at 10 s, i.e. below a single sweep round, so it was
+        the leg that printed `FLEET VISIBILITY LOST`.
+        """
+        health, state_dir = self._dgx_setup(tmp_path, monkeypatch)
+        calls = self._slow_sweep(monkeypatch)
+        monkeypatch.setattr(health, "_sparkrun_venv_python", lambda: None)  # legacy only
+        warns = []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, level="INFO": warns.append((level, msg)))
+
+        health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+
+        assert calls and calls[0]["cap"] >= self.SLOW_SWEEP_SECONDS, (
+            f"legacy leg cap is {calls[0]['cap'] if calls else None}")
+        assert entry["details"]["fleet_visibility"] == "ok"
+        # The text-parse shape: name from the `Job:` token, container from [..].
+        assert entry["details"]["workloads"] == [{"name": "w", "container": "cid_a"}]
+        assert not any("VISIBILITY" in msg.upper() for _, msg in warns), warns
+
+    def test_old_caps_would_have_failed_this_same_sweep(self, tmp_path, monkeypatch):
+        """NEGATIVE CONTROL: with the old 10 s cap the same slow sweep DOES
+        publish degraded + LOST. Proves the two tests above discriminate on the
+        cap rather than passing because the stub is friendly.
+        """
+        health, state_dir = self._dgx_setup(tmp_path, monkeypatch)
+        self._slow_sweep(monkeypatch)
+        monkeypatch.setattr(health, "_sparkrun_venv_python",
+                            lambda: "/fake/sparkrun-venv/bin/python")
+        monkeypatch.setattr(health, "SPARKRUN_STATUS_TIMEOUT", 10)  # pre-fix cap
+        warns = []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, level="INFO": warns.append((level, msg)))
+
+        health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+        assert entry["details"]["fleet_visibility"] == "degraded"
+        assert any("VISIBILITY" in msg.upper() for _, msg in warns)
+
+    # ── the arithmetic that keeps the two halves from drifting ─────────────
+    def test_cap_sits_above_the_sweeps_own_worst_case(self, monkeypatch):
+        """cap > 2 rounds x per-host timeout, so a self-limited sweep fits."""
+        from hscc_daemon import health
+        assert health.SPARKRUN_SWEEP_ROUNDS == 2, (
+            "sparkrun runs the docker + local host-scope executors sequentially "
+            "(orchestration/executor.py:170) — if that changes, re-derive this")
+        assert health.SPARKRUN_SWEEP_WORST_CASE == (
+            health.SPARKRUN_SWEEP_ROUNDS * health.SPARKRUN_SWEEP_HOST_TIMEOUT)
+        assert health.SPARKRUN_STATUS_TIMEOUT > health.SPARKRUN_SWEEP_WORST_CASE, (
+            "the daemon cap must be ABOVE the operation it wraps (audit §c3)")
+        # Concrete numbers the card asked for: 10 s/host self-limit, 40 s cap.
+        assert health.SPARKRUN_SWEEP_HOST_TIMEOUT == 10
+        assert health.SPARKRUN_STATUS_TIMEOUT == 40
+
+    def test_sweep_script_self_limits_under_the_cap(self):
+        """The structured script must pass ssh_kwargs['timeout'] — without it
+        sparkrun defaults to 15 s/host and the sweep's worst case (30 s) is the
+        very number the cap was built to clear."""
+        from hscc_daemon import health
+        assert "ssh_kwargs['timeout']=" in health._SPARKRUN_STATUS_SCRIPT
+        assert f"ssh_kwargs['timeout']={health.SPARKRUN_SWEEP_HOST_TIMEOUT}" \
+            in health._SPARKRUN_STATUS_SCRIPT
+
+    def test_sweep_script_still_compiles(self):
+        """The script is an f-string now; a missing `\\n` would only surface as
+        an ImportError/IndentationError at daemon runtime, every tick."""
+        from hscc_daemon import health
+        compile(health._SPARKRUN_STATUS_SCRIPT, "<sparkrun-status>", "exec")
+
+    def test_every_sweep_caller_shares_the_constant(self):
+        """No caller may re-hardcode a numeric cap for the sweep operation —
+        that is how the 25 s and 10 s caps drifted inside the sweep's budget in
+        the first place (audit §c8-1).
+
+        Matched on AST nodes, not grep and not `ast.dump` strings: a text match
+        survives reformatting for the wrong thing (a dump-string probe of this
+        test's first draft silently MISSED the legacy `sparkrun status` leg
+        because `ast.dump` quotes constants with single quotes, and would have
+        false-matched `sparkrun proxy status --json` once "fixed" naively).
+        """
+        import ast
+        import inspect
+        from pathlib import Path
+        from hscc_daemon import health, recover
+
+        def is_sweep_argv(node):
+            """`sparkrun_bin.argv("status")` — exactly one positional arg."""
+            return (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) == "argv"
+                    and len(node.args) == 1
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "status")
+
+        def is_sweep_call(node):
+            if "SPARKRUN_STATUS_SCRIPT" in ast.dump(node.args[0]):
+                return "structured"
+            if is_sweep_argv(node.args[0]):
+                return "legacy"
+            return None
+
+        def sweep_calls(path):
+            tree = ast.parse(Path(path).read_text())
+            hits = []
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", None) == "run_cmd"
+                        and node.args):
+                    continue
+                leg = is_sweep_call(node)
+                if leg is None:
+                    continue
+                kw = {k.arg: k.value for k in node.keywords}
+                hits.append((leg, node.lineno, kw.get("timeout")))
+            return hits
+
+        seen_legs = set()
+        for mod in (health, recover):
+            src = inspect.getsourcefile(mod)
+            hits = sweep_calls(src)
+            assert hits, f"{mod.__name__}: expected sweep run_cmd calls"
+            for leg, lineno, value in hits:
+                seen_legs.add(leg)
+                assert not isinstance(value, ast.Constant), (
+                    f"{src}:{lineno} ({leg} leg) hardcodes a numeric sweep cap "
+                    f"({getattr(value, 'value', None)}s) — use "
+                    "health.SPARKRUN_STATUS_TIMEOUT")
+        # Both legs must be IN the net: the legacy text-parse leg is the one that
+        # carried the 10 s cap, and a guard that only sees the structured leg
+        # would let that regression back in unnoticed.
+        assert seen_legs == {"structured", "legacy"}, (
+            f"guard must cover both sweep legs; saw only {seen_legs}")
+
+
 class TestServiceEnvironmentDeclaration:
     """The service environment must also be able to SEE the CLI (belt to the
     PATH-independent resolution) — every generator/template in the repo."""
