@@ -694,6 +694,33 @@ class TestFleetVisibilityLastKnownGood:
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": False, "output": "boom"})
 
+    def _write_snapshot(self, health, seconds):
+        """Write a snapshot stamped `seconds` ago, creating parents.
+
+        Used by the cases that age a snapshot they never wrote (an aged-out or
+        corrupted file is a state the daemon can WAKE UP to, not only one it
+        earns mid-run), and by the reset-then-age cases.
+        """
+        from pathlib import Path
+        path = Path(health.FLEET_LAST_SEEN_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"hosts": ["10.0.0.2"], "workloads": [], "workload_count": 0,
+                  "epoch": time.time() - seconds}
+        path.write_text(json.dumps(record))
+        return record
+
+    def _write_raw(self, health, text):
+        """Plant a snapshot VERBATIM (corrupt / foreign-shaped / future-stamped).
+
+        Creates the parent dir: a daemon can WAKE UP to a bad file, so "no file
+        was ever written here" must not be the only way to reach the reader.
+        """
+        from pathlib import Path
+        path = Path(health.FLEET_LAST_SEEN_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
     def _age_snapshot(self, health, seconds):
         """Rewrite the snapshot's stamp as if the last good read was `seconds`
         ago. Ages the FILE, not the in-process copy — that is the whole point
@@ -767,9 +794,11 @@ class TestFleetVisibilityLastKnownGood:
         ok = health.check_dgx()
         entry = json.loads((state_dir / "dgx.json").read_text())
 
-        assert entry["details"]["fleet_visibility"].startswith("stale (last good ")
-        assert entry["details"]["fleet_visibility_stale"] == \
-            entry["details"]["fleet_visibility"]
+        visibility = entry["details"]["fleet_visibility"]
+        assert visibility.startswith("stale (last good ")
+        # The RED stream names the SAME age the visibility value carries — one
+        # fact, stated once, not two numbers that can drift apart.
+        assert visibility[len("stale "):] in entry["message"]
         assert "VISIBILITY STALE" in entry["message"]
         # Still RED: "could not look" is not a healthy read, stale or not.
         assert entry["ok"] is False
@@ -806,7 +835,7 @@ class TestFleetVisibilityLastKnownGood:
     def test_unparsable_snapshot_is_not_evidence(self, tmp_path, monkeypatch):
         health, _state, _logs = self._setup(tmp_path, monkeypatch)
         self._dead_sweep(monkeypatch, health)
-        self._path(health).write_text("{not json")
+        self._write_raw(health, "{not json")
 
         assert health._read_fleet_last_seen() == (None, None)
         assert health._sparkrun_workloads()[2] == "degraded"
@@ -816,11 +845,25 @@ class TestFleetVisibilityLastKnownGood:
         nothing, and an age computed from it would be negative forever."""
         health, _state, _logs = self._setup(tmp_path, monkeypatch)
         self._dead_sweep(monkeypatch, health)
-        self._path(health).write_text(json.dumps(
+        self._write_raw(health, json.dumps(
             {"as_of": "2099-01-01T00:00:00+00:00", "hosts": [], "workloads": []}))
 
         assert health._read_fleet_last_seen() == (None, None)
         assert health._sparkrun_workloads()[2] == "degraded"
+
+    def test_aged_snapshot_from_a_previous_process_is_loss_on_tick_one(
+            self, tmp_path, monkeypatch):
+        """THE reason the age rule exists alongside the streak rule: a daemon
+        that RESTARTS mid-outage starts its failure count at zero, so the
+        streak can never catch a file that is already an hour old. Only the age
+        read off disk knows the truth — and this is the case the whole design
+        (a file, not a clock in memory) was chosen for."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._dead_sweep(monkeypatch, health)
+        self._write_snapshot(health, 3600)   # a stale file left by an old process
+
+        assert health._sparkrun_workloads()[2] == "degraded"
+        assert any("aged past" in m for _lvl, m in logs), logs
 
     # ── the loss threshold ─────────────────────────────────────────────────
     def test_hard_loss_needs_consecutive_failures_not_one_blip(
@@ -926,10 +969,15 @@ class TestFleetVisibilityLastKnownGood:
         assert loss, so the streak threshold cannot be 1."""
         from hscc_daemon import health
         assert health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES >= 2
-        # 3 ticks = 15 s of a 5 s cadence: long enough to ride out a blip.
+        # 3 dgx ticks (60 s each, PERIODIC_INTERVALS["dgx"]): ~3 minutes, i.e.
+        # two full audit-window blips of headroom before a hard alarm.
         assert health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES == 3
-        # And the age cap keeps a hard alarm reachable in minutes, not hours.
-        assert 0 < health.FLEET_STALE_LOST_AFTER_S <= 600
+        # The age cap must cover the audit's own worst blip (the LOST window
+        # whose example age the card quotes is 4 m 10 s) — otherwise the fix
+        # would not have changed that episode's verdict at all — while still
+        # keeping a hard alarm reachable in minutes, not hours.
+        assert health.FLEET_STALE_LOST_AFTER_S >= 250
+        assert health.FLEET_STALE_LOST_AFTER_S <= 600
 
     def test_verdict_shape_is_stable_for_consumers(self, tmp_path, monkeypatch):
         """`fleet_visibility` is a published key (verify + the audits read it):
