@@ -30,5 +30,8 @@ task: t_7ef65bf3
   onboarding block), the fresh-profile case, plus unit coverage for the deep
   merge, falsy-value handling (`False`/`0`/`None` are preserved, not treated
   as absent), non-mutation and the `None`-means-write-nothing contract.
-  Mutation probe: deleting the two merge lines makes ONLY the incident test
-  fail (55 passed, 1 failed) — the suite is not merely counting tests.
+  Mutation probes (backup + restore, tree verified unchanged after): M1 —
+  reverting the call site to pre-fix behaviour (`onboarding = None`) fails
+  ONLY `test_regen_preserves_onboarding_block` (1 failed, 60 passed); M2 —
+  aliasing the merge instead of deep-copying fails ONLY the non-mutation
+  unit. The suite is not merely counting tests.
