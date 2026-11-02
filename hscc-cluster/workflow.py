@@ -492,11 +492,90 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
 
 _TOOL_EVENT_LOG = os.path.join(os.path.expanduser("~/.hscc"), "tool_events.jsonl")
 
+# What a ledger row says when NO identity source resolves at all.
+_UNKNOWN_PROFILE = "unknown"
+
+
+def _active_profile_name():
+    """Hermes' active profile name, or None when ``hermes_cli`` cannot load.
+
+    Fence discipline is the repo's established one for Hermes lookups
+    (``hscc_daemon.profile_roster._hermes_gate``, ``autodown`` for
+    ``hermes_cli.kanban_db``): ``hermes_cli`` lives under ``~/.hermes/hermes-agent``
+    and is not always on the plugin's ``sys.path``, so a failed import retries once
+    with the runtime dir on the path, and ANY remaining failure returns None rather
+    than raising. This runs on the ``pre_tool_call`` hot path of every tool call in
+    every profile — observability must never be the thing that breaks a tool call.
+    """
+    import sys
+
+    def _load():
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name
+
+    try:
+        loader = _load()
+    except Exception:
+        loader = None
+    if loader is None:
+        hermes_path = os.path.expanduser(
+            os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
+        if os.path.isdir(hermes_path) and hermes_path not in sys.path:
+            sys.path.insert(0, hermes_path)
+            try:
+                loader = _load()
+            except Exception:
+                loader = None
+    if loader is None:
+        return None
+    try:
+        name = loader()
+    except Exception:
+        return None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def _ledger_profile_name(kwargs):
+    """``profile_name`` for a ledger row: explicit kwarg, else the active profile.
+
+    WHY THIS EXISTS. Hermes' ``pre_tool_call`` fire site
+    (``hermes_cli/plugins.py``, ``_get_pre_tool_call_directive_details``) sends
+    ``tool_name``, ``args``, ``task_id``, ``session_id``, ``tool_call_id``,
+    ``turn_id``, ``api_request_id``, ``middleware_trace`` — and never
+    ``profile_name``. Reading only the kwarg therefore stamped the same sentinel on
+    EVERY live row (4291 of them in ``~/.hscc/tool_events.jsonl`` when this was
+    measured), collapsing ``hscc stats``' ``tool_calls_by_profile`` into one bucket:
+    the per-profile tool view was silently dead.
+
+    Resolution order matches Hermes' own ``kanban_db._hook_profile_name()``, which
+    resolves the active profile for exactly this reason:
+
+      1. an explicit, non-blank ``profile_name`` kwarg wins (it is the caller's
+         answer, and a future fire site that DOES send one must stay authoritative);
+      2. else ``hermes_cli.profiles.get_active_profile_name()``;
+      3. else the ``"unknown"`` sentinel — reached only when hermes_cli is genuinely
+         unresolvable (partial install, foreign venv) or it raises.
+
+    A blank/None kwarg counts as "not sent" and falls through: an empty string in
+    the ledger is exactly as unattributable as the sentinel, and the fallback is
+    strictly more informative.
+    """
+    explicit = kwargs.get("profile_name")
+    if isinstance(explicit, str):
+        if explicit.strip():
+            return explicit.strip()
+    elif explicit is not None:
+        # A non-string but present value is still an explicit answer; keep it.
+        return str(explicit)
+    return _active_profile_name() or _UNKNOWN_PROFILE
+
 
 def on_pre_tool_call(**kwargs):
     """Stamp profile_name into HSCC observability for every tool call."""
     try:
-        profile = kwargs.get("profile_name", "unknown")
+        profile = _ledger_profile_name(kwargs)
         import datetime
         import json
 
