@@ -82,8 +82,15 @@ for d in "${DIRS[@]}"; do
   # apply and its absence cannot let a test touch real state. This is a harness
   # fix: a test that only fails inside the delegated worker context is a harness
   # bug, not a code failure — do not report it as "pre-existing".
+  #
+  # `-rs` prints every skip REASON, not just the count (GAP-D-1, t_b82ad0fe):
+  # the httpx-keg guard used to hide a blind keg venv behind a soft-skip that
+  # pytest could not report at all, and audit D read the leg as green. Once a
+  # leg genuinely skips, the next reader has to be able to see WHY from the
+  # canonical runner's output without re-running anything — a bare "N skipped"
+  # does not tell an operator whether the guard ran or never got a tap.
   env -u HERMES_DELEGATED_CHILD_CONTEXT \
-    "$PY" -m pytest -q "$ROOT/$d/tests" -p no:cacheprovider "$@"
+    "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider "$@"
   code=$?
   if [ $code -eq 0 ]; then
     summary+=("  ✓ $d")

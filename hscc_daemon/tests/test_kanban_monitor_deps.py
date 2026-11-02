@@ -26,6 +26,19 @@ Two independent legs:
     manifest-declares-X-but-venv-lacks-X is exactly the tap-vs-SOT drift this
     guard exists to catch.
 
+    EVERY such pass-through is a real ``pytest.skip()``, never a
+    ``verdicts.append("...skip...") + continue``. GAP-D-1 (audit
+    2026-10-31, card t_b82ad0fe) is precisely what the soft-skip caused: the
+    keg leg appended a skip STRING to ``verdicts``, ``assert verdicts`` then
+    held, and the run reported ``5 passed`` with an unprobed keg — a blind keg
+    venv looked GREEN. A real skip is reported by pytest as ``skipped``, and
+    ``scripts/run_tests.sh`` prints its reason (``-rs``), so "this machine did
+    not actually exercise the keg" can never again read as "the keg is fine".
+    (c) TAP DRIFT lives in ``scripts/tests/test_formula_dep_drift.py``: the
+    formula builds its venv from hand-written ``resource`` blocks and never
+    reads requirements.txt, so a pin added here is inert for brew installs
+    until the tap carries the matching resource.
+
 The integration probe is read-only and hermetic: it points ``HERMES_KANBAN_HOME``
 at a tmp dir (the one seam that isolates the board root — measured:
 ``kanban_home()`` reads ``HERMES_KANBAN_HOME``, whereas redirecting
@@ -283,45 +296,83 @@ def _keg_manifest(keg_py: Path):
     return cand if cand.is_file() else None
 
 
-def test_brew_keg_venv_imports_the_board_read_chain(tmp_path):
-    """Run the monitor's board-read entry under every installed brew keg venv
-    python and fail on ``No module named`` in the collect errors array."""
+def _keg_params() -> list:
+    """One pytest param per installed keg, decided AT COLLECTION TIME.
+
+    Collection-time (not loop-time) is the whole point (GAP-D-1): a per-keg
+    param can carry ``pytest.mark.skip(reason=...)``, so an unprobed keg shows up
+    in pytest's own output as ``skipped`` with its reason, and
+    ``scripts/run_tests.sh`` prints it (``-rs``). A loop that ``continue``s after
+    appending a skip STRING to ``verdicts`` reports the test as PASSED instead,
+    which is how a keg venv with no httpx at all looked green to audit D.
+
+    The no-keg case keeps ONE param (also marked skipped) rather than zero, so
+    the leg reports ``skipped`` on CI instead of silently contributing no test.
+    A glob at collection time costs one stat call and is safe: the keg tree only
+    changes when the operator runs brew, never under a running suite.
+    """
     kegs = _keg_venv_pys()
     if not kegs:
-        pytest.skip(f"no brew keg venv under {KEG_PY_GLOB} (CI / non-brew install)")
-    verdicts = []
+        return [pytest.param(None, id="no-keg",
+                             marks=pytest.mark.skip(
+                                 f"no brew keg venv under {KEG_PY_GLOB} "
+                                 "(CI / non-brew install)"))]
+    params = []
     for py in kegs:
+        keg_id = py.parents[3].name
         if not py.exists():
             # Dangling interpreter symlink: a stale keg left by a brew upgrade
             # whose python is gone. Environment state, not a repo regression.
-            verdicts.append(f"{py}: skip (dangling interpreter symlink)")
+            params.append(pytest.param(
+                py, id=f"{keg_id}-dangling-python",
+                marks=pytest.mark.skip(
+                    f"keg {keg_id}: {py} is a dangling interpreter symlink "
+                    "(stale keg from an interrupted brew upgrade) — nothing to "
+                    "probe; `brew cleanup` or reinstall the keg")))
             continue
-        manifest = _keg_manifest(py)
-        if manifest is not None and "httpx" not in parse_requirements(
-                manifest.read_text()):
-            # This keg was built from a pre-pin requirements.txt (fix = PR #113;
-            # tap resource blocks + `brew reinstall hscc` are separate,
-            # orchestrator-owned work). Nothing in this repo can retro-fix an
-            # installed keg, so the leg skips it and stays honest about why.
-            verdicts.append(f"{py}: skip (keg manifest predates the httpx pin)")
-            continue
-        payload = _run_probe(py, tmp_path / py.parents[3].name, via_wrapper=True)
-        bad = chain_violations(payload)
-        assert not bad, (
-            f"kanban board-read chain is BLIND under keg venv {py}: {bad}\n"
-            f"full probe: {json.dumps(payload, indent=2)}\n"
-            "Fix: the pin must be in requirements.txt AND installed — "
-            "tap resource blocks mirror it, then `brew reinstall hscc`.")
-        assert payload["ran"], (
-            f"board-read pass never ran under {py}: "
-            f"{json.dumps(payload, indent=2)}")
-        # Non-vacuity: a green pass must have actually read a board.
-        assert payload["boards"], (
-            f"board-read pass read ZERO boards under {py} with no errors — "
-            f"vacuous probe, investigate before trusting this guard: "
-            f"{json.dumps(payload, indent=2)}")
-        verdicts.append(f"{py}: ok boards={payload['boards']}")
-    assert verdicts
+        params.append(pytest.param(py, id=keg_id))
+    return params
+
+
+@pytest.mark.parametrize("keg_py", _keg_params())
+def test_brew_keg_venv_imports_the_board_read_chain(keg_py, tmp_path):
+    """Run the monitor's board-read entry under one installed brew keg venv
+    python and fail on ``No module named`` in the collect errors array.
+
+    One keg per test (see ``_keg_params``): every reason this leg does not
+    exercise a keg is a real skip with a visible reason, never a verdict string.
+    """
+    manifest = _keg_manifest(keg_py)
+    if manifest is not None and "httpx" not in parse_requirements(
+            manifest.read_text()):
+        # This keg was built from a pre-pin requirements.txt (fix = PR #113;
+        # tap resource blocks + `brew reinstall hscc` are separate,
+        # orchestrator-owned work). Nothing in this repo can retro-fix an
+        # installed keg, so the leg skips it — as a SKIP pytest reports, with
+        # the reason below, not as a pass. The leg ARMS automatically on the
+        # first keg whose shipped manifest declares httpx.
+        pytest.skip(
+            f"keg {keg_py.parents[3].name} ({keg_py}) ships "
+            f"{manifest} without an httpx pin, so it was built before PR #113; "
+            "its venv cannot be held to a pin it never declared. Operator "
+            "receipt to arm this leg: tap resources carry httpx AND "
+            "`brew reinstall hscc` (see the PR notes on GAP-D-1).")
+    payload = _run_probe(keg_py, tmp_path / keg_py.parents[3].name,
+                         via_wrapper=True)
+    bad = chain_violations(payload)
+    assert not bad, (
+        f"kanban board-read chain is BLIND under keg venv {keg_py}: {bad}\n"
+        f"full probe: {json.dumps(payload, indent=2)}\n"
+        "Fix: the pin must be in requirements.txt AND installed — "
+        "tap resource blocks mirror it, then `brew reinstall hscc`.")
+    assert payload["ran"], (
+        f"board-read pass never ran under {keg_py}: "
+        f"{json.dumps(payload, indent=2)}")
+    # Non-vacuity: a green pass must have actually read a board.
+    assert payload["boards"], (
+        f"board-read pass read ZERO boards under {keg_py} with no errors — "
+        f"vacuous probe, investigate before trusting this guard: "
+        f"{json.dumps(payload, indent=2)}")
 
 
 def test_guard_fires_on_a_blind_venv(tmp_path):
