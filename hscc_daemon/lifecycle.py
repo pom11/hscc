@@ -607,6 +607,18 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     # is the leg that actually answered.
     if dgx_ok is None:
         if gw_ok:
+            # Deviation recorded for the reviewer, deliberate and bounded to the
+            # <=60 s startup window: with an intentional autodown in effect the
+            # old code reached here with a real dgx_ok=False and stamped
+            # ok:False + intentional:"autodown". This path stamps ok:True with
+            # "no DGX evidence" instead, because there is genuinely no evidence
+            # that the deliberately-down layer is down. Both are safe for
+            # `hscc verify` — §5 C2's RED alarm fires on ok:False WITHOUT the
+            # intentional tag, and ok:True can never be read as a RED fleet
+            # during a deliberate power-save. Noting it rather than hiding it:
+            # a stricter stamp would be ok:False + the intentional marker, which
+            # would re-introduce "failure without evidence" the fork exists to
+            # avoid. Left as a follow-up question, not silently resolved here.
             log("Watchdog: DGX verdict unavailable (dgx stream has not "
                 "published a check in this process yet) — gateway leg healthy, "
                 "no DGX evidence either way; not counting this tick as a "
