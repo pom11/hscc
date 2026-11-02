@@ -1557,9 +1557,22 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
 
     ``budget_watch.doctor_check`` takes ROOTS and joins ``hscc-cluster`` itself,
     so these are dirs that CONTAIN plugin dirs (``~/.hermes/plugins``), not the
-    plugin dir. A PROFILE-scoped home (``<root>/profiles/<name>`` — the normal
-    worker mode) contributes its own ``plugins`` dir AND the root's, matching
-    ``install_payload.install_payload_profiles``, which writes both.
+    plugin dir.
+
+    A home contributes ONLY ITS OWN ``plugins`` dir. A PROFILE-scoped home
+    (``<root>/profiles/<name>`` — the normal worker mode) therefore contributes
+    ``<profile>/plugins`` and NOT the root's, which is the authority question
+    t_ba14f77f asks: Hermes' user-plugin scan is
+    ``get_hermes_home() / "plugins"`` (hermes_cli/plugins_discovery.py:184) and
+    under a profile-scoped ``HERMES_HOME`` that IS the profile dir, with no
+    fallback to the root. So the root copy ``install_payload_profiles`` also
+    writes is never loaded by that worker — and while it was a candidate here,
+    ``doctor_check``'s any-wired-is-green let a wired ROOT rescue an unwired
+    PROFILE deploy, i.e. the row read green over the very hook the running
+    worker had lost. The installer's write-both symmetry is unchanged (the root
+    copy is authoritative for the root-scoped home); only who may ANSWER for a
+    given home changed. The root-scoped home still checks the root dir: it is
+    ``<root>/plugins`` reached as ``home/plugins`` by the ordinary branch.
     """
     dirs: List[str] = []
 
@@ -1574,9 +1587,6 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
     home = os.path.expanduser(str(hermes_home)) if hermes_home else ""
     if home:
         _push(os.path.join(home, "plugins"))
-        parent = os.path.dirname(home)
-        if parent and os.path.basename(parent) == "profiles":
-            _push(os.path.join(os.path.dirname(parent), "plugins"))
         # No default tail when the caller NAMED a home. Appending
         # ``~/.hermes/plugins`` unconditionally — the shape this shipped with —
         # made the row answer about the OPERATOR's deploy: both
@@ -1585,10 +1595,10 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
         # rescue an unwired/broken named tree with the live one, so a sandbox or
         # ``--home`` bootstrap read all-green over the very deploy it was asked
         # to verify (t_d7f2ccd1; measured: three test_doctor_budget_hook cases
-        # failing on any host whose own deploy is wired). The tail is redundant
-        # in every legitimate case anyway — home == ``~/.hermes`` dedupes onto
-        # it, and a profile-scoped home already contributes the root's dir via
-        # the ``profiles`` rule above — so keeping it bought nothing but the bug.
+        # failing on any host whose own deploy is wired). It also no longer has
+        # a legitimate job: home == ``~/.hermes`` dedupes onto it, and the
+        # profile case above deliberately does NOT want the root's answer
+        # (t_ba14f77f).
     else:
         # Human CLI run with no ``--home``: the operator's own deploy is the
         # target, so the default root stays.
