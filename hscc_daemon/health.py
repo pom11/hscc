@@ -143,8 +143,8 @@ SPARKRUN_SWEEP_ROUNDS = 2
 SPARKRUN_SWEEP_WORST_CASE = SPARKRUN_SWEEP_ROUNDS * SPARKRUN_SWEEP_HOST_TIMEOUT
 #: Wall-clock cap on one sparkrun status shell-out (both legs, all callers).
 #: Must stay above SPARKRUN_SWEEP_WORST_CASE + interpreter/import start-up;
-#: tests/test_health.py::TestSweepBudgetAlignment pins the arithmetic so the
-#: two cannot drift apart again.
+#: tests/test_sparkrun_resolution.py::TestSweepBudgetAlignment pins the
+#: arithmetic so the two cannot drift apart again.
 SPARKRUN_STATUS_TIMEOUT = int(os.environ.get("HSCC_SPARKRUN_STATUS_TIMEOUT", "40"))
 
 # Inline script run under sparkrun's OWN venv python to invoke the structured
