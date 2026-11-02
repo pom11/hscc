@@ -579,39 +579,65 @@ class TestSweepBudgetAlignment:
     def test_every_sweep_caller_shares_the_constant(self):
         """No caller may re-hardcode a numeric cap for the sweep operation —
         that is how the 25 s and 10 s caps drifted inside the sweep's budget in
-        the first place (audit §c8-1). Parsed with `ast`, not grep, so a reformatted
-        call cannot slip past it.
+        the first place (audit §c8-1).
+
+        Matched on AST nodes, not grep and not `ast.dump` strings: a text match
+        survives reformatting for the wrong thing (a dump-string probe of this
+        test's first draft silently MISSED the legacy `sparkrun status` leg
+        because `ast.dump` quotes constants with single quotes, and would have
+        false-matched `sparkrun proxy status --json` once "fixed" naively).
         """
         import ast
         import inspect
         from pathlib import Path
         from hscc_daemon import health, recover
 
+        def is_sweep_argv(node):
+            """`sparkrun_bin.argv("status")` — exactly one positional arg."""
+            return (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) == "argv"
+                    and len(node.args) == 1
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "status")
+
+        def is_sweep_call(node):
+            if "SPARKRUN_STATUS_SCRIPT" in ast.dump(node.args[0]):
+                return "structured"
+            if is_sweep_argv(node.args[0]):
+                return "legacy"
+            return None
+
         def sweep_calls(path):
             tree = ast.parse(Path(path).read_text())
             hits = []
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call)
-                        and getattr(node.func, "id", None) == "run_cmd"):
+                        and getattr(node.func, "id", None) == "run_cmd"
+                        and node.args):
                     continue
-                first = ast.dump(node.args[0]) if node.args else ""
-                is_sweep = ("SPARKRUN_STATUS_SCRIPT" in first
-                            or ('value="status"' in first and "argv" in first))
-                if not is_sweep:
+                leg = is_sweep_call(node)
+                if leg is None:
                     continue
                 kw = {k.arg: k.value for k in node.keywords}
-                hits.append((node.lineno, kw.get("timeout")))
+                hits.append((leg, node.lineno, kw.get("timeout")))
             return hits
 
+        seen_legs = set()
         for mod in (health, recover):
             src = inspect.getsourcefile(mod)
             hits = sweep_calls(src)
             assert hits, f"{mod.__name__}: expected sweep run_cmd calls"
-            for lineno, value in hits:
+            for leg, lineno, value in hits:
+                seen_legs.add(leg)
                 assert not isinstance(value, ast.Constant), (
-                    f"{src}:{lineno} hardcodes a numeric sweep cap "
+                    f"{src}:{lineno} ({leg} leg) hardcodes a numeric sweep cap "
                     f"({getattr(value, 'value', None)}s) — use "
                     "health.SPARKRUN_STATUS_TIMEOUT")
+        # Both legs must be IN the net: the legacy text-parse leg is the one that
+        # carried the 10 s cap, and a guard that only sees the structured leg
+        # would let that regression back in unnoticed.
+        assert seen_legs == {"structured", "legacy"}, (
+            f"guard must cover both sweep legs; saw only {seen_legs}")
 
 
 class TestServiceEnvironmentDeclaration:
