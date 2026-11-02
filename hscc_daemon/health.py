@@ -634,6 +634,105 @@ def _sparkrun_workloads_textparse():
     return workloads, True
 
 
+#: The last verdict `check_dgx` returned, published process-wide (proxy-stall
+#: c8-3). `{"serving_ok", "publish_ok", "at"}` where `at` is a monotonic clock
+#: reading. None until the first DGX check has run in THIS process.
+#:
+#: WHY THIS EXISTS. `check_dgx` is the most expensive probe the daemon runs —
+#: two SSH round-trips plus two sparkrun status sweeps, worst case ~40 s — and
+#: during the 2026-10-31 episode it ran from several in-process callers: its own
+#: 60 s stream thread AND `pipeline_watchdog` every 30 s. That is why a stream
+#: declared at 60 s measured a ~24 s median tick, why the sweeps piled up on a
+#: node that was already slow, and why the same `FLEET VISIBILITY LOST` WARN was
+#: re-printed by every caller (two WARNs 0.50 s apart — one tick cannot emit
+#: two). The dedicated `dgx` stream thread is now the ONLY caller that runs the
+#: check; the 30 s watchdog reads this published verdict instead of re-running
+#: it. A shared verdict cannot multiply a shell-out no matter how slow the shell
+#: gets.
+#:
+#: WHY A CACHE AND NOT THE STATE FILE. `~/.hscc/state/dgx.json` looks like the
+#: obvious shared surface and was the findings doc's first option, but it is
+#: NOT the same value: `check_dgx` writes `ok = publish_ok` (serving reachable
+#: AND the fleet list verified) and RETURNS `serving_ok` (ssh + vLLM only) — the
+#: two diverge exactly when sparkrun status polling is what failed. The
+#: watchdog's restart/breaker decisions are keyed to the returned value, so
+#: reading `ok` off the file would silently change semantics (a status-polling
+#: outage would start driving vLLM stop/relaunch cycles against a healthy
+#: serving layer). This shares the returned value verbatim, which is why the
+#: fix needs no semantics argument.
+#:
+#: NOT the freshness mechanism: this carries no staleness judgement at all (see
+#: `dgx_verdict`) — stream liveness belongs to verify's per-stream staleness
+#: rule, which already goes RED on a dark `dgx` stream.
+_DGX_VERDICT = None
+_DGX_VERDICT_LOCK = threading.Lock()
+
+
+def publish_dgx_verdict(serving_ok, publish_ok, at=None):
+    """Record the verdict of the DGX check that just ran (called by check_dgx).
+
+    `serving_ok` is what check_dgx returns; `publish_ok` is what its stream
+    file carries. Both are kept so a reader can tell the two verdicts apart
+    rather than re-deriving either. `at` defaults to a monotonic reading —
+    monotonic so the freshness math survives an NTP step or a clock change on a
+    laptop that slept, which a wall-clock age would misreport as either
+    infinitely fresh or permanently stale.
+    """
+    global _DGX_VERDICT
+    with _DGX_VERDICT_LOCK:
+        _DGX_VERDICT = {"serving_ok": bool(serving_ok),
+                        "publish_ok": bool(publish_ok),
+                        "at": time.monotonic() if at is None else at}
+    return _DGX_VERDICT
+
+
+def dgx_verdict(max_age_s=None):
+    """The last published DGX verdict: a dict, or None when nothing has run.
+
+    `{"serving_ok", "publish_ok", "at", "age_s", "stale"}`. The default reader
+    for a caller that needs the DGX signal without running the DGX check (today:
+    `lifecycle.pipeline_watchdog` — the only reason this cache exists).
+
+    NO SHELL-OUT: this reads a module global, so a slow or unreachable node
+    cannot make a reader of this expensive. That is the whole point.
+
+    NO FRESHNESS JUDGEMENT BY DEFAULT (`max_age_s=None`): the verdict is
+    returned as published, however old, and `stale` stays False. A verdict is
+    the last FACT the daemon observed, and the watchdog's fail action is not
+    neutral — a false failure triggers a vLLM stop/relaunch and, on the third
+    consecutive tick, a pipeline block plus a critical notification plus ~10
+    minutes without any checks. Guessing "stale therefore failed" manufactures
+    exactly that from a thread that is merely behind (a sweep can legitimately
+    run minutes — see the 157.85 s outlier in the audit). Whether the dgx
+    STREAM is alive is a different question with a dedicated owner: verify's
+    per-stream staleness rule, keyed off `PERIODIC_INTERVALS["dgx"]`.
+
+    `max_age_s` is offered for callers that genuinely want to be told when the
+    signal is old without treating old as bad: it only sets `stale=True`, never
+    the verdict.
+    """
+    with _DGX_VERDICT_LOCK:
+        if _DGX_VERDICT is None:
+            return None
+        verdict = dict(_DGX_VERDICT)
+    age = time.monotonic() - verdict["at"]
+    verdict["age_s"] = age
+    verdict["stale"] = max_age_s is not None and age > max_age_s
+    return verdict
+
+
+def reset_dgx_verdict():
+    """Forget the published verdict (test isolation; nothing in the daemon path).
+
+    Without it a test that ran check_dgx would leak its verdict into the next
+    test's watchdog tick, and the tick's DGX signal would silently come from a
+    previous test instead of the fixture.
+    """
+    global _DGX_VERDICT
+    with _DGX_VERDICT_LOCK:
+        _DGX_VERDICT = None
+
+
 def check_dgx():
     """DGX check (every 5s): SSH to primary node, check GPU status, sparkrun workloads."""
     log("Running DGX check")
@@ -728,6 +827,14 @@ def check_dgx():
         state_entry["intentional"] = "autodown"
         state_entry["message"] = "intentional autodown — serving layer down by design"
     write_state("dgx", state_entry)
+    # Publish the verdict for the in-process readers that must NOT re-run this
+    # check (proxy-stall c8-3, see _DGX_VERDICT). Written on EVERY path — ok or
+    # not — because a failing check is exactly the verdict the watchdog needs,
+    # and published AFTER write_state so the stream file and the shared verdict
+    # describe the same tick. `serving_ok` is published, not `publish_ok`: this
+    # is the value the returned verdict carried, so the watchdog's behaviour is
+    # bit-for-bit what it was when it called check_dgx itself.
+    publish_dgx_verdict(serving_ok, publish_ok)
     log(f"DGX check complete: ok={serving_ok}"
         + (" — stream DEGRADED: fleet visibility lost (sparkrun unreachable)"
            if degraded else ""))

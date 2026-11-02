@@ -783,8 +783,16 @@ def run_daemon_loop():
         trigger_interval = STREAMS["triggers"]
         while not stop_event.is_set():
             try:
+                # NO check_dgx_fn here, deliberately (proxy-stall c8-3). This
+                # call passed `check_dgx` for as long as the loop has existed
+                # and `trigger_engine` never once invoked it — 0 call sites in
+                # trigger.py; its DGX metrics (`failed_dgx`, `vllm_down`) read
+                # the dgx STATE FILE via evaluate_trigger(). The kwarg is gone
+                # from the signature now, so a future reader cannot conclude
+                # from this wiring — as the 2026-10-31 audit did — that the
+                # 15 s trigger loop re-runs the full DGX sweep every tick.
+                # DGX is run by exactly one caller: the `dgx` stream thread.
                 trigger_engine(
-                    check_dgx_fn=check_dgx,
                     check_gateway_fn=check_gateway,
                     pipeline_watchdog_fn=pipeline_watchdog,
                     watchdog_block_fn=load_watchdog_block,

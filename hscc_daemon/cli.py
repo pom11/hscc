@@ -705,11 +705,38 @@ def _cmd_check_repo(repo, json_mode, leftover):
     sys.exit(guard_posture.exit_code_for(p))
 
 
+def _cli_watchdog_with_dgx():
+    """CLI-only wrapper: run the DGX check, then the watchdog cycle.
+
+    The live daemon's watchdog reads the DGX verdict the dgx stream published
+    (proxy-stall c8-3) instead of running the check itself. `hscc check
+    watchdog` runs in its own process with no dgx stream thread, so it would
+    otherwise tick with no verdict at all. Running the check here publishes the
+    verdict first and keeps the CLI's output exactly what it was — the operator
+    asking for a watchdog check still gets a real DGX read behind it.
+
+    Deliberately in cli.py and NOT inside pipeline_watchdog: the daemon must
+    never regain a second in-process caller of the most expensive probe in the
+    fleet, so the seed belongs on the CLI edge where a run is one-shot and
+    cannot pile up. It also inherits the caller's persist_disabled() block, so
+    this ad-hoc run still cannot clobber the daemon's state files.
+
+    Skipped when a verdict is already published: `hscc check all` runs the dgx
+    entry a moment before this one, so the watchdog entry reuses that sweep
+    instead of paying for a second identical one (before this change those two
+    entries ran two full sweeps back to back).
+    """
+    from .health import check_dgx, dgx_verdict
+    from .lifecycle import pipeline_watchdog
+    if dgx_verdict() is None:
+        check_dgx()          # publishes the verdict the cycle is about to read
+    return pipeline_watchdog()
+
+
 def _cmd_check_impl(stream=None):
     """The actual check cycle; runs under persist_disabled()."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_engine_wedge
     from .dispatcher_wedge import check_dispatcher_wedge
-    from .lifecycle import pipeline_watchdog
     from .trigger import trigger_engine
     from .state import read_state
 
@@ -718,7 +745,17 @@ def _cmd_check_impl(stream=None):
     check_map = {
         "dgx": check_dgx, "gateway": check_gateway, "local": check_local,
         "heartbeat": check_heartbeat, "nas": check_nas,
-        "watchdog": pipeline_watchdog, "triggers": trigger_engine,
+        # "watchdog" runs check_dgx FIRST, then the cycle (proxy-stall c8-3).
+        # The live daemon's watchdog no longer runs the DGX check itself — it
+        # reads the verdict the dgx STREAM published (health.dgx_verdict). A CLI
+        # process has no dgx stream thread, so without this seed `hscc check
+        # watchdog` would tick with no verdict and take the neutral pass: still
+        # honest (and loudly WARNed), but no longer the check the operator asked
+        # for. Seeding here reproduces exactly what the cycle did internally,
+        # and keeps `check all` CHEAPER than before: the dgx entry above and the
+        # watchdog entry used to each run a full sweep — now the watchdog
+        # consumes the sweep the dgx entry already ran a moment earlier.
+        "watchdog": _cli_watchdog_with_dgx, "triggers": trigger_engine,
         "idle": check_idle_monitor, "workers": check_workers,
         "engine_wedge": check_engine_wedge,
         "dispatcher": check_dispatcher_wedge,
