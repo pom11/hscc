@@ -358,3 +358,217 @@ def test_register_wires_both_budget_hooks():
     assert 'register_hook("post_api_request", budget_watch.on_post_api_request)' in init_src
     assert ('register_hook("transform_tool_result", '
             'budget_watch.on_transform_tool_result)') in init_src
+
+
+# ------------------- leak-guard eviction order + workspace memo (t_b91f1158) -
+#
+# (1) The `_MAX_SESSIONS` guard must evict the LEAST RECENTLY USED entry. On a
+# plain dict, `next(iter(_states))` is insertion order, i.e. "oldest CREATED":
+# a long-lived session that is merely idle would be dropped while a burst of
+# fresh sessions survived. These tests pin move-on-touch semantics — a test that
+# passes with a plain dict would go RED on the old `pop(next(iter(...)))`.
+#
+# (2) `_workspace_for_task` must pay the board scan AT MOST ONCE per task,
+# including across a state eviction (the old code resolved inside `_state_for`,
+# so an eviction re-paid the whole cold scan). Scan traffic is counted through
+# the module's own `_listdir` seam, same precedent as `_subprocess_run`.
+
+
+def _fill_states(n):
+    """Create n session states in creation order s0..s<n-1> (unarmed payloads)."""
+    for i in range(n):
+        budget_watch.on_post_api_request(
+            session_id=f"s{i}", usage={"prompt_tokens": 1})
+
+
+def test_eviction_victim_is_least_recently_used_not_oldest(monkeypatch, tmp_path):
+    """Idle-but-old survives if it was touched recently; a stale entry dies."""
+    _worker_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(budget_watch, "_MAX_SESSIONS", 4)
+    _fill_states(4)                                   # s0 s1 s2 s3 (s0 oldest)
+    # Touch s0 so it becomes most-recently-used despite being created first.
+    _api(1_000, session="s0")
+    # New session forces one eviction. Insertion-order eviction would kill s0.
+    _api(1_000, session="s4")
+    assert budget_watch.snapshot("s0") != {}, "LRU: recently-touched s0 was evicted"
+    assert budget_watch.snapshot("s1") == {}, (
+        "eviction should have dropped the least-recently-USED entry (s1)")
+    for sid in ("s2", "s3", "s4"):
+        assert budget_watch.snapshot(sid) != {}, f"{sid} must survive"
+    assert len(budget_watch._states) == 4
+
+
+def test_eviction_repeatedly_spares_the_touched_session(monkeypatch, tmp_path):
+    """Churning new sessions must never evict a session that keeps working.
+
+    The old failure mode: the survivor set was "the last N created", so a
+    single long-lived worker at the front of the dict was evicted first. It then
+    came back on its very next API call with a FRESH zeroed state — so checking
+    only that the session "is still there" is not enough (re-creation hides the
+    eviction). The counter is what proves continuity: an evicted-and-recreated
+    state restarts at 0.
+    """
+    _worker_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(budget_watch, "_MAX_SESSIONS", 3)
+    calls = 0
+    for i in range(10):                                # a burst of churn
+        _api(1_000, session=f"churn{i}")
+        _api(1_000, session="long-lived")              # keeps it MRU
+        calls += 1
+    st = budget_watch.snapshot("long-lived")
+    assert st != {}, "an actively-used session was evicted by churn"
+    assert st["api_calls"] == calls, (
+        f"session state was silently rebuilt mid-run (api_calls={st['api_calls']}, "
+        f"expected {calls}) — the leak-guard evicted a session that was still "
+        "working and its counters restarted, losing the budget watch")
+    assert len(budget_watch._states) == 3
+
+
+def test_lru_state_is_still_bounded(monkeypatch, tmp_path):
+    """No unbounded growth: the guard still caps _states at the configured max."""
+    _worker_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(budget_watch, "_MAX_SESSIONS", 5)
+    for i in range(40):
+        _api(1_000, session=f"s{i}")
+    assert len(budget_watch._states) == 5
+
+
+def _fake_home(monkeypatch, tmp_path, task, n_boards=1):
+    """HERMES_HOME layout with <home>/kanban/boards/<board>/workspaces/<task>."""
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    home = tmp_path / "home"
+    for b in range(n_boards):
+        (home / "kanban" / "boards" / f"board{b}" / "workspaces" / task).mkdir(
+            parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task)
+    budget_watch.reset_state()
+    return home
+
+
+class _CountingListdir:
+    def __init__(self, real):
+        self._real = real
+        self.calls = 0
+        self.seen = []
+
+    def __call__(self, path):
+        self.calls += 1
+        self.seen.append(str(path))
+        return self._real(path)
+
+
+def test_workspace_scan_runs_once_per_task(monkeypatch, tmp_path):
+    """Cold env: the board scan is memoised, not re-paid on every touch."""
+    task = "t_scanmemo"
+    home = _fake_home(monkeypatch, tmp_path, task)
+    counter = _CountingListdir(budget_watch._listdir)
+    monkeypatch.setattr(budget_watch, "_listdir", counter)
+
+    first = budget_watch._workspace_for_task(task)
+    n_after_first = counter.calls
+    assert first == str(home / "kanban" / "boards" / "board0" / "workspaces" / task)
+    for _ in range(20):
+        assert budget_watch._workspace_for_task(task) == first
+    assert counter.calls == n_after_first, (
+        f"board scan re-ran ({counter.calls} listdir calls for one task) — the "
+        "resolved workspace is not memoised")
+
+
+def test_workspace_scan_not_repaid_after_state_eviction(monkeypatch, tmp_path):
+    """The card's cold-path question: state eviction must NOT re-scan.
+
+    The workspace lives in its own memo precisely so the leak-guard evicting a
+    session's state cannot make the next API call walk every board dir again.
+    """
+    task = "t_evictrescan"
+    home = _fake_home(monkeypatch, tmp_path, task)
+    counter = _CountingListdir(budget_watch._listdir)
+    monkeypatch.setattr(budget_watch, "_listdir", counter)
+
+    # Populate the session state (first touch pays the scan once).
+    _api(1_000)
+    paid = counter.calls
+    assert paid >= 1
+    # Force the leak-guard to evict the session state entirely.
+    monkeypatch.setattr(budget_watch, "_MAX_SESSIONS", 1)
+    _api(1_000, session="other-session")
+    assert budget_watch.snapshot("sess-1") == {}, "state should have been evicted"
+    # Re-create the evicted session's state: workspace must come from the memo.
+    _api(1_000)
+    assert counter.calls == paid, (
+        "eviction re-triggered the cold board scan instead of reusing the "
+        f"memoised workspace ({paid} -> {counter.calls} listdir calls)")
+    # The evicted-and-recreated state still has the right workspace.
+    assert budget_watch.snapshot("sess-1")["workspace"] == str(
+        home / "kanban" / "boards" / "board0" / "workspaces" / task)
+
+
+def test_workspace_miss_is_retried_not_cached_forever(monkeypatch, tmp_path):
+    """A miss must not become permanent, but must not scan per call either."""
+    task = "t_latews"
+    home = tmp_path / "home"
+    (home / "kanban" / "boards" / "board0" / "workspaces").mkdir(parents=True)
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    budget_watch.reset_state()
+    counter = _CountingListdir(budget_watch._listdir)
+    monkeypatch.setattr(budget_watch, "_listdir", counter)
+
+    assert budget_watch._workspace_for_task(task) == ""
+    paid = counter.calls
+    assert paid >= 1
+    for _ in range(10):                               # inside the retry window
+        assert budget_watch._workspace_for_task(task) == ""
+    assert counter.calls == paid, f"a miss re-scanned on every call ({paid} -> {counter.calls})"
+
+    # The workspace appears later (worker dir created after the first touch):
+    # once the retry window expires the scan runs again and finds it.
+    late = home / "kanban" / "boards" / "board0" / "workspaces" / task
+    late.mkdir(parents=True)
+    monkeypatch.setattr(budget_watch, "_WORKSPACE_MISS_RETRY_S", 0.0)
+    assert budget_watch._workspace_for_task(task) == str(late)
+
+
+def test_board_scan_is_bounded(monkeypatch, tmp_path):
+    """The scan itself is bounded: it never walks an unbounded board list."""
+    task = "t_deep"
+    home = tmp_path / "home"
+    boards = home / "kanban" / "boards"
+    n = budget_watch._MAX_BOARD_DIRS + 25
+    for b in range(n):
+        (boards / f"b{b:03d}" / "workspaces").mkdir(parents=True)
+    # Put the match LAST so an unbounded scan would find it.
+    target = boards / f"b{n - 1:03d}" / "workspaces" / task
+    target.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    budget_watch.reset_state()
+
+    counter = _CountingListdir(budget_watch._listdir)
+    monkeypatch.setattr(budget_watch, "_listdir", counter)
+    got = budget_watch._workspace_for_task(task)
+    assert got == "", "scan ran past _MAX_BOARD_DIRS — the bound is not applied"
+    assert counter.calls <= budget_watch._MAX_BOARD_DIRS, (
+        f"{counter.calls} listdir calls for a scan bounded to "
+        f"{budget_watch._MAX_BOARD_DIRS}")
+
+    # A match INSIDE the bound is still found (the bound is not just a failure).
+    budget_watch.reset_state()
+    near = boards / "b000" / "workspaces" / task
+    near.mkdir(parents=True)
+    assert budget_watch._workspace_for_task(task) == str(near)
+
+
+def test_workspace_cache_is_bounded(monkeypatch, tmp_path):
+    """The workspace memo cannot grow past the session bound either."""
+    home = tmp_path / "home"
+    (home / "kanban" / "boards" / "b0" / "workspaces").mkdir(parents=True)
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    budget_watch.reset_state()
+    monkeypatch.setattr(budget_watch, "_MAX_SESSIONS", 4)
+    for i in range(30):
+        budget_watch._workspace_for_task(f"t_{i}")
+    assert len(budget_watch._workspace_cache) == 4
+

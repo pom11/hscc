@@ -130,6 +130,37 @@ def _out_of_pytest(monkeypatch):
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
 
 
+def _isolate(tmp_path, monkeypatch):
+    """Pin the two env vars that decide where the row looks, for tests that hand
+    the row an explicit ``hermes_home``.
+
+    ``_budget_plugin_dirs`` reads ``PLUGINS`` and falls back to ``~/.hermes/plugins``,
+    so without this the row's candidate list is whatever the DISPATCHING host
+    happens to have deployed — the exact hermeticity bug t_d7f2ccd1 is about.
+    ``_home()`` does the same for the run_doctor() tests.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PLUGINS", raising=False)
+
+
+def _live_deploy(tmp_path, monkeypatch, *, init_src=WIRED_INIT):
+    """Seed a WIRED (or unwired) deploy at the shape a no-home caller resolves:
+    ``$HOME/.hermes/plugins/hscc-cluster`` — the OPERATOR's tree in a real run.
+
+    Returns the plugin-container root. The canary tests below put this in place
+    WHILE also naming a different ``hermes_home``: a row that resolves the live
+    tree at all then reads green over the fixture's red verdict, which is how the
+    leak becomes visible even under a redirected HOME.
+    """
+    _isolate(tmp_path, monkeypatch)
+    plugins = tmp_path / ".hermes" / "plugins"
+    cluster = plugins / "hscc-cluster"
+    cluster.mkdir(parents=True)
+    (cluster / "__init__.py").write_text(init_src, encoding="utf-8")
+    shutil.copyfile(_REAL_BUDGET_WATCH, cluster / "budget_watch.py")
+    return plugins
+
+
 # ── the seam inside run_doctor ─────────────────────────────────────────────
 
 def test_run_doctor_reports_the_budget_row_when_injected(tmp_path, monkeypatch):
@@ -182,6 +213,7 @@ def test_wired_deploy_tree_is_green(tmp_path, monkeypatch):
     """A deployed hscc-cluster that registers both hooks reads GREEN, quoting
     the deployed dir — the row's whole point: it sees the tree Hermes loads."""
     plugins = _deploy(tmp_path)
+    _isolate(tmp_path, monkeypatch)
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
@@ -195,8 +227,14 @@ def test_missing_register_hook_lines_are_red_naming_the_fix(tmp_path,
                                                             monkeypatch):
     """THE regression: a deployed hscc-cluster whose register() lost the two
     budget register_hook calls (stale payload / hand-patched dir). Must be RED
-    and its fix must say what to do, never a bare 'no'."""
-    _deploy(tmp_path, init_src=UNWIRED_INIT)
+    and its fix must say what to do, never a bare 'no'.
+
+    A WIRED deploy at the live shape is seeded alongside the fixture (see
+    :func:`_live_deploy`): if the row ever resolves the host's tree instead of
+    the ``hermes_home`` it was handed, the live wiring answers for the fixture
+    and this reads green — the leak t_d7f2ccd1 caught did exactly that."""
+    _live_deploy(tmp_path, monkeypatch)          # the trap: wired, but not the tree asked about
+    _deploy(tmp_path, init_src=UNWIRED_INIT)     # the tree the row was told to check
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
                                         hermes_home=str(tmp_path / "deployed"))
@@ -210,7 +248,11 @@ def test_import_failure_is_non_fatal_degraded(tmp_path, monkeypatch):
     """No deployable budget_watch.py at all (payload half-installed): the row
     says the wiring CANNOT be verified and stays non-fatal — an honest
     'unverifiable', never absence-of-output and never a pass. Same honesty rule
-    as the orch-waker / notifier-mask rows."""
+    as the orch-waker / notifier-mask rows.
+
+    Same live-shaped trap as above: an import failure in the named tree must not
+    be papered over by a healthy module in the operator's deploy."""
+    _live_deploy(tmp_path, monkeypatch)
     _deploy(tmp_path, budget_watch=False)
     _out_of_pytest(monkeypatch)
     row = doctor._budget_hook_check_row(None,
@@ -227,7 +269,12 @@ def test_import_failure_is_non_fatal_degraded(tmp_path, monkeypatch):
 def test_broken_module_is_non_fatal_degraded(tmp_path, monkeypatch):
     """A budget_watch.py that raises on import (syntax error, half-copied file)
     must degrade exactly like a missing one — the loader skips it instead of
-    letting the exception escape the check list."""
+    letting the exception escape the check list.
+
+    And "skips it" must not mean "falls through to the operator's copy": with a
+    WIRED live deploy seeded, a fall-through reads ok=True (the t_d7f2ccd1
+    symptom) instead of the honest unverifiable row."""
+    _live_deploy(tmp_path, monkeypatch)
     plugins = _deploy(tmp_path)
     (plugins / "hscc-cluster" / "budget_watch.py").write_text(
         "raise RuntimeError('cannot load')\n", encoding="utf-8")
@@ -236,6 +283,54 @@ def test_broken_module_is_non_fatal_degraded(tmp_path, monkeypatch):
                                         hermes_home=str(tmp_path / "deployed"))
     assert row.ok is False and row.fatal is False
     assert "not importable" in row.detail
+
+
+# ── hermeticity: the row follows the home it was handed, not the host ──────
+
+def test_named_home_wins_over_a_wired_live_deploy(tmp_path, monkeypatch):
+    """The hermeticity proof t_d7f2ccd1 asks for, both directions at once.
+
+    A fully WIRED deploy sits at ``$HOME/.hermes/plugins`` (what a no-home caller
+    resolves — the operator's install in a real run) while the named ``hermes_home``
+    is UNWIRED. The row must report the named home RED; if it consulted the live
+    tree at all, that wiring would rescue the verdict (measured at main: ok=True
+    with 'wired in ~/.hermes/plugins' in the detail)."""
+    live = _live_deploy(tmp_path, monkeypatch)   # wired
+    _deploy(tmp_path, init_src=UNWIRED_INIT)     # named home — unwired
+    _out_of_pytest(monkeypatch)
+    row = doctor._budget_hook_check_row(None,
+                                        hermes_home=str(tmp_path / "deployed"))
+    assert row.ok is False, "the live tree's wiring must not answer for the named home"
+    assert str(live) not in row.detail, \
+        f"the row read the live deploy, not the home it was handed: {row.detail}"
+
+
+def test_wired_named_home_is_green_while_the_live_deploy_is_unwired(
+        tmp_path, monkeypatch):
+    """The mirror image: a correct named deploy must read GREEN even when the
+    host's own deploy is broken, and its detail must name the tree it actually
+    inspected. Without this the fix could pass by always preferring the host."""
+    live = _live_deploy(tmp_path, monkeypatch, init_src=UNWIRED_INIT)
+    plugins = _deploy(tmp_path)                  # named home — wired, the good one
+    _out_of_pytest(monkeypatch)
+    row = doctor._budget_hook_check_row(None,
+                                        hermes_home=str(tmp_path / "deployed"))
+    assert row.ok is True and row.fatal is False
+    assert str(plugins) in row.detail
+    assert str(live) not in row.detail
+
+
+def test_no_named_home_still_falls_back_to_the_default_root(
+        tmp_path, monkeypatch):
+    """The other half of the contract: a HUMAN CLI run (no --home) must still
+    find the operator's deploy at ``~/.hermes/plugins``. Otherwise the fix above
+    would only have moved the bug."""
+    live = _live_deploy(tmp_path, monkeypatch)
+    _out_of_pytest(monkeypatch)
+    row = doctor._budget_hook_check_row(None)    # no hermes_home — CLI path
+    assert row.ok is True, f"the default root must still be checked: {row.detail}"
+    assert str(live) in row.detail
+
 
 
 def test_row_builder_follows_the_injected_verdict_exactly(tmp_path, monkeypatch):
@@ -284,15 +379,38 @@ def test_row_builder_passes_the_resolved_plugin_dirs_to_the_check(
 
 def test_plugin_dirs_honour_the_plugins_env_then_the_home(tmp_path, monkeypatch):
     """Same precedence the installer writes with (install_payload.py): PLUGINS
-    env first, then the home's own plugins dir, then ~/.hermes/plugins. A
-    `--home`/sandbox bootstrap must check THAT tree, not the operator's."""
+    env first, then the home's own plugins dir. A `--home`/sandbox bootstrap must
+    check THAT tree, not the operator's.
+
+    Exactly-two-roots is the point (t_d7f2ccd1): this asserted a third,
+    ``~/.hermes/plugins`` tail while a home was named — i.e. it pinned the leak
+    this card fixes, and contradicted its own docstring in the process. The
+    host's default root belongs to the no-home CLI path only (below)."""
     monkeypatch.setenv("PLUGINS", str(tmp_path / "env-plugins"))
     home = tmp_path / ".hermes"
     dirs = doctor._budget_plugin_dirs(str(home))
     assert dirs[0] == str(tmp_path / "env-plugins")
     assert os.path.join(str(home), "plugins") in dirs
-    assert dirs[-1] == os.path.join(os.path.expanduser("~"), ".hermes",
-                                    "plugins")
+    assert dirs == [str(tmp_path / "env-plugins"),
+                    os.path.join(str(home), "plugins")], \
+        "a named home must resolve to its OWN roots and nothing else"
+    assert os.path.join(os.path.expanduser("~"), ".hermes", "plugins") not in dirs
+
+
+def test_plugin_dirs_add_the_default_root_only_without_a_named_home(
+        tmp_path, monkeypatch):
+    """The other side of the same rule: a human CLI run (``doctor`` with no
+    ``--home``, so no home reaches the resolver) still targets ``~/.hermes/plugins``
+    — the fix must not have blinded the real-world path. PLUGINS keeps priority."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PLUGINS", raising=False)
+    default = os.path.join(str(tmp_path), ".hermes", "plugins")
+    assert doctor._budget_plugin_dirs(None) == [default]
+    assert doctor._budget_plugin_dirs("") == [default], \
+        "an empty home is 'not named', not the cwd"
+    monkeypatch.setenv("PLUGINS", str(tmp_path / "env-plugins"))
+    assert doctor._budget_plugin_dirs(None) == [str(tmp_path / "env-plugins"),
+                                                default]
 
 
 def test_profile_scoped_home_also_contributes_the_root_plugins(

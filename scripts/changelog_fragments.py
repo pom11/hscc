@@ -138,6 +138,41 @@ class Entry:
         return f"Entry({self.kind}, {self.task}, {self.source})"
 
 
+def validate_entry_body(path: Path, kind: str, body) -> None:
+    """Refuse an entry body that carries entry-level bookkeeping lines.
+
+    The documented format (changelog.d/README.md) separates entries with a
+    line containing exactly ``---``. When an author forgets it, parse_fragment
+    cannot see the boundary and the FOLLOWING entry's ``kind:`` / ``task:`` /
+    ``order:`` headers land inside the PREVIOUS entry's body — where
+    ``release`` then materialises them as prose into CHANGELOG.md. 18
+    bookkeeping lines leaked into [2.15.0] exactly this way (5 files,
+    repaired at 9ea52bc4) while ``check`` reported every fragment consistent,
+    because check only validates the [Unreleased] *block shape*.
+
+    Matching reuses ``_HEADER_RE``/``_ALLOWED_HEADERS`` verbatim, so it fires
+    on exactly the tokens the parser itself consumes at column 0; prose that
+    merely *mentions* the vocabulary (an unknown word before a colon, or an
+    indented ``kind:``) stays legal. Reached through ``load_entries``, so
+    check/sync/render/release all refuse the leak; exit 2 per the module's
+    "malformed fragment" contract.
+    """
+    for line in body:
+        m = _HEADER_RE.match(line)
+        if m and m.group(1).lower() in _ALLOWED_HEADERS:
+            raise FragmentError(
+                f"{path.name}: kind '{kind}' body contains '{m.group(0).strip()}'"
+                " — missing `---` separator between entries (entries are"
+                " separated by a line containing exactly `---`)"
+            )
+        if line.strip() == _SEPARATOR:
+            # Unreachable with today's splitter (it cuts the file on every
+            # separator line); guards the invariant if the splitter ever moves.
+            raise FragmentError(
+                f"{path.name}: kind '{kind}' body contains a stray `---` line"
+            )
+
+
 def parse_fragment(path: Path):
     """Parse one fragment file into a list of Entry."""
     text = path.read_text(encoding="utf-8")
@@ -210,6 +245,7 @@ def parse_fragment(path: Path):
             raise FragmentError(f"{path.name}: kind '{kind}' has an empty body")
         if not any(l.strip() for l in body if not l.lstrip().startswith("#")):
             raise FragmentError(f"{path.name}: kind '{kind}' has only comments")
+        validate_entry_body(path, kind, body)
 
         entries.append(
             Entry(kind=kind, task=task, order=order, index=len(entries),

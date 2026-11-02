@@ -1577,7 +1577,22 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
         parent = os.path.dirname(home)
         if parent and os.path.basename(parent) == "profiles":
             _push(os.path.join(os.path.dirname(parent), "plugins"))
-    _push(os.path.join(os.path.expanduser("~"), ".hermes", "plugins"))
+        # No default tail when the caller NAMED a home. Appending
+        # ``~/.hermes/plugins`` unconditionally — the shape this shipped with —
+        # made the row answer about the OPERATOR's deploy: both
+        # ``_load_budget_watch`` (first importable candidate wins) and
+        # ``budget_watch.doctor_check`` (any wired candidate is green) could
+        # rescue an unwired/broken named tree with the live one, so a sandbox or
+        # ``--home`` bootstrap read all-green over the very deploy it was asked
+        # to verify (t_d7f2ccd1; measured: three test_doctor_budget_hook cases
+        # failing on any host whose own deploy is wired). The tail is redundant
+        # in every legitimate case anyway — home == ``~/.hermes`` dedupes onto
+        # it, and a profile-scoped home already contributes the root's dir via
+        # the ``profiles`` rule above — so keeping it bought nothing but the bug.
+    else:
+        # Human CLI run with no ``--home``: the operator's own deploy is the
+        # target, so the default root stays.
+        _push(os.path.join(os.path.expanduser("~"), ".hermes", "plugins"))
     return dirs
 
 

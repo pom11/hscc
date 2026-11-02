@@ -237,6 +237,30 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
         return None
 
 
+# ── ledger identity normalisation (t_1497a937) ───────────────────────────────
+
+#: Written instead of ``None`` whenever an identity field is genuinely absent.
+#: ``null`` in these ledgers is not a value a reader can act on: it is the
+#: absence of an attribution key, and 797 of 851 completion rows were
+#: unattributable that way. A sentinel string is joinable, filterable and
+#: unmistakable; ``None`` is none of those.
+UNKNOWN_ID = "unknown"
+
+
+def _identity(value) -> str:
+    """Normalise one ledger identity field to a non-empty string.
+
+    ``None``, ``""`` and whitespace-only values all mean "we were not told" —
+    they become :data:`UNKNOWN_ID`. Anything else is stringified and trimmed,
+    so a payload that carries a real id never records a blank or a null.
+    """
+    if value is None:
+        return UNKNOWN_ID
+    text = value if isinstance(value, str) else str(value)
+    text = text.strip()
+    return text or UNKNOWN_ID
+
+
 # ── kanban_task_blocked handler ──────────────────────────────────────────────
 
 _BLOCKED_LOG = os.path.join(os.path.expanduser("~/.hscc"), "blocked_tasks.jsonl")
@@ -280,14 +304,20 @@ def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
         alert = "\n".join(parts)
 
         # Persist to the local log so the dashboard can read it.
+        #
+        # Identity fields go through ``_identity`` (t_1497a937): a genuinely
+        # absent value is recorded as ``"unknown"``, never ``null``. A null
+        # task_id is unjoinable and indistinguishable from a writer that was
+        # never told anything, which is exactly what made 797 ledger rows
+        # useless to the fleet check.
         try:
             import datetime
             import json
             entry = {
-                "task_id": task_id,
-                "profile_name": profile_name,
-                "reason": reason,
-                "board": board,
+                "task_id": _identity(task_id),
+                "profile_name": _identity(profile_name),
+                "reason": _identity(reason),
+                "board": _identity(board),
                 "blocked_at": datetime.datetime.utcnow().isoformat(),
             }
             with open(_BLOCKED_LOG, "a") as f:
@@ -408,11 +438,16 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
         import json
 
         # 1. Record the completion.
+        #
+        # Identity fields go through ``_identity`` (t_1497a937): an absent
+        # task_id is written as ``"unknown"``, never ``null`` — a null key
+        # cannot be joined back to a card and cannot be told apart from a
+        # writer that received nothing at all.
         entry = {
-            "task_id": task_id,
-            "profile_name": profile_name,
+            "task_id": _identity(task_id),
+            "profile_name": _identity(profile_name),
             "summary": summary,
-            "board": board,
+            "board": _identity(board),
             "completed_at": datetime.datetime.utcnow().isoformat(),
         }
         try:
@@ -433,13 +468,21 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
                         try:
                             blocked_entry = json.loads(line)
                             blocked_tid = blocked_entry.get("task_id")
-                            if blocked_tid and blocked_tid != task_id:
+                            # ``UNKNOWN_ID`` rows carry no card to unblock —
+                            # the pre-fix ledger is full of them, and each one
+                            # used to buy a pointless get_task() round trip.
+                            if (blocked_tid and blocked_tid != UNKNOWN_ID
+                                    and blocked_tid != task_id):
                                 _try_auto_unblock(blocked_tid, task_id)
                         except (json.JSONDecodeError, KeyError):
                             continue
         except Exception:
             pass
 
+        # The return dict keeps the RAW task_id (like the blocked handler's):
+        # ``None`` there means "the payload carried no card", which is a fact
+        # about the caller worth preserving. Only the durable ledger entry is
+        # normalised, because that is what downstream code joins on.
         return {"task_id": task_id, "completed": True}
     except Exception:
         return None
@@ -449,11 +492,90 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
 
 _TOOL_EVENT_LOG = os.path.join(os.path.expanduser("~/.hscc"), "tool_events.jsonl")
 
+# What a ledger row says when NO identity source resolves at all.
+_UNKNOWN_PROFILE = "unknown"
+
+
+def _active_profile_name():
+    """Hermes' active profile name, or None when ``hermes_cli`` cannot load.
+
+    Fence discipline is the repo's established one for Hermes lookups
+    (``hscc_daemon.profile_roster._hermes_gate``, ``autodown`` for
+    ``hermes_cli.kanban_db``): ``hermes_cli`` lives under ``~/.hermes/hermes-agent``
+    and is not always on the plugin's ``sys.path``, so a failed import retries once
+    with the runtime dir on the path, and ANY remaining failure returns None rather
+    than raising. This runs on the ``pre_tool_call`` hot path of every tool call in
+    every profile — observability must never be the thing that breaks a tool call.
+    """
+    import sys
+
+    def _load():
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name
+
+    try:
+        loader = _load()
+    except Exception:
+        loader = None
+    if loader is None:
+        hermes_path = os.path.expanduser(
+            os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
+        if os.path.isdir(hermes_path) and hermes_path not in sys.path:
+            sys.path.insert(0, hermes_path)
+            try:
+                loader = _load()
+            except Exception:
+                loader = None
+    if loader is None:
+        return None
+    try:
+        name = loader()
+    except Exception:
+        return None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def _ledger_profile_name(kwargs):
+    """``profile_name`` for a ledger row: explicit kwarg, else the active profile.
+
+    WHY THIS EXISTS. Hermes' ``pre_tool_call`` fire site
+    (``hermes_cli/plugins.py``, ``_get_pre_tool_call_directive_details``) sends
+    ``tool_name``, ``args``, ``task_id``, ``session_id``, ``tool_call_id``,
+    ``turn_id``, ``api_request_id``, ``middleware_trace`` — and never
+    ``profile_name``. Reading only the kwarg therefore stamped the same sentinel on
+    EVERY live row (4291 of them in ``~/.hscc/tool_events.jsonl`` when this was
+    measured), collapsing ``hscc stats``' ``tool_calls_by_profile`` into one bucket:
+    the per-profile tool view was silently dead.
+
+    Resolution order matches Hermes' own ``kanban_db._hook_profile_name()``, which
+    resolves the active profile for exactly this reason:
+
+      1. an explicit, non-blank ``profile_name`` kwarg wins (it is the caller's
+         answer, and a future fire site that DOES send one must stay authoritative);
+      2. else ``hermes_cli.profiles.get_active_profile_name()``;
+      3. else the ``"unknown"`` sentinel — reached only when hermes_cli is genuinely
+         unresolvable (partial install, foreign venv) or it raises.
+
+    A blank/None kwarg counts as "not sent" and falls through: an empty string in
+    the ledger is exactly as unattributable as the sentinel, and the fallback is
+    strictly more informative.
+    """
+    explicit = kwargs.get("profile_name")
+    if isinstance(explicit, str):
+        if explicit.strip():
+            return explicit.strip()
+    elif explicit is not None:
+        # A non-string but present value is still an explicit answer; keep it.
+        return str(explicit)
+    return _active_profile_name() or _UNKNOWN_PROFILE
+
 
 def on_pre_tool_call(**kwargs):
     """Stamp profile_name into HSCC observability for every tool call."""
     try:
-        profile = kwargs.get("profile_name", "unknown")
+        profile = _ledger_profile_name(kwargs)
         import datetime
         import json
 

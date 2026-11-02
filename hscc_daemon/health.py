@@ -147,6 +147,57 @@ SPARKRUN_SWEEP_WORST_CASE = SPARKRUN_SWEEP_ROUNDS * SPARKRUN_SWEEP_HOST_TIMEOUT
 #: arithmetic so the two cannot drift apart again.
 SPARKRUN_STATUS_TIMEOUT = int(os.environ.get("HSCC_SPARKRUN_STATUS_TIMEOUT", "40"))
 
+# ── Last-known-good fleet visibility (t_84381a8b, audit §c8-2) ─────────────
+# The pre-fix rule was "no snapshot read ⇒ the fleet is LOST", evaluated on the
+# FIRST failed sweep and re-printed by every caller of _sparkrun_workloads — a
+# 35-minute slow-node window logged 35 `FLEET VISIBILITY LOST` lines while
+# `/health` stayed `3/3 online` (audit §7/§8 M2). Two things were wrong: the
+# verdict had no memory (a 1.23 s sweep that succeeded 5 s ago is information,
+# and throwing it away is what turned a blip into an alarm), and the alarm was
+# per-call rather than per-transition.
+#
+# So: every SUCCESSFUL sweep writes ~/.hscc/fleet_last_seen.json, and a failed
+# sweep publishes HOW STALE that snapshot is — `fleet_visibility:
+# "stale (last good 4 m 10 s ago)"` — instead of asserting loss. Loss is now a
+# threshold: the snapshot has aged past FLEET_STALE_LOST_AFTER_S, or the sweep
+# has failed FLEET_LOST_AFTER_CONSECUTIVE_FAILURES times in a row, or we never
+# had a snapshot at all (that case genuinely is unknown — the old behaviour is
+# kept there, so this can never make an unobserved fleet look healthy).
+#
+# The age is read from the file, not from an in-process clock, so the verdict
+# survives a daemon restart in the middle of an outage. sparkrun already leaves
+# a running snapshot for the same reason (orchestration/job_metadata.py:765-801);
+# we keep our own because that one is sparkrun's state, keyed per job, and we
+# must never infer "no workloads" from a file we do not own.
+FLEET_LAST_SEEN_FILE = os.path.expanduser("~/.hscc/fleet_last_seen.json")
+#: Age past which a stale snapshot is no longer evidence of a live fleet.
+#: 300 s = 5 dgx ticks (`PERIODIC_INTERVALS["dgx"]` = 60 s, and c8-3 made that
+#: stream the only in-process caller of the check): long enough that the audit's
+#: own 4 m 10 s window still reads as `stale (last good 4 m 10 s ago)` rather
+#: than loss, short enough that an operator gets a hard alarm inside five
+#: minutes of real blindness.
+FLEET_STALE_LOST_AFTER_S = float(os.environ.get("HSCC_FLEET_STALE_LOST_AFTER_S", "300"))
+#: Consecutive failed sweeps that assert loss regardless of snapshot age. The
+#: age rule needs a snapshot; this one is the floor for the case where the file
+#: exists but the sweep has kept failing across the whole grace window. 3 ticks
+#: = ~3 minutes of a 60 s cadence: a single slow-node blip (the 2026-10-30 case:
+#: one node answering at 20 s) can never reach it.
+FLEET_LOST_AFTER_CONSECUTIVE_FAILURES = int(
+    os.environ.get("HSCC_FLEET_LOST_AFTER_CONSECUTIVE_FAILURES", "3"))
+#: A snapshot stamped in the FUTURE (bad clock, clock jump, hand-edited file)
+#: is not evidence of anything. Beyond this tolerance it reads as no snapshot.
+_FLEET_STALE_CLOCK_TOLERANCE_S = 60.0
+
+#: In-process tally + latch for the degraded path. Deliberately NOT persisted:
+#: the consecutive-failure count is about the sweep loop this process is
+#: running, and the snapshot's own age (read from disk) carries the outage
+#: across a restart. `warned` is the once-per-outage latch for the LOST line.
+_fleet_visibility_state = {"failures": 0, "warned": False,
+                           "last_success_at": None,
+                           "last_good_epoch": None, "last_good": None}
+_fleet_last_seen_epoch = None
+_FLEET_VISIBILITY_LOCK = threading.Lock()
+
 # Inline script run under sparkrun's OWN venv python to invoke the structured
 # cluster-status API. We cannot `import sparkrun` in this process: hscc_daemon
 # runs under the Hermes agent venv, and sparkrun is installed (with its
@@ -232,7 +283,7 @@ def _sparkrun_exec_argv(argv):
 
 
 def _sparkrun_workloads():
-    """Return running sparkrun workloads as [{name, container}, ...].
+    """Return ``(workloads, degraded, visibility)`` for one fleet sweep.
 
     Replaces the former `sparkrun status` shell-out + `Job:` text-parsing in
     the DGX check, which was fragile to any cosmetic change in sparkrun's
@@ -247,14 +298,20 @@ def _sparkrun_workloads():
     text-parsing produced — ``[{"name": ..., "container": ...}]`` — so nothing
     downstream that reads ``results["workloads"]`` needs to change.
 
-    Returns ``(workloads, degraded)``. ``degraded`` is the anti-fail-open
-    signal (t_b543e530): True ONLY when BOTH status paths are unavailable —
-    sparkrun's venv python could not be resolved (or the structured query
-    raised) AND the legacy `sparkrun status` shell-out failed (CLI missing
-    from a service PATH is the real-world case). An empty workload list then
-    means "we could not look", which is NOT the same fact as "the fleet is
-    empty", and the DGX check must publish it as a degraded state instead of
-    logging a plain ok=True.
+    ``degraded`` is the anti-fail-open signal (t_b543e530): True ONLY when BOTH
+    status paths are unavailable — sparkrun's venv python could not be resolved
+    (or the structured query raised) AND the legacy `sparkrun status` shell-out
+    failed (CLI missing from a service PATH is the real-world case). An empty
+    workload list then means "we could not look", which is NOT the same fact as
+    "the fleet is empty", and the DGX check must publish it as a degraded state
+    instead of logging a plain ok=True.
+
+    ``visibility`` is what the stream PRINTS (audit §c8-2): "ok" on a good
+    sweep, "lost" only past the loss threshold, and otherwise
+    ``"stale (last good 4 m 10 s ago)"`` with the age of the last snapshot
+    written to ``FLEET_LAST_SEEN_FILE``. A successful sweep rewrites that
+    snapshot; a failed one reads it and counts itself. Callers that only care
+    about fail-open unpack the first two values — the third is presentation.
     """
     venv_py = _sparkrun_venv_python()
     if venv_py:
@@ -263,7 +320,19 @@ def _sparkrun_workloads():
                           timeout=SPARKRUN_STATUS_TIMEOUT)
             if res.get("ok") and res.get("output"):
                 data = json.loads(res["output"])
-                return _workloads_from_cluster_status(data), False
+                workloads = _workloads_from_cluster_status(data)
+                if _fleet_snapshot_from_status(data) is None:
+                    # The script's `if not hosts` early exit answers
+                    # {"host_list": []} — a reply, but NOT a fleet observation.
+                    # Stamping it fresh would let a broken host resolution keep
+                    # the fleet looking good forever, so the snapshot is left
+                    # alone (and the next failure ages against the real one).
+                    log("sparkrun status answered without fleet data "
+                        "(host_list-only payload) — no last-good fleet stamp",
+                        "WARN")
+                else:
+                    _note_fleet_success(data, workloads)
+                return workloads, False, "ok"
         except (ValueError, TypeError, json.JSONDecodeError) as e:
             log(f"sparkrun cluster-status JSON parse failed ({e})", "WARN")
         except Exception as e:
@@ -276,12 +345,234 @@ def _sparkrun_workloads():
     log("structured sparkrun status unavailable — falling back to "
         f"`sparkrun status` text-parse (venv_py={venv_py!r})", "WARN")
     workloads, cli_ok = _sparkrun_workloads_textparse()
-    if not cli_ok:
-        log("FLEET VISIBILITY LOST: sparkrun structured status AND the "
-            "`sparkrun status` shell-out are both unavailable — the workload "
-            "list below is UNKNOWN, not empty. Auto-heal relaunch cannot "
-            "reach the sparkrun CLI either.", "WARN")
-    return workloads, not cli_ok
+    if cli_ok:
+        # A text-parse that ANSWERED is a real observation of the fleet — it
+        # gets the same freshness stamp the structured path gets, so a legacy
+        # leg working through an outage cannot degrade the visibility verdict.
+        _note_fleet_success(None, workloads)
+        return workloads, False, "ok"
+
+    # Both legs dead. Pre-fix this printed `FLEET VISIBILITY LOST` on the first
+    # failure and re-printed it for every caller — 35 WARNs for one slow-node
+    # window (audit §7/§8 M2). Now: count the failure, read the last snapshot,
+    # and assert loss only past the threshold.
+    verdict = _fleet_visibility_verdict()
+    if not verdict["lost"]:
+        log(f"FLEET VISIBILITY STALE ({verdict['age_phrase']}) — sparkrun "
+            "status unavailable this sweep, so the workload list below is "
+            "UNKNOWN, not empty; holding the last-good verdict instead of "
+            "asserting loss "
+            f"(failed sweep {verdict['failures']} of "
+            f"{FLEET_LOST_AFTER_CONSECUTIVE_FAILURES}, "
+            f"age cap {FLEET_STALE_LOST_AFTER_S:g}s)", "WARN")
+        return workloads, True, verdict["visibility"]
+
+    lost_line = (f"FLEET VISIBILITY LOST: sparkrun structured status AND the "
+                 "`sparkrun status` shell-out are both unavailable — the "
+                 "workload list below is UNKNOWN, not empty. Auto-heal "
+                 "relaunch cannot reach the sparkrun CLI either.")
+    if verdict["last_good_epoch"] is not None:
+        lost_line += (f" Last good fleet read was {verdict['age_phrase']}"
+                      f" ({verdict['reason']}).")
+    _log_fleet_lost_once(lost_line)
+    return workloads, True, "degraded"
+
+
+def _age_phrase(seconds):
+    """Human age for the WARN/state text: 250 -> "4 m 10 s ago"."""
+    s = max(0, int(round(seconds)))
+    mins, secs = divmod(s, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours} h {mins} m ago"
+    if mins:
+        return f"{mins} m {secs} s ago"
+    return f"{secs} s ago"
+
+
+def _fleet_snapshot_from_status(data):
+    """Build the last-known-good record from a status to_dict(), or None.
+
+    None means "this read is not a fleet observation" — the script's
+    no-hosts-early-exit prints ``{"host_list": []}`` with neither ``groups``
+    nor ``solo_entries``, and stamping freshness with that would let a broken
+    host resolution keep the fleet looking fresh forever.
+    """
+    if not isinstance(data, dict):
+        return None
+    if "groups" not in data and "solo_entries" not in data:
+        return None
+    hosts = set()
+    for group in (data.get("groups") or {}).values():
+        for c in group.get("containers") or []:
+            if c.get("host"):
+                hosts.add(c["host"])
+    for entry in data.get("solo_entries") or []:
+        if entry.get("host"):
+            hosts.add(entry["host"])
+    return {"hosts": sorted(hosts), "as_of": now_iso()}
+
+
+def _note_fleet_success(data, workloads):
+    """Record a successful sweep: rewrite the snapshot, reset the failure tally.
+
+    Best-effort on disk (a read-only ``~/.hscc`` must not break the check),
+    authoritative in-process: the failure counter and the once-per-outage WARN
+    latch are cleared either way, because we DID just see the fleet. Clearing a
+    latched alarm also prints the matching RECOVERED line — an alarm that can
+    fire but never clear is the same class of bug as one that fires 35 times.
+    """
+    global _fleet_last_seen_epoch
+    snapshot = _fleet_snapshot_from_status(data) if data is not None else {
+        "hosts": [], "as_of": now_iso()}
+    with _FLEET_VISIBILITY_LOCK:
+        was_warned = _fleet_visibility_state["warned"]
+        _fleet_visibility_state["failures"] = 0
+        _fleet_visibility_state["warned"] = False
+        _fleet_visibility_state["last_success_at"] = now_iso()
+        _fleet_last_seen_epoch = time.time()
+        _fleet_visibility_state["last_good_epoch"] = _fleet_last_seen_epoch
+        _fleet_visibility_state["last_good"] = snapshot
+        epoch = _fleet_last_seen_epoch
+    try:
+        record = {
+            "as_of": snapshot["as_of"],
+            "epoch": epoch,
+            "hosts": snapshot["hosts"],
+            "workload_count": len(workloads),
+            "workloads": workloads,
+        }
+        os.makedirs(os.path.dirname(FLEET_LAST_SEEN_FILE), exist_ok=True)
+        # Unique tmp per writer: check_dgx can be entered by more than one
+        # caller per tick (audit §c6 counted four sweeps), so a fixed name
+        # races and one writer's rename takes the other's tmp with it.
+        tmp = (f"{FLEET_LAST_SEEN_FILE}.{os.getpid()}"
+               f".{threading.get_ident()}.tmp")
+        with open(tmp, "w") as f:
+            json.dump(record, f, indent=2, default=str)
+        os.replace(tmp, FLEET_LAST_SEEN_FILE)
+    except OSError:
+        pass
+    if was_warned:
+        # Close a latched hard-loss alarm. The latch is owned here, so the
+        # clear is tied to the fact that produced it (a sweep that answered)
+        # and cannot be missed by a caller.
+        log("FLEET VISIBILITY RECOVERED — sparkrun status answered again", "INFO")
+
+
+def _read_fleet_last_seen():
+    """(epoch, record) of the last good sweep, or (None, None).
+
+    The FILE is the source of truth: every successful sweep rewrites it, so it
+    is never staler than the in-process stamp, and reading the age from disk is
+    what lets the verdict survive a daemon restart in the middle of an outage.
+    The in-process epoch is only a fallback for the case where the write itself
+    failed (read-only ``~/.hscc``) — otherwise a process-local stamp would keep
+    a fleet alive that the disk says we stopped seeing long ago.
+
+    Prefers the numeric `epoch` this daemon version writes and falls back to
+    parsing `as_of` (the field the audit specified, and the only one an
+    older/foreign record is guaranteed to carry). Anything unreadable or
+    nonsensical (unparsable stamp, a stamp in the future beyond
+    ``_FLEET_STALE_CLOCK_TOLERANCE_S``) reads as NO snapshot — fail closed, the
+    same direction the check itself takes.
+    """
+    try:
+        with open(FLEET_LAST_SEEN_FILE) as f:
+            record = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        record = None
+    if isinstance(record, dict):
+        epoch = record.get("epoch")
+        if not isinstance(epoch, (int, float)):
+            epoch = _epoch_from_iso(record.get("as_of"))
+        if isinstance(epoch, (int, float)) and \
+                float(epoch) <= time.time() + _FLEET_STALE_CLOCK_TOLERANCE_S:
+            return float(epoch), record
+    # No usable stamp on disk — fall back to what this process observed.
+    cached = _fleet_visibility_state.get("last_good_epoch")
+    if isinstance(cached, (int, float)) and \
+            float(cached) <= time.time() + _FLEET_STALE_CLOCK_TOLERANCE_S:
+        return float(cached), _fleet_visibility_state.get("last_good") or {}
+    return None, None
+
+
+def _epoch_from_iso(stamp):
+    try:
+        dt = datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def _fleet_visibility_verdict():
+    """Decide what the degraded path publishes, and count this failed sweep.
+
+    Returns {visibility, lost, age_s, age_phrase, failures, reason,
+    last_good_epoch}. Not lost ⇒ the caller warns about staleness without
+    asserting loss; lost ⇒ the hard alarm, which :func:`_log_fleet_lost_once`
+    prints once per outage rather than once per caller.
+    """
+    with _FLEET_VISIBILITY_LOCK:
+        _fleet_visibility_state["failures"] += 1
+        failures = _fleet_visibility_state["failures"]
+
+    epoch, record = _read_fleet_last_seen()
+    if epoch is None:
+        # Never had a snapshot: there is no last-good to be stale about, so
+        # this genuinely IS a loss — unchanged from the pre-fix behaviour.
+        return {"visibility": "lost", "lost": True, "age_s": None,
+                "age_phrase": "no prior good read", "failures": failures,
+                "reason": "no fleet snapshot has ever been written",
+                "last_good_epoch": None}
+
+    age = max(0.0, time.time() - epoch)
+    stale = {
+        # The card's published shape verbatim: "stale (last good 4 m 10 s ago)".
+        "visibility": f"stale (last good {_age_phrase(age)})",
+        "lost": False,
+        "age_s": age,
+        "age_phrase": _age_phrase(age),
+        "failures": failures,
+        "reason": f"last good read {_age_phrase(age)}",
+        "last_good_epoch": epoch,
+    }
+    if failures >= FLEET_LOST_AFTER_CONSECUTIVE_FAILURES:
+        stale.update(lost=True,
+                     reason=f"{failures} consecutive failed sweeps")
+    elif age > FLEET_STALE_LOST_AFTER_S:
+        stale.update(lost=True,
+                     reason=f"snapshot aged past {FLEET_STALE_LOST_AFTER_S:g}s")
+    return stale
+
+
+def _log_fleet_lost_once(line):
+    """Print the hard-loss alarm once per outage, not once per caller.
+
+    The audit counted 35 `FLEET VISIBILITY LOST` lines for one 35-minute
+    window because every caller of the sweep re-printed it on every tick. The
+    latch opens on the first hard-loss log and closes on the next successful
+    sweep (:func:`_note_fleet_success`), so an outage costs one WARN and the
+    recovery costs the RECOVERED line below.
+    """
+    with _FLEET_VISIBILITY_LOCK:
+        already = _fleet_visibility_state["warned"]
+        if not already:
+            _fleet_visibility_state["warned"] = True
+    if not already:
+        log(line, "WARN")
+
+
+def _reset_fleet_visibility_state():
+    """Drop the in-process tally + latch. Test seam; the disk is not touched."""
+    with _FLEET_VISIBILITY_LOCK:
+        _fleet_visibility_state.update(failures=0, warned=False,
+                                       last_success_at=None,
+                                       last_good_epoch=None, last_good=None)
+    global _fleet_last_seen_epoch
+    _fleet_last_seen_epoch = None
 
 
 def _workloads_from_cluster_status(data):
@@ -347,6 +638,105 @@ def _sparkrun_workloads_textparse():
     return workloads, True
 
 
+#: The last verdict `check_dgx` returned, published process-wide (proxy-stall
+#: c8-3). `{"serving_ok", "publish_ok", "at"}` where `at` is a monotonic clock
+#: reading. None until the first DGX check has run in THIS process.
+#:
+#: WHY THIS EXISTS. `check_dgx` is the most expensive probe the daemon runs —
+#: two SSH round-trips plus two sparkrun status sweeps, worst case ~40 s — and
+#: during the 2026-10-31 episode it ran from several in-process callers: its own
+#: 60 s stream thread AND `pipeline_watchdog` every 30 s. That is why a stream
+#: declared at 60 s measured a ~24 s median tick, why the sweeps piled up on a
+#: node that was already slow, and why the same `FLEET VISIBILITY LOST` WARN was
+#: re-printed by every caller (two WARNs 0.50 s apart — one tick cannot emit
+#: two). The dedicated `dgx` stream thread is now the ONLY caller that runs the
+#: check; the 30 s watchdog reads this published verdict instead of re-running
+#: it. A shared verdict cannot multiply a shell-out no matter how slow the shell
+#: gets.
+#:
+#: WHY A CACHE AND NOT THE STATE FILE. `~/.hscc/state/dgx.json` looks like the
+#: obvious shared surface and was the findings doc's first option, but it is
+#: NOT the same value: `check_dgx` writes `ok = publish_ok` (serving reachable
+#: AND the fleet list verified) and RETURNS `serving_ok` (ssh + vLLM only) — the
+#: two diverge exactly when sparkrun status polling is what failed. The
+#: watchdog's restart/breaker decisions are keyed to the returned value, so
+#: reading `ok` off the file would silently change semantics (a status-polling
+#: outage would start driving vLLM stop/relaunch cycles against a healthy
+#: serving layer). This shares the returned value verbatim, which is why the
+#: fix needs no semantics argument.
+#:
+#: NOT the freshness mechanism: this carries no staleness judgement at all (see
+#: `dgx_verdict`) — stream liveness belongs to verify's per-stream staleness
+#: rule, which already goes RED on a dark `dgx` stream.
+_DGX_VERDICT = None
+_DGX_VERDICT_LOCK = threading.Lock()
+
+
+def publish_dgx_verdict(serving_ok, publish_ok, at=None):
+    """Record the verdict of the DGX check that just ran (called by check_dgx).
+
+    `serving_ok` is what check_dgx returns; `publish_ok` is what its stream
+    file carries. Both are kept so a reader can tell the two verdicts apart
+    rather than re-deriving either. `at` defaults to a monotonic reading —
+    monotonic so the freshness math survives an NTP step or a clock change on a
+    laptop that slept, which a wall-clock age would misreport as either
+    infinitely fresh or permanently stale.
+    """
+    global _DGX_VERDICT
+    with _DGX_VERDICT_LOCK:
+        _DGX_VERDICT = {"serving_ok": bool(serving_ok),
+                        "publish_ok": bool(publish_ok),
+                        "at": time.monotonic() if at is None else at}
+    return _DGX_VERDICT
+
+
+def dgx_verdict(max_age_s=None):
+    """The last published DGX verdict: a dict, or None when nothing has run.
+
+    `{"serving_ok", "publish_ok", "at", "age_s", "stale"}`. The default reader
+    for a caller that needs the DGX signal without running the DGX check (today:
+    `lifecycle.pipeline_watchdog` — the only reason this cache exists).
+
+    NO SHELL-OUT: this reads a module global, so a slow or unreachable node
+    cannot make a reader of this expensive. That is the whole point.
+
+    NO FRESHNESS JUDGEMENT BY DEFAULT (`max_age_s=None`): the verdict is
+    returned as published, however old, and `stale` stays False. A verdict is
+    the last FACT the daemon observed, and the watchdog's fail action is not
+    neutral — a false failure triggers a vLLM stop/relaunch and, on the third
+    consecutive tick, a pipeline block plus a critical notification plus ~10
+    minutes without any checks. Guessing "stale therefore failed" manufactures
+    exactly that from a thread that is merely behind (a sweep can legitimately
+    run minutes — see the 157.85 s outlier in the audit). Whether the dgx
+    STREAM is alive is a different question with a dedicated owner: verify's
+    per-stream staleness rule, keyed off `PERIODIC_INTERVALS["dgx"]`.
+
+    `max_age_s` is offered for callers that genuinely want to be told when the
+    signal is old without treating old as bad: it only sets `stale=True`, never
+    the verdict.
+    """
+    with _DGX_VERDICT_LOCK:
+        if _DGX_VERDICT is None:
+            return None
+        verdict = dict(_DGX_VERDICT)
+    age = time.monotonic() - verdict["at"]
+    verdict["age_s"] = age
+    verdict["stale"] = max_age_s is not None and age > max_age_s
+    return verdict
+
+
+def reset_dgx_verdict():
+    """Forget the published verdict (test isolation; nothing in the daemon path).
+
+    Without it a test that ran check_dgx would leak its verdict into the next
+    test's watchdog tick, and the tick's DGX signal would silently come from a
+    previous test instead of the fixture.
+    """
+    global _DGX_VERDICT
+    with _DGX_VERDICT_LOCK:
+        _DGX_VERDICT = None
+
+
 def check_dgx():
     """DGX check (every 5s): SSH to primary node, check GPU status, sparkrun workloads."""
     log("Running DGX check")
@@ -389,10 +779,16 @@ def check_dgx():
     # stream must read DEGRADED (ok=False + WARN log line, which trigger.py
     # turns into a state.dgx.degraded pseudo-event and `hscc verify` shows
     # RED) instead of the old silent ok=True + [].
-    workloads, degraded = _sparkrun_workloads()
+    workloads, degraded, visibility = _sparkrun_workloads()
     results["workloads"] = workloads
     results["workload_count"] = len(workloads)
-    results["fleet_visibility"] = "degraded" if degraded else "ok"
+    # The audit's point (§c8-2): a degraded read names HOW FAR BEHIND we are —
+    # `"stale (last good 4 m 10 s ago)"` — instead of asserting the fleet is
+    # gone. One key, three possible shapes ("ok" / "stale (...)" / "degraded"):
+    # `fleet_visibility` is a published key (verify and the audits read it), so
+    # the two pre-existing strings keep their exact values and staleness is
+    # purely additive for any consumer that has not been taught the new one.
+    results["fleet_visibility"] = visibility
     
     # 4. vLLM health
     health = http_check(serving.VLLM_HEALTH_URL, timeout=5)
@@ -414,10 +810,23 @@ def check_dgx():
     publish_ok = serving_ok and not degraded
     state_entry = {"ok": publish_ok, "details": results}
     if not publish_ok and degraded:
-        state_entry["message"] = (
-            "FLEET VISIBILITY DEGRADED — sparkrun status unavailable "
-            "(structured query + `sparkrun status` shell-out both failed); "
-            "workload list UNKNOWN, auto-heal relaunch cannot reach sparkrun")
+        if visibility == "degraded":
+            state_entry["message"] = (
+                "FLEET VISIBILITY DEGRADED — sparkrun status unavailable "
+                "(structured query + `sparkrun status` shell-out both failed); "
+                "workload list UNKNOWN, auto-heal relaunch cannot reach sparkrun")
+        else:
+            # Within the loss threshold (§c8-2): the stream says HOW FAR BEHIND
+            # we are instead of asserting the fleet is gone. Still RED — an
+            # unverified workload list is not a healthy read either way, so the
+            # trigger engine still gets its state.dgx.degraded pseudo-event.
+            # `visibility` is literally "stale (last good 4 m 10 s ago)"; drop
+            # the redundant lower-case word and keep the age.
+            age = visibility[len("stale "):]
+            state_entry["message"] = (
+                f"FLEET VISIBILITY STALE {age} — sparkrun status unavailable "
+                "this sweep; workload list UNKNOWN, holding the last-good read "
+                "instead of asserting loss")
     elif not publish_ok and _intentional_window():
         # The serving layer is in an intentional-autodown window — either
         # down by design (model stopped IS why vLLM is unreachable) or waking
@@ -427,8 +836,20 @@ def check_dgx():
         state_entry["intentional"] = "autodown"
         state_entry["message"] = "intentional autodown — serving layer down by design"
     write_state("dgx", state_entry)
+    # Publish the verdict for the in-process readers that must NOT re-run this
+    # check (proxy-stall c8-3, see _DGX_VERDICT). Written on EVERY path — ok or
+    # not — because a failing check is exactly the verdict the watchdog needs,
+    # and published AFTER write_state so the stream file and the shared verdict
+    # describe the same tick. `serving_ok` is published, not `publish_ok`: this
+    # is the value the returned verdict carried, so the watchdog's behaviour is
+    # bit-for-bit what it was when it called check_dgx itself.
+    publish_dgx_verdict(serving_ok, publish_ok)
+    # The completion line must not claim more than the sweep established
+    # (§c8-2): the pre-fix text said "visibility lost" for ANY degraded tick, so
+    # even after the alarm itself became staleness-aware the log kept asserting
+    # loss on the first failed sweep — the same over-claim, one line later.
     log(f"DGX check complete: ok={serving_ok}"
-        + (" — stream DEGRADED: fleet visibility lost (sparkrun unreachable)"
+        + (f" — stream DEGRADED: fleet visibility {visibility}"
            if degraded else ""))
     return serving_ok
 

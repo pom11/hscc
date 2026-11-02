@@ -67,11 +67,27 @@ class TestBlockedHandler:
         assert entry["board"] == "default"
         assert "blocked_at" in entry
 
-    def test_blocked_handler_noop_without_context(self):
-        """on_kanban_task_blocked doesn't crash with all-None args."""
-        result = workflow.on_kanban_task_blocked()
+    def test_blocked_handler_noop_without_context(self, tmp_path):
+        """on_kanban_task_blocked doesn't crash with all-None args.
+
+        t_1497a937: this test (and its completed sibling) is what filled the
+        operator's live ``blocked_tasks.jsonl`` / ``task_completions.jsonl`` with
+        797 all-null rows — it called the handler with no args and no path
+        patch. The log paths are now pinned to ``tmp_path`` for every test in
+        this suite by ``conftest._pin_lifecycle_logs_to_tmp``, and the handler
+        records ``"unknown"`` instead of ``null``, so a noop call is both
+        harmless and self-describing.
+        """
+        import workflow as wf
+
+        log = tmp_path / "noop-blocked.jsonl"
+        with patch.object(wf, "_BLOCKED_LOG", str(log)):
+            result = workflow.on_kanban_task_blocked()
         assert result is not None
-        assert result["task_id"] is None
+        assert result["task_id"] is None          # raw return keeps "nothing given"
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "unknown"      # durable row is never null
+        assert None not in entry.values()
 
 
 @pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
@@ -97,11 +113,31 @@ class TestCompletedHandler:
         assert entry["summary"] == "All checklist items done"
         assert "completed_at" in entry
 
-    def test_completed_handler_noop_without_context(self):
-        """on_kanban_task_completed doesn't crash with all-None args."""
-        result = workflow.on_kanban_task_completed()
+    def test_completed_handler_noop_without_context(self, tmp_path):
+        """on_kanban_task_completed doesn't crash with all-None args.
+
+        The twin of ``TestBlockedHandler.test_blocked_handler_noop_without_context``
+        and the other half of the t_1497a937 live-ledger leak: it used to append
+        one all-null row per suite run to ``~/.hscc/task_completions.jsonl``.
+        """
+        import workflow as wf
+
+        log = tmp_path / "noop-completed.jsonl"
+        blocked = tmp_path / "noop-blocked.jsonl"
+        with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+             patch.object(wf, "_BLOCKED_LOG", str(blocked)):
+            result = workflow.on_kanban_task_completed()
         assert result is not None
-        assert result["task_id"] is None
+        assert result["task_id"] is None          # raw return keeps "nothing given"
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "unknown"      # durable row is never null
+        assert entry["profile_name"] == "unknown"
+        assert entry["board"] == "unknown"
+        # Identity keys are never null. ``summary`` is content, not an identity
+        # key: a worker that passed no summary genuinely has none, and putting
+        # the string "unknown" in a human-facing free-text field would be a lie.
+        for key in ("task_id", "profile_name", "board"):
+            assert entry[key] is not None
 
 
 @pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
@@ -287,7 +323,16 @@ class TestOnPreToolCall:
         assert entry["tool_name"] == "terminal"
         assert "timestamp" in entry
 
-    def test_defaults_profile_name_to_unknown(self, tmp_path):
+    def test_defaults_profile_name_to_unknown(self, tmp_path, monkeypatch):
+        """Sentinel ONLY when neither the kwarg nor hermes_cli resolves (t_444b1bb6).
+
+        On main this test pinned the old read-only-the-kwarg behaviour. The card
+        replaces it: an absent kwarg now falls back to
+        ``get_active_profile_name()``, so the sentinel is reachable only when that
+        lookup is genuinely unresolvable — pin the fence unresolvable HERE instead
+        of hoping the test interpreter has no hermes_cli (it usually does).
+        """
+        monkeypatch.setattr(workflow, "_active_profile_name", lambda: None)
         log_path = str(tmp_path / "tool_events.jsonl")
         with patch.object(workflow, "_TOOL_EVENT_LOG", log_path):
             workflow.on_pre_tool_call(tool_name="browser_click")
@@ -307,9 +352,231 @@ class TestOnPreToolCall:
         assert json.loads(lines[0])["profile_name"] == "coder"
         assert json.loads(lines[1])["profile_name"] == "reviewer"
 
-    def test_never_raises_on_io_error(self):
-        """Even with a bad path, on_pre_tool_call silently passes."""
-        workflow.on_pre_tool_call(profile_name="test", tool_name="test_tool")
+    def test_never_raises_on_io_error(self, tmp_path):
+        """Even with a bad path, on_pre_tool_call silently passes.
+
+        LEAK FIXED HERE (t_444b1bb6): on main this test patched nothing, so every
+        ``scripts/run_tests.sh`` run appended a ``profile_name="test"`` row to the
+        operator's LIVE ``~/.hscc/tool_events.jsonl`` — measured at 1538 of 5829 rows.
+        Same defect class t_1497a937 fixed for task_completions/blocked_tasks, whose
+        autouse conftest pin is still open in PR #179 and therefore not in this base.
+        The path is now an unwritable one *inside tmp_path*, so the failure it is
+        testing (open() raising) is exercised without touching production.
+        """
+        bad = str(tmp_path / "no-such-dir" / "tool_events.jsonl")
+        with patch.object(workflow, "_TOOL_EVENT_LOG", bad):
+            assert workflow.on_pre_tool_call(profile_name="test",
+                                             tool_name="test_tool") is None
+        assert not os.path.exists(bad)
+
+
+# ── profile_name FALLBACK (t_444b1bb6) ──────────────────────────────────────
+#
+# LIVE DEFECT: hermes' pre_tool_call fire site
+# (``hermes_cli/plugins.py::_get_pre_tool_call_directive_details``) forwards
+# tool_name/args/task_id/session_id/tool_call_id/turn_id/api_request_id/
+# middleware_trace and NEVER ``profile_name``. The handler read only the kwarg,
+# so every live ``~/.hscc/tool_events.jsonl`` row carried the ``"unknown"``
+# sentinel — the card measured 4291 such rows — and ``hscc stats``'
+# ``tool_calls_by_profile`` collapsed into a single bucket.
+#
+# Contract pinned below, matching hermes' own ``kanban_db._hook_profile_name()``:
+# explicit kwarg wins, else ``get_active_profile_name()``, else the sentinel —
+# and the hook NEVER raises.
+#
+# These patch the log path themselves: the autouse ``_pin_lifecycle_logs_to_tmp``
+# conftest fixture that would make the tmp default structural is on PR #179 and is
+# not in main yet, so on this base every test that can write MUST name its path.
+
+
+class TestPreToolCallProfileFallback:
+    """profile_name: kwarg > get_active_profile_name() > "unknown"."""
+
+    def _row(self, tmp_path, monkeypatch, **kwargs):
+        log_path = str(tmp_path / "tool_events.jsonl")
+        with patch.object(workflow, "_TOOL_EVENT_LOG", log_path):
+            workflow.on_pre_tool_call(**kwargs)
+        with open(log_path) as f:
+            return json.loads(f.readline())
+
+    def test_kwarg_present_wins_over_resolvable_hermes(self, tmp_path, monkeypatch):
+        """(a) A sent profile_name is authoritative even when the fallback works.
+
+        This is the guard against a future fire site that DOES send the kwarg:
+        the caller's answer must beat our own guess, or a multiplexed host
+        profile would re-label a served profile's rows.
+        """
+        monkeypatch.setattr(workflow, "_active_profile_name",
+                            lambda: "backend-engineer")
+        row = self._row(tmp_path, monkeypatch,
+                        profile_name="reviewer", tool_name="terminal")
+        assert row["profile_name"] == "reviewer"
+
+    def test_kwarg_absent_falls_back_to_active_profile(self, tmp_path, monkeypatch):
+        """(b) No kwarg + hermes_cli resolvable -> the ACTIVE profile name.
+
+        This is the exact live shape (the real payload has no profile_name key),
+        so this test is the one that fails on main.
+        """
+        monkeypatch.setattr(workflow, "_active_profile_name",
+                            lambda: "ops-engineer")
+        row = self._row(tmp_path, monkeypatch, tool_name="read_file")
+        assert row["profile_name"] == "ops-engineer"
+
+    def test_both_unavailable_logs_unknown_and_never_raises(
+            self, tmp_path, monkeypatch):
+        """(c) No kwarg + no hermes_cli -> "unknown", and the hook stays fail-open."""
+        monkeypatch.setattr(workflow, "_active_profile_name", lambda: None)
+        row = self._row(tmp_path, monkeypatch, tool_name="browser_click")
+        assert row["profile_name"] == "unknown"
+
+    def test_blank_kwarg_falls_through_not_stamped(self, tmp_path, monkeypatch):
+        """A blank/None/whitespace kwarg counts as NOT sent.
+
+        An empty string in the ledger is exactly as unattributable as the
+        sentinel, and the fallback is strictly more informative.
+        """
+        monkeypatch.setattr(workflow, "_active_profile_name",
+                            lambda: "backend-engineer")
+        for blank in (None, "", "   ", "\t\n"):
+            (tmp_path / "tool_events.jsonl").unlink(missing_ok=True)
+            row = self._row(tmp_path, monkeypatch,
+                            profile_name=blank, tool_name="terminal")
+            assert row["profile_name"] == "backend-engineer", (
+                f"profile_name={blank!r} stamped {row['profile_name']!r}")
+
+    def test_non_string_kwarg_is_stringified(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(workflow, "_active_profile_name", lambda: "worker")
+        row = self._row(tmp_path, monkeypatch, profile_name=42, tool_name="x")
+        assert row["profile_name"] == "42"
+
+
+class TestActiveProfileNameFence:
+    """The hermes_cli lookup itself: fail-open, never raises to the caller.
+
+    ``on_pre_tool_call`` runs on the hot path of EVERY tool call in every
+    profile, so a raising lookup would be an availability bug, not just an
+    observability one.
+    """
+
+    @pytest.mark.skipif(not _HAS_HERMES_CLI,
+                        reason="hermes_cli not installed in this env")
+    def test_real_lookup_names_the_active_profile(self, monkeypatch):
+        """Against real hermes_cli: the name must be non-empty and stable.
+
+        Hermes points HERMES_HOME at the profile dir, so the active profile is
+        derivable in any profile session; the sentinel here would mean the fence
+        silently lost hermes_cli (the failure mode this card is fixing).
+        """
+        from hermes_cli.profiles import get_active_profile_name
+
+        expected = get_active_profile_name()
+        assert workflow._active_profile_name() == expected
+        assert expected and expected.strip() == expected
+
+    def test_unimportable_hermes_cli_returns_none(self, monkeypatch):
+        """hermes_cli present in sys.modules as None -> ImportError -> None.
+
+        ``None`` in ``sys.modules`` is CPython's mark for a failed import; it
+        reproduces a partial install / foreign venv without touching sys.path.
+        """
+        monkeypatch.setitem(sys.modules, "hermes_cli.profiles", None)
+        assert workflow._active_profile_name() is None
+
+    def test_lookup_that_raises_returns_none(self, monkeypatch):
+        """A resolvable module whose call explodes must not reach the hook."""
+        broken = types.ModuleType("hermes_cli.profiles")
+
+        def _boom():
+            raise RuntimeError("profile config unreadable")
+
+        broken.get_active_profile_name = _boom
+        monkeypatch.setitem(sys.modules, "hermes_cli.profiles", broken)
+        assert workflow._active_profile_name() is None
+
+    def test_empty_active_name_is_not_stamped(self, monkeypatch):
+        """A blank answer from hermes is not a usable identity -> None."""
+        blank = types.ModuleType("hermes_cli.profiles")
+        blank.get_active_profile_name = lambda: "   "
+        monkeypatch.setitem(sys.modules, "hermes_cli.profiles", blank)
+        assert workflow._active_profile_name() is None
+
+    def test_hook_never_raises_even_when_lookup_and_io_both_fail(self, tmp_path,
+                                                                 monkeypatch):
+        def _boom():
+            raise RuntimeError("lookup exploded")
+
+        monkeypatch.setattr(workflow, "_active_profile_name", _boom)
+        with patch.object(workflow, "_TOOL_EVENT_LOG",
+                          str(tmp_path / "nope" / "deep" / "tool_events.jsonl")):
+            assert workflow.on_pre_tool_call(tool_name="terminal") is None
+
+
+@pytest.mark.skipif(not _HAS_HERMES_CLI,
+                    reason="hermes_cli not installed in this env")
+class TestPreToolCallThroughRealHermesBinder:
+    """Bind through hermes' OWN callback binder with the real fire-site payload.
+
+    ``PluginDispatchMixin._invoke_hook_callback`` is what hermes uses to call
+    every plugin hook, and ``_hook_callback_kwargs`` decides which payload keys a
+    callback sees. Driving the handler through it — with the key list copied from
+    ``plugins.py``'s ``invoke_lifecycle_hook("pre_tool_call", ...)`` call — means
+    a payload drift fails in pytest instead of quietly re-deadening the
+    per-profile tool view. Same precedent as #179's completion-binder test.
+    """
+
+    # The kwargs hermes' pre_tool_call fire site actually passes
+    # (hermes_cli/plugins.py:1871), plus the observer envelope invoke_hook adds.
+    HERMES_PRE_TOOL_CALL_PAYLOAD = {
+        "tool_name": "terminal",
+        "args": {"command": "echo hi"},
+        "task_id": "t_abc123",
+        "session_id": "sess_1",
+        "tool_call_id": "call_1",
+        "turn_id": "turn_1",
+        "api_request_id": "api_1",
+        "middleware_trace": [],
+        "telemetry_schema_version": 1,
+    }
+
+    def test_binder_forwards_no_profile_name(self):
+        """Guard the PREMISE: hermes still does not send profile_name.
+
+        If hermes ever starts sending it, this fails and the fallback above gets
+        re-verified (and the live ledger's sentinel count stops growing).
+        """
+        import inspect
+
+        from hermes_cli.plugins_dispatch import PluginDispatchMixin as M
+
+        params = inspect.signature(workflow.on_pre_tool_call).parameters
+        assert any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()), (
+            "on_pre_tool_call lost its **kwargs; hermes' binder would now withhold "
+            "every additive field from it (plugins_dispatch._hook_callback_kwargs)")
+
+        forwarded = M._hook_callback_kwargs(
+            workflow.on_pre_tool_call, dict(self.HERMES_PRE_TOOL_CALL_PAYLOAD))
+        assert forwarded.get("tool_name") == "terminal"
+        assert "profile_name" not in forwarded, (
+            "hermes now sends profile_name — revisit _ledger_profile_name and the "
+            "card premise; the kwarg branch must stay authoritative")
+
+    def test_real_payload_row_carries_a_real_profile(self, tmp_path, monkeypatch):
+        """The live end-to-end shape: no profile_name in, a real name out."""
+        from hermes_cli.profiles import get_active_profile_name
+        from hermes_cli.plugins_dispatch import PluginDispatchMixin as M
+
+        log = tmp_path / "tool_events.jsonl"
+        monkeypatch.setattr(workflow, "_TOOL_EVENT_LOG", str(log))
+        M._invoke_hook_callback(workflow.on_pre_tool_call,
+                                dict(self.HERMES_PRE_TOOL_CALL_PAYLOAD))
+
+        row = json.loads(log.read_text().strip())
+        assert row["profile_name"] == get_active_profile_name()
+        assert row["profile_name"] != "unknown", (
+            "fallback resolved to the sentinel — the per-profile tool view would "
+            "be dead again")
+        assert row["tool_name"] == "terminal"
 
 
 class TestOnKanbanTaskBlocked:
@@ -428,3 +695,206 @@ class TestOnKanbanTaskClaimedProfileName:
         # Body should just be the original note, no profile prefix
         assert "`profile`" not in body
         assert body == "Resume note body here"
+
+# ── payload-shape pinning (t_1497a937) ───────────────────────────────────────
+# The card that filed this defect assumed hermes delivers a kwarg shape the
+# handler does not read. It does not: hermes_cli/kanban_db.py fires
+#   invoke_hook(event, task_id=task_id, profile_name=..., board=...,
+#               assignee=..., run_id=..., summary=...)
+# and plugins_dispatch withholds nothing from a callback that declares
+# **kwargs (``_hook_callback_kwargs`` returns the whole payload). The 797
+# null-task_id rows were our own noop tests writing to the live ledger, not a
+# shape drift. These tests pin the ACTUAL shape so a real drift upstream is
+# caught here instead of in the operator's ledger.
+
+#: The exact kwargs hermes 2026.9.24 delivers for kanban_task_completed:
+#: hermes_cli/kanban_db.py:157 (task_id, profile_name) + :164 (board, assignee,
+#: run_id) + :2838 (summary) + plugins_dispatch.py:222 (telemetry_schema_version).
+HERMES_COMPLETED_PAYLOAD = {
+    "task_id": "t_abc123",
+    "profile_name": "backend-engineer",
+    "board": "hscc",
+    "assignee": "backend-engineer",
+    "run_id": 421,
+    "summary": "shipped as PR #173",
+    "telemetry_schema_version": "hermes.observer.v1",
+}
+
+HERMES_BLOCKED_PAYLOAD = {
+    "task_id": "t_abc123",
+    "profile_name": "backend-engineer",
+    "board": "hscc",
+    "assignee": "backend-engineer",
+    "run_id": 421,
+    "reason": "needs_input",
+    "telemetry_schema_version": "hermes.observer.v1",
+}
+
+
+class TestRealHermesPayloadShape:
+    """The handler must land task_id from the payload hermes actually sends."""
+
+    def test_completed_lands_task_id_from_real_shape(self, tmp_path):
+        import workflow as wf
+
+        log = tmp_path / "completions.jsonl"
+        with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+             patch.object(wf, "_BLOCKED_LOG", str(tmp_path / "blocked.jsonl")):
+            result = workflow.on_kanban_task_completed(**HERMES_COMPLETED_PAYLOAD)
+
+        assert result["task_id"] == "t_abc123"
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "t_abc123"
+        assert entry["profile_name"] == "backend-engineer"
+        assert entry["board"] == "hscc"
+        assert entry["summary"] == "shipped as PR #173"
+
+    def test_blocked_lands_task_id_from_real_shape(self, tmp_path):
+        import workflow as wf
+
+        log = tmp_path / "blocked.jsonl"
+        with patch.object(wf, "_BLOCKED_LOG", str(log)):
+            result = workflow.on_kanban_task_blocked(**HERMES_BLOCKED_PAYLOAD)
+
+        assert result["task_id"] == "t_abc123"
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "t_abc123"
+        assert entry["reason"] == "needs_input"
+
+    @pytest.mark.skipif(not _HAS_HERMES_CLI,
+                        reason="hermes_cli not installed in this env")
+    def test_dispatch_through_real_hermes_binding(self, tmp_path):
+        """Drive the handler through hermes' OWN callback binder, not a hand-typed call.
+
+        ``PluginDispatchMixin._invoke_hook_callback`` is what hermes uses to call
+        every plugin hook; ``_hook_callback_kwargs`` decides which payload keys a
+        callback sees. Binding here means these tests fail if hermes starts
+        nesting the payload, renaming ``task_id``, or dropping the ``**kwargs``
+        passthrough our handler relies on — the failure lands in pytest, not in
+        ``~/.hscc/task_completions.jsonl``.
+        """
+        import inspect
+
+        from hermes_cli.plugins_dispatch import PluginDispatchMixin as M
+
+        # Guard the premise: our handler must keep **kwargs, because that is
+        # precisely what makes the binder hand it the whole payload.
+        params = inspect.signature(workflow.on_kanban_task_completed).parameters
+        assert any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()), (
+            "on_kanban_task_completed lost its **kwargs; hermes's binder would now "
+            "withhold every additive field from it (see plugins_dispatch."
+            "_hook_callback_kwargs)")
+
+        forwarded = M._hook_callback_kwargs(workflow.on_kanban_task_completed,
+                                            dict(HERMES_COMPLETED_PAYLOAD))
+        assert forwarded.get("task_id") == "t_abc123", (
+            "hermes' binder no longer forwards task_id to our handler — "
+            f"it forwards {sorted(forwarded)}")
+
+        log = tmp_path / "completions.jsonl"
+        blocked = tmp_path / "blocked.jsonl"
+        with patch.object(workflow, "_COMPLETION_LOG", str(log)), \
+             patch.object(workflow, "_BLOCKED_LOG", str(blocked)):
+            M._invoke_hook_callback(workflow.on_kanban_task_completed,
+                                    dict(HERMES_COMPLETED_PAYLOAD))
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "t_abc123"
+
+
+class TestAbsentFieldFallback:
+    """A genuinely absent field logs "unknown" — never a silent null."""
+
+    def test_missing_task_id_logs_unknown(self, tmp_path):
+        import workflow as wf
+
+        log = tmp_path / "completions.jsonl"
+        payload = dict(HERMES_COMPLETED_PAYLOAD)
+        payload.pop("task_id")
+        with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+             patch.object(wf, "_BLOCKED_LOG", str(tmp_path / "blocked.jsonl")):
+            workflow.on_kanban_task_completed(**payload)
+
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "unknown"
+        assert None not in entry.values()
+        # The rest of the payload is still attributable.
+        assert entry["profile_name"] == "backend-engineer"
+        assert entry["board"] == "hscc"
+
+    def test_blank_and_whitespace_ids_log_unknown(self, tmp_path):
+        import workflow as wf
+
+        log = tmp_path / "completions.jsonl"
+        for bad in (None, "", "   ", "\t\n"):
+            log.unlink(missing_ok=True)
+            payload = dict(HERMES_COMPLETED_PAYLOAD, task_id=bad)
+            with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+                 patch.object(wf, "_BLOCKED_LOG", str(tmp_path / "blocked.jsonl")):
+                workflow.on_kanban_task_completed(**payload)
+            entry = json.loads(log.read_text().strip())
+            assert entry["task_id"] == "unknown", f"task_id={bad!r} logged {entry['task_id']!r}"
+
+    def test_non_string_task_id_is_stringified(self, tmp_path):
+        """A numeric run-style id must not round-trip as null or be dropped."""
+        import workflow as wf
+
+        log = tmp_path / "completions.jsonl"
+        payload = dict(HERMES_COMPLETED_PAYLOAD, task_id=1234)
+        with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+             patch.object(wf, "_BLOCKED_LOG", str(tmp_path / "blocked.jsonl")):
+            workflow.on_kanban_task_completed(**payload)
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "1234"
+
+    def test_blocked_missing_fields_log_unknown(self, tmp_path):
+        import workflow as wf
+
+        log = tmp_path / "blocked.jsonl"
+        payload = dict(HERMES_BLOCKED_PAYLOAD)
+        payload.pop("reason")
+        payload.pop("board")
+        with patch.object(wf, "_BLOCKED_LOG", str(log)):
+            workflow.on_kanban_task_blocked(**payload)
+        entry = json.loads(log.read_text().strip())
+        assert entry["task_id"] == "t_abc123"
+        assert entry["reason"] == "unknown"
+        assert entry["board"] == "unknown"
+        assert None not in entry.values()
+
+    def test_unknown_rows_do_not_drive_auto_unblock(self, tmp_path, monkeypatch):
+        """The auto-unblock scan must not chase the "unknown" sentinel as a card id."""
+        import workflow as wf
+
+        calls = []
+        monkeypatch.setattr(wf, "_try_auto_unblock",
+                            lambda child, parent: calls.append((child, parent)) or False)
+        blocked = tmp_path / "blocked.jsonl"
+        blocked.write_text(
+            json.dumps({"task_id": "unknown", "blocked_at": "2026-11-02T00:00:00"}) + "\n"
+            + json.dumps({"task_id": "t_real", "blocked_at": "2026-11-02T00:00:00"}) + "\n")
+        log = tmp_path / "completions.jsonl"
+        with patch.object(wf, "_COMPLETION_LOG", str(log)), \
+             patch.object(wf, "_BLOCKED_LOG", str(blocked)):
+            workflow.on_kanban_task_completed(**HERMES_COMPLETED_PAYLOAD)
+
+        assert ("unknown", "t_abc123") not in calls
+        assert ("t_real", "t_abc123") in calls
+
+
+class TestNoLiveLedgerWrites:
+    """Regression guard for the leak that produced the 797 null rows."""
+
+    def test_conftest_pins_default_log_paths_away_from_home(self, tmp_path):
+        """The autouse conftest fixture must be what protects the live ledgers.
+
+        Asserted rather than trusted: if the fixture is renamed or removed, the
+        noop tests go back to appending to ``~/.hscc`` and this fails loudly.
+        """
+        import workflow as wf
+
+        home = os.path.expanduser("~/.hscc")
+        for name in ("_COMPLETION_LOG", "_BLOCKED_LOG", "_TOOL_EVENT_LOG"):
+            current = getattr(wf, name)
+            assert not str(current).startswith(home), (
+                f"workflow.{name} resolves to the LIVE ledger ({current}) inside the "
+                "test suite — conftest._pin_lifecycle_logs_to_tmp is not in effect")
