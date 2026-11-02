@@ -137,3 +137,14 @@ def register(ctx) -> None:
             ctx.register_hook("pre_tool_call", workflow.on_pre_tool_call)
         except Exception:
             pass
+    # t_6c4f38f2: worker budget watch — the [budget] note the worker SOUL
+    # promises. post_api_request tracks per-session prompt_tokens + calls
+    # since last commit (kanban workers only); transform_tool_result appends
+    # exactly one [budget] line when a threshold crossed. Fail-open both.
+    if hasattr(ctx, "register_hook"):
+        try:
+            from . import budget_watch
+            ctx.register_hook("post_api_request", budget_watch.on_post_api_request)
+            ctx.register_hook("transform_tool_result", budget_watch.on_transform_tool_result)
+        except Exception:
+            pass
