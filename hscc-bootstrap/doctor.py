@@ -1743,9 +1743,12 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
     else:
         bw = _load_budget_watch(hermes_home)
         if bw is None:
+            roots = ", ".join(_budget_plugin_dirs(hermes_home)[:3]) or \
+                "no plugin roots resolved"
             return Check(_BUDGET_HOOK_CHECK_NAME, False,
-                         detail="hscc-cluster/budget_watch.py not importable — "
-                                "the budget hook's wiring cannot be verified",
+                         detail="hscc-cluster/budget_watch.py not importable "
+                                f"(looked in: {roots}) — the budget hook's "
+                                "wiring cannot be verified",
                          fix="Deploy the hscc-cluster plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)

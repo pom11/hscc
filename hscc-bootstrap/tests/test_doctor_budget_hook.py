@@ -218,6 +218,10 @@ def test_import_failure_is_non_fatal_degraded(tmp_path, monkeypatch):
     assert row.ok is False and row.fatal is False
     assert "not importable" in row.detail
     assert "re-run bootstrap" in row.fix
+    # The detail must name the roots it searched: "not importable" alone cannot
+    # be acted on — a stale deploy and a wrong --home look identical otherwise.
+    assert "looked in:" in row.detail
+    assert str(tmp_path / "deployed" / "plugins") in row.detail
 
 
 def test_broken_module_is_non_fatal_degraded(tmp_path, monkeypatch):
