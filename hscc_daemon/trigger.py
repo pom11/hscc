@@ -251,10 +251,24 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
             )
 
 
-def trigger_engine(check_dgx_fn=None, check_gateway_fn=None,
+def trigger_engine(check_gateway_fn=None,
                    pipeline_watchdog_fn=None, watchdog_block_fn=None,
                    restart_vllm_fn=None):
-    """Evaluate all trigger rules against recent events and state checks."""
+    """Evaluate all trigger rules against recent events and state checks.
+
+    Runs NO health check. Its DGX/gateway/NAS signals (`failed_dgx`,
+    `vllm_down`, `watchdog_blocked`, `nas_down`, `state.<stream>`) are answered
+    by `evaluate_trigger` reading the stream STATE FILES, which the checks' own
+    threads stamp — so this 15 s loop needs no probe of its own and must never
+    gain one. It used to carry a `check_dgx_fn` parameter that
+    `daemon_ops.run_trigger_loop` dutifully wired to the real `check_dgx`; the
+    body never invoked it (0 call sites, which is why removing it changes no
+    behaviour), but the wiring is what led the 2026-10-31 proxy-stall audit to
+    count a fourth in-process caller of the most expensive probe in the daemon.
+    See `_DGX_VERDICT` in health.py for the de-multiplication and why DGX must
+    have exactly one caller. `check_gateway_fn` / `pipeline_watchdog_fn` are
+    likewise unused here (kept: out of scope for this card).
+    """
     rules = load_triggers()
     if not rules:
         write_state("triggers", {
