@@ -660,6 +660,34 @@ def tmp_hfcc_dir(tmp_path):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _isolated_dgx_verdict():
+    """Keep the process-wide DGX verdict (health._DGX_VERDICT) from leaking
+    between tests (proxy-stall c8-3).
+
+    It is module-global state shared by the dgx check and the watchdog's default
+    DGX signal, so a test that ran `check_dgx` would otherwise hand its verdict
+    to the next test's `pipeline_watchdog` tick — that tick would then read a
+    DGX signal from a previous test instead of its own fixture, green for the
+    wrong reason. Reset before AND after; the after-half is what catches a test
+    that imported health itself.
+
+    Deliberately does not import health when no test has: the guard keeps this
+    autouse fixture from adding an import (and any import-time behaviour) to
+    tests that never touch the health module.
+    """
+    import sys
+
+    def _reset():
+        mod = sys.modules.get("hscc_daemon.health")
+        if mod is not None:
+            mod.reset_dgx_verdict()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture
 def state_dir(tmp_hfcc_dir):
     """Create an empty state directory."""
