@@ -1418,7 +1418,11 @@ wraps; starvation then made it unrecoverable-looking.
 ### c6 — a third amplifier found while measuring (the double-fault the ORCH note asked about)
 
 **CALLER COUNT CORRECTED AFTER PUBLICATION (c9).** This section was written
-saying `check_dgx` ran from four places; it ran from **two**. The measured numbers
+saying `check_dgx` ran from four places; at the base it was measured against it ran
+from **two** — the count below is stated in the past tense of that base. One further
+change has since landed: PR #182 (c8-3), merged 2026-11-02, made the watchdog read
+the published verdict instead of re-running the check, so on current main `check_dgx`
+has exactly **one** caller (the `dgx` stream thread). The measured numbers
 below — the cadence and the WARN overlap — stand unchanged; only the caller list
 was wrong. The "~112 extra checks/day" is left as published but is flagged by c9 as
 not reproducing per-day. c9 records exactly what changed, what
@@ -1521,6 +1525,12 @@ and the daemon's own shell-outs are the load to remove (c8-3).
    cannot multiply an already-slow shell-out. Removes the c6 pile-up without
    changing any check's semantics. `trigger_engine` needed nothing: it never ran
    the check.
+   *Shipped as PR #182 (merged 2026-11-02): `health._DGX_VERDICT` +
+   `publish_dgx_verdict` / `read_dgx_verdict` (`health.py:380-384` on today's main)
+   and `lifecycle.dgx_verdict_serving_ok` as `pipeline_watchdog`'s default
+   `check_dgx_fn` (`lifecycle.py:435`, `:491`). The published value is the
+   **returned** `serving_ok`, not the file's `publish_ok`, for exactly the reason
+   above.*
 4. **UPSTREAM (restate of FIX-7, now with the arithmetic that makes it urgent).**
    `query_status_for_cluster` should surface per-host elapsed time and the failure
    reason (connect timeout vs non-zero rc vs unreachable) in `to_dict()`, and the
