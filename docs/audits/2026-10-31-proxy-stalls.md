@@ -1552,17 +1552,15 @@ conclusions were reached.
 
 **This is a precision fix to the caller count, not a retraction of the
 measurement.** The ~24 s median cadence is real and the two-WARNs-0.50 s-apart
-overlap is real. Each is measured
-from the log (tick timestamps, WARN line counts) rather than derived from a caller
-count, so neither moves when the count does — and both are equally well
-explained by the **two** genuine callers (60 s `dgx` stream + 30 s
-`pipeline_watchdog`) as they were by the four c6 asserted. The "~112 extra
+overlap is real. Each is measured from the log (tick timestamps, WARN line counts)
+rather than derived from a caller count, so neither moves when the count does — and
+both are equally well explained by the **two** genuine callers (60 s `dgx` stream +
+30 s `pipeline_watchdog`) as they were by the four c6 asserted. The "~112 extra
 full-DGX-checks/day" figure is *directionally* right — the pile-up is real and
 larger than 112/day suggests — but it does not reproduce as a per-day number, and
 it is flagged in its own paragraph at the end of this section rather than being
-asserted here. Nothing in c1–c5, c7,
-or the value of the c8-1/c8-3 fixes depends on the count, and this correction must
-not be read as discrediting the measurement.
+asserted here. Nothing in c1–c5, c7, or the value of the c8-1/c8-3 fixes depends on
+the count, and this correction must not be read as discrediting the measurement.
 
 What was wrong: c6 listed `trigger_engine` as a third in-process caller
 ("`trigger_engine` every 15 s (`trigger.py:254`, wired at `daemon_ops.py:769`)"),
