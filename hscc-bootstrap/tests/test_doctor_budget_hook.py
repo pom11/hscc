@@ -424,3 +424,56 @@ def test_profile_scoped_home_also_contributes_the_root_plugins(
     dirs = doctor._budget_plugin_dirs(str(home))
     assert str(home / "plugins") in dirs
     assert str(tmp_path / ".hermes" / "plugins") in dirs
+
+
+# ── which deploy is authoritative for a PROFILE-scoped home (t_ba14f77f) ───
+
+def _profile_deploy(tmp_path, *, init_src, name="backend-engineer"):
+    """Seed a deploy at the tree a profile-scoped worker ACTUALLY loads:
+    ``<root>/profiles/<name>/plugins/hscc-cluster``.
+
+    This is not a hypothetical shape. Hermes' user-plugin scan is
+    ``get_hermes_home() / "plugins"`` (hermes_cli/plugins_discovery.py:184) and
+    ``get_hermes_home()`` IS the profile dir when HERMES_HOME is profile-scoped,
+    with no fallback to the root's plugins dir. Measured on this host, the real
+    CLI under ``HERMES_HOME=~/.hermes/profiles/backend-engineer`` parses exactly
+    one ``hscc-cluster`` manifest, from the profile dir. ``install_payload_profiles``
+    writes the root copy too, but the runtime never reads it for a profile run.
+    """
+    plugins = tmp_path / ".hermes" / "profiles" / name / "plugins"
+    cluster = plugins / "hscc-cluster"
+    cluster.mkdir(parents=True)
+    (cluster / "__init__.py").write_text(init_src, encoding="utf-8")
+    shutil.copyfile(_REAL_BUDGET_WATCH, cluster / "budget_watch.py")
+    return plugins
+
+
+def test_wired_root_deploy_does_not_rescue_an_unwired_profile_deploy(
+        tmp_path, monkeypatch):
+    """THE canary this card was filed for (t_ba14f77f).
+
+    A worker runs with ``HERMES_HOME=<root>/profiles/<name>``, so Hermes loads
+    ``<profile>/plugins/hscc-cluster``. Seed that copy UNWIRED (the register()
+    lost the two budget hooks) and the root's copy WIRED, then ask the row about
+    the profile home. It must be RED and name the profile dir.
+
+    Measured red at the base commit: the row returned ok=True with
+    ``'wired in <root>/.hermes/plugins'`` in the detail — the root copy, which
+    the worker never loads, answered for the profile's dead hook. That is the
+    exact failure class the row exists to catch: the worker silently loses its
+    ``[budget]`` note while doctor reads all-green.
+    """
+    _isolate(tmp_path, monkeypatch)
+    root_plugins = _live_deploy(tmp_path, monkeypatch)          # root: WIRED
+    profile_plugins = _profile_deploy(tmp_path, init_src=UNWIRED_INIT)  # dead
+    _out_of_pytest(monkeypatch)
+    home = tmp_path / ".hermes" / "profiles" / "backend-engineer"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    row = doctor._budget_hook_check_row(None, hermes_home=str(home))
+    assert row.ok is False, (
+        "the root tree's wiring must not answer for the profile deploy the "
+        f"worker actually loads: {row.detail}")
+    assert str(root_plugins) not in row.detail, \
+        f"the row consulted the root tree: {row.detail}"
+    assert str(profile_plugins) in row.detail, \
+        f"the row must name the tree it found broken: {row.detail}"
