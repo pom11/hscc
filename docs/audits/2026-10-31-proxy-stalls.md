@@ -1525,8 +1525,8 @@ and the daemon's own shell-outs are the load to remove (c8-3).
    cannot multiply an already-slow shell-out. Removes the c6 pile-up without
    changing any check's semantics. `trigger_engine` needed nothing: it never ran
    the check.
-   *Shipped as PR #182 (merged 2026-11-02): `health._DGX_VERDICT` +
-   `publish_dgx_verdict` / `read_dgx_verdict` (`health.py:380-384` on today's main)
+   *Shipped as PR #182 (merged 2026-11-02): `health._DGX_VERDICT` with
+   `publish_dgx_verdict` / `dgx_verdict` (`health.py:380-402` on today's main)
    and `lifecycle.dgx_verdict_serving_ok` as `pipeline_watchdog`'s default
    `check_dgx_fn` (`lifecycle.py:435`, `:491`). The published value is the
    **returned** `serving_ok`, not the file's `publish_ok`, for exactly the reason
