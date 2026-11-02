@@ -413,17 +413,44 @@ def test_plugin_dirs_add_the_default_root_only_without_a_named_home(
                                                 default]
 
 
-def test_profile_scoped_home_also_contributes_the_root_plugins(
+def test_profile_scoped_home_contributes_only_the_profile_plugins_dir(
         tmp_path, monkeypatch):
-    """Workers run with HERMES_HOME=<root>/profiles/<name>, and
-    install_payload_profiles writes the payload into BOTH the profile's and the
-    root's plugins dir — so the check must look in both or a correct deploy
-    reads red."""
+    """THE DECISION (t_ba14f77f): for a PROFILE-scoped home, the profile's own
+    ``plugins`` dir is the ONLY authoritative tree.
+
+    Chosen over "both dirs stay candidates, per-dir verdict" because of what
+    Hermes actually loads: the user-plugin scan is ``get_hermes_home() /
+    "plugins"`` (hermes_cli/plugins_discovery.py:184) and a profile-scoped
+    ``HERMES_HOME`` resolves to the profile dir — no root fallback (the only
+    code that scans both is the dashboard's tab discovery,
+    ``web_server_dashboard.py:489-492``, which is not the runtime that fires
+    ``register_hook``). The root copy ``install_payload_profiles`` writes stays
+    on disk and remains authoritative for the ROOT-scoped home; it just may not
+    answer for a profile. The resolver used to add it for every
+    ``<root>/profiles/<name>`` home, and with ``doctor_check``'s
+    any-wired-is-green that let a wired root rescue a dead profile deploy
+    (canary: ``test_wired_root_deploy_does_not_rescue_an_unwired_profile_deploy``).
+    """
     monkeypatch.delenv("PLUGINS", raising=False)
     home = tmp_path / ".hermes" / "profiles" / "backend-engineer"
     dirs = doctor._budget_plugin_dirs(str(home))
-    assert str(home / "plugins") in dirs
-    assert str(tmp_path / ".hermes" / "plugins") in dirs
+    assert dirs == [str(home / "plugins")], \
+        "a profile-scoped home must resolve to its OWN plugins dir and nothing " \
+        "else — the root's answer belongs to the root-scoped home"
+
+
+def test_root_scoped_home_still_checks_the_root_plugins_dir(
+        tmp_path, monkeypatch):
+    """The other half of the decision: dropping the root dir from the PROFILE
+    branch must not blind the root-scoped home. ``HERMES_HOME=~/.hermes``
+    (the human/default mode) still resolves ``<root>/plugins`` — reached via the
+    ordinary ``home/plugins`` branch, not a profiles rule — so the root deploy
+    ``install_payload_profiles`` writes is still verified for the home that
+    actually loads it."""
+    monkeypatch.delenv("PLUGINS", raising=False)
+    root = tmp_path / ".hermes"
+    dirs = doctor._budget_plugin_dirs(str(root))
+    assert dirs == [str(root / "plugins")]
 
 
 # ── which deploy is authoritative for a PROFILE-scoped home (t_ba14f77f) ───
