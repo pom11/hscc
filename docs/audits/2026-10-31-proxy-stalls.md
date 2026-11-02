@@ -1236,3 +1236,268 @@ repair** — correct kill decision, clean start, proxy answering within minutes,
 FIX-2/FIX-3 acceptance test that only asserts "escalation eventually succeeds"
 without asserting **that success is reported** will pass while the operator
 still sees failures and keeps getting stall alerts.
+
+---
+
+## 8. Question (c) — sweep starvation cause (follow-up card `t_9328b385`)
+
+Card scope: settle whether, during the stall windows, the structured status query
+and the `sparkrun status` shell-out failed because **(i) SSH to the DGX nodes was
+unreachable/slow** or **(ii) the Mac itself was starved** (CPU/fork pressure from
+the daemon's own 90 s-killed sparkrun children, or the uvx proxy at ~476 MB RSS).
+Read-only throughout; `sparkrun` untouched (upstream proposals only); no proxy or
+fleet action taken. Addresses follow the §Head convention (`10.0.0.1`–`10.0.0.4` =
+the four sweep targets; the primary is `10.0.0.1`).
+
+### c0 — the card's premise is false on the code: `Gateway check` is not SSH-dependent
+
+The card asks why "Gateway check (SSH-dependent!) stayed ok=True" while the sweep
+timed out. It is not SSH-dependent. `check_gateway` (`health.py:518-571`) is:
+
+- `_gateway_job_alive()` → `hscc-bootstrap/gateway_liveness.py::job_is_alive()` —
+  `launchctl`/`systemctl` then a `ps` argv token scan. **Local process queries.**
+- `http_check(serving.VLLM_HEALTH_URL, timeout=5)` — one HTTP GET.
+- `_check_multiplex_profiles()` — reads `~/.hermes/gateway_state.json`.
+
+`grep -n "ssh_cmd\|sparkrun\|ssh " hscc_daemon/health.py | sed -n '<518,571p>'` →
+nothing. So `Gateway check: ok=True` through the window is evidence about
+launchctl + one local HTTP GET + one file read. **It carries no information about
+SSH**, and the asymmetry the card asked me to explain does not exist as posed.
+
+### c1 — the control the card did not know it had: `check_dgx` SSHes on the same tick
+
+This is the discriminator, and it was already in the log. `check_dgx`
+(`health.py:302-386`) does its own SSH before it ever calls sparkrun:
+
+```
+health.py:308  ssh_result = ssh_cmd(serving.PRIMARY_NODE, "echo reachable", timeout=8)
+health.py:313  gpu_result = ssh_cmd(serving.PRIMARY_NODE, "nvidia-smi --query-gpu=…", timeout=10)
+```
+
+and its return value / `DGX check complete: ok=…` line is `serving_ok =
+ssh_reachable and vllm_healthy` (`health.py:371-372`) — i.e. **`ok=True` on a
+degraded tick means that tick's own 8-second SSH to `10.0.0.1` succeeded while
+sparkrun's sweep over its 4-host set failed**, in the same process, the same
+second. Parsing all 14 ticks that emitted `structured sparkrun status unavailable`
+(the full log, not just window A):
+
+| degraded ticks | in-tick `DGX check complete` verdict | meaning |
+|---|---|---|
+| **11 of 14** | `ok=True — stream DEGRADED` | **its own SSH to the primary SUCCEEDED**; only sparkrun's sweep failed |
+| 3 of 14 | `ok=False — stream DEGRADED` | serving leg also down (vLLM HTTP), window-A escalation minutes |
+
+Same four nodes, a different probe: `Workers check` probes each keep-alive unit on
+`http://<node>:<port>/health` (`health.py:2877`, `timeout=5`) — no SSH, no sparkrun.
+It reported **`3/3 online` within ±45 s of all 35 `FLEET VISIBILITY LOST` lines**
+(35/35, no exceptions). Four DGX nodes were answering HTTP on their serving ports
+for the entire window while sparkrun's SSH sweep over the same four nodes was
+declared unavailable.
+
+### c2 — both status legs TIMED OUT AT THEIR CAPS; they did not fail fast
+
+`util.run_cmd` (`util.py:13-62`) returns `{"ok": False, "output": "Command timed
+out after {timeout}s"}` on `TimeoutExpired` — an indistinguishable failure from an
+exec error as far as the WARN is concerned, so "unavailable" hides which happened.
+Splitting the two legs by their log timestamps (cap = the `timeout=` in code):
+
+| leg | cap | n | min | median | max | ≥90% of cap |
+|---|---|---|---|---|---|---|
+| structured query (`health.py:221`, `start`→WARN) | 25 s | 14 | 11.98 s | 27.59 s | **157.85 s** | **9/14** |
+| legacy `sparkrun status` (`health.py:285`, WARN→`LOST`) | 10 s | 13 | 10.13 s | 12.98 s | **24.58 s** | **13/13** |
+| whole degraded tick | — | 14 | 25.09 s | 40.50 s | 171.11 s | — |
+| **healthy tick** (`start`→done, n=24,967) | — | 24,967 | 0.01 s | **3.68 s** | 31.84 s | — |
+
+Two things follow. (1) Both legs **spent wall clock** — the signature of a
+connect/read that blocks, not of a fast failure. A missing interpreter, an
+`ImportError`, or an unresolvable CLI return in milliseconds; that is the
+`t_b543e530` `[Errno 2]` class and it is **confirmed absent here** (the WARN
+prints a resolved `venv_py` and the legs last 10–158 s). (2) A healthy tick costs
+3.68 s against a 25 s + 10 s budget — the caps were never tight, so blowing them
+requires the operation to stretch by an order of magnitude or more.
+
+### c3 — the sweep is allowed to take longer than the budget it is given
+
+From `sparkrun` (read-only) the sweep's own internal budget:
+
+- `api.status` → `query_status_for_cluster` (`orchestration/executor.py:120`)
+  queries the `host`-scope executors — **docker then local, sequentially**
+  (`for name in ordered:` `executor.py:170`; no thread pool around the executors).
+- Each executor fans out with `run_remote_scripts_parallel(…, timeout=ssh_kwargs.get("timeout", 15))`
+  (`executors/docker.py:812-819`, `executors/local.py:704-711`).
+- `build_ssh_kwargs` (`orchestration/primitives.py:55-67`) emits **only**
+  `ssh_user`/`ssh_key`/`ssh_options` — **no `timeout` key**, so the per-host cap is
+  the default **15 s**; SSH `ConnectTimeout=10` (`orchestration/ssh.py:494`).
+- ThreadPool fan-out is not the constraint: `DEFAULT_MAX_PARALLEL_SSH = 20`,
+  `resolve_parallel_cap(4)` → 4 (`ssh.py:99,175-184`).
+
+So the sweep's worst case is **2 sequential rounds × 15 s = 30 s** plus interpreter
+start-up — and `hscc` gives it **25 s**. **The daemon's cap is shorter than the
+operation it shells out to, by construction.** Any single node that takes more
+than ~12.5 s per round makes the daemon report fleet blindness with the network
+merely slow, the Mac perfectly idle, and sparkrun behaving exactly as configured.
+The 10 s legacy cap is worse still: it is under one full round.
+
+Live baseline (harmless read — the same read-only sweep the daemon runs every
+tick; nothing here touches `:4000`):
+
+```
+structured api.status   rc=0  1.51s   SWEEP_SECONDS=1.23  UNREACHABLE=[]  hosts=4
+legacy `sparkrun status` rc=0  1.32s
+```
+
+A healthy sweep is ~1.3–1.5 s. To blow a 25 s cap it must stretch ~17×; observed
+stretch is up to 105× (157.85 s). Something did hang — but the cap design means it
+did not have to hang long to be reported as unavailable.
+
+### c4 — the starvation signal that IS real: the cap is not a ceiling
+
+`run_cmd`'s `timeout=` is not a wall-clock guarantee once the direct child leaves a
+surviving grandchild holding the stdout pipe — `run_cmd` uses
+`subprocess.run(capture_output=True)` and waits on the pipe. Reproduced on this
+box (CPython 3.13.7, `scratch/orphan_pipe_probe2.py`, direct child spawns an
+orphan and is killed at the cap):
+
+```
+argv + capture_output, cap=2s -> TimeoutExpired after   5.35s   (2.7x overshoot)
+argv + capture_output, cap=5s -> TimeoutExpired after  14.02s   (2.8x overshoot)
+shell=True,          cap=2s -> TimeoutExpired after   2.26s
+```
+
+The daemon's own caps were overshot by the same shape: **157.85/25 = 6.3×** and
+**24.58/10 = 2.5×**. Independent corroboration from this doc's own §b6/§b7:
+escalation #1's serial path consumed 305 s against a ~240 s code worst case, i.e.
+~65 s of pure slippage. And the whole daemon slipped in the same window — every
+stream's inter-tick gap, window A vs the two control windows:
+
+| stream | window A med / max | same-day control | previous day |
+|---|---|---|---|
+| dgx | **32.5 s / 231.8 s** | 24.6 s / 66.8 s | 24.4 s / 35.4 s |
+| gateway | **29.6 s / 221.8 s** | 24.1 s / 63.3 s | 23.6 s / 35.1 s |
+| workers | **62.0 s / 145.9 s** | 60.1 s / 103.8 s | 60.2 s / 60.2 s |
+| nas (900 s) | 903.7 s / 940.2 s | 900.1 s / 900.2 s | 900.2 s / 900.2 s |
+
+(`PERIODIC_INTERVALS` declares all three at 60 s (`daemon_ops.py:32-35`); the
+~24 s effective cadence is because `check_dgx` is invoked by **three** callers —
+see c6.) `gateway` slipping 25% matters most: that tick contains only `launchctl`,
+`ps` and a local HTTP GET, and **none of them touches the network or the nodes**.
+A purely node-side or network fault cannot slow those. So the Mac was genuinely
+slower in window A. What it was not is *out of* anything: `ps.txt` (15:54 local)
+shows the litellm child at 476 MB RSS / 9.1% CPU and the uvx wrapper at 6 MB /
+0.0% on a 14-core / 36 GB host — no memory or CPU exhaustion signature, and no
+`vm_stat`/`swap` capture exists for the window.
+
+### c5 — VERDICT
+
+> **VERDICT: (i) — the SSH sweep path. Specifically: SLOW, not unreachable.
+> (ii) host starvation is REFUTED as the primary cause and CONFIRMED as a
+> secondary amplifier.**
+
+Why (ii) cannot be primary: if the Mac were the reason the sweep failed, the two
+*other* probes on that same tick and the same nodes would have failed with it. They
+did not — `ssh PRIMARY echo reachable` (8 s) succeeded on **11/14** degraded ticks,
+and HTTP `/health` on all four nodes stayed `3/3 online` for **35/35** LOST lines.
+A starved host does not let a 4-node HTTP health sweep and an 8-second SSH round-trip
+through while failing a 15-second-per-host SSH sweep on the same hosts. Starvation is
+nonetheless real — the 2.5×–6.3× cap overshoot (with the mechanism reproduced locally)
+and the all-stream cadence slippage are its fingerprints — and it *amplified* the
+event: it is what turned a 30 s slow sweep into a 158 s one.
+
+Why (i) survives as "slow" and not "unreachable": unreachability is directly refuted
+by c1. What is left is a sweep that consumed its whole budget — both legs at their
+caps, 13/13 on the legacy leg — while a healthy identical sweep costs 1.5 s.
+
+And the part that is neither candidate, which I think is the actual defect worth
+fixing first: **the 25 s/10 s caps sit *inside* the sweep's own 30 s budget (c3), so
+"FLEET VISIBILITY LOST" is reachable from node slowness alone, with no fault of any
+kind on the Mac.** The alarm's threshold is not calibrated to the operation it
+wraps; starvation then made it unrecoverable-looking.
+
+### c6 — a third amplifier found while measuring (the double-fault the ORCH note asked about)
+
+`check_dgx` is invoked from **four** places, and every one of them runs the full
+body — 8 s SSH + 10 s SSH + 25 s sweep + 10 s sweep — in-process:
+
+- its own thread, `PERIODIC_INTERVALS["dgx"] = 60` (`daemon_ops.py:32,563-621`);
+- `pipeline_watchdog` every 30 s — `dgx_ok = check_dgx_fn()` (`lifecycle.py:523`);
+- `trigger_engine` every 15 s (`trigger.py:254`, wired at `daemon_ops.py:769`).
+
+That is why a 60 s stream ticks at ~24 s median (c4), and it means during an episode
+**the sweeps pile up on the box that is already struggling**: up to ~112 extra
+full-DGX-checks/day, each with two shell-outs, each re-printing the WARN. Log
+evidence they genuinely overlap: **5 ticks carried 2 WARNs**, and two WARNs landed
+**0.50 s apart** (23:18:18) — one tick cannot emit two, so two callers were in
+`check_dgx` at once. `FLEET VISIBILITY LOST` count (35) equals the WARN count (35),
+i.e. the alarm is re-asserted by every caller and is not an independent signal of
+anything.
+
+### c7 — what remains UNPROVEN, and the capture that settles it
+
+1. **Slow-because-what.** "SSH was slow" is established; the *cause* of the slowness
+   is not, and the three candidates (node-side sshd load, a switch/link path
+   problem, or the daemon's own concurrent sweep pile-up feeding on itself) are not
+   separable from this log — `sparkrun` records per-host latency at `DEBUG` with
+   `quiet=True` (`ssh.py:448`) and none of it reaches `daemon.log`. **This is
+   exactly FIX-7** (upstream: report per-host sweep latency + failure reason in
+   `to_dict()`); with it, c5 becomes measured rather than inferred.
+2. **The 157.85 s outlier's mechanism.** Two candidates, both open: ssh clients that
+   outlived sparkrun's own 15 s internal cap and held the daemon's pipe (c4
+   mechanism, recursive), or the Mac slippage alone. **Settle with:** `ps -o
+   pid,ppid,etime,command` of `ssh`/sparkrun processes sampled every 2 s *across* a
+   degraded tick, plus the sweep's own stderr. Note the residual alternative I
+   cannot exclude: `_ssh_option_args` emits only `BatchMode`/`ConnectTimeout` plus
+   configured `ssh_options`, so unless `~/.config/sparkrun/clusters/hscc.yaml`
+   carries a `ControlPath`, **the daemon's cheap 8-second echo and sparkrun's sweep
+   are not the same kind of connection** — a node-side `sshd` that was slow only for
+   *new* connections (MaxStartups/backlog) would look exactly like c1. Reading
+   `ssh_options` in that cluster file is a one-line, read-only check that would
+   close or confirm this; it was not in the card's evidence list and I did not
+   open it.
+3. **Whether the Mac was memory- or CPU-bound.** No `vm_stat`/`sysctl vm.swapusage`
+   /`top -l` capture exists for the window; `ps.txt` is one instant at 15:54 local,
+   ~14 h after window A.
+
+**Capture recipe for the next episode (one script, all reads):** for 3 consecutive
+degraded ticks record, in order — `date -u +%FT%TZ`; `vm_stat` + `sysctl
+vm.swapusage` + `top -l 1 -o cpu -n 10`; `ps -axo pid,ppid,etime,%cpu,rss,command`
+filtered to `ssh|sparkrun|python|litellm`; `time ssh -o BatchMode=yes -o
+ConnectTimeout=5 10.0.0.<n> echo reachable` for each of the four nodes; then
+`time <venv_py> -c '<_SPARKRUN_STATUS_SCRIPT>'` and `time sparkrun status`, and the
+`errors` keys of the snapshot. The pairing that decides (i) vs (ii) is explicit
+here: **per-node `ssh echo` timings alongside the sweep timing on the same tick** —
+if the echoes are fast and the sweep slow, it is (i) and the fix is the budget/
+observability (FIX-7 + c8-1); if the echoes are slow too, it is (ii) or the path,
+and the daemon's own shell-outs are the load to remove (c8-3).
+
+### c8 — proposals (hscc-side unless marked UPSTREAM)
+
+1. **Align the budget with the operation (smallest fix, highest value).**
+   `health.py:221` — the structured path's cap must exceed the sweep's own worst
+   case (2 × 15 s + interpreter start-up), so raise it to ~40 s or pass
+   `ssh_kwargs={"timeout": 10}` so the sweep self-limits *under* the daemon's cap.
+   `health.py:285` — the 10 s legacy cap is below a single sweep round; either raise
+   it or stop calling it as a second sweep. Acceptance: a stubbed sweep that takes
+   20 s (a merely slow node) yields `ok=True`, not `FLEET VISIBILITY LOST`.
+2. **A non-proxy-dependent fleet-visibility signal (the ORCH ask), hscc-side only.**
+   Write `~/.hscc/fleet_last_seen.json` — `{"as_of": <iso>, "hosts": [...],
+   "workloads": [...]}` — from the structured path *whenever it succeeds*, and have
+   `check_dgx` publish `fleet_visibility: "stale (last good 4 m 10 s ago)"` with the
+   age, instead of asserting loss on the first failed sweep. Note sparkrun already
+   leaves a running snapshot for exactly this reason (`api/_status.py:
+   _record_running_snapshot` → `orchestration/job_metadata.py:765-801`, a plain
+   atomic JSON file), so **hscc can read that rather than asking sparkrun to build
+   anything**. This is what turns the double-fault into one alarm plus a staleness
+   stamp.
+3. **One sweep per tick, not four.** Have `pipeline_watchdog` and `trigger_engine`
+   read the DGX *state file* (`read_all_states`) instead of calling `check_dgx_fn()`
+   in-process — or add a short in-process result cache (a tick's verdict is valid
+   for a few seconds) so the 15 s/30 s callers cannot multiply an already-slow
+   shell-out. Removes the c6 pile-up without changing any check's semantics.
+4. **UPSTREAM (restate of FIX-7, now with the arithmetic that makes it urgent).**
+   `query_status_for_cluster` should surface per-host elapsed time and the failure
+   reason (connect timeout vs non-zero rc vs unreachable) in `to_dict()`, and the
+   two host-scope executors should share one fan-out rather than running two
+   sequential 15 s rounds. Both are additive to a diagnostic path.
+
+*No code was changed by this card. Scripts behind c1/c2/c4/c6 measurements:
+`tick_internals.py`, `leg_timing.py`, `workers_during_lost.py`,
+`orphan_pipe_probe2.py`, `warns_per_tick.py`, `live_sweep_timing.py` (scratch).*
