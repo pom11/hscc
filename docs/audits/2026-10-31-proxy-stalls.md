@@ -1595,7 +1595,8 @@ this correction first cited as the live-looking caller — no longer holds it. W
 quoting the misreading, quote it against a base that still has it (`:769` as
 published, `:708` at `928e1aa3`, `:787` pre-#182) and say which.
 `trigger_engine` has exactly zero in-process health checks before that PR and
-exactly zero after it; its own docstring now says so and points here, and the
+exactly zero after it; its own docstring now says so and names this audit as the
+misreading it prevents, and the
 call-site comment in `run_trigger_loop` records why the kwarg must not come back.
 
 Why the cadence math survives the correction — and, measured, confirms it: the
