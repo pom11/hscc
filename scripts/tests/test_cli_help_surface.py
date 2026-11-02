@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -98,6 +100,89 @@ def a_counts_baseline():
     return data["counts"], data["lines"]
 
 
+# Candidate list for the cross-interpreter pin. An entry is only a CANDIDATE;
+# :func:`_sibling_is_runnable` decides whether it is a SIBLING (see there).
+_SIBLING_CANDIDATES = (
+    "~/.hermes/hermes-agent/venv/bin/python",
+    "~/miniconda3/envs/p313/bin/python",
+    "/Users/desac/miniconda3/envs/p313/bin/python",
+    "python3.11", "python3.12", "python3.13",
+)
+
+# path -> drop reason, filled by :func:`_sibling_interpreters`. Module level so
+# a test can assert a drop is EXPLAINED rather than invisible.
+SIBLING_DROPPED: dict = {}
+
+# Loads the audit module exactly the way the (A)-only pass does — same file,
+# same module-level imports — so a candidate that passes this probe has proved
+# the ONE precondition the pass needs (t_36d9d8fb). ``-B`` keeps it from
+# dropping a sibling-version .pyc into the checkout.
+_SIBLING_PROBE = (
+    "import importlib.util, sys\n"
+    "spec = importlib.util.spec_from_file_location('sibling_probe', sys.argv[1])\n"
+    "mod = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(mod)\n"
+)
+
+
+def _sibling_is_runnable(py: str):
+    """(ok, reason) — can THIS interpreter actually load the audit module?
+
+    "Exists on disk" is not "can run the (A)-only pass". The pass imports
+    ``hscc_daemon.hscc`` and ``flightdeck.cli`` at module level, which pull
+    third-party packages (``rich``, ``yaml``, ``pygments``, ``markdown_it``)
+    that live in the *running* interpreter's own site-packages. A bare
+    interpreter therefore satisfies every existence check and then dies with
+    ``ModuleNotFoundError`` inside the pass — which the gate used to report as
+    a (A)-table failure.
+
+    Measured on this host: ``/opt/homebrew/bin/python3.12`` was a red leg until
+    its site-packages gained ``rich``/``pyyaml``, and green from that moment on
+    with no code change on our side. The gate was not measuring argparse
+    behaviour there at all — it was measuring whether someone had happened to
+    ``pip install`` into a Homebrew interpreter, and it failed LOUDLY (a red
+    leg, blamed on the card whose diff was checked out) instead of skipping.
+    Probing costs ~0.2 s per candidate (measured), so the gate now drops a
+    dep-less interpreter with a recorded reason and still runs every sibling
+    that is genuinely able to answer.
+    """
+    try:
+        proc = subprocess.run([py, "-B", "-c", _SIBLING_PROBE,
+                               str(REPO / "scripts" / "hscc_cli_help_audit.py")],
+                              capture_output=True, text=True, timeout=120)
+    except Exception as e:                                    # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        return False, _root_cause(proc) or f"exit {proc.returncode}"
+    return True, ""
+
+
+# What a failing sibling's stderr tail could look like when the REAL cause sat
+# above it. Python echoes the offending SOURCE LINE into a traceback, and the
+# audit's own post-sys.path imports carry `# noqa: E402` — so a character-cut
+# tail of a `ModuleNotFoundError: No module named 'rich'` traceback ends on the
+# literal text "E402". That is what sent three cards down a lint rabbit hole
+# (t_36d9d8fb): the reported failure was "failed the (A)-only pass: E402" and
+# the actual failure was a missing third-party package. The fix is `_root_cause`
+# below, pinned by test_sibling_cause_extraction_never_blames_a_lint_code.
+
+
+def _root_cause(proc) -> str:
+    """The exception line of a failed sibling run — never a mid-line cut.
+
+    Reads whole lines, so the excerpt can never start inside a ``# noqa:``
+    comment and hand the next reader a phantom lint code.
+    """
+    lines = [ln for ln in (proc.stderr or proc.stdout or "").splitlines()
+             if ln.strip()]
+    for ln in reversed(lines):
+        stripped = ln.lstrip()
+        if stripped and not stripped.startswith(("File \"", "^", "#")) \
+                and not stripped[0].isdigit() and "  File " not in ln:
+            return stripped[:300]
+    return ""
+
+
 def _sibling_interpreters() -> list[str]:
     """Interpreters distinct from this one that can run the (A)-only pass.
 
@@ -105,31 +190,36 @@ def _sibling_interpreters() -> list[str]:
     suite runs on (t_cfdcefa9 / GATE-313: argparse 3.13 widened its help column
     by 2 chars and the gate went red on 3.13 only). Candidates: this leg's
     ``HSCC_TEST_PY`` siblings from run_tests.sh, plus PATH ``python3.x``.
-    Deduped by realpath so aliases don't re-run the same interpreter."""
+    Deduped by realpath so aliases don't re-run the same interpreter.
+
+    Drops every candidate that cannot load the audit module, recording why in
+    :data:`SIBLING_DROPPED` so the skip reason can name it — a dropped
+    candidate is visible, never silently absent."""
     cands = []
-    for p in (os.environ.get("HSCC_SIBLING_PY"),
-              os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python"),
-              "~/miniconda3/envs/p313/bin/python",
-              "/Users/desac/miniconda3/envs/p313/bin/python",
-              "python3.11", "python3.12", "python3.13"):
+    for p in (os.environ.get("HSCC_SIBLING_PY"), *_SIBLING_CANDIDATES):
         if not p:
             continue
         cands.append(os.path.expanduser(p))
     here = os.path.realpath(sys.executable)
     seen, out = {here}, []
+    SIBLING_DROPPED.clear()
     for c in cands:
         path = c if os.path.isabs(c) else _which(c)
         if not path:
             continue
         # "Candidate" is not "runnable": an entry may point into a HOME that
         # does not exist (sandboxed-HOME tests, another operator's absolute
-        # path baked into the list). Only a real file is a sibling.
-        if not os.path.exists(path):
+        # path baked into the list). Only a real executable file is a sibling.
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
             continue
         real = os.path.realpath(path)
         if real in seen:
             continue
         seen.add(real)
+        ok, why = _sibling_is_runnable(path)
+        if not ok:
+            SIBLING_DROPPED[path] = why
+            continue
         out.append(path)
     return out
 
@@ -227,6 +317,29 @@ def test_a_counts_match_committed_table(report, a_counts_baseline):
         "width-dependent again")
 
 
+def _sibling_a_table(py: str, surfaces: list) -> tuple:
+    """Run the sibling's (A)-only pass; (table, failure_text_or_None).
+
+    Shared driver so the gate AND its anti-vacuity receipt cannot drift into
+    two different notions of "the sibling ran" (t_36d9d8fb)."""
+    proc = subprocess.run(
+        [py, str(REPO / "scripts" / "hscc_cli_help_audit.py"),
+         "--repo", str(REPO), "--a-table", ",".join(surfaces)],
+        capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        # A non-zero exit means the sibling could not complete the pass at all
+        # — a broken interpreter or an import error inside it, NOT a table
+        # mismatch. `_root_cause` reports the whole exception line; the old
+        # `stderr[-400:]` character cut could (and did) land inside a
+        # `# noqa: E402` source line echoed by the traceback and blame a lint
+        # code that nothing ever reported.
+        return None, (_root_cause(proc) or proc.stderr.strip()[-400:])
+    try:
+        return json.loads(proc.stdout), None
+    except Exception as e:                                     # noqa: BLE001
+        return None, f"(A) table unparseable: {type(e).__name__}: {e}"
+
+
 def test_a_table_identical_under_sibling_interpreters(report):
     """Cross-interpreter pin (the stronger half of GATE-313).
 
@@ -236,20 +349,20 @@ def test_a_table_identical_under_sibling_interpreters(report):
     chars, which is exactly the class of drift this catches inside a single
     leg — a sibling that renders the same logical line differently can no
     longer hide until its own full-suite leg runs. Skips only when this host
-    has no runnable sibling."""
+    has no runnable sibling; the skip reason NAMES every candidate that was
+    dropped and why, so a host that loses its siblings says so instead of
+    looking green (t_36d9d8fb)."""
     surfaces = sorted(report["a_counts"])
     siblings = _sibling_interpreters()
     if not siblings:
-        pytest.skip("no sibling interpreter distinct from this one is "
-                    "runnable on PATH")
+        dropped = "; ".join(f"{p}: {w}" for p, w in sorted(SIBLING_DROPPED.items()))
+        pytest.skip("no sibling interpreter distinct from this one is runnable"
+                    " on PATH"
+                    + (f" (dropped -> {dropped})" if dropped else ""))
     for py in siblings:
-        proc = subprocess.run(
-            [py, str(REPO / "scripts" / "hscc_cli_help_audit.py"),
-             "--repo", str(REPO), "--a-table", ",".join(surfaces)],
-            capture_output=True, text=True, timeout=300)
-        assert proc.returncode == 0, (
-            f"sibling {py} failed the (A)-only pass: {proc.stderr[-400:]}")
-        table = json.loads(proc.stdout)
+        table, failed = _sibling_a_table(py, surfaces)
+        assert failed is None, (
+            f"sibling {py} could not run the (A)-only pass: {failed}")
         assert table == report["a_counts"], (
             f"(A) table differs under sibling interpreter {py} "
             f"({' '.join(_py_version(py))}) — finding identity became "
@@ -262,6 +375,140 @@ def _py_version(py: str) -> list:
     proc = subprocess.run([py, "-c", "import sys;print(sys.version)"],
                           capture_output=True, text=True, timeout=30)
     return proc.stdout.split() or ["?"]
+
+
+# ── sibling-gate integrity pins (t_36d9d8fb) ─────────────────────────────
+# The card that opened this work recorded the failure as
+# "sibling /opt/homebrew/bin/python3.12 failed the (A)-only pass: E402" and
+# asked why a linter reported E402 in-leg. Nothing ever reported E402: the
+# sibling died on `ModuleNotFoundError: No module named 'rich'` and the
+# `[-400:]` character cut landed inside the `# noqa: E402` source line Python
+# echoes into a traceback. These pins hold both halves of the fix.
+
+# The real captured stderr shape, verbatim in structure (t_49013b1b leg log):
+# Python echoes the offending source line, the audit's own imports carry
+# `# noqa: E402`, and the exception line sits BELOW the echoed source line.
+_REAL_DEP_FAIL_STDERR = """\
+Traceback (most recent call last):
+  File "/repo/scripts/hscc_cli_help_audit.py", line 163, in <module>
+    import hscc_daemon.hscc as daemon_hscc  # noqa: E402  (module import is side-effect free)
+  File "/repo/hscc_daemon/hscc.py", line 29, in <module>
+    from hscc_daemon import cli_theme as theme
+  File "/repo/hscc_daemon/cli_theme.py", line 25, in <module>
+    from rich.color import Color
+ModuleNotFoundError: No module named 'rich'
+"""
+
+
+class _FakeProc:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def test_sibling_cause_extraction_never_blames_a_lint_code():
+    """The failure EXCERPT must be a whole line — the old cut invented E402.
+
+    Proves the trap and the fix on the same bytes: the character cut the gate
+    used to take does contain the literal text E402 (so the phantom code is
+    reproducible), while `_root_cause` returns the ModuleNotFoundError that
+    actually killed the sibling."""
+    old_style = _REAL_DEP_FAIL_STDERR[-400:]
+    assert "E402" in old_style and "ModuleNotFoundError" in old_style, (
+        "fixture drifted: this must stay the real traceback shape")
+    cause = _root_cause(_FakeProc(rc=1, err=_REAL_DEP_FAIL_STDERR))
+    assert cause.startswith("ModuleNotFoundError"), cause
+    assert "E402" not in cause, cause
+    # A lint code only ever appears here as a `# noqa:` comment — never as a
+    # reported cause.
+    assert "# noqa" not in cause
+
+
+def test_sibling_gate_uses_the_interpreter_that_can_import_the_audit(
+        monkeypatch):
+    """A dependency-less interpreter is DROPPED with a reason, not red.
+
+    Builds a real venv from the leg's own interpreter (no third-party deps, so
+    `import rich` inside the audit genuinely fails) and asserts the candidate
+    is dropped AND the drop is explained — the two properties the old code
+    lacked: it treated the interpreter as runnable and failed the leg."""
+    import venv
+
+    sandbox = Path(tempfile.mkdtemp(prefix="sibling-nodeps-"))
+    target = sandbox / "venv"
+    try:
+        # A COPY venv, not a symlink one: under `symlinks=True` the venv's
+        # bin/python resolves back to the leg's own interpreter and the
+        # selector would dedupe it away as "this interpreter" before the probe
+        # ever ran (measured: symlinked realpath == sys.executable, copied
+        # realpath distinct). Build cost 0.02 s.
+        venv.EnvBuilder(with_pip=False, symlinks=False).create(str(target))
+        py = str(target / "bin" / "python")
+        assert os.path.isfile(py), "venv build produced no interpreter"
+        # Sanity: this interpreter really is alive and really lacks a dep the
+        # audit needs, so a PASS here means the probe rejected it, not that the
+        # venv was broken.
+        alive = subprocess.run([py, "-c", "import sys;print(sys.version_info[:2])"],
+                              capture_output=True, text=True, timeout=60)
+        assert alive.returncode == 0, alive.stderr
+        missing = subprocess.run([py, "-c", "import rich"],
+                                 capture_output=True, text=True, timeout=60)
+        assert missing.returncode != 0 and "rich" in missing.stderr, (
+            "pin premise broken: the venv has rich, so it proves nothing")
+
+        ok, reason = _sibling_is_runnable(py)
+        assert ok is False, "a dep-less interpreter must not be a sibling"
+        assert "ModuleNotFoundError" in reason and "rich" in reason, reason
+
+        # And the real selector must drop it (with a recorded reason) when it
+        # is the only candidate standing.
+        monkeypatch.delenv("HSCC_SIBLING_PY", raising=False)
+        monkeypatch.setattr(sys.modules[__name__], "_SIBLING_CANDIDATES", (py,))
+        assert _sibling_interpreters() == []
+        assert SIBLING_DROPPED.get(py), "drop must carry a recorded reason"
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+
+def test_sibling_gate_still_runs_a_real_sibling():
+    """Anti-vacuity: the gate may not be 'fixed' into a permanent skip.
+
+    Two receipts, both cheap:
+
+      1. the selected sibling must actually EXECUTE the audit's (A)-only
+         contract and answer with parseable JSON. Restricting the walk to a
+         surface name that cannot exist makes it return ``{}`` without
+         launching a probe subprocess, so this proves the whole
+         spawn -> import -> argparse -> JSON path for real in seconds;
+      2. if this host has ANY python3.x that can import the audit's
+         third-party deps (checked independently of the gate's own probe, so
+         the assertion is not circular) the gate must have selected at least
+         one sibling. A change that empties `_sibling_interpreters()` on a
+         host with a usable sibling fails here instead of silently un-gating
+         GATE-313."""
+    siblings = _sibling_interpreters()
+    for py in siblings:
+        table, failed = _sibling_a_table(py, ["no-such-surface-xyz"])
+        assert failed is None, (
+            f"selected sibling {py} cannot run the (A)-only contract: {failed}")
+        assert table == {}, f"unexpected (A) table for a phantom surface: {table}"
+
+    have_capable = False
+    for name in ("python3.11", "python3.12", "python3.13", "python3.14"):
+        path = _which(name)
+        if not path:
+            continue
+        probe = subprocess.run([path, "-c", "import rich, yaml"],
+                               capture_output=True, text=True, timeout=60)
+        if probe.returncode == 0:
+            have_capable = True
+            break
+    if have_capable:
+        assert siblings, (
+            "a capable interpreter exists on PATH but the gate selected no "
+            f"sibling (dropped: {SIBLING_DROPPED}) — the cross-interpreter "
+            "pin has been un-gated")
+    # Whatever the outcome, a dropped candidate must always be explained.
+    assert all(v for v in SIBLING_DROPPED.values()), SIBLING_DROPPED
 
 
 # ── (A) identity: pure-function pins (no subprocess, deterministic) ──────
