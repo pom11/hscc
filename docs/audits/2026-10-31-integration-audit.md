@@ -44,11 +44,13 @@ Area is GREEN only when it has **zero open gaps**.
 | C reuse of own seams | **GREEN** | 5 | C-1 … C-5 | — | — |
 | D installed keg deps/verbs | **GREEN-PENDING-RELEASE** | 4 | D-1, D-4 | D-2 | D-3 (operator PATH check) |
 | E bootstrap/install | **GREEN with one uncarded residual** | 4 | E-1, E-2, E-3, E-4 (half) | — | E-4a (observational, no card) |
-| F doctor/verify coverage | **RED** | 8 | F-1, F-2, F-3, F-5, F-6, F-8 | F-7 | **F-4** (fix in PR #173, unmerged) |
-| **Overall** | **RED — 1 open code gap** | **34** | **21** | **8** | **3** |
+| F doctor/verify coverage | **GREEN-PENDING-RELEASE** | 8 | F-1, F-2, F-3, F-4, F-5, F-6, F-8 | F-7 | — |
+| **Overall** | **GREEN — no open code gaps** | **34** | **22** | **8** | **2** |
 
-The single thing standing between this doc and an all-green board is GAP-F-4
-(PR #173 open, unmerged). Everything else is either merged on main or resolves
+Amended 2026-11-02: PR #173 (GAP-F-4) merged as `25c0d84d` after the canonical
+runner stamped the merged content ALL GREEN; area F closed and the doc is
+GREEN. The two remaining Open entries (D-3, E-4a) are operator-named
+non-blockers. Everything else is either merged on main or resolves
 by shipping 2.15.0. §9 lists the gate precisely.
 
 ## 2. Cross-cutting findings
@@ -433,20 +435,20 @@ two real `hscc doctor` runs and fixture-controlled `verify` runs.
   token scan as the fallback when no supervisor can answer; `pgrep` is no longer
   invoked by that row. Follow-up #168 removed the same `pgrep` leg from
   `hscc_daemon/health.py:407`, so both consumers share one implementation.
-- **GAP-F-4 (MED, silent-off) — OPEN. This is the one gap that keeps the doc
-  RED.** kanban pause/enforce had zero doctor/verify coverage *and* zero
+- **GAP-F-4 (MED, silent-off) — CLOSED (PR #173, merged `25c0d84d`).** kanban
+  pause/enforce had zero doctor/verify coverage *and* zero
   scheduler. The fix (t_51931733) makes enforce a real daemon stream
   (`PERIODIC_INTERVALS["kanban_enforce"] = 60` + a `CHECKS` row, stamping its
   own `~/.hscc/state/kanban_enforce.json` — deliberately *not*
   `kanban_paused.json`, whose non-`_` keys are board names) plus a doctor row
-  "kanban enforce (paused-board hold)". Shipped as **PR #173, OPEN, base
-  `3c0428ee`, head `0008a53a`, guard checks pass, NOT merged**. 18 new daemon-side
-  tests green and the existing 15 `test_kanban_pause` cases green, but the
-  card's own note is that **suite-ALL-GREEN was not yet proven** when it
-  finished — the fix landed too late in the cycle for the canonical runner to
-  have been run to completion on the final tree. Verified here: at main `850b38d1`
-  there is still **no** `kanban_enforce` entry in `daemon_ops.py` and no enforce
-  row in `doctor.py` — the gap is genuinely still open in shipped code.
+  "kanban enforce (paused-board hold)". Merged 2026-11-02 onto `81b45951` after
+  the canonical runner (`bash scripts/run_tests.sh`) stamped the merged content
+  ALL GREEN, 12/12 legs — the stamp this gap's own text demanded. 18 new
+  daemon-side tests + the existing 15 `test_kanban_pause` cases green.
+  Residual LEFT: the doctor-row *bootstrap-side* seam test
+  (`test_doctor_kanban_enforce.py`) is carded as t_97703f62 — a coverage
+  follow-up, not an open gap: the row ships, is fenced, and is daemon-side
+  tested.
 - **GAP-F-5 (MED — the t_61457fbd incident class re-silenced) — CLOSED (#161).**
   New `hscc-bootstrap/doctor_supervision.py` + a doctor row comparing the
   pid-file pid against the owning supervisor's pid; the orphan-daemon class now
@@ -468,8 +470,9 @@ two real `hscc doctor` runs and fixture-controlled `verify` runs.
   expired / incident-latched / `GAVE-UP` (`ok=None`) / corrupt — read-only from
   the existing state file.
 
-**Verdict F: RED — GAP-F-4 open.** Merge PR #173 (with the canonical runner
-stamped ALL GREEN on its final head) and F goes GREEN.
+**Verdict F: GREEN-PENDING-RELEASE.** GAP-F-4 merged as `25c0d84d` (canonical
+runner ALL GREEN on the merged head); F-7 is F-1/F-2's release-drift shape,
+closed with the release.
 
 ## 9. Stopgap retirement table (what the operator can kill after 2.15.0)
 
@@ -498,15 +501,15 @@ do not paraphrase them.
 
 ## 10. 2.15.0 gate
 
-The doc is GREEN iff all six areas are GREEN. Today it is **RED**: five areas
-are GREEN or GREEN-PENDING-RELEASE, area F is RED.
+The doc is GREEN iff all six areas are GREEN. As amended 2026-11-02 it **is
+GREEN**: all six areas are GREEN or GREEN-PENDING-RELEASE, area F having closed
+when PR #173 merged as `25c0d84d` (canonical runner ALL GREEN, 12/12 legs).
 
-What stands between now and green, in order:
+What stands between now and shipping, in order:
 
-1. **Merge PR #173 (GAP-F-4)** — kanban enforce as a supervised daemon stream +
-   its doctor row. Before merging, stamp `bash scripts/run_tests.sh` ALL GREEN
-   on the final head; the fix card did not get to run the canonical runner to
-   completion and said so. This is the only remaining code change.
+1. ~~**Merge PR #173 (GAP-F-4)**~~ — **DONE 2026-11-02: merged `25c0d84d` after
+   the canonical runner stamped the merged content ALL GREEN**, exactly as this
+   gate required. It was the only remaining code change.
 2. **Cut 2.15.0** (t_5ae7284b, already a child of this card) — fragments →
    CHANGELOG, VERSION + badge, frozen-tree suite green.
 3. **Install + restart + verify the deploy is whole** — the release steps added
@@ -537,7 +540,7 @@ are numbered, no URLs. Code-side closures now merged into main: #145 (B-2),
 #152 (B-6), #153 (E-1, E-4 half), #154 (E-2), #155 (E-3), #156 (C-2),
 #157 (F-8), #158 (C-1), #160 (C-4), #161 (F-5, F-6, F-7 statement), #162
 (A-2, A-3), #163 (C-3), #164 (C-5), #166 (A-4), #167 (A-7), #169 (D-4),
-#170 (D-1 repo side). Open: #173 (F-4).
+#170 (D-1 repo side), #171 (budget hook), #172 (dead import), #173 (F-4).
 
 Re-verified against main `850b38d1` for this synthesis (not just quoted):
 `daemon_ops.py:68` carries the watchdog/triggers cadence (B-6);
@@ -545,8 +548,9 @@ Re-verified against main `850b38d1` for this synthesis (not just quoted):
 `board_db_paths` consumed at `orch_waker.py:260` (C-1); `plugin.yaml` declares
 23 tools (A-7); `hscc.py:625` `TOP_LEVEL_COMMANDS` (A-4); `verify.py:590`
 `unrecognized schema` / `not-checked` (F-1/F-2); `verify.py:1819`
-`check_deployed_vs_released` (E-2); and **no** `kanban_enforce` anywhere in
-`daemon_ops.py` / `kanban_pause.py` / `doctor.py` (F-4 still open).
+`check_deployed_vs_released` (E-2); and at that anchor **no** `kanban_enforce`
+in `daemon_ops.py` / `kanban_pause.py` / `doctor.py` (F-4 was still open then —
+it is closed now by #173, `25c0d84d`).
 
 ### Thin or contradictory evidence, named plainly
 
