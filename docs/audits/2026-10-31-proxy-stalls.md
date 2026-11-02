@@ -1596,15 +1596,15 @@ quoting the misreading, quote it against a base that still has it (`:769` as
 published, `:708` at `928e1aa3`, `:787` pre-#182) and say which.
 `trigger_engine` has exactly zero in-process health checks before that PR and
 exactly zero after it; its own docstring now says so and names this audit as the
-misreading it prevents, and the
-call-site comment in `run_trigger_loop` records why the kwarg must not come back.
+misreading it prevents, and the call-site comment in `run_trigger_loop` records
+why the kwarg must not come back.
 
 Why the cadence math survives the correction — and, measured, confirms it: the
 stream's timestamp is stamped by `check_dgx` itself (`health.py:381` at this
 audit's base, `write_state("dgx", state_entry)` → `state.write_state` sets
 `timestamp: now_iso()`; `:528` on today's main), so every caller that runs the
-check re-stamps the *same* stream. Two
-callers at 60 s and 30 s already interleave their stamps into the observed ~24 s
+check re-stamps the *same* stream. Two callers at 60 s and 30 s already interleave
+their stamps into the observed ~24 s
 median; a live 15 s caller would have pulled it toward ~15 s, which the log does
 not show. The c4 table carries its own control for exactly this: `gateway` — which
 has the *same* two-caller structure, the 60 s stream plus the same
