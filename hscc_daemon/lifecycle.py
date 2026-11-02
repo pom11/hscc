@@ -743,8 +743,8 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             # no critical notification. The block file, not the stream file, is
             # the breaker's memory; a failure that must count has to be written.
             # Note this does NOT open the vLLM restart gate: that stays behind
-            # `not dgx_ok` above, so a gateway-only fault is fatal-but-never
-            # touches the serving layer.
+            # `not dgx_ok` above, so a gateway-only fault can block the pipeline
+            # but still never touches the serving layer.
             save_watchdog_block(block)
             write_state("watchdog", {
                 "ok": False,
