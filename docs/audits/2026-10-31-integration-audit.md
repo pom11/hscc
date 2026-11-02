@@ -490,8 +490,9 @@ Gate for all four: 2.15.0 installed → daemon restarted (bootstrap does it,
 Two more pieces of stale inventory that are **not** in the four above but belong
 in the same sweep (GAP-B-5, #151): `hscc-proxy-watchdog` and `hscc-nas-watchdog`
 are Hermes cron jobs in the **default profile's** store, paused since
-2026-06-20, superseded by the daemon `proxy`/`nas` streams. `crontab -l` returns
-`no crontab for desac` and proves nothing. The verified delete commands are in
+2026-06-20, superseded by the daemon `proxy`/`nas` streams. `crontab -l` on the
+dispatcher host returns `no crontab for <operator user>` and therefore proves
+nothing. The verified delete commands are in
 `scripts/README.md` → "Retiring the superseded watchdog cron jobs" — run those,
 do not paraphrase them.
 
