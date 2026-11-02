@@ -26,7 +26,6 @@ task: t_614f4cac
   sweep 1.5 s). Env overrides `HSCC_SPARKRUN_STATUS_TIMEOUT` /
   `HSCC_SPARKRUN_SWEEP_HOST_TIMEOUT` for operators; the last-known-good fleet
   visibility signal is deliberately NOT here (it is the parented follow-up).
----
 kind: Verified
 task: t_614f4cac
 
