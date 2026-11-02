@@ -362,6 +362,23 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (health, "_WORKER_RELATCH_FILE", p("worker_relaunch.json")),
             (health, "_WORKER_CONTAINER_STATE_FILE",
              p("worker_container_state.json")),
+            # health.py (t_84381a8b) — the last-known-good fleet visibility
+            # snapshot. EVERY successful sweep rewrites it, so an unredirected
+            # path would litter the operator's real ~/.hscc from any test that
+            # reaches _sparkrun_workloads, and — worse — a test could READ a
+            # live snapshot and publish "stale (last good …)" instead of the
+            # honest "never observed" verdict. Redirected like the two above.
+            (health, "FLEET_LAST_SEEN_FILE", p("fleet_last_seen.json")),
+            # The in-process failure tally + once-per-outage WARN latch are
+            # module state; without a per-test reset a test that fails three
+            # sweeps leaves the NEXT test already past the hard-loss threshold,
+            # i.e. the suite would pass or fail on test ORDER. Rebinding fresh
+            # values (monkeypatch restores the originals at teardown) is the
+            # same pattern the two state files above use.
+            (health, "_fleet_visibility_state",
+             {"failures": 0, "warned": False, "last_success_at": None,
+              "last_good_epoch": None, "last_good": None}),
+            (health, "_fleet_last_seen_epoch", None),
             # heal_lease.py (F2) — the durable single-flight repair lease. This
             # MUST be redirected: check_workers / check_proxy / recover now all
             # take and release it, so an unredirected path would write a LIVE

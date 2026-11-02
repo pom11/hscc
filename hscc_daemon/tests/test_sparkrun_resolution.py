@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import subprocess
+import time
 
 import pytest
 
@@ -350,7 +351,7 @@ class TestDegradedFleetVisibility:
         monkeypatch.setattr(health, "_sparkrun_venv_python", lambda: None)
         monkeypatch.setattr(health, "run_cmd", lambda args, **k: {"ok": False, "output": "boom"})
 
-        workloads, degraded = health._sparkrun_workloads()
+        workloads, degraded, _visibility = health._sparkrun_workloads()
         assert workloads == [] and degraded is True
         assert any(lvl == "WARN" and "VISIBILITY" in msg.upper() for lvl, msg in logs)
 
@@ -638,6 +639,383 @@ class TestSweepBudgetAlignment:
         # would let that regression back in unnoticed.
         assert seen_legs == {"structured", "legacy"}, (
             f"guard must cover both sweep legs; saw only {seen_legs}")
+
+
+class TestFleetVisibilityLastKnownGood:
+    """t_84381a8b — a slow-node blip must not become an alarm storm (audit §c8-2).
+
+    Pre-fix, `_sparkrun_workloads` asserted `FLEET VISIBILITY LOST` on the FIRST
+    failed sweep and re-printed it per caller: the 2026-10-30 window logged 35
+    WARNs for one 35-minute outage while `/health` stayed `3/3 online`. Now every
+    successful sweep writes `~/.hscc/fleet_last_seen.json`, and a failed sweep
+    publishes the AGE of that snapshot instead of asserting loss; hard loss
+    needs either `FLEET_LOST_AFTER_CONSECUTIVE_FAILURES` failed sweeps in a row
+    or an aged-out snapshot.
+
+    Hermetic throughout: `FLEET_LAST_SEEN_FILE` is redirected by the package
+    conftest (same audit that pins `_WORKER_RELATCH_FILE`), and the in-process
+    tally + WARN latch are rebound per test, so nothing here touches the live
+    `~/.hscc` or depends on test order.
+    """
+
+    _PAYLOAD = json.dumps({"groups": {"cid_a": {
+        "meta": {"recipe": "w"},
+        "containers": [{"host": "10.0.0.2"}, {"host": "10.0.0.3"}]}},
+        "solo_entries": []})
+
+    def _setup(self, tmp_path, monkeypatch, logs=None):
+        from hscc_daemon import health, serving, state as state_mod
+        sink = logs if logs is not None else []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, level="INFO": sink.append((level, msg)))
+        monkeypatch.setattr(health, "ssh_cmd",
+                            lambda *a, **k: {"ok": True, "output": "reachable"})
+        monkeypatch.setattr(health, "http_check",
+                            lambda url, timeout=5: {"ok": True, "status": 200})
+        monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
+        monkeypatch.setattr(serving, "VLLM_HEALTH_URL",
+                            "http://10.0.0.2:8000/health")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        health._reset_fleet_visibility_state()
+        return health, state_dir, sink
+
+    def _good_sweep(self, monkeypatch, health):
+        """Structured leg answers with a real fleet snapshot."""
+        monkeypatch.setattr(health, "_sparkrun_venv_python",
+                            lambda: "/fake/sparkrun-venv/bin/python")
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True, "output": self._PAYLOAD})
+
+    def _dead_sweep(self, monkeypatch, health):
+        """Both legs dead — the double-fault the alarm is about."""
+        monkeypatch.setattr(health, "_sparkrun_venv_python", lambda: None)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": False, "output": "boom"})
+
+    def _write_snapshot(self, health, seconds):
+        """Write a snapshot stamped `seconds` ago, creating parents.
+
+        Used by the cases that age a snapshot they never wrote (an aged-out or
+        corrupted file is a state the daemon can WAKE UP to, not only one it
+        earns mid-run), and by the reset-then-age cases.
+        """
+        from pathlib import Path
+        path = Path(health.FLEET_LAST_SEEN_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"hosts": ["10.0.0.2"], "workloads": [], "workload_count": 0,
+                  "epoch": time.time() - seconds}
+        path.write_text(json.dumps(record))
+        return record
+
+    def _write_raw(self, health, text):
+        """Plant a snapshot VERBATIM (corrupt / foreign-shaped / future-stamped).
+
+        Creates the parent dir: a daemon can WAKE UP to a bad file, so "no file
+        was ever written here" must not be the only way to reach the reader.
+        """
+        from pathlib import Path
+        path = Path(health.FLEET_LAST_SEEN_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def _age_snapshot(self, health, seconds):
+        """Rewrite the snapshot's stamp as if the last good read was `seconds`
+        ago. Ages the FILE, not the in-process copy — that is the whole point
+        of persisting it, and the reader must agree with the disk."""
+        record = self._snapshot(health)
+        record["epoch"] = time.time() - seconds
+        self._path(health).write_text(json.dumps(record))
+        return record
+
+    @staticmethod
+    def _path(health):
+        """FLEET_LAST_SEEN_FILE is a str in production AND under the conftest
+        redirect, so tests go through Path rather than assuming either."""
+        from pathlib import Path
+        return Path(health.FLEET_LAST_SEEN_FILE)
+
+    def _snapshot(self, health):
+        return json.loads(self._path(health).read_text())
+
+    # ── the snapshot ───────────────────────────────────────────────────────
+    def test_successful_sweep_writes_the_snapshot(self, tmp_path, monkeypatch):
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+
+        assert health._sparkrun_workloads() == (
+            [{"name": "w (cid_a)", "container": "cid_a"}], False, "ok")
+        record = self._snapshot(health)
+        assert record["hosts"] == ["10.0.0.2", "10.0.0.3"]
+        assert record["workload_count"] == 1
+        assert record["workloads"] == [{"name": "w (cid_a)", "container": "cid_a"}]
+        # Both stamps: `as_of` is the field the audit specified, `epoch` is what
+        # the reader prefers (no timezone parsing on the hot path).
+        assert record["epoch"] == pytest.approx(health._fleet_last_seen_epoch)
+        assert health._epoch_from_iso(record["as_of"]) == pytest.approx(
+            health._fleet_last_seen_epoch, abs=2)
+
+    def test_legacy_leg_success_also_stamps_freshness(self, tmp_path, monkeypatch):
+        """A working text-parse IS an observation — it must not read as stale."""
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(health, "_sparkrun_venv_python", lambda: None)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True, "output": "Job: w [cid_a]"})
+
+        assert health._sparkrun_workloads() == (
+            [{"name": "w", "container": "cid_a"}], False, "ok")
+        assert self._snapshot(health)["workload_count"] == 1
+
+    def test_host_list_early_exit_is_not_a_fresh_observation(self, tmp_path,
+                                                             monkeypatch):
+        """The script's `if not hosts` path prints {"host_list": []} — stamping
+        freshness with that would let a broken host resolution keep the fleet
+        looking fresh forever, i.e. permanently hide the outage."""
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(health, "_sparkrun_venv_python",
+                            lambda: "/fake/sparkrun-venv/bin/python")
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True,
+                                               "output": '{"host_list": []}'})
+
+        workloads, degraded, visibility = health._sparkrun_workloads()
+        assert (workloads, degraded, visibility) == ([], False, "ok")
+        assert not self._path(health).exists()
+
+    # ── the staleness stamp (the card's acceptance) ────────────────────────
+    def test_first_failed_sweep_publishes_stale_not_lost(self, tmp_path, monkeypatch):
+        health, state_dir, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health.check_dgx()                      # establishes the snapshot
+        self._dead_sweep(monkeypatch, health)
+
+        ok = health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+
+        visibility = entry["details"]["fleet_visibility"]
+        assert visibility.startswith("stale (last good ")
+        # The RED stream names the SAME age the visibility value carries — one
+        # fact, stated once, not two numbers that can drift apart.
+        assert visibility[len("stale "):] in entry["message"]
+        assert "VISIBILITY STALE" in entry["message"]
+        # Still RED: "could not look" is not a healthy read, stale or not.
+        assert entry["ok"] is False
+        # The alarm rule is unchanged for the serving layer, so a status-polling
+        # blip still cannot restart a healthy vLLM.
+        assert ok is True
+        assert not any("LOST" in msg.upper() for _, msg in logs), logs
+
+    def test_stale_warn_names_the_age(self, tmp_path, monkeypatch):
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+        # The audit's own example age, stamped into the file the reader uses.
+        self._age_snapshot(health, 250)
+
+        health._sparkrun_workloads()
+        warns = [m for lvl, m in logs if lvl == "WARN" and "VISIBILITY" in m.upper()]
+        assert warns and "4 m 10 s ago" in warns[0], warns
+        assert "STALE" in warns[0].upper()
+
+    def test_no_snapshot_at_all_still_asserts_loss(self, tmp_path, monkeypatch):
+        """A fleet we have NEVER seen has no last-good to be stale about — the
+        old fail-closed verdict must survive, or this card would turn a real
+        blind daemon green."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._dead_sweep(monkeypatch, health)
+
+        workloads, degraded, visibility = health._sparkrun_workloads()
+        assert (workloads, degraded, visibility) == ([], True, "degraded")
+        assert not self._path(health).exists()
+        assert any(lvl == "WARN" and "LOST" in msg.upper() for lvl, msg in logs)
+
+    def test_unparsable_snapshot_is_not_evidence(self, tmp_path, monkeypatch):
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._dead_sweep(monkeypatch, health)
+        self._write_raw(health, "{not json")
+
+        assert health._read_fleet_last_seen() == (None, None)
+        assert health._sparkrun_workloads()[2] == "degraded"
+
+    def test_future_stamped_snapshot_is_not_evidence(self, tmp_path, monkeypatch):
+        """Clock jump / hand-edited file: a snapshot from the future proves
+        nothing, and an age computed from it would be negative forever."""
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._dead_sweep(monkeypatch, health)
+        self._write_raw(health, json.dumps(
+            {"as_of": "2099-01-01T00:00:00+00:00", "hosts": [], "workloads": []}))
+
+        assert health._read_fleet_last_seen() == (None, None)
+        assert health._sparkrun_workloads()[2] == "degraded"
+
+    def test_aged_snapshot_from_a_previous_process_is_loss_on_tick_one(
+            self, tmp_path, monkeypatch):
+        """THE reason the age rule exists alongside the streak rule: a daemon
+        that RESTARTS mid-outage starts its failure count at zero, so the
+        streak can never catch a file that is already an hour old. Only the age
+        read off disk knows the truth — and this is the case the whole design
+        (a file, not a clock in memory) was chosen for."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._dead_sweep(monkeypatch, health)
+        self._write_snapshot(health, 3600)   # a stale file left by an old process
+
+        assert health._sparkrun_workloads()[2] == "degraded"
+        assert any("aged past" in m for _lvl, m in logs), logs
+
+    # ── the loss threshold ─────────────────────────────────────────────────
+    def test_hard_loss_needs_consecutive_failures_not_one_blip(
+            self, tmp_path, monkeypatch):
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+
+        n = health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES
+        for i in range(n - 1):
+            assert health._sparkrun_workloads()[2].startswith("stale"), i
+        assert health._sparkrun_workloads()[2] == "degraded"
+        lost = [m for lvl, m in logs if "LOST" in m.upper()]
+        assert len(lost) == 1, f"expected exactly one LOST line, got {lost}"
+        # The hard line is still honest about how long we could actually see.
+        assert "Last good fleet read" in lost[0]
+
+    def test_one_success_resets_the_failure_tally(self, tmp_path, monkeypatch):
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+        n = health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES
+        for _ in range(n - 1):
+            health._sparkrun_workloads()
+        assert health._fleet_visibility_state["failures"] == n - 1
+
+        self._good_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2] == "ok"
+        assert health._fleet_visibility_state["failures"] == 0
+
+        self._dead_sweep(monkeypatch, health)
+        # Back to ONE failure, not resuming the streak — an intermittent sparkrun
+        # that answers now and then is not an outage.
+        assert health._sparkrun_workloads()[2].startswith("stale")
+
+    def test_aged_snapshot_is_loss_on_the_first_failure(self, tmp_path, monkeypatch):
+        """The age rule is independent of the streak rule: a snapshot older
+        than the cap is not evidence of a live fleet even on failure #1."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+        self._age_snapshot(health, health.FLEET_STALE_LOST_AFTER_S + 60)
+
+        assert health._sparkrun_workloads()[2] == "degraded"
+        assert any("aged past" in m for _lvl, m in logs), logs
+
+    # ── the dedupe (the ORCH ask: 35 WARNs = 1 alarm) ─────────────────────
+    def test_outage_logs_lost_once_however_many_callers(
+            self, tmp_path, monkeypatch):
+        """The audit's count was 35 LOST lines for 35 minutes of one outage,
+        because every caller of the sweep re-printed it on every tick."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+
+        # A whole outage: the hard threshold plus 30 further ticks/callers.
+        for _ in range(health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES + 30):
+            health._sparkrun_workloads()
+
+        lost = [m for _lvl, m in logs if "LOST" in m.upper()]
+        assert len(lost) == 1, f"{len(lost)} LOST lines for one outage"
+        # The stale path keeps informing (it is not an alarm), so the outage is
+        # not silent — 3 stale lines before the threshold was reached.
+        assert len([m for _lvl, m in logs if "STALE" in m.upper()]) == 2
+
+    def test_recovery_logs_one_recovered_line(self, tmp_path, monkeypatch):
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+        for _ in range(health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES):
+            health._sparkrun_workloads()
+        assert any("LOST" in m.upper() for _lvl, m in logs)
+
+        self._good_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2] == "ok"
+        recovered = [m for _lvl, m in logs if "RECOVERED" in m.upper()]
+        assert len(recovered) == 1, recovered
+
+        # A second good sweep must not re-announce; a healthy fleet is quiet.
+        health._sparkrun_workloads()
+        assert len([m for _lvl, m in logs if "RECOVERED" in m.upper()]) == 1
+
+    def test_stale_outage_recovery_is_silent(self, tmp_path, monkeypatch):
+        """No alarm was raised ⇒ no recovery line. Otherwise the log gains a
+        'recovered' entry for a fault that was never asserted."""
+        health, _state, logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        health._sparkrun_workloads()
+        self._dead_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2].startswith("stale")
+        self._good_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2] == "ok"
+        assert not any("RECOVERED" in m.upper() for _lvl, m in logs), logs
+
+    # ── the arithmetic that keeps the rule from drifting back ─────────────
+    def test_loss_threshold_is_not_one_sweep(self):
+        """Regression pin for the actual complaint: the FIRST failure must not
+        assert loss, so the streak threshold cannot be 1."""
+        from hscc_daemon import health
+        assert health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES >= 2
+        # 3 dgx ticks (60 s each, PERIODIC_INTERVALS["dgx"]): ~3 minutes, i.e.
+        # two full audit-window blips of headroom before a hard alarm.
+        assert health.FLEET_LOST_AFTER_CONSECUTIVE_FAILURES == 3
+        # The age cap must cover the audit's own worst blip (the LOST window
+        # whose example age the card quotes is 4 m 10 s) — otherwise the fix
+        # would not have changed that episode's verdict at all — while still
+        # keeping a hard alarm reachable in minutes, not hours.
+        assert health.FLEET_STALE_LOST_AFTER_S >= 250
+        assert health.FLEET_STALE_LOST_AFTER_S <= 600
+
+    def test_verdict_shape_is_stable_for_consumers(self, tmp_path, monkeypatch):
+        """`fleet_visibility` is a published key (verify + the audits read it):
+        'ok' and 'degraded' keep their exact strings, staleness is additive."""
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2] == "ok"
+        # No snapshot anywhere = the never-observed shape, unchanged verdict.
+        self._path(health).unlink()
+        health._reset_fleet_visibility_state()
+        self._dead_sweep(monkeypatch, health)
+        assert health._sparkrun_workloads()[2] == "degraded"
+
+    def test_age_phrase_format(self):
+        from hscc_daemon import health
+        assert health._age_phrase(45) == "45 s ago"
+        assert health._age_phrase(250) == "4 m 10 s ago"
+        assert health._age_phrase(3725) == "1 h 2 m ago"
+        assert health._age_phrase(-5) == "0 s ago"
+
+    def test_snapshot_write_is_atomic_under_concurrent_sweeps(
+            self, tmp_path, monkeypatch):
+        """check_dgx can be reached by several callers per tick (audit §c6
+        counted four sweeps/tick), so a fixed tmp name would let one writer's
+        rename take another's tmp with it. Prove the file is always whole."""
+        import concurrent.futures
+        import glob
+        health, _state, _logs = self._setup(tmp_path, monkeypatch)
+        self._good_sweep(monkeypatch, health)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: health._sparkrun_workloads(), range(40)))
+
+        # Every write parses — a torn file would raise here.
+        record = self._snapshot(health)
+        assert record["hosts"] == ["10.0.0.2", "10.0.0.3"]
+        leftovers = glob.glob(str(health.FLEET_LAST_SEEN_FILE) + "*")
+        assert leftovers == [str(health.FLEET_LAST_SEEN_FILE)], leftovers
 
 
 class TestServiceEnvironmentDeclaration:
