@@ -34,9 +34,13 @@ one-note-per-10-calls throttle.
 
 Fail-open contract
 ------------------
-Both entry points swallow ALL exceptions and return the input unchanged
-(transform) or None (observer). A broken budget watch must never break a
-worker turn — the same contract the other workflow hooks honour.
+Both entry points swallow ALL exceptions and return None — the observer's
+"nothing recorded" and the transform's "no opinion". The transform never
+returns the input string on a pass-through path: the dispatcher keeps the
+FIRST string any plugin returns, so echoing the input would hijack the tool
+result away from later plugins (see ``on_transform_tool_result``). A broken
+budget watch must never break a worker turn — the same contract the other
+workflow hooks honour.
 """
 
 from __future__ import annotations
@@ -232,20 +236,27 @@ def on_post_api_request(**kwargs: Any) -> None:
         return None
 
 
-def on_transform_tool_result(result: Any, **kwargs: Any) -> Any:
+def on_transform_tool_result(result: Any, **kwargs: Any) -> Optional[str]:
     """transform_tool_result: append the [budget] line to the next tool result.
 
-    Returns the extended string when (and only when) a note is due; anything
-    else returns the input untouched. First non-None string wins upstream, so
-    a returned str here replaces the tool result — hence the exact append and
-    the pass-through of every non-note path. Never raises.
+    Returns the extended string when (and ONLY when) a note is due. Every other
+    path returns ``None`` — meaning "no opinion" — and never the input string.
+
+    Why None and not ``result``: the dispatch site (``model_tools.py``,
+    ``_apply_transform_tool_result_hook``) resolves the hook with
+    ``next((r for r in hook_results if isinstance(r, str)), result)`` — the
+    FIRST non-empty string any plugin returns wins and becomes the tool result.
+    Returning the unchanged input would therefore register budget_watch as the
+    winning transform: the result would read the same, but any LATER plugin's
+    real transform would be silently suppressed. ``None`` is filtered out of
+    ``hook_results``, so the pipeline stays open for other plugins. Never raises.
     """
     try:
         task_id = _is_worker_env()
         if not task_id:
-            return result
+            return None  # non-worker: no opinion
         if not isinstance(result, str):
-            return result
+            return None  # not a string we could append to: no opinion
         session_id = str(kwargs.get("session_id") or "") or "_unknown_"
         now = time.monotonic()
         with _lock:
@@ -266,10 +277,10 @@ def on_transform_tool_result(result: Any, **kwargs: Any) -> Any:
                     st["armed"] = False
 
             if not st.get("armed"):
-                return result
+                return None  # not armed: no opinion
             calls = st["result_calls"]
             if calls - st["last_note_result"] < NOTE_EVERY_N_CALLS:
-                return result
+                return None  # note due but inside the throttle window: no opinion
 
             note = _note_text(st["prompt_tokens"], st["api_calls"])
             st["armed"] = False
@@ -278,7 +289,7 @@ def on_transform_tool_result(result: Any, **kwargs: Any) -> Any:
             # so the note is the last (and only new) line of the block.
             return result.rstrip("\n") + "\n" + note
     except Exception:  # noqa: BLE001 — fail-open, a hook must never break a turn
-        return result
+        return None  # fail-open = no opinion, NOT the input string (see docstring)
 
 
 # ------------------------------------------------- diagnostics / test helpers
