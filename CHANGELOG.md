@@ -338,6 +338,26 @@ _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` 
   turn. 19 fake-payload tests (threshold fire, one-line-only, re-arm after
   commit, per-10-call throttle, non-worker sessions never noted, fail-open
   both entry points, per-session isolation, git-read-once-HEAD-unchanged).
+- **`doctor` now verifies the worker `[budget]` hook is actually registered.**
+  `hscc-bootstrap/doctor.py` gained a `worker budget hook ([budget] note)` row
+  after the supervision row: it loads the **deployed**
+  `hscc-cluster/budget_watch.py` (by file path — the hyphenated plugin dirs are
+  not importable package names — and never across a plugin boundary) and lets
+  the feature's own `doctor_check(plugins_dirs=…)` own the verdict, adapting
+  only its five `Check` fields, exactly as the orch-waker and cron-watchers
+  rows do. Until now nothing in doctor ever called that function, so a deploy
+  that silently lost the two `ctx.register_hook` calls still read all-green.
+  Warn-only on every verdict (`fatal=False` always — a missing hook costs the
+  note, never an install), and a tree whose module cannot be imported at all
+  reports itself *unverifiable* rather than vanishing. Plugin roots resolve with
+  the installer's own precedence (`PLUGINS` env → the `--home` tree → a profile
+  home's own `plugins` **and** the root's → `~/.hermes/plugins`), and the row is
+  pytest-fenced like the waker's: inside a suite the verdict must be injected
+  (`_budget_hook_check`) or the row renders as a refusal naming the seam — it
+  can never read the operator's deployed plugin tree. 12 tests, including a
+  fixture deploy tree with the real `budget_watch.py` copied in (wired → green,
+  `register_hook` lines removed → red naming the fix, module missing / raising
+  on import → non-fatal degraded).
 - **`hscc orch inject <profile> "<message>"` — inject is now a first-class CLI
   verb.** `hscc-cluster/hscc.py` registers `orch-inject` in `COMMANDS` (the
   merged CLI's `hscc orch inject`), so typing into a running Hermes REPL no
