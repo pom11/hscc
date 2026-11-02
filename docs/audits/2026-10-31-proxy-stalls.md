@@ -1422,7 +1422,10 @@ saying `check_dgx` ran from four places; at the base it was measured against it 
 from **two** — the count below is stated in the past tense of that base. One further
 change has since landed: PR #182 (c8-3), merged 2026-11-02, made the watchdog read
 the published verdict instead of re-running the check, so on current main `check_dgx`
-has exactly **one** caller (the `dgx` stream thread). The measured numbers
+has exactly **one** periodic caller (the `dgx` stream thread; `hscc check`/`hscc
+status` CLI paths still run it on demand, and `hscc check watchdog` seeds one sweep
+before its cycle — `cli.py:732`, on purpose, since a CLI process has no stream
+thread to publish a verdict). The measured numbers
 below — the cadence and the WARN overlap — stand unchanged; only the caller list
 was wrong. The "~112 extra checks/day" is left as published but is flagged by c9 as
 not reproducing per-day. c9 records exactly what changed, what
