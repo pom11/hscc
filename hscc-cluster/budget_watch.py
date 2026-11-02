@@ -439,7 +439,8 @@ def doctor_check(plugins_dirs=None) -> dict:
                     "fix": ""}
         return {"name": name, "ok": False, "fatal": False,
                 "detail": "hscc-cluster is deployed but does not register the "
-                          "budget hooks (budget_watch.py missing or register() not wired)",
+                          "budget hooks (budget_watch.py missing or register() "
+                          f"not wired) in: {', '.join(candidates)}",
                 "fix": "Re-deploy hscc-cluster from the repo (bootstrap) so "
                        "budget_watch.py and its register() wiring ship."}
     except Exception as exc:  # noqa: BLE001 — doctor rows never crash the run
