@@ -10,66 +10,296 @@ from pathlib import Path
 
 
 class TestGatewayJobAlive:
-    """_gateway_job_alive() checks if Hermes gateway is running."""
+    """_gateway_job_alive() — the daemon's one-bit gateway-liveness verdict.
 
-    def test_launchctl_found(self, fake_subprocess, monkeypatch):
+    GAP-F-3 / t_c14d18cb. This function used to compute the verdict itself and
+    its last-resort leg was ``pgrep -f "hermes.*gateway"``. Measured on the
+    operator machine with the gateway LIVE as launchd pid 74857, macOS pgrep
+    cannot SEE that process at all: ``pgrep -f .`` (a pattern matching every
+    command line) returns 1210 pids while ``ps -axww -o pid=`` lists 1216, and
+    the gateway's pid is in the ps set and not the pgrep set. A pattern cannot
+    match a pid the matcher never receives, so that leg returned False for a
+    live gateway and was masked only by the launchctl leg above it.
+
+    The verdict now comes from the single implementation in
+    ``hscc-bootstrap/gateway_liveness.py`` (supervisor first, then a ``ps``
+    argv token scan) and pgrep is never invoked. These tests pin all of that:
+    the transports, the removal, and the GAP-F-3 shape — a gateway invisible to
+    pgrep but visible to ps must still read alive.
+    """
+
+    # The gateway's real argv on this fleet, read back verbatim from the launchd
+    # job's ProgramArguments (`launchctl list ai.hermes.gateway`).
+    REAL_ARGV = ("/Users/example/.hermes/hermes-agent/venv/bin/python "
+                 "-m hermes_cli.main gateway run --replace")
+    LAUNCHD_OUT = (
+        '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
+        '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
+        '\t"Program" = "/Users/example/.hermes/hermes-agent/venv/bin/python";\n};\n')
+
+    class _R:
+        def __init__(self, returncode=0, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    @pytest.fixture(autouse=True)
+    def _clean_probe_globals(self, monkeypatch):
+        """Reset the module-global degradation reason before every case.
+
+        `_gateway_job_alive()` records WHY a cycle could not verify the job on
+        the module. Cached module state is what leaks between tests and lets a
+        later case pass only because of collection order, so every case starts
+        from "nothing has failed yet".
+        """
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None, raising=False)
+        yield
+
+    def _drive(self, monkeypatch, results):
+        """Install a subprocess.run stub keyed by argv[0]; record every argv.
+
+        Keyed rather than queued, so each test states what each transport
+        answers instead of depending on how many probes happen to run.
+        """
+        import subprocess
+
+        seen = []
+
+        def fake_run(args, *a, **kw):
+            argv = list(args)
+            seen.append(argv)
+            key = argv[0]
+            if key not in results:
+                # An un-stubbed probe must never reach the real process table.
+                raise AssertionError(f"unexpected probe in test: {argv}")
+            return results[key]
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        return seen
+
+    # ── the acceptance case: pgrep-blind, ps-visible ─────────────────────────
+    def test_pgrep_invisible_gateway_still_reports_alive(self, monkeypatch):
+        """GAP-F-3's exact shape in the daemon's second implementation.
+
+        The supervisor cannot answer (launchd unreadable) and pgrep — which this
+        box answers with rc 1 even for `pgrep -f .` — is not consulted at all.
+        The ps argv scan is what carries the verdict, so a live gateway reads
+        alive instead of triggering the "gateway down" failure #148 closed in
+        the doctor row.
+        """
         from hscc_daemon import health
         import sys
         monkeypatch.setattr(sys, "platform", "darwin")
-        fake_subprocess.set_result(stdout="    0    ai.hermes.gateway\n", returncode=0)
+        seen = self._drive(monkeypatch, {
+            "launchctl": self._R(1, "Could not find service."),
+            # What the box really answers for a live gateway — proof the result
+            # does not ride on it either way.
+            "pgrep": self._R(1, ""),
+            "ps": self._R(0, f"  74857 {self.REAL_ARGV}\n"),
+        })
+        assert health._gateway_job_alive() is True
+        assert "pgrep" not in [a[0] for a in seen]
+
+    def test_pgrep_is_never_invoked(self, monkeypatch):
+        """The removed transport must not come back through any leg."""
+        from hscc_daemon import health
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        seen = self._drive(monkeypatch, {
+            "launchctl": self._R(0, self.LAUNCHD_OUT),
+            "ps": self._R(0, ""),
+        })
+        health._gateway_job_alive()
+        assert not any("pgrep" in arg for argv in seen for arg in argv)
+
+    # ── the supervisor leg (unchanged semantics for this stream) ─────────────
+    def test_launchd_pid_reports_alive(self, monkeypatch):
+        from hscc_daemon import health
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        self._drive(monkeypatch, {"launchctl": self._R(0, self.LAUNCHD_OUT)})
         assert health._gateway_job_alive() is True
 
-    def test_launchctl_not_found(self, fake_subprocess, monkeypatch):
+    def test_launchd_loaded_without_pid_counts_as_job_present(self, monkeypatch):
+        """A loaded job is a kickstartable job — the stream's own meaning.
+
+        Deliberate: the doctor row reads this state as "job loaded but no
+        running process" because it prints the operator a fix hint. The stream
+        keeps its historical answer (any launchctl success = job present), so
+        this fix changes only the fallback leg, not what the stream decides.
+        """
         from hscc_daemon import health
         import sys
         monkeypatch.setattr(sys, "platform", "darwin")
-        fake_subprocess.set_result(stdout="", stderr="does not exist", returncode=1)
-        # Falls back to pgrep
-        fake_subprocess.set_result(stdout="", returncode=1)
-        assert health._gateway_job_alive() is False
+        no_pid = self.LAUNCHD_OUT.replace('\t"PID" = 74857;\n', "")
+        self._drive(monkeypatch, {"launchctl": self._R(0, no_pid),
+                                  "ps": self._R(0, "")})
+        assert health._gateway_job_alive() is True
 
-    def test_systemctl_active(self, fake_subprocess, monkeypatch):
+    def test_systemd_active_reports_alive(self, monkeypatch):
         from hscc_daemon import health
         import sys
         import shutil
         monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(shutil, "which", lambda x: "/usr/bin/systemctl" if x == "systemctl" else None)
-        fake_subprocess.set_result(stdout="active\n", returncode=0)
+        monkeypatch.setattr(shutil, "which",
+                            lambda x: "/bin/systemctl" if x == "systemctl" else None)
+        self._drive(monkeypatch, {"systemctl": self._R(0, "active\n")})
         assert health._gateway_job_alive() is True
 
-    def test_systemctl_inactive(self, fake_subprocess, monkeypatch):
-        from hscc_daemon import health
-        import sys
-        import shutil
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(shutil, "which", lambda x: "/usr/bin/systemctl" if x == "systemctl" else None)
-        fake_subprocess.set_result(stdout="inactive\n", returncode=3)
-        # Falls back to pgrep
-        fake_subprocess.set_result(stdout="", returncode=1)
-        assert health._gateway_job_alive() is False
-
-    def test_pgrep_fallback(self, fake_subprocess, monkeypatch):
-        from hscc_daemon import health
-        import sys
-        import shutil
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(shutil, "which", lambda x: None)  # no systemctl
-        # pgrep finds process
-        fake_subprocess.set_result(stdout="12345\n", returncode=0)
-        assert health._gateway_job_alive() is True
-
-    def test_exception_handling(self, fake_subprocess, monkeypatch):
+    # ── the fallback leg replaces pgrep, in both supervisor shapes ───────────
+    def test_macos_no_job_but_unsupervised_gateway_reports_alive(self, monkeypatch):
         from hscc_daemon import health
         import sys
         monkeypatch.setattr(sys, "platform", "darwin")
-        # launchctl fails with exception
-        fake_subprocess.set_result(timeout_exc=True)
-        # pgrep fallback also fails — but run_cmd catches TimeoutExpired and returns
-        # {"ok": False, "output": "Command timed out..."}. Since pgrep output is
-        # truthy on timeout, we need to simulate a clean failure where pgrep returns
-        # exit code 1 with empty output.
-        fake_subprocess.set_result(stdout="", returncode=1)
+        self._drive(monkeypatch, {
+            "launchctl": self._R(1, "Could not find service."),
+            "ps": self._R(0, f"400 /usr/sbin/httpd -D FOREGROUND\n"
+                             f"74857 {self.REAL_ARGV}\n"),
+        })
+        assert health._gateway_job_alive() is True
+
+    def test_linux_inactive_unit_falls_back_to_argv_scan(self, monkeypatch):
+        from hscc_daemon import health
+        import sys
+        import shutil
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(shutil, "which",
+                            lambda x: "/bin/systemctl" if x == "systemctl" else None)
+        self._drive(monkeypatch, {
+            "systemctl": self._R(3, "inactive\n"),
+            "ps": self._R(0, f"74857 {self.REAL_ARGV}\n"),
+        })
+        assert health._gateway_job_alive() is True
+
+    def test_linux_no_systemctl_at_all_uses_argv_scan(self, monkeypatch):
+        from hscc_daemon import health
+        import sys
+        import shutil
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(shutil, "which", lambda x: None)
+        self._drive(monkeypatch, {"ps": self._R(0, f"74857 {self.REAL_ARGV}\n")})
+        assert health._gateway_job_alive() is True
+
+    # ── genuinely down stays down ────────────────────────────────────────────
+    def test_nothing_matches_reports_dead(self, monkeypatch):
+        from hscc_daemon import health
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        self._drive(monkeypatch, {
+            "launchctl": self._R(1, "Could not find service."),
+            "ps": self._R(0, "400 /usr/sbin/httpd -D FOREGROUND\n"),
+        })
         assert health._gateway_job_alive() is False
+
+    def test_chat_prompt_mentioning_the_gateway_is_not_alive(self, monkeypatch):
+        """The fallback must not mistake a worker for the server."""
+        from hscc_daemon import health
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        self._drive(monkeypatch, {
+            "launchctl": self._R(1, "Could not find service."),
+            "ps": self._R(0, '74900 /venv/bin/python -m hermes_cli.main '
+                             'chat -q "why did the gateway run fail"\n'),
+        })
+        assert health._gateway_job_alive() is False
+
+    # ── a probe that cannot run is UNKNOWN, never a silent green ─────────────
+    def test_unloadable_probe_is_unknown_not_a_verdict(self, monkeypatch):
+        """If the shared module cannot be loaded, there is no answer.
+
+        Fabricating True here would be GAP-F-3's failure mode exactly — a
+        liveness signal that can never print red. The job bit is None and the
+        reason is recorded; check_gateway() publishes both.
+        """
+        from hscc_daemon import health, gateway_probe
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        self._drive(monkeypatch, {"launchctl": self._R(0, self.LAUNCHD_OUT)})
+        assert health._gateway_job_alive() is True          # transport answered
+        assert health._GATEWAY_PROBE_UNAVAILABLE is None
+
+        def boom():
+            raise gateway_probe.GatewayLivenessSourceError("sibling not deployed")
+        monkeypatch.setattr(gateway_probe, "load_gateway_liveness", boom)
+        assert health._gateway_job_alive() is None          # unknown, not True
+        assert health._GATEWAY_PROBE_UNAVAILABLE            # and it says why
+
+    def test_degraded_flag_clears_when_the_probe_works_again(self, monkeypatch):
+        """A recovery must not leave a stale UNVERIFIED marker on the stream."""
+        from hscc_daemon import health, gateway_probe
+        import sys
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", "earlier failure")
+        self._drive(monkeypatch, {"launchctl": self._R(0, self.LAUNCHD_OUT)})
+        assert health._gateway_job_alive() is True
+        assert health._GATEWAY_PROBE_UNAVAILABLE is None
+
+    def test_probe_that_raises_is_unknown_not_dead(self, monkeypatch):
+        """Every transport silent (missing binary / timeout / exec error) means
+        no verdict was earned: the job bit is None, with the reason recorded.
+        """
+        from hscc_daemon import health
+        import sys
+        import subprocess
+
+        def raise_all(args, *a, **kw):
+            raise OSError("no launchctl here")
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(subprocess, "run", raise_all)
+        assert health._gateway_job_alive() is None
+        assert health._GATEWAY_PROBE_UNAVAILABLE
+
+    def test_probe_timeout_is_unknown_not_the_old_truthy_timeout(self, monkeypatch):
+        """The leg this card removed had a second, quieter bug.
+
+        `run_cmd` turns a timeout into ``{"ok": False, "output": "Command timed
+        out after 5s"}``, and the old fallback tested the OUTPUT — so a hung
+        pgrep returned True and the gateway read alive no matter what. The
+        shared module treats a probe timeout as UNKNOWN instead.
+        """
+        from hscc_daemon import health
+        import sys
+        import subprocess
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def hang(args, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd=list(args), timeout=kw.get("timeout", 5))
+        monkeypatch.setattr(subprocess, "run", hang)
+        assert health._gateway_job_alive() is None
+        assert health._GATEWAY_PROBE_UNAVAILABLE
+
+    def test_unknown_publishes_unverified_not_a_green(self, tmp_hfcc_dir, monkeypatch):
+        """check_gateway() must not write a healthy-looking entry for a cycle
+        that verified nothing — and must not pretend it checked the job either.
+
+        Fail-closed here is the same rule check_dgx already applies to UNKNOWN
+        workloads (t_b543e530): a check that fails open never prints red, which
+        is exactly how GAP-F-3 survived two doctor runs. The stream does go
+        not-ok, so the pipeline watchdog sees a degraded read rather than a
+        false green; what is new is that it says WHY.
+        """
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        import subprocess
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        monkeypatch.setattr(health, "http_check",
+                            lambda url, timeout=5: {"ok": True})
+        monkeypatch.setattr(health, "_GATEWAY_PROBE_UNAVAILABLE", None)
+
+        def raise_all(args, *a, **kw):
+            raise OSError("no supervisor readable")
+        monkeypatch.setattr(subprocess, "run", raise_all)
+
+        assert health.check_gateway() is False              # never a false green
+        state = state_mod.read_state("gateway")
+        assert state is not None
+        assert state["gateway_job"] is None                 # unknown, published as such
+        assert state["gateway_job_degraded"]                # and it says why
+        # ...and the reason reaches the surface that prints a Detail line.
+        assert "UNVERIFIED" in state["message"]
 
 
 class TestCheckIdleMonitor:
