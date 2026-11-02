@@ -36,7 +36,19 @@ reason (its `ok` is `job_ok and vllm_ok`, and vLLM is stopped by design).
 Counting it would block the pipeline and fire a critical desktop alarm during
 a deliberate power-save — the false-alarm class that work exists to kill.
 `test_intentional_autodown_gateway_failure_does_not_accumulate` pins that
-carve-out so the fix cannot be widened into it later.
+carve-out so the fix cannot be widened into it later, and
+`test_waking_window_records_nothing` pins the other half of that window (a wake
+in progress returns from the backoff fork before any check runs, so it cannot
+feed the breaker either).
+
+One thing this suite pins rather than fixes: the breaker reason says "3
+consecutive failures in 10min", but `cleanup_old_failures()` prunes by TIME only
+and the success path resets `failed_count` without removing failure entries, so
+an interleaved healthy tick does NOT reset the window — on either leg. Verified
+by probe on the DGX path this card does not touch, and locked in by
+`test_dgx_leg_shows_the_same_windowed_behaviour_as_the_gateway_leg` so the two
+legs cannot drift into different reset rules. Whether the breaker *should* mean
+consecutive is a separate policy question with its own card.
 """
 
 import datetime
