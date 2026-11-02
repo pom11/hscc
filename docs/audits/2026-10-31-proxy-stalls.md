@@ -1417,10 +1417,11 @@ wraps; starvation then made it unrecoverable-looking.
 
 ### c6 — a third amplifier found while measuring (the double-fault the ORCH note asked about)
 
-**CALLER COUNT CORRECTED — read c9 before quoting the numbers below at face
-value.** This section originally said `check_dgx` ran from four places; it ran
-from **two**. The measurement (the WARN overlap, the cadence, the extra-check
-count) stands — see c9 for what exactly changed and what did not.
+**CALLER COUNT CORRECTED AFTER PUBLICATION (c9).** This section was written
+saying `check_dgx` ran from four places; it ran from **two**. The numbers below —
+the cadence, the WARN overlap, the extra-check count — are measurements and stand
+unchanged; only the caller list was wrong. c9 records exactly what changed, what
+did not, and how the misreading happened.
 
 `check_dgx` is invoked from **two** places, and both run the full body — 8 s SSH
 + 10 s SSH + 25 s sweep + 10 s sweep — in-process:
@@ -1545,7 +1546,11 @@ not be read as discrediting the measurement.
 
 What was wrong: c6 listed `trigger_engine` as a third in-process caller
 ("`trigger_engine` every 15 s (`trigger.py:254`, wired at `daemon_ops.py:769`)"),
-and c4's cadence sentence therefore said "three callers". In fact `trigger_engine`
+and c4's cadence sentence therefore said "three callers". (Note c6's own
+enumeration was already short of its headline: it asserted **four** places and
+listed **three** bullets. The count was never the product of an enumeration — which
+is the second reason to distrust it and the reason c9 re-derives it from call sites
+and from the log's own rate.) In fact `trigger_engine`
 accepted `check_dgx_fn`/`check_gateway_fn` and invoked neither —
 `grep -c 'check_dgx_fn()' hscc_daemon/trigger.py` returns **0** both at this
 audit's own base (`origin/main` `928e1aa3`) and on today's main. Its DGX/gateway/
@@ -1567,18 +1572,52 @@ is **OPEN, not merged**, as this correction is written: until that lands,
 caller. `trigger_engine` has exactly zero in-process health checks before that PR
 and exactly zero after it.
 
-Why the cadence math survives the correction: the stream's timestamp is stamped by
-`check_dgx` itself (`health.py:429`, `write_state("dgx", state_entry)` →
-`state.write_state` sets `timestamp: now_iso()`), so every caller that runs the
-check re-stamps the *same* stream. Two callers at 60 s and 30 s already interleave
-their stamps into the observed ~24 s median; a live 15 s caller would have pulled
-it toward ~15 s, which the log does not show. The c4 table carries its own control
-for exactly this: `gateway` — which has the *same* two-caller structure, the 60 s
-stream plus the same `pipeline_watchdog` tick (`gw_ok = check_gateway_fn()`,
-`lifecycle.py:524`) — measures 24.1 s in the control window, while the
-**single-caller** streams in that same table hold their declared periods: `workers`
-60.1 s against 60, `nas` 900.1 s against 900. Two callers ⇒ sub-60 median; one
-caller ⇒ exactly the declared interval. The dgx median needs no third caller to be
-explained. The overlap evidence is likewise two-caller evidence — two WARNs 0.50 s
-apart require two callers concurrent in `check_dgx`, and two is what there are.
-The proof never needed a third and does not lose force without one.
+Why the cadence math survives the correction — and, measured, confirms it: the
+stream's timestamp is stamped by `check_dgx` itself (`health.py:429`,
+`write_state("dgx", state_entry)` → `state.write_state` sets `timestamp:
+now_iso()`), so every caller that runs the check re-stamps the *same* stream. Two
+callers at 60 s and 30 s already interleave their stamps into the observed ~24 s
+median; a live 15 s caller would have pulled it toward ~15 s, which the log does
+not show. The c4 table carries its own control for exactly this: `gateway` — which
+has the *same* two-caller structure, the 60 s stream plus the same
+`pipeline_watchdog` tick (`gw_ok = check_gateway_fn()`, `lifecycle.py:524`) —
+measures 24.1 s in the control window, while the **single-caller** streams in that
+same table hold their declared periods: `workers` 60.1 s against 60, `nas` 900.1 s
+against 900. Two callers ⇒ sub-declared median; one ⇒ exactly the declared
+interval.
+
+Re-measured on the audit's own days with the same marker this section's script
+used (`Running DGX check`, logged inside `check_dgx` at `health.py:352`, so it
+counts invocations rather than stream stamps — `scratch/t9e45955c_check_rate.py`):
+**3,765 / 3,801 / 3,795 invocations on 2026-10-29 / -30 / -31**, gap median
+**24.6 s** (p25 12.3, p75 33.3). That is the arithmetic that settles the count.
+Two callers predict 1440 (60 s) + 2880 (30 s) = 4320/day, less the loop overhead
+that makes each real period `interval + check duration` ⇒ measured 3800. **Four**
+callers, adding a live 15 s loop, would add 5760/day for a median gap near 8–9 s —
+neither of which the log shows anywhere. The overlap evidence is likewise
+two-caller evidence: two WARNs 0.50 s apart require two callers concurrent in
+`check_dgx`, and two is what there are. The proof never needed a third and does not
+lose force without one.
+
+**One number this correction does NOT resolve, flagged not touched.** The "~112
+extra full-DGX-checks/day" in c6 does not reproduce as a *per-day* figure. Measured
+as above, the per-day excess over a lone 60 s stream is **~2,360/day** (3800 −
+1440); re-cut by hour it is **~98–101/hour** (42 complete hours in the audit window:
+94 / 161 / 163 invocations per hour at min / median / max, i.e. 34 / 101 / 103 above
+the 60/hour a single stream would produce; 33 of 42 hours sit at ≥ 100). The ceiling
+makes this two-loop arithmetic, not three- or four-loop: two callers can produce at
+most 60 + 120 = 180 invocations/hour, and the 161/hour observed median is that
+ceiling less the loop overhead each period absorbs in the check's own duration —
+whereas a live 15 s caller would add up to 240/hour more, which nothing in the
+window reaches. So 112 sits within ~11% of the per-**hour** excess and ~20× below
+the per-**day** one: the most likely reading is a per-hour magnitude carrying a
+per-day label. The script that produced it is not among the c1/c2/c4/c6 scripts
+listed at the end of this section (`warns_per_tick.py` counts WARNs per tick and
+sub-second WARN pairs; it emits no rate at all), and it lives in scratch rather than
+in the repo, so the derivation cannot be re-run from this checkout alone. It is left
+as published — the figure belongs to the card that measured it, and this card's
+scope is the caller count — but as written it understates the pile-up, and the next
+reader should not treat "112/day" as measured. Either way c6's conclusion is
+unaffected: on the two-caller reading the pile-up is real, is roughly one extra full
+check every ~36 s on the box that is already degraded, and that is what justifies
+c8-3. `scratch/t9e45955c_hourly.py` reproduces the hourly cut.
