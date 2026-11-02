@@ -110,7 +110,9 @@ _PATTERNS = [
      "restart", 1),
     (re.compile(r"Watchdog: attempting vLLM auto-restart"),
      "restart", "attempt"),
-    # — pipeline escalation / block — the "3 consecutive failures" escalation —
+    # — pipeline escalation / block — the "N failures within 10min" escalation
+    # (t_49013b1b: the reason text is now honest about the window; this
+    # classifier keys on the `BLOCKING pipeline` prefix, not the reason) —
     (re.compile(r"Watchdog: BLOCKING pipeline"),
      "block", "failed"),
     # — block cleared
