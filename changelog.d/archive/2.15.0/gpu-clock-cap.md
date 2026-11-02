@@ -12,7 +12,7 @@ task: gpu-clock-cap
   sparkrun transport only. Value or opt-out: `node_recovery.gpu_clock_cap_mhz`
   (integer, or `false`) in `~/.hscc/cluster.json`. New non-fatal doctor check
   `GPU clock cap (node-recovery)`.
-
+---
 kind: Fixed
 task: gpu-clock-cap
 

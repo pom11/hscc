@@ -17,7 +17,7 @@ task: t_cd836fee
   config are distinguishable from blank caps because the operator set no cap.
   hermes' own fail-open `FailedConfigRead` fallback is flagged the same way.
   Caps values and bootstrap behaviour are unchanged.
-
+---
 kind: Verified
 task: t_cd836fee
 

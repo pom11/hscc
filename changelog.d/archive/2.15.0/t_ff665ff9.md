@@ -14,6 +14,7 @@ task: t_ff665ff9
   Chosen mode + busy state are one shared decision (`plan_pane`), used by both
   the dry-run path and the real delivery — there is exactly one place in the
   repo that turns a mode into a verb.
+---
 kind: Fixed
 task: t_ff665ff9
 
@@ -28,6 +29,7 @@ task: t_ff665ff9
   prefers the chat line that names a profile, and falls back to `default` only
   when none does. Ambiguity is still fatal: two panes that resolve to the same
   profile refuse (`ambiguous`), wrapper-resolved or not.
+---
 kind: Added
 task: t_ff665ff9
 
@@ -42,6 +44,7 @@ task: t_ff665ff9
   plan plus the message metadata and a `dry_run: True` receipt, and send
   nothing. This is the seam `hscc orch inject --dry-run` builds on, so the CLI
   stays a thin wrapper instead of re-implementing pane logic.
+---
 kind: Verified
 order: 1
 
