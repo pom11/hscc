@@ -175,7 +175,13 @@ def build_row(doctor_module, spec: FeatureCheckRow, injected, **context):
                 getattr(doctor_module, spec.fallback_name), False,
                 detail=spec.missing_detail, fix=spec.missing_fix, fatal=False)
         res = feature.doctor_check(**context)
-    name, ok, detail, fix, fatal = adapt(res, spec.fallback_name)
+    # ``fallback_name`` is the NAME OF A MODULE CONSTANT (the same convention as
+    # ``_BUDGET_HOOK_CHECK_NAME``), so resolve it here rather than hand the
+    # attribute name to adapt() — otherwise a verdict dict without a name would
+    # print the literal string "_PROBE_CHECK_NAME" to a human.
+    fallback = getattr(doctor_module, spec.fallback_name, None) \
+        if spec.fallback_name else None
+    name, ok, detail, fix, fatal = adapt(res, fallback)
     return check_cls(name=name, ok=ok, detail=detail, fix=fix, fatal=fatal)
 
 

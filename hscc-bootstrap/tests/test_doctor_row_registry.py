@@ -288,6 +288,34 @@ def test_generic_row_exposes_only_the_five_check_fields():
     assert set(vars(row)) == {"name", "ok", "detail", "fix", "fatal"}
 
 
+def test_generic_row_resolves_the_fallback_name_constant():
+    """``fallback_name`` is the NAME OF A MODULE CONSTANT, not the name itself
+    (the `_BUDGET_HOOK_CHECK_NAME` convention), so a feature verdict dict with no
+    ``name`` must print the constant's VALUE — not the literal string
+    "_PROBE_CHECK_NAME" to a human.
+
+    Found by the non-pytest smoke run of this registry: the generic path handed
+    the attribute name straight to the five-field adapter, and every test here
+    used a feature that always returned its own name, so nothing covered the
+    fallback. That is the exact class of bug a registry invites — a name that
+    used to be a Python identifier in hand-written code is now data.
+    """
+    class _NamelessFeature:
+        @staticmethod
+        def doctor_check(hscc_dir=None):
+            # A feature dict that forgot `name` — adapt() must not print "None"
+            # nor the constant's attribute name.
+            return {"ok": True, "detail": "no name here", "fix": "",
+                    "fatal": False}
+
+    hooks = _ProbeHooks(loader=lambda: _NamelessFeature())
+    row = doctor_rows.build_row(hooks, _probe_spec(), None)
+    assert row.name == _ProbeFeature.CHECK_NAME, row.name
+    assert not row.name.startswith("_"), \
+        f"the constant NAME leaked into the row: {row.name!r}"
+    assert row.detail == "no name here"
+
+
 # ── the four existing rows through the loop ────────────────────────────────
 
 def test_all_feature_rows_render_exactly_once(tmp_path, monkeypatch):

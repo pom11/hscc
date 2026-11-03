@@ -92,12 +92,18 @@ adjustments"). The registry keeps every name the tests touch where the tests loo
 
 ## Verification
 
-- `tests/test_doctor_row_registry.py` — 16 tests. Pins registry self-consistency
+- `tests/test_doctor_row_registry.py` — 17 tests. Pins registry self-consistency
   (every named hook exists — the one thing a string-named registry gives up
   versus a direct call), seam/signature agreement, "a new row needs no change to
   `run_doctor()`", unknown-seam rejection, per-row context selection, and the
   generic build path (refusal / unverifiable / `hscc_dir` pass-through /
-  five-field copy).
+  five-field copy / `fallback_name` constant resolution).
+- The `fallback_name` case was found by a non-pytest smoke run, not by the suite:
+  the generic path passed the *attribute name* to the adapter, so a feature verdict
+  dict without a `name` would print `_PROBE_CHECK_NAME` to a human. Every suite test
+  used a feature that returned its own name, so the fallback was uncovered — exactly
+  the hazard a string-named registry invites (an identifier that was checked by the
+  interpreter at import becomes unchecked data).
 - Mutation-proven (each mutation restored immediately after, verified by diff):
   pinning `render_rows` to the known rows fails the "new row needs no change"
   tests; `if False:` on the unknown-seam guard fails the rejection test; dropping
