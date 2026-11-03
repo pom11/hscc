@@ -41,3 +41,19 @@ provides_tools:
   - apply_template
   # _ORCH_TOOLS
   - orch_message
+# Same registry-first rule as provides_tools above, for hooks: this list
+# mirrors every ctx.register_hook(...) call in __init__.py exactly, in both
+# directions, and the pair is asserted on every suite run by
+# hscc_daemon/tests/test_plugin_manifest_drift.py. `hermes plugins doctor`
+# WARNs each registered hook missing here (found by qa on t_1153d42c: 6 WARNs,
+# registration still succeeded — declaration hygiene, not a runtime failure).
+# Names must be hermes VALID_HOOKS members (hermes_cli/plugins.py).
+provides_hooks:
+  # workflow.py (hermes 0.17 kanban observers + tool stamping)
+  - kanban_task_claimed
+  - kanban_task_blocked
+  - kanban_task_completed
+  - pre_tool_call
+  # budget_watch.py (t_6c4f38f2 worker budget watch)
+  - post_api_request
+  - transform_tool_result
