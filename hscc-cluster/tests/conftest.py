@@ -14,6 +14,39 @@ import sparkrun_fence
 
 
 @pytest.fixture(autouse=True)
+def _pin_lifecycle_logs_to_tmp(monkeypatch, tmp_path):
+    """Defense-in-depth (same doctrine as ``_pin_serving_json_to_tmp``): NO test
+    may append to the operator's LIVE ``~/.hscc/{task_completions,blocked_tasks}.jsonl``.
+
+    LIVE INCIDENT (t_1497a937, 2026-11-02): 797 of 851 completion rows — and
+    797 of 894 blocked rows — were all-null, unattributable junk. They were not
+    a hook bug: they were this suite's own two "noop without context" tests
+    (``test_lifecycle_hooks.py::test_blocked_handler_noop_without_context`` and
+    ``::test_completed_handler_noop_without_context``), which call the handlers
+    with no args and, unlike every sibling test, did NOT patch the module log
+    path. Each run of ``scripts/run_tests.sh`` therefore appended 2 junk rows to
+    the operator's real ledgers — 73 rows on 2026-11-01 alone against 1 real
+    completion. ``hscc_daemon/stats.py`` counts any row with a parseable
+    timestamp, so the fleet check's ``completions.total`` was reading 200 junk
+    rows against 2 real ones over 7 days (99% inflation), and the null task_ids
+    made every one of them unjoinable to a card.
+
+    Per-test patches were the bug: 7 of 9 tests in that file remembered, and the
+    2 that forgot wrote to production. This fixture makes the default a tmp path
+    by construction for EVERY test in this suite. A test that wants a specific
+    path still ``patch.object``/``monkeypatch.setattr``es it itself — that runs
+    after this fixture and wins.
+    """
+    import workflow as wf
+
+    monkeypatch.setattr(wf, "_COMPLETION_LOG", str(tmp_path / "task_completions.jsonl"))
+    monkeypatch.setattr(wf, "_BLOCKED_LOG", str(tmp_path / "blocked_tasks.jsonl"))
+    # ``on_pre_tool_call`` appends to a third live ledger with the same shape of
+    # leak (profile_name="test" rows are visible in the operator's tool_events).
+    monkeypatch.setattr(wf, "_TOOL_EVENT_LOG", str(tmp_path / "tool_events.jsonl"))
+
+
+@pytest.fixture(autouse=True)
 def _fence_sparkrun_argv(monkeypatch):
     """Fence literal-argv sparkrun calls for EVERY test in this suite.
 

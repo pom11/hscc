@@ -188,6 +188,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/lossless-generate-pontaje-t_0f2ee405.md` — measured report of what `hscc.py generate` dropped from `ecofire-pontaje-engineer/SOUL.md` (one spec-pointer line under an emittable heading); drove the lossless-generate fix.
 - `docs/audits/content-loss-list-t_5b362400.md` — why the role-SOUL doctor check's heading sweep cannot see CONTENT loss (a hand-patched paragraph under an emittable heading reads clean until the next generate deletes it) and the content-loss list that replaced it.
 - `docs/audits/protocol-violation-budget-already-implemented.md` — audit proving the protocol-violation budget was already implemented upstream.
+- `docs/audits/task-completions-null-taskid-t_1497a937.md` — forensics behind the 797 all-null rows in `~/.hscc/task_completions.jsonl`: the card assumed a hermes hook kwarg drift that does not reproduce; the rows were the suite's own un-patched noop tests appending to the operator's live ledgers, plus the reader audit and the `_identity`/conftest fix.
 - `docs/audits/analyze.py` — scratch log-analysis script used by the daemon-log investigations.
 - `docs/audits/overnight-2026-09-22.md` — overnight report: project session linking + digests epic.
 - `docs/audits/overnight-2026-09-22.log` — raw log attached to the overnight report above.
