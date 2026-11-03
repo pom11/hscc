@@ -120,5 +120,8 @@ adjustments"). The registry keeps every name the tests touch where the tests loo
       `kanban_enforce`, `budget_hook` — the last folded in when #175 merged)
 - [x] `tests/test_doctor_row_registry.py`
 - [x] changelog fragment + `docs/README.md` index entry
-- [ ] `bash scripts/run_tests.sh` ALL GREEN + `scripts/address_guard.py --tracked`
-      rc 0 — see the card comment for the measured result
+- [x] `bash scripts/run_tests.sh` ALL GREEN 12/12 legs `SUITE_RC=0` (8581 passed,
+      6 skipped; bootstrap leg 1093) + `scripts/address_guard.py --tracked` rc 0 —
+      measured on the final tree `f77cfa71` (post-v2.15.0 main: #196 #197 #198 #199
+      folded in). `readme_lint --strict` 0 findings (docs-index 189/189);
+      `changelog_fragments.py check` rc 0; `git status` empty.
