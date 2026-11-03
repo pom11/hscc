@@ -1039,6 +1039,53 @@ def test_role_specs_name_no_shared_sandbox_inventory():
     )
 
 
+# -- reviewer follow-up routing rule (t_58cd36e8) ---------------------------
+#
+# Operator standing rule: a reviewer that finds a follow-up comments it on the
+# card it is reviewing and returns THAT card to `todo` — it never mints new
+# cards. Decomposition is the orchestrator's job. The rule must therefore be
+# part of the generated reviewer SOUL, and pinned in pytest exactly the way the
+# pontaje override tokens are: asserted on the text `compose_soul()` emits from
+# the tracked spec (the tracked source of truth), never on ~/.hermes/profiles
+# (PR #115's ruling; live state belongs to the doctor).
+
+_REVIEWER_SPEC = os.path.join(rolelib.ROLES_DIR, "reviewer.yaml")
+
+
+def _reviewer_role_section():
+    """The `## Role: reviewer` section of the SOUL `generate` would write,
+    whitespace-normalized. Position-pinned on purpose: the rule is asserted
+    inside the role identity, not merely 'somewhere in the SOUL' — an
+    orchestrator-ops mention would not reach a worker reviewer as its contract.
+    """
+    base = open(rolelib.BASE_IDENTITY_PATH, encoding="utf-8").read()
+    soul = generator.compose_soul(rolelib.load_spec(_REVIEWER_SPEC), base)
+    start = soul.index("## Role: reviewer")
+    end = soul.index("## Operational", start)
+    return " ".join(soul[start:end].split())
+
+
+def test_reviewer_soul_routes_followups_to_the_reviewed_card():
+    """The positive half: comment on the reviewed card, return it to todo."""
+    section = _reviewer_role_section()
+    assert "Comment it on the card you are reviewing and return that card to " \
+           "`todo`" in section, (
+        "the reviewer SOUL no longer tells the reviewer where a follow-up "
+        "goes — the operator rule (comment on the reviewed card + return it "
+        "to todo) must live in roles/reviewer.yaml's `identity`")
+
+
+def test_reviewer_soul_forbids_card_spawning_from_a_review():
+    """The negative half, as a contiguous phrase (mutation M3's lesson:
+    word-level assertions survive deleting the whole sentence, because
+    base-identity.md already carries words like 'card' and 'kanban')."""
+    section = _reviewer_role_section()
+    assert "Spawning new cards from a review is forbidden" in section, (
+        "the prohibition against kanban_create from a review was lost from "
+        "the reviewer spec")
+    assert "`kanban_create` is not a reviewer's tool" in section
+
+
 # -- top-level onboarding.* preservation (t_7ef65bf3 / 12:24 fleet freeze) --
 #
 # `hscc bootstrap --yes` regenerates every profile config.yaml through
