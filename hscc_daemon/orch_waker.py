@@ -212,14 +212,18 @@ def map_fingerprint(orch_map) -> str:
         return "<unfingerprintable>"
 
 
-def backoff_seconds_left(ent, now, backoff_s=DEFAULT_BACKOFF_S) -> float:
+def backoff_seconds_left(ent, now, backoff_s=DEFAULT_BACKOFF_S,
+                         fail_threshold=DEFAULT_FAIL_THRESHOLD) -> float:
     """Seconds this board must still be skipped (0.0 when not in backoff).
 
-    Armed when ``n`` has reached the threshold; the window runs ``backoff_s``
-    from the LAST failure, so a board that fails again after the window expired
-    gets a fresh window rather than a second chance every tick.
+    Armed ONLY once ``n`` has reached ``fail_threshold`` — a board on its first
+    or second failure is still in the normal retry path (that is the pre-existing
+    pending-retry behaviour, and a transient tmux hiccup must not cost the
+    operator a window). Once armed, the window runs ``backoff_s`` from the LAST
+    failure, so a board that fails again after a window expired gets a fresh
+    window rather than a second chance every tick.
     """
-    if not ent or backoff_s <= 0:
+    if not ent or backoff_s <= 0 or ent["n"] < fail_threshold:
         return 0.0
     left = float(backoff_s) - (float(now) - float(ent["at"]))
     return left if left > 0 else 0.0
@@ -590,8 +594,12 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
         # same failure. The batch stays in `pending`, so when the window
         # expires the whole accumulated set goes out as ONE nudge.
         ent = fails.get(b)
-        if ent:
-            left = backoff_seconds_left(ent, now, backoff_s)
+        # Only an ARMED counter (n reached the threshold) can skip a board; a
+        # board still below it keeps accumulating across ticks (that is the
+        # pre-existing retry path, and popping its counter here would mean the
+        # threshold could never be reached at all).
+        if ent and ent["n"] >= fail_threshold:
+            left = backoff_seconds_left(ent, now, backoff_s, fail_threshold)
             if left > 0:
                 backoff_report.append({"board": b, "retry_in_s": round(left, 1),
                                        "failures": ent["n"]})
@@ -897,17 +905,37 @@ DEFAULT_CONFIG_PATH = "~/.hscc/orch_waker.json"
 #: ``POLL_S`` — the daemon's stream cadence and this knob are the same number
 #: on purpose (see ``stream_interval``), and doctor derives its freshness
 #: budget from HERE so the two cannot drift.
+#:
+#: t_f1122b7a adds the two dead-pane knobs and the profile override:
+#:   ``orch_map``       — ``{board: profile}`` consulted by :func:`resolve_orch`
+#:                        before the ``<board>-orch`` convention (the mapped
+#:                        profile must exist on disk or the entry is ignored).
+#:                        Default ``{}`` — no board is hardcoded in code; the
+#:                        operator who has an orch running under a differently
+#:                        named profile maps it in the config file himself.
+#:   ``fail_threshold`` — consecutive failed attempts that arm the backoff.
+#:   ``backoff_s``      — seconds the board stays skipped once armed.
 CONFIG_DEFAULTS = {
     "enabled": True,      # default ON (W3 card) — see the fail-open note above
     "debounce_s": DEBOUNCE_S,
     "min_gap_s": MIN_GAP_S,
     "poll_s": POLL_S,
+    "orch_map": {},
+    "fail_threshold": DEFAULT_FAIL_THRESHOLD,
+    "backoff_s": DEFAULT_BACKOFF_S,
 }
 
 #: Hard floors for the numeric knobs. Zero/negative would turn the debounce
 #: into "nudge on every event" and the rate limit into "nudge every tick",
-#: i.e. exactly the flood the batching rules exist to prevent.
-_KNOB_FLOOR = {"debounce_s": 0, "min_gap_s": 0, "poll_s": 1}
+#: i.e. exactly the flood the batching rules exist to prevent. ``fail_threshold``
+#: floors at 1 (0 would skip a board on its very first failure — a single
+#: transient tmux hiccup must not cost the operator a backoff window);
+#: ``backoff_s`` floors at the stream cadence, because a window shorter than a
+#: tick cannot suppress a retry and would only hide the failure. The floor uses
+#: ``POLL_S`` — the same number as ``daemon_ops.PERIODIC_INTERVALS``' cadence for
+#: this stream (kept equal on purpose; see :func:`stream_cadence`).
+_KNOB_FLOOR = {"debounce_s": 0, "min_gap_s": 0, "poll_s": 1,
+               "fail_threshold": 1, "backoff_s": POLL_S}
 
 
 def _coerce_knob(key, value):
@@ -927,6 +955,30 @@ def _coerce_knob(key, value):
     return value
 
 
+def _coerce_orch_map(value) -> dict:
+    """A usable ``{board: profile}`` map, or ``{}``.
+
+    Junk is dropped entry by entry — a non-string value, a blank value and a
+    non-string key are all typos, and an entry that cannot be a profile name
+    must never reach :func:`resolve_orch` (where a truthy value would win over
+    the convention and route a board at a non-existent pane). A whole-value that
+    is not an object at all degrades to the empty map, i.e. "no overrides", which
+    is the default behaviour — never to a partial guess.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for board, profile in value.items():
+        if not isinstance(board, str) or not board.strip():
+            continue
+        if not isinstance(profile, str) or not profile.strip():
+            LOG.warning("orch-waker: orch_map entry %r -> %r is not a profile "
+                        "name — entry ignored", board, profile)
+            continue
+        out[board.strip()] = profile.strip()
+    return out
+
+
 def config_path(path=None) -> str:
     """Resolved path of the daemon operator config file (expanduser at call)."""
     return _resolve(path or DEFAULT_CONFIG_PATH)
@@ -941,8 +993,17 @@ def load_config(path=None) -> dict:
     ``CONFIG_DEFAULTS`` are returned, so a stray hand-edit cannot reach the
     tick, and a partial file (or one written by an older build) still yields
     every knob.
+
+    ``orch_map`` is the one non-numeric knob and gets its own coercion
+    (:func:`_coerce_orch_map`): a map is a *routing decision*, so junk in it is
+    dropped entry by entry rather than trusted, and a junk whole-value falls
+    back to the empty map. The returned dict always carries its OWN map dict, so
+    a caller mutating its config cannot poison ``CONFIG_DEFAULTS`` for the next
+    tick (the daemon re-reads the config every tick; a shared mutable default
+    would be a slow leak with routing consequences).
     """
     cfg = dict(CONFIG_DEFAULTS)
+    cfg["orch_map"] = {}
     file = config_path(path)
     try:
         with open(file) as f:
@@ -958,8 +1019,10 @@ def load_config(path=None) -> dict:
                     file)
         return cfg
     cfg["enabled"] = bool(doc.get("enabled", CONFIG_DEFAULTS["enabled"]))
-    for key in ("debounce_s", "min_gap_s", "poll_s"):
+    for key in ("debounce_s", "min_gap_s", "poll_s", "fail_threshold",
+                "backoff_s"):
         cfg[key] = _coerce_knob(key, doc.get(key, CONFIG_DEFAULTS[key]))
+    cfg["orch_map"] = _coerce_orch_map(doc.get("orch_map"))
     return cfg
 
 
@@ -989,6 +1052,9 @@ def set_enabled(enabled: bool, path=None) -> dict:
                     f"{file} is not a JSON object — refusing to rewrite it")
             doc = loaded
     merged = dict(CONFIG_DEFAULTS)
+    # `orch_map` is a mutable default: give the document its own dict so this
+    # writer can never mutate CONFIG_DEFAULTS through it (t_f1122b7a knob).
+    merged["orch_map"] = {}
     merged.update({k: v for k, v in doc.items() if k in CONFIG_DEFAULTS})
     merged["enabled"] = bool(enabled)
     doc.update(merged)
@@ -1054,6 +1120,25 @@ def effective_scan_interval(cfg=None, path=None) -> int:
 
 
 # ── W3: the daemon-loop entry + the status surface ──────────────────────────
+
+def _tick_message(nudged: int, failed: int, decided: int, backoff=()) -> str:
+    """The stream stamp's human ``message`` for a scan tick.
+
+    The pre-existing shape is preserved verbatim (``"N nudged, M failed, K
+    decided"`` / ``"steady"``) so nothing that greps it changes; the backoff
+    names the boards currently skipped (t_f1122b7a). A waker that is silently
+    skipping a board because its pane is gone must say so in the one field the
+    doctor already prints — otherwise "steady" would read healthy forever.
+    """
+    base = (f"{nudged} nudged, {failed} failed, {decided} decided" if decided
+            else "steady")
+    if backoff:
+        names = ", ".join(f"{e.get('board')} ({e.get('retry_in_s')}s)"
+                          for e in backoff[:3])
+        more = f" +{len(backoff) - 3} more" if len(backoff) > 3 else ""
+        return base + f" — backing off: {names}{more}"
+    return base
+
 
 #: The daemon's stream name for the waker — the key in PERIODIC_INTERVALS
 #: (daemon_ops), the state file ``~/.hscc/state/orch_waker.json`` (state.py),
@@ -1152,7 +1237,8 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
         ``poll_s=30`` the gate never fires, so the built-in behaves exactly
         like the stopgap.
       * scan      -> :func:`run_tick` (scan -> decide -> inject -> audit) with
-        the configured ``debounce_s``/``min_gap_s``.
+        the configured ``debounce_s``/``min_gap_s``/``orch_map``/
+        ``fail_threshold``/``backoff_s``.
 
     Returns the stamped stream entry. NEVER raises: a waker failure must not
     take the stream thread down (:func:`run_tick` already swallows its own
@@ -1198,7 +1284,9 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
             profiles_dir=profiles_dir, hermes_home=hermes_home,
             boards_dir=boards_dir, audit_path=audit_path, inject=inject,
             report=report,
-            debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"])
+            debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"],
+            orch_map=cfg["orch_map"], fail_threshold=cfg["fail_threshold"],
+            backoff_s=cfg["backoff_s"])
         if report.get("unevaluable"):
             entry.update(ok=False, last_scan=now,
                          boards_unevaluable=True,
@@ -1207,11 +1295,12 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
             return entry
         nudged = sum(1 for d in decisions if d.get("ok") is True)
         failed = sum(1 for d in decisions if d.get("ok") is False)
+        backoff = report.get("backoff") or []
         entry.update(ok=True, decisions=len(decisions), nudged=nudged,
                      delivery_failed=failed, last_scan=now,
-                     message=(f"{nudged} nudged, {failed} failed, "
-                              f"{len(decisions)} decided" if decisions
-                              else "steady"))
+                     backoff=backoff,
+                     message=_tick_message(nudged, failed, len(decisions),
+                                           backoff))
         return entry
     except Exception as e:  # noqa: BLE001 — the stream must survive anything
         LOG.exception("orch-waker: daemon tick failed")
@@ -1487,16 +1576,25 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
              profiles_dir=None, hermes_home=None, boards_dir=None,
              inject=None, has_orch=None, repl=None, mode="auto",
              audit_path=None, warned=None, report=None,
-             debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S):
+             debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
+             orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
+             backoff_s=DEFAULT_BACKOFF_S):
     """One waker pass wired end to end: scan -> decide -> inject -> audit.
 
     The public entry (W3 calls it every ~30 s from the daemon loop). Defaults
-    plug in the real seams — paused file, ``<board>-orch`` disk resolution,
-    in-process repl_inject delivery at ``mode="auto"`` and the JSONL audit —
-    while every one of them stays injectable for tests. Returns ``tick``'s
-    decision list; NEVER raises: any unexpected failure is logged and
+    plug in the real seams — paused file, ``orch_map``-then-``<board>-orch``
+    resolution, in-process repl_inject delivery at ``mode="auto"`` and the JSONL
+    audit — while every one of them stays injectable for tests. Returns
+    ``tick``'s decision list; NEVER raises: any unexpected failure is logged and
     swallowed, because the daemon calls this forever and a waker that dies
     silently stops waking every orchestrator.
+
+    ``orch_map`` is threaded into BOTH seams that resolve a target — the
+    ``has_orch`` gate and the ``make_inject`` delivery — because they must agree:
+    a board whose mapped profile exists is a target for both, and one resolved
+    differently by the two would either be nudged at the wrong pane or silently
+    never nudged. When the caller passes its own ``inject`` the map goes to the
+    gate only, and that inject owns its own resolution.
 
     ``report`` is passed through to :func:`tick` (see its contract) so the
     daemon can tell "no boards to scan" apart from "cannot see the boards".
@@ -1505,20 +1603,25 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
     be reported as a healthy empty pass.
     """
     try:
+        def _resolve(board):
+            return resolve_orch(board, profiles_dir, hermes_home, orch_map)
+
         return tick(
             now=now,
             boards=boards,
             paused=read_paused(paused_path),
-            has_orch=has_orch if has_orch is not None else (
-                lambda b: resolve_orch(b, profiles_dir, hermes_home)),
+            has_orch=has_orch if has_orch is not None else _resolve,
             inject=inject if inject is not None else make_inject(
                 repl=repl, mode=mode, profiles_dir=profiles_dir,
-                hermes_home=hermes_home, audit_path=audit_path),
+                hermes_home=hermes_home, audit_path=audit_path,
+                orch_map=orch_map),
             state_path=state_path, boards_dir=boards_dir,
             hermes_home=hermes_home,
             warned=_WARNED_ONCE if warned is None else warned,
             report=report,
-            debounce_s=debounce_s, min_gap_s=min_gap_s)
+            debounce_s=debounce_s, min_gap_s=min_gap_s,
+            orch_map=orch_map, fail_threshold=fail_threshold,
+            backoff_s=backoff_s)
     except Exception:  # noqa: BLE001 — the daemon loop must survive anything
         LOG.exception("orch-waker: tick failed — will retry next tick")
         if report is not None:
