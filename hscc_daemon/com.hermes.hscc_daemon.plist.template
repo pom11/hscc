@@ -51,6 +51,12 @@
         <string>__HOME__/.hermes/plugins</string>
         <key>PYTHONDONTWRITEBYTECODE</key>
         <string>1</string>
+        <!-- t_6b5a5c61: launchd-setup.sh replaces this placeholder line with
+             the tmux socket-dir key when the installing shell exports it (the
+             daemon's orch-waker cannot see any pane without it), and removes
+             the line when it does not. A generated plist never contains the
+             placeholder. -->
+        __TMUX_ENV__
     </dict>
 
     <!-- KeepAlive: restart on crash (not on clean exit via SIGTERM) -->

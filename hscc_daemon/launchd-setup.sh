@@ -40,18 +40,6 @@ if ! command -v launchctl &>/dev/null; then
     exit 1
 fi
 
-# ── Ensure directories exist ───────────────────────────────────────────────
-
-mkdir -p "${LAUNCH_DIR}"
-mkdir -p "$(dirname "${LOG_FILE}")"
-
-# ── Install plist ──────────────────────────────────────────────────────────
-
-if [[ "${1:-}" == "force" ]]; then
-    info "Force-reloading hscc_daemon..."
-    launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
-fi
-
 # Resolve a REAL python interpreter for ProgramArguments[0]. The old template
 # hardcoded /usr/local/bin/python3, which doesn't exist on Homebrew-only Macs or
 # Spark nodes — launchd then fails to exec and KeepAlive respawn-loops it (C1).
@@ -72,11 +60,67 @@ if [[ -z "${PYBIN}" ]]; then
 fi
 info "Daemon python: ${PYBIN}"
 
+# ── Render the plist (template → real file) ─────────────────────────────────
+#
+# t_6b5a5c61: the daemon's orch-waker injects into tmux panes, and tmux finds
+# its server socket under TMUX_TMPDIR. launchd starts the daemon with a CLEAN
+# environment, so a plist that does not carry the operator's TMUX_TMPDIR ships
+# a pane-blind daemon: every board fails `no tmux pane` while panes visibly
+# exist. Propagate it when the installing shell has it; omit the key entirely
+# when it has none (an empty value would point tmux at "" — worse than absent).
+TMUX_ENV_XML=""
+if [[ -n "${TMUX_TMPDIR:-}" ]]; then
+    _tmux_val=${TMUX_TMPDIR//&/&amp;}
+    _tmux_val=${_tmux_val//</&lt;}
+    _tmux_val=${_tmux_val//>/&gt;}
+    TMUX_ENV_XML="        <key>TMUX_TMPDIR</key>
+        <string>${_tmux_val}</string>"
+    info "Propagating TMUX_TMPDIR=${TMUX_TMPDIR} into the plist EnvironmentVariables"
+fi
+
+render_plist() {
+    # Substitute __HOME__ + __PYBIN__ (launchctl does not expand ~/$HOME, and
+    # the interpreter path must be a real absolute path) and expand or drop the
+    # __TMUX_ENV__ placeholder, from the template on $1 to stdout.
+    local line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line//__HOME__/${HOME}}"
+        line="${line//__PYBIN__/${PYBIN}}"
+        if [[ "${line}" == *"__TMUX_ENV__"* ]]; then
+            if [[ -n "${TMUX_ENV_XML}" ]]; then
+                printf '%s\n' "${TMUX_ENV_XML}"
+            fi
+        else
+            printf '%s\n' "${line}"
+        fi
+    done < "$1"
+}
+
+if [[ "${1:-}" == "render-only" ]]; then
+    # Test/inspection seam: render the plist to $2 (or stdout) and exit before
+    # any launchctl interaction — never installs, never loads a job.
+    if [[ -n "${2:-}" ]]; then
+        render_plist "${PLIST_TEMPLATE}" > "$2"
+    else
+        render_plist "${PLIST_TEMPLATE}"
+    fi
+    exit 0
+fi
+
+# ── Ensure directories exist ───────────────────────────────────────────────
+
+mkdir -p "${LAUNCH_DIR}"
+mkdir -p "$(dirname "${LOG_FILE}")"
+
+# ── Install plist ──────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "force" ]]; then
+    info "Force-reloading hscc_daemon..."
+    launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
+fi
+
 if true; then
-    # Substitute __HOME__ + __PYBIN__ (launchctl does not expand ~/$HOME, and the
-    # interpreter path must be a real absolute path), generating the real plist.
-    sed -e "s|__HOME__|${HOME}|g" -e "s|__PYBIN__|${PYBIN}|g" \
-        "${PLIST_TEMPLATE}" > "${LAUNCH_PLIST}"
+    render_plist "${PLIST_TEMPLATE}" > "${LAUNCH_PLIST}"
     info "Installed plist to ${LAUNCH_PLIST}"
 else
     info "Plist already up to date at ${LAUNCH_PLIST}"

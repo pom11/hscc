@@ -167,7 +167,12 @@ A board is silently skipped (pending dropped, watermark still advances) when:
 **A profile directory is not a pane.** A profile that exists but runs no Hermes
 REPL in tmux passes the existence rule and then fails every delivery, which is
 how the waker shipped one identical `no tmux pane …` audit line every 30 s
-forever (card `t_f1122b7a`). Two mechanisms cover it — a board whose orchestrator
+forever (card `t_f1122b7a`). A second way to reach the same symptom: the daemon
+must share the tmux server's socket environment — a launchd-started daemon
+needs `TMUX_TMPDIR` in its plist `EnvironmentVariables` (which
+`launchd-setup.sh` propagates from the installing shell, card `t_6b5a5c61`),
+and when it is missing every board fails `FAILED no tmux pane` while panes
+visibly exist. Two mechanisms cover it — a board whose orchestrator
 REPL runs under a differently named profile is reachable via
 [`orch_map`](#config), and a board whose deliveries keep failing is put on a
 **dead-pane backoff**, which is a skip of a different kind:
