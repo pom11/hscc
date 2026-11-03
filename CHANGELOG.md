@@ -11,6 +11,688 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.1] - 2026-11-02
+
+### Added
+- **The daemon now detects and heals HELD-STREAM PROXY STALLS (the
+  2026-11-02 incident) on its own.** Two stalls (12:27, 12:45) left LiteLLM
+  holding worker streams on :4000 while ALL four nodes sat idle answering
+  direct requests in <0.5 s (faulthandler proof: the frozen worker blocked in
+  openai `_streaming` `iter_bytes`); `check_proxy` could not see the shape —
+  its probes only ask whether the proxy accepts NEW work, which a stalled
+  proxy still does — and each recovery was a manual `proxy stop` → TERM/KILL
+  the lingering litellm → `proxy start`. New stream `proxy_stall`
+  (`daemon_ops.PERIODIC_INTERVALS["proxy_stall"] = 30` + a `CHECKS` row — the
+  cadence SOT, never a private sleep loop): a stall is declared only when ALL
+  THREE operator-specified conditions hold — (a) ≥1 ESTABLISHED socket on the
+  proxy port (local `lsof`, allowed: the proxy is THIS host's service), (b)
+  sum of vLLM `num_requests_running + num_requests_waiting` == 0 across every
+  serving endpoint from serving.json (via the shared
+  `throughput.fetch_node_metrics` — never ssh, never local `docker ps`)
+  sustained ≥120 s (4 consecutive 30 s ticks; streak in monotonic time), and
+  (c) a 5-token chat probe through :4000 still SUCCEEDS. Any UNKNOWN read
+  (lsof failure, unreachable node /metrics, probe transport failure) fails
+  OPEN with a named degradation and resets the streak; an intentional
+  autodown (`autodown.classify == expected_down`, the shared table — no
+  parallel rule) makes the tick inert. Remediation on a confirmed stall is
+  the operator's recipe THROUGH the existing proxy-control path
+  (`health._proxy_repair_orphan`: stop → cmdline-vetted TERM/KILL → plain
+  start → port-owner verification, every leg a bounded subprocess) under the
+  heal lease, then one re-probe; at most ONE restart per 10 min, cooldown
+  persisted in `proxy_stall.json` (epoch stamps, survive a daemon restart,
+  carried forward on every stamp so a healthy tick cannot wipe the window),
+  and a suppressed remediation logs + raises a `proxy.stall.suppressed`
+  event instead of restarting. `hscc verify` gains the stream for free via
+  the cadence SOT (staleness floor `max(600, 2*30+90)`).
+
+### Fixed
+- **A profile regeneration can no longer delete the top-level `onboarding`
+  block.** `hscc bootstrap --yes` at 12:24:45 regenerated every profile
+  `config.yaml` through `hscc-roles/generator.py:generate_profile`, and the
+  regeneration silently dropped `onboarding.seen.tool_progress_prompt` from 47
+  profiles: every worker's first tool call re-fired the one-time progress
+  prompt, hung at "preparing terminal", and dispatcher spawns stalled until the
+  operator restored 47 configs by hand and restarted the gateway (fleet healthy
+  12:41). Root cause: `_read_existing_config` read back ONLY `compression` and
+  `auxiliary` from the on-disk file, and `generate_profile` builds the config
+  dict from the role spec and writes it wholesale — so any top-level key the
+  generator does not emit itself (onboarding, and anything else Hermes owns)
+  could not survive a regeneration. Fix: `_read_existing_config` now returns
+  `(compression, auxiliary, onboarding)` and the config write site merges the
+  on-disk `onboarding` block through a new `_onboarding_block`, the same
+  operator-choices-survive polarity as `_compression_block` / `_memory_block`
+  — existing wins at EVERY depth, `_ONBOARDING_DEFAULTS` (empty today) fills
+  only keys that are missing, nothing existing is ever deleted or overwritten,
+  and the caller's dict is never mutated. A profile that has no onboarding
+  block still gets none, so fresh-profile output is byte-identical to before
+  (verified by the regen-is-idempotent tests). `compression` / `auxiliary`
+  merge behaviour is untouched — `auxiliary.goal_judge` being ADDED is a
+  separate, correct new-feature change. New in `hscc-roles/tests/
+  test_generator.py`: the incident regression (seed
+  `onboarding: {seen: {tool_progress_prompt: true}, extra_custom: 7}`,
+  regenerate, both subkeys survive verbatim), an additive-only companion (the
+  rest of the generated config is unchanged versus a profile with no
+  onboarding block), the fresh-profile case, plus unit coverage for the deep
+  merge, falsy-value handling (`False`/`0`/`None` are preserved, not treated
+  as absent), non-mutation and the `None`-means-write-nothing contract.
+  Mutation probes (backup + restore, tree verified unchanged after): M1 —
+  reverting the call site to pre-fix behaviour (`onboarding = None`) fails
+  ONLY `test_regen_preserves_onboarding_block` (1 failed, 60 passed); M2 —
+  aliasing the merge instead of deep-copying fails ONLY the non-mutation
+  unit. The suite is not merely counting tests.
+- **`scripts` leg red on this host — "sibling python3.12 failed the (A)-only
+  pass: E402" — was a mis-reported DEPENDENCY failure, and the cross-interpreter
+  gate was non-hermetic.** No linter ever ran and nothing ever reported `E402`.
+  The captured leg log (`run_tests_49013b1b.log`, `run_tests_t8438.log`) shows
+  the sibling dying on `ModuleNotFoundError: No module named 'yaml'` /
+  `'rich'`; the gate's `proc.stderr[-400:]` **character** cut landed inside the
+  `# noqa: E402` comment on a source line Python echoes into a traceback, so
+  the last 4 characters the assertion could show were `E402`. Three cards
+  (t_49013b1b, t_84381a8b, t_9e45955c) each read that as a lint/order mystery
+  and correctly failed to find one. Two real defects, both fixed:
+
+  *Non-hermetic sibling selection.* The (A)-only pass imports
+  `hscc_daemon.hscc` and `flightdeck.cli` at module level, which need `rich`,
+  `yaml`, `pygments`, `markdown_it` from the **running** interpreter's own
+  site-packages. `_sibling_interpreters()` checked only `os.path.exists`, so a
+  bare interpreter became a "sibling" and then failed the leg — for reasons
+  outside the checkout. Measured on this host: `/opt/homebrew/bin/python3.12`
+  was a red leg until its site-packages gained `rich`/`pyyaml`, and green from
+  that moment on with **zero** code change on our side. Selection now probes
+  each candidate by loading the audit module itself (same file, same
+  module-level imports; ~0.2 s per candidate measured) and drops a
+  non-importable one with a recorded reason in `SIBLING_DROPPED`, surfaced in
+  the skip message — so a host that has lost its siblings says so instead of
+  failing a stranger's diff or silently looking green.
+
+  *Truncation invented the error code.* Failure excerpts now come from
+  `_root_cause()`, which reads whole lines and returns the exception line, so a
+  `# noqa:` comment can never be blamed for a failure again.
+- **`hscc stats`' per-profile tool view was silently dead: every
+  `tool_events.jsonl` row said `"unknown"`.** `on_pre_tool_call` resolved the
+  profile with `kwargs.get("profile_name", "unknown")`, but hermes'
+  `pre_tool_call` fire site (`hermes_cli/plugins.py`,
+  `_get_pre_tool_call_directive_details`) sends `tool_name`, `args`, `task_id`,
+  `session_id`, `tool_call_id`, `turn_id`, `api_request_id`,
+  `middleware_trace` — and never `profile_name`. The sentinel was therefore the
+  ONLY value ever written by live traffic: 4291 of 5829 rows in
+  `~/.hscc/tool_events.jsonl` when measured, collapsing
+  `tool_calls_by_profile` into a single bucket. `on_pre_tool_call` now falls
+  back to `hermes_cli.profiles.get_active_profile_name()` when the kwarg is
+  absent, matching hermes' own `kanban_db._hook_profile_name()` contract:
+  an explicit non-blank kwarg wins, else the active profile, else `"unknown"`
+  only when hermes_cli is genuinely unresolvable. A blank/None kwarg counts as
+  not sent. The lookup uses the repo's established Hermes-import fence
+  (`profile_roster._hermes_gate` / `autodown`): import `hermes_cli`, on failure
+  retry once with `HERMES_AGENT_PATH` on `sys.path`, and return `None` on ANY
+  remaining failure — this runs on the hot path of every tool call in every
+  profile, so it must never raise into the tool.
+  Same file also stopped a second leak: `test_never_raises_on_io_error` patched
+  no log path, so each `run_tests.sh` run appended a `profile_name="test"` row
+  to the operator's live ledger (1538 such rows measured) — the same defect
+  class t_1497a937 fixed for the completion/blocked ledgers.
+- **check_dgx runs once per tick, not once per caller (proxy-stall c8-3).**
+
+  `check_dgx` is the daemon's most expensive probe: two SSH round-trips plus two
+  sparkrun status sweeps. During the 2026-10-31 proxy-stall episode it ran from
+  several in-process callers at once — its own 60 s stream thread **and**
+  `pipeline_watchdog` every 30 s (`dgx_ok = check_dgx_fn()`,
+  `lifecycle.py:523`) — which is why a stream declared at 60 s was measured
+  ticking at a ~24 s median, why the sweeps piled up on a box that was already
+  struggling, and why the same `FLEET VISIBILITY LOST` WARN was re-printed by
+  every caller (two WARNs 0.50 s apart: one tick cannot emit two).
+
+  Now only the dedicated `dgx` stream thread runs the check. `check_dgx`
+  publishes its verdict into a process-wide cache on every run, and the
+  watchdog's default DGX signal is `health.dgx_verdict()` — a read of that
+  published verdict, which performs no shell-out at all. The verdict the
+  watchdog consumes is byte-identical to what `check_dgx` returned and what
+  `~/.hscc/state/dgx.json` carries, so the restart/breaker semantics are
+  unchanged; the 30 s caller simply stops re-running a 40-second shell-out to
+  re-derive an answer it could read.
+
+  Two honest deviations, both deliberate:
+
+  - **UNKNOWN is kept a third state, not folded into a bool.** With the watchdog
+    no longer running the check, a tick can find *no verdict at all* — the 30 s
+    loop outruns the 60 s `dgx` thread's first run in the ~60 s after daemon
+    start. Folding that into `False` would count a startup tick as a full
+    pipeline failure (a vLLM stop/relaunch, and after three ticks — 90 s, before
+    `dgx` has likely ever run — a pipeline block plus a critical notification);
+    folding it into `True` would swallow a genuine gateway failure. So the signal
+    returns `None` for unknown and the cycle forks: gateway healthy ⇒ an honest
+    no-failure tick that stamps `dgx: None` rather than claiming a verdict it
+    never had; gateway failed ⇒ still a failure, still stamped `ok: False`. A
+    verdict older than `2 x cadence + 30 s` (derived from
+    `PERIODIC_INTERVALS["dgx"]`, the same shape verify's staleness rule uses) is
+    carried with a WARN naming the age rather than read as a failure — the audit
+    measured a legitimate 157.85 s sweep, and stream liveness already has an
+    owner that reports it instead of acting on it: verify's per-stream rule goes
+    RED on a dark `dgx` stream.
+  - **`trigger_engine` never ran the DGX check.** It accepted
+    `check_dgx_fn`/`check_gateway_fn` and never invoked them (0 call sites in
+    `trigger.py`), but `daemon_ops.py` wired `check_dgx` in, which is what led
+    the audit to count a 15 s caller. The dead `check_dgx_fn` wiring is removed
+    so no future reader — or caller — can multiply the sweep from that path.
+
+  `hscc check watchdog` is unchanged for the operator: the CLI seeds the verdict
+  by running the DGX check first (`cli._cli_watchdog_with_dgx`), because a CLI
+  process has no `dgx` stream thread to publish one. `hscc check all` is
+  strictly cheaper than before — the `dgx` and `watchdog` entries used to run two
+  full sweeps back to back and now share one.
+- **The pipeline breaker's alarm no longer claims a streak it never
+  measured.** The reason string on the 3-failure block read
+  `3 consecutive failures in 10min`, but the counter is a **time window**:
+  `cleanup_old_failures()` prunes purely by timestamp and the success path
+  resets `failed_count` without removing failure entries, so a healthy tick
+  between two faults does not reset the breaker. Probed on main: DGX fail,
+  fail, HEALTHY, fail -> blocked, and the critical desktop notification said
+  "3 consecutive" about a history in which one of the four ticks was
+  healthy. The card asked which of the two — behaviour or wording — is
+  wrong, and the behaviour wins: the function's own docstring ("block on 3
+  failures"), the 2.14.0 changelog ("the 3-failures-in-10min pipeline
+  breaker") and the `len(recent) >= 3` gate all describe a window, the latch
+  is a self-clearing backoff (so escalating a flapping-but-self-healed
+  pipeline costs one notification + 10 quiet minutes), and a true streak
+  would let a gateway that dies for 30 s every 40 s never escalate at all.
+  The string now reads `<N> failures within 10min`, with `N` the actual
+  in-window count instead of a hardcoded `3`, so the alarm text matches the
+  measurement that fired it. Both legs share the one line that builds it —
+  neither leg gained a reset rule.
+- **The `doctor` budget-hook row now says WHY it is red: "this home never
+  carried the payload" vs "the wiring was lost".** t_ba14f77f made a
+  profile-scoped home answer only from its own `<profile>/plugins`, so a home
+  whose tree has no `hscc-cluster` began reading red — the honest verdict
+  (Hermes discovers user plugins at `get_hermes_home()/plugins` only,
+  `hermes_cli/plugins_discovery.py:184`, so such a home loads no hscc plugin at
+  all: neither the `[budget]` hook nor the hscc tools). But it read red in the
+  same words as the failure the row exists to catch: when no candidate root
+  carried an importable `budget_watch.py`, the row printed
+  `budget_watch.py not importable … wiring cannot be verified` whether the
+  payload had lost its wiring or had never been deployed. Measured before this
+  change (real `doctor._budget_plugin_dirs` + `_load_budget_watch` +
+  `budget_watch.doctor_check`, `HOME` untouched): `~/.hermes`,
+  `profiles/backend-engineer` and `profiles/hscc-orch` green; every other
+  profile home red — and the red set is NOT other projects' noise. Against
+  `hermes kanban --board hscc assignees`, the red homes include ones the
+  dispatcher has really run cards in (ios-engineer done=139, worker done=41,
+  devops-engineer done=25, reviewer done=19, coder done=7):
+  `install_payload._named_profile_plugins_dirs` only writes into a profile that
+  ALREADY has a `plugins/` dir, so 47 of 49 profile dirs never received the
+  payload. The card's (a)-or-(b) question resolves to (b): a real deploy gap.
+  Decision: a never-deployed home stays RED — softening it to a warning or a
+  skip would hide the gap — but it now prints
+  `no hscc-cluster payload in this home: … never received the payload` with a
+  fix that says to deploy the payload (or to accept it, if the home is
+  deliberately not an HSCC one), while the lost-wiring class keeps its
+  "not importable … cannot be verified" / "does not register the budget hooks"
+  wording untouched. The card's two options collapse into one change: honest
+  red everywhere, readable at a glance. Note the row-level verdict differs from
+  the parent card's probe, which called `doctor_check` directly: through the
+  row, `_load_budget_watch` short-circuits first, so an absent payload printed
+  the *import* message, never doctor_check's "plugin dir not found under the
+  checked plugin roots". The branch is in the row (`_home_has_hscc_cluster_payload`,
+  a dir-exists test over the same resolved roots) because that is the only
+  caller that knows which of the two reds it holds; the wiring verdict itself
+  stays in `budget_watch.doctor_check` (verdict-with-feature, unchanged).
+- **A slow node no longer reads as "the fleet is gone", and one outage no longer
+  costs 35 alarms.** `FLEET VISIBILITY LOST` was asserted on the **first** failed
+  sparkrun sweep and re-printed by **every caller** of it, so the 2026-10-30
+  slow-node window logged 35 `LOST` lines across 35 minutes while `/health` stayed
+  `3/3 online` and Workers stayed `3/3` (`docs/audits/2026-10-31-proxy-stalls.md`
+  §7/§8 M2, proposal c8-2). Two flaws, one deliverable:
+  **(a) the verdict had no memory.** A sweep that succeeded 5 s ago is information,
+  and discarding it is what turned a blip into an alarm. Every **successful** sweep
+  now writes `~/.hscc/fleet_last_seen.json` — `{as_of, epoch, hosts, workload_count,
+  workloads}` — atomically (`os.replace` over a pid+thread-unique tmp, because
+  `check_dgx` can be entered by several callers per tick and a fixed tmp name lets
+  one writer's rename take another's tmp), and a **failed** sweep reads the age back
+  off that file and publishes `fleet_visibility: "stale (last good 4 m 10 s ago)"`.
+  The age comes from **disk, not an in-process clock**: that is what lets the verdict
+  survive a daemon restart *mid-outage*, where a failure counter would reset to zero
+  and a file already an hour old would look fresh (pinned by
+  `test_aged_snapshot_from_a_previous_process_is_loss_on_tick_one`). sparkrun already
+  leaves a running snapshot for the same reason (`orchestration/job_metadata.py:765-801`)
+  and we deliberately do **not** read it: that file is sparkrun's per-job state, and
+  inferring "no workloads" from a file we do not own is the fail-open this check
+  exists to close. No sparkrun change needed.
+  **(b) the alarm was per-call, not per-transition.** Loss is now a **threshold** —
+  `FLEET_LOST_AFTER_CONSECUTIVE_FAILURES` = 3 failed sweeps in a row (~3 min of the
+  60 s `dgx` tick), **or** the snapshot aged past `FLEET_STALE_LOST_AFTER_S` = 300 s,
+  **or** no snapshot has ever been written. The third case keeps the old fail-closed
+  verdict verbatim, so a daemon that has never seen the fleet can never be made green
+  by this change. The hard line prints **once per outage** (latched) and the next
+  good sweep prints the matching `FLEET VISIBILITY RECOVERED` — an alarm that can
+  fire but never clear is the same bug class as one that fires 35 times.
+  Kept deliberately unchanged: the stream stays **RED** while degraded (an
+  unverified workload list is not a healthy read, stale or not), so the trigger
+  engine's `state.dgx.degraded` pseudo-event, `check_dgx`'s `serving_ok` vs
+  `publish_ok` split, and the watchdog's auto-heal semantics are untouched. The two
+  published `fleet_visibility` strings `"ok"` and `"degraded"` keep their exact
+  values; staleness is one **additive** shape. Two kinds of "evidence" are rejected
+  as evidence: the status script's `if not hosts` early exit (`{"host_list": []}` —
+  stamping that fresh would let broken host resolution keep the fleet looking good
+  **forever**), and a snapshot that is unparsable or stamped in the future beyond a
+  60 s clock tolerance. Both fail closed. Env overrides
+  `HSCC_FLEET_STALE_LOST_AFTER_S` / `HSCC_FLEET_LOST_AFTER_CONSECUTIVE_FAILURES`.
+  The log-completion line also stops over-claiming: it said
+  `fleet visibility lost (sparkrun unreachable)` for *any* degraded tick, so the same
+  over-claim survived one line past the alarm itself; it now echoes the actual verdict.
+- **A gateway-only outage can now trip the pipeline breaker.** The watchdog
+  recorded a failure entry and recomputed `failed_count` on *every* failure tick,
+  and the gate that decides the block —
+  `recent = [f for f in block["failures"] if not f.get("dgx", True) or not f.get("gateway", True)]`
+  at `lifecycle.py:571` — counts the gateway leg explicitly. But the branch a
+  gateway-only tick takes (`dgx_ok` fine, `gw_ok` False, the `else` of
+  `if not dgx_ok and not intentional:`) was the only failure path that never
+  called `save_watchdog_block()`. The appended entry lived only in the in-memory
+  `block` and died with the tick, so every fresh tick reloaded an empty history
+  from disk and `len(recent)` could never reach 3. A persistent gateway outage
+  stamped `ok: False` every 30 s **forever** and could never latch
+  `PIPELINE BLOCKED` nor send the critical desktop notification — the one signal
+  an operator needs when the gateway stays down. The fix is the one missing call:
+  persist the block on that branch. Intent was settled before changing anything
+  (this card's DECIDE FIRST step) and the evidence says oversight, not policy —
+  `changelog.d/archive/2.14.0/t_1c545ebb.md` describes "the 3-failures-in-10min
+  pipeline breaker" that `check_gateway()` copies its verdict into, the `recent`
+  filter already counts the gateway leg, and the block message reads
+  `PIPELINE BLOCKED`, not `DGX BLOCKED`. Two properties are deliberately
+  preserved: the vLLM restart gate stays behind `not dgx_ok`, so a gateway fault
+  is fatal but never stops or relaunches the serving layer; and the
+  intentional-autodown branch still does **not** persist, because
+  `check_gateway()`'s `ok` is `job_ok and vllm_ok` and vLLM is stopped by design
+  there — counting it would alarm during a deliberate power-save, the exact
+  false-alarm class §5/C2 exists to kill. Probed to confirm the carve-out is
+  real and not incidental: the `len(recent) >= 3` block sits *above* the
+  intentional fork, and the three ticks stay at `gw_entries=0` /
+  `critical_notifs=0` only because that path never writes.
+- **`budget_watch`'s session leak-guard now evicts the least-recently-USED
+  session, not the oldest-created one.** `_states` was a plain `dict`, and plain
+  `dict` order is *insertion* order, so `pop(next(iter(_states)))` at
+  `_MAX_SESSIONS` dropped whichever worker had **registered first** — an idle,
+  stale session could be kept alive by a burst of freshly-created ones while a
+  session that was still working was thrown away. The cost is not just memory:
+  the evicted entry is rebuilt zeroed on its very next API call (`api_calls`
+  back to 0, `armed` back to `False`, the commit baseline `base_ct` re-captured),
+  so a long-running worker silently lost the `[budget]` note that is the whole
+  point of the module — a worker deep in an over-budget turn, which is precisely
+  the session that must not be forgotten. `_states` is now an `OrderedDict` and
+  `_state_for` does a `move_to_end` on every touch, so the front entry is
+  genuinely the LRU victim. The victim is still only a victim-selection rule for
+  a leak-guard; nothing else in the module depends on the order.
+- **The cold board scan is paid at most once per task, not once per eviction.**
+  `_workspace_for_task` resolved inside `_state_for`, so the scan it triggers in
+  a cold env (no `HERMES_KANBAN_WORKSPACE`, e.g. a session spawned before the
+  dispatcher exports it) walked **every board dir under every board root** —
+  and because the resolution lived in the *session state*, the leak-guard
+  evicting that state re-triggered the whole scan on the next call. The
+  resolution now lives in its own `OrderedDict` (`_workspace_cache`, same bound,
+  same LRU rule): a task's workspace never moves, so an eviction can no longer
+  re-pay it. A **miss** is retried after 60 s rather than cached forever, since
+  a worker dir can legitimately appear just after the first API call. Two cheap
+  exact-match lookups were added ahead of the scan (`HERMES_KANBAN_WORKSPACE`,
+  then `HERMES_KANBAN_BOARD`'s own `workspaces/<task>`) and the scan itself is
+  capped at `_MAX_BOARD_DIRS` (64) board dirs per root — now over **sorted**
+  names, because `os.listdir` order is arbitrary and an unsorted bound would
+  drop a resolvable task depending purely on how the directory happened to be
+  laid out. Fail-open at both hook entry points is untouched.
+- **A profile-scoped home no longer lets the ROOT plugin tree answer for it, so
+  the `doctor` budget-hook row cannot read green over the hook the running worker
+  actually lost.** `_budget_plugin_dirs()` contributed BOTH `<root>/profiles/<name>/plugins`
+  AND `<root>/plugins` for a profile-scoped home, and
+  `hscc-cluster/budget_watch.py::doctor_check` returns ok=True when ANY candidate
+  dir is wired. Measured at the base commit: with the profile copy's `register()`
+  stripped of the two budget hooks and the root copy intact, the row returned
+  `ok=True` quoting `<root>/.hermes/plugins` — the deploy a profile worker never
+  loads. Hermes' user-plugin scan is `get_hermes_home() / "plugins"`
+  (`hermes_cli/plugins_discovery.py:184`) and under a profile-scoped `HERMES_HOME`
+  that IS the profile dir, with **no fallback** to the root's; verified on this
+  host against the real CLI (`HERMES_PLUGINS_DEBUG=1` parses exactly one
+  `hscc-cluster` manifest, from the profile dir). The root copy
+  `install_payload.install_payload_profiles` writes therefore cannot be
+  authoritative for a profile, and letting it vote is what hid the dead hook —
+  the same failure class the row exists to catch (a lost `[budget]` note nobody
+  notices). Decision (strict, per the card): **the profile's own `plugins` dir is
+  the ONLY authoritative tree for a profile-scoped home**; only a root-scoped home
+  may be answered by `<root>/plugins`, which it still reaches via the ordinary
+  `home/plugins` branch. The installer's write-both symmetry is untouched — only
+  who may answer for a given home changed. The unwired verdict now also names the
+  dirs it inspected (the green verdict already named its winner; a red row that
+  names nothing cannot be acted on, and a profile-vs-root mixup is invisible
+  otherwise).
+- **`changelog_fragments.py check` can no longer pass a fragment that is
+  missing its `---` entry separator.** Entries in one file are separated by a
+  line containing exactly `---`; when an author omitted it, `parse_fragment`
+  had no boundary to find, so the FOLLOWING entry's `kind:` / `task:` /
+  `order:` headers were swallowed into the PREVIOUS entry's body. `check` never
+  looked inside a body — it validates only the `[Unreleased]` *block* shape
+  (pointer, or exactly what `sync` would write) — so it reported every fragment
+  "consistent" while `release` materialised the bookkeeping lines as prose:
+  18 leaked lines into `[2.15.0]` (5 files, repaired at `9ea52bc4` on PR #178).
+  `parse_fragment` now calls a new `validate_entry_body()` on every entry,
+  which refuses a body line that matches the tokens the parser itself consumes
+  (`_HEADER_RE` + `_ALLOWED_HEADERS` at column 0) or a stray `---`, naming the
+  file and quoting the README's vocabulary ("missing `---` separator between
+  entries"). It lives in the parse pass, reached through `load_entries`, so
+  `check`, `sync`, `render`, `list` and `release` all refuse the leak — the
+  release path that turned it into CHANGELOG prose included. Exit code is 2
+  ("malformed fragment") per the module's existing contract, not 1 (drift); the
+  assembler and sync/release semantics are untouched — gate, not formatter.
+  Prose that merely *mentions* the vocabulary stays legal (an indented
+  ``kind:`` or an unknown word before a colon), and the pass already bites on
+  the tree it landed on: `changelog.d/t_614f4cac.md` (from PR #180) had the same
+  missing separator and is repaired here with a separator-only insertion.
+- **The `doctor` budget-hook row checked the OPERATOR's plugin tree even when
+  told which home to check — so a sandbox or `--home` bootstrap could read
+  all-green over a broken deploy.** `_budget_plugin_dirs()` appended
+  `~/.hermes/plugins` **unconditionally**, after the roots derived from the
+  `hermes_home` it was handed, so the candidate list was always
+  `[<named home>/plugins, ~/.hermes/plugins]`. Both downstream consumers then
+  rescued the named tree with the host's: `_load_budget_watch` takes the first
+  root whose `budget_watch.py` imports (a broken or missing module in the named
+  tree fell through to the live one) and
+  `hscc-cluster/budget_watch.py::doctor_check` calls ANY wired candidate green
+  (an unwired named tree was rescued by a wired live one). The row answered
+  `wired in ~/.hermes/plugins` about a tree nobody asked about — the same
+  HERMES_HOME/plugin-dir resolution-leak class as the `importlib.reload()`
+  HOOKS_DIR binding and t_444b1bb6's profile fallback, and the reason three
+  `test_doctor_budget_hook` cases failed on any host whose own deploy is wired.
+  The default root is now contributed **only when no home was named** (the human
+  CLI path, which targets the operator's own deploy); a named home resolves to
+  its own roots and nothing else. That tail was redundant in every legitimate
+  case anyway — `home == ~/.hermes` dedupes onto it, and a profile-scoped home
+  already contributes the root's dir through the `profiles` rule — so it bought
+  nothing but the leak. Same fence as the waker / cron-watchers / supervision
+  rows, and now honoured by the row that documented it.
+- **`task_completions.jsonl` / `blocked_tasks.jsonl` stop recording
+  unattributable rows, and the test suite stops writing to them.** 797 of 851
+  completion rows (and 797 of 894 blocked rows) had `task_id: null`, so the
+  fleet check could not join a single one back to a card. Root cause was not a
+  hook payload drift — hermes' `kanban_task_completed` kwargs (`task_id`,
+  `board`, `assignee`, `run_id`, `summary`, `telemetry_schema_version`) match
+  the handler signature, and all 52 real rows in the ledger do carry a task id.
+  Two `*_noop_without_context` tests in `hscc-cluster/tests/test_lifecycle_hooks.py`
+  called the handlers with no args and no log-path patch, appending two
+  all-null rows to the operator's live ledgers on every `scripts/run_tests.sh`
+  run (73 rows on 2026-11-01 alone, against 1 real completion —
+  `hscc_daemon/stats.py` counts any row with a parseable timestamp, inflating
+  `completions.total` by 99% over 7 days). Fix: an autouse
+  `_pin_lifecycle_logs_to_tmp` fixture in `hscc-cluster/tests/conftest.py` pins
+  `_COMPLETION_LOG`, `_BLOCKED_LOG` and `_TOOL_EVENT_LOG` to `tmp_path` for
+  every test in the suite (same doctrine as `_pin_serving_json_to_tmp`, so a
+  test can no longer reach a live ledger by forgetting to patch); both handlers
+  now normalise identity fields through `workflow._identity`, so a genuinely
+  absent `task_id` is recorded as `"unknown"` and never a silent null; the
+  auto-unblock scan skips `"unknown"` rows instead of chasing them as card ids.
+  New payload-shape tests drive the handler through hermes' own
+  `PluginDispatchMixin._invoke_hook_callback` binder, so an upstream kwarg drift
+  fails in pytest instead of in the ledger. Verified hermetically: running the
+  whole `hscc-cluster` suite against the fixed tree (1059 passed, 3 skipped)
+  leaves `~/.hscc/task_completions.jsonl` at exactly the same row count — 857
+  before, 857 after — so this suite no longer writes a single row to the
+  operator's ledgers. Null rows did still appear during a later full
+  `run_tests.sh`, from a SIBLING card's concurrent suite leg still running the
+  unfixed code (the deployed `~/.hermes/plugins/hscc-cluster/workflow.py` also
+  still assigns the raw `task_id`); that stops when this lands and the runtime
+  copy is redeployed.
+
+### Verified
+- `scripts/tests/test_cli_help_surface.py`: 19 -> **22** cases. New pins —
+  `test_sibling_cause_extraction_never_blames_a_lint_code` (asserts BOTH that
+  the old character cut contains the literal `E402` and that the new extractor
+  returns `ModuleNotFoundError` for the same bytes — the phantom code is
+  reproducible, the fix is not vacuous);
+  `test_sibling_gate_uses_the_interpreter_that_can_import_the_audit` (builds a
+  real **copy** venv with no third-party deps and asserts the candidate is
+  dropped AND the drop carries a reason; a symlinked venv resolves back to the
+  leg's own interpreter and is deduped before the probe, which the pin states
+  explicitly so it cannot regress into a no-op);
+  `test_sibling_gate_still_runs_a_real_sibling` (anti-vacuity: every selected
+  sibling must actually execute the audit's `--a-table` contract end-to-end and
+  answer with parseable JSON — restricted to a phantom surface so it costs
+  seconds, not a full walk — and a capable interpreter on PATH must yield at
+  least one selected sibling).
+- `bash scripts/run_tests.sh` `scripts` leg: **314 passed, 2 skipped** (was 311
+  at base on this host; base was red at `1 failed, 310 passed` whenever the
+  sibling lacked its deps). Standalone file: 22 passed, 1 skipped (the
+  pre-existing `HSCC_CLI_HELP_WRITE_ARTIFACT` skip).
+- Mutation-proven in a scratch clone, restored after each probe: neuter the
+  runnable probe -> drop pin fails; revert `_root_cause` to the raw `[-400:]`
+  cut -> cause-extraction pin fails; make the selector return `[]` ->
+  anti-vacuity pin fails.
+- `hscc-cluster/tests/test_lifecycle_hooks.py`: **32 passed** (was 20), with
+  the live `~/.hscc/tool_events.jsonl` at 5833 rows before and after the leg.
+  Three contract pins per the card: (a) kwarg present wins even when the
+  fallback resolves, (b) kwarg absent + resolvable hermes_cli -> active
+  profile name, (c) both unavailable -> `"unknown"`. Plus the fence itself
+  (unimportable `hermes_cli`, a lookup that raises, a blank answer) and the
+  fail-open guarantee when lookup AND io both fail.
+- `test_binder_forwards_no_profile_name` / `test_real_payload_row_carries_a_real_profile`
+  drive the handler through hermes' own `PluginDispatchMixin._invoke_hook_callback`
+  with the fire site's exact payload (#179 precedent): the row must carry a real
+  profile name, and the test fails if hermes ever starts withholding fields or
+  begins sending `profile_name` itself.
+- Full `scripts/run_tests.sh` ALL GREEN; `scripts/address_guard.py` rc 0.
+- `hscc_daemon/tests/test_watchdog_breaker_window_not_streak_49013b1b.py`:
+  9 new cases — the reworded reason on the block file, the critical
+  notification body and the `BLOCKING pipeline` log line (the prefix
+  `hscc-api/routes_history.py` classifies on), the count in the string
+  tracking the live window (expired entries excluded, 4 shown as 4), the
+  window semantics themselves (interleaved healthy tick still trips; two
+  split faults do NOT; faults beyond 10 min do NOT), a cross-leg parity pin
+  showing one shared history feeds both legs, and a `check_daemon_streams`
+  negative control that the reworded block still reads RED. Non-vacuous by
+  mutation: reverting the string fails exactly the 4 wording cases and
+  leaves the 5 semantics pins green. `hscc_daemon`: 3039 passed
+  (`pytest tests/ -p no:randomly`), and `scripts/run_tests.sh` ALL GREEN
+  with `scripts/address_guard.py` rc 0.
+- **PR #187 integration measured, not assumed.** Merging this branch with
+  `wt/t_b0811ce0` in a throwaway worktree fails EXACTLY ONE assertion —
+  #187's own string pin (`test_three_gateway_only_failures_trip_the_breaker`
+  asserts the old `"3 consecutive failures in 10min"`), 23 of 24 green. Its
+  cross-leg parity control
+  (`test_dgx_leg_shows_the_same_windowed_behaviour_as_the_gateway_leg`) and
+  its healthy-tick pin both pass untouched, which is the card's parity
+  requirement met without either suite weakening anything. Whoever lands
+  these two must update that one string assertion to the window wording —
+  deliberately, as the card asks.
+- **Full-suite state on this host.** `hscc_daemon`, the suite this change
+  touches: 3039 passed. `scripts/run_tests.sh` exits 1 here for two reasons
+  NOT from this diff: `hscc-bootstrap/tests/test_doctor_budget_hook.py`
+  fails 3 cases identically on untouched `origin/main` @ `9bfe6779` in a
+  clean worktree (the doctor resolves the budget-hook row against the live
+  `~/.hermes/plugins` deploy dir), and
+  `scripts/tests/test_cli_help_surface.py::test_a_table_identical_under_sibling_interpreters`
+  saw an `E402` from a homebrew `python3.12` sibling subprocess while the
+  same file passes standalone on both main and this branch (19 passed each).
+  Neither file is touched by this diff.
+- Chosen semantics pinned by named tests in
+  `hscc-bootstrap/tests/test_doctor_budget_hook.py`:
+  `test_home_that_never_carried_the_payload_reads_red_naming_the_absent_payload`
+  (never-deployed home = red, non-fatal, detail names the absent payload and
+  the searched root; a WIRED live root deploy is seeded as the trap so the
+  strict rule from t_ba14f77f holds on this branch too),
+  `test_never_deployed_home_is_distinguishable_from_a_lost_wiring` (the two reds
+  side by side with disjoint wording — any change that re-converges them
+  fails), and `test_payload_dir_presence_is_what_separates_the_two_red_classes`
+  (the seam itself: dir-exists over resolved roots, an unrelated plugin dir
+  does not count, any-root votes). Mutation probes, each reverted and
+  re-verified against the saved original: M1 `_home_has_hscc_cluster_payload`
+  always True -> exactly those 3 failed (18 passed); M2 class-A detail reverted
+  to the import message -> the 2 row tests failed; M3 class-A softened to
+  ok=True -> the same 2 failed. Both t_ba14f77f pins
+  (`test_profile_scoped_home_contributes_only_the_profile_plugins_dir`,
+  `test_wired_root_deploy_does_not_rescue_an_unwired_profile_deploy`) re-run
+  green. `test_doctor_budget_hook.py` 18 -> **21** passed; `hscc-bootstrap` and
+  `hscc-cluster` legs of `scripts/run_tests.sh` green;
+  `scripts/changelog_fragments.py` check and `scripts/address_guard.py` rc 0.
+- `hscc_daemon/tests/test_sparkrun_resolution.py`: 35 → **54** cases. New
+  `TestFleetVisibilityLastKnownGood` decides the card's acceptance by the code path,
+  not by a constant: a good sweep then one dead sweep publishes
+  `fleet_visibility` starting `stale (last good ` with the **same age** in the RED
+  stream message, `ok=False`, and **no `LOST` line at all**; the WARN names the
+  audit's own example age (`250 s` → `"4 m 10 s ago"`). Also pinned: the snapshot's
+  content and both stamps; that the **legacy text-parse leg stamps freshness too**
+  (a working `sparkrun status` is an observation); that the `host_list`-only early
+  exit writes **no** snapshot; no-snapshot / unparsable / future-stamped all still
+  assert loss; the streak needs **3** failures and one success resets it (an
+  intermittent sparkrun is not an outage); the age rule fires independently of the
+  streak; **35 ticks of one outage log exactly one `LOST`** and 2 `STALE` lines;
+  recovery logs exactly one `RECOVERED` and a stale-only outage logs none; the
+  published verdict strings are stable for consumers; and 40 concurrent sweeps leave
+  a file that always parses with **no leftover tmp files**.
+  Hermetic by construction: `conftest.py` redirects `FLEET_LAST_SEEN_FILE` into the
+  per-test `~/.hscc` (the audit that pins `_WORKER_RELATCH_FILE` — otherwise any test
+  reaching the sweep litters the operator's real home *and* could read a live snapshot
+  instead of the honest "never observed" verdict) and rebinds the failure tally + WARN
+  latch per test, so the suite cannot pass or fail on test order.
+- `bash scripts/run_tests.sh` — one pytest process per plugin dir, all green;
+  `python3 scripts/address_guard.py --tracked` clean;
+  `python3 scripts/changelog_fragments.py check` clean.
+- `hscc_daemon/tests/test_watchdog_gateway_only_breaker_b0811ce0.py`: **15**
+  cases, written RED against main first (6 failed / 5 passed on the
+  pre-fix baseline; 15 green after the fix). Covers the persistence itself,
+  accumulation to 2 without blocking, the 3-tick trip plus its exactly-one
+  critical notification and `DGX=OK GW=FAIL` reason, the no-restart rule that
+  must survive the fix, the 10-minute prune and post-recovery reset — both
+  previously **unfalsifiable** because the history was always empty — the
+  intentional-autodown and waking-window carve-outs that must NOT accumulate,
+  and DGX-path negative controls.
+- **One premise in the first draft was wrong and was corrected with evidence,
+  not by weakening an assertion.** It asserted a healthy tick clears the
+  failure streak. A probe against the path this card does *not* touch — DGX
+  fail, fail, HEALTHY, fail — blocks anyway: `cleanup_old_failures()` prunes by
+  **time only**, and the success path resets `failed_count` without removing
+  entries. So the breaker is a 10-minute **window**, not a streak, on *either*
+  leg. The test now pins the real shared semantics plus an explicit DGX-parity
+  control so the two legs cannot drift apart. The follow-up question raised
+  here — should the reason claim a *streak*? — was settled by PR #192: the
+  behaviour stands, the claim went; the reason now reads
+  `<N> failures within 10min`, and this suite asserts that prefix.
+- `bash scripts/run_tests.sh` — one pytest process per plugin dir, all green;
+  `python3 scripts/address_guard.py --tracked` clean;
+  `python3 scripts/changelog_fragments.py check` clean.
+- `hscc-cluster/tests/test_budget_watch.py`: 19 → **27** cases. New
+  `test_eviction_victim_is_least_recently_used_not_oldest` puts the oldest
+  session at the front, touches it, then forces an eviction and asserts the
+  *second* entry died — plus a continuity test that churns 10 fresh sessions
+  around one busy session and asserts its `api_calls` survived the whole run
+  (checking only "the session is still present" is **not** enough: eviction
+  followed by re-creation looks identical, and that is exactly how the original
+  bug hid). Four more pin the memo through the module's own `_listdir` seam —
+  scan once per task across 20 touches, **no re-scan after a forced state
+  eviction**, a miss is not re-scanned per call yet recovers a workspace
+  created later, and the scan stops at `_MAX_BOARD_DIRS` (with the match placed
+  *past* the bound so an unbounded walk fails the test, and a second case inside
+  the bound so the cap cannot pass by simply never matching).
+- Mutation-probed, not just green: each new test was re-run against the
+  reverted behaviour in a scratch copy and went RED — insertion-order eviction
+  fails both eviction tests, dropping the memo fails all four workspace tests,
+  removing the cap fails the bound test. The restored file is 27/27 green.
+- `bash scripts/run_tests.sh` — one pytest process per plugin dir, all green;
+  `python3 scripts/address_guard.py --tracked` rc 0;
+  `python3 scripts/changelog_fragments.py check` clean.
+- Canary `test_wired_root_deploy_does_not_rescue_an_unwired_profile_deploy`
+  seeds the profile copy unwired + the root copy wired and asserts red naming the
+  profile dir: **measured RED at the base commit** (`ok=True`, detail quoting the
+  root's plugins dir) and green after the fix. Resolution tests, per the chosen
+  semantics:
+  `test_profile_scoped_home_contributes_only_the_profile_plugins_dir`
+  (`_budget_plugin_dirs(<root>/profiles/<name>) == [<profile>/plugins]` exactly —
+  replaces `test_profile_scoped_home_also_contributes_the_root_plugins`, which
+  pinned the rescue) and
+  `test_root_scoped_home_still_checks_the_root_plugins_dir` (the root-scoped home
+  is not blinded). Mutation probes, each reverted after: restore the old
+  `profiles` rule -> exactly those 2 tests fail (16 passed); drop the dir list
+  from the unwired detail -> only the canary fails (17 passed).
+  `test_doctor_budget_hook.py` 16 -> 18 passed; `hscc-cluster/tests/test_budget_watch.py`
+  27 passed; `scripts/run_tests.sh` hscc-bootstrap and hscc-cluster legs green;
+  `scripts/changelog_fragments.py` check and `scripts/address_guard.py` rc 0.
+- `scripts/tests/test_changelog_fragments.py`: 26 → **32** cases. One fixture
+  pair, byte-identical except the separator line: `NO_SEPARATOR` must fail
+  (parser raises naming the file + `check` exits 2 + `release` exits 2 and
+  writes no archive) and `WITH_SEPARATOR` must pass the same assertions, so the
+  gate cannot go green by rejecting everything. Mutation-probed: replacing the
+  `validate_entry_body` call with `pass` fails exactly those 3 tests. Also
+  pinned: a repo-tree pass over the pending `changelog.d/` fragments (fails if
+  a future fragment reintroduces the class), and the pre-existing
+  `test_committed_repo_state_is_consistent` now actually exercises the body pass.
+- `bash scripts/run_tests.sh` — one pytest process per dir, all 12 legs green;
+  `python3 scripts/changelog_fragments.py check` rc 0 (3 entries),
+  `python3 scripts/address_guard.py --tracked` rc 0, `readme_lint.py` 0 findings.
+- `hscc-bootstrap/tests/test_doctor_budget_hook.py`: **9 -> 16 cases**, green on
+  a host whose live `~/.hermes/plugins` deploy IS wired. Three of the old cases
+  (`test_missing_register_hook_lines_are_red_naming_the_fix`,
+  `test_import_failure_is_non_fatal_degraded`,
+  `test_broken_module_is_non_fatal_degraded`) failed at main @ `e1534088` here
+  and passed on a host with an unwired deploy — host-state-dependent, which was
+  itself the bug. They now seed a WIRED deploy at the live shape
+  (`_live_deploy`) alongside the fixture they name, so the leak cannot rescue
+  the verdict regardless of what the dispatching host has deployed; pinning
+  `HOME` + clearing `PLUGINS` (`_isolate`) makes the whole file hermetic.
+- Two-directional hermeticity pins: `test_named_home_wins_over_a_wired_live_deploy`
+  (live wired + named home unwired -> RED, and the live dir must not appear in
+  the detail) and `test_wired_named_home_is_green_while_the_live_deploy_is_unwired`
+  (mirror image, so the fix cannot pass by always preferring the host);
+  `test_no_named_home_still_falls_back_to_the_default_root` keeps the human CLI
+  path pointed at `~/.hermes/plugins`.
+- `test_plugin_dirs_honour_the_plugins_env_then_the_home` asserted the leak
+  (`dirs[-1] == ~/.hermes/plugins` while a home was named) and contradicted its
+  own docstring; it now pins exactly the two roots the named home owns.
+  `test_plugin_dirs_add_the_default_root_only_without_a_named_home` covers the
+  no-home and empty-home CLI shapes.
+- Mutation probe: restoring `_budget_plugin_dirs` from HEAD turns **5** of these
+  cases red again, and the restored file is byte-identical to the committed one
+  afterwards — the new cases fail on the defect, not on the environment.
+- Non-pytest probe of the real CLI (`_home_from_argv` -> `run_doctor`): this
+  worker's profile home -> green naming the profile plugins dir (the root's
+  plugins dir still contributed by the `profiles` rule); no-home -> green naming
+  `~/.hermes/plugins`; `--home` at a throwaway tree -> honest `not importable`,
+  no longer rescued by the live deploy.
+- `scripts/run_tests.sh hscc-bootstrap` green; `scripts/address_guard.py` rc 0.
+- `hscc_daemon/tests/test_proxy_stall.py`: 0 -> **24** cases, green. Fakes
+  only through injected seams (socket-count / node-metrics / probe / restart
+  / intentional / state / event writers — the `pipeline_watchdog`
+  `check_dgx_fn` precedent); the run's sparkrun fence confirms zero live
+  sparkrun execs. Covers the card's full matrix: confirmed stall restarts
+  exactly once with the cooldown written and events recorded; fleet-busy,
+  probe-negative and socket-idle ticks never restart; UNKNOWN reads fail
+  open named; cooldown suppresses a second stall inside 10 min AND a failed
+  repair still spends the window; intentional autodown inert before any
+  probe runs; `stall_since` resets when any condition clears. Mutation
+  proofs: replacing each of `_cond_a`/`_cond_b`/`_cond_c`/`_cond_cooldown`
+  fails exactly its own scenario (a-removal → socket-idle restarts; b →
+  fleet-busy restarts; c → probe-negative restarts; cooldown → bounce-kill
+  at t=270) and the other three guards still hold in every mutant.
+
+### Docs
+- **Proxy-stall audit: corrected the `check_dgx` caller count**
+  (`docs/audits/2026-10-31-proxy-stalls.md` c4/c6/c8-3, new c9). c6 claimed
+  "`check_dgx` is invoked from **four** places" and c4 credited the ~24 s cadence
+  to **three** callers; the real count at the measured base is **two** — the 60 s
+  `dgx` stream thread and `pipeline_watchdog` at 30 s (one periodic caller on main
+  since PR #182). `trigger_engine` was never one: it accepted
+  `check_dgx_fn`/`check_gateway_fn` and invoked neither
+  (`grep -c 'check_dgx_fn()' hscc_daemon/trigger.py` = 0, at the audit's own base
+  `928e1aa3` as well as today), answering its DGX/gateway/NAS signals from the
+  stream **state files** via `evaluate_trigger` (`trigger.py:129-146`). What made
+  the misreading easy was wiring that looked like a call site —
+  `check_dgx_fn=check_dgx` passed into the signature by `run_trigger_loop` — so c9
+  records the lesson ("wiring is not a call site") alongside the correction. The
+  audit's measured numbers are untouched and are not discredited by this: the
+  ~24 s median and the two-WARNs-0.50 s-apart overlap come from tick timestamps and
+  WARN counts, not from the caller count, and two callers explain them as well as
+  four did. c9 also flags — without rewriting — that c6's "~112 extra
+  checks/day" does not reproduce as a per-day figure (measured excess over one
+  60 s stream is ~2,360/day, ~98-101/hour, so 112 reads as a per-hour magnitude
+  with a per-day label); the pile-up it describes is real and larger than stated.
+  c8-3's own proposal was also wrong in
+  the same direction — it told the next reader to have `trigger_engine` read the
+  state file, which is what it always did, and to have `pipeline_watchdog` read it
+  too, which would have been a semantics change (`check_dgx` writes
+  `ok = publish_ok` but *returns* `serving_ok`, `health.py:365-367` at the audit's
+  base / `:512-514` today; the two diverge precisely during a FLEET VISIBILITY
+  LOST episode). No code change.
 ## [2.15.0] - 2026-11-02
 
 ### Added
