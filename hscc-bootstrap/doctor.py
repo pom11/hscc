@@ -1558,9 +1558,22 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
 
     ``budget_watch.doctor_check`` takes ROOTS and joins ``hscc-cluster`` itself,
     so these are dirs that CONTAIN plugin dirs (``~/.hermes/plugins``), not the
-    plugin dir. A PROFILE-scoped home (``<root>/profiles/<name>`` — the normal
-    worker mode) contributes its own ``plugins`` dir AND the root's, matching
-    ``install_payload.install_payload_profiles``, which writes both.
+    plugin dir.
+
+    A home contributes ONLY ITS OWN ``plugins`` dir. A PROFILE-scoped home
+    (``<root>/profiles/<name>`` — the normal worker mode) therefore contributes
+    ``<profile>/plugins`` and NOT the root's, which is the authority question
+    t_ba14f77f asks: Hermes' user-plugin scan is
+    ``get_hermes_home() / "plugins"`` (hermes_cli/plugins_discovery.py:184) and
+    under a profile-scoped ``HERMES_HOME`` that IS the profile dir, with no
+    fallback to the root. So the root copy ``install_payload_profiles`` also
+    writes is never loaded by that worker — and while it was a candidate here,
+    ``doctor_check``'s any-wired-is-green let a wired ROOT rescue an unwired
+    PROFILE deploy, i.e. the row read green over the very hook the running
+    worker had lost. The installer's write-both symmetry is unchanged (the root
+    copy is authoritative for the root-scoped home); only who may ANSWER for a
+    given home changed. The root-scoped home still checks the root dir: it is
+    ``<root>/plugins`` reached as ``home/plugins`` by the ordinary branch.
     """
     dirs: List[str] = []
 
@@ -1575,10 +1588,22 @@ def _budget_plugin_dirs(hermes_home=None) -> list:
     home = os.path.expanduser(str(hermes_home)) if hermes_home else ""
     if home:
         _push(os.path.join(home, "plugins"))
-        parent = os.path.dirname(home)
-        if parent and os.path.basename(parent) == "profiles":
-            _push(os.path.join(os.path.dirname(parent), "plugins"))
-    _push(os.path.join(os.path.expanduser("~"), ".hermes", "plugins"))
+        # No default tail when the caller NAMED a home. Appending
+        # ``~/.hermes/plugins`` unconditionally — the shape this shipped with —
+        # made the row answer about the OPERATOR's deploy: both
+        # ``_load_budget_watch`` (first importable candidate wins) and
+        # ``budget_watch.doctor_check`` (any wired candidate is green) could
+        # rescue an unwired/broken named tree with the live one, so a sandbox or
+        # ``--home`` bootstrap read all-green over the very deploy it was asked
+        # to verify (t_d7f2ccd1; measured: three test_doctor_budget_hook cases
+        # failing on any host whose own deploy is wired). It also no longer has
+        # a legitimate job: home == ``~/.hermes`` dedupes onto it, and the
+        # profile case above deliberately does NOT want the root's answer
+        # (t_ba14f77f).
+    else:
+        # Human CLI run with no ``--home``: the operator's own deploy is the
+        # target, so the default root stays.
+        _push(os.path.join(os.path.expanduser("~"), ".hermes", "plugins"))
     return dirs
 
 
@@ -1617,6 +1642,29 @@ def _load_budget_watch(hermes_home=None):
         except Exception:
             continue
     return None
+
+
+def _home_has_hscc_cluster_payload(plugin_dirs) -> bool:
+    """True when ANY resolved plugin root carries an ``hscc-cluster`` dir.
+
+    Separates the two RED classes the row can report (t_5720ef53):
+
+      A. the home has no ``hscc-cluster`` payload at all — it was never
+         deployed here, so there is no wiring to have lost;
+      B. the payload is here but the wiring is gone or the module will not
+         load — the failure class this row was written to catch.
+
+    Deliberately a dir-exists test, NOT an import or a wiring test: class A has
+    to be recognised by a caller that has already failed to import the module,
+    and "does the dir exist at all" is precisely the question the two classes
+    answer differently. ``budget_watch.doctor_check`` keeps the verdict on the
+    wiring itself (verdict-with-feature); this only says whether it had
+    anything to judge.
+    """
+    for root in plugin_dirs or ():
+        if os.path.isdir(os.path.join(str(root), "hscc-cluster")):
+            return True
+    return False
 
 
 #: Fallback for the row's name when the module cannot be imported — same trick
@@ -1664,18 +1712,52 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
     elif "pytest" in sys.modules:
         res = _refused_budget_hook_check()
     else:
+        roots = _budget_plugin_dirs(hermes_home)
         bw = _load_budget_watch(hermes_home)
         if bw is None:
-            roots = ", ".join(_budget_plugin_dirs(hermes_home)[:3]) or \
-                "no plugin roots resolved"
+            if not _home_has_hscc_cluster_payload(roots):
+                # CLASS A — this home never carried the payload. Red, because
+                # it is the true verdict: Hermes discovers user plugins at
+                # ``get_hermes_home()/plugins`` only
+                # (``hermes_cli/plugins_discovery.py:184``), so a home whose own
+                # tree has no ``hscc-cluster`` loads NO hscc plugin — not just
+                # the budget hook, no hscc tools either. Measured on this host
+                # (t_5720ef53): every profile home except the two that are
+                # wired reads this way, and the red set includes homes the
+                # kanban dispatcher has really run cards in (ios-engineer,
+                # worker, devops-engineer, reviewer, coder), so "never
+                # deployed" is not a synonym for "not an HSCC home". It stays
+                # red — a warning or a skip would hide the gap — but the detail
+                # says the payload is ABSENT rather than "unverifiable",
+                # because nothing here is broken-but-hidden: there is no wiring
+                # to have lost, so the honest fix is to deploy (or to say on
+                # purpose that this home is not HSCC's).
+                # ``install_payload._named_profile_plugins_dirs`` only writes
+                # into a profile that ALREADY has a ``plugins/`` dir, which is
+                # how a home ends up in this class.
+                searched = ", ".join(str(r) for r in roots[:3]) or \
+                    "no plugin roots resolved"
+                return Check(
+                    _BUDGET_HOOK_CHECK_NAME, False,
+                    detail=f"no hscc-cluster payload in this home: {searched} "
+                           "has no hscc-cluster dir, so this home never "
+                           "received the payload (it loads no hscc plugin at "
+                           "all, not only no budget hook)",
+                    fix="Deploy the payload here (re-run hscc-bootstrap; note "
+                        "install_payload only writes into a profile that "
+                        "already has a plugins/ dir) — or, if this home is "
+                        "deliberately not an HSCC one, that is expected and "
+                        "no fix is needed here.",
+                    fatal=False)
+            searched = ", ".join(roots[:3]) or "no plugin roots resolved"
             return Check(_BUDGET_HOOK_CHECK_NAME, False,
                          detail="hscc-cluster/budget_watch.py not importable "
-                                f"(looked in: {roots}) — the budget hook's "
+                                f"(looked in: {searched}) — the budget hook's "
                                 "wiring cannot be verified",
                          fix="Deploy the hscc-cluster plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = bw.doctor_check(plugins_dirs=_budget_plugin_dirs(hermes_home))
+        res = bw.doctor_check(plugins_dirs=roots)
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 

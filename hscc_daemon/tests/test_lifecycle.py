@@ -538,7 +538,7 @@ class TestPipelineWatchdog:
         monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
         # BLOCKED with NO `intentional` key, recent blocked_at ⇒ backoff branch.
         lifecycle.save_watchdog_block({
-            "blocked": True, "reason": "3 consecutive failures in 10min",
+            "blocked": True, "reason": "3 failures within 10min",
             "blocked_at": self._recent_ts(minutes_ago=1),
             "failures": [], "auto_restart_count": 0,
         })

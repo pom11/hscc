@@ -49,6 +49,7 @@ import os
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 # ----------------------------------------------------------------- thresholds
@@ -65,17 +66,59 @@ NOTE_TEMPLATE = ("[budget] context {ctx}K / {calls} calls since last commit — 
                  "DONE/LEFT handoff.")
 
 #: Bound on per-session state (one entry per live worker session; eviction is
-#: a leak-guard, not a feature).
+#: a leak-guard, not a feature). The victim is the LEAST RECENTLY TOUCHED
+#: entry — see ``_state_for`` — not the oldest created one.
 _MAX_SESSIONS = 128
 
+#: Bound on the fallback board scan in ``_resolve_workspace`` (leak-guard: a
+#: hermes home with an unusual number of board dirs is never walked in full).
+_MAX_BOARD_DIRS = 64
+
+#: A workspace resolution MISS is retried no more often than this (seconds), so
+#: the cold-path scan cannot run per tool result while still recovering a
+#: workspace that is created after the first touch.
+_WORKSPACE_MISS_RETRY_S = 60.0
+
 _lock = threading.Lock()
-_states: Dict[str, Dict[str, Any]] = {}
+
+#: OrderedDict, not dict: plain dict order is INSERTION order, so evicting the
+#: front entry would drop the session that was created first — an idle, stale
+#: one — while a session churning new state survived. ``_state_for`` does a
+#: move-on-touch (``move_to_end``) so the front entry is genuinely the
+#: least-recently-used one. LRU here is only a victim-selection rule for the
+#: leak-guard; nothing else in the module depends on the order.
+_states: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+#: task_id -> (workspace, resolved_at_monotonic). Same LRU rule and same bound
+#: as ``_states``, but a SEPARATE map: the workspace of a task never moves, so
+#: the (potentially expensive) board scan must not be re-paid just because the
+#: session's *state* was evicted by the leak-guard. A non-empty resolution is
+#: final; an empty one is retried after _WORKSPACE_MISS_RETRY_S.
+_workspace_cache: "OrderedDict[str, tuple]" = OrderedDict()
 
 #: Seam for tests: replaced instead of monkeypatching subprocess directly.
 _subprocess_run = subprocess.run
 
+#: Seams for tests (same precedent as ``_subprocess_run``): the board scan's
+#: two filesystem calls, so a test can count them and pin both the per-task
+#: memo (scan at most once) and the ``_MAX_BOARD_DIRS`` bound.
+_listdir = os.listdir
+_isdir = os.path.isdir
+
 
 # ------------------------------------------------------------------ plumbing
+
+def _lru_insert(cache: "OrderedDict[str, Any]", key: str, value: Any) -> None:
+    """Insert ``key`` as most-recently-used, dropping the LRU entry when full.
+
+    Shared by ``_states`` and ``_workspace_cache`` (both bounded by
+    ``_MAX_SESSIONS``). Callers hold ``_lock``.
+    """
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _MAX_SESSIONS:
+        cache.popitem(last=False)
+
 
 def _is_worker_env(environ: Optional[Dict[str, str]] = None) -> str:
     """Return the kanban task id when this process is a kanban worker, else ''."""
@@ -83,30 +126,74 @@ def _is_worker_env(environ: Optional[Dict[str, str]] = None) -> str:
     return (env.get("HERMES_KANBAN_TASK") or "").strip()
 
 
-def _workspace_for_task(task_id: str) -> str:
-    """Workspace dir for a kanban task id; '' when not resolvable.
+def _resolve_workspace(task_id: str) -> str:
+    """One uncached workspace lookup: env vars, then a bounded board scan.
 
-    Prefers HERMES_KANBAN_WORKSPACE (exported into every worker env), then the
-    standard scratch layout ``<board-root>/workspaces/<task>``. Cheap directory
-    checks only — never opens kanban.db (hermes owns that state).
+    Order, cheapest first:
+      1. HERMES_KANBAN_WORKSPACE (exported into every worker env) — the normal
+         hit, no scanning at all.
+      2. HERMES_KANBAN_BOARD's own ``workspaces/<task>`` under each board root —
+         also exact, no scanning.
+      3. A bounded scan of the remaining board dirs: at most ``_MAX_BOARD_DIRS``
+         per board root, in SORTED name order.
+
+    Sorting matters for correctness, not tidiness: ``os.listdir`` returns an
+    arbitrary (filesystem) order, so an unsorted bound would silently drop a
+    resolvable task depending on nothing but how the directory happened to be
+    laid out. A deterministic order makes the bound mean "the first N board
+    names" and makes it testable. Cheap directory checks only — never opens
+    kanban.db (hermes owns that state).
     """
     ws = (os.environ.get("HERMES_KANBAN_WORKSPACE") or "").strip()
-    if ws and os.path.isdir(ws):
+    if ws and _isdir(ws):
         return ws
     home = (os.environ.get("HERMES_HOME") or "").strip() or os.path.expanduser("~/.hermes")
     boards_roots = [os.path.join(home, "kanban", "boards")]
     parent = os.path.dirname(home)
     if os.path.basename(parent) == "profiles":  # profile-scoped HERMES_HOME
         boards_roots.append(os.path.join(os.path.dirname(parent), "kanban", "boards"))
+    active_board = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if active_board:
+        for boards in boards_roots:
+            cand = os.path.join(boards, active_board, "workspaces", task_id)
+            if _isdir(cand):
+                return cand
     for boards in boards_roots:
         try:
-            for board in os.listdir(boards):
-                cand = os.path.join(boards, board, "workspaces", task_id)
-                if os.path.isdir(cand):
-                    return cand
+            board_names = sorted(_listdir(boards))
         except OSError:
             continue
+        for board in board_names[:_MAX_BOARD_DIRS]:
+            cand = os.path.join(boards, board, "workspaces", task_id)
+            if _isdir(cand):
+                return cand
     return ""
+
+
+def _workspace_for_task(task_id: str) -> str:
+    """Workspace dir for a kanban task id; '' when not resolvable.
+
+    Memoised per task_id in ``_workspace_cache`` so the board scan in
+    ``_resolve_workspace`` runs at most once per task per process — a task's
+    workspace never moves, so it must not be re-paid when the session *state*
+    was evicted by the leak-guard (the old code resolved inside ``_state_for``
+    only, so an eviction silently re-triggered a full cold scan).
+
+    A miss (``''``) is retried after ``_WORKSPACE_MISS_RETRY_S`` rather than
+    cached forever: the workspace can legitimately be created a moment after
+    the first API call, and a miss costs a directory scan, not correctness.
+    Callers hold ``_lock``.
+    """
+    now = time.monotonic()
+    hit = _workspace_cache.get(task_id)
+    if hit is not None:
+        ws, resolved_at = hit
+        if ws or (now - resolved_at) < _WORKSPACE_MISS_RETRY_S:
+            _workspace_cache.move_to_end(task_id)  # LRU touch
+            return ws
+    ws = _resolve_workspace(task_id)
+    _lru_insert(_workspace_cache, task_id, (ws, now))
+    return ws
 
 
 def _head_file(workspace: str) -> str:
@@ -171,27 +258,24 @@ def _observed_commit_ts(st: Dict[str, Any], now: float) -> Optional[int]:
 
 def _state_for(session_id: str, task_id: str) -> Dict[str, Any]:
     st = _states.get(session_id)
-    if st is None:
-        if len(_states) >= _MAX_SESSIONS:  # leak-guard: evict oldest
-            try:
-                _states.pop(next(iter(_states)), None)
-            except StopIteration:
-                pass
-        st = {
-            "task_id": task_id,
-            "workspace": _workspace_for_task(task_id),
-            "prompt_tokens": 0,
-            "api_calls": 0,          # since the baseline commit
-            "base_ct": None,         # commit ts the counter is based on
-            "last_seen_ct": None,    # last observed HEAD commit ts
-            "armed": False,
-            "result_calls": 0,
-            "last_note_result": -(10 ** 9),
-            "head_ct": None,
-            "head_mtime_ns": None,
-            "last_stat_at": 0.0,
-        }
-        _states[session_id] = st
+    if st is not None:
+        _states.move_to_end(session_id)  # LRU touch: this session is now MRU
+        return st
+    st = {
+        "task_id": task_id,
+        "workspace": _workspace_for_task(task_id),
+        "prompt_tokens": 0,
+        "api_calls": 0,          # since the baseline commit
+        "base_ct": None,         # commit ts the counter is based on
+        "last_seen_ct": None,    # last observed HEAD commit ts
+        "armed": False,
+        "result_calls": 0,
+        "last_note_result": -(10 ** 9),
+        "head_ct": None,
+        "head_mtime_ns": None,
+        "last_stat_at": 0.0,
+    }
+    _lru_insert(_states, session_id, st)  # evicts the LEAST recently used
     return st
 
 
@@ -295,9 +379,10 @@ def on_transform_tool_result(result: Any, **kwargs: Any) -> Optional[str]:
 # ------------------------------------------------- diagnostics / test helpers
 
 def reset_state() -> None:
-    """Drop all per-session state. Tests and doctor diagnostics only."""
+    """Drop all per-session state and workspace memos. Tests/doctor only."""
     with _lock:
         _states.clear()
+        _workspace_cache.clear()
 
 
 def snapshot(session_id: str) -> Dict[str, Any]:
@@ -354,7 +439,8 @@ def doctor_check(plugins_dirs=None) -> dict:
                     "fix": ""}
         return {"name": name, "ok": False, "fatal": False,
                 "detail": "hscc-cluster is deployed but does not register the "
-                          "budget hooks (budget_watch.py missing or register() not wired)",
+                          "budget hooks (budget_watch.py missing or register() "
+                          f"not wired) in: {', '.join(candidates)}",
                 "fix": "Re-deploy hscc-cluster from the repo (bootstrap) so "
                        "budget_watch.py and its register() wiring ship."}
     except Exception as exc:  # noqa: BLE001 — doctor rows never crash the run

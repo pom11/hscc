@@ -128,6 +128,118 @@ def test_readme_fragment_is_ignored(frags):
     assert cf.load_entries(frags) == []
 
 
+# ------------------------------------------- body-level separator gate (t_c365fe82)
+#
+# The class that shipped: two entries in one file WITHOUT the documented
+# standalone `---` separator. parse_fragment then folds the FOLLOWING entry's
+# `kind:`/`task:`/`order:` headers into the previous entry's body, `check`
+# stays green (it only validates the [Unreleased] block shape), and `release`
+# materialises the bookkeeping lines as prose into CHANGELOG.md — 18 lines
+# leaked into [2.15.0] this way (5 files; repaired at 9ea52bc4 on PR #178).
+# The gate lives in the parser pass (`validate_entry_bodies`, reached through
+# every command via `load_entries`), so check/sync/render/release all refuse
+# the leak; a malformed fragment is exit 2 per the module contract.
+
+# Two entries in one file; identical content in both shapes — the ONLY
+# difference is the separator line. This is what makes the fixture
+# mutation-proof: a gate that fails the first must pass the second.
+NO_SEPARATOR = (
+    "kind: Fixed\ntask: t_deadbeef\n\n- **first entry.** prose.\n"
+    "  continuation of the first entry.\n"
+    "kind: Verified\ntask: t_deadbeef\norder: 1\n\n"
+    "- **second entry.** evidence.\n"
+)
+WITH_SEPARATOR = (
+    "kind: Fixed\ntask: t_deadbeef\n\n- **first entry.** prose.\n"
+    "  continuation of the first entry.\n"
+    "---\n"
+    "kind: Verified\ntask: t_deadbeef\norder: 1\n\n"
+    "- **second entry.** evidence.\n"
+)
+
+
+def _pointer_state(changelog):
+    """Put CHANGELOG.md in the normal committed shape (pointer block)."""
+    pre, _, post = cf.split_changelog(changelog.read_text(encoding="utf-8"))
+    changelog.write_text(cf.assemble(pre, cf.pointer_block(), post),
+                         encoding="utf-8")
+
+
+def test_missing_separator_leaks_headers_into_body(frags):
+    """Parser pass must refuse the swallowed-header body, naming the file and
+    using the README's vocabulary ('missing `---` separator between entries')."""
+    (frags / "t_deadbeef.md").write_text(NO_SEPARATOR, encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    msg = str(exc.value)
+    assert "t_deadbeef.md" in msg
+    assert "missing `---` separator between entries" in msg
+
+
+def test_same_fixture_clean_when_separator_present(frags):
+    """Mutation-proof half: byte-identical entries + a `---` -> two clean
+    entries. Without this the leak test could go green on any parse failure."""
+    (frags / "t_deadbeef.md").write_text(WITH_SEPARATOR, encoding="utf-8")
+    entries = cf.load_entries(frags)
+    assert [e.kind for e in entries] == ["Fixed", "Verified"]
+    assert entries[0].body == ["- **first entry.** prose.",
+                               "  continuation of the first entry."]
+    assert entries[1].body == ["- **second entry.** evidence."]
+
+
+def test_check_fails_then_passes_on_the_no_separator_fixture(frags, changelog,
+                                                             capsys):
+    """The shipped scenario end-to-end: committed CHANGELOG.md is the pointer
+    (the shape that hid the defect on the 2.15.0 tree — with zero parsed
+    entries `check` validated nothing), the fragment carries the leak.
+    check must exit 2 (malformed fragment, per the module contract) naming the
+    file; repairing ONLY the separator makes the same command exit 0."""
+    (frags / "t_deadbeef.md").write_text(NO_SEPARATOR, encoding="utf-8")
+    _pointer_state(changelog)
+    rc = cf.main(["check", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2, "missing separator is a malformed fragment -> exit 2"
+    err = capsys.readouterr().err
+    assert "t_deadbeef.md" in err
+    assert "missing `---` separator between entries" in err
+    # repair = separator insertion only, zero prose -> the same check is green
+    (frags / "t_deadbeef.md").write_text(WITH_SEPARATOR, encoding="utf-8")
+    assert cf.main(["check", "--fragments-dir", str(frags),
+                    "--changelog", str(changelog)]) == 0
+
+
+def test_release_refuses_to_materialise_the_leak(frags, changelog):
+    """The leak must be impossible at the release step too — that is where it
+    became CHANGELOG prose on the real cut."""
+    (frags / "t_deadbeef.md").write_text(NO_SEPARATOR, encoding="utf-8")
+    rc = cf.main(["release", "--version", "9.9.9", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2
+    assert not (frags / "archive" / "9.9.9").exists()
+    assert "kind: Verified" not in changelog.read_text(encoding="utf-8")
+
+
+def test_body_prose_may_still_mention_headers(frags):
+    """The gate keys on _HEADER_RE/_ALLOWED_HEADERS at column 0 (the same
+    tokens the parser consumes), so prose that merely MENTIONS vocabulary —
+    an unknown header word, or an indented mention — stays legal."""
+    (frags / "t_cafebabe.md").write_text(
+        "kind: Fixed\ntask: t_cafebabe\n\n"
+        "- **prose.** Notes: the docs use `kind: Fixed` loosely; an entry\n"
+        "  kind: Fixed header at column 0 would mean a second entry.\n",
+        encoding="utf-8")
+    entries = cf.load_entries(frags)
+    assert len(entries) == 1
+    assert any("kind: Fixed" in l for l in entries[0].body)
+
+
+def test_repo_pending_fragments_pass_the_body_gate():
+    """Guards both directions against regression: the fragments committed on
+    this tree must be body-clean, or `release` would leak again."""
+    entries = cf.load_entries(REPO_ROOT / "changelog.d")
+    assert entries, "expected pending fragments on the repo tree"
+
+
 # ---------------------------------------------------------------- render/sync
 
 def test_render_block_shape(frags):

@@ -287,7 +287,7 @@ def fetch_identity_entries():
         if not venv_py:
             return []
         res = run_cmd([venv_py, "-c", _health._SPARKRUN_STATUS_SCRIPT],
-                      timeout=25)
+                      timeout=_health.SPARKRUN_STATUS_TIMEOUT)
         if not res or not res.get("ok") or not res.get("output"):
             return []
         return _normalise_identity_entries(json.loads(res["output"]))
