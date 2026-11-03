@@ -1,4 +1,4 @@
-# Kind allowlist gate — decision packet (t_f48f8f84c4)
+# Kind allowlist gate — decision packet (t_f48f84c4)
 
 Task: `[changelog gate] decide + enforce the kind allowlist — ### schema / ### Test / ### Docs
 rendered as live CHANGELOG vocabulary in [2.15.0]`
@@ -46,7 +46,7 @@ Consequences, all measured on the current tree:
 
 ## Option X — hard gate, closed allowlist = KIND_ORDER (7 names)
 
-My recommendation, and what I implemented on `wt/t_f48f8f84c4`.
+My recommendation, and what I implemented on `wt/t_f48f84c4`.
 
 - `validate_kind()` runs in the parse pass next to `validate_entry_body`, so
   **check / sync / render / list / release all refuse** — a gate the release path can walk past is
@@ -101,3 +101,32 @@ Blocked on exactly two answers, both recorded on the card:
 Everything else — gate location (my answer: parse pass), the `schema`/`Test` prohibition (they
 stay illegal under both vocabulary options), the duplicate-section item (do not build) — is
 decided here so the operator only has to answer the two questions that are genuinely theirs.
+
+## RESOLVED — operator answers (2026-11-03, via orch comments on the card)
+
+1. **Severity: HARD.** Unknown kind -> exit 2, no warn-only mode. Implemented as decided here:
+   `validate_kind()` in the parse pass (next to `validate_entry_body`, reached through
+   `load_entries` so check/sync/render/list/release all refuse) plus the same check inside
+   `add_entry` so `add --kind schema` fails at the command that writes the fragment.
+2. **Vocabulary: the 7 canonical kinds + `Docs` as the 8th**, inserted into `KIND_ORDER` last,
+   after `Verified` (operator: "Docs last after Generated is the obvious slot" — there is no
+   `Generated` kind in `KIND_ORDER`; the obvious slot is taken as end-of-list). `schema` and
+   `Test` stay illegal, as decided here.
+
+The operator's data point for admitting `Docs`: a fresh author wrote `kind: Docs` again on
+t_9e45955c (PR #189) after the packet landed — doc-only changes have no legal outlet, and
+authors improvise until one exists. The same commit therefore makes the outlet explicit in
+`changelog.d/README.md` (closed list + hard-failure wording, replacing the self-contradictory
+:63/:77 pair) and in the worker skill (`install/hscc-skills/devops/kanban-worker/SKILL.md`,
+plus the `WORKER_BLOCK` inside `scripts/audits/apply_changelog_skill_docs_t_95f1d6e1.py` that
+would otherwise re-plant the old 7-name text on re-run).
+
+Mutation proof on the shipped pair (`KIND_SCHEMA` vs `KIND_DOCS`, byte-identical except the
+kind word): neutering the parse-pass `validate_kind(path, kind)` call fails EXACTLY the four
+gate tests (`test_unknown_kind_raises_naming_the_file`,
+`test_check_fails_then_passes_on_the_unknown_kind_fixture`,
+`test_release_refuses_to_materialise_an_unknown_kind`, `test_kind_is_case_sensitive`);
+restoring it returns the file to green.
+
+Note: this document's header line and Option X line carry a typo task id (`t_f48f8f84c4`);
+the card is `t_f48f84c4`.
