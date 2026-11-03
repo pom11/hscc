@@ -70,6 +70,8 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/review_t_d20fb383.md` — README review (memori, memori_byodb, sparkrun-hermes), 2026-09-25. **superseded** by `docs/audits/README_REVIEW_2026-10-15.md`. **record**
 - `docs/t_f109e7ea-findings.md` — app→CLI two-way findings: working/reasoning indicator + 1:1 session surfacing. **record**
 - `docs/t_18318fd9-findings.md` — findings for the `hscc autodown status --json` flake: a foreground-mode WARN line from `daemon_ops.log` was prefixed to stdout's JSON; the fix is both sides (stderr for diagnostics, machine channel kept clean). **record**
+- `docs/t_16eb73ab-profile-target-measurement.md` — t_16eb73ab STEP-1 measurement (measure-first, no code): the three profile-home sets (profile list / board-assignee census / homes already carrying payload), why the assignees census cannot isolate a board, and the dry-run baseline that framed the operator's target-profiles decision. **record** — the decision it gated shipped on t_32f97d20.
+- `docs/t_32f97d20-target-profiles-seed.md` — t_32f97d20 seed derivation: the board-isolated rule behind `DEFAULT_TARGET_PROFILES` (distinct hscc-board assignees ∩ on-disk homes), the ghost exclusion, and the operator override file. **record** — the live truth is the constant in `hscc-bootstrap/install_payload.py` plus `~/.hscc/target_profiles.json`.
 
 ## design/
 
