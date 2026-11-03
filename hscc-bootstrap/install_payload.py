@@ -23,6 +23,7 @@ The generalises the preserve precedent that previously covered only
 """
 
 import hashlib
+import json
 import os
 import shutil
 from datetime import datetime
@@ -331,9 +332,153 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
     }
 
 
-def _named_profile_plugins_dirs(plugins_dir):
-    """Plugin dirs of every existing named profile under the same home as
-    ``plugins_dir`` (``<root>/profiles/<name>/plugins``).
+# ── target-profile selection (t_32f97d20, operator decision option 3) ────────
+# install_payload_profiles used to write into every profile home that ALREADY
+# had a plugins/ dir — on this fleet that is exactly 2 of 49 (measurement doc
+# docs/t_16eb73ab-profile-target-measurement.md), so 47 homes silently never
+# received the payload and the t_5720ef53 doctor budget-hook row reads red for
+# them. The operator decision (comment 1642 on t_16eb73ab) is an explicit
+# allowlist seeded narrowest, NOT a write-to-everything default:
+#
+#   ~/.hscc/target_profiles.json -> {"target_profiles": ["backend-engineer", ...]}
+#
+# A DEDICATED file, deliberately not a key inside cluster.json:
+# hscc-cluster/discovery.py::_write_cache rewrites cluster.json from a freshly
+# built dict (to_cluster_json: name/gateway/workers/nasDevices only) on every
+# live discovery, so any hand-added top-level key there silently evaporates —
+# the operator's widening edit must not be one `hscc cluster` run away from
+# vanishing (same silent-signal-loss class as the node_recovery opt-out drops,
+# filed as t_7c3ec484).
+#
+# Semantics (pinned by tests named for each rule):
+#   file ABSENT / key ABSENT -> DEFAULT_TARGET_PROFILES (the hscc-board seed)
+#   ["*", ...]  -> EVERY profile home under profiles/ (option 1; the key must
+#                  keep this meaning so widening stays a config edit, no code)
+#   [...]       -> exactly those profile names; missing plugins/ is CREATED
+#   []          -> legacy behaviour: only homes that already have plugins/
+# The seed is the DEFAULT, never a wall: an operator adds or drops names by
+# editing the config file (same reader convention as install_notifier_mask:
+# one key, one reader, hscc_dir= seam so tests can seal ~/.hscc).
+DEFAULT_TARGET_PROFILES = (
+    # Derived 2026-11-03 from the hscc BOARD's own task history via the
+    # sanctioned CLI — see docs/t_32f97d20-target-profiles-seed.md for the
+    # exact commands and the caveat that made the board-scoped reading work:
+    #   hermes kanban --board hscc stats --json   (board roster, non-archived)
+    #   hermes kanban --board hscc assignees      (on_disk filter, drops ghosts)
+    "architect", "backend-engineer", "coder", "default", "devops-engineer",
+    "ecofire-bc-engineer", "ecofire-bc-orch", "hscc-orch", "ios-engineer",
+    "qa", "reviewer", "technical-writer", "worker",
+)
+
+#: The literal that widens the allowlist to every profile home (option 1).
+TARGET_ALL = "*"
+
+#: The config key inside target_profiles.json that carries the allowlist.
+TARGET_PROFILES_KEY = "target_profiles"
+
+
+def hscc_dir() -> str:
+    """HSCC state dir, env-resolved (never a baked ``~/.hscc``). Same shape as
+    ``install_notifier_mask.hscc_dir`` / ``install_gpu_clock_cap.hscc_dir``."""
+    return os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc")
+
+
+def target_profiles_config(hscc_dir=None):
+    """Read ``target_profiles`` from ``<hscc_dir>/target_profiles.json``.
+
+    Returns ``{"target_profiles": <resolved>, "config_error": str}`` where the
+    resolved value is one of:
+
+    * ``None``            — legacy selection (only homes that already have a
+                            ``plugins/`` dir). Returned for an explicit ``[]``.
+    * ``TARGET_ALL``      — every profile home (the ``["*", ...]`` spelling).
+    * ``tuple[str, ...]`` — the allowlist of profile names.
+
+    Missing file / missing key -> ``DEFAULT_TARGET_PROFILES``. A value that is
+    not a list of strings keeps the default and is NAMED in ``config_error``:
+    a silently-ignored allowlist looks exactly like a working one (same rule
+    install_notifier_mask applies to its own subkey). This reader owns only its
+    own file — it cannot flip a sibling key in cluster.json and no sibling
+    reader can flip it.
+    """
+    base = hscc_dir or globals()["hscc_dir"]()
+    target = os.path.join(base, "target_profiles.json")
+    try:
+        with open(target) as fh:
+            cfg = json.load(fh)
+    except FileNotFoundError:
+        return {"target_profiles": tuple(DEFAULT_TARGET_PROFILES),
+                "config_error": ""}
+    except (json.JSONDecodeError, OSError, IsADirectoryError) as e:
+        return {"target_profiles": tuple(DEFAULT_TARGET_PROFILES),
+                "config_error": (f"could not read {target} "
+                                 f"({e.__class__.__name__}: {e}) — default "
+                                 f"target_profiles seed applied")}
+    if not isinstance(cfg, dict) or TARGET_PROFILES_KEY not in cfg:
+        return {"target_profiles": tuple(DEFAULT_TARGET_PROFILES),
+                "config_error": ""}
+    raw = cfg[TARGET_PROFILES_KEY]
+    if raw == []:
+        return {"target_profiles": None, "config_error": ""}
+    if not isinstance(raw, list) or not all(isinstance(n, str) for n in raw):
+        return {"target_profiles": tuple(DEFAULT_TARGET_PROFILES),
+                "config_error": (f"{target}:{TARGET_PROFILES_KEY} must be a "
+                                 f"list of profile-name strings (or "
+                                 f'["*"] for all); got {raw!r} — default '
+                                 f"target_profiles seed applied")}
+    if TARGET_ALL in raw:
+        return {"target_profiles": TARGET_ALL, "config_error": ""}
+    return {"target_profiles": tuple(sorted(set(raw))), "config_error": ""}
+
+
+def _selected_profile_plugin_dirs(plugins_dir, targets):
+    """Plugin dirs of the profile homes *targets* selects, with creation flags.
+
+    ``targets``: ``None`` (legacy: only homes that already have ``plugins/``),
+    ``TARGET_ALL`` (every profile home; ``plugins/`` is created when absent),
+    or an iterable of profile names (only those homes; ``plugins/`` created
+    when absent). Returns a list of ``{"profile", "plugins_dir", "created"}``
+    dicts sorted by profile name — ``created`` records whether this call is
+    the one that first materialised the home's ``plugins/`` dir, which is
+    exactly the "flipped from payload-less to payload" census the bootstrap
+    diff needs (t_16eb73ab acceptance criterion).
+
+    A profile NAME that has no home dir on disk is never fabricated here:
+    selection iterates the homes that exist (ghosts have no home to write to —
+    phase-1 measurement, set B minus A).
+    """
+    plugins_dir = Path(plugins_dir).expanduser().resolve()
+    if plugins_dir.name != "plugins":
+        return []  # not a root layout — cannot derive a profiles sibling
+    profiles_dir = plugins_dir.parent / "profiles"
+    if not profiles_dir.is_dir():
+        return []
+    allow_all = targets == TARGET_ALL
+    allow = None
+    if targets is not None and not allow_all:
+        allow = set(targets)
+    out = []
+    try:
+        for child in sorted(profiles_dir.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if allow is not None and not allow_all and child.name not in allow:
+                continue
+            pdir = child / "plugins"
+            existed = pdir.is_dir()
+            if not existed and targets is None:
+                continue  # legacy gate: unlisted homes never materialise
+            out.append({"profile": child.name,
+                        "plugins_dir": pdir,
+                        "created": not existed})
+    except OSError:
+        return []
+    return out
+
+
+def _named_profile_plugins_dirs(plugins_dir, target_profiles=None):
+    """Plugin dirs of named profiles under the same home as ``plugins_dir``
+    (``<root>/profiles/<name>/plugins``), legacy selection only.
 
     Each Hermes profile loads its plugins and memory provider from its OWN
     ``$HERMES_HOME/plugins`` (``get_hermes_home()/plugins``), NOT the root
@@ -345,34 +490,43 @@ def _named_profile_plugins_dirs(plugins_dir):
     Returns [] when ``plugins_dir`` is itself profile-scoped (already inside a
     ``<root>/profiles/<name>``) or when no profiles exist, so the call is a
     no-op in those cases.
+
+    ``target_profiles`` (t_32f97d20) is the allowlist resolution
+    (``None`` legacy / ``TARGET_ALL`` / names); the default ``None`` keeps the
+    historical behaviour byte-for-byte for external callers — only
+    ``install_payload_profiles`` passes a resolved selection.
     """
-    plugins_dir = Path(plugins_dir).expanduser().resolve()
-    if plugins_dir.name != "plugins":
-        return []  # not a root layout — cannot derive a profiles sibling
-    profiles_dir = plugins_dir.parent / "profiles"
-    if not profiles_dir.is_dir():
-        return []
-    out = []
-    try:
-        for child in sorted(profiles_dir.iterdir()):
-            if not child.is_dir() or child.name.startswith("."):
-                continue
-            pdir = child / "plugins"
-            if pdir.is_dir():
-                out.append(pdir)
-    except OSError:
-        return []
-    return out
+    return [e["plugins_dir"] for e in
+            _selected_profile_plugin_dirs(plugins_dir, target_profiles)]
+
+
+#: Sentinel: "no explicit target_profiles passed — resolve from config".
+#: A plain object() so type checkers don't read ``...`` as EllipsisType.
+_UNSET = object()
 
 
 def install_payload_profiles(
-    repo_root, plugins_dir, payload, *, backup=True, ts=None, force=False
+    repo_root, plugins_dir, payload, *, backup=True, ts=None, force=False,
+    target_profiles=_UNSET, hscc_dir=None,
 ):
-    """Install ``payload`` into the root home AND every named profile's plugin
-    dir under the same home, so the runtime code is current for every profile
-    that loads it. Returns the primary summary with a ``profiles`` child list
-    (one summary per profile plugin dir; a failing profile is recorded, not
-    fatal).
+    """Install ``payload`` into the root home AND the selected named profiles'
+    plugin dirs under the same home, so the runtime code is current for every
+    profile that loads it. Returns the primary summary with a ``profiles``
+    child list (one summary per profile plugin dir; a failing profile is
+    recorded, not fatal). Each profile summary carries ``profile`` (name) and
+    ``created`` (True when this install materialised that home's ``plugins/``
+    dir for the first time — the payload-less-to-payload flip).
+
+    ``target_profiles`` (t_32f97d20): left unset resolves the allowlist from
+    ``<hscc_dir>/target_profiles.json`` ``target_profiles`` — see
+    :func:`target_profiles_config`; an explicit value (``None`` or ``[]`` for
+    legacy, ``"*"`` / ``["*"]`` for all homes, or a collection of names)
+    overrides the config.
+    A malformed config keeps the default seed and is reported under the
+    primary summary's ``target_profiles_error`` instead of silently ignored.
+    A selected profile whose ``plugins/`` dir is missing gets it created
+    (``install_payload`` mkdirs at the copy stage); an unselected home is not
+    written at all.
 
     The GAP-E-1 drift guard runs per destination: every profile plugin dir gets
     its own drift detection + preserve-to-backup (an operator patch inside
@@ -382,21 +536,45 @@ def install_payload_profiles(
     destination (primary or profile) flagged drift, so a caller that only
     reads the primary summary still sees profile drift.
     """
+    target_error = ""
+    if target_profiles is _UNSET:
+        resolved = target_profiles_config(hscc_dir=hscc_dir)
+        targets = resolved["target_profiles"]
+        target_error = resolved["config_error"]
+    elif target_profiles is None:
+        targets = None
+    elif isinstance(target_profiles, str):
+        # "*" (or a lone name) as a bare string.
+        targets = TARGET_ALL if target_profiles == TARGET_ALL else (target_profiles,)
+    elif isinstance(target_profiles, (list, tuple, set, frozenset)):
+        if len(target_profiles) == 0:
+            # [] == legacy, same as the config spelling for it (empty allowlist).
+            targets = None
+        elif TARGET_ALL in target_profiles:
+            targets = TARGET_ALL
+        else:
+            targets = tuple(target_profiles)
+    else:
+        raise TypeError(
+            "target_profiles must be None, '*', or a collection of profile-"
+            f"name strings; got {type(target_profiles).__name__}")
     primary = install_payload(repo_root, plugins_dir, payload,
                               backup=backup, ts=ts, force=force)
     profile_results = []
-    for p_dir in _named_profile_plugins_dirs(plugins_dir):
+    for sel in _selected_profile_plugin_dirs(plugins_dir, targets):
+        p_dir = sel["plugins_dir"]
         try:
-            profile_results.append(
-                install_payload(repo_root, p_dir, payload,
-                                backup=backup, ts=ts, force=force)
-            )
+            summary = install_payload(repo_root, p_dir, payload,
+                                      backup=backup, ts=ts, force=force)
         except Exception as exc:  # a bad profile must never sink the whole deploy
-            profile_results.append(
-                {"plugins_dir": str(p_dir),
-                 "error": f"{type(exc).__name__}: {exc}"}
-            )
+            summary = {"plugins_dir": str(p_dir),
+                       "error": f"{type(exc).__name__}: {exc}"}
+        summary["profile"] = sel["profile"]
+        summary["created"] = sel["created"]
+        profile_results.append(summary)
     primary["profiles"] = profile_results
+    if target_error:
+        primary["target_profiles_error"] = target_error
     if any(r.get("drift_detected") for r in profile_results):
         primary["drift_detected"] = True
     return primary
