@@ -235,9 +235,25 @@ def test_body_prose_may_still_mention_headers(frags):
 
 def test_repo_pending_fragments_pass_the_body_gate():
     """Guards both directions against regression: the fragments committed on
-    this tree must be body-clean, or `release` would leak again."""
-    entries = cf.load_entries(REPO_ROOT / "changelog.d")
-    assert entries, "expected pending fragments on the repo tree"
+    this tree must be body-clean, or `release` would leak again.
+
+    Zero pending fragments is a legitimate committed state: a release fold
+    consumes the whole set (`release` moves every fragment into
+    changelog.d/archive/<version>/), so every post-fold tree — up to the
+    next card adding a fragment — has none. Demanding a non-empty set here
+    made the FIRST fold since this test landed (2.15.1, at which point no
+    fold had exercised it — the 2.15.0 cut predates it) fail the scripts
+    leg on a correctly folded tree. The dir itself must exist (a missing
+    or renamed dir would make `load_entries` return [] silently), and the
+    body gate itself stays pinned both-directional by the
+    NO_SEPARATOR / WITH_SEPARATOR fixture pair above."""
+    pending = REPO_ROOT / "changelog.d"
+    assert pending.is_dir(), "changelog.d/ (the fragments dir) must exist"
+    entries = cf.load_entries(pending)  # raises FragmentError -> test fails
+    if entries:
+        # pending fragments exist: prove the gate actually bites on this
+        # tree (t_c365fe82's original intent), not just that parsing ran
+        assert any(e.body for e in entries), "parsed entries carry no bodies"
 
 
 # ---------------------------------------------------------------- render/sync
