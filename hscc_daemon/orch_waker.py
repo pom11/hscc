@@ -143,11 +143,12 @@ def load_state(state_path=None) -> dict:
     file is logged, because silently resetting it would drop pending batches.
 
     The waker's OWN extra keys (:data:`FAIL_STATE_KEY`, :data:`MAP_STATE_KEY`)
-    are validated but NOT created here: a hand-edited or foreign value in one
-    of them is dropped rather than trusted, and an absent one stays absent so
-    :func:`save_state` never grows the stopgap's three-key schema for a board
-    that has never failed (``test_state_file_is_exactly_the_stopgap_schema``).
-    Read every use site through :func:`fail_state` / :func:`_map_seen`.
+    are validated here but never CREATED: a hand-edited or foreign value in one
+    of them is dropped rather than trusted, and an absent one stays absent so a
+    healthy board's document stays exactly the stopgap's three keys
+    (``test_state_file_is_exactly_the_stopgap_schema``). Read every use site
+    through :func:`fail_state` and the validated ``st.get(MAP_STATE_KEY)`` in
+    :func:`tick`.
     """
     path = _resolve(state_path or DEFAULT_STATE_PATH)
     try:
