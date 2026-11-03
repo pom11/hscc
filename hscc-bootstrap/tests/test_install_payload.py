@@ -374,7 +374,8 @@ def test_install_propagates_to_named_profile_plugin_dirs(tmp_path):
     (root / "profiles" / "no-plugins").mkdir(parents=True)
 
     res = install_payload.install_payload_profiles(
-        repo, plugins, ["hscc-cluster", "README.md"], ts="A")
+        repo, plugins, ["hscc-cluster", "README.md"], ts="A",
+        target_profiles=None)  # legacy selector; allowlist rules are pinned below
 
     # Root home installed.
     assert res["skipped"] is False
@@ -400,6 +401,201 @@ def test_named_profile_plugins_dirs_noop_when_plugins_already_profile_scoped(tmp
 
     dirs = install_payload._named_profile_plugins_dirs(profile_plugins)
     assert dirs == []
+
+
+# ── target_profiles allowlist (t_32f97d20, operator decision option 3) ───────
+# The rule that ships: DEFAULT_TARGET_PROFILES (the hscc-board seed) when the
+# config is silent; an explicit config widens or narrows without a code
+# change; "*" means every home. Each rule below has its own named test.
+
+def _seeded_tree(tmp_path, *, with_plugins=("backend-engineer", "hscc-orch"),
+                 without_plugins=("worker", "qa", "stranger")):
+    """A fake hermes home: some profile homes carry plugins/, some don't.
+    Returns (repo, root, plugins_dir)."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    for name in with_plugins:
+        (root / "profiles" / name / "plugins").mkdir(parents=True)
+    for name in without_plugins:
+        (root / "profiles" / name).mkdir(parents=True)
+    return repo, root, root / "plugins"
+
+
+def test_fresh_profile_NOT_written_unless_seeded(tmp_path):
+    """THE allowlist rule, negative half (card-named): a profile home that is
+    NOT in the target_profiles allowlist must NOT be written and must NOT get
+    a plugins/ dir — even though it exists on disk. This is the difference
+    from option 1; the 47 payload-less homes stay untouched until seeded."""
+    repo, root, plugins = _seeded_tree(tmp_path)
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A",
+        target_profiles=["backend-engineer", "worker"],
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    touched = {p["profile"] for p in res["profiles"]}
+    assert touched == {"backend-engineer", "worker"}
+    assert not (root / "profiles" / "stranger" / "plugins").exists()
+    assert not (root / "profiles" / "stranger" / "plugins" / "hscc-cluster").exists()
+    assert not (root / "profiles" / "qa").joinpath("plugins").exists()
+
+
+def test_seeded_missing_profile_IS_created(tmp_path):
+    """THE allowlist rule, positive half (card-named): a seeded profile whose
+    plugins/ does not exist yet IS created and receives the payload, and the
+    per-home summary reports created: true (the payload-less-to-payload flip
+    the bootstrap diff must name)."""
+    repo, root, plugins = _seeded_tree(tmp_path)
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A",
+        target_profiles=["backend-engineer", "worker"],
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    worker = next(p for p in res["profiles"] if p["profile"] == "worker")
+    assert worker["created"] is True
+    assert (root / "profiles" / "worker" / "plugins" / "hscc-cluster"
+            / "__init__.py").is_file()
+    # An existing home is written but did not flip: created: false.
+    be = next(p for p in res["profiles"] if p["profile"] == "backend-engineer")
+    assert be["created"] is False
+    # A second run sees the home as already existing — flip counted once.
+    res2 = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="B",
+        target_profiles=["backend-engineer", "worker"],
+        hscc_dir=str(tmp_path / "hscc-none"))
+    assert next(p for p in res2["profiles"]
+                if p["profile"] == "worker")["created"] is False
+
+
+def test_target_profiles_star_means_ALL_homes(tmp_path):
+    """'*' in config must still mean all (option 1, card-mandated): every
+    profile home under profiles/ is written, plugins/ created where absent —
+    no code change, config edit only."""
+    repo, root, plugins = _seeded_tree(tmp_path)
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", target_profiles=["*"],
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    touched = {p["profile"] for p in res["profiles"]}
+    assert touched == {"backend-engineer", "hscc-orch", "worker", "qa",
+                       "stranger"}
+    for name in touched:
+        assert (root / "profiles" / name / "plugins" / "hscc-cluster"
+                / "__init__.py").is_file()
+    # created flags split exactly by what existed before the run
+    assert {p["profile"] for p in res["profiles"] if p["created"]} == {
+        "worker", "qa", "stranger"}
+
+
+def test_empty_target_profiles_keeps_legacy_skip(tmp_path):
+    """Explicit [] means the pre-t_32f97d20 behaviour: only homes that ALREADY
+    have plugins/ are written; a payload-less home is NOT created. The
+    operator's way to turn the allowlist off without deleting the key. Same
+    reading through the config door (cluster.json target_profiles: [])."""
+    repo, root, plugins = _seeded_tree(tmp_path)
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "cluster.json").write_text('{"target_profiles": []}',
+                                       encoding="utf-8")
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", hscc_dir=str(hscc))
+
+    touched = {p["profile"] for p in res["profiles"]}
+    assert touched == {"backend-engineer", "hscc-orch"}   # pre-card set
+    assert not (root / "profiles" / "worker" / "plugins").exists()
+    assert not any(p["created"] for p in res["profiles"])
+    # the explicit-argument door agrees with the config door
+    res2 = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="B", target_profiles=[],
+        hscc_dir=str(tmp_path / "hscc-none"))
+    assert {p["profile"] for p in res2["profiles"]} == {
+        "backend-engineer", "hscc-orch"}
+
+
+def test_config_absent_key_uses_hscc_board_seed(tmp_path, monkeypatch):
+    """No cluster.json (or no target_profiles key) -> the DEFAULT_TARGET_PROFILES
+    seed ships, NOT all 49 homes and NOT the legacy skip. The seed list itself
+    is pinned so a silent edit to DEFAULT_TARGET_PROFILES breaks a test."""
+    assert install_payload.DEFAULT_TARGET_PROFILES == (
+        "architect", "backend-engineer", "coder", "default", "devops-engineer",
+        "ecofire-bc-engineer", "ecofire-bc-orch", "hscc-orch", "ios-engineer",
+        "qa", "reviewer", "technical-writer", "worker")
+
+    repo, root, plugins = _seeded_tree(tmp_path)
+    hscc = tmp_path / "hscc-empty"
+    hscc.mkdir()
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", hscc_dir=str(hscc))
+
+    touched = {p["profile"] for p in res["profiles"]}
+    # homes on disk ∩ seed — 'stranger' is not seeded, 'worker' is.
+    assert touched == {"backend-engineer", "hscc-orch", "worker", "qa"}
+    assert "stranger" not in touched
+    assert "target_profiles_error" not in res
+
+
+def test_config_star_and_list_and_malformed_readings(tmp_path):
+    """The config reader's four readings, each named: ['*'] -> all; a list ->
+    that allowlist (dedup+sorted); [] -> legacy None; a malformed value ->
+    the default seed AND a named config_error (never silently ignored)."""
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    cfg = hscc / "cluster.json"
+
+    def write(value):
+        cfg.write_text('{"target_profiles": %s}' % __import__("json").dumps(value),
+                       encoding="utf-8")
+
+    write(["*"])
+    r = install_payload.target_profiles_config(hscc_dir=str(hscc))
+    assert r["target_profiles"] == install_payload.TARGET_ALL
+    assert r["config_error"] == ""
+
+    write(["worker", "backend-engineer", "worker"])
+    r = install_payload.target_profiles_config(hscc_dir=str(hscc))
+    assert r["target_profiles"] == ("backend-engineer", "worker")
+
+    write([])
+    r = install_payload.target_profiles_config(hscc_dir=str(hscc))
+    assert r["target_profiles"] is None  # legacy
+    assert r["config_error"] == ""
+
+    write("backend-engineer")  # a bare string, not a list
+    r = install_payload.target_profiles_config(hscc_dir=str(hscc))
+    assert r["target_profiles"] == install_payload.DEFAULT_TARGET_PROFILES
+    assert "target_profiles" in r["config_error"] and "must be a list" in r["config_error"]
+
+    # malformed config must ALSO surface on the install summary, not just the reader
+    repo, root, plugins = _seeded_tree(tmp_path)
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", hscc_dir=str(hscc))
+    assert "target_profiles_error" in res
+
+
+def test_config_file_unreadable_reports_error_and_keeps_seed(tmp_path):
+    """Present-but-unreadable cluster.json is an environment fault, not 'no
+    config': the default seed applies and the error is NAMED (same honesty
+    rule install_notifier_mask applies to its own subkey)."""
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "cluster.json").write_text("{not json", encoding="utf-8")
+
+    r = install_payload.target_profiles_config(hscc_dir=str(hscc))
+    assert r["target_profiles"] == install_payload.DEFAULT_TARGET_PROFILES
+    assert "could not read" in r["config_error"]
+
+
+def test_named_profile_plugins_dirs_legacy_gate_unchanged(tmp_path):
+    """Zero-regression pin (card): the selector with no target_profiles still
+    yields ONLY homes that already carry plugins/ — the exact pre-card set.
+    The allowlist path cannot quietly widen the legacy callers."""
+    repo, root, plugins = _seeded_tree(tmp_path)
+    dirs = install_payload._named_profile_plugins_dirs(plugins)
+    assert [d.parent.name for d in dirs] == ["backend-engineer", "hscc-orch"]
 
 
 def test_run_tests_sh_covers_every_tested_payload_package():
@@ -648,12 +844,12 @@ def test_drift_guard_applies_inside_profile_plugin_dirs(tmp_path):
 
     # first fan-out installs everywhere
     install_payload.install_payload_profiles(
-        repo, plugins, ["hscc-cluster"], ts="A")
+        repo, plugins, ["hscc-cluster"], ts="A", target_profiles=None)
     # operator patches ONLY the profile copy
     (prof / "hscc-cluster" / "__init__.py").write_text("profile-local patch\n")
 
     res = install_payload.install_payload_profiles(
-        repo, plugins, ["hscc-cluster"], ts="B")
+        repo, plugins, ["hscc-cluster"], ts="B", target_profiles=None)
 
     assert res["drift_detected"] is True          # surfaces on the primary
     assert res["drifted"] == []                   # root tree was clean
@@ -676,11 +872,12 @@ def test_force_flag_reaches_profile_dirs(tmp_path):
     prof = root / "profiles" / "hscc-orch" / "plugins"
     prof.mkdir(parents=True)
     install_payload.install_payload_profiles(
-        repo, plugins, ["hscc-cluster"], ts="A")
+        repo, plugins, ["hscc-cluster"], ts="A", target_profiles=None)
     (prof / "hscc-cluster" / "__init__.py").write_text("profile-local patch\n")
 
     res = install_payload.install_payload_profiles(
-        repo, plugins, ["hscc-cluster"], ts="B", force=True)
+        repo, plugins, ["hscc-cluster"], ts="B", force=True,
+        target_profiles=None)
     assert res["drift_detected"] is False
     assert all(not p.get("drifted") for p in res["profiles"])
     assert not (prof.parent / "plugins-backups").exists() or \
@@ -715,7 +912,10 @@ def test_main_cli_flags_drift_with_rc3_and_force_clears_it(tmp_path):
     repo = _make_repo(tmp_path)
     plugins = tmp_path / "plugins"
     script = pathlib.Path(install_payload.__file__)
-    env = {**os.environ, "REPO_ROOT": str(repo), "PLUGINS": str(plugins)}
+    empty_hscc = tmp_path / "hscc-sealed"
+    empty_hscc.mkdir()
+    env = {**os.environ, "REPO_ROOT": str(repo), "PLUGINS": str(plugins),
+           "HSCC_DIR": str(empty_hscc)}  # seal the config read; live ~/.hscc untouched
     for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE"):
         env.pop(k, None)
 
