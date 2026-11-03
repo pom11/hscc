@@ -88,12 +88,14 @@ off streams and screen-shares); '--no-qr' suppresses the QR.
 
 '--theme <name>' selects the human palette.""",
     "install-service": """\
-Usage: hscc api install-service
+Usage: hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]
 
 OPT-IN boot-resilience (macOS only): write the launchd unit
 ~/Library/LaunchAgents/com.hscc.api.plist (RunAtLoad + KeepAlive) so a
-reboot no longer takes the API offline. Deliberately does NOT load the
-unit — activating stays your call:
+reboot no longer takes the API offline. The bind flags are carried into
+the unit exactly as 'start' honours them; no flags keeps the loopback
+unit. '--no-qr' is accepted and ignored (a launchd unit has no terminal).
+Deliberately does NOT load the unit — activating stays your call:
 
   plutil -lint ~/Library/LaunchAgents/com.hscc.api.plist
   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.hscc.api.plist
@@ -132,7 +134,7 @@ Usage: hscc api <subcommand> [args]
       Stop the running API server
   hscc api status [--no-qr]
       Show running/stopped + bound host:port
-  hscc api install-service
+  hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]
       OPT-IN: write the launchd unit (boot-resilient API;
       loading stays manual)
   hscc api uninstall-service
@@ -459,6 +461,42 @@ def _warn_payload_drift(repo_root=None, plugins_dir=None, theme_name=None):
     )
 
 
+def _strict_serve_flag_values(argv):
+    """Refuse malformed ``--bind``/``--port`` VALUES for install-service.
+
+    ``_parse_start_flags`` is deliberately forgiving for `start`: an
+    unparseable ``--port`` value falls through ``except ValueError: pass`` and
+    the server starts on the configured port, and ``--bind`` with no value
+    after it is ignored. That forgiveness is inherited by install-service
+    because the flags are parsed by the same helper — and for a launchd unit it
+    would be the very defect this card fixes: the operator asks for
+    ``--port 88ab``, the flag is dropped, and the unit comes up on 8787 at
+    every boot with no complaint. A unit is not a one-off command line — it is
+    the thing that runs unattended at boot — so a value the parser cannot read
+    is refused here, loudly, before the plist file is written.
+
+    Only the SHAPE is checked here (a value exists, a port is an int); the
+    address itself is validated by ``api_launchd.serve_args``. Returns nothing;
+    raises ValueError with an actionable message.
+    """
+    for i, arg in enumerate(argv):
+        if arg == "--port":
+            if i + 1 >= len(argv):
+                raise ValueError("--port needs a value, e.g. --port 8787")
+            raw = argv[i + 1]
+            try:
+                int(raw)
+            except ValueError:
+                raise ValueError(
+                    f"invalid --port value {raw!r} — expected a port number"
+                ) from None
+        elif arg == "--bind":
+            if i + 1 >= len(argv):
+                raise ValueError(
+                    "--bind needs a value, e.g. --bind 100.64.0.1 (or use "
+                    "--tailscale)")
+
+
 def _handle_start(argv, theme_name=None):
     """`hscc api start` — resolve bind/config + token, fork into background.
 
@@ -640,18 +678,36 @@ def _handle_install_service(argv, theme_name=None):
     stays a manual operator step, same opt-in spirit as `hscc daemon install`
     but one notch stricter — writing the file changes nothing until you load
     it. macOS only (launchd).
+
+    ``--tailscale`` / ``--bind <ip>`` / ``--port <n>`` are forwarded into the
+    unit's ProgramArguments so a tailnet-served API can move onto launchd
+    without silently losing its bind (t_37948685 — the operator's running
+    `hscc api start --tailscale` had no launchd equivalent to migrate to).
+    Parsed by the SAME helper `start` uses, so a flag combination that means
+    one thing to `start` means the same thing here; ``--no-qr`` is accepted and
+    dropped because it is display-only and a launchd unit has no terminal.
     """
     argv, theme_name_ = _strip_theme(argv)
     if sys.platform != "darwin":
         print("install-service is macOS-only (launchd)", file=sys.stderr)
         return 1
     from hscc_daemon import api_launchd
+    try:
+        _strict_serve_flag_values(argv)
+        bind_override, port_override, _no_qr = _parse_start_flags(argv)
+        extra = api_launchd.serve_args(bind=bind_override, port=port_override)
+    except ValueError as exc:
+        # Refused BEFORE the file is touched — a unit that cannot start is
+        # worse than no unit (launchd would respawn the failure forever).
+        print(f"error: {theme.esc(exc)}", file=sys.stderr)
+        return 1
     api_dir = _resolve_api_dir()
     if not api_dir.is_dir():
         print(f"error: hscc-api dir not found at {api_dir}", file=sys.stderr)
         return 1
     try:
-        res = api_launchd.install_api_plist(str(api_dir))
+        res = api_launchd.install_api_plist(str(api_dir),
+                                            serve_extra_args=extra)
     except (RuntimeError, OSError) as exc:
         print(f"error: {theme.esc(exc)}", file=sys.stderr)
         return 1
@@ -660,7 +716,8 @@ def _handle_install_service(argv, theme_name=None):
     console.print(
         f"launchd unit {state}: {res['path']}\n"
         f"  interpreter: {res['python']}\n"
-        "NOT loaded yet (opt-in). To activate:\n"
+        + (f"  serve flags: {' '.join(extra)}\n" if extra else "")
+        + "NOT loaded yet (opt-in). To activate:\n"
         f"  plutil -lint {res['path']}\n"
         f"  launchctl bootstrap gui/$UID {res['path']}\n"
         f"To check: launchctl print gui/$UID/{api_launchd.API_LABEL} | head -20\n"
