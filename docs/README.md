@@ -87,6 +87,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/design/2026-08-30-audit-report.md` — "Monday readiness" audit of the v1 app. **record**
 - `docs/design/telegram-optional.md` — design + implementation log for making Telegram fully optional; the removal then shipped (`docs/audits/telegram-removal-report.md`). **record**
 - `docs/design/cluster-up-launch-hardening-t_be4b94ca.md` — design record for the `hscc cluster up` launch hardening (per-unit launch phase timeout via `HSCC_CLUSTER_UP_LAUNCH_TIMEOUT`, 180s default; already-serving-unit hang fix) + per-unit alias detection; shipped in v2.12.0, written before the code. **record**
+- `docs/design/doctor-row-registry-t_32a06db9.md` — design record for the doctor feature-row registry: why `run_doctor()` was a merge hotspot (three hunks every feature row edited), why a registry beat `doctor_<feature>.py` splits (the row suites patch the hooks on the doctor module), and the semantics that must not move. **live**
 - `docs/design/screens/` (3 PNGs below) — earlier root-tree reviewer proof shots cited by `ios-app/README.md` and the redesign spec; the current full 12-screens × light/dark capture set lives under `ios-app/docs/design/screens/`.
 - `docs/design/screens/appicon-springboard.png` — springboard proof the AppIcon replaced the `H` placeholder. **live** evidence.
 - `docs/design/screens/phase2-home.png` — Phase-2 home reviewer screenshot. **live** evidence.

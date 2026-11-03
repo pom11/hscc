@@ -87,7 +87,8 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | File | Role |
 |------|------|
 | `bootstrap.sh` | the orchestrator script |
-| `doctor.py` | preflight checks |
+| `doctor.py` | preflight checks; the feature rows it runs come from its `FEATURE_CHECK_ROWS` registry (one entry per row), not from code in `run_doctor()` |
+| `doctor_rows.py` | the machinery behind that registry: a `FeatureCheckRow` record (key, seam keyword, the hooks that build its verdict, the per-row context it reads), the shared five-field `Check` adapter, and `render_rows()` which resolves each hook on the doctor module **per call** so the row suites can patch them. Adding a doctor row = one entry in `doctor.py::FEATURE_CHECK_ROWS`; see `docs/design/doctor-row-registry-t_32a06db9.md` |
 | `doctor_node_recovery.py` | the doctor's per-node node-recovery check (watchdog armed + panic sysctls in sync), read-only over sparkrun ssh; reuses `hscc-cluster/node_recovery.py` + `install_autoreboot.py` as its single source of truth |
 | `doctor_role_soul.py` | the doctor's role-SOUL identity check (each worker SOUL's `## Role:` header vs its profile dir name and its spec, any heading `compose_soul()` cannot emit, and — since t_5b362400 — the CONTENT loss list: live lines a positional compose-vs-live diff shows `generate` would delete, with sandbox identifiers masked). Bridge only — the audit lives in `hscc-roles/role_soul_check.py`, which owns `PROFILES_DIR`/`ROLES_DIR`/`compose_soul`; read-only, WARNING-severity, honest ERROR when the hscc-roles sibling is absent |
 | `detect.py` | parse `sparkrun cluster list` |

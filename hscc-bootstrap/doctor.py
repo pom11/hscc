@@ -44,6 +44,7 @@ import _theme
 import backup_util
 import doctor_node_recovery
 import doctor_role_soul
+import doctor_rows
 
 
 @dataclass
@@ -1761,6 +1762,103 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+# ---------------------------------------------------------------------------
+# FEATURE ROW REGISTRY (t_32a06db9)
+#
+# The five rows above used to be wired into run_doctor() by hand: one call plus
+# one "why this row exists" comment in the check list, and one keyword in
+# run_doctor()'s signature each. Every feature that added a row edited the same
+# three hunks, which is why PR #175 and PR #173 collided and needed the
+# t_3f805c4f rebase — and PR #175 then collided with this card's own branch the
+# same way, which is the strongest argument for the registry that exists.
+# The wiring is now ONE entry per row below, iterated by run_doctor()
+# (machinery in hscc-bootstrap/doctor_rows.py), so a new row is one edit in one
+# place — never the signature, never the check list, never the adapter block.
+#
+# Adding a row:
+#   1. put the verdict in the feature's own module (its config loader, its
+#      stream name, its freshness budget — the verdict must live with the
+#      feature so doctor cannot drift from what the running daemon means).
+#      Precedent: doctor_supervision.py, doctor_notifier_mask.py, or the
+#      feature's daemon module exposing doctor_check(hscc_dir=...).
+#   2. add a loader + a refusal helper in this file (the refusal is the pytest
+#      fence: the check's default target is the operator's live ~/.hscc or
+#      deployed plugin tree, so an uninjected check inside a suite must come
+#      back an ERROR naming the seam, never a silent pass and never a real read).
+#   3. append ONE FeatureCheckRow here naming those helpers. Do not touch
+#      run_doctor() — its **feature_rows kwargs are validated against the
+#      registry, so the seam keyword exists the moment the entry does.
+#
+# `row_fn` is set for the five pre-existing rows because their own suites call
+# those functions directly (and pin the five-field copy at the bridge); a NEW
+# row should leave it empty and let doctor_rows.build_row assemble the row from
+# loader/refusal/fallback_name. `row_kwargs` names the per-row context each
+# row function wants: "hscc_dir" (the sandboxed ~/.hscc root, the
+# doctor_notifier_mask convention) or "hermes_home" (the deployed plugin tree,
+# what the budget-hook row reads).
+# ---------------------------------------------------------------------------
+FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
+    # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
+    # enabled and ticking? Its own check (hscc_daemon/orch_waker.py) owns the
+    # verdict; only the five Check fields are taken, so `doctor --json` keeps
+    # one shape. A STALE waker is a warning (fatal=False) — drift to fix, never
+    # a reason to abort an install; RED is reserved for "enabled, daemon
+    # running, this stream never stamped".
+    doctor_rows.FeatureCheckRow(
+        key="orch_waker", seam_kwarg="_orch_waker_check",
+        row_fn="_orch_waker_check_row"),
+    # GAP-B-4 (audit B): the dep_pr / escalate Hermes-cron watchers run OUTSIDE
+    # the daemon, so no stream notices when they stop firing — the dep-watcher
+    # once failed 17 consecutive daily runs unnoticed (t_3aadd2c0). Each pass
+    # stamps into ~/.hscc/state through the daemon's own state writer; the row
+    # warns when a stamp passes 3x its cadence and says "not configured"
+    # cleanly when nobody installed the watcher. Warn-only by construction
+    # (fatal=False always).
+    doctor_rows.FeatureCheckRow(
+        key="cron_watchers", seam_kwarg="_cron_watchers_check",
+        row_fn="_cron_watchers_check_row"),
+    # GAP-F-5 (audit F): is the running daemon loop the process the service
+    # manager OWNS? The t_61457fbd incident class (an orphan `hscc start` /
+    # TCC-blind bootstrap loop with PPID 1) keeps stream state fresh, so every
+    # other row reads green while nothing restarts the daemon on crash. This row
+    # makes the ONE comparison nobody did: ~/.hscc/daemon.pid's pid vs the pid
+    # launchd/systemd reports (the same probes restart_daemon.sh's pid-turnover
+    # poll trusts). Warn, never fatal — doctor is Stage 1 and runs before the
+    # daemon exists.
+    doctor_rows.FeatureCheckRow(
+        key="supervision", seam_kwarg="_supervision_check",
+        row_fn="_supervision_check_row"),
+    # GAP-F-4 (audit F, t_51931733): is the paused-board policy actually being
+    # ENFORCED? `hscc kanban enforce` used to be a verb nobody called: an
+    # orchestrator turn in flight could leave cards ready/running on a paused
+    # board and nothing noticed. It is the daemon's kanban_enforce stream now
+    # (60 s, PERIODIC_INTERVALS), and this row is the coverage half:
+    # paused-count + last-enforce freshness + policy-document coherence, with
+    # fatal RED reserved for the orch-waker class (policy live, daemon running,
+    # stream never stamped).
+    doctor_rows.FeatureCheckRow(
+        key="kanban_enforce", seam_kwarg="_kanban_enforce_check",
+        row_fn="_kanban_enforce_check_row"),
+    # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note and
+    # budget_watch.doctor_check verifies the two ctx.register_hook calls that
+    # make it fire — but until that row existed nothing in doctor ever CALLED
+    # it, so a deploy that lost the wiring (stale payload, hand-patched plugin
+    # dir) still read all-green. Warn-only by construction: a missing hook
+    # costs the note, never an install. Same fence as the waker row — its
+    # default target is the operator's DEPLOYED plugin tree, so inside a pytest
+    # process the verdict must be injected, never read. Reads hermes_home (the
+    # plugin-tree root), not hscc_dir.
+    doctor_rows.FeatureCheckRow(
+        key="budget_hook", seam_kwarg="_budget_hook_check",
+        row_fn="_budget_hook_check_row", row_kwargs=("hermes_home",)),
+]
+
+#: The seam keywords the registry owns. run_doctor() validates its
+#: **feature_rows against this, so a typo'd seam cannot silently downgrade a
+#: row to its refusal verdict with nobody noticing.
+_FEATURE_SEAM_NAMES = doctor_rows.seam_names(FEATURE_CHECK_ROWS)
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None, _serving_raw=None, _venv_python=None,
                _lan_probe=None, _cluster_default_runner=None,
@@ -1768,7 +1866,7 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                hscc_dir: Optional[str] = None, _role_soul_scan=None,
                _orch_waker_check=None, _cron_watchers_check=None,
                _supervision_check=None, _kanban_enforce_check=None,
-               _budget_hook_check=None) -> dict:
+               _budget_hook_check=None, **feature_rows) -> dict:
     """Run all checks.
 
     Fleet checks (lan reachability / cluster-vs-serving / serving
@@ -1790,6 +1888,14 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     target reads SOUL.md under the live profiles root, which in the operator's
     env is real profile state. Uninjected inside a suite it renders as an ERROR
     naming the missing seam, never as a pass.
+
+    Feature rows (orch-waker, cron watchers, supervision, kanban-enforce,
+    budget hook, …) are wired by ``FEATURE_CHECK_ROWS`` below, not by this
+    signature: the keywords above are the rows that existed before the registry
+    and stay for compatibility. A NEW row's seam arrives through
+    ``**feature_rows`` and is validated against the registry, so run_doctor()
+    never needs editing again (an unknown keyword is a TypeError rather than a
+    silently ignored seam).
     """
     if fleet_checks is None:
         fleet_checks = "pytest" not in sys.modules
@@ -1819,67 +1925,39 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # hard-stop. It probes each distinct endpoint once; a probe failure is
         # reported as ok (no false alarm), so it never flips preflight `ok`.
         _check_models_served(home, _http_get=_http_get),
-        # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
-        # enabled and ticking? Its own check (hscc_daemon/orch_waker.py) owns
-        # the verdict; only the five Check fields are taken, so `doctor --json`
-        # keeps one shape. A STALE waker is a warning (fatal=False) — drift to
-        # fix, never a reason to abort an install; RED is reserved for
-        # "enabled, daemon running, this stream never stamped".
-        #
-        # Same fence as the role-SOUL audit above: its default target is the
-        # OPERATOR's live ~/.hscc (config + the waker's stream state), so
-        # inside a pytest process it must be injected — without a seam it
-        # renders as an ERROR naming the seam, never a silent pass and never a
-        # real read of the operator's daemon state. hscc_dir comes from the
-        # environment (the doctor_notifier_mask convention two rows down):
-        # bootstrap's sandboxed tests keep HOME real and relocate only
-        # HSCC_DIR, and doctor runs there as the Stage-1 gate.
-        _orch_waker_check_row(_orch_waker_check,
-                              hscc_dir=os.environ.get("HSCC_DIR")),
-        # GAP-B-4 (audit B): the dep_pr / escalate Hermes-cron watchers run
-        # OUTSIDE the daemon, so no stream notices when they stop firing —
-        # the dep-watcher once failed 17 consecutive daily runs unnoticed
-        # (t_3aadd2c0). Each pass stamps into ~/.hscc/state through the
-        # daemon's own state writer; this row warns when a stamp passes 3x its
-        # cadence and says "not configured" cleanly when nobody installed the
-        # watcher. Warn-only by construction (fatal=False always) and
-        # pytest-fenced exactly like the waker row above.
-        _cron_watchers_check_row(_cron_watchers_check,
-                                 hscc_dir=os.environ.get("HSCC_DIR")),
-        # GAP-F-5 (audit F): is the running daemon loop the process the
-        # service manager OWNS? The t_61457fbd incident class (an orphan
-        # `hscc start` / TCC-blind bootstrap loop with PPID 1) keeps stream
-        # state fresh, so every other row reads green while nothing restarts
-        # the daemon on crash. This row makes the ONE comparison nobody did:
-        # ~/.hscc/daemon.pid's pid vs the pid launchd/systemd reports (the
-        # same probes restart_daemon.sh's pid-turnover poll trusts). Warn,
-        # never fatal — doctor is Stage 1 and runs before the daemon exists.
-        # Same fence as the waker row: inside a pytest process the verdict
-        # must be injected, never probed (live launchctl + live pid file).
-        _supervision_check_row(_supervision_check,
-                               hscc_dir=os.environ.get("HSCC_DIR")),
-        # GAP-F-4 (audit F, t_51931733): is the paused-board policy actually
-        # being ENFORCED? `hscc kanban enforce` used to be a verb nobody called:
-        # an orchestrator turn in flight could leave cards ready/running on a
-        # paused board and nothing noticed (its own docstring said "safe to run
-        # from a loop" — there was no loop). It is the daemon's kanban_enforce
-        # stream now (60 s, PERIODIC_INTERVALS), and this row is the coverage
-        # half: paused-count + last-enforce freshness + policy-document
-        # coherence, with fatal RED reserved for the orch-waker class (policy
-        # live, daemon running, stream never stamped). Same fence as the waker
-        # row: inside pytest the verdict must be injected, never probed.
-        _kanban_enforce_check_row(_kanban_enforce_check,
-                                  hscc_dir=os.environ.get("HSCC_DIR")),
-        # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note
-        # and budget_watch.doctor_check verifies the two ctx.register_hook calls
-        # that make it fire — but until this row existed nothing in doctor ever
-        # CALLS it, so a deploy that lost the wiring (stale payload, hand-patched
-        # plugin dir) still read all-green. Warn-only by construction: a missing
-        # hook costs the note, never an install. Same fence as the waker row —
-        # its default target is the operator's DEPLOYED plugin tree, so inside a
-        # pytest process the verdict must be injected, never read.
-        _budget_hook_check_row(_budget_hook_check, hermes_home=home),
     ]
+    # The feature rows (orch-waker, cron watchers, supervision, kanban-enforce,
+    # budget hook) come from FEATURE_CHECK_ROWS right before run_doctor(), in
+    # registry order — the same position and the same relative order they had
+    # when each was a literal entry in the list above. Each keeps its own row
+    # function, its own pytest fence, and its own seam; only the wiring moved
+    # here (t_32a06db9).
+    #
+    # The pre-registry seams stay explicit keywords for compatibility with the
+    # suites that inject them, and are folded into the same mapping a new row's
+    # seam arrives through. An unknown keyword is rejected instead of ignored,
+    # so a typo'd seam can never silently downgrade a row to its refusal verdict.
+    seams = {
+        "_orch_waker_check": _orch_waker_check,
+        "_cron_watchers_check": _cron_watchers_check,
+        "_supervision_check": _supervision_check,
+        "_kanban_enforce_check": _kanban_enforce_check,
+        "_budget_hook_check": _budget_hook_check,
+    }
+    seams.update(feature_rows)
+    unknown = sorted(set(seams) - _FEATURE_SEAM_NAMES)
+    if unknown:
+        raise TypeError(
+            f"run_doctor() got unexpected feature-row seam(s) {unknown}; the "
+            f"registry knows {sorted(_FEATURE_SEAM_NAMES)}. Add a "
+            f"FeatureCheckRow for a new row — do not add a keyword here.")
+    # hscc_dir comes from the environment (the doctor_notifier_mask convention):
+    # bootstrap's sandboxed tests keep HOME real and relocate only HSCC_DIR, and
+    # doctor runs there as the Stage-1 gate. hermes_home is the deployed
+    # plugin-tree root the budget-hook row reads.
+    checks += doctor_rows.render_rows(
+        sys.modules[__name__], FEATURE_CHECK_ROWS, seams,
+        hscc_dir=os.environ.get("HSCC_DIR"), hermes_home=home)
     if fleet_checks:
         # A pytest process must never acquire sparkrun's production ssh
         # transport, even when a test forces fleet_checks=True: the transport
