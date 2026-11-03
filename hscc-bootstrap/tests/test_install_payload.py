@@ -493,11 +493,11 @@ def test_empty_target_profiles_keeps_legacy_skip(tmp_path):
     """Explicit [] means the pre-t_32f97d20 behaviour: only homes that ALREADY
     have plugins/ are written; a payload-less home is NOT created. The
     operator's way to turn the allowlist off without deleting the key. Same
-    reading through the config door (cluster.json target_profiles: [])."""
+    reading through the config door (target_profiles.json: [])."""
     repo, root, plugins = _seeded_tree(tmp_path)
     hscc = tmp_path / "hscc"
     hscc.mkdir()
-    (hscc / "cluster.json").write_text('{"target_profiles": []}',
+    (hscc / "target_profiles.json").write_text('{"target_profiles": []}',
                                        encoding="utf-8")
 
     res = install_payload.install_payload_profiles(
@@ -516,7 +516,7 @@ def test_empty_target_profiles_keeps_legacy_skip(tmp_path):
 
 
 def test_config_absent_key_uses_hscc_board_seed(tmp_path, monkeypatch):
-    """No cluster.json (or no target_profiles key) -> the DEFAULT_TARGET_PROFILES
+    """No target_profiles.json (or no target_profiles key) -> the DEFAULT_TARGET_PROFILES
     seed ships, NOT all 49 homes and NOT the legacy skip. The seed list itself
     is pinned so a silent edit to DEFAULT_TARGET_PROFILES breaks a test."""
     assert install_payload.DEFAULT_TARGET_PROFILES == (
@@ -544,7 +544,7 @@ def test_config_star_and_list_and_malformed_readings(tmp_path):
     the default seed AND a named config_error (never silently ignored)."""
     hscc = tmp_path / "hscc"
     hscc.mkdir()
-    cfg = hscc / "cluster.json"
+    cfg = hscc / "target_profiles.json"
 
     def write(value):
         cfg.write_text('{"target_profiles": %s}' % __import__("json").dumps(value),
@@ -577,12 +577,12 @@ def test_config_star_and_list_and_malformed_readings(tmp_path):
 
 
 def test_config_file_unreadable_reports_error_and_keeps_seed(tmp_path):
-    """Present-but-unreadable cluster.json is an environment fault, not 'no
+    """Present-but-unreadable target_profiles.json is an environment fault, not 'no
     config': the default seed applies and the error is NAMED (same honesty
     rule install_notifier_mask applies to its own subkey)."""
     hscc = tmp_path / "hscc"
     hscc.mkdir()
-    (hscc / "cluster.json").write_text("{not json", encoding="utf-8")
+    (hscc / "target_profiles.json").write_text("{not json", encoding="utf-8")
 
     r = install_payload.target_profiles_config(hscc_dir=str(hscc))
     assert r["target_profiles"] == install_payload.DEFAULT_TARGET_PROFILES

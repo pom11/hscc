@@ -340,17 +340,25 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
 # them. The operator decision (comment 1642 on t_16eb73ab) is an explicit
 # allowlist seeded narrowest, NOT a write-to-everything default:
 #
-#   ~/.hscc/cluster.json -> {"target_profiles": ["backend-engineer", ...]}
+#   ~/.hscc/target_profiles.json -> {"target_profiles": ["backend-engineer", ...]}
+#
+# A DEDICATED file, deliberately not a key inside cluster.json:
+# hscc-cluster/discovery.py::_write_cache rewrites cluster.json from a freshly
+# built dict (to_cluster_json: name/gateway/workers/nasDevices only) on every
+# live discovery, so any hand-added top-level key there silently evaporates —
+# the operator's widening edit must not be one `hscc cluster` run away from
+# vanishing (same silent-signal-loss class as the node_recovery opt-out drops,
+# filed as t_7c3ec484).
 #
 # Semantics (pinned by tests named for each rule):
-#   key ABSENT  -> DEFAULT_TARGET_PROFILES (the hscc-board seed below)
+#   file ABSENT / key ABSENT -> DEFAULT_TARGET_PROFILES (the hscc-board seed)
 #   ["*", ...]  -> EVERY profile home under profiles/ (option 1; the key must
 #                  keep this meaning so widening stays a config edit, no code)
 #   [...]       -> exactly those profile names; missing plugins/ is CREATED
 #   []          -> legacy behaviour: only homes that already have plugins/
 # The seed is the DEFAULT, never a wall: an operator adds or drops names by
 # editing the config file (same reader convention as install_notifier_mask:
-# own top-level key, own reader, hscc_dir= seam so tests can seal ~/.hscc).
+# one key, one reader, hscc_dir= seam so tests can seal ~/.hscc).
 DEFAULT_TARGET_PROFILES = (
     # Derived 2026-11-03 from the hscc BOARD's own task history via the
     # sanctioned CLI — see docs/t_32f97d20-target-profiles-seed.md for the
@@ -365,7 +373,7 @@ DEFAULT_TARGET_PROFILES = (
 #: The literal that widens the allowlist to every profile home (option 1).
 TARGET_ALL = "*"
 
-#: The config key inside cluster.json that carries the allowlist.
+#: The config key inside target_profiles.json that carries the allowlist.
 TARGET_PROFILES_KEY = "target_profiles"
 
 
@@ -376,7 +384,7 @@ def hscc_dir() -> str:
 
 
 def target_profiles_config(hscc_dir=None):
-    """Read ``target_profiles`` from ``<hscc_dir>/cluster.json``.
+    """Read ``target_profiles`` from ``<hscc_dir>/target_profiles.json``.
 
     Returns ``{"target_profiles": <resolved>, "config_error": str}`` where the
     resolved value is one of:
@@ -390,11 +398,11 @@ def target_profiles_config(hscc_dir=None):
     not a list of strings keeps the default and is NAMED in ``config_error``:
     a silently-ignored allowlist looks exactly like a working one (same rule
     install_notifier_mask applies to its own subkey). This reader owns only its
-    own key — it cannot flip a sibling block in the same file and no sibling
+    own file — it cannot flip a sibling key in cluster.json and no sibling
     reader can flip it.
     """
     base = hscc_dir or globals()["hscc_dir"]()
-    target = os.path.join(base, "cluster.json")
+    target = os.path.join(base, "target_profiles.json")
     try:
         with open(target) as fh:
             cfg = json.load(fh)
@@ -510,7 +518,7 @@ def install_payload_profiles(
     dir for the first time — the payload-less-to-payload flip).
 
     ``target_profiles`` (t_32f97d20): left unset resolves the allowlist from
-    ``<hscc_dir>/cluster.json`` ``target_profiles`` — see
+    ``<hscc_dir>/target_profiles.json`` ``target_profiles`` — see
     :func:`target_profiles_config`; an explicit value (``None`` or ``[]`` for
     legacy, ``"*"`` / ``["*"]`` for all homes, or a collection of names)
     overrides the config.
