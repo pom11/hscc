@@ -34,10 +34,14 @@ sysctl --version-specific output formatting.
 
 Opt-out: ``~/.hscc/cluster.json`` -> ``{"node_recovery": {"autoreboot": false}}``
 (default ON when the block or subkey is absent; unknown keys stay ignorable by
-older consumers). The sibling watchdog card owns the ``watchdog`` subkey;
-``node_recovery`` is the shared block, one subkey per layer, so the two cards
-never edit the same reader. Doctor coverage is the sibling doctor card (child
-of this one): it must reuse ``MANAGED_KEYS``/``HARDLOCKUP_KEY``/``build_dropin``
+older consumers). The block is durable: ``discovery._write_cache`` rewrites the
+topology keys on every live discovery but carries every key it does not own —
+``node_recovery`` included — forward, so an opt-out here survives ``hscc
+cluster`` sweeps (t_7c3ec484). The sibling watchdog card owns the ``watchdog``
+subkey; ``node_recovery`` is the shared block, one subkey per layer, so the two
+cards never edit the same reader. Doctor coverage is the sibling doctor card
+(child of this one): it must reuse
+``MANAGED_KEYS``/``HARDLOCKUP_KEY``/``build_dropin``
 and the probe command exported here rather than re-deriving the expected set.
 
 THE hung_task DECISION (review gate — the reasoning lives here and in the PR

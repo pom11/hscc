@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 
@@ -215,6 +216,23 @@ def _run(args, timeout=20) -> dict:
         return {"ok": False, "stdout": "", "stderr": str(e)}
 
 
+def _read_cluster_json_detail() -> tuple:
+    """(parsed cluster.json dict or None, error string or "").
+
+    The error half is what lets a *caller that is about to overwrite the file*
+    tell "no config yet" (quiet, normal) from "config present but unreadable"
+    (must be reported). `_read_cluster_json()` stays the simple
+    dict-or-None reader everyone else uses.
+    """
+    try:
+        with open(CLUSTER_JSON) as fh:
+            return json.load(fh), ""
+    except FileNotFoundError:
+        return None, ""
+    except (json.JSONDecodeError, OSError, IsADirectoryError) as e:
+        return None, f"{e.__class__.__name__}: {e}"
+
+
 def _read_cluster_json() -> Optional[dict]:
     try:
         with open(CLUSTER_JSON) as fh:
@@ -223,12 +241,62 @@ def _read_cluster_json() -> Optional[dict]:
         return None
 
 
+#: Top-level keys `_write_cache` OWNS — the shape `to_cluster_json` writes.
+#: Everything else in cluster.json is operator-authored state (the
+#: ``node_recovery`` opt-out block, and anything a future card adds) and must
+#: survive a discovery sweep: `install_autoreboot.py`, `install_notifier_mask.py`,
+#: `install_gpu_clock_cap.py` and `node_recovery.py` all read their opt-out out
+#: of this same file, and bootstrap.sh tells operators to write it there.
+#: ``nas_devices`` counts as owned: it is the camelCase ``nasDevices`` spelling's
+#: read-side alias (topology_from_cluster_json accepts both), so carrying a
+#: stale one forward would leave two spellings of one field in the file.
+OWNED_CACHE_KEYS = ("name", "gateway", "workers", "nasDevices", "nas_devices")
+
+
+def merge_preserved_keys(previous: Any, fresh: dict) -> dict:
+    """``fresh`` (what discovery just resolved) plus every top-level key of
+    ``previous`` that discovery does not own — verbatim, untouched.
+
+    ``previous`` is typed ``Any`` on purpose: it is whatever ``json.load``
+    produced for the old file, and JSON files can hold a list or a scalar.
+
+    Ownership, not a key allowlist of things to keep: an unknown key is kept
+    because discovery has no idea what it means, exactly as it must keep
+    ``node_recovery``. Owned keys are NEVER taken from ``previous`` — live
+    membership stays authoritative, so a hand-edited ``workers`` list in the
+    old file can never resurrect a node that was removed from the sparkrun
+    cluster. Non-dict ``previous`` (absent file, or parsed as a list/scalar) is
+    treated as "nothing to preserve".
+    """
+    out = dict(fresh)
+    if not isinstance(previous, dict):
+        return out
+    for key, value in previous.items():
+        if key not in OWNED_CACHE_KEYS:
+            out[key] = value
+    return out
+
+
 def _write_cache(topo: ClusterTopology) -> None:
     try:
         os.makedirs(os.path.dirname(CLUSTER_JSON), exist_ok=True)
+        # Re-read at write time (not the copy `discover()` read before probing)
+        # so an opt-out the operator added *during* this discovery sweep is not
+        # lost by a snapshot taken before it.
+        previous, parse_error = _read_cluster_json_detail()
+        if parse_error:
+            # Absent file is the normal first run and stays quiet. A file that
+            # is there but unreadable means operator state is about to be
+            # overwritten: say so, because a silently-dead opt-out looks
+            # exactly like a working one (same rule as node_recovery_config).
+            print(f"hscc: WARNING: {CLUSTER_JSON} exists but could not be read "
+                  f"({parse_error}); rewriting it from live topology — any "
+                  f"hand-added keys (e.g. node_recovery) in the old file are "
+                  f"LOST.", file=sys.stderr, flush=True)
         tmp = CLUSTER_JSON + ".tmp"
         with open(tmp, "w") as fh:
-            json.dump(to_cluster_json(topo), fh, indent=2)
+            json.dump(merge_preserved_keys(previous, to_cluster_json(topo)),
+                      fh, indent=2)
         # cluster.json holds node addresses. This plugin is loaded into Hermes
         # agent processes whose umask we do not control, so a process-level
         # umask (as the daemon, CLI and cron watcher each set) cannot reach

@@ -5,6 +5,11 @@ import pytest
 
 import discovery as d
 
+#: The REAL `_write_cache`, captured at import time. tests/conftest.py's
+#: autouse `_pin_discovery_io` replaces it with a recorder, so a test that must
+#: prove what actually lands on disk has to reach around that fixture.
+_REAL_WRITE_CACHE = d._write_cache
+
 
 SPARKRUN_FIXTURE = json.dumps([{
     "name": "hscc",
@@ -202,6 +207,135 @@ class TestAutoAdopt:
         topo = d.discover()
         assert "192.0.2.99" in topo.worker_ips      # adopted
         assert "192.0.2.12" not in topo.worker_ips  # dropped
+
+
+class TestCachePreservesOperatorKeys:
+    """t_7c3ec484: `_write_cache` used to write `to_cluster_json(topo)` and
+    nothing else, so every hand-added top-level key in ~/.hscc/cluster.json
+    silently evaporated on the next discovery sweep — including the
+    ``node_recovery`` opt-out blocks that install_autoreboot /
+    install_notifier_mask / install_gpu_clock_cap / node_recovery read and that
+    bootstrap.sh tells operators to write there. One sweep deleted an opt-out
+    and the feature silently re-enabled."""
+
+    OPERATOR_KEYS = {
+        # the documented opt-out block (watchdog + autoreboot subkeys)
+        "node_recovery": {"watchdog": False, "autoreboot": False},
+        # the shape t_32f97d20's allowlist would have had if it lived here
+        "target_profiles": ["backend-engineer", "reviewer"],
+        # a key discovery has never heard of — ownership, not an allowlist
+        "some_future_thing": {"nested": [1, 2, 3]},
+    }
+
+    def _seed(self, tmp_path, extra=None):
+        """cluster.json as discovery last wrote it, plus operator keys."""
+        data = dict(CLUSTER_JSON_FIXTURE)
+        data.update(extra if extra is not None else self.OPERATOR_KEYS)
+        path = tmp_path / "cluster.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def _live_discovery(self, monkeypatch):
+        """sparkrun answers live (the conftest fixture already does) and the
+        REAL cache writer runs, so the assertion is about the file on disk."""
+        monkeypatch.setattr(d, "_write_cache", _REAL_WRITE_CACHE)
+
+    def test_operator_keys_survive_live_discovery(self, monkeypatch, tmp_path):
+        """THE regression: seed node_recovery + a target_profiles-shaped key,
+        run discover() with sparkrun stubbed live, both keys still there."""
+        path = self._seed(tmp_path)
+        self._live_discovery(monkeypatch)
+
+        topo = d.discover()
+        assert topo.source == "live"          # discovery really went live
+        assert topo.worker_ips == ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
+
+        on_disk = json.loads(path.read_text())
+        assert on_disk["node_recovery"] == self.OPERATOR_KEYS["node_recovery"]
+        assert on_disk["target_profiles"] == self.OPERATOR_KEYS["target_profiles"]
+        assert on_disk["some_future_thing"] == self.OPERATOR_KEYS["some_future_thing"]
+        # and the topology itself is still the live one, not the seeded one
+        assert [w["ip"] for w in on_disk["workers"]] == topo.worker_ips
+
+    def test_opt_out_reader_still_reads_the_preserved_block(self, monkeypatch, tmp_path):
+        """Honesty rule (same as t_32f97d20's reader): a preserved key must be
+        readable by the ORIGINAL reader, unchanged. Here: the real
+        node_recovery reader, pointed at the file discovery just rewrote."""
+        import node_recovery as nr
+        path = self._seed(tmp_path)
+        self._live_discovery(monkeypatch)
+        d.discover()
+
+        cfg = nr.node_recovery_config(str(path))
+        assert cfg["watchdog"] is False and cfg["autoreboot"] is False
+        assert cfg["config_error"] == ""
+
+    def test_owned_keys_stay_live_authoritative(self, monkeypatch, tmp_path):
+        """Preservation must NOT resurrect a removed node: owned keys always
+        come from the live topology, even though the old file lists .12."""
+        raw = json.dumps([{"name": "hscc",
+                           "hosts": ["192.0.2.10", "192.0.2.11", "192.0.2.99"],
+                           "user": "spark", "default": True}])
+
+        def fake_run(args, timeout=20):
+            if args[:3] == [d.SPARKRUN, "cluster", "list"]:
+                return {"ok": True, "stdout": raw, "stderr": ""}
+            return {"ok": False, "stdout": "", "stderr": ""}
+        monkeypatch.setattr(d, "_run", fake_run)
+        path = self._seed(tmp_path)
+        self._live_discovery(monkeypatch)
+
+        topo = d.discover()
+        on_disk = json.loads(path.read_text())
+        assert "192.0.2.12" not in [w["ip"] for w in on_disk["workers"]]
+        assert "192.0.2.99" in [w["ip"] for w in on_disk["workers"]]
+        assert on_disk["node_recovery"] == self.OPERATOR_KEYS["node_recovery"]
+        assert topo.source == "live"
+
+    def test_absent_old_file_is_quiet(self, monkeypatch, tmp_path, capsys):
+        """First run (no cluster.json yet) writes the topology and says nothing
+        — the warning below is only for a file that exists but cannot be read."""
+        self._live_discovery(monkeypatch)
+        d.discover()
+        assert json.loads((tmp_path / "cluster.json").read_text())["name"] == "hscc"
+        assert capsys.readouterr().err == ""
+
+    def test_unreadable_old_file_is_reported_not_silent(self, monkeypatch, tmp_path,
+                                                        capsys):
+        """Present-but-corrupt means operator state is about to be overwritten.
+        Discovery must still succeed (cache write is best-effort) but must say
+        out loud what it is about to lose."""
+        path = tmp_path / "cluster.json"
+        path.write_text("{ this is not json")
+        self._live_discovery(monkeypatch)
+
+        topo = d.discover()
+        assert topo.source == "live"                       # never fails discovery
+        err = capsys.readouterr().err
+        assert "node_recovery" in err and "LOST" in err    # names the damage
+        assert json.loads(path.read_text())["name"] == "hscc"  # file repaired
+
+    def test_merge_preserved_keys_is_pure_and_ownership_based(self):
+        """The pure function: fresh wins on owned keys, everything unknown is
+        carried verbatim, and a non-dict `previous` is 'nothing to preserve'."""
+        fresh = {"name": "hscc", "gateway": {"ip": "192.0.2.10"},
+                 "workers": [{"ip": "192.0.2.11"}]}
+        prev = {"name": "stale", "gateway": {"ip": "198.51.100.1"},
+                "workers": [], "nasDevices": [{"ip": "192.0.2.20"}],
+                "nas_devices": [{"ip": "192.0.2.20"}],
+                "node_recovery": {"watchdog": False}, "x": 1}
+        out = d.merge_preserved_keys(prev, fresh)
+        assert out["name"] == "hscc"                     # fresh, not stale
+        assert out["gateway"]["ip"] == "192.0.2.10"      # fresh, not stale
+        assert "nasDevices" not in out and "nas_devices" not in out
+        assert out["node_recovery"] == {"watchdog": False} and out["x"] == 1
+        assert d.merge_preserved_keys(None, fresh) == fresh
+        assert d.merge_preserved_keys(["nope"], fresh) == fresh
+        # fresh is never mutated
+        assert "x" not in fresh
+        # ownership list covers exactly what to_cluster_json can write
+        topo = d.topology_from_cluster_json(CLUSTER_JSON_FIXTURE)
+        assert set(d.to_cluster_json(topo)) <= set(d.OWNED_CACHE_KEYS)
 
 
 class TestProbeNodeRealPort:

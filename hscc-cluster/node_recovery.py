@@ -52,7 +52,11 @@ RUNTIME_WATCHDOG_SEC = 30
 #: second line of defence if PID1 is wedged on the way down.
 REBOOT_WATCHDOG_SEC = "2min"
 
-#: The opt-out block lives in ~/.hscc/cluster.json under this key. The key
+#: The opt-out block lives in ~/.hscc/cluster.json under this key. It is
+#: durable there: discovery._write_cache owns only the topology keys
+#: (OWNED_CACHE_KEYS) and carries every other top-level key forward when it
+#: rewrites the cache, so a hand-written opt-out survives an ``hscc cluster``
+#: sweep instead of silently re-enabling the layer (t_7c3ec484). The key
 #: naming is a batch contract: the sysctl sibling card reads the sibling
 #: ``autoreboot`` subkey; this card owns ``watchdog``. Subkeys are read
 #: independently and unknown subkeys are ignored, so an older consumer cannot

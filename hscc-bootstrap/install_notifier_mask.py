@@ -101,7 +101,9 @@ the ``_ssh`` seam and no test opens a socket or contacts a node.
 
 Opt-out: ``~/.hscc/cluster.json`` ->
 ``{"node_recovery": {"firmware_notifier_mask": false}}`` (default ON when the
-block or subkey is absent). ``node_recovery`` is the batch's shared block, one
+block or subkey is absent; durable across ``hscc cluster`` sweeps —
+``discovery._write_cache`` carries every key it does not own forward,
+t_7c3ec484). ``node_recovery`` is the batch's shared block, one
 subkey per layer, read independently — the watchdog card's ``watchdog`` and the
 sysctl card's ``autoreboot`` can neither enable nor disable this layer, and an
 unknown subkey is ignored rather than fatal. A non-boolean value is NOT allowed
