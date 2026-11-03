@@ -155,13 +155,32 @@ A board is silently skipped (pending dropped, watermark still advances) when:
 - it is **paused** — `~/.hscc/state/kanban_paused.json`, read through
   `kanban_pause.paused_boards` so the pause tool's `_`-prefixed bookkeeping keys
   are filtered exactly as the pause tool filters them;
-- it has **no live orchestrator** — `~/.hermes/profiles/<board>-orch` is not a
+- it has **no live orchestrator** — neither a configured `orch_map` entry that
+  names an existing profile nor `~/.hermes/profiles/<board>-orch` as a
   directory. Board → profile uses the repo's single naming rule
   (`kanban_pause.orchestrator_for`), so there is no hardcoded board list. A board
   with no orch is never nudged **and never audited** (there is no REPL to reach);
 - the event is a **block raised by the orchestrator or the operator** —
   `run_id IS NULL` in `task_events`. The orch does not need waking for its own
   action. Worker-raised blocks (`run_id NOT NULL`) do wake it.
+
+**A profile directory is not a pane.** A profile that exists but runs no Hermes
+REPL in tmux passes the existence rule and then fails every delivery, which is
+how the waker shipped one identical `no tmux pane …` audit line every 30 s
+forever (card `t_f1122b7a`). Two mechanisms cover it — a board whose orchestrator
+REPL runs under a differently named profile is reachable via
+[`orch_map`](#config), and a board whose deliveries keep failing is put on a
+**dead-pane backoff**, which is a skip of a different kind:
+
+| skip | pending | audit | watermark | log |
+|---|---|---|---|---|
+| paused / no orchestrator | dropped | none | advances | — |
+| **dead-pane backoff** (armed) | **kept, still batching** | **none** | advances | one line on entering the window |
+
+Nothing is attempted inside a window — that is what "no audit line" means — and
+when it expires the whole accumulated batch goes out as one nudge. The stream
+message names the boards currently in backoff, so a skipped board is never a
+silent one. See [Config](#config) for the knobs.
 
 Two more safety rules: a board seen for the **first time** tail-starts at the
 current `MAX(id)` (never a backlog flood), and an **unreadable board** is warned
@@ -178,7 +197,15 @@ The waker's own file, `~/.hscc/orch_waker.json` (the autodown posture: one small
 JSON per feature; **not** a block inside `~/.hscc/config.json`):
 
 ```json
-{ "enabled": true, "debounce_s": 90, "min_gap_s": 300, "poll_s": 30 }
+{
+  "enabled": true,
+  "debounce_s": 90,
+  "min_gap_s": 300,
+  "poll_s": 30,
+  "orch_map": {},
+  "fail_threshold": 3,
+  "backoff_s": 900
+}
 ```
 
 | key | default | meaning |
@@ -187,6 +214,51 @@ JSON per feature; **not** a block inside `~/.hscc/config.json`):
 | `debounce_s` | 90 | batching window (floor 0) |
 | `min_gap_s` | 300 | per-board rate limit (floor 0) |
 | `poll_s` | 30 | scan cadence, clamped to `[1, 3600]` |
+| `orch_map` | `{}` | `{board: profile}` profile override, checked before `<board>-orch` |
+| `fail_threshold` | 3 | consecutive failed attempts that arm the dead-pane backoff (floor 1) |
+| `backoff_s` | 900 | seconds a board stays skipped once armed (floor = the 30 s cadence) |
+
+### `orch_map` — when the orchestrator's REPL is not named `<board>-orch`
+
+The convention `resolve_orch` uses is `<board>-orch`. When the orchestrator for a
+board actually runs under a different profile name, map it here — the config is
+re-read every tick, so the change is live on the next tick with no restart:
+
+```bash
+cat > ~/.hscc/orch_waker.json <<'JSON'
+{ "orch_map": { "pontaje": "ecofire-pontaje-orch" } }
+JSON
+```
+
+That is the exact JSON for the case the card measured: board `pontaje` has a
+`pontaje-orch` **directory** but no REPL pane, while the live orchestrator REPL
+runs as `ecofire-pontaje-orch`. No board name is hardcoded in code — an empty
+(or absent) `orch_map` means "convention only", exactly the previous behaviour.
+
+- **The mapped profile must exist on disk.** An entry naming a profile that does
+  not exist is ignored and resolution falls back to `<board>-orch`: a typo in a
+  map value must never silence a board the convention could reach.
+- Junk is dropped, never trusted: a whole-value that is not an object means "no
+  overrides"; a non-string or blank value drops that one entry (with a warning)
+  and leaves its siblings working.
+- **Editing the map resets every board's failure counters**, so a board sitting
+  in a backoff window armed against the old target is retried on the very next
+  tick instead of waiting out `backoff_s`.
+
+### `fail_threshold` / `backoff_s` — the dead-pane backoff
+
+After `fail_threshold` **consecutive** failed delivery attempts to one board, that
+board is skipped for `backoff_s` seconds: no inject attempt, therefore **no audit
+line**, and one `LOG` warning when the window opens. Pending keeps batching and the
+event watermark still advances; when the window expires the board gets a fresh set
+of `fail_threshold` attempts, so a still-dead pane costs one attempt per window
+instead of one per tick. A successful delivery clears the board's counter.
+Below the threshold nothing changes — the ordinary "pending kept for retry" path
+runs, so a transient tmux hiccup is never punished with a window.
+
+Counters and the map fingerprint live in the waker's own state document under the
+`fail` / `orch_map_fp` keys (see the state schema below); both ride the stream
+stamp merge on purpose, since the stamp rewrites that file every tick.
 
 - **Fail-open, deliberately.** A missing file, an unreadable file, invalid JSON
   or a non-object document all resolve to *enabled at the stopgap's tuning*. This
@@ -243,8 +315,8 @@ orch-waker: ENABLED  (poll 30s, debounce 90s, min gap 300s)
 | `~/.hscc/state/orch_waker.jsonl` | **daemon** | audit, one JSON line per delivery *attempt*, append-only |
 | `~/.hscc/state/kanban_paused.json` | `hscc kanban pause` | read-only input (the skip rule) |
 
-Waker state — the stopgap's schema, verbatim (`empty_state()`), and the only
-keys `load_state` reads:
+Waker state — the stopgap's schema (`empty_state()`), and the three keys
+`load_state` always provides:
 
 ```json
 { "last":    { "<board>": 76173 },
@@ -252,8 +324,25 @@ keys `load_state` reads:
   "sent":    { "<board>": 1793500090.5 } }
 ```
 
+A board that has failed at least one delivery attempt also carries the waker's
+own bookkeeping keys, and they are **absent entirely** when there is nothing to
+record (so a healthy board's document is still exactly the three keys above):
+
+```json
+{ "fail":        { "<board>": { "n": 3, "at": 1793500090.5 } },
+  "orch_map_fp": "{\"pontaje\": \"ecofire-pontaje-orch\"}" }
+```
+
+`fail.n` is the consecutive failed attempts and `fail.at` the timestamp of the
+last one (the backoff window runs `backoff_s` from it); `orch_map_fp` is the
+fingerprint of the `orch_map` the waker last saw, which is how the next tick
+knows the operator edited the map. Both are validated on read — a malformed
+entry is dropped rather than trusted — and both survive the stream stamp, which
+rewrites this document every tick.
+
 The same file also carries the stream stamp (`timestamp`, `stream`, `last_tick`,
-`ok`, `message`, plus that tick's `nudged`/`decisions`/`last_scan`), written by
+`ok`, `message`, plus that tick's `nudged`/`decisions`/`last_scan`/`backoff`),
+written by
 `state.write_state` merged on top of the three keys above — so `hscc verify`,
 `hscc orch waker status` and the doctor row can all read the one document. The
 three scan keys are what `load_state` consumes; the stamp fields are foreign to
