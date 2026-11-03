@@ -34,7 +34,9 @@ proves nothing; it is only the last of the four conditions.
 
 Opt-out / value: ``~/.hscc/cluster.json`` ->
 ``{"node_recovery": {"gpu_clock_cap_mhz": 2200}}``; ``false`` turns the layer
-off (default 2200 when the block or key is absent). Turning it off does NOT
+off (default 2200 when the block or key is absent; durable across ``hscc
+cluster`` sweeps — ``discovery._write_cache`` carries every key it does not own
+forward, t_7c3ec484). Turning it off does NOT
 remove an installed cap — undo is explicit (``--uninstall``), the same rule the
 sibling layers follow. A value that is not an integer in
 [MIN_CAP_MHZ, MAX_CAP_MHZ] keeps the default and is named in ``config_error``.
