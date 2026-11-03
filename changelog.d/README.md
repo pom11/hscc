@@ -60,10 +60,19 @@ order: 1
 `task:` defaults to the file stem, so it is optional. `order:` (integer,
 default `0`) only breaks ties between entries inside one file.
 
-Allowed `kind` values are the Keep a Changelog sections — `Added`, `Changed`,
-`Deprecated`, `Removed`, `Fixed`, `Security` — plus HSCC's **`Verified`**, which
-is rendered last. `Verified` is where the landing evidence goes (suite counts,
-both-interpreter runs, audit-doc paths), exactly as before.
+Allowed `kind` values are a **closed list** — `Added`, `Changed`, `Deprecated`,
+`Removed`, `Fixed`, `Security`, plus HSCC's **`Verified`** (landing evidence:
+suite counts, both-interpreter runs, audit-doc paths) and **`Docs`** (doc-only
+changes). Both HSCC kinds render last, `Verified` before `Docs`. A `kind`
+outside that list is a **hard failure**: `check` (and `sync`/`render`/`list`/
+`release`) exits `2` naming the file, and the `add` command refuses an unknown
+`--kind` so the mistake is caught where it is typed.
+Unknown kinds used to sort alphabetically after the known ones, which let
+invented words become published `### <kind>` headings — [2.15.0] shipped
+`### schema`, `### Docs` and `### Test` exactly this way (t_f48f84c4). Admitting
+a new kind means a deliberate edit to `KIND_ORDER` in
+`scripts/changelog_fragments.py` plus this file and the worker skill, in a card
+that says so — never an author typing a new word.
 
 A malformed fragment (missing `kind`, empty body, non-integer `order`) fails
 loudly in `check` rather than silently vanishing at release. A fragment whose
@@ -74,8 +83,8 @@ ownership rule; `misc.md` would put two cards back into one shared file.
 
 Deterministic, so re-running the assembler is a no-op:
 
-1. kinds in Keep a Changelog order, `Verified` last, unknown kinds
-   alphabetically after that;
+1. kinds in the order of `KIND_ORDER` (Keep a Changelog order, then HSCC's
+   `Verified`, then `Docs`); the list is closed, so no other kind can appear;
 2. within a kind: `(task id, order, index-in-file)`.
 
 Task ids sort lexically. That is deliberate: it is stable across merges and

@@ -33,14 +33,18 @@ appear under the ``### <Kind>`` heading (i.e. keep the leading ``- ``).
     - Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages).
 
 Optional headers before the body: ``task: t_<id>`` (defaults to the file stem)
-and ``order: <int>`` (defaults 0; breaks ties inside one file). Blank ``kind``
-values, unknown header names and empty bodies are errors — a malformed
-fragment must fail loudly in ``check`` rather than silently vanish at release.
+and ``order: <int>`` (defaults 0; breaks ties inside one file). Blank or
+unknown ``kind`` values, unknown header names and empty bodies are errors — a
+malformed fragment must fail loudly in ``check`` rather than silently vanish at
+release. ``KIND_ORDER`` below is the closed vocabulary: a kind outside it is
+rejected at the same rc 2 instead of becoming new CHANGELOG vocabulary (see
+``validate_kind``).
 
 ORDERING (deterministic, so re-running `sync` is a no-op)
 --------------------------------------------------------
-Kinds in Keep a Changelog order with HSCC's ``Verified`` last; unknown kinds
-alphabetically after that. Within a kind: ``(task id, order, index-in-file)``.
+Kinds in Keep a Changelog order with HSCC's ``Verified`` and then ``Docs``
+last. Only ``KIND_ORDER`` names are legal, so no other kind can appear. Within
+a kind: ``(task id, order, index-in-file)``.
 
 COMMANDS
 --------
@@ -99,7 +103,13 @@ POINTER_LINES = [
 def pointer_block() -> str:
     return "\n".join(POINTER_LINES)
 
-# Keep a Changelog order; `Verified` is HSCC-specific and goes last.
+# Keep a Changelog order; `Verified` (HSCC landing evidence) and `Docs`
+# (doc-only changes) are HSCC additions and go last. This list is the CLOSED
+# vocabulary — `validate_kind` rejects anything else at rc 2, so no other kind
+# can ever render as a `### <Kind>` heading. Admitting a new kind is a
+# deliberate edit here plus the README/SKILL.md lines, never an author typing a
+# new word (t_f48f84c4: `schema`/`Test`/`Docs` all rendered as live headings
+# in [2.15.0] because nothing rejected them).
 KIND_ORDER = [
     "Added",
     "Changed",
@@ -108,6 +118,7 @@ KIND_ORDER = [
     "Fixed",
     "Security",
     "Verified",
+    "Docs",
 ]
 
 _HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$")
@@ -118,6 +129,36 @@ TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
 
 class FragmentError(Exception):
     """A fragment file cannot be parsed."""
+
+
+def validate_kind(path: Path, kind: str) -> None:
+    """Refuse a ``kind`` outside ``KIND_ORDER`` — the closed CHANGELOG vocabulary.
+
+    Before t_f48f84c4 the tool accepted any kind: ``kind_sort_key`` parked
+    unknown kinds in a catch-all bucket and ``render``/``release`` emitted a
+    ``### <kind>`` heading for each, so an author's typo became permanent,
+    published vocabulary — [2.15.0] shipped ``### schema`` (x8 entries),
+    ``### Docs`` (x6) and ``### Test`` (x1). The README contradicted itself
+    (a closed allowlist at :63 vs "unknown kinds alphabetically after that"
+    at :77), so nothing — tool or docs — ever said no.
+
+    The operator's decision (t_f48f84c4): an unknown kind is a HARD failure,
+    exit 2 like a malformed fragment; the allowlist is KIND_ORDER's 8 names
+    with ``Docs`` admitted for doc-only changes. The gate lives in the parse
+    pass (reached through ``load_entries``, so check/sync/render/list/release
+    all refuse) — the t_c365fe82 lesson is that a gate the release path walks
+    past is not a gate. ``add_entry`` validates too, so the mistake is caught
+    where it is typed, not where it lands. Blast radius zero at adoption:
+    ``load_entries`` globs ``changelog.d/*.md`` non-recursively and ``release``
+    archives consumed fragments, so no existing or historical fragment can
+    fail — only future authoring.
+    """
+    if kind not in KIND_ORDER:
+        raise FragmentError(
+            f"{path.name}: kind '{kind}' is not an allowed section name — "
+            f"allowed: {', '.join(KIND_ORDER)} "
+            "(doc-only changes use 'Docs'; landing evidence uses 'Verified')"
+        )
 
 
 class Entry:
@@ -225,6 +266,7 @@ def parse_fragment(path: Path):
         kind = headers.get("kind", "").strip()
         if not kind:
             raise FragmentError(f"{path.name}: entry is missing a 'kind:' value")
+        validate_kind(path, kind)
         task = (headers.get("task") or "").strip() or default_task
         order_raw = (headers.get("order") or "0").strip()
         try:
@@ -466,6 +508,10 @@ def add_entry(task: str, kind: str, body: str, fragments_dir: Path = FRAGMENTS_D
         raise FragmentError(
             f"task id {task!r} must look like t_<8 hex> (the kanban task id)"
         )
+    # Same allowlist as the parse pass, validated at the command that WRITES the
+    # fragment: `add --kind schema` must fail here rather than produce a file
+    # that only fails later at check.
+    validate_kind(Path(f"{task}.md"), kind)
     path = fragments_dir / f"{task}.md"
     body_lines = [l.rstrip() for l in body.replace("\r\n", "\n").split("\n")]
     while body_lines and not body_lines[-1].strip():
@@ -504,7 +550,8 @@ def main(argv=None) -> int:
     ap.add_argument("--version", help="version for `release` (e.g. 2.5.5)")
     ap.add_argument("--date", help="release date override (YYYY-MM-DD)")
     ap.add_argument("--task", help="task id for `add`/`rescue` (e.g. t_95f1d6e1)")
-    ap.add_argument("--kind", help="section for `add` (Fixed, Verified, …)")
+    ap.add_argument("--kind", help="section for `add` — one of "
+                                   + ", ".join(KIND_ORDER))
     ap.add_argument("--body", help="entry body for `add` (else read stdin)")
     ap.add_argument("--base", help="for `rescue`: base rev (default: merge-base "
                                    "of --branch with HEAD)")

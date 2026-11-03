@@ -178,9 +178,15 @@ The rule:
 - Add **one file per card**, named after your task id:
   `changelog.d/<your-task-id>.md`. Two cards can never name the same file, so
   the diffs are disjoint and always merge.
-- Format: a `kind:` header (`Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/
-  `Security`, or HSCC's `Verified` for landing evidence), an optional `task:` /
-  `order:` header, then the entry body **verbatim** — keep the leading `- `.
+- Format: a `kind:` header from the CLOSED list —
+  `Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/`Security`, HSCC's
+  `Verified` for landing evidence, and `Docs` for doc-only changes. An
+  unknown kind (e.g. `schema`, `Test`) is a **hard gate failure**: `check`
+  exits 2 and `add --kind` refuses to write it, so it can never become a
+  `### <kind>` heading in `CHANGELOG.md`. If you think you need a new kind,
+  use the closest listed one and raise it on your card. An optional `task:` /
+  `order:` header precedes the entry body, written **verbatim** — keep the
+  leading `- `.
   Multiple entries in one file are separated by a line containing exactly `---`.
 - Or let the tool write it: `python3 scripts/changelog_fragments.py add
   --task <id> --kind Fixed --body "- **…** prose…"`.

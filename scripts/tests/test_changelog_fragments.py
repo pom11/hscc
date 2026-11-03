@@ -256,6 +256,133 @@ def test_repo_pending_fragments_pass_the_body_gate():
         assert any(e.body for e in entries), "parsed entries carry no bodies"
 
 
+# ------------------------------------------- kind-allowlist gate (t_f48f84c4)
+#
+# The class this gate stops: `parse_fragment` accepted ANY kind and
+# `kind_sort_key` parked unknown kinds in a catch-all bucket, so an author's
+# invented word rendered as a permanent `### <Kind>` heading — [2.15.0]
+# shipped `### schema` (x8 entries), `### Docs` (x6) and `### Test` (x1) as
+# live CHANGELOG vocabulary. Operator decision (t_f48f84c4): an unknown kind
+# is a HARD failure — exit 2 like a malformed fragment — and the vocabulary is
+# closed at KIND_ORDER, with `Docs` admitted deliberately for doc-only changes.
+# The gate lives in the parse pass (`validate_kind`, reached through
+# `load_entries`), so check/sync/render/list/release all refuse it.
+
+# Same entry in both shapes — the ONLY difference is the kind word. This is
+# what makes the fixture mutation-proof: a gate that fails `schema` must pass
+# the byte-identical `Docs` entry (Docs is legal vocabulary; schema is not).
+KIND_SCHEMA = "kind: schema\ntask: t_deadbeef\n\n- **schema drift.** prose.\n"
+KIND_DOCS = "kind: Docs\ntask: t_deadbeef\n\n- **schema drift.** prose.\n"
+
+
+def test_unknown_kind_raises_naming_the_file(frags):
+    (frags / "t_deadbeef.md").write_text(KIND_SCHEMA, encoding="utf-8")
+    with pytest.raises(cf.FragmentError) as exc:
+        cf.load_entries(frags)
+    msg = str(exc.value)
+    assert "t_deadbeef.md" in msg
+    assert "kind 'schema' is not an allowed section name" in msg
+    # the message must teach the fix, not just refuse
+    assert "Docs" in msg and "Verified" in msg
+
+
+def test_docs_kind_is_legal(frags):
+    """Mutation-proof half: the identical entry with `kind: Docs` — the kind
+    the operator admitted for doc-only changes — passes the same parse."""
+    (frags / "t_deadbeef.md").write_text(KIND_DOCS, encoding="utf-8")
+    entries = cf.load_entries(frags)
+    assert [e.kind for e in entries] == ["Docs"]
+    assert entries[0].body == ["- **schema drift.** prose."]
+    assert "### Docs" in cf.render_block(fragments_dir=frags, marker="")
+
+
+def test_check_fails_then_passes_on_the_unknown_kind_fixture(frags, changelog,
+                                                             capsys):
+    """End-to-end on the shipped scenario: pointer-committed CHANGELOG.md +
+    fragment with `kind: schema` -> check exits 2 (malformed fragment per the
+    module contract) naming the file; swapping ONLY the kind word to `Docs`
+    (not the body) makes the same command exit 0."""
+    (frags / "t_deadbeef.md").write_text(KIND_SCHEMA, encoding="utf-8")
+    _pointer_state(changelog)
+    rc = cf.main(["check", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2, "unknown kind is a malformed fragment -> exit 2"
+    err = capsys.readouterr().err
+    assert "t_deadbeef.md" in err
+    assert "not an allowed section name" in err
+    (frags / "t_deadbeef.md").write_text(KIND_DOCS, encoding="utf-8")
+    assert cf.main(["check", "--fragments-dir", str(frags),
+                    "--changelog", str(changelog)]) == 0
+
+
+def test_release_refuses_to_materialise_an_unknown_kind(frags, changelog):
+    """`### schema` must become structurally impossible at the release step —
+    that is where the 2.15.0 headings were minted."""
+    (frags / "t_deadbeef.md").write_text(KIND_SCHEMA, encoding="utf-8")
+    rc = cf.main(["release", "--version", "9.9.9", "--fragments-dir", str(frags),
+                  "--changelog", str(changelog)])
+    assert rc == 2
+    assert not (frags / "archive" / "9.9.9").exists()
+    assert "### schema" not in changelog.read_text(encoding="utf-8")
+
+
+def test_add_command_refuses_unknown_kind(frags):
+    """`add --kind schema` must fail at the command that writes the fragment
+    (exit 2 via main), and must not leave a fragment behind to fail later."""
+    rc = cf.main(["add", "--task", "t_deadbeef", "--kind", "schema",
+                  "--body", "- prose", "--fragments-dir", str(frags)])
+    assert rc == 2
+    assert list(frags.glob("*.md")) == []
+    with pytest.raises(cf.FragmentError):
+        cf.add_entry("t_deadbeef", "Test", "- prose\n", fragments_dir=frags)
+
+
+def test_add_accepts_docs_kind(frags):
+    """`Docs` is vocabulary, so the writer accepts it end to end."""
+    p = cf.add_entry("t_deadbeef", "Docs", "- docs only change\n",
+                     fragments_dir=frags)
+    assert p.name == "t_deadbeef.md"
+    assert [e.kind for e in cf.load_entries(frags)] == ["Docs"]
+
+
+@pytest.mark.parametrize("kind", cf.KIND_ORDER)
+def test_every_allowed_kind_parses(frags, kind):
+    """The closed list is the contract in BOTH directions: every name in
+    KIND_ORDER must parse, or the allowlist and the gate disagree."""
+    write_fragment(frags, "t_1a2b3c4d", kind, f"- entry for {kind}\n")
+    assert [e.kind for e in cf.load_entries(frags)] == [kind]
+
+
+def test_kind_is_case_sensitive(frags):
+    """The vocabulary is exact: `fixed` is not `Fixed`. Loosening this would
+    re-open the door `schema` walked through."""
+    write_fragment(frags, "t_1a2b3c4d", "fixed", "- entry\n")
+    with pytest.raises(cf.FragmentError):
+        cf.load_entries(frags)
+
+
+def test_docs_sorts_last_after_verified(frags):
+    """Operator chose Docs as the 8th kind, last after Verified — the heading
+    order is part of the decision, pin it."""
+    for kind in ("Docs", "Verified", "Fixed", "Added"):
+        (frags / f"k-{kind}.md").write_text(
+            f"kind: {kind}\ntask: t_11111111\n\n- {kind}\n", encoding="utf-8")
+    out = cf.render_block(fragments_dir=frags)
+    positions = {k: out.index(f"### {k}") for k in ("Added", "Fixed", "Verified", "Docs")}
+    assert positions["Added"] < positions["Fixed"] < positions["Verified"] < positions["Docs"]
+
+
+def test_repo_pending_fragments_pass_the_kind_gate():
+    """Every pending fragment on this tree must use the closed vocabulary, or
+    `check`/`release` would refuse the tree the moment this gate lands (the
+    blast radius was measured zero; this test keeps it zero)."""
+    pending = REPO_ROOT / "changelog.d"
+    kinds = {e.kind for p in sorted(pending.glob("*.md"))
+             if not p.name.lower().startswith("readme")
+             for e in cf.parse_fragment(p)}
+    assert kinds <= set(cf.KIND_ORDER), f"off-vocabulary kinds pending: {kinds - set(cf.KIND_ORDER)}"
+
+
 # ---------------------------------------------------------------- render/sync
 
 def test_render_block_shape(frags):
