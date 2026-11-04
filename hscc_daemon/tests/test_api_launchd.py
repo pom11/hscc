@@ -222,6 +222,31 @@ def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
         assert fh.read() == legacy
 
 
+def test_install_seam_refuses_every_bind_api_server_refuses():
+    """Drift guard against the AUTHORITY, without importing it.
+
+    `api_server._REFUSED_BINDS` is the authority on which bind values may never
+    be served; `serve_args` must refuse them too, or install-service would
+    happily write a unit for a bind the server later refuses at boot (and
+    KeepAlive would retry the refusal forever). This module cannot import
+    api_server — the plugin dir is not on sys.path at install time and the two
+    suites run in separate pytest processes by design — so the set is read out
+    of the server's source as text. Reading text is enough: the guard is about
+    the literal list not drifting, not about behaviour.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(api_launchd.__file__).resolve().parent.parent / "hscc-api" / "api_server.py"
+    m = re.search(r"_REFUSED_BINDS\s*=\s*\{([^}]*)\}", src.read_text())
+    assert m, "api_server._REFUSED_BINDS vanished — update this guard"
+    refused = re.findall(r'"([^"]*)"', m.group(1))
+    assert refused, "could not read any literal out of _REFUSED_BINDS"
+    for bad in refused:
+        with pytest.raises(ValueError, match="bind|untrusted"):
+            api_launchd.serve_args(bind=bad)
+
+
 def test_install_api_plist_writes_flags_and_reinstall_is_still_idempotent(home):
     extra = api_launchd.serve_args(bind="tailscale", port=8788)
     res = api_launchd.install_api_plist("/repo", python_path="/venv/bin/python3",
