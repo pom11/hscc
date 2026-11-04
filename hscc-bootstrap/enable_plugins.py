@@ -121,13 +121,118 @@ COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
 # derivation below reads both aliases end-to-end: orch URL → orchestrator-model,
 # any other URL → worker-model. The COMPACT_MODEL env override (HSCC_COMPACT_MODEL)
 # still forces a concrete id at runtime.
-_DEFAULT_COMPACT_URL = f"http://{ORCH_MODEL_HOST}:8000/v1"
+# The compaction/auxiliary endpoint is DERIVED from ~/.hscc/serving.json, not
+# from the ORCH_MODEL_HOST constant above. That constant is a bootstrap-time
+# fallback for a machine with no serving.json yet; treating it as the answer was
+# the t_417610e6 generator bug: on a uniform_pool fleet serving.json declares
+# the orchestrator unit node, and stamping `http://<that node>:8000/v1` into
+# every auxiliary.* made 9 of the orchestrator profile's auxiliary calls
+# (compression + the 8 text tasks) target an address the gateway Mac cannot
+# route to at all, while model/delegation/goal_judge — routed from
+# WORKER_PROXY_URL — kept working. Read-only JSON here, no network, no ssh:
+# serving.json is the fleet's own record of where things are served (the same
+# source hscc_daemon.serving and hscc-roles.generator read).
+#
+# HSCC_SERVING_JSON overrides the path (tests pin it at a fixture; the deployed
+# default is the live file).
+SERVING_JSON = os.path.expanduser(
+    os.environ.get("HSCC_SERVING_JSON", "~/.hscc/serving.json"))
+
+
+def _serving_compact_route(path=None):
+    """Derive the auxiliary/compaction route from serving.json.
+
+    Returns ``(base_url, is_orchestrator_endpoint, fleet_node_hosts)`` or
+    ``(None, None, set())`` when serving.json is missing/unparseable/has no
+    usable unit — callers then fall back to the ORCH_MODEL_HOST default.
+
+    * ``uniform_pool`` -> ``(WORKER_PROXY_URL, False, hosts)``. Every pool unit
+      advertises BOTH aliases behind the one proxy, so the proxy is both the
+      reachable and the correct summarization front; naming the node there
+      wastes the pool and dies with the node (mirrors
+      hscc-roles.generator._live_orchestrator_endpoint and
+      cluster_template._update_hermes_config's uniform_pool branch).
+    * pinned (non-uniform) fleet -> ``(http://<orch head>:<port>/v1, True,
+      hosts)``, the historical direct form: there the role split is real and
+      the orchestrator GPU is the idle summarization endpoint.
+
+    ``fleet_node_hosts`` is every node named by any unit in serving.json. It is
+    what lets the fill-empty writers tell "our own old node-direct default"
+    apart from "an operator deliberately pointed this somewhere else".
+    """
+    import json
+    try:
+        with open(path or SERVING_JSON) as fh:
+            data = json.load(fh)
+    except Exception:  # missing/unreadable -> caller falls back
+        return None, None, set()
+    if not isinstance(data, dict):
+        return None, None, set()
+    units = [u for u in (data.get("units") or []) if isinstance(u, dict)]
+    hosts = {str(n) for u in units for n in (u.get("nodes") or [])}
+    if data.get("uniform_pool"):
+        return WORKER_PROXY_URL, False, hosts
+    for u in units:
+        nodes = u.get("nodes") or []
+        if u.get("role") == "orchestrator" and nodes:
+            try:
+                port = int(u.get("port") or 8000)
+            except (TypeError, ValueError):
+                port = 8000
+            return f"http://{nodes[0]}:{port}/v1", True, hosts
+    return None, None, hosts
+
+
+_SERVING_URL, _SERVING_IS_ORCH, FLEET_NODE_HOSTS = _serving_compact_route()
+# serving.json silent -> the documented bootstrap fallback (a machine with no
+# plan applied yet). The node-direct form is only legitimate on that path.
+_DEFAULT_COMPACT_URL = _SERVING_URL or f"http://{ORCH_MODEL_HOST}:8000/v1"
+_DEFAULT_IS_ORCH = True if _SERVING_URL is None else bool(_SERVING_IS_ORCH)
 _COMPACT_URL_RAW = os.environ.get("HSCC_COMPACT_URL", _DEFAULT_COMPACT_URL)
-_COMPACT_MODEL_DEFAULT = ORCH_MODEL if _COMPACT_URL_RAW == _DEFAULT_COMPACT_URL else WORKER_MODEL
+_COMPACT_MODEL_DEFAULT = ORCH_MODEL if (
+    _COMPACT_URL_RAW == _DEFAULT_COMPACT_URL and _DEFAULT_IS_ORCH
+) else WORKER_MODEL
 COMPACT_URL = _COMPACT_URL_RAW
 COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", _COMPACT_MODEL_DEFAULT)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
+
+# ── t_417610e6: repair our OWN node-direct auxiliary default ────────────────
+#
+# Every auxiliary writer in this file is fill-empty, and that is right — an
+# operator who pointed a task at their own provider must keep it. But fill-empty
+# has a blind side: once the pre-fix default above stamped a node-direct URL
+# onto disk, EVERY later bootstrap and every `doctor --fix` read that wrong
+# value as a deliberate operator choice and refused to correct it. The poison
+# could not be rewritten by the very code that wrote it. That is why the
+# operator's hscc-orch config carried 9 unreachable base_urls through many
+# re-enters of this function.
+#
+# So one narrow class is repaired rather than preserved: a base_url whose host
+# is a FLEET NODE, on a fleet whose serving.json declares `uniform_pool`. That
+# combination is never a deliberate choice — under a pool the gateway cannot
+# route to a node at all (that is exactly the invariant
+# hscc_daemon.verify.check_provider_routing asserts), so the value is
+# unreachable-by-construction and only ever got there via this generator. Any
+# other non-proxy value (a cloud provider, a localhost tool, a pinned-fleet
+# orchestrator endpoint) is left byte-for-byte.
+_POOL_REPAIR = (_SERVING_URL is not None and not _SERVING_IS_ORCH)
+
+
+def _node_direct_aux_url(url):
+    """True when ``url`` is a fleet-node base_url on a uniform-pool fleet.
+
+    See ``_POOL_REPAIR``. Returns False whenever the pool invariant is not
+    established (no serving.json, or a pinned fleet) — with no proof the value
+    is unreachable, nothing is repaired.
+    """
+    if not _POOL_REPAIR or not FLEET_NODE_HOSTS or not isinstance(url, str):
+        return False
+    rest = url.strip()
+    if "://" in rest:
+        rest = rest.split("://", 1)[1]
+    host = rest.split("/", 1)[0].rsplit(":", 1)[0].strip().lower()
+    return host in {h.strip().lower() for h in FLEET_NODE_HOSTS}
 
 # M5: a wedged orchestrator (200-but-hangs) should degrade to the worker LB
 # instead of hanging. Seed one fallback provider = the worker proxy, using the
@@ -426,9 +531,21 @@ def _ensure_compaction(cfg):
     if COMPACT_URL:
         aux = cfg.setdefault("auxiliary", {}).setdefault("compression", {})
         if isinstance(aux, dict):
+            # t_417610e6: a node-direct base_url on a uniform-pool fleet is
+            # this generator's own old default, not an operator choice —
+            # re-aim it (and its model) instead of preserving it. See
+            # _node_direct_aux_url.
+            stale = _node_direct_aux_url(aux.get("base_url"))
             for key, want in (("base_url", COMPACT_URL), ("model", COMPACT_MODEL),
                               ("provider", "custom"), ("api_key", COMPACT_KEY)):
-                if want and not (aux.get(key) or "").strip():
+                if not want:
+                    continue
+                if stale and key in ("base_url", "model"):
+                    if aux.get(key) != want:
+                        aux[key] = want
+                        changed.append(f"aux.{key}")
+                    continue
+                if not (aux.get(key) or "").strip():
                     aux[key] = want
                     changed.append(f"aux.{key}")
             # Only fill timeout when absent or non-int — a higher operator value
@@ -458,6 +575,11 @@ def _ensure_text_auxiliaries(cfg):
     Mirrors _ensure_compaction: only fills EMPTY fields (operator choices and any
     pre-set provider survive) and only when a local endpoint is available.
     Prevents the multiplexing secret-scope throw from an auto→cloud fall-through.
+
+    One exception to fill-empty: a base_url naming a fleet NODE on a
+    uniform-pool fleet is repaired (see ``_node_direct_aux_url``) — that value
+    is this module's own pre-fix default and is unreachable by construction, not
+    an operator choice.
     """
     changed = []
     if not COMPACT_URL:
@@ -469,10 +591,16 @@ def _ensure_text_auxiliaries(cfg):
         aux = aux_root.setdefault(task, {})
         if not isinstance(aux, dict):
             continue
+        # t_417610e6: a node-direct base_url on a uniform-pool fleet is this
+        # generator's own pre-fix default (the value that broke all 8 text
+        # auxiliaries for the orchestrator profile), not an operator choice —
+        # claim it even though provider/base_url are non-empty. See
+        # _node_direct_aux_url.
+        stale = _node_direct_aux_url(aux.get("base_url"))
         # Only claim a task still at the default auto/empty provider — never
         # override an operator who deliberately set a provider for it.
         prov = (aux.get("provider") or "").strip()
-        if prov not in ("", "auto"):
+        if prov not in ("", "auto") and not stale:
             continue
         # provider must become 'custom': 'auto' is the very value that triggers
         # the cloud fall-through, so it is replaced (not fill-empty-preserved).
@@ -481,7 +609,14 @@ def _ensure_text_auxiliaries(cfg):
             changed.append(f"aux.{task}.provider")
         for key, want in (("base_url", COMPACT_URL),
                           ("model", COMPACT_MODEL), ("api_key", COMPACT_KEY)):
-            if want and not (aux.get(key) or "").strip():
+            if not want:
+                continue
+            if stale and key in ("base_url", "model"):
+                if aux.get(key) != want:
+                    aux[key] = want
+                    changed.append(f"aux.{task}.{key}")
+                continue
+            if not (aux.get(key) or "").strip():
                 aux[key] = want
                 changed.append(f"aux.{task}.{key}")
     return changed
