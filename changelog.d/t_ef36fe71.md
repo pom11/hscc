@@ -20,11 +20,13 @@ task: t_ef36fe71
 kind: Verified
 order: 1
 
-- `hscc_daemon/tests/test_api_route_sweep_standalone.py`: **14** new cases —
+- `hscc_daemon/tests/test_api_route_sweep_standalone.py`: **15** new cases —
   the operator's manual repro (bare script path, cwd `/`, scrubbed `HOME`, fake
-  keg in tmp) plus every classification path through `check_api_routes`.
-  Mutation-checked: removing the `sys.path` bootstrap turns
+  keg in tmp) plus every classification path through `check_api_routes`, and
+  both false-verdict traps (a crash read as red, an empty route list read as
+  green). Mutation-checked: removing the `sys.path` bootstrap turns
   `test_bare_script_run_can_import_the_real_theme` red.
 - Live-keg reproduction of both faults before the fix, and of the fixed sweep
   after: `--json` on a closed loopback port reports its routes, the human view
-  without `rich` says `cannot render`, and neither emits a traceback.
+  without `rich` says `cannot render`, an absent `curl` or an empty route list
+  says `could not run`, and none of them emits a traceback.
