@@ -110,11 +110,27 @@ def test_pinned_unit_port_respected(tmp_path):
 
 
 def test_pool_model_is_worker_alias(tmp_path, monkeypatch):
-    """On a pool the aux default target is the proxy, so COMPACT_MODEL must be
-    the worker alias — the orchestrator alias is not resolvable at a proxy that
-    only fronts worker units (a mismatch 404s every compaction call)."""
-    _wire_pool(tmp_path, monkeypatch, uniform=True)
-    assert enable_plugins.COMPACT_MODEL == enable_plugins.WORKER_MODEL
+    """Reloading the module against a pool serving.json must derive BOTH ends:
+    the proxy URL and the WORKER alias. The orchestrator alias is not
+    resolvable at a proxy that only fronts worker units — a mismatch 404s
+    every compaction call (the derivation the H1 comment pins, pool-shaped)."""
+    import importlib
+    serving = _serving(tmp_path, uniform=True)
+    pinned = os.environ.get("HSCC_SERVING_JSON")  # conftest's fallback pin
+    monkeypatch.setenv("HSCC_SERVING_JSON", serving)
+    monkeypatch.delenv("HSCC_COMPACT_URL", raising=False)
+    monkeypatch.delenv("HSCC_COMPACT_MODEL", raising=False)
+    ep = importlib.reload(enable_plugins)
+    try:
+        assert ep.COMPACT_URL == PROXY
+        assert ep.COMPACT_MODEL == ep.WORKER_MODEL
+        assert ep._POOL_REPAIR is True
+    finally:
+        # Restore the suite-wide fallback-mode module. Restore the PINNED path
+        # — deleting it would point the reload at the LIVE ~/.hscc/serving.json
+        # (the ambient-state class this suite's conftest exists to close).
+        monkeypatch.setenv("HSCC_SERVING_JSON", pinned)
+        importlib.reload(enable_plugins)
 
 
 # ── writer behaviour ─────────────────────────────────────────────────────────
@@ -199,6 +215,25 @@ def test_operator_cloud_provider_never_rewritten(tmp_path, monkeypatch):
                                         "model": "someone/else"}
     assert out["curator"]["base_url"] == "http://localhost:9999/v1"
     assert out["curator"]["model"] == "local-tool"
+
+
+def test_operator_named_provider_with_our_old_url_survives(tmp_path, monkeypatch):
+    """Provider guard: an entry with a deliberate NON-custom provider (the
+    operator pointed it at openrouter) but a stale node URL of ours left in
+    base_url is left alone — the provider value proves it is not our output."""
+    _wire_pool(tmp_path, monkeypatch, uniform=True)
+    node_url = f"http://{NODE_A}:8000/v1"
+    path = _write(tmp_path / "config.yaml", {
+        "plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"],
+        "auxiliary": {"curator": {"provider": "openrouter",
+                                  "base_url": node_url,
+                                  "model": "someone/else"}},
+    })
+    enable_plugins.enable(path)
+    out = _aux(yaml.safe_load(open(path)))
+    assert out["curator"]["provider"] == "openrouter"
+    assert out["curator"]["base_url"] == node_url
+    assert out["curator"]["model"] == "someone/else"
 
 
 def test_pinned_fleet_node_aux_preserved(tmp_path, monkeypatch):

@@ -536,6 +536,11 @@ def _ensure_compaction(cfg):
             # re-aim it (and its model) instead of preserving it. See
             # _node_direct_aux_url.
             stale = _node_direct_aux_url(aux.get("base_url"))
+            # Same provider guard as _ensure_text_auxiliaries: a deliberate
+            # non-custom provider is an operator statement even when the URL
+            # looks like ours.
+            if stale and (aux.get("provider") or "").strip() not in ("", "auto", "custom"):
+                stale = False
             for key, want in (("base_url", COMPACT_URL), ("model", COMPACT_MODEL),
                               ("provider", "custom"), ("api_key", COMPACT_KEY)):
                 if not want:
@@ -597,9 +602,14 @@ def _ensure_text_auxiliaries(cfg):
         # claim it even though provider/base_url are non-empty. See
         # _node_direct_aux_url.
         stale = _node_direct_aux_url(aux.get("base_url"))
+        # A deliberate NON-custom provider (openrouter, openai, ...) is an
+        # operator statement even when the base_url looks like ours — only the
+        # auto/empty/custom shapes can be our own output.
+        prov = (aux.get("provider") or "").strip()
+        if stale and prov not in ("", "auto", "custom"):
+            stale = False
         # Only claim a task still at the default auto/empty provider — never
         # override an operator who deliberately set a provider for it.
-        prov = (aux.get("provider") or "").strip()
         if prov not in ("", "auto") and not stale:
             continue
         # provider must become 'custom': 'auto' is the very value that triggers
