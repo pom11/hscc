@@ -29,6 +29,11 @@ from __future__ import annotations
 import os
 import plistlib
 
+try:  # package import — the deployed-plugin shape (`hscc api install-service`)
+    from . import hermes_python
+except ImportError:  # bare import — tests/ load this dir straight onto sys.path
+    import hermes_python
+
 API_LABEL = "com.hscc.api"
 API_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{API_LABEL}.plist")
 
@@ -139,15 +144,19 @@ def build_api_plist(python_path: str, hscc_api_dir: str, *,
 def recommend_api_python() -> str | None:
     """Interpreter for the API unit, resolved at install time.
 
-    Same rule as bootstrap._api_python: hermes' venv (which carries the
-    websockets/starlette deps the API needs), never the system python3.
-    Returns None when no venv interpreter exists — the caller reports it
-    rather than writing a plist that could never start.
+    Hermes' venv (which carries the websockets/starlette deps the API needs),
+    never the system python3 — but resolved through the SHARED ladder in
+    :mod:`hscc_daemon.hermes_python`, because ``$HERMES_HOME`` is the PROFILE
+    dir whenever Hermes runs under a profile and ``<profile>/hermes-agent`` does
+    not exist. The old one-path join here made `hscc api install-service`
+    unusable from every profile session (t_314eb13c); ``hermes_venv_python()``
+    tries the exported home, the ``profiles/``-grandparent root, ``~/.hermes``,
+    then the venv this process is running in.
+
+    Returns None only when NO candidate exists anywhere searched — the caller
+    reports it rather than writing a plist that could never start.
     """
-    hermes_home = os.environ.get(
-        "HERMES_HOME", os.path.expanduser(os.path.join("~", ".hermes")))
-    cand = os.path.join(hermes_home, "hermes-agent", "venv", "bin", "python3")
-    return cand if os.path.exists(cand) else None
+    return hermes_python.hermes_venv_python()
 
 
 def install_api_plist(hscc_api_dir: str, python_path: str | None = None, *,
@@ -162,7 +171,8 @@ def install_api_plist(hscc_api_dir: str, python_path: str | None = None, *,
     py = python_path or recommend_api_python()
     if not py:
         raise RuntimeError(
-            "no Hermes venv python found (HERMES_HOME/hermes-agent/venv/bin/python3) "
+            "no Hermes venv python found — looked at: "
+            f"{hermes_python.describe_search()} "
             "— pass python_path explicitly or install Hermes first")
     data = build_api_plist(py, os.path.abspath(hscc_api_dir),
                            serve_extra_args=serve_extra_args)

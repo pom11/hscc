@@ -19,8 +19,38 @@ PLUGINS="$HERMES_HOME/plugins"
 RECIPES_DIR="${RECIPES_DIR:-$HOME/.sparkrun-local/recipes}"
 BOOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$BOOT_DIR/.." && pwd)"
-PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
-[ -x "$PYBIN" ] || PYBIN="python3"
+# ── the Hermes venv python (t_314eb13c) ─────────────────────────────────────
+# HERMES_HOME is NOT the Hermes root: Hermes exports it as <root>/profiles/<name>
+# for every profile session, and `hermes-agent` (where the venv lives) sits at
+# the ROOT. The old one-line join `$HERMES_HOME/hermes-agent/venv/bin/python`
+# therefore resolved a nonexistent path from any profile session and fell
+# through to a brew `python3` — after which the CLI-shim stage below ran
+# `install_cli.py "$PYBIN"` and installed the `hscc` shim into BREW python
+# instead of the Hermes venv. Same bug class the API launchd unit had.
+# Ladder: exported home → profiles-grandparent root → ~/.hermes → PATH.
+# $PLUGINS deliberately KEEPS the raw (possibly profile-scoped) HERMES_HOME:
+# Hermes scans get_hermes_home()/plugins, i.e. the profile's own plugins dir.
+PYBIN=""
+for _cand in "${HERMES_HOME:-}" "$HOME/.hermes"; do
+  [ -n "$_cand" ] || continue
+  for _py in "$_cand/hermes-agent/venv/bin/python3" "$_cand/hermes-agent/venv/bin/python"; do
+    [ -x "$_py" ] || continue
+    PYBIN="$_py"; break 2
+  done
+  [ -n "$PYBIN" ] && break
+  # walk a profile-scoped home up to its root before trying the default
+  _parent="$(basename "$(dirname "$_cand")" 2>/dev/null)"
+  if [ "$_parent" = "profiles" ]; then
+    _root="$(dirname "$(dirname "$_cand")")"
+    for _py in "$_root/hermes-agent/venv/bin/python3" "$_root/hermes-agent/venv/bin/python"; do
+      [ -x "$_py" ] || continue
+      PYBIN="$_py"; break 2
+    done
+  fi
+  [ -n "$PYBIN" ] && break
+done
+unset _cand _py _parent _root 2>/dev/null || true
+[ -n "$PYBIN" ] || PYBIN="$(command -v python3 || echo python3)"
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false; DRY_RUN=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false; SKIP_CLI=false
