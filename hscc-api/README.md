@@ -72,9 +72,16 @@ unit's `ProgramArguments`, so a tailnet-served API can move onto launchd
 without losing its bind; with no flags the unit is the plain loopback one.
 The unit stores the intent (`--tailscale`, not a resolved address), so the
 tailnet IP is re-resolved at every boot. `--no-qr` is accepted and ignored
-(a launchd unit has no terminal). `hscc api status`/`stop` read the PID file,
-so a launchd-run instance looks stopped there — trust
-`launchctl print gui/$UID/com.hscc.api`.
+(a launchd unit has no terminal). `hscc api status` consults
+`launchctl print gui/$UID/com.hscc.api` as well as `~/.hscc/api.pid`, so an API
+that launchd started at boot reads as **running**, and `hscc api stop` runs
+`launchctl bootout gui/$UID/com.hscc.api` when the unit is loaded rather than
+SIGTERM-ing a `KeepAlive`-supervised process that launchd would resurrect. A
+bootout is a **session-scoped** stop — the unit file stays installed and
+`RunAtLoad` brings the API back at the next login; `uninstall-service` removes
+it for good. The unit also carries `ThrottleInterval 30` / `ExitTimeOut 10`
+(like the daemon's own unit) so a tailnet unit that legitimately fails while
+Tailscale is down backs off instead of respawn-storming `api.err.log`.
 
 ## Auth
 

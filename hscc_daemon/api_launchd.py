@@ -11,11 +11,14 @@ weakened — loopback default, token required, 0.0.0.0 refused. The
 `start`-level choice carried into the unit; it never widens anything by
 itself, and the server still refuses a wide bind at every boot.
 
-Honest scope note: `hscc api status` reads its PID file, so a launchd-run
-instance looks stopped there; use `launchctl print gui/$UID/com.hscc.api`
-for the unit (same known asymmetry as the daemon unit). The serve entrypoint
-deliberately does NOT write api.pid — `hscc api stop` would SIGTERM a
-KeepAlive-supervised process and launchd would resurrect it.
+Honest scope note, closed by t_d2245e7e: `hscc api status` used to read only
+its PID file, so a launchd-run instance looked stopped there. It now consults
+`launchctl print gui/$UID/com.hscc.api` as well, and `hscc api stop` runs
+`launchctl bootout` when the unit is loaded instead of SIGTERM-ing a
+KeepAlive-supervised process (which launchd would simply resurrect). The
+serve entrypoint still deliberately writes NO api.pid — under launchd the
+supervisor is authoritative, and a pid file that only existed to be SIGTERM'd
+was the source of the wrongness.
 
 Pure-text module (build/recommend only) so the plist shape is unit-testable
 without launchctl: the install path is `plutil -lint` + a read-back compare,
@@ -25,7 +28,6 @@ from __future__ import annotations
 
 import os
 import plistlib
-import shlex
 
 API_LABEL = "com.hscc.api"
 API_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{API_LABEL}.plist")
@@ -108,6 +110,20 @@ def build_api_plist(python_path: str, hscc_api_dir: str, *,
         "WorkingDirectory": hscc_api_dir,
         "RunAtLoad": True,
         "KeepAlive": True,
+        # t_d2245e7e: launchd's default throttle is 10s, and a KeepAlive unit
+        # with no override respins on it forever. That stopped being
+        # theoretical when t_37948685 added `--tailscale` passthrough: a unit
+        # whose bind is the tailnet legitimately FAILS at boot whenever
+        # Tailscale is down (`api_server.resolve_bind` refuses to widen the
+        # bind — correct behaviour), and every retry appends a refusal to
+        # ~/.hscc/logs/api.err.log. 30s, matching hscc_daemon/install.py's
+        # PLIST_CONTENT, so the two units on one machine throttle alike.
+        "ThrottleInterval": 30,
+        # How long launchd waits after SIGTERM before SIGKILL. Same 10 as the
+        # daemon unit: `python -m api_server serve` shuts its gateway sidecar
+        # down on SIGTERM (t_37948685), and 10s is well past that teardown —
+        # launchd's 20s default would only delay a `bootout`/logout.
+        "ExitTimeOut": 10,
         "StandardOutPath": log_path or os.path.expanduser("~/.hscc/logs/api.log"),
         "StandardErrorPath": log_path or os.path.expanduser("~/.hscc/logs/api.err.log"),
         "EnvironmentVariables": {
@@ -175,15 +191,9 @@ def uninstall_api_plist() -> dict:
         return {"path": API_PLIST_PATH, "removed": False}
 
 
-def plist_snippet(hscc_api_dir: str) -> str:
-    """Copy-paste text for the manual route (report item 5)."""
-    py = recommend_api_python() or "python3  # <-- set the Hermes venv python"
-    args = " ".join(shlex.quote(a) for a in build_api_plist(py, hscc_api_dir)["ProgramArguments"])
-    return (
-        "# Save as ~/Library/LaunchAgents/%s.plist, then:\n"
-        "#   plutil -lint ~/Library/LaunchAgents/%s.plist\n"
-        "#   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/%s.plist\n"
-        "#   launchctl print gui/$UID/%s | head -20\n"
-        "# ProgramArguments line: %s  (WorkingDirectory: %s)\n"
-        % (API_LABEL, API_LABEL, API_LABEL, API_LABEL, args, hscc_api_dir)
-    )
+# t_d2245e7e: `plist_snippet()` — a copy-paste text block for the manual
+# route — was deleted here along with its test. It had no caller anywhere in
+# the repo (grep-verified twice), and the manual route it duplicated is already
+# printed verbatim by `api_cli._handle_install_service` (plutil -lint +
+# launchctl bootstrap + launchctl print, with the real path and interpreter).
+# Two surfaces for one instruction means one of them drifts.
