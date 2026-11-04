@@ -43,6 +43,27 @@ def test_plist_survives_reboot_and_crash():
     assert d["Label"] == api_launchd.API_LABEL
 
 
+def test_plist_throttles_the_respawn_and_bounds_the_stop():
+    """KeepAlive without a throttle is a respawn storm (t_d2245e7e).
+
+    A `--tailscale` unit LEGITIMATELY fails at boot whenever Tailscale is down
+    — `api_server.resolve_bind` refuses to widen the bind, which is correct and
+    must not be weakened. launchd's default throttle is 10 s, so an
+    always-failing unit retries six times a minute, forever, each retry
+    appending a refusal to ~/.hscc/logs/api.err.log. The daemon's own unit
+    (hscc_daemon/install.py PLIST_CONTENT) already sets 30 + ExitTimeOut 10;
+    these two units live on the same Mac and must be tuned alike.
+    """
+    d = api_launchd.build_api_plist("/p", "/d")
+    assert d["ThrottleInterval"] == 30
+    assert d["ExitTimeOut"] == 10
+    # Same numbers as the daemon unit — the drift guard, not just two literals.
+    from pathlib import Path
+    daemon_plist = (Path(api_launchd.__file__).resolve().parent / "install.py").read_text()
+    assert "<key>ThrottleInterval</key>\n    <integer>30</integer>" in daemon_plist
+    assert "<key>ExitTimeOut</key>\n    <integer>10</integer>" in daemon_plist
+
+
 def test_plist_is_plistlib_roundtrippable():
     import plistlib
     d = api_launchd.build_api_plist("/p", "/d")
@@ -116,11 +137,8 @@ def test_uninstall_removes_then_is_clean_noop(home):
     assert api_launchd.uninstall_api_plist()["removed"] is False
 
 
-def test_plist_snippet_shows_manual_launchctl_route():
-    s = api_launchd.plist_snippet("/repo/hscc-api")
-    for needle in ("launchctl bootstrap", "plutil -lint", "api_server",
-                   "WorkingDirectory", "LaunchAgents"):
-        assert needle in s
+# t_d2245e7e: `test_plist_snippet_shows_manual_launchctl_route` was removed
+# with `api_launchd.plist_snippet()` — see the note at the end of that module.
 
 
 # --------------------------------------------------------------------------- #
@@ -202,12 +220,22 @@ def test_plist_program_arguments_carry_the_flags():
 
 def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
     """Byte-identical default: a plain loopback install must not shift one
-    byte, or every existing unit would report 'changed' on the next install."""
+    byte beyond the deliberate throttle keys, or every existing unit would
+    report 'changed' on the next install.
+
+    RE-PINNED deliberately on t_d2245e7e. The baseline this pins against is
+    `0d95403c` (PR #210, the pre-ThrottleInterval unit); the only addition
+    below that baseline is `ThrottleInterval 30` + `ExitTimeOut 10`, the whole
+    point of that card. Everything else — argv tail, working dir, log paths,
+    EnvironmentVariables, key ORDER — is still pinned byte for byte, which is
+    what this test is for: an accidental reorder or a stray key still fails it.
+    """
     legacy = plistlib.dumps(
         {"Label": api_launchd.API_LABEL,
          "ProgramArguments": ["/venv/bin/python3", "-m", "api_server", "serve"],
          "WorkingDirectory": "/repo",
          "RunAtLoad": True, "KeepAlive": True,
+         "ThrottleInterval": 30, "ExitTimeOut": 10,
          "StandardOutPath": os.path.expanduser("~/.hscc/logs/api.log"),
          "StandardErrorPath": os.path.expanduser("~/.hscc/logs/api.err.log"),
          "EnvironmentVariables": {
