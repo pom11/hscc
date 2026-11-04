@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest  # noqa: E402
 
 import api_launchd  # noqa: E402
+import hermes_python  # noqa: E402
 
 
 PLIST = "com.hscc.api.plist"
@@ -70,6 +71,37 @@ def test_plist_is_plistlib_roundtrippable():
     assert plistlib.loads(plistlib.dumps(d, sort_keys=False)) == d
 
 
+def _seal_running_interpreter(monkeypatch, tmp_path):
+    """Seal the LAST candidate of the t_314eb13c ladder: the running interpreter.
+
+    The fail-closed tests pin "no Hermes venv exists anywhere" — but pytest
+    itself runs inside the real Hermes venv, which the ladder now consults as a
+    last resort. Pin the module seam (not `sys`) to a path that is never
+    created: naming a real interpreter here — even a plausible brew python —
+    would make the fixture pass on some hosts and fail on others.
+
+    BOTH module identities get patched. This suite imports `api_launchd` bare
+    (tests/conftest puts the plugin dir on sys.path, matching the deployed
+    shape) while `api_cli` imports it as `hscc_daemon.api_launchd` — two module
+    objects, two `hermes_python` bindings. Sealing only one leaves the CLI path
+    reading the real sys.executable.
+    """
+    sealed = str(tmp_path / "sealed" / "bin" / "python3")
+    monkeypatch.setattr(hermes_python, "_current_executable", lambda: sealed)
+    try:
+        from hscc_daemon import hermes_python as pkg_hermes_python
+    except ImportError:  # pragma: no cover - package form always importable here
+        return
+    if pkg_hermes_python is not hermes_python:
+        monkeypatch.setattr(pkg_hermes_python, "_current_executable",
+                            lambda: sealed)
+
+
+@pytest.fixture()
+def no_hermes_anywhere(monkeypatch, tmp_path):
+    _seal_running_interpreter(monkeypatch, tmp_path)
+
+
 def test_recommend_api_python_prefers_hermes_venv(tmp_path, monkeypatch):
     py = tmp_path / "hermes-agent" / "venv" / "bin" / "python3"
     py.parent.mkdir(parents=True)
@@ -78,12 +110,50 @@ def test_recommend_api_python_prefers_hermes_venv(tmp_path, monkeypatch):
     assert api_launchd.recommend_api_python() == str(py)
 
 
-def test_recommend_api_python_returns_none_when_no_venv(tmp_path, monkeypatch):
+def test_recommend_api_python_survives_a_profile_scoped_home(tmp_path, monkeypatch,
+                                                             no_hermes_anywhere):
+    """t_314eb13c regression, at the verb's own entry point.
+
+    Hermes exports HERMES_HOME=<root>/profiles/<name> for every profile session
+    (this very CLI does), and <profile>/hermes-agent does not exist. The old
+    one-path join returned None there, so `hscc api install-service` refused to
+    run from any worker session while the real venv sat one level up.
+    """
+    root = tmp_path / ".hermes"
+    real = root / "hermes-agent" / "venv" / "bin" / "python3"
+    real.parent.mkdir(parents=True)
+    real.write_text("#!/bin/sh\n")
+    profile = root / "profiles" / "backend-engineer"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # no_hermes_anywhere seals the running-venv fallback, so what resolves here
+    # is the profiles-grandparent root and nothing else.
+    assert api_launchd.recommend_api_python() == str(real)
+
+
+def test_recommend_api_python_returns_none_when_no_venv(tmp_path, monkeypatch,
+                                                        no_hermes_anywhere):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "missing"))
+    monkeypatch.setenv("HOME", str(tmp_path))
     assert api_launchd.recommend_api_python() is None
     # install must REFUSE to write a plist that could never start
     with pytest.raises(RuntimeError):
         api_launchd.install_api_plist("/repo")
+
+
+def test_the_refusal_names_every_place_it_looked(tmp_path, monkeypatch,
+                                                 no_hermes_anywhere):
+    """The old message named only the one path that CANNOT exist under a
+    profile, so an operator could not tell a missing install from a bad
+    resolver. The new one lists the whole ladder."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "worker"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(RuntimeError) as exc:
+        api_launchd.install_api_plist("/repo")
+    msg = str(exc.value)
+    assert str(tmp_path / "profiles" / "worker" / "hermes-agent" / "venv" / "bin" / "python3") in msg
+    assert str(tmp_path / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3") in msg
 
 
 # --------------------------------------------------------------------------- #
@@ -348,14 +418,19 @@ def test_cli_install_service_is_idempotent(home, tmp_path, capsys, monkeypatch):
     assert "already up to date" in capsys.readouterr().out
 
 
-def test_cli_install_service_refuses_without_venv_python(home, tmp_path, capsys, monkeypatch):
+def test_cli_install_service_refuses_without_venv_python(home, tmp_path, capsys, monkeypatch,
+                                                         no_hermes_anywhere):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "missing"))
     from hscc_daemon import api_cli
     monkeypatch.setattr(api_cli, "_resolve_api_dir", lambda: tmp_path / "hscc-api")
     (tmp_path / "hscc-api").mkdir(exist_ok=True)
     rc = api_cli.cmd_api(["install-service"])
     assert rc == 1
-    assert "error:" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "error:" in err
+    # t_314eb13c: the refusal must name the whole ladder, not just the one path
+    # that can never exist under a profile home.
+    assert "looked at:" in err
 
 
 def test_cli_uninstall_service_roundtrip(tmp_path, capsys, monkeypatch):
