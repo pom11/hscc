@@ -1256,6 +1256,15 @@ def check_api_routes(script=None, python=None, timeout=None):
         screen would be dead).
       * exit 2 → the sweep could not run at all (no API host/token) — the API
         is not up, which is a real failure for "is the app going to work?".
+      * exit 3 → the sweep COULD NOT RUN (no client source to derive routes
+        from, no renderer). That is UNVERIFIED, never red: an unusable checker
+        must not read as a dead API.
+
+    ``ok`` is also None (unverified) when the sweep exits 1 but produced no
+    route report at all — i.e. it died before sweeping (an import or interpreter
+    error). That case used to surface as ``"route(s) the app calls did not
+    answer: Traceback (most recent call last):"`` while the API was healthy,
+    which is exactly the false alarm this row exists to prevent (t_ef36fe71).
 
     ``ok`` is None (unverified, not pass/fail) only when the sweep script
     itself is not found, i.e. verify is not running from a checked-out repo
@@ -1290,7 +1299,14 @@ def check_api_routes(script=None, python=None, timeout=None):
                           f"({script})",
                 "next_step": "run hscc verify from a checked-out repo tree"}
 
-    py = python or os.environ.get("HSCC_TEST_PY") or "python3"
+    py = python or os.environ.get("HSCC_TEST_PY") or sys.executable or "python3"
+    # Was a bare ``"python3"`` — a PATH lookup for an interpreter we know
+    # nothing about. On the 2.15.2 keg that resolved to a Homebrew python
+    # without ``rich``, so the sweep's theme import died and the row went red on
+    # a healthy API. ``sys.executable`` is the interpreter that is ALREADY
+    # running verify successfully (and so can import this package), and
+    # ``check_chat_roundtrip`` in this same file already uses it — same posture
+    # for the same reason. HSCC_TEST_PY still wins so hermetic runs control it.
     rc, out = _capture([py, script, "--json"], timeout=timeout)
     if rc == 0:
         return {"name": "api_routes", "ok": True,
@@ -1299,18 +1315,41 @@ def check_api_routes(script=None, python=None, timeout=None):
         # api_route_sweep returns 2 when it has no API host or token — i.e. the
         # API is not actually up. This is a genuine "would the app work?" fail.
         return {"name": "api_routes", "ok": False,
-                "detail": "API not reachable: " + _first_line(out),
+                "detail": "API not reachable: " + _sweep_reason(out),
                 "next_step": "start the API (hscc api start / the daemon) and "
                              "confirm `hscc api status` reports Listening"}
+    if rc == 3:
+        # The sweep says outright that it could not run (no client source, no
+        # renderer). Nothing was observed, so nothing may be concluded about
+        # the API — that is UNVERIFIED, not a failure.
+        return {"name": "api_routes", "ok": None,
+                "detail": "unverified: api route sweep could not run: "
+                          + _sweep_reason(out),
+                "next_step": "run the sweep by hand to see why: %s %s --json"
+                             % (py, script)}
 
-    # rc == 1 → some swept route did not answer. The sweep's --json output names
-    # them; surface the failing routes (and their HTTP status) as the cause.
+    # Anything else (1, or an unexpected exit such as 127/137) is only evidence
+    # of a dead route if the sweep actually REPORTED one. The sweep's --json
+    # output names the failing routes and their HTTP status; without that
+    # report, no route was ever called.
     failed = _sweep_failures(out)
-    detail = "; ".join(failed) if failed else _first_line(out)
-    return {"name": "api_routes", "ok": False,
-            "detail": "route(s) the app calls did not answer: " + detail,
-            "next_step": "open the failing route(s) above; that screen would be "
-                         "dead for the operator"}
+    if failed:
+        return {"name": "api_routes", "ok": False,
+                "detail": "route(s) the app calls did not answer: "
+                          + "; ".join(failed),
+                "next_step": "open the failing route(s) above; that screen would "
+                             "be dead for the operator"}
+
+    # Exit non-zero AND no route report ⇒ the sweep died before sweeping
+    # (import error, missing interpreter, killed). Classify it as "could not
+    # run", never as a dead route: this is the exact false alarm that shipped in
+    # 2.15.2 as `route(s) the app calls did not answer: Traceback (most recent
+    # call last):` while the API was listening and its log was clean.
+    return {"name": "api_routes", "ok": None,
+            "detail": "unverified: api route sweep did not produce a route "
+                      "report (exit %s): %s" % (rc, _crash_line(out)),
+            "next_step": "run the sweep by hand to see why: %s %s --json"
+                         % (py, script)}
 
 
 def _generation_is_advancing(node, port, window=20.0):
@@ -2163,7 +2202,8 @@ def _sweep_failures(out):
 
     Returns [] when the output is not the sweep's JSON (e.g. a sweep run from
     a version that predates --json, or an interpreter-level error), so the
-    caller falls back to the raw first line.
+    caller can tell "these routes failed" apart from "the sweep never reported
+    anything at all" — the two must not share a verdict (t_ef36fe71).
     """
     try:
         parsed = json.loads(out)
@@ -2172,6 +2212,36 @@ def _sweep_failures(out):
         return []
     return [f"{r.get('route')} ({r.get('status')})"
             for r in rows if not r.get("ok")]
+
+
+def _crash_line(text):
+    """The most informative line of a crashed helper's output.
+
+    A traceback's FIRST line is always the useless ``Traceback (most recent
+    call last):`` — the exception itself is on the LAST. Verify used to print
+    the first line into the row, so every sweep crash read identically as a
+    dead route. Prefer the last non-empty line (the actual
+    ``ModuleNotFoundError: ...``); fall back to ``_first_line``.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else "no output"
+
+
+def _sweep_reason(out):
+    """The sweep's own stated reason for a non-route failure (exit 2 / 3).
+
+    The sweep prints ``{"error": ..., "could_not_run": ...}`` on those exits
+    when called with --json, so pull the sentence out of it — ``_first_line``
+    of indented JSON is just ``{``, which tells the operator nothing.
+    """
+    try:
+        parsed = json.loads(out)
+        reason = parsed.get("error")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return _first_line(out)
 
 
 def check_declaration_agreement(applied_state_path=None, config=None,
