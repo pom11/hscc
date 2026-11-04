@@ -44,7 +44,7 @@ All line numbers verified at `c5ba9926`. "Ladder?" = whether
 | 1 | hscc-bootstrap/ensure_review_feature.py:24-26 | `hermes-agent` | ROOT | MISCLASSIFIED | no | `HERMES_DIR` module constant. From a profile session the dir is absent → `_feature_state` returns `skipped_missing`, `ok=True` (L86-87) → bootstrap prints "ok kanban review feature: skipped_missing" while the PR #43425 feature is NEVER applied. Silent feature loss, boot-time-relevant. |
 | 2 | hscc-bootstrap/apply_patches.py:101-102 | `hermes-agent` | ROOT | MISCLASSIFIED | no | `_hh` used only for `--check` without `--target`. From a profile session the check reports `{not found}` → `ok:false`, exit 1. bootstrap.sh:510 swallows it (`2>/dev/null` + grep) and warns "already patched / upstream drifted" — WRONG diagnosis; the real cause is the resolver. The `--target` path (L113) is caller-supplied and fine. |
 | 3 | hscc-bootstrap/bootstrap.sh:509 (plan text :507) | `hermes-agent` | ROOT | MISCLASSIFIED | no | `HERMES_DIR="$HERMES_HOME/hermes-agent"` — the exact c5ba9926 sibling of the fixed PYBIN, left raw. From a profile session `--target <profile>/hermes-agent` → apply fails → warn; combined with #2 the whole patch step is a no-op with a misleading message. Bootstrap is always run by a human at a terminal, but they may well be inside a profile session (`hermes`-spawned shell). |
-| 4 | hscc-bootstrap/enable_plugins.py:1231-1233 | `config.yaml` | ROOT (installer) | MISCLASSIFIED/AMBIG | no | `__main__` (bootstrap's only caller; bootstrap.sh:533). Intent is "wire the install's config". Profile session → reads/writes `<profile>/config.yaml`, and the root config stays unseeded; the goal-judge tree sweep at L1210 then derives its root from that profile path and sweeps it as if root. |
+| 4 | hscc-bootstrap/enable_plugins.py:1231-1233 | `config.yaml` | ROOT (installer) | MISCLASSIFIED/AMBIG | no | `__main__` (bootstrap's only caller; bootstrap.sh:533). Intent is "wire the install's config". Profile session → reads/writes `<profile>/config.yaml` and the root config stays unseeded (the goal-judge sweep at L1210 itself resolves the root correctly via `_hermes_root(config_path)`). |
 | 5 | hscc-bootstrap/install_soul.py:267-269 | `SOUL.md`, `config.yaml` | ROOT (installer) | MISCLASSIFIED/AMBIG | no | `__main__`. Same vector as #4: from a profile session the HSCC SOUL block lands in `<profile>/SOUL.md` and the personality in `<profile>/config.yaml`; the root home is skipped. |
 
 ### B. Correct-as-is PROFILE-intent (raw joins that MUST stay raw)
@@ -156,11 +156,12 @@ any-`hermes`-spawned-shell normal mode.
    writes land in the wrong tree).** Run from a profile session, bootstrap
    wires the PROFILE's config/SOUL instead of the root install's — the root
    config.yaml (the general/`default` home, and the file the doctor's
-   models-served + wiring rows check for the root) stays unseeded; the
-   goal-judge sweep then treats the profile as root (enable_plugins.py:1210
-   derives root from `config_path`). Minimal fix: resolve the home with the
-   profiles-grandparent rule at `__main__` (document: installer acts on the
-   ROOT home; use `--home` for an intentional profile wire).
+   models-served + wiring rows check for the root) stays unseeded — the
+   goal-judge sweep at enable_plugins.py:1210 DOES walk a profile path up to
+   the root correctly, so per-profile configs still get wired; it is the
+   ROOT config.yaml itself that is skipped. Minimal fix: resolve the home
+   with the profiles-grandparent rule at `__main__` (document: installer
+   acts on the ROOT home; use `--home` for an intentional profile wire).
 4. **routes_profile.py:59 + routes_profile_editor.py:52/80 — MEDIUM
    (API-vs-CLI divergence, empty/double-nested profile lists).** If the API
    process ever carries a profile-scoped `HERMES_HOME` (spawned from a
