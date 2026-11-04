@@ -58,7 +58,7 @@ actions (A4), the `hscc api` CLI verb (A5), conversational orchestrator chat
 hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]  start in the background
 hscc api stop                                                      stop it
 hscc api status [--no-qr]                                          running/stopped + bound host:port
-hscc api install-service                                           OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
+hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]  OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
 hscc api uninstall-service                                         remove the launchd unit written by install-service
 ```
 
@@ -66,6 +66,15 @@ hscc api uninstall-service                                         remove the la
 The token is **encoded into that QR**, so the QR must be treated like a
 password — never show it on a stream or screen-share. `start` also runs the
 repo-vs-installed payload-drift check and warns loudly on drift.
+
+`install-service` takes the same bind flags as `start` and writes them into the
+unit's `ProgramArguments`, so a tailnet-served API can move onto launchd
+without losing its bind; with no flags the unit is the plain loopback one.
+The unit stores the intent (`--tailscale`, not a resolved address), so the
+tailnet IP is re-resolved at every boot. `--no-qr` is accepted and ignored
+(a launchd unit has no terminal). `hscc api status`/`stop` read the PID file,
+so a launchd-run instance looks stopped there — trust
+`launchctl print gui/$UID/com.hscc.api`.
 
 ## Auth
 

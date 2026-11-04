@@ -58,6 +58,21 @@ TAILSCALE_CLI_PATHS = (
 
 log = logging.getLogger("hscc-api")
 
+# `python -m api_server serve` (the launchd unit's argv — see
+# hscc_daemon/api_launchd.py) executes this file under the name `__main__`.
+# Every routes_*.py at the bottom does `from api_server import ...`; without
+# the alias below, Python does not find `api_server` in sys.modules (the file
+# is registered only as `__main__`) and imports the SAME file a SECOND time as
+# `api_server`. The routes then register into that second instance's ROUTES
+# while the server serves from the `__main__` instance — which knows only the
+# inline /v1/ping route. The result is an API that answers /v1/ping and 404s
+# every /v1 route (t_37948685 e2e pins it). Aliasing before those imports run
+# makes the module name resolve to the instance that is actually serving.
+# Under a normal `import api_server` this block never runs (name != __main__) —
+# zero change to every in-process caller, including the whole test suite.
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    sys.modules.setdefault("api_server", sys.modules[__name__])
+
 
 # ---------------------------------------------------------------------------
 # Auth: token load/create, fail-closed (design §Hard constraints #3, §C)
@@ -751,4 +766,169 @@ import routes_session  # noqa: E402,F401  (registers /v1/projects/{name}/session
 # seq space as the history endpoint. Module-level register_ws_route() runs at
 # import, after WS_ROUTES is defined above.
 import routes_ws  # noqa: E402,F401  (registers /v1/projects/{name}/session/ws)
+
+
+# ---------------------------------------------------------------------------
+# Command-line entrypoint — `python -m api_server serve`
+#
+# Why this exists (t_37948685): this argv is what the launchd unit execs
+# (hscc_daemon/api_launchd.build_api_plist writes it into ProgramArguments,
+# with WorkingDirectory = this plugin dir). The module had no `__main__` block,
+# so the command imported, registered its routes and EXITED 0 — no bind, no log
+# line, nothing listening. Under `KeepAlive` launchd keeps relaunching a
+# process that exits 0, so a boot-loaded unit would have looked healthy in
+# `launchctl print` while the API stayed offline. `hscc api start` never hit
+# this because it forks and calls create_server().serve_forever() in-process
+# (api_cli._serve). tests/test_api_server_entrypoint.py runs THIS command as a
+# subprocess and is the only place the plist text meets a listening socket.
+#
+# Scope, deliberately: NO PID file. The documented asymmetry ("`hscc api
+# status` reads the PID file, so a launchd-run instance looks stopped there —
+# trust launchctl") is kept on purpose. Writing api.pid here would make
+# `hscc api stop` SIGTERM a launchd-supervised process, which KeepAlive then
+# resurrects — a stop that silently un-stops is worse than the honest
+# "looks stopped, trust launchctl" note. If the operator wants `status`/`stop`
+# to work under launchd, that is a separate change to BOTH verbs.
+# ---------------------------------------------------------------------------
+
+def _parse_serve_argv(argv):
+    """Parse the `serve` argv. Returns (subcommand, bind_override, port_override).
+
+    Accepts the same flags `hscc api start` takes (api_cli._parse_start_flags),
+    including `--no-qr`, which is accepted and ignored here: a launchd unit has
+    no terminal to print a QR to, and accepting it means the operator can paste
+    their existing `hscc api start --tailscale --no-qr` flag tail into the unit
+    without the boot failing on an unknown argument. Unknown flags are a hard
+    error (exit 2) — a hand-edited unit should fail loudly, not quietly serve
+    something else.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m api_server",
+        description="HSCC read-only HTTP API (the launchd unit runs 'serve').")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    serve = sub.add_parser("serve", help="bind and serve the API in the foreground")
+    serve.add_argument("--tailscale", action="store_true",
+                       help="bind the tailnet address instead of loopback")
+    serve.add_argument("--bind", default=None, metavar="<ip>",
+                       help="bind this specific address (0.0.0.0 is always refused)")
+    serve.add_argument("--port", default=None, type=int, metavar="<n>",
+                       help=f"override the configured port (default {DEFAULT_PORT})")
+    serve.add_argument("--no-qr", action="store_true",
+                       help="accepted for parity with 'hscc api start'; has no "
+                            "effect when run under launchd")
+    ns = parser.parse_args(argv)
+    bind = "tailscale" if ns.tailscale else ns.bind
+    return ns.cmd, bind, ns.port
+
+
+def serve_main(bind_override=None, port_override=None) -> int:
+    """Bind + serve in the foreground; returns a process exit code.
+
+    Uses create_server() — the same resolution `hscc api start` runs, so the
+    bind rules (loopback default, tailnet opt-in, 0.0.0.0 refused) and the
+    fail-closed token load are not re-implemented here and cannot drift. Every
+    startup failure exits NON-ZERO: that is what tells launchd the unit failed
+    instead of letting an unbound process look like a served API.
+
+    The live-gateway sidecar is started best-effort, exactly as api_cli._serve
+    does (a serve that cannot boot must not stop the API — the WS relay's REST
+    fallback stays authoritative), and torn down on exit so no supervised
+    `hermes serve` child is orphaned holding port 9119 with this process's
+    token (the stale-token defect gateway_bridge's port-occupancy heal exists
+    to clean up).
+    """
+    # Plain INFO, no env knob: nothing else in the repo reads a log-level
+    # variable, and inventing one here would be an undocumented switch the
+    # operator cannot find. `hscc api install-service` sends stdout+stderr to
+    # ~/.hscc/logs/api.log / api.err.log, which is where to look.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
+    try:
+        server = create_server(bind_override=bind_override,
+                               port_override=port_override)
+    except RuntimeError as exc:
+        # Refused bind / unreadable-or-empty token / malformed api.json.
+        print(f"hscc-api: refusing to start: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # Almost always EADDRINUSE: something already holds the port (the
+        # common one is an `hscc api start` instance still running, because a
+        # launchd-run process writes no api.pid and so cannot see it, or vice
+        # versa). Name the remedy — this is the line the operator reads in
+        # ~/.hscc/logs/api.err.log while KeepAlive retries every few seconds.
+        print(f"hscc-api: cannot bind: {exc}\n"
+              "  If 'hscc api start' has an instance running, stop it first "
+              "(or drop this unit); 'lsof -nP -iTCP -sTCP:LISTEN | grep "
+              "hscc' names the holder.", file=sys.stderr)
+        return 1
+
+    addr = server.ctx.config
+    print(f"hscc-api: listening on {addr['host']}:{addr['port']}", flush=True)
+
+    bridge = None
+    try:
+        import gateway_bridge
+        bridge = gateway_bridge
+        if not gateway_bridge.start_serve():
+            log.warning("gateway sidecar NOT started (bridge inert; WS relay "
+                        "REST fallback stays authoritative)")
+    except Exception as exc:      # never let a sidecar failure stop the API
+        log.warning("gateway sidecar startup skipped: %r", exc)
+        bridge = None
+
+    # launchd stops the unit with SIGTERM. Without a handler the default action
+    # kills us before bridge.shutdown(), orphaning the supervised serve on
+    # 9119 with our token — so the next boot pays the stale-token heal.
+    import signal as _signal
+    import threading as _threading
+
+    def _on_term(signum, frame):
+        # server.shutdown() blocks until serve_forever() returns, so it runs on
+        # its own thread: calling it from the handler would deadlock against the
+        # accept loop it is trying to stop.
+        print(f"hscc-api: signal {signum}, shutting down", flush=True)
+        _threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        _signal.signal(_signal.SIGTERM, _on_term)
+        _signal.signal(_signal.SIGINT, _on_term)
+    except (ValueError, OSError):
+        pass                      # not the main thread / not installable
+
+    try:
+        server.serve_forever()
+    except Exception as exc:
+        print(f"hscc-api: crashed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if bridge is not None:
+            try:
+                bridge.shutdown()
+            except Exception:
+                pass
+        print("hscc-api: stopped", flush=True)
+    return 0
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        # A hand-edited unit that lost its `serve` word would otherwise get
+        # argparse's generic "arguments are required: cmd", which names nothing
+        # the operator can act on. Say what the unit must run.
+        print("hscc-api: nothing to do — the unit must run "
+              "'python -m api_server serve' (see 'hscc api install-service')",
+              file=sys.stderr)
+        return 2
+    cmd, bind_override, port_override = _parse_serve_argv(argv)
+    if cmd != "serve":            # add_subparsers(required=True) keeps this defensive
+        print(f"hscc-api: unknown command {cmd!r}", file=sys.stderr)
+        return 2
+    return serve_main(bind_override=bind_override, port_override=port_override)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 

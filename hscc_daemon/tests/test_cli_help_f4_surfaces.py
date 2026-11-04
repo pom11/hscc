@@ -74,7 +74,8 @@ API_VERB_LINES = [
     "hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]",
     "hscc api stop",
     "hscc api status [--no-qr]",
-    "hscc api install-service",
+    # t_37948685: install-service now carries the same bind flags into the unit.
+    "hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]",
     "hscc api uninstall-service",
     "hscc api --help",
 ]
