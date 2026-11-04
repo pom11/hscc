@@ -10,9 +10,17 @@ Usage:
     python3 scripts/api_route_sweep.py            # sweep the live API
     python3 scripts/api_route_sweep.py --json     # machine-readable
 
-Exit code is non-zero if any route is unreachable, 5xx, or returns a body that
-does not parse. A 400 from a route that REQUIRES a parameter is expected and is
-NOT a failure — the client supplies it; a bare sweep call does not.
+Exit codes:
+    0  every swept route answered with parseable JSON
+    1  a route the app calls did not answer (unreachable / 5xx / bad body)
+    2  preconditions missing — no API host or token, i.e. the API is not up
+    3  the sweep COULD NOT RUN (no client source to derive routes from, or no
+       renderer available). Distinct from 1 on purpose: "I could not look" is
+       not "I looked and it was dead", and ``hscc verify`` maps the two to
+       different rows — 1 is red, 3 is unverified (t_ef36fe71).
+
+A 400 from a route that REQUIRES a parameter is expected and is NOT a failure —
+the client supplies it; a bare sweep call does not.
 
 Only GETs are swept. Mutating POSTs are listed as not covered rather than fired,
 so the gap is explicit instead of silently missing.
@@ -21,12 +29,37 @@ so the gap is explicit instead of silently missing.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
-from hscc_daemon import cli_theme as theme
+# ── Standalone-import bootstrap (t_ef36fe71) ────────────────────────────────
+# This file is run TWO ways: as a package module (``python -m``) and as a bare
+# script path. The latter is what ``hscc verify`` does, and what the installed
+# keg does: ``python3 <keg>/libexec/hscc/hscc_daemon/api_route_sweep.py``. A
+# script gets ONLY its own directory on sys.path — ``hscc_daemon/`` — so the
+# parent dir that actually CONTAINS the ``hscc_daemon`` package is missing and
+# the import below dies with ``ModuleNotFoundError: No module named
+# 'hscc_daemon'``. The traceback then exits 1, which verify used to read as
+# "a route did not answer" — a working API reported dead (2026-11-04 keg 2.15.2).
+# Sanctioned pattern: hscc_daemon/verify_chat_roundtrip.py does the same
+# insert; here it must come BEFORE the package import to be worth anything.
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from hscc_daemon import cli_theme as theme
+except ImportError:  # pragma: no cover - standalone/deps-missing fallback
+    # Two distinct causes land here: the bootstrap above could not find the
+    # package (a layout we did not anticipate), or `rich` is absent from the
+    # interpreter running us (Homebrew's bare python3 has no rich; the keg
+    # venv does). Neither is a route failure, so do NOT crash — leave the
+    # human renderer unavailable and let main() report exit 3. The machine
+    # ``--json`` path never touches the theme, so it stays fully working.
+    theme = None
+
+REPO = _PKG_ROOT
 CLIENT = os.path.join(REPO, "ios-app/Sources/HSCC/HSCCClient.swift")
 
 # Routes whose handler requires a parameter the client always supplies. A bare
@@ -78,14 +111,46 @@ def client_routes():
     return sorted(literal), sorted(dynamic)
 
 
+def _bail(code, reason):
+    """Report a NON-ROUTE failure, print a classifiable reason, return the code.
+
+    2 = the API is not up (no host / no token). 3 = the sweep itself could not
+    run. Both print an explicit one-line reason instead of dying with a
+    traceback: ``hscc verify`` reads that text, and a raw
+    ``Traceback (most recent call last):`` in a verify row tells the operator
+    nothing (t_ef36fe71).
+    """
+    if "--json" in sys.argv:
+        print(json.dumps({"error": reason, "could_not_run": code == 3},
+                         indent=2))
+    else:
+        print(reason)
+    return code
+
+
 def sweep():
     base, tok = api_base(), token()
     if not base or not tok:
-        print("cannot sweep: no API host or token (is `hscc api status` running?)")
-        return 2
+        return _bail(2, "cannot sweep: no API host or token "
+                        "(is `hscc api status` running?)")
 
-    literal, dynamic = client_routes()
+    try:
+        literal, dynamic = client_routes()
+    except OSError as exc:
+        # No client source to derive the route list from — an installed layout
+        # without ios-app/. That is "nothing to check", NOT "a route is dead".
+        return _bail(3, "cannot sweep: no iOS client source to derive routes "
+                        "from (%s: %s)" % (CLIENT, exc.strerror or exc))
+
     gets = [r for r in literal if not r.endswith(("/stop", "/up", "/down"))]
+
+    if shutil.which("curl") is None:
+        # The sweep speaks HTTP through curl. Without it NOTHING was observed,
+        # so this is "could not run" (exit 3) — not a verdict on the API. A
+        # bare subprocess.run would instead die with FileNotFoundError and hand
+        # verify a traceback to interpret (t_ef36fe71).
+        return _bail(3, "cannot sweep: `curl` not found on PATH (%s)"
+                          % os.environ.get("PATH"))
 
     rows, failures = [], []
     for route in gets:
@@ -170,7 +235,10 @@ def render_human(rows, failures, dynamic, theme_name=None):
     value below goes through ``theme.esc`` first (Rich would otherwise raise
     MarkupError on a route or note containing ``[/bold]``).
     """
-    console = theme.make_console(theme_name)
+    console = theme.make_console(theme_name) if theme is not None else None
+    if console is None:  # pragma: no cover - guarded by main()'s exit-3 path
+        print("cannot render: hscc_daemon.cli_theme unavailable")
+        return
 
     console.print(theme.make_panel(
         "api route sweep",
@@ -219,10 +287,24 @@ def render_human(rows, failures, dynamic, theme_name=None):
             status="ok", title="result"))
 
 
+def _renderer_available():
+    """True when the themed human view can actually be built.
+
+    Checks for the callable, not just that the import returned something: a
+    stub/empty ``cli_theme`` would pass an ``is not None`` test and then die on
+    the first ``make_console`` call with an AttributeError traceback — the very
+    shape of failure this file must never produce again (t_ef36fe71).
+    """
+    return all(callable(getattr(theme, name, None)) for name in
+               ("make_console", "make_panel", "make_table", "make_status_panel"))
+
+
 def main():
     result = sweep()
-    if result == 2:
-        return 2
+    if isinstance(result, int):
+        # sweep() bailed before sweeping anything: 2 (API not up) or 3 (could
+        # not run). Already printed its reason; do not touch the renderers.
+        return result
     rows, failures, dynamic = result
 
     # ``--theme`` is only for the human palette; strip it before the --json
@@ -232,8 +314,19 @@ def main():
     if "--json" in sys.argv:
         print(json.dumps({"routes": rows, "failures": failures,
                           "not_swept_dynamic": dynamic}, indent=2))
-    else:
-        render_human(rows, failures, dynamic, theme_name)
+        return 1 if failures else 0
+
+    # Machine path above is theme-free and always works. The human view is the
+    # only thing that needs cli_theme/rich, so a missing renderer degrades the
+    # HUMAN view to exit 3 ("could not run") instead of crashing it with a
+    # traceback — verify must never see a crash it could mistake for a dead
+    # route, and an operator piping the human view still gets a real answer.
+    if not _renderer_available():
+        print("cannot render: hscc_daemon.cli_theme unavailable for this "
+              "interpreter (%s lacks the package or `rich`). Re-run with "
+              "--json for the machine view." % sys.executable)
+        return 3
+    render_human(rows, failures, dynamic, theme_name)
     return 1 if failures else 0
 
 
