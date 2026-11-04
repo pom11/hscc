@@ -839,15 +839,29 @@ def serve_main(bind_override=None, port_override=None) -> int:
     token (the stale-token defect gateway_bridge's port-occupancy heal exists
     to clean up).
     """
-    logging.basicConfig(
-        level=os.environ.get("HSCC_API_LOG_LEVEL", "INFO"),
-        format="%(asctime)s [%(levelname)s] %(message)s")
+    # Plain INFO, no env knob: nothing else in the repo reads a log-level
+    # variable, and inventing one here would be an undocumented switch the
+    # operator cannot find. `hscc api install-service` sends stdout+stderr to
+    # ~/.hscc/logs/api.log / api.err.log, which is where to look.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
     try:
         server = create_server(bind_override=bind_override,
                                port_override=port_override)
     except RuntimeError as exc:
         # Refused bind / unreadable-or-empty token / malformed api.json.
         print(f"hscc-api: refusing to start: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # Almost always EADDRINUSE: something already holds the port (the
+        # common one is an `hscc api start` instance still running, because a
+        # launchd-run process writes no api.pid and so cannot see it, or vice
+        # versa). Name the remedy — this is the line the operator reads in
+        # ~/.hscc/logs/api.err.log while KeepAlive retries every few seconds.
+        print(f"hscc-api: cannot bind: {exc}\n"
+              "  If 'hscc api start' has an instance running, stop it first "
+              "(or drop this unit); 'lsof -nP -iTCP -sTCP:LISTEN | grep "
+              "hscc' names the holder.", file=sys.stderr)
         return 1
 
     addr = server.ctx.config

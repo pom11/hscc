@@ -298,6 +298,62 @@ def test_serve_refuses_a_wide_bind_before_binding(sandbox):
     assert "untrusted network" in out
 
 
+def test_serve_stops_cleanly_on_sigterm(sandbox):
+    """launchd stops the unit with SIGTERM, so that path decides whether the
+    supervised `hermes serve` sidecar is torn down or orphaned.
+
+    Without the handler, SIGTERM kills the process immediately: `bridge
+    .shutdown()` never runs, the supervised serve survives reparented on 9119
+    holding this process's token, and the NEXT boot pays gateway_bridge's
+    stale-token heal (the defect that made the iOS read-path 403 for a whole
+    session). With it, serve_forever returns, the finally: tears the sidecar
+    down, and the process exits 0 having said so.
+
+    Discriminator: a default-action kill leaves rc=-15 and no 'stopped' line.
+    """
+    port = _free_port()
+    proc = _spawn(sandbox, ["--port", str(port)], port)
+    proc.terminate()
+    try:
+        out, _ = proc.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        _kill(proc)
+        pytest.fail("SIGTERM did not stop the server — it ignored the signal "
+                    "launchd uses to stop the unit")
+    assert proc.returncode == 0, (
+        f"SIGTERM killed the process (rc={proc.returncode}) instead of "
+        f"shutting it down; the gateway sidecar would be orphaned.\n{out}")
+    assert "stopped" in out, out
+
+
+def test_serve_reports_a_port_already_held_and_exits_nonzero(sandbox):
+    """KeepAlive turns any startup failure into a retry loop, so the failure
+    has to NAME itself. The realistic boot case is a stale `hscc api start`
+    instance still holding the port — a launchd-run process writes no
+    api.pid, so neither side can see the other.
+
+    The port is bound by this test before the child starts, so the child hits
+    EADDRINUSE in create_server(); it must exit non-zero with an actionable
+    message, not traceback and not exit 0.
+    """
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-m", "api_server", "serve",
+             "--port", str(port)],
+            cwd=str(API_DIR), env=sandbox["env"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        out, _ = proc.communicate(timeout=30)
+        assert proc.returncode != 0, f"bound a port already in use:\n{out}"
+        assert "Traceback" not in out, out
+        assert "cannot bind" in out, out
+    finally:
+        holder.close()
+
+
 def test_serve_fails_closed_on_an_empty_token(sandbox):
     """An EMPTY token file -> refuse to start.
 
