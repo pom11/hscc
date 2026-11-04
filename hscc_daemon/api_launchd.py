@@ -5,12 +5,17 @@ bootstrap offers `hscc api install` — nothing is loaded without it. One
 consequence the operator called out: after a REBOOT the iPhone would find
 no API at all (the current PID-file start does not survive login). KeepAlive
 here covers crash respin AND boot; the unit runs the real entrypoint
-(`python3 -m api_server serve`) so the bind rules — 127.0.0.1 only, token
-required — are unchanged, not weakened.
+(`python3 -m api_server serve`) so the bind rules are unchanged, not
+weakened — loopback default, token required, 0.0.0.0 refused. The
+`--tailscale`/`--bind`/`--port` tail (t_37948685) is the operator's explicit
+`start`-level choice carried into the unit; it never widens anything by
+itself, and the server still refuses a wide bind at every boot.
 
 Honest scope note: `hscc api status` reads its PID file, so a launchd-run
 instance looks stopped there; use `launchctl print gui/$UID/com.hscc.api`
-for the unit (same known asymmetry as the daemon unit).
+for the unit (same known asymmetry as the daemon unit). The serve entrypoint
+deliberately does NOT write api.pid — `hscc api stop` would SIGTERM a
+KeepAlive-supervised process and launchd would resurrect it.
 
 Pure-text module (build/recommend only) so the plist shape is unit-testable
 without launchctl: the install path is `plutil -lint` + a read-back compare,
