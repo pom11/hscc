@@ -35,6 +35,11 @@ Exit codes:
     0  round trip succeeded — model saw the message and answered
     1  a step failed (diagnosis printed)
     2  preconditions missing (no API host/token, no orch endpoint, no metrics)
+
+A missing renderer (no ``cli_theme``/``rich`` in the interpreter running us)
+costs the human view its colouring, NOTHING else: the round trip still runs,
+``--json`` is untouched, and the exit code still reports the round trip's own
+verdict — never a traceback (t_fc3eb536).
 """
 
 import json
@@ -46,10 +51,33 @@ import time
 import urllib.error
 import urllib.request
 
-from hscc_daemon import cli_theme as theme
-
+# ── Standalone-import bootstrap (t_fc3eb536) ────────────────────────────────
+# This file is run TWO ways: as a package module (``python -m``) and as a bare
+# script path — which is exactly how ``hscc verify --chat`` runs it
+# (``verify.run_chat_roundtrip`` does ``[sys.executable, <path>/…/verify_chat_roundtrip.py,
+# --json]``), and how the installed keg has it beside ``verify.py``. A bare
+# script gets ONLY its own directory on ``sys.path`` — ``hscc_daemon/`` — so the
+# parent dir that CONTAINS the ``hscc_daemon`` package is missing and the import
+# below dies with ``ModuleNotFoundError: No module named 'hscc_daemon'``.
+#
+# The insert below USED to sit at line 52 — i.e. AFTER the import it protects,
+# which made it dead code and the whole deep check died before it read a single
+# config value. Ordering is the entire fix: compute the root, insert it, THEN
+# import. Sanctioned pattern: hscc_daemon/api_route_sweep.py @ wt/t_ef36fe71.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+try:
+    from hscc_daemon import cli_theme as theme
+except ImportError:  # pragma: no cover - standalone/deps-missing fallback
+    # Two distinct causes land here: the bootstrap above could not find the
+    # package (a layout we did not anticipate), or ``rich`` is absent from the
+    # interpreter running us (Homebrew's bare python3 has no rich; the keg venv
+    # does). Neither is a chat failure, so do NOT crash: leave the human
+    # renderer unavailable and let main() print a plain view. The machine
+    # ``--json`` path never touches the theme, so verify stays fully working.
+    theme = None
 
 # Seconds to wait for a terminal chat state before giving up. The default
 # orchestrator chat timeout in ~/.hscc/api.json is 600 s; the API blocks the
@@ -302,6 +330,46 @@ def _strip_theme(args):
     return cleaned, theme_name
 
 
+def _render_plain(code, result):
+    """Human view WITHOUT Rich — used only when ``theme`` failed to import.
+
+    Deliberately the same fixed labels as ``render_human`` so an operator (and
+    the tests) see the same words whether or not the renderer loaded, and so a
+    missing ``rich`` degrades colouring only. Every value goes through
+    ``_safe`` rather than markup-escaping: this path emits no Rich markup at
+    all, so live data (a job id / model reply quoting ``[/bold]``) can print
+    verbatim and cannot raise MarkupError. Returns ``code`` unchanged — the
+    round trip's own verdict is the exit code, never "the renderer was missing".
+    """
+    def _safe(v):
+        return "" if v is None else str(v)
+
+    if code == 2:
+        print("cannot run chat round trip: %s" % _safe(result.get("error")))
+    elif code == 1:
+        print("  CHAT ROUND TRIP FAILED at step:")
+        print("      %s" % _safe(result.get("error")))
+        print("      http=%s job=%s reply=%r"
+              % (_safe(result.get("http")), _safe(result.get("job_id")),
+                 result.get("reply")))
+        if result.get("tokens_before") is not None:
+            print("      generation_tokens_total: %s -> %s"
+                  % (_safe(result["tokens_before"]),
+                     _safe(result.get("tokens_after"))))
+    else:
+        print("  POST accepted  -> job %s" % _safe(result["job_id"]))
+        print("  status=%s  elapsed=%.1fs"
+              % (_safe(result["status"]), result["elapsed"]))
+        print("  reply = %r" % result["reply"])
+        print("  orchestrator vllm:generation_tokens_total  %s -> %s  (delta +%s)"
+              % (_safe(result["tokens_before"]),
+                 _safe(result.get("tokens_after")),
+                 _safe(result.get("delta"))))
+        if result.get("metric_verified") is False:
+            print("  (metric re-read unavailable, reply treated as proof)")
+    return code
+
+
 def render_human(code, result, theme_name=None):
     """Render the round-trip's human view through a themed Rich console.
 
@@ -312,7 +380,16 @@ def render_human(code, result, theme_name=None):
     can never inject Rich markup — and "plain" here means markup-ESCAPED
     (``theme.esc``): a model reply quoting ``[/bold]`` must render literally,
     not crash the console with MarkupError (t_716cf37c).
+
+    When ``theme`` could not be imported at all (no ``rich`` in this
+    interpreter, or an unforeseen install layout) we do NOT raise — the round
+    trip already ran and its exit code is the real verdict, so a missing
+    renderer must never turn a working check into a traceback. The same labels
+    are printed as plain text instead (t_fc3eb536).
     """
+    if theme is None:  # pragma: no cover - standalone/deps-missing fallback
+        return _render_plain(code, result)
+
     console = theme.make_console(theme_name)
     if code == 2:
         console.print(theme.make_status_panel(
