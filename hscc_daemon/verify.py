@@ -930,11 +930,20 @@ def check_profile_endpoints(serving_path=None, profiles_dir=None,
                           "cannot derive orchestrator endpoint"}
 
     orch_ep = _serving.orchestrator_endpoint(serving_data)
-    if not orch_ep:
+    # t_417610e6 pin: under a uniform_pool the node origin is a valid SERVING
+    # address but never a valid HERMES ROUTE — every pool unit serves both
+    # aliases behind the proxy, and the gateway host has no path to a node port.
+    # So the orchestrator endpoint only joins the allowed set for a PINNED
+    # fleet, where the role split is real and the node address is routable.
+    # Leaving it in on a pool is what let a node-direct `auxiliary.*.base_url`
+    # read as "served by the cluster" and pass this guard silently.
+    pool = _serving.is_uniform_pool(serving_data)
+    if not pool and not orch_ep:
         return {"name": "profile_endpoints", "ok": None,
                 "detail": "unverified: no orchestrator unit in serving.json"}
-
-    allowed = {_origin(orch_ep), _origin(proxy_base)}
+    allowed = {_origin(proxy_base)}
+    if not pool:
+        allowed.add(_origin(orch_ep))
 
     by_profile = _collect_profile_urls(profiles_dir)
     if by_profile is None:
@@ -951,6 +960,12 @@ def check_profile_endpoints(serving_path=None, profiles_dir=None,
                 issues.append(f"{prof}: {key_path} unparseable base_url {url!r}")
             elif origin in allowed or origin[1] in loopback_hosts:
                 continue
+            elif pool and origin == _origin(orch_ep):
+                issues.append(
+                    f"{prof}: {key_path} {url} is node-direct but the applied "
+                    "fleet is a uniform_pool — hermes must route via the proxy; "
+                    "a generator wrote this value (see enable_plugins "
+                    "_node_direct_aux_url)")
             else:
                 issues.append(
                     f"{prof}: {key_path} {url} not in serving endpoints")

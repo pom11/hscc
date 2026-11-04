@@ -29,6 +29,19 @@ def _hooks_redirect_target():
 
 _SANDBOX, _SANDBOX_HOOKS = _hooks_redirect_target()
 
+# ── serving.json redirect (t_417610e6) ──────────────────────────────────────
+# enable_plugins now DERIVES COMPACT_URL / the aux-repair policy from
+# ~/.hscc/serving.json at import (uniform_pool -> proxy route + repair armed).
+# Left live, the suite's answers would depend on whatever template the operator
+# last applied: the legacy tests below pin the no-serving.json fallback form
+# (node-direct default, repair disarmed) and would flip on a pool host. Pin the
+# path at a missing file — deterministic fallback mode for every test — and let
+# tests that want a plan shape monkeypatch the derived constants explicitly
+# (test_aux_routing_serving.py). importlib.reload() re-reads this SAME env
+# value, so reload tests stay in fallback mode too.
+os.environ.setdefault("HSCC_SERVING_JSON",
+                      os.path.join(_SANDBOX, "no-serving.json"))
+
 
 def _apply_hooks_redirect(module):
     module.HOOKS_DIR = _SANDBOX_HOOKS
