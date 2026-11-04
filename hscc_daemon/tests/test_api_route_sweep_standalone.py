@@ -201,6 +201,25 @@ def test_sweep_without_curl_says_could_not_run(tmp_path):
     assert "curl" in json.loads(cp.stdout)["error"]
 
 
+def test_sweep_with_no_get_routes_refuses_a_false_green(tmp_path):
+    """A client file that yields no GET routes must not read as 'all routes ok'.
+
+    The mirror image of the false red this card fixes: an emptied or renamed
+    client source would otherwise make the row pass forever.
+    """
+    root = tmp_path / "keg"
+    _, script = _fake_keg(tmp_path, theme="")
+    (root / "ios-app" / "Sources" / "HSCC" / "HSCCClient.swift").write_text(
+        "// routes moved elsewhere\n")
+    cp = _run(script, ["--json"], tmp_path, cwd="/")
+    combined = cp.stdout + cp.stderr
+    assert cp.returncode == 3, combined
+    assert "Traceback" not in combined, combined
+    payload = json.loads(cp.stdout)
+    assert payload["could_not_run"] is True
+    assert "no literal GET routes" in payload["error"]
+
+
 def test_sweep_without_client_source_says_could_not_run(tmp_path):
     """No ios-app/ to parse routes from = nothing was checked, not a dead API."""
     _, script = _fake_keg(tmp_path, theme="", with_client=False)

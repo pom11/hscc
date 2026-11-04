@@ -143,6 +143,13 @@ def sweep():
                         "from (%s: %s)" % (CLIENT, exc.strerror or exc))
 
     gets = [r for r in literal if not r.endswith(("/stop", "/up", "/down"))]
+    if not gets:
+        # The client source parsed but yielded no GET route to call. Reporting
+        # "every route the app calls answers" over an empty list would be a
+        # FALSE GREEN — the mirror image of the false red this card fixes (a
+        # renamed or emptied client file would make the row pass forever).
+        return _bail(3, "cannot sweep: %s yielded no literal GET routes to call"
+                          % CLIENT)
 
     if shutil.which("curl") is None:
         # The sweep speaks HTTP through curl. Without it NOTHING was observed,
