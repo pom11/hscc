@@ -11,11 +11,14 @@ weakened — loopback default, token required, 0.0.0.0 refused. The
 `start`-level choice carried into the unit; it never widens anything by
 itself, and the server still refuses a wide bind at every boot.
 
-Honest scope note: `hscc api status` reads its PID file, so a launchd-run
-instance looks stopped there; use `launchctl print gui/$UID/com.hscc.api`
-for the unit (same known asymmetry as the daemon unit). The serve entrypoint
-deliberately does NOT write api.pid — `hscc api stop` would SIGTERM a
-KeepAlive-supervised process and launchd would resurrect it.
+Honest scope note, closed by t_d2245e7e: `hscc api status` used to read only
+its PID file, so a launchd-run instance looked stopped there. It now consults
+`launchctl print gui/$UID/com.hscc.api` as well, and `hscc api stop` runs
+`launchctl bootout` when the unit is loaded instead of SIGTERM-ing a
+KeepAlive-supervised process (which launchd would simply resurrect). The
+serve entrypoint still deliberately writes NO api.pid — under launchd the
+supervisor is authoritative, and a pid file that only existed to be SIGTERM'd
+was the source of the wrongness.
 
 Pure-text module (build/recommend only) so the plist shape is unit-testable
 without launchctl: the install path is `plutil -lint` + a read-back compare,

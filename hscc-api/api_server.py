@@ -782,13 +782,13 @@ import routes_ws  # noqa: E402,F401  (registers /v1/projects/{name}/session/ws)
 # (api_cli._serve). tests/test_api_server_entrypoint.py runs THIS command as a
 # subprocess and is the only place the plist text meets a listening socket.
 #
-# Scope, deliberately: NO PID file. The documented asymmetry ("`hscc api
-# status` reads the PID file, so a launchd-run instance looks stopped there —
-# trust launchctl") is kept on purpose. Writing api.pid here would make
-# `hscc api stop` SIGTERM a launchd-supervised process, which KeepAlive then
-# resurrects — a stop that silently un-stops is worse than the honest
-# "looks stopped, trust launchctl" note. If the operator wants `status`/`stop`
-# to work under launchd, that is a separate change to BOTH verbs.
+# Scope, deliberately: NO PID file. Not because the verbs are blind any more —
+# t_d2245e7e made `status` consult `launchctl print` and `stop` run `launchctl
+# bootout`, so the old "looks stopped, trust launchctl" asymmetry is closed.
+# It stays absent because under launchd the SUPERVISOR is the authority on
+# which process is running: an api.pid here would be a second, lazier source of
+# truth that `hscc api stop` would SIGTERM (and `KeepAlive` would resurrect),
+# which is exactly the stop-that-does-not-stop the verbs now avoid.
 # ---------------------------------------------------------------------------
 
 def _parse_serve_argv(argv):
