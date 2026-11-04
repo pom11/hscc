@@ -11,6 +11,371 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.2] - 2026-11-04
+
+### Added
+- **`install_payload` now writes the HSCC payload into a selected set of
+  profile homes.** The selector used to skip every profile home that did not
+  already carry a `plugins/` dir — on this fleet exactly 2 of 49 homes were
+  ever written, so 47 homes (including dispatched ones: `ios-engineer`,
+  `worker`, `qa`) silently never received the payload and the budget-hook
+  doctor row correctly read red for them. The selection is now an explicit
+  allowlist, `target_profiles` in `~/.hscc/target_profiles.json` (operator
+  decision option 3 on t_16eb73ab): absent file → the seeded default (the hscc
+  board's own assignees, 13 names); `["*", ...]` → every home, so option 1
+  stays one config edit away; `[]` → the old skip-everything behaviour. A
+  dedicated file rather than a key inside `cluster.json` because
+  `hscc-cluster/discovery.py::_write_cache` rewrites `cluster.json` from a
+  freshly built dict on every live discovery — an operator's widening edit
+  there would silently evaporate. A selected home
+  gets its `plugins/` created, and the per-home summary reports
+  `created: true|false` so the bootstrap run can name exactly which homes
+  flipped from payload-less to payload. A malformed value keeps the seeded
+  default and surfaces `target_profiles_error` on the summary — a silently
+  ignored allowlist looks exactly like a working one.
+- **`hscc api install-service` now carries the bind flags into the launchd
+  unit.** `hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]`
+  writes those flags into the unit's `ProgramArguments`, so migrating a
+  tailnet-served API onto launchd no longer silently drops the bind. The flags
+  are validated at install time exactly the way `api_cli` parses them for
+  `start` (last-wins collapsed to one, `0.0.0.0`/`::` refused, `--port` must be
+  a real port) — a bad combination is refused with `error:` before the plist
+  file is touched, never baked into a unit that would fail at boot.
+  `--no-qr` is deliberately NOT forwarded: it is display-only and a launchd
+  unit has no terminal. No flags keeps the unit byte-identical to before.
+- **`launchd-setup.sh render-only [OUT]`** — renders the plist from the
+  template and exits before any launchctl interaction. The plist render moved
+  out of a bare `sed` into a `render_plist` function with a
+  `__TMUX_ENV__` template placeholder, giving the install path a test seam
+  that never installs or loads a job. `hscc_daemon/tests/
+  test_launchd_setup_tmux_env.py` drives the real script through the seam and
+  parses the result with `plistlib` (the first test harness this script ever
+  had — the card believed one existed; `grep -rn launchd-setup
+  hscc_daemon/tests/` was empty).
+
+### Changed
+- **A new doctor row is now one edit in one place, not three hunks in the same
+  file.** `hscc-bootstrap/doctor.py::run_doctor()` had become a merge hotspot:
+  every feature that wanted a row edited the *same* three places — a row adapter
+  appended after the previous one, a seam keyword appended to the signature, and
+  an entry (plus its "why this row exists" comment) appended to the `checks`
+  list. PR #175 vs #173 collided in all three and needed the t_3f805c4f rebase,
+  and PR #175 collided with this refactor's own branch the same way while it was
+  being written. The wiring is now `FEATURE_CHECK_ROWS` — one
+  `doctor_rows.FeatureCheckRow` entry per row (its key, its seam keyword, and the
+  hooks that produce its verdict), iterated by `run_doctor()`. New rows arrive
+  their seam through `**feature_rows` and are validated against the registry, so
+  a typo'd seam is a `TypeError` rather than a silently ignored keyword that
+  downgrades a row to its refusal verdict, and the signature never grows again.
+  Row hooks are resolved against the doctor module **per call**, so the suites
+  that patch `_load_orch_waker` / `_kanban_enforce_check_row` on the module keep
+  pinning what they pin. Each row declares the per-row context it reads —
+  `hscc_dir` (the sandboxed `~/.hscc` root) or `hermes_home` (the deployed plugin
+  tree the budget row reads) — so a row can never be handed a keyword its
+  function does not accept. No check semantics moved: same three-source trust
+  order (injected seam → in-suite refusal → the feature's own `doctor_check`),
+  same pytest fence, same *unverifiable* row for a module that cannot be
+  imported, same five-field `Check` adapter, same row order — the five feature
+  suites (`test_doctor_orch_waker`, `_cron_watchers`, `_supervision`,
+  `_kanban_enforce`, `_budget_hook`) pass unchanged. New suite
+  `test_doctor_row_registry.py` (17 tests) pins what a registry loses to a direct
+  call and what the move could break: every hook name an entry names exists on
+  the module, the seam map agrees with the signature, a row appended to the list
+  renders with **no** change to `run_doctor()` (mutation-proven: pinning the
+  loop to the known rows fails it), an unknown seam keyword raises
+  (mutation-proven), and the budget row receives `hermes_home` and never
+  `hscc_dir` (mutation-proven: dropping the kwarg from the render call fails it).
+- **The reviewer role no longer cards its own follow-ups.** `roles/reviewer.yaml`
+  states the operator's standing rule as role identity, so it is part of the
+  SOUL every reviewer session is generated with: a follow-up found on the way
+  (an adjacent defect, a cleanup, something worth doing later) is commented on
+  **the card under review** and that card is returned to `todo`, so the
+  orchestrator decides whether it becomes work — spawning new cards from a
+  review is named as forbidden, and says why (`kanban_create` is not a
+  reviewer's tool; decomposition belongs to the orchestrator). Before this the
+  rule existed only as a correction after the fact, so every reviewer session
+  rediscovered the choice on its own and a review could silently mint cards the
+  orchestrator never routed. Rule text lives in the spec `identity`, not in a
+  hand-edited live SOUL, because `role_soul_check.py` exists precisely to warn
+  that a hand-appended block is deleted by the next `hscc.py generate`.
+
+### Fixed
+- **`python -m api_server serve` was a no-op.** The launchd unit's
+  `ProgramArguments` run that command, but `api_server` had no `__main__`
+  block: the module imported, registered its routes and exited 0 without ever
+  binding a socket, so a boot-loaded unit would have respun forever under
+  `KeepAlive` while the API stayed offline. `api_server` now has a real
+  `main()` entrypoint (`serve` + the same `--tailscale`/`--bind`/`--port`
+  flags), serves through `create_server()` so the bind rules and fail-closed
+  token load cannot drift from `hscc api start`, exits non-zero on any startup
+  refusal (that is what tells launchd the unit failed), and shuts the
+  gateway sidecar down on SIGTERM so a boot-time stop cannot orphan
+  `hermes serve` on 9119. Deliberately writes no PID file: the documented
+  "trust launchctl, not the PID file" asymmetry is kept, because an
+  `api.pid` would let `hscc api stop` SIGTERM a supervised process that
+  `KeepAlive` then resurrects.
+- **`python -m api_server` 404d every route except `/v1/ping`.** Running a
+  module with `-m` executes it as `__main__`, but every `routes_*.py` imports
+  `api_server` by name — so the same file was imported a second time and the
+  routes registered on that other module instance, while the listening process
+  served from the `__main__` instance whose table held only the inline ping
+  route. `api_server` now aliases `sys.modules["api_server"]` to itself when
+  run as `__main__`. Pinned without executing a handler: a GET on the
+  POST-only `/v1/profile/install` must be 405 (registered), not 404.
+- **The launchd install path shipped a pane-blind daemon: the orch-waker
+  could never see a tmux pane.** launchd starts the daemon with a CLEAN
+  environment, and the plist template's `EnvironmentVariables` carried only
+  PATH/HOME/PYTHONPATH/PYTHONDONTWRITEBYTECODE — never `TMUX_TMPDIR`, which
+  is where the operator's real tmux server (iTerm2 integration) puts its
+  socket (`~/.tmux/tmp`). `repl_inject` found no server, so the waker
+  delivered to ZERO panes for its whole existence (2,283 audit lines, zero
+  ok=true, measured live 2026-11-03) while every board burned retries on
+  `FAILED no tmux pane` — the same symptom as the dead-pane case of
+  `t_f1122b7a` but caused by the *supervisor environment*, invisible to the
+  dead-pane backoff's per-board logic. `launchd-setup.sh` now propagates
+  `TMUX_TMPDIR` from the installing shell into the plist when it is set
+  (XML-escaped; omitted entirely when unset or empty — an empty value would
+  point tmux at `""`, worse than absent).
+- **`hscc-cluster/plugin.yaml` now declares its 6 hooks; the drift suite
+  guards hooks as it already guards tools.** The manifest carried
+  `provides_tools` (the GAP-A-7 registry-first list) and no hook block at
+  all, so `hermes plugins doctor` WARNed every registered hook —
+  `kanban_task_claimed`/`_blocked`/`_completed`, `pre_tool_call` (workflow.py),
+  `post_api_request`/`transform_tool_result` (budget_watch.py) — as "not
+  listed in provides_hooks" (6 WARNs; found by qa during t_1153d42c live
+  acceptance). Registration always succeeded (doctor OK: 23 tools, 6 hooks),
+  so this is declaration hygiene: Hermes advertises and audits capabilities
+  from the manifest, and a manifest that omits what it registers lies in the
+  same direction GAP-A-7 was about. `provides_hooks` now mirrors the
+  `ctx.register_hook(...)` calls exactly, annotated per source module. The
+  repo has no other plugin that registers a hook, so no other manifest needed
+  the block.
+- **`hscc cluster` silently deleted the operator's `node_recovery` opt-outs.**
+  `discovery._write_cache` wrote `to_cluster_json(topo)` — `name`/`gateway`/
+  `workers`/`nasDevices` and nothing else — over `~/.hscc/cluster.json` on
+  every successful live discovery, so every hand-added top-level key
+  evaporated on the next sweep. That is exactly where
+  `install_autoreboot` / `install_notifier_mask` / `install_gpu_clock_cap` /
+  `node_recovery` read their opt-outs and where `bootstrap.sh` tells operators
+  to write them: one discovery run deleted an opt-out and the layer silently
+  re-enabled, which looks identical to a working opt-out. `_write_cache` now
+  re-reads the file it is about to replace and carries forward every top-level
+  key it does not own (`OWNED_CACHE_KEYS`), so `node_recovery` — and any key a
+  future card adds — survives. Ownership rather than an allowlist of keys to
+  keep, and owned keys always come from the live topology, so a hand-edited
+  `workers` list can never resurrect a node removed from the sparkrun cluster.
+  A `cluster.json` that exists but cannot be read is no longer overwritten in
+  silence: the rewrite still happens (the cache write stays best-effort) but
+  names on stderr what is about to be lost.
+- **Step 4 of the dep-bump runbook never stated the signal the guard calls
+  decisive.** `FORK_RULE_LINES` tells the verifier to "confirm the balancer is
+  live in `~/.cache/sparkrun/proxy/litellm_config.yaml`:
+  `litellm_settings.callbacks` contains `sparkrun_balancer.handler` and
+  `sparkrun_balancer.py` sits next to the config", and calls that callback the
+  live signal. The operator runbook
+  (`install/hscc-skills/hscc/references/runtime-bump-verification.md`) step 4
+  said only that `router_settings` propagates, `proxy_router_settings` /
+  `router_drift` must be quiet, and `simple-shuffle` is HEALTHY — so an
+  operator following it literally never opened the callbacks line. In the one
+  scenario the guard exists for (the balancer silently stops being emitted
+  while `router_settings` still propagates, e.g. `sparkrun_balancer.py` is not
+  next to the config) every step-4 signal stays green.
+  `git log -S "sparkrun_balancer.handler" -- <runbook>` returns zero commits:
+  the omission is pre-existing, not a regression t_6956da89 introduced — that
+  card's pin correctly forbids CONTRADICTION while letting the runbook say
+  less, and this closes the "says less" half. Step 4 (and the rule-2 failure
+  description and the `simple-shuffle` NOTE sentence, which are the other two
+  places a reader meets `simple-shuffle`/`litellm_config.yaml`) now state the
+  callbacks check beside the `router_settings` check.
+  `TestRunbookAgreesWithGuard` gained
+  `test_runbook_states_the_balancer_live_signal_the_guard_calls_decisive`: it
+  selects the canonical line by SHAPE (the only `FORK_RULE_LINES` entry naming
+  both a generated `.yaml` and a `.py` — `_balancer_line`), derives the
+  required identifiers from that line's code tokens (dotted callback paths plus
+  the module file; `_balancer_signal_ids`), derives the base-strategy value from
+  its `key: value` token (`_base_strategy_value`) and the config name from its
+  `.yaml` token, then requires every runbook sentence naming the generated
+  config or that strategy to carry all of them — per-sentence, so naming the
+  callback once in an unrelated paragraph cannot satisfy it. No obligation is
+  restated as a literal here. Proven to bite with 13 mutants in a throwaway
+  worktree — 11 RED, each on the leg meant to catch it, 2 GREEN negative
+  controls, every mutant restored with `__pycache__` wiped so CPython's
+  (mtime,size) check could not serve stale bytecode: drop the new step-4
+  sentence (revert to the pre-card text), drop just the callbacks clause
+  (keeping the `router_settings` check), strip the identifiers from rule 2 and
+  from the NOTE sentence, scatter the identifiers into a far paragraph that
+  names neither the config nor the strategy (whole-file substring presence is
+  satisfied; per-sentence scoping is what catches it), drop the config path from
+  step 4, and five guard-side mutants — rename the handler, prose-ify the dotted
+  identifiers (caught by the anti-vacuity floor), prose-ify every code token and
+  split the obligation across two entries (both caught by the shape selector's
+  exactly-one assert), and a second `.yaml`+`.py` entry making the selector
+  ambiguous. The two GREEN controls are a benign rewording that keeps every
+  identifier and extra operator prose appended to step 4, proving the leg does
+  not forbid the runbook from saying MORE than the guard.
+- **The API launchd unit had no `ThrottleInterval`, so a failing unit respawn-stormed
+  the error log.** `api_launchd.build_api_plist()` set `RunAtLoad` + `KeepAlive` and
+  nothing else, so launchd used its 10 s default throttle. Since t_37948685 added
+  `--tailscale` passthrough this is no longer theoretical: a unit whose bind is the
+  tailnet *legitimately* fails at boot whenever Tailscale is down
+  (`api_server.resolve_bind` refuses to widen the bind — correct behaviour that must
+  not be weakened), and launchd retried it six times a minute forever, each retry
+  appending a refusal to `~/.hscc/logs/api.err.log`. The unit now sets
+  `ThrottleInterval 30` and `ExitTimeOut 10`, matching the daemon's own unit in
+  `hscc_daemon/install.py` (`PLIST_CONTENT`) — same Mac, same tuning — with a guard
+  test that pins the two units' numbers to each other rather than to two literals.
+  **This changes the no-flag unit's bytes**, so the two idempotence/byte-identity
+  pins in `tests/test_api_launchd.py` are re-pinned deliberately in the same commit
+  against the `0d95403c` baseline (key order, argv tail, log paths and
+  `EnvironmentVariables` stay pinned byte for byte; only the two keys are added).
+- **`hscc api status` said "not running" for an API that launchd had been serving
+  since boot, and `hscc api stop` had nothing to stop.** The serve entrypoint writes
+  no `api.pid` on purpose, so both verbs were PID-file-blind — the only thing the
+  operator got was a note telling them to trust `launchctl` themselves. The design
+  call the card asked for was **launchctl-aware verbs (as a pair)**, not
+  pidfile-with-ownership-guard: a pid file would still leave `status` blind and still
+  could not stop anything, only turning "silently un-stops" into "refuses and tells
+  you the command". Now `status` reports the unit's real state (it asks
+  `launchctl print gui/$UID/com.hscc.api`, the same probe
+  `hscc-bootstrap/doctor_supervision.py` already trusts for the daemon, so doctor and
+  the CLI cannot disagree about who owns the job) and `stop` runs `launchctl bootout`
+  whenever the job is **loaded** — a SIGTERM would be undone by `KeepAlive` on the
+  next throttle tick even when launchd has no pid right now. A plain
+  `hscc api start` keeps the old SIGTERM/SIGKILL path. Honest scope, said on screen:
+  a bootout is **session-scoped** — the unit file stays installed and `RunAtLoad`
+  brings the API back at the next login; `uninstall-service` is what removes it for
+  good. Probing is gated (`_launchd_matters`): no unit file and no pid file means no
+  `launchctl` fork, and a suite that forgets the probe seam gets a visible refusal
+  (`_refused_launchd_status`) instead of reaching into the operator's live gui domain.
+  The stale "will look stopped under launchd" notes in `api_launchd.py`, `api_cli.py`
+  and `hscc-api/README.md` are updated to say what the verbs now do.
+  `api_launchd.py` stays subprocess-free — its `test_install_never_loads_the_unit`
+  opt-in guarantee is untouched; the two new `launchctl` calls live in `api_cli.py`,
+  which already performed the SIGTERM.
+- **`orch-waker` retried a dead orchestrator pane every 30 s forever.** Board
+  `pontaje` has a `pontaje-orch` profile directory but no tmux REPL pane, and
+  `resolve_orch()` only checked the profile dir — so every tick attempted the
+  delivery, every attempt failed with `no tmux pane running a Hermes REPL for
+  profile 'pontaje-orch'`, `pending` never drained, and
+  `~/.hscc/state/orch_waker.jsonl` grew one identical failure line per tick
+  (125/125 identical since the daemon start). Two fixes:
+  (1) the waker's config (`~/.hscc/orch_waker.json`, hot-reloaded every tick)
+  gains `orch_map` — `{"<board>": "<profile>"}` — consulted before the
+  `<board>-orch` convention, so a board whose orchestrator REPL runs under a
+  differently-named profile is reachable; a map entry naming a profile that
+  does not exist on disk falls back to the convention instead of going dark.
+  (2) dead-pane backoff: after `fail_threshold` (default 3) *consecutive*
+  failed attempts to one board, that board is skipped for `backoff_s`
+  (default 900 s) — no inject attempt, no audit line (the audit is an evidence
+  trail, not a 30 s spool), one `LOG` line on entering backoff, and pending
+  keeps batching. A successful delivery, a changed `orch_map` or the expiry of
+  the window resets/retires the counters.
+- **An unknown fragment `kind:` is now a hard gate failure (exit 2), and
+  `Docs` is the 8th legal kind.** `parse_fragment` accepted any kind:
+  `kind_sort_key` parked unknown words in a catch-all bucket and
+  `render`/`release` emitted a `### <kind>` heading per bucket, so an author's
+  invented word became permanent CHANGELOG vocabulary — `[2.15.0]` shipped
+  `### schema` (8 entries), `### Test` (1) and `### Docs` (6). The docs
+  contradicted each other (a closed allowlist vs "unknown kinds alphabetically
+  after that"), so nothing said no. Per the operator's decision on
+  `t_f48f84c4`: a new `validate_kind()` runs in the parse pass next to
+  `validate_entry_body` — reached through `load_entries`, so `check`, `sync`,
+  `render`, `list` and `release` all refuse, and the release path that minted
+  the headings is included — and `add_entry` validates `--kind` too, so
+  `add --kind schema` fails where it is typed. Exit 2 ("malformed fragment")
+  per the module's existing contract; the error names the file, the bad kind,
+  and the legal names. `KIND_ORDER` is the closed vocabulary: the 7 canonical
+  kinds plus `Docs` (last, after `Verified`) for doc-only changes — admitted
+  deliberately because doc-only changes had no legal outlet and authors kept
+  improvising (`t_9e45955c` wrote `kind: Docs` again after the audit).
+  `schema`/`Test` stay illegal; a new kind now requires a deliberate
+  `KIND_ORDER` edit. Blast radius zero: `load_entries` globs non-recursively
+  and `release` archives consumed fragments, so no existing or historical
+  fragment can fail the gate. `changelog.d/README.md` (both contradicting
+  sites) and the kanban-worker skill now state the closed list and the
+  hard-failure rule in one voice.
+
+### Verified
+- `hscc-bootstrap/tests/test_install_payload.py`: 35 → **43** cases green.
+  Eight named tests pin the rule: fresh profile NOT written unless seeded;
+  seeded missing profile IS created (`created` flips true once); `["*"]` =
+  all homes; `[]` = legacy skip; absent key = the seeded default (the seed
+  list itself is pinned); reader readings `["*"]`/list/`[]`/malformed;
+  unreadable config keeps the seed and names the error; legacy selector
+  gate unchanged. Existing fan-out/drift tests pass the legacy selector
+  explicitly to stay hermetic; the `__main__` CLI test seals `HSCC_DIR` to
+  a tmp dir.
+- `test_doctor_budget_hook.py` + `test_e2e_install.py` +
+  `test_bootstrap_isolated.py`: 27 cases re-run green — the doctor row
+  semantics pinned by t_5720ef53/t_ba14f77f are untouched (a seeded home
+  without the payload still goes red legitimately).
+- `hscc_daemon/tests/test_api_launchd.py`: 17 -> **30** cases (argv tail, byte-
+  identical default unit, refusal-before-write, a drift guard tying the
+  install seam's refusal list to `api_server._REFUSED_BINDS` read from source,
+  and the CLI seam).
+- `hscc-api/tests/test_api_server_entrypoint.py`: **10** new cases — the only
+  place in the repo where the plist `ProgramArguments` are exec'd and reach a
+  listening socket. Verified RED before the fix ("exited 0 instead of
+  serving"); the two new boot behaviours were also mutation-verified.
+  Readiness polls the socket, so the file runs in 4.2 s (was 128 s).
+- `scripts/run_tests.sh` ALL GREEN (see the card's completion note for the
+  per-leg counts).
+- `hermes plugins doctor hscc-cluster` on the repo tree: **zero WARNs**
+  (was 6), `OK: runtime discovery, manifest parsing, import, and registration
+  passed — registrations: 23 tool(s), 6 hook(s)`.
+- `hscc_daemon/tests/test_plugin_manifest_drift.py`: 22 → **24** cases. The
+  tools contract gains its hook twin — `provides_hooks` == the
+  `register_hook()` calls, both directions — parametrized over every repo
+  plugin dir carrying plugin.yaml + `__init__.py`, plus a named-set receipt
+  for hscc-cluster's 6 (a silent drop, e.g. a budget_watch revert that
+  forgets the manifest, fails loudly). The legacy `hooks:` spelling (Hermes'
+  `provides_hooks` alias, used by the vendored memori manifests) is still
+  checked for under-declaration but not over-declaration — see
+  `_manifest_hooks`. Mutation-probed against the ORIGINAL manifest both ways:
+  dropping the two budget-watch entries fails exactly the 2 new hook tests
+  naming them; adding an unregistered `on_session_end` fails exactly the 2
+  naming it. Restore returns the file green.
+- `bash scripts/run_tests.sh hscc-cluster` and the `hscc_daemon` leg green;
+  `python3 scripts/changelog_fragments.py check` rc 0.
+- `hscc-cluster/tests/test_discovery.py`: 26 -> **32** cases, green. The new
+  `TestCachePreservesOperatorKeys` seeds `node_recovery` + a
+  `target_profiles`-shaped key + a key discovery has never heard of, runs
+  `discover()` with sparkrun stubbed live through the REAL cache writer, and
+  asserts all three survive the rewrite — then re-reads the preserved block
+  with the untouched `node_recovery.node_recovery_config()` reader (a
+  preserved key is only fixed if the original reader still sees it).
+  Mutation-probed: reverting the carry-forward in a throwaway clone fails 3
+  cases, and silencing the corrupt-file report fails 1; both reset green.
+- `hscc_daemon/tests/test_orch_waker_dead_pane.py`: **18 new cases / 24
+  parametrised runs** (map hit routes, map-to-missing-profile falls back to the
+  convention, backoff arms at exactly N, zero attempts + zero audit lines inside
+  the window, pending keeps batching, resumes after K, success resets,
+  `orch_map` edit resets + retries immediately, window expiry gives a fresh set
+  of N, config coercion + fresh-dict-per-load, the stamp-merge regression driven
+  through the deployed entry with the real `state.write_state`). The 99
+  pre-existing orch-waker cases are unchanged and green; four mutation probes
+  (stamp-merge drop, arm-at-any-failure, no-reset-on-map-edit, map-ignored) are
+  each caught by the new suite. Full per-leg summary in the PR body.
+- `scripts/tests/test_changelog_fragments.py`: 32 → **49** cases. One fixture
+  pair, byte-identical except the kind word: `KIND_SCHEMA` must fail (parser
+  raises naming the file + `check` exits 2 + `release` exits 2 and writes no
+  archive) and `KIND_DOCS` must pass the same assertions, so the gate cannot
+  go green by rejecting everything. Mutation-probed: replacing the parse-pass
+  `validate_kind(path, kind)` call with `pass` fails exactly the 4 gate tests;
+  restore returns the file green. Also pinned: every `KIND_ORDER` name parses
+  (parametrized over the closed list), kind is case-sensitive, `Docs` renders
+  last after `Verified`, `add --kind schema` exits 2 and writes no file, and a
+  repo-tree pass over the pending `changelog.d/` fragments (fails if a future
+  fragment reintroduces the class).
+- `bash scripts/run_tests.sh` all legs green; `python3
+  scripts/changelog_fragments.py check` rc 0, `python3 scripts/address_guard.py
+  --tracked` rc 0.
+
+### Docs
+- `install_autoreboot` / `install_notifier_mask` / `install_gpu_clock_cap`
+  module docs and the `node_recovery.NODE_RECOVERY_KEY` comment now state that
+  the opt-out block is durable in `cluster.json` and say why, so the next
+  reader does not have to rediscover the sweep that used to eat it.
 ## [2.15.1] - 2026-11-02
 
 ### Added
