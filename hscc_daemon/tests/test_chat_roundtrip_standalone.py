@@ -55,6 +55,20 @@ CLI_THEME_SRC = os.path.join(REPO, "hscc_daemon", "cli_theme.py")
 # which interpreter runs the suite.
 _BROKEN_THEME = 'raise ImportError("simulated: no rich in this interpreter")\n'
 
+# A result dict complete enough for ALL THREE render branches (0/1/2), so one
+# payload can drive every exit code in the verdict test.
+_ANY_RESULT = {
+    "error": "no API host or token (is `hscc api status` running?)",
+    "http": 500,
+    "job_id": "job_pin",
+    "status": "done",
+    "elapsed": 1.5,
+    "reply": "pong",
+    "tokens_before": 100,
+    "tokens_after": 115,
+    "delta": 15,
+}
+
 
 def _fake_keg(tmp_path, theme=None, name="keg"):
     """Lay out a minimal *installed* tree; return (root, script_path).
@@ -228,6 +242,42 @@ def test_fallback_view_needs_no_markup_escaping(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "[/bold]pong" in out
+
+
+def test_the_renderer_can_never_alter_the_verdict(tmp_path, monkeypatch):
+    """The exit code comes from ``run()``, and the renderer echoes it unchanged.
+
+    Two halves, both load-bearing because ``verify.run_chat_roundtrip`` maps this
+    script's exit code onto the ``chat_roundtrip`` row:
+
+    * ``main()`` returns the code ``run()`` produced — a rendering detail (Rich
+      missing) cannot move the verdict, whatever a renderer returns.
+    * Each renderer path — Rich and the plain fallback — returns the code it was
+      handed for ALL three codes (0/1/2), so it can neither invent a pass nor
+      swallow a failure. A mutation-probe that made the fallback ``return 0`` on
+      the precondition path is invisible through ``main()`` precisely because of
+      the first half, so this pins it where it is actually observable.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    import hscc_daemon.verify_chat_roundtrip as rt
+
+    for label, theme in (("plain (no renderer)", None),
+                         ("rich", rt.theme)):
+        monkeypatch.setattr(rt, "theme", theme)
+        monkeypatch.setattr(sys, "argv", ["verify_chat_roundtrip.py"])
+        seen = []
+        for code in (0, 1, 2):
+            monkeypatch.setattr(rt, "run",
+                                lambda c=code: (seen.append(c) or (c, _ANY_RESULT)))
+            with redirect_stdout(io.StringIO()):
+                assert rt.main() == code, (label, code)
+        assert seen == [0, 1, 2]
+
+        for code in (0, 1, 2):
+            with redirect_stdout(io.StringIO()):
+                assert rt.render_human(code, dict(_ANY_RESULT)) == code, (label, code)
 
 
 # ── 3. no regression of the ordering, repo-wide ──────────────────────────────
