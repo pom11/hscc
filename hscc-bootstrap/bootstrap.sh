@@ -498,23 +498,73 @@ else
   [ "$GC_RC" -ne 0 ] && warn "GPU clock cap NOT verified on every node (rc=$GC_RC); see the doctor check 'GPU clock cap (node-recovery)'"
 fi
 
+# ── the hermes-agent CHECKOUT (t_8579fba4) ──────────────────────────────────
+# The same trap as $PYBIN above, one level up. This stage used to open with
+# `HERMES_DIR="$HERMES_HOME/hermes-agent"`, and Hermes exports HERMES_HOME as
+# <root>/profiles/<name> for every profile session — so from a profile session
+# HERMES_DIR named a directory that cannot exist. apply_patches.py --check
+# reported it "not found", the grep for '"ok": true' below failed, and the
+# stage printed "already patched / upstream drifted" and SKIPPED the --target
+# apply. The hermes patch set (kanban review + resume hook) silently never
+# landed, on every machine, forever — and the message blamed upstream.
+# Ladder, in order: the venv the $PYBIN ladder already resolved
+# ($PYBIN = <root>/hermes-agent/venv/bin/python*, so the checkout is its
+# great-grandparent), then the same home sites that ladder walks (exported
+# $HERMES_HOME → its profiles/ grandparent → ~/.hermes), each checked for a
+# real `hermes-agent` DIRECTORY. Never a blind join. Sets HERMES_DIR and
+# HERMES_DIR_FROM (which candidate won) and returns non-zero when none exists.
+# Kept in sync with hscc_daemon/hermes_python.agent_dir_candidates (the Python
+# side of this stage) — test_bootstrap_hermes_dir_ladder.py pins both.
+resolve_hermes_dir() {
+  HERMES_DIR=""; HERMES_DIR_FROM="none"
+  local _cand _parent _root
+  # 1. the venv $PYBIN came from — proof this is a Hermes install's checkout.
+  _cand="$(dirname "$(dirname "$(dirname "$PYBIN")")" 2>/dev/null)"
+  if [ "$(basename "$_cand" 2>/dev/null)" = "hermes-agent" ] && [ -d "$_cand" ]; then
+    HERMES_DIR="$_cand"; HERMES_DIR_FROM="pyvenv"; return 0
+  fi
+  # 2. exported home → its profiles/ grandparent → ~/.hermes (+ its grandparent
+  # for symmetry), each checked for a real `hermes-agent` DIRECTORY. Same walk
+  # as the PYBIN ladder above and hermes_python.hermes_homes; a profile-local
+  # checkout still wins.
+  for _cand in "${HERMES_HOME:-}" "$HOME/.hermes"; do
+    [ -n "$_cand" ] || continue
+    if [ -d "$_cand/hermes-agent" ]; then
+      HERMES_DIR="$_cand/hermes-agent"; HERMES_DIR_FROM="home"; return 0
+    fi
+    _parent="$(basename "$(dirname "$_cand")" 2>/dev/null)"
+    if [ "$_parent" = "profiles" ]; then
+      _root="$(dirname "$(dirname "$_cand")")"
+      if [ -d "$_root/hermes-agent" ]; then
+        HERMES_DIR="$_root/hermes-agent"; HERMES_DIR_FROM="profiles-root"; return 0
+      fi
+    fi
+  done
+  return 1
+}
+
 hdr "Install: hermes/sparkrun patches"
 # Reapply the curated upstream patches (kanban review + kanban_task_claimed
 # resume hook live in hermes core, so the review/resume features need them on a
 # fresh official install). Non-fatal: a machine already on a patched/newer
 # hermes will report patches that don't re-apply — that's expected, not an error.
+# But "no checkout found" is NOT the same report, and used to read as if it were.
 if $SKIP_PATCHES; then warn "skipped"
-elif $DRY_RUN; then plan "patches: apply_patches.py --target $HERMES_HOME/hermes-agent --set hermes (+ sparkrun set when ~/sparkrun exists)"
+elif $DRY_RUN; then
+  if resolve_hermes_dir; then plan "patches: apply_patches.py --target $HERMES_DIR --set hermes --check then apply (resolved via $HERMES_DIR_FROM; + sparkrun set when ~/sparkrun exists)"
+  else warn "dry-run: no hermes-agent checkout found under the homes ladder — the hermes/sparkrun patch sets would NOT be applied"; fi
+elif ! resolve_hermes_dir; then
+  warn "no hermes-agent checkout found under the homes ladder — the hermes/sparkrun patch sets were NOT applied (run: $PYBIN $BOOT_DIR/apply_patches.py --target <hermes-agent> --set hermes --check)"
 else
-  HERMES_DIR="$HERMES_HOME/hermes-agent"
-  CHK=$("$PYBIN" "$BOOT_DIR/apply_patches.py" --check 2>/dev/null)
+  ok "hermes checkout: $HERMES_DIR (ladder: $HERMES_DIR_FROM)"
+  CHK=$("$PYBIN" "$BOOT_DIR/apply_patches.py" --target "$HERMES_DIR" --set hermes --check 2>/dev/null)
   if echo "$CHK" | grep -q '"ok": true'; then
     "$PYBIN" "$BOOT_DIR/apply_patches.py" --target "$HERMES_DIR" --set hermes >/dev/null 2>&1 \
       && ok "hermes patches applied" || warn "hermes patch apply reported issues"
     [ -d "$HOME/sparkrun" ] && { "$PYBIN" "$BOOT_DIR/apply_patches.py" --target "$HOME/sparkrun" --set sparkrun >/dev/null 2>&1 \
       && ok "sparkrun patches applied" || warn "sparkrun patch apply reported issues"; }
   else
-    warn "patches not cleanly applicable (already patched, or upstream drifted — run apply_patches.py --check to inspect)"
+    warn "patches not cleanly applicable at $HERMES_DIR (already patched, or upstream drifted — run: $PYBIN $BOOT_DIR/apply_patches.py --target $HERMES_DIR --set hermes --check)"
   fi
 fi
 
