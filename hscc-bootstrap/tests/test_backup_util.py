@@ -637,3 +637,28 @@ def test_writers_never_reach_the_exported_hermes_home(tmp_path, monkeypatch):
     # the write landed in the throwaway sandbox instead
     assert enable_plugins.CLUSTER_GUARD_DST.startswith(
         enable_plugins._CLUSTER_GUARD_SANDBOX)
+
+
+# ── _hermes_root: one canonical transform (t_53f5b85a) ─────────────────────
+
+def test_hermes_root_profile_home_resolves_to_the_root(tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "backend-engineer"
+    assert backup_util._hermes_root(str(profile)) == str(root)
+
+
+def test_hermes_root_plain_home_is_unchanged(tmp_path):
+    root = tmp_path / ".hermes"
+    custom = tmp_path / "srv" / "hermes-custom"
+    assert backup_util._hermes_root(str(root)) == str(root)
+    assert backup_util._hermes_root(str(custom)) == str(custom)
+
+
+def test_hermes_root_is_deterministic_not_first_existing(tmp_path):
+    """A real default install must not outrank the profile's grandparent: the
+    transform is deterministic and never probes (F6's stamp)."""
+    (tmp_path / ".hermes" / "hermes-agent").mkdir(parents=True)
+    root = tmp_path / "srv" / "hermes"
+    profile = root / "profiles" / "worker"
+    assert not profile.exists()
+    assert backup_util._hermes_root(str(profile)) == str(root)

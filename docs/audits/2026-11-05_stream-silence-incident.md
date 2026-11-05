@@ -1,6 +1,10 @@
 # Incident 2026-11-05 — model streams silent while every health check is green
 
 - Card: t_22b546e3 (hscc board) · Author: backend-engineer · Status: **FINAL** — verdict: *not reproduced / not located*; four card layers ruled out, one primary suspect named with an explicit confidence statement
+- Supersedes: PR #228 (landed on `main` as 94f285c2 with the title "located layer: gateway en0
+  DHCP-renew clock"). That landing used run 1369's mid-investigation framing, before the correlation
+  was independently re-checked. §0.1 records what the later run could and could not confirm; the
+  "located" wording should not be carried into fix cards.
 - Scope: locate the silent layer among client (hermes stream reader) / litellm proxy / sparkrun_balancer in-flight accounting / vLLM engines. Fixes are out of scope; fix proposals per layer only.
 - Redaction: LAN engines `10.0.0.244/.246/.247/.248`, gateway Mac `10.0.0.245` (documented placeholders; real addresses deliberately omitted — this repo is public). No tokens anywhere.
 

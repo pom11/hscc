@@ -569,9 +569,12 @@ else
 fi
 
 hdr "Install: enable HSCC plugins + toolsets"
-# Seed the general plugin/toolset wiring in $HERMES_HOME/config.yaml
+# Seed the general plugin/toolset wiring in the Hermes ROOT config.yaml
 # (plugins.enabled, toolsets, kanban, delegation, compaction, fallback
-# provider). enable_plugins.py reads HERMES_HOME itself.
+# provider). enable_plugins.py resolves the ROOT from HERMES_HOME itself:
+# Hermes exports a profile-scoped home under a profile session, and the
+# installer walks it up to the install root (pass --home to wire a profile
+# deliberately).
 #
 # It is a deliberate NO-OP when config.yaml does not exist yet — Hermes owns
 # that file and creates it on first run — so it reports "NOT WIRED" instead of
@@ -579,7 +582,7 @@ hdr "Install: enable HSCC plugins + toolsets"
 # "✓ config wired" for a fresh machine where nothing was wired is exactly the
 # silent gap this step exists to close.
 if $DRY_RUN; then
-  plan "config wiring: enable_plugins.py updates $HERMES_HOME/config.yaml (plugins.enabled, toolsets, kanban, delegation, compaction)"
+  plan "config wiring: enable_plugins.py updates the Hermes ROOT config.yaml ($HERMES_HOME resolved up; --home for a profile wire)"
 elif WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null); then
   case "$WIRED" in
     *"NOT WIRED"*) warn "$WIRED" ;;
@@ -591,7 +594,7 @@ fi
 
 hdr "Install: agent instructions (SOUL + ops personality)"
 if $DRY_RUN; then
-  plan "SOUL/personality: install_soul.py updates $HERMES_HOME/SOUL.md + personality (sentinel blocks)"
+  plan "SOUL/personality: install_soul.py updates the Hermes ROOT SOUL.md + personality ($HERMES_HOME resolved up; --home for a profile wire)"
 else
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"
 fi

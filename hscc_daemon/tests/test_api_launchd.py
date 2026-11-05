@@ -71,6 +71,29 @@ def test_plist_is_plistlib_roundtrippable():
     assert plistlib.loads(plistlib.dumps(d, sort_keys=False)) == d
 
 
+def test_plist_never_exports_hermes_home():
+    """The accidental guard the API profile routes used to depend on (t_dbae1837).
+
+    ``hscc-api/routes_profile`` + ``routes_profile_editor`` resolved
+    ``$HERMES_HOME/profiles``. Hermes exports ``HERMES_HOME=<root>/profiles/
+    <name>`` under a profile session, so had the unit carried it, the Profile
+    Library and its editor would have enumerated ``<profile>/profiles`` — empty,
+    silently. They were correct only because THIS dict carries HOME + PATH and
+    nothing else: the fix makes that accident unnecessary, and this pin keeps
+    the accident from becoming load-bearing again in the other direction (a
+    future ``--hermes-home`` flag here would re-break every raw-env reader in
+    the API for a reason nobody intended).
+
+    Pin the SHAPE, not just the absence of one key: the allowed set is exactly
+    {HOME, PATH}, so any new export has to be a deliberate edit here.
+    """
+    d = api_launchd.build_api_plist("/p", "/d")
+    env_vars = d["EnvironmentVariables"]
+    assert "HERMES_HOME" not in env_vars
+    assert set(env_vars) == {"HOME", "PATH"}, (
+        f"a new exported var re-opens the t_dbae1837 raw-env class: {sorted(env_vars)}")
+
+
 def _seal_running_interpreter(monkeypatch, tmp_path):
     """Seal the LAST candidate of the t_314eb13c ladder: the running interpreter.
 

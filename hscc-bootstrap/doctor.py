@@ -96,6 +96,30 @@ def _sparkrun_cluster_ok(_runner=None) -> Check:
     return Check("sparkrun cluster", True, detail="configured")
 
 
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` for the canonical root rule.
+
+    Deferred + guarded, same pattern as ``ensure_review_feature._load_hermes_python``:
+    the profiles-grandparent transform and its predicate live with the shared
+    ladder (t_53f5b85a), so doctor cannot drift from backup_util/rolelib.
+    Returns None when hscc_daemon is not deployed next to this plugin (a
+    bootstrap-only install), in which case the caller applies the same rule.
+    """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        return None
+
+
 def hermes_root_from_home(hermes_home) -> Optional[str]:
     """Hermes ROOT for a home that may be PROFILE-scoped; None if no install.
 
@@ -126,9 +150,14 @@ def hermes_root_from_home(hermes_home) -> Optional[str]:
     _push(hermes_home)
     home = os.path.expanduser(str(hermes_home)) if hermes_home else ""
     if home:
-        parent = os.path.dirname(home)
-        if parent and os.path.basename(parent) == "profiles":
-            _push(os.path.dirname(parent))
+        hp = _load_hermes_python()
+        if hp is not None:
+            if hp.is_profile_dir(home):
+                _push(hp.hermes_root(home))
+        else:
+            parent = os.path.dirname(home)
+            if parent and os.path.basename(parent) == "profiles":
+                _push(os.path.dirname(parent))
     _push(os.path.join(os.path.expanduser("~"), ".hermes"))
 
     for cand in candidates:

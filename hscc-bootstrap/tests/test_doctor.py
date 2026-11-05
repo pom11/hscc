@@ -1929,3 +1929,15 @@ class TestLanCurlFallback:
         assert "No route to host" in msg               # original kept, not replaced
         assert "curl fallback unavailable" in msg      # + the one-line hint
 
+
+def test_profile_root_is_deterministic_not_first_existing(tmp_path, monkeypatch):
+    """The profile's own grandparent wins over an existing default install —
+    the candidate ORDER is fixed, not a first-existing-probe (t_53f5b85a)."""
+    custom_root = tmp_path / "srv" / "hermes"
+    (custom_root / "hermes-agent").mkdir(parents=True)
+    (tmp_path / ".hermes" / "hermes-agent").mkdir(parents=True)
+    profile = custom_root / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    _pin_home(monkeypatch, tmp_path)
+    assert doctor.hermes_root_from_home(str(profile)) == str(custom_root)
+

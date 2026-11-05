@@ -37,6 +37,7 @@ on ordering and survives copies and moves.
 import os
 import re
 import shutil
+import sys
 import time
 
 __all__ = [
@@ -303,17 +304,51 @@ _SWEEP_SUBDIRS = ("hooks", "scripts", "plugins-backups", "plugins_backups")
 _SWEEP_FILES = ("config.yaml", "SOUL.md")
 
 
-def _hermes_root(home):
-    """Root home for a possibly PROFILE-scoped ``HERMES_HOME``.
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` for the canonical root rule.
 
-    ``<root>/profiles/<name>`` is Hermes' normal run mode; the sweep covers the
-    whole tree from the root. Same profiles-grandparent rule as doctor.py and
-    hscc-roles/rolelib.py.
+    Deferred + guarded, same pattern as ``ensure_review_feature._load_hermes_python``:
+    the transform lives with the shared ladder (t_53f5b85a) so this sweep cannot
+    drift from doctor/rolelib. Returns the module, or None when hscc_daemon is
+    not deployed next to this plugin (a bootstrap-only install), in which case
+    :func:`_fallback_hermes_root` applies the same rule.
     """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        return None
+
+
+def _fallback_hermes_root(home):
+    """The canonical profiles-grandparent transform when hscc_daemon is absent."""
     home = os.path.expanduser(str(home))
     if os.path.basename(os.path.dirname(home)) == "profiles":
         return os.path.dirname(os.path.dirname(home))
     return home
+
+
+def _hermes_root(home):
+    """Root home for a possibly PROFILE-scoped ``HERMES_HOME``.
+
+    ``<root>/profiles/<name>`` is Hermes' normal run mode; the sweep covers the
+    whole tree from the root. Delegates to the canonical
+    ``hermes_python.hermes_root`` (guarded; same-rule fallback for a
+    bootstrap-only install). Deterministic: it never probes for an existing
+    root.
+    """
+    hp = _load_hermes_python()
+    if hp is not None:
+        return hp.hermes_root(home)
+    return _fallback_hermes_root(home)
 
 
 def _group_backups(names, stamped_only):

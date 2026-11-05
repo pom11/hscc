@@ -88,6 +88,13 @@ PERIODIC_INTERVALS = {
     # other stream. The tick stamps its state file on EVERY path (healthy,
     # suspect, unknown, inert, suppressed), so a quiet stream is a live stream.
     "proxy_stall": 30,
+    # t_291ced43 (incident 2026-11-05): the stream-silence detector tick
+    # (stream_silence.check_stream_silence). 60 s matches the worker/gateway
+    # supervision class; the contract's N is 600 s, so a fast tick only makes
+    # the WARN land within a minute of crossing N. verify widens this stream to
+    # max(600, 2*60+90) = the usual 600 s floor. Every tick stamps state, and
+    # the tick always reports ok=True — this is visibility, not a failing gate.
+    "stream_silence": 60,
 }
 
 
@@ -692,6 +699,7 @@ def run_daemon_loop():
     from . import orch_waker
     from . import kanban_pause
     from .proxy_stall import check_proxy_stall
+    from .stream_silence import check_stream_silence
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -783,6 +791,10 @@ def run_daemon_loop():
         # proxy_stall.json. The tick never raises (fail-open wrapper), so the
         # respawn path is a belt-and-braces guarantee, not the design.
         "proxy_stall": check_proxy_stall,
+        # t_291ced43 (incident 2026-11-05): alive-but-starved model streams.
+        # Same supervised thread machinery as every stream above; the tick
+        # stamps stream_silence.json on every path and never raises.
+        "stream_silence": check_stream_silence,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the

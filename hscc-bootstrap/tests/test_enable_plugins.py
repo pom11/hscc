@@ -1267,3 +1267,47 @@ class TestGoalJudgeSweep:
         gj = yaml.safe_load(live_cfg.read_text())
         assert "auxiliary" not in gj, "sweep leaked to the live tree via ambient HERMES_HOME"
         assert gj["model"]["default"] == "untouched"
+
+
+# ── __main__ ROOT resolution (t_290747e6) ───────────────────────────────────
+# bootstrap.sh's only call is the installer entry, whose intent is the ROOT
+# config.yaml. Hermes exports HERMES_HOME=<root>/profiles/<name> under its
+# normal profile mode, so the entry must walk the home up to the root — while
+# an explicit --home keeps wiring exactly the home the operator named.
+
+def _minimal_cfg():
+    return {"model": {"default": "X"}}
+
+
+def test_main_resolves_profile_hermes_home_to_root(tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "backend-engineer"
+    profile.mkdir(parents=True)
+    root_cfg = root / "config.yaml"
+    root_cfg.write_text(yaml.safe_dump(_minimal_cfg()))
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert enable_plugins.main([]) == 0
+
+    cfg = yaml.safe_load(root_cfg.read_text())
+    assert "hscc-cluster" in cfg["plugins"]["enabled"]
+    assert not (profile / "config.yaml").exists(), \
+        "installer wrote the caller's profile, not the root"
+
+
+def test_main_home_flag_honors_explicit_target(tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "backend-engineer"
+    profile.mkdir(parents=True)
+    root_cfg = root / "config.yaml"
+    root_cfg.write_text(yaml.safe_dump(_minimal_cfg()))
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    explicit_cfg = explicit / "config.yaml"
+    explicit_cfg.write_text(yaml.safe_dump(_minimal_cfg()))
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert enable_plugins.main(["--home", str(explicit)]) == 0
+
+    assert "hscc-cluster" in yaml.safe_load(explicit_cfg.read_text())["plugins"]["enabled"]
+    assert "plugins" not in yaml.safe_load(root_cfg.read_text())

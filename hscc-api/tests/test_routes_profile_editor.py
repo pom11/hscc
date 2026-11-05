@@ -243,3 +243,113 @@ def test_put_unknown_profile_404(running, token):
     status, body = _req(running, token, "/v1/profile/editor/nope-orch",
                         body={"model": "x", "confirm": True})
     assert status == 404
+
+
+# --------------------------------------------------------------------------- #
+# HERMES_HOME resolution (t_dbae1837 — audit t_8893ab89 rows 33 + 34)
+#
+# The editor is the sharper case: it WRITES config.yaml / profile.yaml through
+# the same resolver. Under a profile-scoped HERMES_HOME the old join resolved
+# <root>/profiles/<name>/profiles/<proj>-orch, so a real profile 404'd and a
+# PUT would have created a double-nested phantom profile.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def leaked_profile_home(tmp_path, monkeypatch):
+    """ROOT with a real profile, plus a leaked profile env + double-nest.
+
+    ``HERMES_HOME`` points at the running profile dir — exactly what Hermes
+    exports (the shape of the t_7a16aed0 leak class) — and that dir carries a
+    ``profiles/`` child of its own so a resolver that merely prefers the
+    grandparent cannot pass by accident.
+    """
+    home = tmp_path / "real-home"
+    root = home / ".hermes"
+    pdir = root / "profiles" / "hscc-orch"
+    pdir.mkdir(parents=True)
+    (pdir / "config.yaml").write_text(
+        "model:\n  default: hscc-model\n  provider: custom\n"
+        "  base_url: http://10.0.0.244:8000/v1\n")
+    (pdir / "profile.yaml").write_text("description: Routes HSCC work.\n")
+
+    # GLOBAL skills live at the ROOT; the leaked profile has its own smaller set.
+    (root / "skills" / "auto" / "hermes-agent").mkdir(parents=True)
+    (root / "skills" / "auto" / "hermes-agent" / "SKILL.md").write_text("# x\n")
+
+    leaked = root / "profiles" / "backend-engineer"
+    (leaked / "skills" / "only-local").mkdir(parents=True)
+    (leaked / "skills" / "only-local" / "SKILL.md").write_text("# y\n")
+    phantom = leaked / "profiles" / "hscc-orch"      # the double-nest
+    phantom.mkdir(parents=True)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(leaked))
+    return {"home": home, "root": root, "pdir": pdir, "leaked": leaked,
+            "phantom": phantom}
+
+
+@pytest.fixture
+def leaked_running(tmp_path, leaked_profile_home):
+    srv = types.SimpleNamespace()
+    srv.server = api_server.create_server(hscc_dir=str(tmp_path),
+                                          addr=("127.0.0.1", 0))
+    srv.host, srv.port = srv.server.server_address[:2]
+    thread = threading.Thread(target=srv.server.serve_forever, daemon=True)
+    thread.start()
+    yield srv
+    srv.server.shutdown()
+    srv.server.server_close()
+
+
+@pytest.fixture
+def leaked_token(leaked_running):
+    return api_server.load_token(leaked_running.server.ctx.hscc_dir)
+
+
+def test_editor_reads_the_root_profile_under_a_leaked_env(leaked_running,
+                                                          leaked_token,
+                                                          leaked_profile_home):
+    status, body = _req(leaked_running, leaked_token,
+                        "/v1/profile/editor/hscc-orch")
+    assert status == 200, body            # was 404 before the fix
+    assert body["model"] == "hscc-model"
+    assert body["description"] == "Routes HSCC work."
+
+
+def test_editor_global_skills_survive_a_leaked_env(leaked_running, leaked_token,
+                                                   leaked_profile_home):
+    """Audit row 34: the GLOBAL half of the preload picker vanished.
+
+    ``skills_all`` must include the ROOT's skills AND the profile's own; the
+    old env join scanned <profile>/skills as if it were the global dir, so
+    root-level skills disappeared from the picker.
+    """
+    status, body = _req(leaked_running, leaked_token,
+                        "/v1/profile/editor/hscc-orch")
+    assert status == 200
+    assert "hermes-agent" in body["skills_all"]     # ROOT skills (the lost half)
+
+
+def test_editor_writes_land_in_the_root_profile(leaked_running, leaked_token,
+                                                leaked_profile_home):
+    """A PUT edits ROOT/profiles/hscc-orch and creates no phantom profile."""
+    status, body = _req(leaked_running, leaked_token,
+                        "/v1/profile/editor/hscc-orch",
+                        body={"model": "new-model", "confirm": True})
+    assert status == 200
+    assert body["model"] == "new-model"
+    cfg = (leaked_profile_home["pdir"] / "config.yaml").read_text()
+    assert "new-model" in cfg
+    assert "base_url: http://10.0.0.244:8000/v1" in cfg   # merge, not clobber
+    # Nothing was written into the double-nest.
+    assert list(leaked_profile_home["phantom"].iterdir()) == []
+    assert not (leaked_profile_home["leaked"] / "profiles" / "hscc-orch" /
+                "config.yaml").exists()
+
+
+def test_editor_profiles_dir_is_the_shared_resolver(leaked_profile_home):
+    """One resolver for both routes — no private copy that can drift."""
+    import routes_profile
+    assert rpe._hermes_profiles_dir() == routes_profile._hermes_profiles_dir()
+    assert rpe._hermes_root_dir() == routes_profile.hermes_root_dir()
+

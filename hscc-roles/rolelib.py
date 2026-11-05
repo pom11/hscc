@@ -1,11 +1,47 @@
 """Role framework shared helpers: paths, toolset policy, spec load/validate, hashing."""
 import hashlib
 import os
+import sys
 import yaml
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROLES_DIR = os.path.join(_PLUGIN_DIR, "roles")
 BASE_IDENTITY_PATH = os.path.join(_PLUGIN_DIR, "base-identity.md")
+
+
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` for the canonical root rule.
+
+    Deferred + guarded, same pattern as ``ensure_review_feature._load_hermes_python``:
+    the transform lives with the shared ladder (t_53f5b85a) so rolelib cannot
+    drift from doctor/backup_util. Returns the module, or None when hscc_daemon
+    is not deployed next to this plugin, in which case
+    :func:`_fallback_hermes_root` applies the same rule.
+    """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        return None
+
+
+def _fallback_hermes_root(home):
+    """The canonical profiles-grandparent transform when hscc_daemon is absent."""
+    home = os.path.expanduser(home) if home else ""
+    if not home:
+        return home
+    parent = os.path.dirname(home)
+    if parent and os.path.basename(parent) == "profiles":
+        return os.path.dirname(parent)
+    return home
 
 
 def _hermes_root(home):
@@ -17,14 +53,17 @@ def _hermes_root(home):
     when HERMES_HOME's parent is a directory named `profiles`, HERMES_HOME is
     itself a profile dir and the root is the grandparent. Otherwise HERMES_HOME
     is already the root. Robust to both run modes (hermes root vs profile dir).
+
+    Delegates to the canonical ``hermes_python.hermes_root`` (guarded;
+    same-rule fallback for a bootstrap-only install). Empty/unset stays empty —
+    the caller's default applies elsewhere.
     """
-    home = os.path.expanduser(home) if home else ""
     if not home:
-        return home
-    parent = os.path.dirname(home)
-    if parent and os.path.basename(parent) == "profiles":
-        return os.path.dirname(parent)
-    return home
+        return ""
+    hp = _load_hermes_python()
+    if hp is not None:
+        return hp.hermes_root(home)
+    return _fallback_hermes_root(home)
 
 
 # HERMES_HOME is the hermes ROOT, independent of whether the ambient env points
