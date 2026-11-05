@@ -461,6 +461,52 @@ class TestGuardedInstall:
         assert (skills / "software-development" / "test-driven-development"
                 / "SKILL.md").is_file()
 
+    def test_profile_hermes_home_skill_all_seeds_root_and_every_profile(
+            self, tmp_path, monkeypatch, capsys):
+        # F6 (HERMES_HOME audit): under a profile session HERMES_HOME is
+        # <root>/profiles/<name>. default_home() must resolve the ROOT, or
+        # skill_dirs() walks <profile>/profiles (nonexistent) and --skill all
+        # misses the root home AND every sibling profile.
+        root = tmp_path / ".hermes"
+        mk_profile(root, "acme-orch")
+        mk_profile(root, "beta-orch")
+        profile_session = root / "profiles" / "acme-orch"
+        monkeypatch.setenv("HERMES_HOME", str(profile_session))
+        rc = irs.main(["--repo-root", REPO_ROOT, "--skill", "all", "--json"])
+        assert rc == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["home"] == str(root)
+        assert report["ok"], report
+        expected = (("sdlc-review", "devops"),
+                    ("systematic-debugging", "software-development"),
+                    ("test-driven-development", "software-development"))
+        for home in (root, root / "profiles" / "acme-orch",
+                     root / "profiles" / "beta-orch"):
+            for name, cat in expected:
+                assert (home / "skills" / cat / name / "SKILL.md").is_file(), \
+                    (home, name)
+        # The profile-scoped path was not mistaken for a root.
+        assert not (profile_session / "profiles").exists()
+
+    def test_explicit_home_stays_profile_scoped(self, tmp_path, monkeypatch):
+        # --home is the legitimate profile-scoped escape hatch: it is used
+        # exactly as given and must NOT widen to the root or sibling profiles.
+        root = tmp_path / ".hermes"
+        mk_profile(root, "acme-orch")
+        mk_profile(root, "beta-orch")
+        profile_session = root / "profiles" / "acme-orch"
+        monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "beta-orch"))
+        report = irs.install_review_skill(
+            home=str(profile_session), repo_root=REPO_ROOT, stamp="t",
+            skills=irs.INSTALLABLE)
+        assert report["home"] == str(profile_session)
+        assert report["ok"], report
+        assert (profile_session / "skills" / "devops" / "sdlc-review"
+                / "SKILL.md").is_file()
+        assert not (root / "skills").exists()
+        assert not (root / "profiles" / "beta-orch" / "skills"
+                    / "devops").exists()
+
     def test_cli_json_exit_codes(self, tmp_path):
         home = self._home(tmp_path)
         mk_profile(home, "acme-orch")

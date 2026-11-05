@@ -105,8 +105,18 @@ _RUNTIME_DIRS = {"__pycache__"}
 # ── discovery ───────────────────────────────────────────────────────────────
 
 def default_home() -> Path:
-    """The Hermes home this installer should act on."""
-    return Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")).expanduser()
+    """The Hermes ROOT this installer should act on.
+
+    Hermes exports ``HERMES_HOME=<root>/profiles/<name>`` whenever it runs
+    under a profile — its normal run mode. Fanning out from that path walks
+    ``<profile>/profiles`` (which does not exist), so the root home and every
+    sibling profile are missed. Resolve the profiles-grandparent root with
+    ``backup_util._hermes_root``, the same rule doctor.py and rolelib.py use.
+    An explicit ``--home`` is NOT routed through here: it stays exactly as
+    given, so an operator can deliberately scope an install to one profile.
+    """
+    raw = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return Path(backup_util._hermes_root(raw)).expanduser()
 
 
 def bundle_source(name=REVIEW_SKILL, repo_root=None):
@@ -650,7 +660,9 @@ def main(argv=None):
                     "Hermes profile's own skills dir (collision-guarded, "
                     "idempotent, never clobbers an operator-edited copy).")
     parser.add_argument("--home", default=None,
-                        help="Hermes home (default: $HERMES_HOME or ~/.hermes)")
+                        help="Hermes root or one profile home, used as given "
+                             "(default: $HERMES_HOME resolved to its root, "
+                             "else ~/.hermes)")
     parser.add_argument("--repo-root", default=None,
                         help="root holding install/hscc-skills (default: auto)")
     parser.add_argument("--dry-run", action="store_true",
