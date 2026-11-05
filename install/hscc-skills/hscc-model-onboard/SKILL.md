@@ -31,7 +31,7 @@ python3 ~/.hermes/skills/hscc-model-onboard/scripts/onboard.py <phase> ...
 |-------|------|---------|--------------|
 | `plan`   | `<model> <recipe>` | no | Print topology, recipe model check, NAS + per-node cache state, and the config changes `wire` would make. **Always run first.** |
 | `cache`  | `<model> [recipe]` | nodes' HF cache (additive) | Verify model on NAS; rsync NAS->each serving node's local cache. Skips nodes already complete. If `recipe` is given and missing, scaffolds a starter and stops. |
-| `wire`   | `<model> <recipe> --yes` | HSCC config | Backup, then update serving.json, models.json, provision.json, agents.json, hermes config.yaml + worker profiles. |
+| `wire`   | `<model> <recipe> --yes` | HSCC config | Backup, then update serving.json, models.json, provision.json, agents.json, hermes root config.yaml + every profile config.yaml (model.default). |
 | `launch` | `<recipe> --yes` | cluster | `sparkrun run <recipe> --hosts <node>` on every serving node. |
 | `verify` | `<model> [--wait]` | no | `/health` + a coherent `/v1/chat/completions` on every serving node. `--wait` polls up to 5 min for slow loads. |
 | `all`    | `<model> <recipe> --yes` | all of the above | plan -> cache -> wire -> launch -> verify. |
@@ -64,9 +64,18 @@ each phase is inspectable.
 | `~/.hscc/provision.json` | active `mappings[*].recipe` | `history` (audit log left intact) |
 | `~/.hscc/agents.json` | only the `<model>` part of each `vllm-<ip>/<model>` | **per-agent routing IP** |
 | `~/.hermes/config.yaml` | `model.default` line only | everything else incl. **secrets** |
-| `~/.hermes/profiles/worker-*/config.yaml` | `model.default` | per-node `base_url` |
+| `~/.hermes/profiles/<name>/config.yaml` (every profile under the resolved root) | `model.default` | per-node `base_url` |
 
-Backup is written to `~/.hscc/_onboard-backup-<timestamp>/` before any write.
+The hermes **root** (not `$HERMES_HOME`) is the mirror target: Hermes exports
+`HERMES_HOME=<root>/profiles/<name>` for profile sessions, so joining it would
+aim at `<profile>/profiles` and skip every profile. Resolution is lazy and goes
+through the shared homes ladder (exported home → `profiles/` grandparent →
+`~/.hermes`); set `HSCC_HERMES_ROOT` to name the root explicitly. The chosen
+root is printed by `wire`.
+
+Backup is written to `~/.hscc/_onboard-backup-<timestamp>/` before any write
+(root `config.yaml` + every profile `config.yaml`, so the set matches what
+`wire` writes).
 
 ## After wiring: services
 

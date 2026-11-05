@@ -18,7 +18,11 @@ Phases (each is a subcommand; `all` runs them in order):
 
 Safety:
     - Mutating phases (wire/launch/all) require --yes.
-    - wire backs up ~/.hscc + hermes config + worker profiles first.
+    - wire backs up ~/.hscc + hermes root config + EVERY profile config first.
+    - The hermes root is resolved at call time (never an import-time
+      $HERMES_HOME join): under a profile session $HERMES_HOME is the profile
+      dir, and mirroring model.default from there skips every profile (t_629a6842).
+      $HSCC_HERMES_ROOT overrides the resolution explicitly.
     - Cache sync is additive (rsync -a, no --delete); NEVER rm -rf.
     - hermes config.yaml is edited line-targeted (model.default only) so the
       file's secrets are never rewritten/printed.
@@ -38,14 +42,195 @@ import urllib.request
 from datetime import datetime, timezone
 
 HSCC_HOME = os.path.expanduser(os.environ.get("HSCC_HOME", "~/.hscc"))
-HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
-HERMES_CONFIG = os.path.join(HERMES_HOME, "config.yaml")
-PROFILES_DIR = os.path.join(HERMES_HOME, "profiles")
 SPARKRUN_DIR = os.path.expanduser("~/sparkrun")
 SPARKRUN_BIN = os.path.join(SPARKRUN_DIR, ".venv", "bin", "sparkrun")
 SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 
 R = "\033[0;31m"; G = "\033[0;32m"; Y = "\033[0;33m"; B = "\033[0;34m"; NC = "\033[0m"
+
+
+# ── Hermes ROOT resolution (t_629a6842) ──────────────────────────────────────
+# This used to be three module-level constants:
+#
+#     HERMES_HOME  = os.environ.get("HERMES_HOME", "~/.hermes")
+#     HERMES_CONFIG = HERMES_HOME/config.yaml
+#     PROFILES_DIR  = HERMES_HOME/profiles
+#
+# ``HERMES_HOME`` is NOT the Hermes root. Hermes exports it as the *profile* dir
+# (``<root>/profiles/<name>``) for every profile session — the fleet's normal run
+# mode, not a misconfiguration — so from a dispatched worker ``PROFILES_DIR``
+# resolved to ``<profile>/profiles``, which does not exist. The consequence at
+# :func:`wire_hermes_and_profiles`: the per-profile ``model.default`` mirroring
+# iterated nothing and silently skipped EVERY profile, while the "root" config it
+# did edit was the profile's own — the real root config and all sibling profiles
+# kept the old model with a green line printed. Measured on a fabricated root
+# with two profiles: root and beta stayed on the old model; only the active
+# profile moved.
+#
+# The root is therefore resolved at CALL time (import-time env is fragile for a
+# script run from mixed contexts — a bare terminal, a profile session, a cron
+# watcher) through the shared homes ladder in ``hscc_daemon/hermes_python.py``
+# (t_314eb13c), with the same guarded fallback + drift pin used by
+# ``hscc-bootstrap/apply_patches.py`` and ``ensure_review_feature.py``.
+#
+# ``HSCC_HERMES_ROOT`` is an explicit operator override: when set it IS the root,
+# no ladder, no existence probe (so a non-standard install location works).
+
+#: Explicit override for the Hermes ROOT (see block comment above).
+HERMES_ROOT_ENV = "HSCC_HERMES_ROOT"
+#: What makes a candidate a Hermes ROOT rather than a profile dir. A root
+#: carries ``profiles/`` and/or a root ``config.yaml``; a profile dir ALSO
+#: carries its own ``config.yaml``, so the marker test alone is not enough —
+#: :func:`_is_profile_dir` (parent named ``profiles``, the same rule the ladder
+#: and ``doctor.hermes_root_from_home`` use) excludes it.
+_ROOT_MARKERS = ("profiles", "config.yaml")
+
+
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` for the shared homes ladder.
+
+    Deferred + guarded, same pattern as ``apply_patches._load_hermes_python``:
+    the resolution rule lives with the shared ladder (t_314eb13c) so this skill
+    script cannot drift from how the rest of HSCC finds the Hermes install.
+    Returns the module, or None when ``hscc_daemon`` is not reachable from this
+    script (a skills-only install), in which case :func:`_fallback_homes` covers
+    us. Walk-up scan rather than a fixed ``../../..`` because the script sits at
+    different depths in the repo (``install/hscc-skills/<skill>/scripts/``) than
+    in the deployed tree, and the deployed payload keeps both dirs as siblings.
+    """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    d = here
+    for _ in range(8):
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+        if os.path.isfile(os.path.join(d, "hscc_daemon", "hermes_python.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            try:
+                from hscc_daemon import hermes_python
+                return hermes_python
+            except Exception:
+                return None
+    return None
+
+
+def _fallback_homes(env=None, *, home=None):
+    """Candidate Hermes ROOTS when ``hscc_daemon`` is unavailable.
+
+    Deliberately the SAME three steps as ``hermes_python.hermes_homes`` —
+    exported ``$HERMES_HOME``, its ``profiles/`` grandparent, then
+    ``~/.hermes`` — because a shorter list here is exactly the bug being fixed:
+    any resolver that looks only at the exported home misses every sibling
+    profile from a profile session. ``test_ladder_drift`` pins the two against
+    each other so this cannot drift silently.
+    """
+    env = os.environ if env is None else env
+    home = home or os.path.expanduser("~")
+    homes = []
+
+    def _push(path):
+        if not path:
+            return
+        path = os.path.expanduser(str(path))
+        if path not in homes:
+            homes.append(path)
+
+    _push(env.get("HERMES_HOME", "").strip())
+    if homes:
+        parent = os.path.dirname(homes[0])
+        if parent and os.path.basename(parent) == "profiles":
+            _push(os.path.dirname(parent))
+    _push(os.path.join(os.path.expanduser(str(home)), ".hermes"))
+    return homes
+
+
+def hermes_home_candidates(env=None, *, home=None):
+    """Candidate Hermes ROOTS, in the order they are tried.
+
+    An explicit ``$HSCC_HERMES_ROOT`` short-circuits the ladder: it is the only
+    candidate, so an operator override can never be second-guessed by the
+    profile walk-up or by ``~/.hermes``.
+    """
+    env = os.environ if env is None else env
+    override = (env.get(HERMES_ROOT_ENV) or "").strip()
+    if override:
+        return [os.path.expanduser(override)]
+    hp = _load_hermes_python()
+    if hp is not None:
+        return hp.hermes_homes(env, home=home)
+    return _fallback_homes(env, home=home)
+
+
+def _is_profile_dir(path):
+    """True when ``path`` looks like ``<root>/profiles/<name>``.
+
+    The same parent-name rule as ``hscc_daemon.hermes_python.hermes_homes``,
+    ``hscc-bootstrap/doctor.hermes_root_from_home`` and ``rolelib``. It is
+    needed here because a profile dir carries its OWN ``config.yaml``, so the
+    root-marker test alone would happily accept the profile a session is
+    running under — which is the bug this function exists to prevent.
+    """
+    parent = os.path.dirname(os.path.normpath(str(path)))
+    return bool(parent) and os.path.basename(parent) == "profiles"
+
+
+def resolve_hermes_root(env=None, *, home=None):
+    """Resolve the Hermes ROOT for config mirroring: ``(root_or_None, searched)``.
+
+    Walks :func:`hermes_home_candidates` in priority order (exported
+    ``$HERMES_HOME``, its ``profiles/`` grandparent, ``~/.hermes``) and takes the
+    first candidate that (a) is not itself a ``profiles/<name>`` dir and (b)
+    carries a root marker — ``profiles/`` or a root ``config.yaml``. Condition
+    (a) is what makes this fix work: under a profile session the ladder's first
+    candidate IS the profile dir, and it has a ``config.yaml``.
+
+    An explicit ``$HSCC_HERMES_ROOT`` is honoured verbatim — no profile-dir
+    exclusion, no marker requirement — because an operator who names a root
+    knows their layout better than a heuristic does.
+
+    Returns ``(None, searched_detail)`` when nothing qualifies. Callers must
+    report that as "no Hermes home here", never let it read as a no-op: a silent
+    skip is exactly how this step printed green while every profile kept the old
+    model (t_629a6842).
+    """
+    env = os.environ if env is None else env
+    override = (env.get(HERMES_ROOT_ENV) or "").strip()
+    cands = hermes_home_candidates(env, home=home)
+    if override:
+        return (cands[0], "") if os.path.isdir(cands[0]) else (None, cands[0])
+    for cand in cands:
+        try:
+            if _is_profile_dir(cand):
+                continue
+            if any(os.path.exists(os.path.join(cand, m)) for m in _ROOT_MARKERS):
+                return cand, ""
+        except OSError:  # pragma: no cover - unreadable path is not a hit
+            continue
+    return None, ", ".join(cands) or "no candidate paths"
+
+
+def hermes_paths(env=None, *, home=None):
+    """``(root, config_path, profiles_dir)`` for the resolved Hermes ROOT.
+
+    ``(None, None, None)`` when there is no home. :func:`wire_hermes_and_profiles`
+    and :func:`backup_configs` both go through here so ONE resolution decides what
+    gets read, backed up and written — they can no longer disagree about which
+    tree is "the" one (the old code did the join twice, at :42-43 and again at
+    :207-212/:317-323).
+    """
+    root, _ = resolve_hermes_root(env, home=home)
+    if root is None:
+        return None, None, None
+    return (root,
+            os.path.join(root, "config.yaml"),
+            os.path.join(root, "profiles"))
 
 
 def c(color, msg):
@@ -204,14 +389,21 @@ def backup_configs():
         src = os.path.join(HSCC_HOME, name)
         if os.path.exists(src):
             shutil.copy2(os.path.realpath(src), os.path.join(dest, name))
-    if os.path.exists(HERMES_CONFIG):
-        shutil.copy2(HERMES_CONFIG, os.path.join(dest, "hermes-config.yaml"))
-    # Back up the worker role profile (worker roles serve from the load-balanced
-    # proxy now, not per-node worker-246/247/248 profiles).
-    for n in ("worker",):
-        p = os.path.join(PROFILES_DIR, n, "config.yaml")
-        if os.path.exists(p):
-            shutil.copy2(p, os.path.join(dest, f"{n}-config.yaml"))
+    root, hermes_config, profiles_dir = hermes_paths()
+    if not (root and hermes_config and profiles_dir):
+        print(c(Y, "  hermes: no Hermes home resolved — config NOT backed up"))
+    else:
+        if os.path.exists(hermes_config):
+            shutil.copy2(hermes_config, os.path.join(dest, "hermes-config.yaml"))
+        # Back up every profile that has a config.yaml: wire mirrors model.default
+        # across ROOT/profiles/*, so a backup set that only carried the old
+        # hard-coded "worker" (and, under a profile session, carried nothing at
+        # all because PROFILES_DIR was <profile>/profiles) was not a rollback
+        # point for what wire actually writes.
+        for n in _profile_names(profiles_dir):
+            p = os.path.join(profiles_dir, n, "config.yaml")
+            if os.path.exists(p):
+                shutil.copy2(p, os.path.join(dest, f"profile-{n}-config.yaml"))
     print(c(B, f"  backup -> {dest}"))
     return dest
 
@@ -283,6 +475,14 @@ def wire_agents(model_id):
     print(c(G, f"  agents.json: {n} agents re-pointed (routing IPs preserved)"))
 
 
+def _profile_names(profiles_dir):
+    """Sorted profile directory names under ``profiles_dir`` (skips dot-dirs)."""
+    if not profiles_dir or not os.path.isdir(profiles_dir):
+        return []
+    return sorted(n for n in os.listdir(profiles_dir)
+                  if not n.startswith(".") and os.path.isdir(os.path.join(profiles_dir, n)))
+
+
 def set_yaml_model_default(path, model_id):
     """Line-targeted edit of model.default in a YAML file. Only the value on the
     `default:` line inside the top-level `model:` block is changed; the rest of
@@ -314,14 +514,40 @@ def set_yaml_model_default(path, model_id):
 
 
 def wire_hermes_and_profiles(model_id):
-    if set_yaml_model_default(HERMES_CONFIG, model_id):
+    """Mirror ``model.default`` into the Hermes root config and EVERY profile.
+
+    The walk is over ``ROOT/profiles/*`` — resolved by :func:`resolve_hermes_root`,
+    not by joining ``$HERMES_HOME`` (a profile session's ``$HERMES_HOME`` is the
+    profile dir, so the old walk found no ``profiles/`` under it and skipped every
+    profile while editing the profile's own config as if it were the root —
+    t_629a6842). A root that cannot be resolved is reported, not swallowed: this
+    step used to be green on exactly the silence it is now required to break.
+    """
+    root, hermes_config, profiles_dir = hermes_paths()
+    if not (root and hermes_config and profiles_dir):
+        _, searched = resolve_hermes_root()
+        print(c(R, f"  hermes: NO Hermes home resolved (searched: {searched}) "
+                   f"— model.default NOT mirrored"))
+        return False
+    print(c(B, f"  hermes root: {root}"))
+    ok = bool(set_yaml_model_default(hermes_config, model_id))
+    if ok:
         print(c(G, "  hermes config.yaml: model.default updated"))
     else:
         print(c(Y, "  hermes config.yaml: model.default NOT found (skipped)"))
-    for n in sorted(os.listdir(PROFILES_DIR)) if os.path.isdir(PROFILES_DIR) else []:
-        p = os.path.join(PROFILES_DIR, n, "config.yaml")
-        if os.path.exists(p) and set_yaml_model_default(p, model_id):
+    missing = []
+    for n in _profile_names(profiles_dir):
+        p = os.path.join(profiles_dir, n, "config.yaml")
+        if not os.path.exists(p):
+            missing.append(n)
+            continue
+        if set_yaml_model_default(p, model_id):
             print(c(G, f"  profile {n}: model.default updated"))
+        else:
+            print(c(Y, f"  profile {n}: model.default NOT found (skipped)"))
+    if missing:
+        print(c(Y, f"  profiles without a config.yaml (skipped): {', '.join(missing)}"))
+    return ok
 
 
 # ── Phases ────────────────────────────────────────────────────────────────────
@@ -350,7 +576,8 @@ def phase_plan(topo, model_id, recipe):
             print(c(Y, f"    {h}: cache needs sync"))
     print(c(B, "  config changes wire would make:"))
     print("    serving.json units, models.json primary_model, provision.json mappings,")
-    print("    agents.json (model part only), hermes config.yaml + worker profiles model.default")
+    print("    agents.json (model part only), hermes ROOT config.yaml + every "
+          "profile config.yaml model.default")
     return nref, nfiles
 
 
