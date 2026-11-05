@@ -103,10 +103,9 @@ def hermes_root_dir() -> Path:
         # list`` gives when the env is unset.
         return default
     for home in homes:
-        # A home whose parent is named ``profiles`` IS a profile dir: its
-        # ``profiles`` child is the double-nest, so skip it even when it exists.
-        parent = os.path.dirname(home)
-        if parent and os.path.basename(parent) == "profiles":
+        # A profile dir's ``profiles`` child is the double-nest, so skip it
+        # even when it exists. Shared predicate: never spell this rule inline.
+        if hermes_python.is_profile_dir(home):
             continue
         try:
             if (Path(home) / "profiles").is_dir():

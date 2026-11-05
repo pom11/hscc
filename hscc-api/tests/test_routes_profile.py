@@ -476,4 +476,34 @@ def test_resolver_never_reads_the_env_directly():
         assert 'environ["HERMES_HOME"]' not in src, mod.__name__
     # ...and the ladder is the shared one, not a copy.
     assert "hermes_homes" in inspect.getsource(routes_profile.hermes_root_dir)
+    # ...and the profile-dir filter is the shared predicate, never inline.
+    src = inspect.getsource(routes_profile.hermes_root_dir)
+    assert "is_profile_dir" in src
+    assert 'basename(parent) == "profiles"' not in src
+
+
+def test_profile_dir_candidate_is_skipped_via_the_shared_predicate(
+        tmp_path, monkeypatch):
+    """Only the ROOT wins; the profile-scoped candidate is dropped by the rule.
+
+    The profile dir carries a real ``profiles/`` child (the double-nest), so a
+    resolver that stopped filtering would return that phantom tree instead.
+    The predicate is instrumented to prove this resolver calls it.
+    """
+    from hscc_daemon import hermes_python
+
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "worker"
+    (profile / "profiles" / "ghost").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "plain-home"))
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    assert routes_profile.hermes_root_dir() == root
+
+    seen = []
+    real = hermes_python.is_profile_dir
+    monkeypatch.setattr(hermes_python, "is_profile_dir",
+                        lambda home: seen.append(str(home)) or real(home))
+    assert routes_profile.hermes_root_dir() == root
+    assert str(profile) in seen
 
