@@ -111,6 +111,14 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   the known blocker that currently makes the built-in inert (state-file /
   stream-state collision). **live**
 
+## audit/
+
+- `docs/audit/hermes-home-joins.md` — the HERMES_HOME join classification: every
+  path join on `$HERMES_HOME` in the tree, marked ROOT-intent / PROFILE-intent /
+  AMBIGUOUS with the decision rule (Hermes exports `HERMES_HOME=<root>/profiles/<name>`
+  under a profile session) and a severity-ranked list of the unfixed members.
+  Report-only companion to the `hscc_daemon.hermes_python` venv ladder. **live**
+
 ## template-examples/
 
 - `docs/template-examples/example-colocation.yaml` — annotated example: colocated models on one node (not a shipped layout). **live**
