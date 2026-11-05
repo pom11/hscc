@@ -43,14 +43,28 @@ from pathlib import Path
 
 from api_server import ApiError, ROUTES
 
+# Single resolver, shared with the Profile Library route: the profiles tree and
+# the GLOBAL skills dir both live under the Hermes ROOT, never under
+# $HERMES_HOME (which Hermes exports as the PROFILE dir — see
+# routes_profile.hermes_root_dir and audit t_8893ab89 rows 33/34). The editor
+# WRITES config.yaml/profile.yaml through this path, so a profile-scoped join
+# here would both hide every profile and write a fresh profile config into
+# <profile>/profiles/<name> — a double-nested phantom profile.
+import routes_profile as _rp
+
 # --------------------------------------------------------------------------- #
-# Path helpers (same resolution as routes_profile._hermes_profiles_dir)
+# Path helpers (delegated to the shared resolver in routes_profile)
 # --------------------------------------------------------------------------- #
+
+
+def _hermes_root_dir() -> Path:
+    """The Hermes ROOT (see ``routes_profile.hermes_root_dir``)."""
+    return _rp.hermes_root_dir()
 
 
 def _hermes_profiles_dir() -> Path:
-    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    return Path(home) / "profiles"
+    """The ROOT ``profiles/`` directory (see ``routes_profile``)."""
+    return _rp._hermes_profiles_dir()
 
 
 # Known toolset catalog for pickers. This mirrors the Hermes toolset
@@ -77,8 +91,11 @@ def _installed_skill_names(profile_dir: Path) -> list:
     """
     names: set = set()
     for root_dir in (
-        Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"))
-        / "skills",
+        # The GLOBAL skills dir is a ROOT child. The old env join made the
+        # global half of the preload picker vanish under a profile session
+        # (audit t_8893ab89 row 34): <profile>/skills is the profile's own
+        # skills dir, already covered by the second entry.
+        _hermes_root_dir() / "skills",
         profile_dir / "skills",
     ):
         if not root_dir.is_dir():

@@ -41,6 +41,13 @@ from pathlib import Path
 
 from api_server import ApiError, ROUTES
 
+# Make hscc_daemon importable (sibling of hscc-api/) — same seam as
+# routes_autodown.py / routes_cluster.py, so the shared Hermes-home ladder in
+# hscc_daemon/hermes_python.py is reachable from the API process.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(_REPO_ROOT))
+
 # --------------------------------------------------------------------------- #
 # Hermes CLI resolution
 # --------------------------------------------------------------------------- #
@@ -53,11 +60,65 @@ _HERMES_CLI_PATHS = (
     "hermes",
 )
 
-# Default hermes home where profiles live (mirrors `hermes profile`); may be
-# overridden via env HERMES_HOME, resolved at call time.
+
+def hermes_root_dir() -> Path:
+    """The Hermes ROOT directory — never a profile dir.
+
+    ``HERMES_HOME`` is NOT the Hermes root. Hermes exports it as the *profile*
+    dir (``<root>/profiles/<name>``) whenever it runs under a profile — the
+    fleet's normal run mode — and ``profiles/`` is a child of the ROOT, so
+    joining the two resolves ``<root>/profiles/<name>/profiles``: a directory
+    that is empty (or, on this fleet, exists-but-empty from an earlier leak)
+    and therefore lists ZERO profiles. ``routes_memory.py:73-114`` documents
+    the same trap and the operator-visible symptom — an empty screen for every
+    profile (t_7a16aed0).
+
+    Correctness here has been accidental so far: the ``com.hscc.api`` launchd
+    unit sets HOME + PATH only, no HERMES_HOME (pinned by
+    ``hscc_daemon/tests/test_api_launchd.py``), so the raw env read the old
+    resolvers had nothing to corrupt. Any other supervisor, a manual
+    ``hermes``-spawned shell, or one added ``EnvironmentVariables`` key later
+    would have made the Profile Library and its editor silently empty.
+
+    Resolution goes through the SHARED ladder
+    :func:`hscc_daemon.hermes_python.hermes_homes` (exported home, then the
+    ``profiles/``-grandparent, then ``~/.hermes``) with the profile-scoped
+    candidates dropped: joining ``profiles`` to a directory that is itself a
+    profile dir is never what these routes mean. The first candidate that
+    actually carries a ``profiles/`` directory wins; when none does, the
+    platform default ``~/.hermes`` is returned — an honest empty enumeration
+    rather than a double-nest.
+
+    Resolution stays at CALL TIME on purpose: the API is long-lived and its env
+    can change (launchd reload, a re-exec), and this is two cheap stats.
+    """
+    default = Path(os.path.expanduser("~/.hermes"))
+    try:
+        from hscc_daemon import hermes_python
+        homes = hermes_python.hermes_homes()
+    except Exception:
+        # No ladder (hscc_daemon unimportable, or a stripped runtime).
+        # Deliberately do NOT fall back to $HERMES_HOME — honouring the raw env
+        # is the bug. The default root is the same answer ``hermes profile
+        # list`` gives when the env is unset.
+        return default
+    for home in homes:
+        # A home whose parent is named ``profiles`` IS a profile dir: its
+        # ``profiles`` child is the double-nest, so skip it even when it exists.
+        parent = os.path.dirname(home)
+        if parent and os.path.basename(parent) == "profiles":
+            continue
+        try:
+            if (Path(home) / "profiles").is_dir():
+                return Path(home)
+        except OSError:  # pragma: no cover - unreadable path is not a hit
+            continue
+    return default
+
+
 def _hermes_profiles_dir() -> Path:
-    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    return Path(home) / "profiles"
+    """The ROOT ``profiles/`` directory (see :func:`hermes_root_dir`)."""
+    return hermes_root_dir() / "profiles"
 
 
 def _hermes_cli() -> str:

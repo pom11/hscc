@@ -328,3 +328,152 @@ def test_export_not_via_get(running, token, fakes):
     status, payload = _req(running, token, "/v1/profile/export")
     assert status == 405
     assert fakes["export_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# HERMES_HOME resolution (t_dbae1837 — audit t_8893ab89 row 32)
+#
+# Hermes exports HERMES_HOME=<root>/profiles/<name> for every profile session,
+# and the old resolver joined "profiles" onto it: <root>/profiles/<name>/profiles
+# — empty, so the Profile Library listed ZERO profiles. These tests fabricate
+# that layout under a throwaway HOME (never the operator's real ~/.hermes) and
+# pin that the ROOT's profiles dir is what gets enumerated.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def leaked_home(tmp_path, monkeypatch):
+    """A scratch Hermes ROOT + a profile env that leaks into the API process.
+
+    Layout (the real fleet layout, including the double-nest an earlier leak
+    left behind):
+
+        <root>/profiles/hscc-orch/config.yaml        <- the ONLY real profile
+        <root>/profiles/backend-engineer/            <- the running profile
+        <root>/profiles/backend-engineer/profiles/ghost/  <- the double-nest
+
+    ``HERMES_HOME`` points at the running profile dir, i.e. exactly what Hermes
+    exports. HOME is pinned to tmp_path so the ``~/.hermes`` default candidate
+    is also inside the fixture, never the operator's real home.
+    """
+    home = tmp_path / "real-home"
+    root = home / ".hermes"
+    orch = root / "profiles" / "hscc-orch"
+    orch.mkdir(parents=True)
+    (orch / "config.yaml").write_text(
+        "model:\n  default: hscc-model\n  provider: custom\n")
+    (orch / "description.txt").write_text("Routes HSCC work.\n")
+
+    leaked = root / "profiles" / "backend-engineer"
+    ghost = leaked / "profiles" / "ghost"          # the double-nest
+    ghost.mkdir(parents=True)
+    (ghost / "config.yaml").write_text("model:\n  default: phantom\n")
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(leaked))
+    return {"home": home, "root": root, "orch": orch, "leaked": leaked,
+            "ghost": ghost}
+
+
+def _listing_names(profiles_dir):
+    return [p.name for p in sorted(profiles_dir.iterdir()) if p.is_dir()]
+
+
+def test_profiles_dir_ignores_a_profile_scoped_env(leaked_home):
+    """A profile-exported HERMES_HOME still resolves the ROOT's profiles/."""
+    got = routes_profile._hermes_profiles_dir()
+    assert got == leaked_home["root"] / "profiles"
+    # The double-nest is not what gets listed — and the real profile is.
+    assert _listing_names(got) == ["backend-engineer", "hscc-orch"]
+    assert "ghost" not in _listing_names(got)
+
+
+def test_double_nest_is_skipped_even_when_it_exists(leaked_home):
+    """The double-nest exists here, and is still ruled out (t_7a16aed0 class).
+
+    A resolver that merely preferred the grandparent and stopped would pass the
+    test above by accident; this one puts a real ``profiles/`` directory inside
+    the profile dir (the state this fleet is actually in) and requires the
+    resolver to reject it because its parent is named ``profiles``.
+    """
+    assert (leaked_home["leaked"] / "profiles").is_dir()   # fixture sanity
+    got = routes_profile._hermes_profiles_dir()
+    assert got != leaked_home["leaked"] / "profiles"
+    assert (got / "hscc-orch").is_dir()
+
+
+def test_list_route_enumerates_real_profiles_under_a_leaked_env(leaked_home,
+                                                                monkeypatch,
+                                                                tmp_path):
+    """The bug's operator-visible symptom: the library listed 0 profiles.
+
+    Unlike the rest of this file, this drives the REAL ``_backing_list`` (no
+    backing stub) over loopback HTTP, so the whole read path — resolver,
+    directory walk and config.yaml model read — runs against the scratch tree.
+    """
+    import threading
+    import http.client
+
+    srv = api_server.create_server(hscc_dir=str(tmp_path), addr=("127.0.0.1", 0))
+    host, port = srv.server_address[:2]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.request("GET", "/v1/profile/list", headers={
+            "Authorization": "Bearer " + api_server.load_token(srv.ctx.hscc_dir)})
+        resp = conn.getresponse()
+        payload = json.loads(resp.read())
+        conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert resp.status == 200
+    names = [p["name"] for p in payload["profiles"]]
+    assert "hscc-orch" in names           # the real profile is listed
+    assert "ghost" not in names           # the double-nest is not
+    assert payload["count"] == len(names) >= 1
+    assert "0 profile" not in payload["speak"]
+
+
+def test_unset_env_resolves_the_default_root(tmp_path, monkeypatch):
+    """No HERMES_HOME at all (the shipped launchd unit) → ~/.hermes/profiles."""
+    home = tmp_path / "plain-home"
+    (home / ".hermes" / "profiles" / "solo").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert routes_profile._hermes_profiles_dir() == home / ".hermes" / "profiles"
+
+
+def test_no_profiles_dir_anywhere_falls_back_to_the_default_root(tmp_path,
+                                                                 monkeypatch):
+    """Nothing installed → the default root, never a $HERMES_HOME join."""
+    home = tmp_path / "bare-home"
+    # A HERMES_HOME that carries no profiles/ child anywhere near it: the
+    # resolver must not invent `$HERMES_HOME/profiles`.
+    stray = home / "scratch" / "hermes-workdir"
+    stray.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(stray))
+    got = routes_profile._hermes_profiles_dir()
+    assert got == home / ".hermes" / "profiles"
+    assert got != stray / "profiles"
+
+
+def test_resolver_never_reads_the_env_directly():
+    """Structural pin: the resolver must go through the shared ladder.
+
+    The whole class of bug is a private ``os.environ["HERMES_HOME"]`` join in
+    one route (audit t_8893ab89 rows 32-34). A future edit that reintroduces it
+    in either file fails here even if the author also adds a passing test.
+    """
+    import inspect
+
+    import routes_profile_editor
+    for mod in (routes_profile, routes_profile_editor):
+        src = inspect.getsource(mod)
+        assert 'environ.get("HERMES_HOME"' not in src, mod.__name__
+        assert 'environ["HERMES_HOME"]' not in src, mod.__name__
+    # ...and the ladder is the shared one, not a copy.
+    assert "hermes_homes" in inspect.getsource(routes_profile.hermes_root_dir)
+
