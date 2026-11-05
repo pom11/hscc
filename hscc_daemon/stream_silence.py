@@ -12,21 +12,32 @@ Signal sources (chosen, deliberately)
 1. **Running kanban cards** come from the sanctioned, read-only board monitor
    (:func:`kanban_live.collect`): ``task_runs.last_heartbeat_at`` /
    ``tasks.last_heartbeat_at`` are the dispatcher's own worker heartbeat, and a
-   running card is by definition not a legitimately-idle session.
+   running card is by definition not a legitimately-idle session. Each card is
+   matched to ITS OWN worker session by the ``[session_id]`` on its log lines
+   and the session-id spawn timestamp versus the run's ``started_at`` (the same
+   profile+spawn-time rule ``~/fleet-check/card-stats.py`` uses). A profile can
+   run several cards at once; another session's completion must never mask a
+   silent one, and an ambiguous match is reported UNKNOWN, never fresh.
 2. **Configured orchestrators** are the per-board ``<board>-orch`` profiles the
    rest of HSCC already resolves through :func:`orch_waker.resolve_orch`.
 3. **Last completed model call** is read from hermes' own per-profile OUTPUT
    log (``~/.hermes/profiles/<p>/agent.log``, plus the profile's ``logs/``
    variant; the default profile uses ``~/.hermes/logs/agent.log``). The incident
-   proved those lines carry ``latency=`` on completion. This is read-only
-   inspection of a log hermes already writes; no hermes state DB is parsed and
-   nothing under ``~/.hermes`` is written.
-4. **Orchestrator heartbeat** is the log's mtime: any log write (a completion,
-   a start line, or a ``Stream stale for ...s`` warning) proves the REPL is
-   alive. A genuinely idle orchestrator stops writing, so its mtime tracks its
-   last completion and the check stays quiet. A hung orchestrator that keeps
-   emitting stale warnings has a fresh mtime with no new completion — exactly
-   the alive-but-starved shape this stream exists for.
+   proved those lines carry ``latency=`` on completion. Card sessions are
+   filtered to the matched ``[session_id]``; orchestrators use the newest
+   completion in their profile. This is read-only inspection of a log hermes
+   already writes; no hermes state DB is parsed and nothing under ``~/.hermes``
+   is written.
+4. **Orchestrator alive/busy state** comes from the tmux pane, through the one
+   pane matcher the repo already uses (:mod:`repl_inject`, shared with
+   ``~/bin/hermes-inject`` and ``orch_waker``): exactly one ``hermes -p X chat``
+   pane means alive, ``msg=interrupt`` in its prompt means a turn is running,
+   and a bare prompt means idle. Log mtime is NOT a heartbeat — housekeeping
+   lines freshen it without a call, and a hung stream writes nothing at all.
+   An idle orchestrator at its prompt is never starved, however old its last
+   call; a live pane that is busy in a turn with no completion for N seconds is
+   the alive-but-starved shape this stream exists for. No pane is the dead-pane
+   case and stays suppressed (``orch_waker`` owns it).
 
 Age is measured from the last COMPLETION (the portable signal), not from the
 start of an in-flight attempt: a start timestamp is not reliably present in
@@ -35,8 +46,13 @@ may tune the env knob once it lands.
 
 Anti-noise contract
 -------------------
-* No running card / no live orchestrator log -> no candidate, never an alert.
-* A stale heartbeat is suppressed: dead panes remain ``orch_waker``'s job.
+* No running card / no live orchestrator pane -> no candidate, never an alert.
+* An idle orchestrator at its prompt is never an alert, however old its last
+  call; housekeeping log lines cannot make it look busy.
+* A stale card heartbeat is suppressed: dead panes remain ``orch_waker``'s job.
+  An orchestrator whose pane is absent is suppressed for the same reason.
+* A card whose session cannot be matched unambiguously is UNKNOWN, never
+  fresh and never an alert.
 * Per-session cooldown: one desktop notify per ``NOTIFY_COOLDOWN_S`` (1800 s,
   persisted in the stream state so a daemon restart cannot re-page), while
   every tick still writes a silent WARN log line for the ongoing silence.
@@ -81,10 +97,16 @@ NOTIFY_COOLDOWN_S = float(
 # matters and the daemon must never burn a tick scanning a multi-GB log.
 LOG_TAIL_BYTES = 256 * 1024
 
+# A worker session id embeds its spawn local time (YYYYMMDD_HHMMSS_suffix).
+# Match that against the card run's started_at the way card-stats.py does.
+SESSION_MATCH_SLACK_S = float(
+    os.environ.get("HSCC_STREAM_SILENCE_SESSION_MATCH_S", "180"))
+
 # A completion line (incident evidence: `latency=...`) at the start of a log
 # record. Timestamps seen in hermes logs are ISO-ish, local time, optionally
 # with brackets / milliseconds / an explicit zone.
 _COMPLETION_RE = re.compile(r"\blatency\s*=")
+_SESSION_RE = re.compile(r"\[(\d{8}_\d{6}_\w+)\]")
 _TS_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
     r"(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)")
@@ -146,57 +168,163 @@ def _pick_log(profile, hermes_home=None):
     return None
 
 
-def last_completion_age(profile, now=None, hermes_home=None, path=None):
-    """``(age_s, source)`` from the newest ``latency=`` line, or ``(None, why)``.
+def _read_tail(path, max_bytes=None):
+    """(lines, truncated) from the bounded tail of ``path``."""
+    max_bytes = LOG_TAIL_BYTES if max_bytes is None else int(max_bytes)
+    size = os.path.getsize(path)
+    start = max(0, size - max_bytes)
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        text = fh.read().decode("utf-8", "replace")
+    lines = text.splitlines()
+    if start:
+        lines = lines[1:]  # first line may be a partial record
+    return lines, bool(start)
 
-    Reads only the bounded tail of hermes' existing output log. A log that has
-    ``Stream stale`` lines but no completion marker is UNKNOWN (○), never
-    silently treated as fresh — that would erase precisely the incident shape.
+
+def _session_spawn_epoch(session_id):
+    """Epoch seconds encoded in a hermes session id (local time), or None."""
+    m = re.match(r"^(\d{8})_(\d{6})_", str(session_id or ""))
+    if not m:
+        return None
+    try:
+        import datetime
+        dt = datetime.datetime.strptime(
+            f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S")
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def _matched_session(lines, started_at, slack_s=SESSION_MATCH_SLACK_S):
+    """Session id(s) that could belong to a run started at ``started_at``.
+
+    More than one candidate is AMBIGUOUS: the caller must report unknown, never
+    let one sibling's completion stand in for another. Returns
+    ``(session_id or None, why)``.
+    """
+    seen = {}
+    for line in lines:
+        m = _SESSION_RE.search(line)
+        if not m:
+            continue
+        sid = m.group(1)
+        if sid in seen:
+            continue
+        spawn = _session_spawn_epoch(sid)
+        if spawn is None:
+            continue
+        if abs(spawn - float(started_at)) <= float(slack_s):
+            seen[sid] = spawn
+    if not seen:
+        return None, "no session matched run start"
+    if len(seen) > 1:
+        return None, (f"ambiguous session match ({len(seen)} sessions within "
+                      f"{int(float(slack_s))}s of run start)")
+    return next(iter(seen)), ""
+
+
+def last_completion_age(profile, now=None, hermes_home=None, path=None,
+                        session_id=None, started_at=None,
+                        match_slack_s=None):
+    """``(age_s, source)`` from the newest matching ``latency=`` line.
+
+    Returns ``(None, why)`` when there is no signal. With ``session_id`` the
+    search is restricted to that session; with ``started_at`` (and no explicit
+    id) the session is resolved by profile+spawn time, and an ambiguous match
+    is UNKNOWN. The orchestrator path passes neither and uses the profile's
+    newest completion. Reads only the bounded tail of hermes' existing output
+    log. A log that has ``Stream stale`` lines but no completion marker is
+    UNKNOWN (○), never silently treated as fresh — that would erase precisely
+    the incident shape.
     """
     now = time.time() if now is None else float(now)
+    match_slack_s = (SESSION_MATCH_SLACK_S if match_slack_s is None
+                     else float(match_slack_s))
     path = path or _pick_log(profile, hermes_home)
     if not path:
         return None, "no agent.log"
     try:
-        size = os.path.getsize(path)
-        start = max(0, size - LOG_TAIL_BYTES)
-        with open(path, "rb") as fh:
-            fh.seek(start)
-            text = fh.read().decode("utf-8", "replace")
+        lines, _ = _read_tail(path)
     except OSError as exc:
         return None, f"log unreadable: {type(exc).__name__}"
-    lines = text.splitlines()
-    if start:
-        lines = lines[1:]  # first line may be a partial record
+
+    if session_id is None and started_at is not None:
+        session_id, why = _matched_session(lines, started_at,
+                                           slack_s=match_slack_s)
+        if session_id is None:
+            return None, why
+
     for line in reversed(lines):
         if not _COMPLETION_RE.search(line):
             continue
+        if session_id is not None:
+            m_sid = _SESSION_RE.search(line)
+            if not m_sid or m_sid.group(1) != session_id:
+                continue
         m = _TS_RE.search(line[:200])
         if not m:
             continue
         ts = _parse_ts(m.group(1))
         if ts is None:
             continue
-        return max(0.0, now - ts), os.path.basename(path)
+        source = os.path.basename(path)
+        if session_id:
+            source = f"{source}:{session_id}"
+        return max(0.0, now - ts), source
+    if session_id:
+        return None, f"no completion marker for {session_id} in tail"
     return None, "no completion marker in tail"
 
 
-def _log_age(profile, now, hermes_home=None):
-    path = _pick_log(profile, hermes_home)
-    if not path:
-        return None
+def _pane_states():
+    """``profile -> {pane_alive, pane_busy}`` from the repo's one pane matcher.
+
+    Uses ``repl_inject`` exactly as ``orch_waker`` does (never raw tmux here):
+    exactly one ``hermes -p X chat`` pane is alive, and ``msg=interrupt`` in its
+    prompt means a turn is running (idle otherwise). A pane list failure is
+    UNKNOWN, not "dead": the check must not turn its own blindness into a
+    suppression.
+    """
     try:
-        return max(0.0, float(now) - os.path.getmtime(path))
-    except OSError:
-        return None
+        from . import orch_waker
+        repl = orch_waker.load_repl_inject()
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"repl_inject: {type(exc).__name__}: {exc}"
+    if repl is None:
+        return {}, "repl_inject not importable"
+    try:
+        panes = repl.hermes_panes()
+    except Exception as exc:  # noqa: BLE001 — no tmux server, etc.
+        return {}, f"pane discovery: {type(exc).__name__}: {exc}"
+    by_profile = {}
+    for pane in panes:
+        by_profile.setdefault(str(pane.get("profile") or ""), []).append(pane)
+    states = {}
+    for profile, matches in by_profile.items():
+        if not profile:
+            continue
+        if len(matches) != 1:
+            # Alive but which pane is "the" REPL is ambiguous: busy unknown.
+            states[profile] = {"pane_alive": True, "pane_busy": None}
+            continue
+        busy = None
+        try:
+            busy = bool(repl.busy_from_screen(
+                repl.screen(matches[0]["pane"], 12)))
+        except Exception:  # noqa: BLE001 — alive pane, unreadable prompt
+            pass
+        states[profile] = {"pane_alive": True, "pane_busy": busy}
+    return states, ""
 
 
-def _default_roster(now, hermes_home=None):
+def _default_roster(now, hermes_home=None, pane_states_fn=None):
     """Running cards + configured orchestrators, all from sanctioned surfaces.
 
     Cards: ``kanban_live.collect`` (read-only board monitor; the same heartbeat
-    the monitor renders). Orchestrators: every board's resolved
-    ``<board>-orch``/``orch_map`` profile, with agent.log mtime as heartbeat.
+    the monitor renders) plus the run's ``started_at`` for session matching.
+    Orchestrators: every board's resolved ``<board>-orch``/``orch_map`` profile,
+    with alive/busy read from its tmux pane (never log mtime).
     """
     from . import kanban_live
     try:
@@ -209,30 +337,56 @@ def _default_roster(now, hermes_home=None):
             "key": f"card:{r.get('board')}:{r.get('id')}",
             "kind": "card",
             "profile": r.get("worker") or "",
+            "started_at": r.get("started_at"),
+            "session_id": r.get("session_id"),
             "heartbeat_age_s": r.get("hb_s"),
         })
     errors = list(data.get("errors") or [])
     try:
+        if pane_states_fn is not None:
+            pane_states, pane_err = pane_states_fn()
+        else:
+            pane_states, pane_err = _pane_states()
+        if pane_err:
+            errors.append(pane_err)
         from . import orch_waker
         for b in data.get("boards") or []:
             board = b.get("name")
             profile = orch_waker.resolve_orch(board, hermes_home=hermes_home)
             if not profile:
                 continue
+            state = pane_states.get(profile)
+            if state is None and pane_err:
+                state = {"pane_alive": None, "pane_busy": None}
+            elif state is None:
+                state = {"pane_alive": False, "pane_busy": False}
             sessions.append({
                 "key": f"orch:{profile}",
                 "kind": "orchestrator",
                 "profile": profile,
-                "heartbeat_age_s": _log_age(profile, now, hermes_home),
+                "heartbeat_age_s": None,
+                "pane_alive": state.get("pane_alive"),
+                "pane_busy": state.get("pane_busy"),
             })
     except Exception as exc:  # noqa: BLE001
         errors.append(f"orchestrator roster: {exc}")
     return {"sessions": sessions, "errors": errors}
 
 
-def _default_completion(profile, now, hermes_home=None):
-    age, source = last_completion_age(profile, now=now,
-                                      hermes_home=hermes_home)
+def _default_completion(item, now, hermes_home=None):
+    """Last completion for one roster item (card session or orchestrator)."""
+    if isinstance(item, str):  # legacy seam shape: profile only
+        item = {"kind": "orchestrator", "profile": item}
+    profile = item.get("profile") or ""
+    kind = item.get("kind") or "session"
+    session_id = item.get("session_id")
+    started_at = item.get("started_at") if kind == "card" else None
+    if kind == "card" and session_id is None and started_at is None:
+        return {"last_completed_age_s": None,
+                "source": "no run start for session match"}
+    age, source = last_completion_age(
+        profile, now=now, hermes_home=hermes_home,
+        session_id=session_id, started_at=started_at)
     return {"last_completed_age_s": age, "source": source}
 
 
@@ -312,45 +466,76 @@ def _tick(roster_fn, completion_fn, notify_fn, write_state_fn, read_state_fn,
         profile = str(item.get("profile") or "")
         kind = str(item.get("kind") or "session")
         hb = item.get("heartbeat_age_s")
-        comp = completion_fn(profile, now) if profile else {}
+        comp = completion_fn(item, now) if profile else {}
         comp = comp or {}
         age = comp.get("last_completed_age_s")
         source = comp.get("source") or ""
+        pane_alive = item.get("pane_alive")
+        pane_busy = item.get("pane_busy")
 
-        if age is None:
-            status = "unknown"
-            unknown.append(key)
-            age = None
-        elif hb is None:
-            status = "unknown"
-            unknown.append(key)
-        elif float(hb) > heartbeat_fresh_s:
-            status = "suppressed"
-            suppressed.append(key)
-        elif float(age) > threshold_s:
-            status = "silent"
+        if kind == "orchestrator":
+            # Log mtime is not a heartbeat. The pane is: idle at its prompt is
+            # never starved (however old the last call), busy in a turn is the
+            # only shape that can be stream-silent, absent is the dead-pane
+            # case already owned by orch_waker.
+            if pane_alive is False:
+                status = "suppressed"
+                suppressed.append(key)
+            elif pane_alive is None:
+                status = "unknown"
+                unknown.append(key)
+            elif pane_busy is False:
+                status = "idle"
+            elif pane_busy is None:
+                status = "unknown"
+                unknown.append(key)
+            elif age is None:
+                status = "unknown"
+                unknown.append(key)
+            elif float(age) > threshold_s:
+                status = "silent"
+            else:
+                status = "healthy"
         else:
-            status = "healthy"
+            if hb is None:
+                status = "unknown"
+                unknown.append(key)
+            elif float(hb) > heartbeat_fresh_s:
+                status = "suppressed"
+                suppressed.append(key)
+            elif age is None:
+                status = "unknown"
+                unknown.append(key)
+            elif float(age) > threshold_s:
+                status = "silent"
+            else:
+                status = "healthy"
 
         row = {
             "key": key, "kind": kind, "profile": profile,
             "last_completed_age_s": None if age is None else round(float(age)),
             "heartbeat_age_s": None if hb is None else round(float(hb)),
+            "pane_alive": pane_alive if kind == "orchestrator" else None,
+            "pane_busy": pane_busy if kind == "orchestrator" else None,
             "status": status, "source": source,
         }
         sessions.append(row)
         if status == "silent":
             violations.append(row)
+            if kind == "orchestrator":
+                beat = "its pane is busy in a turn"
+            else:
+                beat = f"its heartbeat is fresh ({float(hb):.0f}s)"
             log(f"Stream-silence: {key} ({profile}) has not completed a model "
-                f"call for {float(age):.0f}s while its heartbeat is fresh "
-                f"({float(hb):.0f}s) — threshold {int(threshold_s)}s", "WARN")
+                f"call for {float(age):.0f}s while {beat} — threshold "
+                f"{int(threshold_s)}s", "WARN")
             if key not in alerted:
                 try:
                     notify_fn(
                         "HSCC: model stream silent",
                         f"{key} ({profile}) has no completed model call for "
-                        f"{int(float(age))}s while heartbeating "
-                        f"({int(float(hb))}s). The stream may be hung.",
+                        f"{int(float(age))}s while {beat}. The stream may be "
+                        "hung.",
                         priority="high")
                 except Exception as exc:  # noqa: BLE001 — notify is best-effort
                     log(f"Stream-silence: notify failed: "
@@ -378,9 +563,9 @@ def _tick(roster_fn, completion_fn, notify_fn, write_state_fn, read_state_fn,
         message = f"no alert; {len(suppressed)} session(s) had a stale heartbeat"
     else:
         status = "healthy"
-        message = (f"all {len(sessions)} running session(s) completed a model "
-                   f"call within {int(threshold_s)}s" if sessions
-                   else "no running cards or live orchestrators")
+        message = (f"no silent sessions among {len(sessions)} running card(s) "
+                   f"or orchestrator(s); threshold {int(threshold_s)}s"
+                   if sessions else "no running cards or live orchestrators")
 
     write_state_fn(STREAM, {
         "ok": True,
