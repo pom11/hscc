@@ -100,3 +100,11 @@ def test_profiles_dir_end_to_end_import(monkeypatch, tmp_path, capsys):
         [sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(tmp_path / "profiles")
+
+
+def test_hermes_root_is_deterministic_not_first_existing(tmp_path):
+    """An existing ~/.hermes must not outrank the profile's own grandparent:
+    the transform is string-only, never a first-existing probe (t_53f5b85a)."""
+    (tmp_path / ".hermes").mkdir()
+    pdir = _tmp_profiles(tmp_path / "srv" / "hermes", "worker")
+    assert rolelib._hermes_root(str(pdir)) == str(tmp_path / "srv" / "hermes")

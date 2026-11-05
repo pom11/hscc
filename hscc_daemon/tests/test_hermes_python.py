@@ -285,3 +285,40 @@ def test_bootstrap_sh_follows_the_same_root_rule():
     assert '"$HOME/.hermes"' in body, "bootstrap.sh must keep the default root"
     assert 'PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"' not in body, (
         "the single HERMES_HOME join is the bug (t_314eb13c) — use the ladder")
+
+
+# --------------------------------------------------------------------------- #
+# hermes_root — one canonical, deterministic transform (t_53f5b85a)
+# --------------------------------------------------------------------------- #
+
+def test_hermes_root_is_the_grandparent_for_a_profile_dir(tmp_path):
+    profile = tmp_path / ".hermes" / "profiles" / "worker"
+    assert hermes_python.hermes_root(str(profile)) == str(tmp_path / ".hermes")
+    assert hermes_python.is_profile_dir(str(profile)) is True
+
+
+def test_hermes_root_leaves_a_plain_root_alone(tmp_path):
+    root = tmp_path / ".hermes"
+    custom = tmp_path / "srv" / "hermes-custom"
+    assert hermes_python.hermes_root(str(root)) == str(root)
+    assert hermes_python.hermes_root(str(custom)) == str(custom)
+    assert hermes_python.is_profile_dir(str(root)) is False
+
+
+def test_hermes_root_never_probes_for_a_first_existing_root(tmp_path):
+    """The transform is string-only: an existing ~/.hermes must NOT win over
+    the profile's own grandparent (F6's deterministic-transform stamp)."""
+    (tmp_path / ".hermes" / "hermes-agent").mkdir(parents=True)
+    profile = tmp_path / "srv" / "hermes" / "profiles" / "worker"
+    # nothing along the profile path exists — the rule still answers
+    assert not profile.exists()
+    assert hermes_python.hermes_root(str(profile)) == str(tmp_path / "srv" / "hermes")
+
+
+def test_hermes_homes_keeps_exported_home_first_over_its_root(tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    assert hermes_python.hermes_homes(
+        {"HERMES_HOME": str(profile)}, home=str(tmp_path)) == \
+        [str(profile), str(root)]

@@ -206,3 +206,12 @@ any-`hermes`-spawned-shell normal mode.
   joins (ensure_review_feature, apply_patches `--check`, bootstrap.sh:509)
   and the two bootstrap `__main__` config joins — same rule, same
   profiles-grandparent fix, no ladder consumer yet.
+
+## Consolidation (2026-11-05)
+
+- **One canonical rule (t_53f5b85a).** The profiles-grandparent ROOT transform
+  is now defined once, in `hscc_daemon/hermes_python.py`
+  (`hermes_root` + `is_profile_dir`). `backup_util._hermes_root`,
+  `rolelib._hermes_root` and `doctor.hermes_root_from_home` delegate to it via
+  the sanctioned deferred-guarded import, each keeping a same-rule fallback for
+  a bootstrap-only install. Deterministic transform; no behavior change.

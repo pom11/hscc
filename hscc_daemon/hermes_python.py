@@ -62,6 +62,35 @@ VENV_BIN_REL = os.path.join(AGENT_DIR, "venv", "bin")
 VENV_PYTHONS = ("python3", "python")
 
 
+def is_profile_dir(home) -> bool:
+    """True when ``home`` is ``<root>/profiles/<name>`` — a profile, not a root.
+
+    Named predicate rather than an inline ``basename(dirname(...))`` check so
+    callers that must NOT treat a profile dir as a root (routes_profile filters
+    the candidate ladder with exactly this rule) share one spelling.
+    """
+    home = os.path.expanduser(str(home)) if home else ""
+    if not home:
+        return False
+    parent = os.path.dirname(home)
+    return bool(parent) and os.path.basename(parent) == "profiles"
+
+
+def hermes_root(home):
+    """The canonical Hermes ROOT transform for a possibly profile-scoped home.
+
+    ``<root>/profiles/<name>`` -> ``<root>``; every other path is returned
+    unchanged. Deliberately a pure string transform: it NEVER probes the
+    filesystem, so a missing root is still reported as itself. Callers that
+    need an existing install walk candidates/existence themselves
+    (``doctor.hermes_root_from_home``).
+    """
+    home = os.path.expanduser(str(home))
+    if is_profile_dir(home):
+        return os.path.dirname(os.path.dirname(home))
+    return home
+
+
 def hermes_homes(env=None, *, home=None) -> list[str]:
     """Candidate Hermes ROOTS, in priority order, de-duplicated.
 
@@ -91,9 +120,7 @@ def hermes_homes(env=None, *, home=None) -> list[str]:
 
     _push(env.get("HERMES_HOME", "").strip())
     if homes:
-        parent = os.path.dirname(homes[0])
-        if parent and os.path.basename(parent) == "profiles":
-            _push(os.path.dirname(parent))
+        _push(hermes_root(homes[0]))
     _push(os.path.join(os.path.expanduser(str(home)), ".hermes"))
     return homes
 
