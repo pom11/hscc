@@ -171,6 +171,9 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/route-fleet-ssh-via-sparkrun-t_17cdc637.md` — route hscc-cluster fleet SSH through sparkrun.
 - `docs/audits/sparkrun-service-path-t_b543e530.md` — sparkrun resolution under a service-supervised PATH.
 - `docs/audits/2026-11-05_stream-silence-incident.md` — 2026-11-05 stream silence: per-layer evidence (client / litellm proxy / balancer / vLLM), timeline, repro + observation probes. **live**
+- `docs/audits/t_22b546e3_renew_correlation.py` — its burst-vs-DHCP-mark correlation table generator (chunked `log show`).
+- `docs/audits/t_22b546e3_stream_forensics.py` — cross-profile stale-kill / stream-drop sweep.
+- `docs/audits/t_22b546e3_metrics_watch.py` — engine /metrics advancement sampler (the wedge discriminator).
 - `docs/audits/t_17dc00ee_signal15.md` — investigation: who sends SIGTERM to the hscc daemon.
 - `docs/audits/t_17dc00ee_context.txt` — raw signal-15 log extract attached to the investigation above.
 - `docs/audits/t_873590dd_engine-wedge-inert.md` — engine-wedge self-heal is inert: measured diagnosis.
