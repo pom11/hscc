@@ -11,6 +11,321 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.3] - 2026-11-05
+
+### Added
+- **A new daemon stream catches alive-but-starved model streams (incident 2026-11-05).**
+  `stream_silence.check_stream_silence` runs every 60 s and compares each
+  running kanban card's own worker session against the newest `latency=`
+  completion line in that profile's `agent.log`. Cards are matched to their
+  session by the line's `[session_id]` and the session's spawn timestamp versus
+  the run's `started_at` (the `card-stats.py` rule), so one card's completion
+  cannot mask a silent sibling; an ambiguous match is reported `○` (unknown),
+  never fresh. Orchestrators are judged alive and busy-in-a-turn from their
+  tmux pane through `repl_inject` (`msg=interrupt` = busy, bare prompt = idle,
+  no pane = dead-pane suppression) — log mtime is not a heartbeat, so
+  housekeeping lines cannot page and an idle orchestrator at its prompt is
+  never starved however old its last call. A busy orchestrator or running card
+  whose last completion is older than the 600 s threshold gets a WARN log
+  line, a persisted state entry, and one desktop notify per 30-minute
+  per-session cooldown. The stream always publishes `ok: true`; `hscc verify`
+  gains a `stream_silence` row that lists the ages and is never red by itself.
+  Tests are hermetic (fabricated tmp logs and fake roster/notify/state seams).
+
+### Fixed
+- **`routes_profile.hermes_root_dir` now uses the shared `is_profile_dir`
+  predicate.** The profile-dir filter in the `hermes_homes()` ladder had been
+  spelled inline, so it could drift from the canonical profiles-grandparent
+  rule in `hscc_daemon/hermes_python.py`. Behaviour is unchanged; the filter is
+  now pinned structurally and by a hermetic skip test.
+- **`enable_plugins.py` / `install_soul.py` seeded the caller's PROFILE when
+  bootstrap ran from a profile session.** Both `__main__` entries joined
+  `HERMES_HOME` directly, but Hermes exports it as `<root>/profiles/<name>` in
+  its normal profile mode, so bootstrap wrote `<profile>/config.yaml` /
+  `<profile>/SOUL.md` and the ROOT install stayed unseeded (audit t_8893ab89
+  finding 3). Both entries now resolve the Hermes ROOT with the shared
+  profiles-grandparent rule (`backup_util._hermes_root`, the same rung as
+  `hscc_daemon.hermes_python.hermes_homes` and the F2 landing in
+  `install_review_skill`), and gained a documented `--home` flag that is used
+  exactly as given for an intentional profile wire. The import-time and
+  plugin-runtime joins the audit classified PROFILE-intent are untouched.
+- **`hscc api install-service` refused to run from every Hermes profile session.**
+  Hermes exports `HERMES_HOME=<root>/profiles/<name>` whenever it runs under a
+  profile — its normal run mode — and `hermes-agent` (where the venv lives) sits at
+  the ROOT. `api_launchd.recommend_api_python()` joined the two
+  (`HERMES_HOME + "hermes-agent/venv/bin/python3"`), so from any profile session it
+  resolved a path that cannot exist, returned `None`, and the verb died with
+  `error: no Hermes venv python found (HERMES_HOME/hermes-agent/venv/bin/python3)`.
+  The 2026-11-04 API migration had to work around it with `env -u HERMES_HOME`, which
+  is a hint about the resolver, not the install. Resolution now goes through the new
+  shared `hscc_daemon/hermes_python.py`: exported `$HERMES_HOME` (a profile-local
+  checkout still wins), then the `profiles/`-grandparent root, then `~/.hermes`, then
+  the venv the running process is inside — the same `profiles/` rule
+  `hscc-bootstrap/doctor.py:hermes_root_from_home` and `hscc-roles/rolelib.py` already
+  use. Still fail-closed: `None` when NO candidate exists, and the refusal now names
+  every path it searched instead of the one path that could never be there. The
+  install stays opt-in (write the plist, never `launchctl bootstrap`).
+  **Audit of the sibling the docstring cited (`bootstrap._api_python`): that function
+  does not exist anywhere in the repo** (`git grep _api_python` finds only
+  `recommend_api_python` and prose references), so the docstring pointed at a stale
+  name. The sibling that really did share the flaw is the shell one:
+  `hscc-bootstrap/bootstrap.sh` resolved `PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"`
+  the same way, silently fell through to a brew `python3` from a profile session, and
+  then handed that brew python to `install_cli.py "$PYBIN"` — installing the `hscc`
+  console shim into brew python instead of the Hermes venv. It walks the same ladder
+  now, with a shell-level test that sources the extracted block. `$PLUGINS`
+  deliberately keeps the raw profile-scoped home: Hermes scans
+  `get_hermes_home()/plugins`, so widening it would make the payload undiscoverable.
+- **`enable_plugins` wrote node-direct auxiliary URLs into orch profiles; now derived from serving.json + repaired + pinned.** The orchestrator profile's 9 auxiliary endpoints (compression + the 8 text tasks: kanban_decomposer, triage_specifier, profile_describer, curator, title_generation, skills_hub, approval, mcp) carried `base_url: http://<orch node>:8000/v1` while model/delegation/goal_judge correctly carried the local proxy — so every auxiliary call for the orchestrator profile (compression included) died on an address the gateway cannot route to. Culprit: `COMPACT_URL`'s default `http://{ORCH_MODEL_HOST}:8000/v1` (a hardcoded constant), stamped by `_ensure_compaction` (1 entry) and `_ensure_text_auxiliaries` (8). `cluster_template.py` (its :2316/:2776 never touch an auxiliary block; routing resolves proxied families to `localhost:<proxy>`) and `hscc-roles/generator.py` (orch profiles get no `auxiliary` block at all) are ruled out with tests. Three fixes: (1) `_serving_compact_route()` derives the endpoint from `serving.json` — proxy + worker alias under `uniform_pool`, the direct orchestrator endpoint on a pinned fleet, the old constant only as the no-serving.json bootstrap fallback; (2) a narrow repair for the poison this generator itself left on disk (a base_url whose host is a fleet node on a pool fleet — unreachable by construction) that fill-empty could never fix, because every later bootstrap and every `doctor --fix` read the wrong value as a deliberate operator choice — deliberate cloud/localhost/pinned providers are still preserved byte-for-byte and the repair is idempotent; (3) the `check_profile_endpoints` pin hole closed: under a pool the node origin from serving.json is no longer an allowed hermes route and the finding names the profile, the dotted key path, and the fleet shape. 27 new tests (15 bootstrap derivation/repair/preservation, 5 generator-plan, 7 guard-teeth), all tmp-dir with synthetic addresses.
+- **The profiles-grandparent Hermes ROOT rule now has one definition.**
+  `hscc_daemon/hermes_python.hermes_root` (plus the named `is_profile_dir`
+  predicate) is canonical; `backup_util._hermes_root`,
+  `rolelib._hermes_root` and `doctor.hermes_root_from_home` delegate to it
+  through the guarded deferred import, keeping a same-rule fallback where
+  `hscc_daemon` is not importable. The transform stays deterministic (no
+  first-existing probing) and every caller's profile-home and plain-root
+  behavior is unchanged.
+- **`hscc-model-onboard` mirrored `model.default` against `<profile>/profiles` —
+  silently skipping every profile under a profile session.** `onboard.py` bound
+  `HERMES_HOME`/`HERMES_CONFIG`/`PROFILES_DIR` at import from `$HERMES_HOME`.
+  Hermes exports that as the *profile* dir (`<root>/profiles/<name>`) for every
+  profile session, so `PROFILES_DIR` resolved to `<profile>/profiles` — a path
+  that does not exist — and the per-profile mirroring walked nothing while
+  editing the profile's own `config.yaml` as if it were the root: the real root
+  config and all sibling profiles kept the old model, with a green
+  "model.default updated" line printed (audit t_8893ab89 finding 5). The root is
+  now resolved at **call time** through the shared homes ladder
+  (`hscc_daemon.hermes_python.hermes_homes`, t_314eb13c; guarded standalone
+  fallback + drift pin, same pattern as `apply_patches.py` /
+  `ensure_review_feature.py`), excluding any `profiles/<name>` candidate (a
+  profile dir has its own `config.yaml`, so a marker test alone cannot tell it
+  from a root). `$HSCC_HERMES_ROOT` is the explicit operator override.
+  An unresolvable home is now **reported** (with the paths ruled out) instead of
+  reading as a no-op, `backup_configs` snapshots the root config and EVERY
+  profile config (the old set hard-coded one `worker` profile from a directory
+  that did not exist under a profile session), and profiles without a
+  `config.yaml` are announced rather than dropped.
+- **The hermes patch step silently no-oped from every profile session (the
+  un-fixed siblings of c5ba9926).** `bootstrap.sh` opened its
+  `Install: hermes/sparkrun patches` stage with `HERMES_DIR="$HERMES_HOME/hermes-agent"`
+  (raw env join, L509) and gated the apply on
+  `apply_patches.py --check` — whose own default target was
+  `Path($HERMES_HOME) / "hermes-agent"` (L101-102). Hermes exports
+  `HERMES_HOME=<root>/profiles/<name>` for every profile session (the fleet's
+  normal run mode) and `hermes-agent` sits at the ROOT, so both joins named a
+  directory that cannot exist. `--check` reported
+  `{"hermes": {"ok": false, "error": ".../profiles/<name>/hermes-agent not found"}}`,
+  the stage's `grep '"ok": true'` failed, and bootstrap printed
+  `patches not cleanly applicable (already patched, or upstream drifted…)` —
+  blaming upstream for a path that was never even checked — then skipped the
+  `--target` apply. The hermes patch set (kanban review tool + resume hook)
+  silently never landed. Reproduced read-only on the live box at base
+  `df8253ac`: old `--check` under
+  `HERMES_HOME=~/.hermes/profiles/backend-engineer` -> `ok:false`,
+  `error: …/profiles/backend-engineer/hermes-agent not found`, gate `False`;
+  the fixed `--check` in the same env resolves
+  `target=/Users/<op>/.hermes/hermes-agent` and reports real per-patch
+  verdicts. `apply_patches.py` now resolves the checkout through the shared
+  homes ladder — `_load_hermes_python()` / `agent_dir_candidates()` /
+  `resolve_agent_dir()`, reusing `hermes_python.hermes_agent_dir()` shipped by
+  F1 (t_919ac971), with the same guarded-fallback + drift-pin pattern as
+  `ensure_review_feature.py` — and echoes the chosen `target` in the JSON so
+  the resolution is auditable. `bootstrap.sh` gained a `resolve_hermes_dir()`
+  ladder: first the already-laddered `$PYBIN`'s venv great-grandparent
+  (`$PYBIN = <checkout>/venv/bin/python*`, shape-checked against
+  `hermes-agent`), falling back to the same home sites the PYBIN ladder walks
+  (exported home → its `profiles/` grandparent → `~/.hermes`, each requiring a
+  real DIRECTORY); the chosen candidate is reported (`ladder: pyvenv|home|profiles-root`)
+  and a genuine no-checkout outcome gets its own warning —
+  "the hermes/sparkrun patch sets were NOT applied" — instead of the drift
+  message. The stage's `--check` now targets the SAME resolved `$HERMES_DIR`
+  the apply writes to, so gate and target can no longer disagree. No raw
+  `HERMES_HOME` join remains in either file's code paths (pinned by tests).
+- **`ensure_review_feature.py` silently skipped the review-feature re-apply from
+  every profile session.** It bound `HERMES_DIR = $HERMES_HOME/hermes-agent` at
+  IMPORT (L24-25). Hermes exports `HERMES_HOME=<root>/profiles/<name>` whenever it
+  runs under a profile — the fleet's normal run mode — and `hermes-agent` (the
+  runtime checkout the feature is cherry-picked into) sits at the ROOT. So the
+  import-time join resolved `<profile>/hermes-agent`, a path that cannot exist;
+  `os.path.isdir` was false and the step returned
+  `{"status": "skipped_missing", "ok": True}` (L86-87), which `bootstrap.sh` prints
+  in its green case (`already_present|applied|skipped_missing`). A `hermes update`
+  that dropped the PR #43425 review feature left it dropped while bootstrap
+  reported a near-green row — the apply path was never even reached. Reproduced on
+  the live box at base `a99a2a1a`: `HERMES_DIR=…/profiles/backend-engineer/hermes-agent`,
+  `isdir` false, `ensure_review_feature()` -> `skipped_missing`/ok, while the real
+  checkout at the root existed and reported the marker `absent`. The step now
+  resolves the checkout **at call time** through the shared ladder — new
+  `hermes_python.hermes_agent_dir()` / `agent_dir_candidates()` /
+  `describe_agent_search()`, siblings of `hermes_venv_python()` reusing
+  `hermes_homes()`: exported `$HERMES_HOME` (a profile-local checkout still wins),
+  the `profiles/` grandparent root, then `~/.hermes`. `skipped_missing`/ok is kept
+  only for the genuinely-no-install case and now carries a `detail` naming every
+  candidate it ruled out, so a resolver regression can no longer read as "there is
+  no runtime here". No raw env join remains and no import-time `HERMES_DIR` exists
+  (pinned by a test). Deliberate difference from the interpreter ladder: the
+  checkout ladder has NO running-`sys.executable` fallback — a caller *writes* into
+  the resolved checkout, so the target must come from the configured home, not from
+  whichever python invoked it. A guarded deferred import of `hscc_daemon` keeps a
+  standalone bootstrap install working, with `_fallback_homes()` mirroring the
+  ladder and a drift test pinning the two together. The marker-read
+  `unreadable` path, the dirty/mid-operation refusals and the ref-token guard are
+  unchanged.
+- **`install_review_skill.py --skill all` missed the root home and sibling
+  profiles under a profile session.** Hermes exports
+  `HERMES_HOME=<root>/profiles/<name>` whenever it runs under a profile, and
+  `default_home()` returned that profile path verbatim; `skill_dirs()` then
+  walked `<profile>/profiles`, which does not exist, so only the current
+  profile was seeded. `default_home()` now resolves the Hermes ROOT via the
+  existing profiles-grandparent rule in `backup_util._hermes_root` (the same
+  rule `doctor.py` and `rolelib.py` use), restoring the root skills dir plus
+  every root profile. An explicit `--home` is still used exactly as given, so
+  a deliberately profile-scoped install remains scoped.
+- **`GET /v1/profile/list` and the profile editor enumerated ZERO profiles the moment the API inherited a profile env.** Both routes built their profiles path as `Path($HERMES_HOME or ~/.hermes)/"profiles"`. Hermes exports `HERMES_HOME=<root>/profiles/<name>` for every profile session — the fleet's normal run mode — and `profiles/` is a child of the ROOT, so the join resolved `<root>/profiles/<name>/profiles`: on this box that directory *exists and is empty* (an earlier t_7a16aed0-class leak left it behind), so the Library listed nothing and the editor 404'd every real profile — and a `PUT` would have written a fresh `config.yaml` into the double-nest, inventing a phantom profile. They were correct only by accident: the `com.hscc.api` launchd unit exports HOME + PATH and nothing else, verified against the live plist. Both now resolve the ROOT through the shared ladder `hscc_daemon.hermes_python.hermes_homes()` (`routes_profile.hermes_root_dir`, which `routes_profile_editor` delegates to — one resolver, no private copy), skipping any candidate that is itself a profile dir so the double-nest is ruled out even when it exists, and falling back to `~/.hermes` rather than to `$HERMES_HOME`. Same call-time resolution as before, so a long-lived API still reacts to env changes. The editor's "GLOBAL" skills dir — audit row 34, the same env join in the same file — went to the ROOT too, which restores the root half of the preload picker. Reproduced on the base at `df8253ac` (old resolver listed `['ghost']`, the phantom, and not the real `hscc-orch`); 9 of the 11 new tests fail there and pass here. `test_api_launchd.py` now pins the plist's env shape as exactly `{HOME, PATH}` so the accidental guard cannot quietly become load-bearing again.
+- **`hscc verify`'s `api_routes` row called a healthy API dead.** In the
+  installed keg the row read `route(s) the app calls did not answer: Traceback
+  (most recent call last):` while the API was listening and its log was clean.
+  Two faults stacked: the sweep is run by script path, so its own directory was
+  the only thing on `sys.path` and `from hscc_daemon import cli_theme` raised
+  `ModuleNotFoundError`; and `check_api_routes` shelled out to a bare
+  `python3`, which on the keg has no `rich` at all. The traceback exited 1 and
+  exit 1 meant "a route did not answer" — the checker's own crash was
+  indistinguishable from the outage the row exists to catch. The sweep now
+  bootstraps `sys.path` itself (the sanctioned `verify_chat_roundtrip.py`
+  pattern), `verify` uses its own interpreter, and a sweep that produced no
+  route report is UNVERIFIED — never a dead-route verdict. A missing client
+  source, missing `curl` or unavailable renderer exits a new code 3 ("could not
+  run"). The row also stops printing a traceback's useless first line: the
+  exception itself is on the last.
+- **`hscc verify --chat`'s deep check was dead on arrival.**
+  `hscc_daemon/verify_chat_roundtrip.py` carried a `sys.path` bootstrap that was
+  dead code: line 49 imported `hscc_daemon` and line 52 inserted the package
+  root, so the insert ran *after* the import it was written to protect. Run the
+  way `verify.run_chat_roundtrip` and the installed keg run it — a bare script
+  path, so only `hscc_daemon/` lands on `sys.path` and the parent that *contains*
+  the package is missing — it died before reading a single config value:
+  `ModuleNotFoundError: No module named 'hscc_daemon'` at line 49, exit 1
+  (reproduced 2026-11-04 with the repo venv interpreter, which has `rich`, so
+  `rich` was never the blocker here). The bootstrap now computes the root from
+  `__file__` and runs *before* the import — the shape proven for
+  `api_route_sweep.py` in #213 (t_ef36fe71). `verify` tolerated the crash (`rc=1`
+  fell back to the traceback text as the row detail, so the row was verbose
+  rather than wrongly green), but the check it reports on never actually ran.
+- **A missing renderer can no longer take the human view down.** The
+  `cli_theme` import in `verify_chat_roundtrip.py` is now guarded, and
+  `render_human` falls back to `_render_plain` — the same fixed labels, no Rich.
+  With no `rich` in the interpreter running us, the round trip still runs,
+  `--json` stays byte-identical (verify's path is renderer-proof) and the human
+  view prints plain text instead of raising `AttributeError: 'NoneType' object
+  has no attribute 'make_console'` out of `render_human`. The exit code stays the
+  round trip's own verdict, so a missing colour scheme is never reported as a
+  chat failure.
+
+### Verified
+- `hscc_daemon/tests/test_stream_silence.py` (12 cases): quiet at 60 s,
+  WARN + exactly one notify at 700 s then cooldown, stale-heartbeat
+  suppression, empty roster, unknown signal, bounded log-tail parsing of
+  `latency=` vs `Stream stale`, never-red verify row, a busy orchestrator with
+  a quiet log warns, an idle orchestrator at its prompt stays quiet despite
+  fresh housekeeping lines, two sessions in one log warn only for the silent
+  card, and an ambiguous session match is unknown. Full
+  `scripts/run_tests.sh` result is in the PR body.
+- `hscc_daemon/tests/test_hermes_python.py` (new, 19 cases) pins the ladder on
+  fabricated roots only: profile-exported home finds the real root venv, a
+  profile-local checkout wins, unset `HERMES_HOME` uses the default root,
+  `python3` beats `python`, a home with no venv python is skipped, no candidate
+  anywhere → `None`, and the running-interpreter fallback accepts only the exact
+  `<...>/hermes-agent/venv/bin/python3|python` shape (a brew or unrelated-venv
+  `sys.executable` is rejected, so the API unit can never record an interpreter
+  without websockets/starlette). Plus a drift guard that pins `bootstrap.sh` to the
+  same `profiles/` rule.
+- `hscc-bootstrap/tests/test_bootstrap_venv_ladder.py` (new, 9 cases) extracts the
+  real ladder block out of `bootstrap.sh` and runs it under `bash` against
+  fabricated roots — including `set -u` safety and the PATH fallback.
+- Reproduced on the operator's live box before the change: `recommend_api_python()`
+  returned `None` with `HERMES_HOME=~/.hermes/profiles/backend-engineer` and the real
+  venv present one level up; after it, the same call resolves
+  `~/.hermes/hermes-agent/venv/bin/python3`.
+- `hscc-bootstrap/tests/test_aux_routing_serving.py` (15), `hscc-roles/tests/test_generator_aux_routing.py` (5), `hscc_daemon/tests/test_verify_pool_aux_pin.py` (7) — green; full `scripts/run_tests.sh` gate result in the PR body.
+- `hscc_daemon/tests/test_model_onboard_hermes_root.py`: **18 new** cases, green
+  with `HERMES_HOME` at a fabricated profile dir; reproduced the skip first on
+  the base (root + sibling profile kept the old model, active profile moved).
+  Mutation probe: reverting `onboard.py` to the pre-fix file fails **17/18**.
+  Fabricated tmp homes only; no fleet, ssh, sparkrun or live-home access.
+- `hscc-bootstrap/tests/test_apply_patches_hermes_dir.py` (NEW, 9 cases): the
+  ladder surface honors injected env/home (profile dir first, profiles/
+  grandparent, default home, deduplicated); `resolve_agent_dir` fail-closes
+  with a `looked:` detail, finds the root checkout from a profile session,
+  prefers a profile-local checkout, rejects a stale `hermes-agent` *file*;
+  `_fallback_agent_dirs` == `hermes_python.agent_dir_candidates` over four env
+  shapes (drift pin); `--check` run as a subprocess with `HOME`/`HERMES_HOME`
+  pinned to a sandbox resolves and echoes `target` at the fabricated root
+  checkout, really evaluates the set there, and still names every candidate
+  when nothing exists; no `os.environ.get("HERMES_HOME")` join remains.
+- `hscc-bootstrap/tests/test_bootstrap_hermes_dir_ladder.py` (NEW, 12 cases):
+  the extracted `resolve_hermes_dir` block run in a real bash (the
+  t_314eb13c shell-ladder pattern) — PYBIN's venv great-grandparent wins and
+  is shape-checked (a non-hermes venv is refused), profile home falls back to
+  the root checkout (`profiles-root`), a profile-local checkout wins, default
+  `~/.hermes` used when unset, no-checkout is a distinct rc=1 outcome, a stale
+  `hermes-agent` file is not a checkout, works under `set -u`; static pins —
+  no raw join in stage code lines, no-checkout branches before the drift
+  message, the `--check` gate targets `"$HERMES_DIR"` (same dir as the apply),
+  dry-run reports the resolved dir and which ladder rung chose it.
+- Live read-only check: fixed `--check` from this profile session resolves
+  `~/.hermes/hermes-agent` (old code reported not-found) and the patch verdicts
+  it prints are the checkout's real `git apply --check` results.
+- `hscc-bootstrap/tests/test_ensure_review_feature.py`: 9 -> **15** cases. New:
+  profile-exported `HERMES_HOME` with the runtime at the root must report
+  `already_present` (not skip); the same layout with the marker absent must reach
+  `cherry-pick` with `cwd` asserted to be the ROOT checkout; nothing-exists still
+  skips `ok=True` but names both ladder paths in `detail`; injected env/home fully
+  seal resolution while the process env exports a live profile `HERMES_HOME`;
+  `_fallback_homes` == `hermes_python.hermes_homes` + `hermes-agent` over four env
+  shapes; module has no import-time `HERMES_DIR`.
+- `hscc_daemon/tests/test_hermes_python.py`: 19 -> **25** cases for the checkout
+  ladder (profile home finds the root checkout, profile-local checkout wins,
+  fail-closed `None`, a stale `hermes-agent` *file* is not a checkout, no
+  running-interpreter path is invented, `describe_agent_search` names every
+  candidate).
+- `hscc_daemon/tests/test_api_route_sweep_standalone.py`: **15** new cases —
+  the operator's manual repro (bare script path, cwd `/`, scrubbed `HOME`, fake
+  keg in tmp) plus every classification path through `check_api_routes`, and
+  both false-verdict traps (a crash read as red, an empty route list read as
+  green). Mutation-checked: removing the `sys.path` bootstrap turns
+  `test_bare_script_run_can_import_the_real_theme` red.
+- Live-keg reproduction of both faults before the fix, and of the fixed sweep
+  after: `--json` on a closed loopback port reports its routes, the human view
+  without `rich` says `cannot render`, an absent `curl` or an empty route list
+  says `could not run`, and none of them emits a traceback.
+- `hscc_daemon/tests/test_chat_roundtrip_standalone.py` (11 cases) runs the
+  script by bare script path from a cwd outside the repo with a scrubbed `HOME`,
+  no `hscc` on `PATH` and `PYTHONPATH` dropped so the child cannot inherit the
+  real repo for free, and asserts it never dies with `ModuleNotFoundError`. It
+  asserts on the preconditions path (no API host/token → exit 2 + parseable
+  error), so **no real chat prompt is ever fired at the live orchestrator**; a
+  fake keg in `tmp_path` supplies the package, and the real `cli_theme.py`
+  planted in it proves the Rich panel actually draws from a bare script path
+  (delete the bootstrap and that case goes red). Six mutation probes in a
+  throwaway clone — bootstrap-after-import, bootstrap deleted, unguarded theme
+  import, fallback renderer removed, fallback lying about the exit code, AST
+  guard neutered — all KILLED, each reverted before the next.
+- The repo was swept for the same ordering fault with an AST statement-order
+  check (a module-level `import hscc_daemon` before the first module-level
+  `sys.path` call, function-level lazy imports excluded), and the check now
+  *ships as a test* so the report cannot rot: any bare-runnable module that
+  reintroduces bootstrap-after-import fails the suite with `file:line`. The
+  checker was first validated against the known-bad file so a false "all clean"
+  was impossible. **Only one module had the ordering bug — this one.** Three
+  others import `hscc_daemon` from a bare-runnable file with no bootstrap at all
+  and are accounted for, not silently refactored: `api_route_sweep.py`
+  (unguarded import and no bootstrap on `main`; its fix ships in #213 and is
+  untouched here), `event_driven.py` (peer-guarded import with a
+  `_FallbackTheme`, so a bare path renders unthemed instead of crashing) and
+  `hscc.py` (launched with `PYTHONPATH` pointed at the package root by its
+  launchd/systemd unit in `hscc_daemon/install.py` and by
+  `hscc-bootstrap/restart_daemon.sh`, whose own comments record this exact
+  `ModuleNotFoundError`).
 ## [2.15.2] - 2026-11-04
 
 ### Added
