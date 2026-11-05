@@ -666,6 +666,19 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     return {"name": "daemon_streams", "ok": True, "detail": head}
 
 
+def check_stream_silence_visibility(state_dir=None, now=None):
+    """Informational row: last completed model call per running session.
+
+    t_291ced43 (incident 2026-11-05). This is deliberately NOT part of the
+    daemon-streams pass/fail set: a silent stream is a WARN + operator notify,
+    never a failed verify gate. ``○`` means the session had no completion
+    signal (unknown), not that it is healthy or broken. Reads only the daemon's
+    own ``stream_silence.json``; no live hermes/board/log access here.
+    """
+    from .stream_silence import stream_silence_row
+    return stream_silence_row(state_dir=state_dir, now=now)
+
+
 def check_proxy(url=None, timeout=None):
     """Check that the local proxy responds with a non-empty model list.
 
@@ -2520,6 +2533,9 @@ def run_all(**overrides):
         check_plugins,
         check_multiplex,
         check_daemon_streams,
+        # t_291ced43: informational last-completed-call ages (○ = unknown).
+        # Detection + visibility only — this row is never red by itself.
+        check_stream_silence_visibility,
         check_proxy,
         check_proxy_router_settings,
         check_config_wiring,
