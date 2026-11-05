@@ -214,4 +214,6 @@ any-`hermes`-spawned-shell normal mode.
   (`hermes_root` + `is_profile_dir`). `backup_util._hermes_root`,
   `rolelib._hermes_root` and `doctor.hermes_root_from_home` delegate to it via
   the sanctioned deferred-guarded import, each keeping a same-rule fallback for
-  a bootstrap-only install. Deterministic transform; no behavior change.
+  a bootstrap-only install. `routes_profile.hermes_root_dir` also filters its
+  candidate ladder with `is_profile_dir`, so no consumer spells the rule
+  inline. Deterministic transform; no behavior change.
