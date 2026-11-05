@@ -143,6 +143,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/HEAL_CASCADE_2026-10-14.md` — heal-cascade incident: why the heal-lease / heal-breaker / launch-guard trio exists; rationale cited by `hscc_daemon/README.md`. **live**
 - `docs/audits/IOS_CHAT_REPORT_2026-10-14.md` — iOS chat end-to-end overnight report; baseline for the chat path as shipped. **live**
 - `docs/audits/PROXY_RELAUNCH_NOOP_2026-10-18.md` — proxy :4000 outage while the 5-min relaunch loop no-opped: root cause + fix. **live** incident record.
+- `docs/audits/2026-11-05_stream-silence-incident.md` — fleet-wide stream silence with every health check green: located layer = gateway en0 on its DHCP-renew clock (899 s marks, kills correlate ±35 s; per-layer refutations of engine wedge / balancer leak / client fault). **live** — mechanism pending tcpdump; drives the lease fix + fork-hardening sizing. (t_22b546e3)
 - `docs/audits/DEPBUMP_GUARD_2026-10-16.md` — dep-bump fork-branch guard + `router_settings` drift check (t_39d7c915). Guard design **live**; the 0.3.10 fork-branch names it cites are the rollback line since the 0.4.0 cutover — see `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`.
 - `docs/audits/address-guard-binary-policy-t_3e6d3db7.md` — the address guard's binary policy (what counts as a real address, placeholder ranges `10.0.0.x` / `100.64.0.1`). **live**
 - `docs/audits/commit-time-address-guard-t_ec2c2f95.md` — commit-time address-guard hook: mechanism + bypass rules. **live**
