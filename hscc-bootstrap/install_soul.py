@@ -15,6 +15,7 @@ cluster.
 Single source of truth: ``HSCC_SOUL_BLOCK`` below is reused for both SOUL.md and
 the ops personality, so they can never drift.
 """
+import argparse
 import os
 import sys
 
@@ -263,8 +264,40 @@ def install_personality(config_path, name="ops"):
     return action
 
 
-if __name__ == "__main__":
-    home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+def _root_home(env=None, *, home=None):
+    """The Hermes ROOT home this installer seeds.
+
+    ``__main__`` is the INSTALLER entry (bootstrap.sh's only caller) and seeds
+    the install's ``SOUL.md`` + ops personality. Hermes exports
+    ``HERMES_HOME=<root>/profiles/<name>`` under a profile — its normal run
+    mode — so a raw env join writes the caller's profile and leaves the ROOT
+    home unseeded. Resolve through the profiles-grandparent rule, the same
+    rung of the shared homes ladder as
+    ``hscc_daemon.hermes_python.hermes_homes`` (and the rule F2 landed in
+    ``install_review_skill.default_home`` via ``backup_util._hermes_root``).
+
+    An explicit ``--home`` never goes through here: it is used exactly as
+    given, so an operator can deliberately wire one profile.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("HERMES_HOME") or "").strip()
+    if not raw:
+        raw = os.path.join(os.path.expanduser(str(home or "~")), ".hermes")
+    return backup_util._hermes_root(raw)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Install the HSCC agent-instruction block into a Hermes "
+                    "home (the ROOT install by default; --home to target one "
+                    "profile deliberately).")
+    parser.add_argument("--home", default=None,
+                        help="explicit Hermes home to seed, used as given "
+                             "(default: $HERMES_HOME resolved to the Hermes "
+                             "ROOT, else ~/.hermes)")
+    args = parser.parse_args(argv)
+    home = args.home if args.home is not None else _root_home()
+    home = os.path.expanduser(home)
     soul = install_soul(os.path.join(home, "SOUL.md"))
     pers = install_personality(os.path.join(home, "config.yaml"))
     body = f"SOUL.md: {soul} | ops personality: {pers}"
@@ -274,4 +307,8 @@ if __name__ == "__main__":
         _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
     else:
         print(body)
-    sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

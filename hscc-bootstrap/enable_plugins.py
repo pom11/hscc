@@ -30,6 +30,7 @@ regardless can still force one via the ``HSCC_*_MODEL`` env overrides — those
 bypass the alias and are written verbatim. Bootstrap only emits the alias; the
 serving layer is what resolves alias → concrete id.
 """
+import argparse
 import os
 import sys
 
@@ -1227,10 +1228,39 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "hooks_file": hooks_file_result}
 
 
-if __name__ == "__main__":
-    path = os.path.join(
-        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-        "config.yaml")
+def _root_home(env=None, *, home=None):
+    """The Hermes ROOT home this installer seeds.
+
+    ``__main__`` is the INSTALLER entry (bootstrap.sh's only caller) and seeds
+    the install's ``config.yaml``. Hermes exports
+    ``HERMES_HOME=<root>/profiles/<name>`` under a profile — its normal run
+    mode — so a raw env join wires the caller's profile and leaves the ROOT
+    config unseeded. Resolve through the profiles-grandparent rule, the same
+    rung of the shared homes ladder as
+    ``hscc_daemon.hermes_python.hermes_homes`` (and the rule F2 landed in
+    ``install_review_skill.default_home`` via ``backup_util._hermes_root``).
+
+    An explicit ``--home`` never goes through here: it is used exactly as
+    given, so an operator can deliberately wire one profile.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("HERMES_HOME") or "").strip()
+    if not raw:
+        raw = os.path.join(os.path.expanduser(str(home or "~")), ".hermes")
+    return backup_util._hermes_root(raw)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Wire HSCC into a Hermes config.yaml (the ROOT install "
+                    "by default; --home to target one profile deliberately).")
+    parser.add_argument("--home", default=None,
+                        help="explicit Hermes home to wire, used as given "
+                             "(default: $HERMES_HOME resolved to the Hermes "
+                             "ROOT, else ~/.hermes)")
+    args = parser.parse_args(argv)
+    home = args.home if args.home is not None else _root_home()
+    path = os.path.join(os.path.expanduser(home), "config.yaml")
     res = enable(path)
     missing = res.get("config_missing")
     parts = [f"{k}: {', '.join(v)}" for k, v in res.items()
@@ -1252,4 +1282,8 @@ if __name__ == "__main__":
         _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
     else:
         print(body)
-    sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

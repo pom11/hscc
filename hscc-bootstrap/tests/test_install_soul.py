@@ -199,3 +199,41 @@ def test_main_summary_no_ansi(monkeypatch, tmp_path):
     assert "SOUL.md:" in out
     assert "ops personality" in out
     assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
+
+
+# ── __main__ ROOT resolution (t_290747e6) ───────────────────────────────────
+# Same contract as enable_plugins: the installer entry seeds the ROOT home even
+# from a profile-scoped HERMES_HOME; --home keeps an intentional profile wire.
+
+def test_main_resolves_profile_hermes_home_to_root(tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "backend-engineer"
+    profile.mkdir(parents=True)
+    (root / "config.yaml").write_text("{}\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert IS.main([]) == 0
+
+    assert (root / "SOUL.md").is_file()
+    cfg = yaml.safe_load((root / "config.yaml").read_text())
+    assert "HSCC" in cfg["personalities"]["ops"]
+    assert not (profile / "SOUL.md").exists(), \
+        "installer wrote the caller's profile, not the root"
+
+
+def test_main_home_flag_honors_explicit_target(tmp_path, monkeypatch):
+    root = tmp_path / "hermes"
+    profile = root / "profiles" / "backend-engineer"
+    profile.mkdir(parents=True)
+    root_cfg = root / "config.yaml"
+    root_cfg.write_text("{}\n")
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    (explicit / "config.yaml").write_text("{}\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert IS.main(["--home", str(explicit)]) == 0
+
+    assert (explicit / "SOUL.md").is_file()
+    assert not (root / "SOUL.md").exists()
+    assert "personalities" not in yaml.safe_load(root_cfg.read_text())
