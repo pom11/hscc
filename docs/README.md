@@ -108,8 +108,7 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   events, batch/debounce/rate rules, skip rules, `~/.hscc/orch_waker.json` config,
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
   row, and the retirement procedure for the `~/bin/orch-waker` stopgap — including
-  the known blocker that currently makes the built-in inert (state-file /
-  stream-state collision). **live**
+  the resolved state-file / stream-state collision that once made the built-in inert. **live**
 
 ## audit/
 
