@@ -13,17 +13,21 @@ any cherry-pick failure it aborts cleanly (never leaves the runtime in a
 conflicted state) and reports the failure so bootstrap can warn, not die. The
 permanent fix is the PR merging upstream, after which the feature arrives via a
 plain ``hermes update`` and this step becomes a no-op.
+
+The runtime checkout is resolved at CALL time through the shared homes ladder
+(``hscc_daemon.hermes_python.hermes_agent_dir``; see :func:`resolve_hermes_dir`).
+It must never be an import-time ``$HERMES_HOME/hermes-agent`` join: under a
+profile session that path cannot exist, and this step would report a green
+``skipped_missing`` while the feature stayed dropped (t_919ac971).
 """
 
 import json
 import os
 import re
 import subprocess
+import sys
 
 
-HERMES_DIR = os.path.join(
-    os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-    "hermes-agent")
 FORK_REMOTE = os.environ.get("HSCC_HERMES_FORK_REMOTE", "fork")
 FEATURE_BRANCH = os.environ.get(
     "HSCC_REVIEW_FEATURE_BRANCH", "feat/kanban-submit-review")
@@ -32,6 +36,99 @@ _MARKER = "kanban_submit_review"
 
 # A safe git ref token: alnum start, no leading '-' (blocks option smuggling).
 _REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` for the runtime-checkout ladder.
+
+    Deferred + guarded, same pattern as doctor.py's ``_load_orch_waker``: the
+    resolution rule lives with the shared ladder (t_314eb13c) so this step
+    cannot drift from how the rest of HSCC finds the Hermes install. Returns
+    the module, or None when hscc_daemon is not deployed next to this plugin
+    (a bootstrap-only install), in which case :func:`_fallback_homes` covers us.
+    """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        return None
+
+
+def _fallback_homes(env=None, *, home=None):
+    """Candidate Hermes ROOTS when ``hscc_daemon`` is unavailable.
+
+    Deliberately the SAME three steps as ``hermes_python.hermes_homes`` —
+    exported ``$HERMES_HOME``, its ``profiles/`` grandparent, then
+    ``~/.hermes`` — because a shorter list here is exactly the bug being fixed:
+    any resolver that looks only at the exported home reports "no runtime" from
+    every profile session. ``test_ladder_drift`` pins the two against each
+    other so this cannot drift silently.
+    """
+    env = os.environ if env is None else env
+    home = home or os.path.expanduser("~")
+    homes: list[str] = []
+
+    def _push(path):
+        if not path:
+            return
+        path = os.path.expanduser(str(path))
+        if path not in homes:
+            homes.append(path)
+
+    _push(env.get("HERMES_HOME", "").strip())
+    if homes:
+        parent = os.path.dirname(homes[0])
+        if parent and os.path.basename(parent) == "profiles":
+            _push(os.path.dirname(parent))
+    _push(os.path.join(os.path.expanduser(str(home)), ".hermes"))
+    return [os.path.join(h, "hermes-agent") for h in homes]
+
+
+def agent_dir_candidates(env=None, *, home=None) -> list[str]:
+    """Candidate ``hermes-agent`` checkout paths, in the order they are tried.
+
+    Shared-module ladder when available, :func:`_fallback_homes` otherwise.
+    Non-existent candidates are kept so :func:`resolve_hermes_dir` can report
+    every path it ruled out.
+    """
+    hp = _load_hermes_python()
+    if hp is not None:
+        return hp.agent_dir_candidates(env, home=home)
+    return _fallback_homes(env, home=home)
+
+
+def resolve_hermes_dir(env=None, *, home=None):
+    """Resolve the runtime checkout: ``(hermes_dir_or_None, searched_detail)``.
+
+    Resolved **at call time**, never at import. The old module-level
+    ``HERMES_DIR = $HERMES_HOME/hermes-agent`` (L24-25 before this fix) bound
+    the profile dir + ``hermes-agent`` — a path that cannot exist under a
+    profile session, which is Hermes' normal run mode. ``os.path.isdir`` was
+    then false, this step returned ``skipped_missing``/ok, bootstrap printed
+    "kanban review feature: skipped_missing" as a green row, and the PR #43425
+    feature a ``hermes update`` had dropped stayed dropped with nobody told
+    (t_919ac971).
+
+    ``searched_detail`` is non-None only on the no-runtime path, and names every
+    candidate that was ruled out — so a genuine "no Hermes install here" is
+    auditable rather than a bare word.
+    """
+    for cand in agent_dir_candidates(env, home=home):
+        try:
+            if os.path.isdir(cand):
+                return cand, None
+        except OSError:  # pragma: no cover - unreadable path is not a hit
+            continue
+    return None, ", ".join(agent_dir_candidates(env, home=home)) or "no candidate paths"
+
 
 
 def _git(args, cwd, timeout=60):
@@ -65,14 +162,30 @@ def _feature_state(hermes_dir):
         return "unreadable"
 
 
-def ensure_review_feature(hermes_dir=None, remote=None, branch=None):
+def ensure_review_feature(hermes_dir=None, remote=None, branch=None,
+                          env=None, home=None):
     """Ensure the kanban review feature is present in the Hermes runtime.
 
     Returns a dict: {status, ok, [detail]}. status is one of:
       already_present | applied | unreadable | not_git | dirty | fetch_failed |
       conflict | missing_ref | skipped_missing | invalid_config
+
+    ``hermes_dir=None`` resolves the checkout through the shared ladder at call
+    time (see :func:`resolve_hermes_dir`); an explicit ``hermes_dir`` is used as
+    given. ``env``/``home`` are injectable for tests so the ladder can be
+    exercised against fabricated roots — this step must never read or write the
+    operator's real ``~/.hermes`` from a test.
     """
-    hermes_dir = hermes_dir or HERMES_DIR
+    if not hermes_dir:
+        hermes_dir, searched = resolve_hermes_dir(env=env, home=home)
+        if not hermes_dir:
+            # Genuinely no Hermes runtime anywhere we look — the only case that
+            # stays fail-open ok=True (there is nothing here to install into).
+            # It is NOT silent any more: the detail names every candidate that
+            # was ruled out, so a resolver regression can no longer masquerade
+            # as "there is no runtime on this box".
+            return {"status": "skipped_missing", "ok": True,
+                    "detail": f"no hermes-agent checkout found in: {searched}"}
     remote = remote or FORK_REMOTE
     branch = branch or FEATURE_BRANCH
 
@@ -84,7 +197,8 @@ def ensure_review_feature(hermes_dir=None, remote=None, branch=None):
                 "detail": "remote/branch must match a plain ref token"}
 
     if not os.path.isdir(hermes_dir):
-        return {"status": "skipped_missing", "ok": True}
+        return {"status": "skipped_missing", "ok": True,
+                "detail": f"hermes-agent checkout missing at {hermes_dir}"}
 
     state = _feature_state(hermes_dir)
     if state == "present":

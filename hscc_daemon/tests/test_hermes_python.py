@@ -189,6 +189,80 @@ def test_describe_search_names_every_place_it_looked(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# hermes_agent_dir — the CHECKOUT ladder (t_919ac971)
+# --------------------------------------------------------------------------- #
+
+def _fake_checkout(root):
+    """Create ``<root>/hermes-agent`` as a runtime-ish dir; return its path."""
+    agent = root / "hermes-agent"
+    (agent / "tools").mkdir(parents=True)
+    return str(agent)
+
+
+def test_agent_dir_profile_exported_home_finds_the_root_checkout(tmp_path):
+    """THE regression (t_919ac971): a profile-exported HERMES_HOME whose root
+    carries hermes-agent must resolve the ROOT checkout, not report None."""
+    root = tmp_path / ".hermes"
+    real = _fake_checkout(root)
+    (root / "profiles" / "backend-engineer").mkdir(parents=True)
+
+    got = hermes_python.hermes_agent_dir(
+        {"HERMES_HOME": str(root / "profiles" / "backend-engineer")},
+        home=str(tmp_path))
+    assert got == real
+
+
+def test_agent_dir_profile_local_checkout_wins(tmp_path):
+    """A profile dir that carries its own checkout stays first, as for the venv."""
+    root = tmp_path / ".hermes"
+    _fake_checkout(root)
+    local = _fake_checkout(root / "profiles" / "worker")
+
+    got = hermes_python.hermes_agent_dir(
+        {"HERMES_HOME": str(root / "profiles" / "worker")}, home=str(tmp_path))
+    assert got == local
+
+
+def test_agent_dir_fail_closed_when_no_checkout_exists(tmp_path):
+    """No candidate carries hermes-agent → None (the caller must report it)."""
+    got = hermes_python.hermes_agent_dir(
+        {"HERMES_HOME": str(tmp_path / "profiles" / "worker")},
+        home=str(tmp_path))
+    assert got is None
+
+
+def test_agent_dir_candidates_do_not_invent_a_running_interpreter_path():
+    """The checkout ladder has NO running-interpreter fallback (unlike the venv
+    one). ``ensure_review_feature`` WRITES into the resolved checkout, so the
+    target must come from the configured home, not from whichever python
+    happened to invoke it."""
+    cands = hermes_python.agent_dir_candidates(
+        {"HERMES_HOME": ""}, home="/nonexistent-fixture")
+    assert all(c.endswith("hermes-agent") for c in cands)
+    assert sys.executable not in cands
+
+
+def test_agent_dir_skips_a_home_whose_checkout_is_a_file(tmp_path):
+    """A stale ``hermes-agent`` FILE is not a checkout — fall through, don't
+    hand a non-directory to a caller that is about to run git in it."""
+    root = tmp_path / ".hermes"
+    (root / "profiles" / "worker").mkdir(parents=True)
+    (root / "hermes-agent").write_text("not a dir\n")
+
+    assert hermes_python.hermes_agent_dir(
+        {"HERMES_HOME": str(root / "profiles" / "worker")},
+        home=str(tmp_path)) is None
+
+
+def test_describe_agent_search_names_every_checkout_ruled_out(tmp_path):
+    profile = tmp_path / ".hermes" / "profiles" / "worker"
+    desc = hermes_python.describe_agent_search({"HERMES_HOME": str(profile)},
+                                              home=str(tmp_path))
+    assert str(profile / "hermes-agent") in desc
+    assert str(tmp_path / ".hermes" / "hermes-agent") in desc
+
+
+# --------------------------------------------------------------------------- #
 # drift guard: bootstrap.sh resolves the same ladder in shell
 # --------------------------------------------------------------------------- #
 

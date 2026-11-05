@@ -35,6 +35,14 @@ resolve_hermes_python`` probes with a subprocess; this module is
 stdlib-only, import-time-safe and process-cheap so the install paths can use
 it without spawning anything).
 
+The same profile-vs-root trap applies to the CHECKOUT itself, not only to the
+interpreter inside it: ``ensure_review_feature.py`` used to bind
+``$HERMES_HOME/hermes-agent`` at import, so under a profile session the runtime
+looked absent, it returned ``skipped_missing``/ok, and bootstrap printed a
+near-green line while the review feature stayed dropped (t_919ac971).
+:func:`hermes_agent_dir` walks the same homes ladder for the checkout, so
+callers that need the repository resolve it in the same one place.
+
 All three inputs are injectable so the ladder is testable without touching
 the operator's real ``~/.hermes`` — see
 ``hscc_daemon/tests/test_hermes_python.py``.
@@ -167,6 +175,56 @@ def hermes_venv_python(env=None, *, home=None, sys_executable=None) -> str | Non
         except OSError:  # pragma: no cover - unreadable path is not a hit
             continue
     return None
+
+
+def agent_dir_candidates(env=None, *, home=None) -> list[str]:
+    """Every candidate ``hermes-agent`` CHECKOUT path, in the order they should be tried.
+
+    Same homes ladder as :func:`hermes_homes`, joined to ``hermes-agent`` — the
+    checkout itself, not the interpreter inside it. Candidates are returned even
+    when they do not exist so a caller can print where it looked
+    (:func:`describe_agent_search`).
+
+    Deliberately NO running-interpreter fallback here, unlike
+    :func:`venv_python_candidates`. That fallback exists because a venv this
+    process is inside demonstrably carries Hermes' deps, which is the only
+    property the API unit needs. A checkout is different: it is the repository a
+    caller is about to WRITE to (``ensure_review_feature`` cherry-picks into
+    it), and deriving the write target from whichever python happened to invoke
+    the script could point it at a checkout unrelated to the configured home.
+    Checkout resolution stays env/home-driven — which also keeps
+    "nothing exists anywhere" a state a test can fabricate hermetically.
+    """
+    candidates: list[str] = []
+    for h in hermes_homes(env, home=home):
+        cand = os.path.join(os.path.expanduser(str(h)), AGENT_DIR)
+        if cand not in candidates:
+            candidates.append(cand)
+    return candidates
+
+
+def hermes_agent_dir(env=None, *, home=None) -> str | None:
+    """Absolute path of the ``hermes-agent`` checkout, or None when there is none.
+
+    The runtime checkout — where ``tools/kanban_tools.py`` and ``.git`` live.
+    Returns the first candidate from :func:`agent_dir_candidates` that is a real
+    DIRECTORY. ``None`` means no candidate exists anywhere searched: a caller
+    must report that as "there is no runtime here", never as a silent no-op
+    (that is exactly how t_919ac971's silent skip read as near-green).
+    """
+    for cand in agent_dir_candidates(env, home=home):
+        try:
+            if os.path.isdir(cand):
+                return cand
+        except OSError:  # pragma: no cover - unreadable path is not a hit
+            continue
+    return None
+
+
+def describe_agent_search(env=None, *, home=None) -> str:
+    """One-line "where did you look" for the no-checkout report."""
+    cands = agent_dir_candidates(env, home=home)
+    return ", ".join(cands) if cands else "no candidate paths"
 
 
 def describe_search(env=None, *, home=None, sys_executable=None) -> str:
