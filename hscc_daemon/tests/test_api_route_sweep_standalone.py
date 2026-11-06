@@ -337,3 +337,43 @@ def test_run_all_keeps_a_crashed_sweep_out_of_the_red(tmp_path):
     script.write_text("raise SystemExit(1)\n")
     assert check_api_routes(script=str(script),
                             python=sys.executable)["ok"] is None
+
+
+# ── 4. required query parameters (t_0494b09e) ───────────────────────────────
+
+def test_logs_probe_sends_source_and_limit(tmp_path):
+    """The /v1/logs probe must send the query the app sends, not a bare path.
+
+    ``handle_logs`` answers 400 when ``source`` is omitted (it validates the
+    parameter before reading anything), so an unparameterised probe was a
+    permanent false red on a healthy API. Capture the URL curl is actually
+    handed and pin both the required ``source`` and the bounded ``limit``.
+    """
+    root, script = _fake_keg(tmp_path, theme="")
+    (root / "ios-app" / "Sources" / "HSCC" / "HSCCClient.swift").write_text(
+        'func health() { get("/v1/health") }\n'
+        'func logs()   { get("/v1/logs") }\n')
+
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    capture = tmp_path / "urls.txt"
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "for last; do :; done\n"
+        'echo "$last" >> "%s"\n'
+        "printf '{\"ok\": true}\\n200 0.01'\n" % capture)
+    curl.chmod(0o755)
+
+    cp = _run(script, ["--json"], tmp_path, cwd="/",
+              path=str(bindir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    captured = capture.read_text().splitlines()
+    assert "http://127.0.0.1:1/v1/logs?source=daemon&limit=1" in captured
+    assert "http://127.0.0.1:1/v1/logs" not in captured
+
+    row = next(r for r in json.loads(cp.stdout)["routes"]
+               if r["route"] == "/v1/logs")
+    assert row["ok"] is True
+    assert "source=daemon" in row["note"] and "limit=1" in row["note"]
+
