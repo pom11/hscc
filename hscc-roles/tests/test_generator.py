@@ -110,6 +110,76 @@ def test_generate_profile_idempotent(tmp_path, monkeypatch):
     assert changed_second is False  # unchanged content → no rewrite
 
 
+# -- SOUL regeneration keeps operator-owned trailing sections (t_8695aa1a) --
+
+def test_regen_preserves_operator_soul_section(tmp_path, monkeypatch):
+    """An operator-appended `## ` section survives a regeneration."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+            "preload_skills": []}
+    generator.generate_profile(spec, base_identity="BASE")
+    soul_path = tmp_path / "profiles" / "demo-orch" / "SOUL.md"
+    operator = ("## OpenCode routing (operator 2026-11-05)\n\n"
+                "Keep this operator block.\n")
+    soul_path.write_text(soul_path.read_text() + "\n\n" + operator)
+
+    changed = generator.generate_profile(spec, base_identity="BASE")
+
+    text = soul_path.read_text()
+    assert changed is True
+    assert operator.strip() in text
+    assert text.count("## OpenCode routing (operator 2026-11-05)") == 1
+
+
+def test_regen_operator_section_is_idempotent(tmp_path, monkeypatch):
+    """Two regenerations with an operator section yield the same bytes."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+            "preload_skills": []}
+    generator.generate_profile(spec, base_identity="BASE")
+    soul_path = tmp_path / "profiles" / "demo-orch" / "SOUL.md"
+    soul_path.write_text(
+        soul_path.read_text()
+        + "\n\n## OpenCode routing (operator 2026-11-05)\n\nKeep this.\n")
+    generator.generate_profile(spec, base_identity="BASE")
+    first = soul_path.read_text()
+
+    assert generator.generate_profile(spec, base_identity="BASE") is False
+    assert soul_path.read_text() == first
+    assert first.count("## OpenCode routing (operator 2026-11-05)") == 1
+
+
+def test_regen_updates_generated_section_not_duplicated(tmp_path, monkeypatch):
+    """A stale copy of a GENERATED section is replaced, never appended twice."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
+    generator.generate_profile(spec, base_identity="BASE")
+    soul_path = tmp_path / "profiles" / "coder" / "SOUL.md"
+    stale = soul_path.read_text().replace(
+        "## Operational\n\n", "## Operational\n\nSTALE GENERATED BODY.\n\n", 1)
+    assert "STALE GENERATED BODY." in stale
+    soul_path.write_text(stale)
+
+    generator.generate_profile(spec, base_identity="BASE")
+
+    text = soul_path.read_text()
+    assert "STALE GENERATED BODY." not in text
+    assert text.count("## Operational") == 1
+
+
+def test_regen_without_operator_sections_is_byte_identical(tmp_path, monkeypatch):
+    """No operator sections -> exactly today's compose_soul() output."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
+    generator.generate_profile(spec, base_identity="BASE")
+    soul_path = tmp_path / "profiles" / "coder" / "SOUL.md"
+    assert soul_path.read_text() == generator.compose_soul(spec, "BASE")
+
+
 # -- orchestrator cluster-control toolsets (t_ef4a6c1d) --
 #
 # An orchestrator is supposed to have FULL control — its profiles must carry the
