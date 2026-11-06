@@ -339,7 +339,7 @@ def _ordering_offence(src):
 
 
 _SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", "build",
-              "dist", ".pytest_cache", "_archive", "docs"}
+              "dist", ".pytest_cache", "_archive", "docs", ".worktrees"}
 
 
 def _bare_runnable_modules():

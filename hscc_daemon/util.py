@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 
 
-def run_cmd(args, timeout=30, as_json=False, shell=False):
+def run_cmd(args, timeout=30, as_json=False, shell=False, env=None):
     """Run a command and return structured output.
 
     On a non-zero exit, ``output`` folds stdout AND stderr together so the
@@ -18,6 +18,12 @@ def run_cmd(args, timeout=30, as_json=False, shell=False):
     — autodown's failure reason was empty for exactly this reason); a separate
     ``stderr`` field is also kept for structured access. ``as_json`` parses
     stdout as JSON instead.
+
+    ``env`` overlays extra variables on the CURRENT environment for this
+    child only (``None`` keeps today's inherit-everything behaviour). Callers
+    use it for per-invocation pins such as ``UV_PYTHON`` — never to replace
+    the environment wholesale, which would drop PATH and the operator's
+    variables.
 
     sparkrun argvs are made PATH-independent here (t_b543e530): a logical
     ``["sparkrun", ...]`` argv gets argv[0] swapped to the resolved ABSOLUTE CLI
@@ -37,8 +43,13 @@ def run_cmd(args, timeout=30, as_json=False, shell=False):
         from . import sparkrun_bin
         args = sparkrun_bin.exec_argv(args)
     try:
+        run_env = None
+        if env:
+            run_env = os.environ.copy()
+            run_env.update(env)
         result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, shell=shell
+            args, capture_output=True, text=True, timeout=timeout, shell=shell,
+            env=run_env
         )
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()

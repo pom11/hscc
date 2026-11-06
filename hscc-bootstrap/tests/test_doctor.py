@@ -412,6 +412,26 @@ class TestSparkrunCheck:
         assert check.ok is False
         assert "not on PATH" in check.detail
 
+    def test_warns_when_uv_default_is_314(self, monkeypatch):
+        """A 3.14 uv default breaks sparkrun's LiteLLM (uvloop) — warn only."""
+        monkeypatch.delenv("UV_PYTHON", raising=False)
+        with patch("shutil.which",
+                   side_effect=lambda n: "/usr/local/bin/sparkrun"
+                   if n == "sparkrun" else "/usr/local/bin/uv"):
+            check = doctor._sparkrun_ok(_uv_runner=lambda: subprocess.CompletedProcess(
+                [], 0, stdout="3.14.0\n", stderr=""))
+        assert check.ok is False and check.fatal is False
+        assert "3.14" in check.detail and "UV_PYTHON=3.12" in check.fix
+
+    def test_operator_uv_python_pin_is_respected(self, monkeypatch):
+        """An exported UV_PYTHON is the operator's explicit choice."""
+        monkeypatch.setenv("UV_PYTHON", "3.12")
+        def _must_not_run():
+            raise AssertionError("uv probe ran despite UV_PYTHON")
+        with patch("shutil.which", return_value="/usr/local/bin/sparkrun"):
+            check = doctor._sparkrun_ok(_uv_runner=_must_not_run)
+        assert check.ok is True
+
 
 class TestGatewayCheck:
     """GAP-F-3 (t_f766ddd5): the row must not print "not running" on a LIVE gateway.
