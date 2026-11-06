@@ -8,7 +8,7 @@ small curated delta, done.
 
 ## hermes/ — applies onto NousResearch/hermes-agent
 
-**Re-based onto v2026.9.11.** The kanban review-flow feature that powered
+**Re-based onto v0.23.0.** The kanban review-flow feature that powered
 HSCC's WS4 autonomous-review gate was absorbed upstream — upstream now ships
 `kanban_request_review` / `request_review` / `claim_review_task` /
 `request_changes` + KANBAN_GUIDANCE coverage (strict superset of the fork's
@@ -20,8 +20,6 @@ below). What remains carried is the unabsorbed delta:
 | 0001 | fix(kanban): rewrite unknown create-assignee to default_assignee (`tools/kanban_tools.py`) |
 | 0002 | feat(kanban): pure review-pairing transform for decompose (`hermes_cli/kanban_decompose.py` + `tests/test_kanban_review_pairing.py`) |
 | 0003 | feat(kanban): auto_review config policy reader (`hermes_cli/kanban_decompose.py`) |
-| 0007 | chore: remove obsolete holographic-memory plugin |
-| 0008 | fix(kanban): board argument always wins over env override in path resolution (`hermes_cli/kanban_db.py`) |
 | 0009 | fix(kanban): re-read dispatch caps live every tick, not at boot (`gateway/kanban_watchers_dispatcher.py`) |
 | 0010 | test(kanban): prove caps resolve live each tick (`tests/gateway/test_kanban_caps_live_reload.py`) |
 | 0011 | fix(kanban): reset started_at on reclaim and set fresh on each claim (`hermes_cli/kanban_db.py`) |
@@ -33,22 +31,28 @@ Notes on the re-base:
   that wiring (net-zero churn). Under the acceptance gate each patch must apply
   independently to pristine, which a removal-only patch cannot. The net intent
   (helpers present, auto-pairing OFF) is preserved by 0002+0003 alone.
-- **0006 dropped (absorbed)**: upstream v2026.9.11 already implements the
+- **0006 dropped (absorbed)**: upstream v0.23.0 already implements the
   review flow natively as `kanban_request_review` (see above).
-- **c873decc80's `cli.py` half absorbed**: the carried `deterministic
-  session-end flush` (c873decc80) touched both `cli.py` and `kanban_db.py`.
-  v2026.9.11 already finalizes the single-query worker session deterministically
-  (`finally: _finalize_single_query(cli)` @ cli.py:4436) and flushes the
-  session-store before the kanban `os._exit(0)` signal path (@ cli.py:4222-4228),
-  so only the `kanban_db.py` board-precedence half survives as patch 0008.
-- Spread across 6 modules + tests; the decompose review-pairing helpers
+- **0007 dropped (absorbed)**: v0.22.0 moved the holographic memory provider out
+  of core into the external plugin catalog, so `plugins/memory/holographic/` no
+  longer exists upstream and the removal patch is obsolete.
+- **0008 dropped (absorbed)**: v0.23.0's `_board_path` honours an explicit
+  `board=` outside fenced workers via `_explicit_board_slug` /
+  `_explicit_board_intent_pinned`, so the board-precedence fix is upstream; the
+  remaining delta is only the worker/subagent fence, which we accept.
+- **c873decc80 absorbed**: the carried `deterministic session-end flush`
+  (c873decc80) touched both `cli.py` and `kanban_db.py`. Upstream already
+  finalizes the single-query worker session deterministically and flushes the
+  session-store before the kanban `os._exit(0)` signal path, and its board
+  precedence now matches 0008's intent (dropped above), so no part remains.
+- Spread across 5 modules + tests; the decompose review-pairing helpers
   (0002/0003) are dormant — `_apply_fanout` does NOT call them; review is
   handled by the native built-in review-status path.
 
 Excluded from the curated set (not HSCC-essential): the holographic-memory
-plugin removal was re-based as 0007 (retained for historical continuity) but is
-a no-op against v2026.9.11; the Jun-3 autostash recovery commit was local
-cleanup, not a feature HSCC needs to carry forward.
+plugin removal (0007) is dropped because upstream removed the plugin from core;
+the Jun-3 autostash recovery commit was local cleanup, not a feature HSCC needs
+to carry forward.
 
 ## sparkrun/ — applies onto spark-arena/sparkrun
 
