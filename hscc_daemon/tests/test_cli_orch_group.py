@@ -145,14 +145,14 @@ class TestOrchGroupDispatch:
         the plain view rebuilds the same shape from the receipt fields."""
         eng = StubEngine(result={"pane": "%9", "target": "s1:0.4",
                                 "profile": "demo-orch", "busy": True,
-                                "mode": "queue", "verb": "/queue ",
+                                "mode": "queue", "verb": "/queue add ",
                                 "interrupts": False,
-                                "sent_text": "/queue hello"})
+                                "sent_text": "/queue add hello"})
         _with_engine(monkeypatch, eng)
         rc, out = _main(monkeypatch, ["orch", "inject", "demo-orch", "hello"])
         assert rc == 0
         assert "target: demo-orch @ s1:0.4 (busy) -> queue" in out
-        assert "(12 chars)" in out      # len("/queue hello")
+        assert "(16 chars)" in out      # len("/queue add hello")
 
     def test_theme_flag_is_stripped_before_the_engine(self, monkeypatch):
         """`--theme` selects the human palette; the engine verb has no such
@@ -357,7 +357,7 @@ class FakeReplModule:
                            "dry_run": dry_run})
         eff = "queue" if (mode == "auto" and self.busy) else \
             ("plain" if mode in ("auto", "interrupt") else mode)
-        verb = {"plain": "", "queue": "/queue ", "steer": "/steer "}[eff]
+        verb = {"plain": "", "queue": "/queue add ", "steer": "/steer "}[eff]
         base = {"pane": "%7", "target": "s1:0.1", "profile": profile,
                 "busy": self.busy, "mode": eff, "verb": verb,
                 "interrupts": eff == "plain" and self.busy}

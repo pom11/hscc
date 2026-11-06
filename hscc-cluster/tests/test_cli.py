@@ -206,7 +206,7 @@ class FakeReplModule:
             raise self.fail
         eff = "queue" if (mode == "auto" and self.busy) else \
             ("plain" if mode in ("auto", "interrupt") else mode)
-        verb = {"plain": "", "queue": "/queue ", "steer": "/steer "}[eff]
+        verb = {"plain": "", "queue": "/queue add ", "steer": "/steer "}[eff]
         base = {"pane": "%7", "target": "s1:0.1", "profile": profile,
                 "busy": self.busy, "mode": eff, "verb": verb,
                 "interrupts": eff == "plain" and self.busy}
@@ -259,7 +259,7 @@ class TestOrchInjectVerb:
         fake = FakeReplModule(busy=True)
         r = cluster_hscc_engine.cmd_orch_inject(
             ["demo-orch", "ping", "--dry-run"], repl=fake)
-        assert r["mode"] == "queue" and r["verb"] == "/queue " and r["interrupts"] is False
+        assert r["mode"] == "queue" and r["verb"] == "/queue add " and r["interrupts"] is False
         assert "(busy) -> queue" in r["line"]
 
     def test_explicit_mode_passed_straight_through(self):

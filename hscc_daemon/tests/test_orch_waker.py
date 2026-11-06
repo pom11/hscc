@@ -743,7 +743,7 @@ def test_run_tick_wires_the_real_repl_inject_entry_point(tmp_path, state_path,
     run_tmux/run_ps seams are stubbed so pane discovery + the busy marker +
     bracketed paste all run their REAL code against a fake tmux transcript.
     Asserts the queue path: the fake pane shows the busy marker and the keys
-    the fake tmux receives start with '/queue '.
+    the fake tmux receives start with '/queue add '.
     """
     ri = ow.load_repl_inject()
     assert ri is not None, "hscc-api/repl_inject.py must import beside hscc_daemon"
@@ -770,7 +770,7 @@ def test_run_tick_wires_the_real_repl_inject_entry_point(tmp_path, state_path,
     dec, _ = _deliver(tmp_path, state_path, env, repl=None)   # real module path
     assert dec[0]["ok"] is True
     queue_key = [a for a in sent if "-l" in a]                # the /queue prefix
-    assert queue_key and queue_key[0][queue_key[0].index("-l") + 1] == "/queue "
+    assert queue_key and queue_key[0][queue_key[0].index("-l") + 1] == ri.VERB_PREFIX["queue"]
     assert any(a[0] == "send-keys" and a[-1] == "Enter" for a in sent)
     line, = audit_lines(env["audit_path"])
     assert line["ok"] is True and line["profile"] == "b-orch"

@@ -219,7 +219,7 @@ class FakeReplInject:
         if self.fail:
             raise self.fail
         return {"pane": "%1", "target": "s1:0.0", "profile": profile, "busy": mode == "auto",
-                "mode": "queue" if mode == "auto" else mode, "verb": "/queue ",
+                "mode": "queue" if mode == "auto" else mode, "verb": "/queue add ",
                 "interrupts": False, "sent_text": message}
 
 

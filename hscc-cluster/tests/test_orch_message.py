@@ -37,7 +37,7 @@ class FakeInjectError(Exception):
 
 
 class FakeRepl:
-    VERB_PREFIX = {"plain": "", "queue": "/queue ", "steer": "/steer "}
+    VERB_PREFIX = {"plain": "", "queue": "/queue add ", "steer": "/steer "}
 
     def __init__(self, panes=None, busy=False, raise_exc=None, legacy=False):
         self.panes = panes if panes is not None else [
@@ -175,7 +175,7 @@ def test_busy_target_queues_idle_target_sends_plain(repl):
     this tool (the receipt would carry '/steer' if it were)."""
     repl.busy = True
     out = send(message="heads up")
-    assert out["mode"] == "queue" and out["verb"] == "/queue "
+    assert out["mode"] == "queue" and out["verb"] == "/queue add "
     assert repl.calls[0]["mode"] == "auto"  # the tool asks for auto, never steer
 
     repl.busy = False
@@ -191,14 +191,14 @@ def test_legacy_receipt_without_verb_still_reports_a_verb(repl):
     repl.legacy = True
     repl.busy = True
     out = send(message="queued on purpose")
-    assert out["mode"] == "queue" and out["verb"] == "/queue "
+    assert out["mode"] == "queue" and out["verb"] == "/queue add "
 
 
 # ── GAP-C-4: the mode→verb table is repl_inject's, never copied here ────────
 #
-# Before this card, orch_message carried its own fallback table
-# (`{"plain": "", "queue": "/queue "}`) for the case where the loaded
-# repl_inject exposes no table. A second source of truth that is already stale
+# Before this card, orch_message carried its own fallback table (with a
+# queue entry) for the case where the loaded repl_inject exposes no table.
+# A second source of truth that is already stale
 # — the real one has a `steer` entry the copy never did. The four tests below
 # pin the two against diverging again: two read the CANONICAL table and compare
 # (one through the tool, one against the helper), one pins the pre-parity
@@ -257,8 +257,9 @@ def test_pre_parity_table_is_read_by_name_not_reimplemented(real_repl):
     when this path runs in production. The derived verbs must equal the
     canonical ones, including `steer`, which the deleted copy lacked."""
     class PreParityRepl:
-        # v2.14.0's private table, verbatim shape (extra `interrupt` key).
-        _PREFIX = {"queue": "/queue ", "steer": "/steer ",
+        # The pre-parity private table's shape (extra `interrupt` key), with
+        # the current canonical verbs so the two tables can be compared.
+        _PREFIX = {"queue": "/queue add ", "steer": "/steer ",
                    "interrupt": "", "plain": ""}
 
     for mode, canonical in real_repl.VERB_PREFIX.items():
