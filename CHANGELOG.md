@@ -11,6 +11,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.4] - 2026-11-06
+
+### Changed
+- **Hermes runtime moves to v0.23.0 on Python 3.14.** The carried Hermes patch set is re-based onto v0.23.0: `0007` (holographic memory removal) and `0008` (board argument over env override) are dropped because upstream absorbed both, `0011` (fresh `started_at` on claim, cleared on reclaim) and `0012` (out-of-tree worktree root) are regenerated, and all seven remaining patches apply on their own to pristine v0.23.0. The compatibility audit behind it is `docs/audits/2026-11-06-hermes-0.23-compat.md` (patch verdicts, integration points, behaviour changes, cutover recipe).
+
+### Fixed
+- **Proxy relaunch can no longer pick Python 3.14 for LiteLLM.** The daemon
+  launches `sparkrun proxy start` / orphan repair with `UV_PYTHON=3.12` unless
+  the operator already exported `UV_PYTHON`, so uv's machine-global default can
+  no longer break uvloop on :4000. `hscc doctor` warns when `uv python find
+  --no-project` resolves >= 3.14 with no `UV_PYTHON` pin.
+- **v0.23.0 runtime rebuild docs corrected.** The compatibility audit's cutover
+  checklist now uses the uv-managed 3.14 sync recipe, the optional-package
+  freeze diff (`xpress9` excluded), the `hscc-cli` install, and records the
+  32 -> 52 config migrations that reset personality/delegation/curator values.
+- **README lint index + repo-wide import-order guard.** Indexed the Hermes
+  v0.23.0 compatibility audit in `docs/README.md`, and the standalone-import
+  guard now skips `.worktrees/` just like pytest's `norecursedirs`.
+- **Board freshness reads survive Hermes v0.23.0's no-resurrection rule.**
+  `kanban.list_board_watermarks()` now skips a configured board that no longer
+  exists instead of letting `connect(board=...)` abort `flightdeck standup`
+  (v0.23.0 raises `ValueError: kanban board '…' does not exist`).
+- **The brew keg dependency list carries `ruamel.yaml==0.18.16`.** Hermes
+  v0.23.0 imports `ruamel` eagerly through `hermes_yaml` on the kanban
+  board-read chain; without the pin the keg venv reports
+  `No module named 'ruamel'`. The tap formula still needs a matching
+  `resource "ruamel.yaml"` block and a keg reinstall.
+- **Daemon fixtures and the blind-venv control track v0.23.0 board shapes.**
+  Named-board fixtures now plant the `board.json` identity marker that v0.23.0
+  discovery requires, and the negative control blinds `ruamel` (the eager
+  import) rather than `httpx` (now lazy).
+- **Queued REPL messages use `/queue add`, so text can never manage the queue.**
+  `hscc-api/repl_inject.py` sent `"/queue " + text`; Hermes v0.22+ parses
+  `/queue list|clear|edit N|rm N|move A B` as queue management, so a queued
+  message starting with one of those words could wipe or edit the orchestrator's
+  queue. The explicit `add` form always enqueues (upstream
+  `hermes_cli/cli_loops_mixin.py`), and a regression test pins `"clear the
+  board"` arriving as `/queue add clear the board`.
+- **`hscc verify` accepts `multiplex_profiles` under `gateway:` as well as at
+  the top level.** Hermes v0.23.0 may migrate the flag to
+  `gateway.multiplex_profiles` and pop the top-level key, which made
+  `check_config_wiring` report a false `missing: multiplex_profiles`. Both
+  shapes now pass; missing in both still fails.
+- **`hscc api install-service` writes a version-stable WorkingDirectory.**
+  The launchd unit pinned the brew Cellar keg path
+  (`<prefix>/Cellar/hscc/<ver>/libexec/hscc/hscc-api`), which `brew upgrade`
+  deletes, leaving launchd unable to start the API (exit 78 EX_CONFIG). A
+  keg-shaped path is now rewritten to `<prefix>/opt/hscc/<same suffix>`;
+  non-brew layouts are unchanged.
 ## [2.15.3] - 2026-11-05
 
 ### Added
