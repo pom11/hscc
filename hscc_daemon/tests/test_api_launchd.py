@@ -38,6 +38,36 @@ def test_plist_runs_api_server_serve_with_hermes_python():
     assert d["WorkingDirectory"] == "/repo/hscc-api"
 
 
+def test_brew_cellar_working_directory_is_rewritten_to_stable_opt_path():
+    """A keg path dies at `brew upgrade`; `<prefix>/opt/hscc` survives it."""
+    for prefix in ("/opt/homebrew", "/usr/local"):
+        d = api_launchd.build_api_plist(
+            "/p", f"{prefix}/Cellar/hscc/2.15.2/libexec/hscc/hscc-api")
+        assert d["WorkingDirectory"] == \
+            f"{prefix}/opt/hscc/libexec/hscc/hscc-api"
+
+
+def test_non_brew_working_directory_is_unchanged():
+    for path in ("/repo/hscc-api",
+                 "/Users/operator/src/hscc/hscc-api",
+                 "/opt/homebrew/Cellar/other/1.0/libexec/hscc",
+                 "/opt/homebrew/opt/hscc/libexec/hscc/hscc-api"):
+        d = api_launchd.build_api_plist("/p", path)
+        assert d["WorkingDirectory"] == path
+
+
+def test_install_pins_stable_path_across_a_version_bump(home):
+    """Rewrite only the version segment: 2.15.2 -> 2.15.3 is a no-op."""
+    old = "/opt/homebrew/Cellar/hscc/2.15.2/libexec/hscc/hscc-api"
+    new = "/opt/homebrew/Cellar/hscc/2.15.3/libexec/hscc/hscc-api"
+    res = api_launchd.install_api_plist(old, python_path="/venv/bin/python3")
+    with open(res["path"], "rb") as fh:
+        assert plistlib.load(fh)["WorkingDirectory"] == \
+            "/opt/homebrew/opt/hscc/libexec/hscc/hscc-api"
+    again = api_launchd.install_api_plist(new, python_path="/venv/bin/python3")
+    assert again["changed"] is False
+
+
 def test_plist_survives_reboot_and_crash():
     d = api_launchd.build_api_plist("/p", "/d")
     assert d["RunAtLoad"] is True and d["KeepAlive"] is True

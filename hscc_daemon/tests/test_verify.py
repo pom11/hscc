@@ -739,6 +739,37 @@ class TestCheckConfigWiring:
         result = check_config_wiring(config=str(config))
         assert result["ok"] is True
 
+    def test_ok_multiplex_under_gateway(self, tmp_path):
+        """v0.23.0's migration may pop the top-level key into gateway."""
+        from hscc_daemon.verify import check_config_wiring
+        import yaml
+        config = tmp_path / "config.yaml"
+        cfg = {
+            "gateway": {"multiplex_profiles": True},
+            "kanban": {"max_in_progress": 3},
+            "toolsets": ["hscc-cluster"],
+        }
+        config.write_text(yaml.dump(cfg))
+
+        result = check_config_wiring(config=str(config))
+        assert result["ok"] is True
+        assert result["detail"] == "all wiring checks passed"
+
+    def test_fail_multiplex_missing_in_both_shapes(self, tmp_path):
+        from hscc_daemon.verify import check_config_wiring
+        import yaml
+        config = tmp_path / "config.yaml"
+        cfg = {
+            "gateway": {},
+            "kanban": {"max_in_progress": 3},
+            "toolsets": ["hscc-cluster"],
+        }
+        config.write_text(yaml.dump(cfg))
+
+        result = check_config_wiring(config=str(config))
+        assert result["ok"] is False
+        assert "multiplex_profiles" in result["detail"]
+
     def test_fail_missing_items(self, tmp_path):
         from hscc_daemon.verify import check_config_wiring
         import yaml
