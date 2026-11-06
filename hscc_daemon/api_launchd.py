@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 
 try:  # package import — the deployed-plugin shape (`hscc api install-service`)
     from . import hermes_python
@@ -36,6 +37,32 @@ except ImportError:  # bare import — tests/ load this dir straight onto sys.pa
 
 API_LABEL = "com.hscc.api"
 API_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{API_LABEL}.plist")
+
+# A brew keg lives at <prefix>/Cellar/hscc/<version>/...; `brew upgrade` deletes
+# that whole versioned directory, leaving a launchd WorkingDirectory that can
+# never start (exit 78 EX_CONFIG). The `<prefix>/opt/hscc` symlink is repointed
+# by brew, so it survives upgrades. Rewrite only that exact shape; a git
+# checkout or any other layout is returned unchanged.
+_CELLAR_HSCC_RE = re.compile(
+    r"^(?P<prefix>.+?)/Cellar/hscc/[^/]+(?:/(?P<suffix>.*))?$")
+
+
+def stable_working_directory(path: str) -> str:
+    """Return the version-stable brew opt path for a Cellar keg, else ``path``.
+
+    ``/opt/homebrew/Cellar/hscc/2.15.2/libexec/hscc/hscc-api`` becomes
+    ``/opt/homebrew/opt/hscc/libexec/hscc/hscc-api`` (same suffix), so the
+    launchd unit keeps working after ``brew upgrade`` removes the keg.
+    """
+    path = os.path.abspath(path)
+    match = _CELLAR_HSCC_RE.match(path)
+    if not match:
+        return path
+    stable = f"{match.group('prefix')}/opt/hscc"
+    suffix = match.group("suffix")
+    if suffix:
+        stable += f"/{suffix}"
+    return stable
 
 
 def serve_args(bind: str | None = None,
@@ -112,7 +139,7 @@ def build_api_plist(python_path: str, hscc_api_dir: str, *,
         "Label": API_LABEL,
         "ProgramArguments": [python_path, "-m", "api_server", "serve",
                              *(serve_extra_args or [])],
-        "WorkingDirectory": hscc_api_dir,
+        "WorkingDirectory": stable_working_directory(hscc_api_dir),
         "RunAtLoad": True,
         "KeepAlive": True,
         # t_d2245e7e: launchd's default throttle is 10s, and a KeepAlive unit

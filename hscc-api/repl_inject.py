@@ -20,7 +20,7 @@ Mechanism (identical to the proven tool):
   * resolution: EXACTLY ONE pane for the profile, or refuse. Never guess —
     a wrong injection target is worse than no injection (the operator's rule:
     never inject a REPL you did not pick).
-  * modes: ``plain`` (no verb prefix), ``queue`` (``/queue ``), ``steer``
+  * modes: ``plain`` (no verb prefix), ``queue`` (``/queue add ``), ``steer``
     (``/steer ``) and ``auto`` = ``queue`` while busy else ``plain``. The
     busy prompt shows ``msg=interrupt``, i.e. a plain message sent during a
     running turn INTERRUPTS it; ``auto`` therefore queues so a running goal is
@@ -60,7 +60,8 @@ REPLY_BOX = "☤ Hermes"               # header of the assistant's reply box
 # Modes (operator naming contract, same as ~/bin/hermes-inject):
 #   plain   -> no verb prefix (the reference tool's `interrupt`; a plain
 #              message sent while a turn runs is what INTERRUPTS it)
-#   queue   -> "/queue "   (never cuts off a running turn)
+#   queue   -> "/queue add " (never cuts off a running turn; the explicit
+#              `add` form cannot be mistaken for queue management)
 #   steer   -> "/steer "
 #   auto    -> queue when the pane is busy, plain when it is idle
 # `interrupt` is kept as a legacy alias of `plain` so callers written against
@@ -70,7 +71,7 @@ MODES = ("auto", "plain", "queue", "steer")
 LEGACY_MODES = ("interrupt",)            # accepted, normalised to `plain`
 
 # The ONE verb table in the repo: resolved mode -> what gets typed first.
-VERB_PREFIX = {"plain": "", "queue": "/queue ", "steer": "/steer "}
+VERB_PREFIX = {"plain": "", "queue": "/queue add ", "steer": "/steer "}
 
 
 class InjectError(Exception):
@@ -423,7 +424,7 @@ def inject(profile: str, text: str, mode: str = "auto",
            sleep_fn=time.sleep, dry_run: bool = False) -> dict:
     """Deliver ``text`` to the profile's REPL pane. Returns a receipt dict.
 
-    ``mode``: auto (plain if idle, /queue if busy — NEVER interrupts a
+    ``mode``: auto (plain if idle, /queue add if busy — NEVER interrupts a
     running turn), or explicit plain/queue/steer (``interrupt`` accepted as the
     legacy name of ``plain``). ``dry_run=True`` resolves the pane, reports the
     target / busy state / chosen verb and sends nothing. Raises InjectError on

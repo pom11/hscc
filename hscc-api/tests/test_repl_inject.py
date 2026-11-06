@@ -274,10 +274,27 @@ def test_auto_busy_queues_never_interrupts(monkeypatch, fake):
     assert receipt["mode"] == "queue" and receipt["busy"] is True
     keys = fake.sent_keys()
     # prefix goes in FIRST via send-keys -l, then paste, then Enter
-    assert keys[0][0] == ("send-keys", "-t", "%1", "-l", "/queue ")
+    assert keys[0][0] == ("send-keys", "-t", "%1", "-l", "/queue add ")
     assert fake.loaded()[0][1] == "line1\nline2\nline3"   # ONE paste
-    assert receipt["sent_text"] == "/queue line1\nline2\nline3"
+    assert receipt["sent_text"] == "/queue add line1\nline2\nline3"
     assert fake.calls[-1][0] == ("send-keys", "-t", "%1", "Enter")
+
+
+def test_auto_busy_queues_a_management_word_as_a_message(monkeypatch, fake):
+    """A message starting with `clear` must not manage the queue.
+
+    Hermes v0.22+ parses `/queue clear` (and list/edit/rm/move) as queue
+    management, so the raw `queue` verb could wipe the orchid's queue. The
+    explicit `add` form always enqueues the text, whatever it starts with.
+    """
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
+    monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
+    receipt = repl_inject.inject("pom-orch", "clear the board",
+                                 mode="auto", sleep_fn=lambda s: None)
+    assert receipt["mode"] == "queue"
+    assert receipt["sent_text"] == "/queue add clear the board"
+    assert fake.sent_keys()[0][0][-1] == "/queue add "
+    assert fake.loaded()[0][1] == "clear the board"
 
 
 def test_explicit_modes(monkeypatch, fake):
@@ -346,7 +363,7 @@ def test_ambiguous_pane_blocks_inject_entirely(monkeypatch, fake):
 def test_mode_table_is_the_naming_contract():
     """plain = NO verb prefix; queue/steer carry theirs; auto resolves."""
     assert repl_inject.MODES == ("auto", "plain", "queue", "steer")
-    assert repl_inject.VERB_PREFIX == {"plain": "", "queue": "/queue ",
+    assert repl_inject.VERB_PREFIX == {"plain": "", "queue": "/queue add ",
                                        "steer": "/steer "}
     # auto is resolved against busy, never delivered verbatim.
     assert repl_inject.resolve_mode("auto", True) == "queue"
@@ -390,8 +407,8 @@ def test_receipt_carries_verb_for_every_mode(monkeypatch, fake):
     monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [_two_panes()[0]])
     monkeypatch.setattr(repl_inject, "is_busy", lambda pane: True)
     for mode, want_mode, want_verb in [
-        ("auto", "queue", "/queue "),
-        ("queue", "queue", "/queue "),
+        ("auto", "queue", "/queue add "),
+        ("queue", "queue", "/queue add "),
         ("steer", "steer", "/steer "),
         ("plain", "plain", ""),
     ]:
@@ -412,7 +429,7 @@ def test_dry_run_sends_nothing_and_reports_the_target(monkeypatch, fake):
                            sleep_fn=lambda s: None)
     assert r["dry_run"] is True
     assert (r["pane"], r["target"], r["profile"]) == ("%1", "s1:0.0", "pom-orch")
-    assert r["busy"] is True and r["mode"] == "queue" and r["verb"] == "/queue "
+    assert r["busy"] is True and r["mode"] == "queue" and r["verb"] == "/queue add "
     assert r["text"] == "do the thing" and r["chars"] == len("do the thing")
     # THE point of --dry-run: not one keystroke, not one buffer.
     assert fake.loaded() == [] and fake.pasted() == [] and fake.sent_keys() == []

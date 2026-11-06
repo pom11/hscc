@@ -794,7 +794,11 @@ def check_config_wiring(config=None):
 
     missing = []
 
-    if not cfg.get("multiplex_profiles"):
+    # v0.23.0 may keep the flag top-level or move it under `gateway:` (the
+    # migration pops the top-level key); accept either shape, matching
+    # hermes_cli/gateway_multiplex_mode.py.
+    if not (cfg.get("multiplex_profiles")
+            or (cfg.get("gateway") or {}).get("multiplex_profiles")):
         missing.append("multiplex_profiles")
 
     kanban = cfg.get("kanban", {})
