@@ -557,9 +557,12 @@ def hermes_kanban_root(tmp_path):
     """A throwaway multi-board kanban root, pinned via ``HERMES_KANBAN_HOME``.
 
     Yields ``(root, boards_dir)`` and CREATES both. Boards planted as
-    ``<root>/kanban/boards/<slug>/kanban.db`` are then visible to Hermes' own
-    ``list_boards()`` — i.e. to ``autodown.board_db_paths`` and therefore to
-    ``orch_waker`` — with no monkeypatching of private constants. The legacy
+    ``<root>/kanban/boards/<slug>/kanban.db`` plus the v0.23.0 ``board.json``
+    identity marker are then visible to Hermes' own ``list_boards()`` — i.e. to
+    ``autodown.board_db_paths`` and therefore to ``orch_waker`` — with no
+    monkeypatching of private constants. A DB-only directory is a stale stub
+    that discovery deliberately skips
+    (``hermes_cli/kanban_db_boards.py::_dir_holds_board``). The legacy
     ``default`` board is ``<root>/kanban.db`` (Hermes' resolution rule).
 
     Used by the tests that must drive REAL board enumeration (GAP-C-1); the

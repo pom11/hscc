@@ -52,6 +52,10 @@ def make_tree(tmp_path, boards):
     home = tmp_path / "hermes"
     boards = Path(boards)
     (boards / "demo").mkdir(parents=True)
+    # v0.23.0 discovers a named board only when ``board.json`` marks the
+    # directory (hermes_cli/kanban_db_boards.py::_dir_holds_board); a DB-only
+    # directory is a stale stub and is deliberately invisible.
+    (boards / "demo" / "board.json").write_text('{"name": "Demo"}')
     (home / "profiles" / "demo-orch").mkdir(parents=True)
     db = boards / "demo" / "kanban.db"
     conn = sqlite3.connect(db)

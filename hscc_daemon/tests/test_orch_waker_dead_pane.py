@@ -453,6 +453,9 @@ def make_tree(tmp_path, boards):
     home = tmp_path / "hermes"
     boards = boards
     (boards / "demo").mkdir(parents=True)
+    # v0.23.0 requires the ``board.json`` identity marker for discovery
+    # (hermes_cli/kanban_db_boards.py::_dir_holds_board).
+    (boards / "demo" / "board.json").write_text('{"name": "Demo"}')
     (home / "profiles" / "demo-orch").mkdir(parents=True)
     db = boards / "demo" / "kanban.db"
     conn = sqlite3.connect(db)

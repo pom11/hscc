@@ -466,7 +466,14 @@ def list_board_watermarks(*, _kdb=None, boards=None) -> dict[str, int]:
 
     watermarks: dict[str, int] = {}
     for slug in slugs:
-        conn = kdb.connect(board=slug)
+        try:
+            conn = kdb.connect(board=slug)
+        except ValueError:
+            # Hermes v0.23.0's read path refuses to resurrect a board with no
+            # ``board.json`` (kanban_db_connect.py::_refuse_dead_board_resurrection).
+            # A configured board that no longer exists has no freshness to
+            # contribute; it must not abort the whole digest.
+            continue
         try:
             row = conn.execute(
                 "SELECT MAX(ts) FROM ("

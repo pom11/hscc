@@ -377,8 +377,13 @@ def test_brew_keg_venv_imports_the_board_read_chain(keg_py, tmp_path):
 
 def test_guard_fires_on_a_blind_venv(tmp_path):
     """Negative control: the same probe with a PYTHONPATH stub that makes
-    ``import httpx`` raise MUST report violations — otherwise the green leg
+    ``import ruamel`` raise MUST report violations — otherwise the green leg
     above proves nothing.
+
+    v0.23.0 imports ``ruamel`` eagerly on the board-read chain:
+    ``hermes_cli.kanban_db`` -> ``utils`` -> ``hermes_yaml`` -> ``ruamel.yaml``
+    (hermes_yaml.py:10). ``httpx`` used to fail this chain at import time, but
+    that import is now lazy, so stubbing it no longer blinds a healthy chain.
 
     Runs under the test interpreter against the repo tree (available wherever
     the suite runs). Skips when even the CLEAN run cannot reach the chain on
@@ -394,12 +399,12 @@ def test_guard_fires_on_a_blind_venv(tmp_path):
             f"boards={clean['boards']!r}) — nothing to blind; live blindness "
             "must be judged on the keg leg")
     stub = tmp_path / "stub"
-    stub.mkdir()
-    (stub / "httpx.py").write_text(
-        "raise ModuleNotFoundError(\"No module named 'httpx'\")\n")
+    (stub / "ruamel").mkdir(parents=True)
+    (stub / "ruamel" / "__init__.py").write_text(
+        "raise ModuleNotFoundError(\"No module named 'ruamel'\")\n")
     blinded = _run_probe(sys.executable, tmp_path / "blinded",
                          extra={"PYTHONPATH": f"{stub}{os.pathsep}{REPO}"})
     bad = chain_violations(blinded)
     assert bad, (
-        "guard is VACUOUS: stubbing out httpx did NOT surface 'No module named' "
-        f"in the errors array: {json.dumps(blinded, indent=2)}")
+        "guard is VACUOUS: stubbing out ruamel did NOT surface "
+        f"'No module named' in the errors array: {json.dumps(blinded, indent=2)}")
