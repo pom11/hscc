@@ -622,6 +622,66 @@ def _short_desc_identity(spec):
     return (first[:200] + ".") if first else f"The {spec['name']} role."
 
 
+def _read_text(path):
+    """Read *path* as UTF-8, returning None when absent or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def _h2_sections(text):
+    """Split *text* into ``## `` sections, each starting at its heading line.
+
+    Content before the first ``## `` heading is not a section and is ignored:
+    that preamble is generated identity, never operator-owned. A section runs
+    to the next ``## `` heading (or EOF).
+    """
+    sections = []
+    current = None
+    for line in text.splitlines(keepends=True):
+        if line.startswith("## "):
+            if current is not None:
+                sections.append("".join(current))
+            current = [line]
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        sections.append("".join(current))
+    return sections
+
+
+def _carry_operator_sections(existing, generated):
+    """Append operator-owned ``## `` sections from *existing* to *generated*.
+
+    Explicit rule: a section of the existing SOUL is operator-owned when its
+    heading line does not occur as a heading in the newly generated SOUL. Those
+    sections are appended after the generated content in their original order,
+    so a regeneration cannot delete an operator block the generator does not
+    own. Generated headings always win: a stale copy of a generated section is
+    dropped, never duplicated.
+
+    Idempotent: feeding the result back as *existing* yields the same text, so
+    a second generator run is a byte-identical no-op. When there are no
+    operator sections the generated text is returned byte-for-byte unchanged.
+    """
+    if not existing:
+        return generated
+    generated_headings = {
+        section.splitlines()[0].strip()
+        for section in _h2_sections(generated)
+    }
+    kept = [
+        section.rstrip("\n")
+        for section in _h2_sections(existing)
+        if section.splitlines()[0].strip() not in generated_headings
+    ]
+    if not kept:
+        return generated
+    return generated.rstrip() + "\n\n" + "\n\n".join(kept) + "\n"
+
+
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
@@ -674,8 +734,16 @@ def generate_profile(spec, base_identity):
         changed = False
 
     # 2. Compose and write SOUL.md (HSCC-specific composition — always manual)
+    # An EXISTING SOUL may carry operator-appended `## ` sections the generator
+    # does not own; carry them over (see _carry_operator_sections) so a
+    # regeneration does not wipe them. A freshly scaffolded profile has no
+    # previous SOUL of ours to preserve — create_profile() may seed a generic
+    # SOUL, which must never be mistaken for operator content.
+    soul_path = os.path.join(pdir, "SOUL.md")
     soul = compose_soul(spec, base_identity)
-    changed |= _write_if_changed(os.path.join(pdir, "SOUL.md"), soul)
+    if not changed:
+        soul = _carry_operator_sections(_read_text(soul_path), soul)
+    changed |= _write_if_changed(soul_path, soul)
 
     # 3. Write config.yaml (HSCC-specific: model block + compaction + toolsets)
     # Toolsets: orchestrator profiles get the FULL set PLUS cluster control
