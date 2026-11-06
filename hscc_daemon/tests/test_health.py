@@ -2253,6 +2253,33 @@ class TestCheckProxy:
         assert cmd[1:3] == ["proxy", "start"]
         assert "10.0.0.2,10.0.0.3" in cmd
 
+    def test_relaunch_pins_uv_python_312(self, tmp_hfcc_dir, monkeypatch):
+        """LiteLLM/uvloop cannot run on Python 3.14, so the daemon's relaunch
+        must not inherit uv's machine-global interpreter default (t_425990ae)."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            probe={"ok": False, "models": [], "error": "connection refused"})
+        monkeypatch.delenv("UV_PYTHON", raising=False)
+        seen = {}
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda args, **k: seen.update(k) or {"ok": True})
+        assert health.check_proxy() is True
+        assert seen.get("env") == {"UV_PYTHON": "3.12"}
+
+    def test_relaunch_respects_operator_uv_python(self, tmp_hfcc_dir, monkeypatch):
+        """An explicit operator UV_PYTHON is authoritative — never overridden."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            probe={"ok": False, "models": [], "error": "connection refused"})
+        monkeypatch.setenv("UV_PYTHON", "3.13")
+        seen = {}
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda args, **k: seen.update(k) or {"ok": True})
+        assert health.check_proxy() is True
+        assert seen.get("env") is None
+
     # ── t_proxy_outage_20261011 bug 1: HTTP 200 + empty catalogue ──────────
 
     def test_empty_catalogue_is_unhealthy_and_relaunches(self, tmp_hfcc_dir, monkeypatch):

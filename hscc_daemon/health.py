@@ -1041,6 +1041,26 @@ def check_gateway():
 
 PROXY_PORT = int(os.environ.get("HSCC_PROXY_PORT", "4000"))
 
+# LiteLLM's uvloop dependency has no Python 3.14 wheel/port (uvloop fails with
+# `ImportError: cannot import name 'BaseDefaultEventLoopPolicy'`), and
+# `sparkrun proxy start` launches it through `uv tool uvx`. uvx resolves the
+# interpreter from uv's GLOBAL default, which on 2026-11-06 became 3.14 and
+# took :4000 down until the operator pinned 3.12. Pin it on the relaunch
+# itself so the daemon never depends on that machine-global file.
+PROXY_UV_PYTHON = "3.12"
+
+
+def _proxy_launch_env():
+    """Extra env for a `sparkrun proxy start`/repair child (None = inherit).
+
+    ``UV_PYTHON=3.12`` unless the operator already exported a UV_PYTHON: an
+    explicit operator pin is authoritative and must never be overridden
+    (t_425990ae).
+    """
+    if os.environ.get("UV_PYTHON"):
+        return None
+    return {"UV_PYTHON": PROXY_UV_PYTHON}
+
 
 def _proxy_models_probe(url, timeout=5):
     """GET the proxy /v1/models endpoint and PARSE ITS BODY.
@@ -1690,7 +1710,8 @@ def _proxy_repair_orphan(relaunch_hosts):
                 "will re-detect it next tick", "WARN")
     args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
             "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
-    res = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+    res = run_cmd(sparkrun_bin.argv(*args), timeout=90,
+                  env=_proxy_launch_env())
     # VERIFY, do not trust exit code: exit 0 over a proxy that bound a
     # different port is exactly how this incident stayed invisible.
     # BOUNDED WAIT first: `proxy start` returns after sparkrun's own 2 s
@@ -2068,7 +2089,8 @@ def check_proxy():
                                 "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
                         if restart:
                             args.append("--restart")
-                        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+                        r = run_cmd(sparkrun_bin.argv(*args), timeout=90,
+                                    env=_proxy_launch_env())
                         message = "relaunched" if r.get("ok") else "relaunch failed"
                 finally:
                     heal_lease.release("proxy-relaunch")

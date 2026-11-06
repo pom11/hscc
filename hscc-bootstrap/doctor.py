@@ -77,11 +77,54 @@ def _pyyaml_ok() -> Check:
                      fatal=True)
 
 
-def _sparkrun_ok() -> Check:
+def _uv_default_python(_runner=None):
+    """(major, minor) uv resolves for `uv python find` OUTSIDE any project.
+
+    None when UV_PYTHON is exported (an operator pin wins), uv is absent, the
+    probe fails, or its output carries no version. This is a WARNING input,
+    never a verdict on its own: sparkrun launches LiteLLM through
+    `uv tool uvx`, whose interpreter comes from uv's machine-global default —
+    the 2026-11-06 outage was uv defaulting to 3.14, where uvloop cannot
+    import BaseDefaultEventLoopPolicy (t_425990ae).
+    """
+    if os.environ.get("UV_PYTHON"):
+        return None
+    uv = shutil.which("uv")
+    if not uv:
+        return None
+    if _runner is None:
+        def _runner():
+            return subprocess.run(
+                [uv, "python", "find", "--no-project", "--show-version"],
+                capture_output=True, text=True, timeout=15)
+    try:
+        r = _runner()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    m = re.search(r"(\d+)\.(\d+)", getattr(r, "stdout", "") or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _sparkrun_ok(_uv_runner=None) -> Check:
     path = shutil.which("sparkrun")
     if not path:
         return Check("sparkrun", False, detail="not on PATH",
                      fix="Install sparkrun and ensure it's on PATH.", fatal=True)
+    uv_py = _uv_default_python(_uv_runner)
+    if uv_py is not None and uv_py >= (3, 14):
+        return Check(
+            "sparkrun", False,
+            detail=(f"{path} — uv's no-project default is Python "
+                    f"{uv_py[0]}.{uv_py[1]}; sparkrun's LiteLLM proxy "
+                    "(uvloop) cannot run there"),
+            fix=("Set UV_PYTHON=3.12 in the environment that launches the "
+                 "daemon (or `uv python pin --global 3.12`) before the next "
+                 "proxy relaunch."),
+            fatal=False)
     return Check("sparkrun", True, detail=path)
 
 
