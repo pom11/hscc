@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.5] - 2026-11-06
+
+### Fixed
+- **`hscc verify` no longer reports a false red for `/v1/logs`.** The
+  `api_routes` sweep probed the route without `source`, which
+  `hscc-api/routes_logs.py` rejects with 400 by design, so a healthy API always
+  looked broken. The probe now sends `source=daemon&limit=1`, matching the
+  client's required query; the other swept routes were checked and only
+  `/v1/sessions` and `/v1/memory` need the same treatment, which they already
+  get via `profile`.
+- **`hscc bootstrap` no longer wipes operator-appended SOUL sections.** Profile
+  regeneration (`hscc-roles/generator.py`) now carries over every `## ` section
+  of the existing `SOUL.md` whose heading the newly generated SOUL does not
+  own, appending them after the generated content in their original order.
+  Repeated runs are byte-identical, and a stale copy of a generated section is
+  replaced rather than duplicated.
 ## [2.15.4] - 2026-11-06
 
 ### Changed
