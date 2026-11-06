@@ -421,7 +421,11 @@ def test_enumerate_includes_legacy_default_and_named_boards(
     root, boards_dir = hermes_kanban_root
     (boards_dir / "beta").mkdir(parents=True)
     (boards_dir / "beta" / "kanban.db").write_text("")
-    (boards_dir / "notaboard").mkdir()      # no kanban.db, no board.json -> skipped
+    # v0.23.0's discovery requires the board.json identity marker; a
+    # kanban.db-only directory is a stub that must stay invisible
+    # (hermes_cli/kanban_db_boards.py::_dir_holds_board).
+    (boards_dir / "beta" / "board.json").write_text('{"name": "Beta"}')
+    (boards_dir / "notaboard").mkdir()      # no board.json -> skipped
     (boards_dir / "default").mkdir()
     (boards_dir / "default" / "kanban.db").write_text("")   # metadata dir: never wins
     # the legacy default DB holds a real board (created here, not write_text)

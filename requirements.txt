@@ -15,3 +15,11 @@ psutil>=5.9
 # is enough — socksio is imported lazily and only when a socks5:// proxy is
 # configured (httpx/_transports/default.py), which this path never does.
 httpx==0.28.1
+
+# Hermes v0.23.0's board-read chain reaches ruamel eagerly: importing
+# `hermes_cli.kanban_db` pulls `utils` -> `hermes_yaml`, whose module-level
+# `from ruamel.yaml import YAML` (hermes_yaml.py:10) fails the whole chain
+# under the keg venv with "No module named 'ruamel'". Track Hermes' own exact
+# pin. Adding it here is only half the fix: the tap formula needs a matching
+# `resource "ruamel.yaml"` block, then `brew reinstall hscc` rebuilds the keg.
+ruamel.yaml==0.18.16
