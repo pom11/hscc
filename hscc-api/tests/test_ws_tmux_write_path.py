@@ -204,7 +204,7 @@ def test_deliver_appends_receipt_with_via(monkeypatch):
                         lambda pane, text, mode="auto", sleep_fn=None: {
                             "pane": "%1", "target": "s:0.0", "profile": "p",
                             "busy": True, "mode": "queue",
-                            "sent_text": "/queue " + text})
+                            "sent_text": repl_inject.VERB_PREFIX["queue"] + text})
     routes_ws._tmux_deliver("proj", "hi", PANE)
     evs = _sys_events(get_store("proj").history()["events"])
     w = [e for e in evs if e["payload"].get("kind") == "working"]
