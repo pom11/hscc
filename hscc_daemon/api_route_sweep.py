@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import urlencode
 
 # ── Standalone-import bootstrap (t_ef36fe71) ────────────────────────────────
 # This file is run TWO ways: as a package module (``python -m``) and as a bare
@@ -62,11 +63,19 @@ except ImportError:  # pragma: no cover - standalone/deps-missing fallback
 REPO = _PKG_ROOT
 CLIENT = os.path.join(REPO, "ios-app/Sources/HSCC/HSCCClient.swift")
 
-# Routes whose handler requires a parameter the client always supplies. A bare
-# call returns 400 by design, so treat that as PASS and say why.
+# Routes whose handler requires query parameters the client always supplies. A
+# bare call returns 400 by design, so the probe sends the client's own values
+# and treats that as PASS, saying why.
+#
+# /v1/logs belongs here because `handle_logs` rejects an omitted `source`
+# before it reads anything (400 bad_request, valid: daemon|api|worker), which
+# made an unparameterised probe a guaranteed 400 on a healthy API. `limit=1`
+# mirrors the app's bounded tail and keeps the probe's read to one line
+# (t_0494b09e).
 NEEDS_PARAM = {
-    "/v1/sessions": "profile",
-    "/v1/memory": "profile",
+    "/v1/sessions": {"profile": "hscc-orch"},
+    "/v1/memory": {"profile": "hscc-orch"},
+    "/v1/logs": {"source": "daemon", "limit": "1"},
 }
 
 
@@ -162,9 +171,9 @@ def sweep():
     rows, failures = [], []
     for route in gets:
         url = base + route
-        param = NEEDS_PARAM.get(route)
-        if param:
-            url += "?%s=hscc-orch" % param
+        params = NEEDS_PARAM.get(route)
+        if params:
+            url += "?" + urlencode(params)
         proc = subprocess.run(
             ["curl", "-s", "-m", "30", "-w", "\n%{http_code} %{time_total}",
              "-H", "Authorization: Bearer " + tok, url],
@@ -189,8 +198,9 @@ def sweep():
         note = ""
         if post_only:
             note = "route exists; POST-only, not exercised"
-        elif param:
-            note = "(needs ?%s= — supplied)" % param
+        elif params:
+            note = "(needs ?%s — supplied)" % "&".join(
+                "%s=%s" % (k, v) for k, v in params.items())
         if code == "200" and not parses:
             note = "BODY DID NOT PARSE"
         rows.append({"route": route, "status": code, "seconds": float(elapsed),
