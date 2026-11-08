@@ -135,8 +135,8 @@ When building a Hermes plugin that needs periodic health checks or daemon-like b
 1. **Modular handlers** — each handler checks one subsystem independently via SSH. Timeout each handler (10s), don't let one failure block others.
 2. **Categorized statuses** — always use `healthy` / `unhealthy` / `unknown`. `unknown` means the handler couldn't connect (SSH timeout, network issue) — never auto-restart on `unknown`, only alert.
 3. **Single JSON report per cycle** — after all handlers complete, build one HealthReport JSON object. Save to `~/.hscc/daemon/status.json`. Append alerts to `~/.hscc/daemon/alerts.jsonl` (one JSON object per line — append-only, never overwrite).
-4. **Escalator logic** — reads the report and decides actions. Auto-restart ONLY for the orchestrator container (max 1 restart per cycle). All other `unhealthy` + `unknown` (if all handlers are unknown) route via Telegram alert.
-5. **File-based state** — avoid WebSocket dependency. CLI reads/writes `status.json` and `alerts.jsonl`. Telegram delivery is done via subprocess calling the orchestrator's bot.
+4. **Escalator logic** — reads the report and decides actions. Auto-restart ONLY for the orchestrator container (max 1 restart per cycle). All other `unhealthy` + `unknown` (if all handlers are unknown) raise a desktop notification + an `events.jsonl` event.
+5. **File-based state** — avoid WebSocket dependency. CLI reads/writes `status.json` and `alerts.jsonl`. Alerts go out as desktop notifications (osascript / notify-send) + `events.jsonl`; there is no chat delivery.
 
 See `references/health-check-daemon-pattern.md` for the full design.
 

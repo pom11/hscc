@@ -15,7 +15,7 @@ metadata:
 
 **Post-refactor (2026-06-08): HSCC is a thin cluster-PHYSICAL layer.** The duplicated agent pipeline (coordinator, projects, orchestrator, events, governance, MCP server) was archived. Agent work now runs on **native Hermes kanban**, not HSCC.
 
-Cluster: gateway/orchestrator node `192.0.2.10` (always-on vLLM serving Telegram + all Hermes agents), worker GPU nodes `.246 / .247 / .248` (provisioned on demand), NAS `.249`. Controlled via `sparkrun`. State in `~/.hscc/`.
+Cluster: gateway/orchestrator node `192.0.2.10` (always-on vLLM serving all Hermes agents), worker GPU nodes `.246 / .247 / .248` (provisioned on demand), NAS `.249`. Controlled via `sparkrun`. State in `~/.hscc/`.
 
 ## Two responsibilities, two surfaces
 
@@ -48,16 +48,16 @@ Model container lifecycle (provision/stop/restart) is now part of the **hscc-clu
 
 ## Daemon (hscc_daemon)
 
-Only continuous process. Live code: `~/.hermes/plugins/hscc_daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc_daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are cross-platform desktop (macOS osascript / Linux notify-send, falling back to `~/.hscc/notifications.json` when neither is available) + `events.jsonl` — the daemon does **not** post to Telegram.
+Only continuous process. Live code: `~/.hermes/plugins/hscc_daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc_daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are cross-platform desktop (macOS osascript / Linux notify-send, falling back to `~/.hscc/notifications.json` when neither is available) + `events.jsonl` — the daemon does **not** post to any chat platform.
 
 - **Daemon health check**: `ps aux | grep hscc_daemon | grep -v grep` — `launchctl list | grep hscc` exit code is often STALE (`-9` while running). Trust the process list + `hscc.py status`.
 - **Daemon node resolution**: resolves `PRIMARY_NODE` (=gateway .244, runs the orchestrator vLLM) / `NAS_HOST` from `cluster.json` → `sparkrun cluster list --json` → hardcoded defaults. `_rebuild_vllm_cmds()` must run after any `PRIMARY_NODE` change.
 
-## Telegram Operations-topic messages = CRON, not the daemon
+## Hermes cron jobs
 
-Two Hermes cron jobs (`~/.hermes/cron/jobs.json`) deliver to `telegram:0:140` (Operations topic):
-- `138f8b56d790` orch-tick — every 1m, interpreting agent
-- `381ef65e40f5` idle-monitor — every 5m, `scripts/idle-monitor.py` (no_agent, verbatim). **PAUSED 2026-06-08**: it keys off stale `~/.hscc/agents.json` + absent `lifecycle.json` and would reap native-provisioned worker vLLMs as "orphan". Resume: `hermes cron resume 381ef65e40f5` — but port the daemon's BRIDGE_FILE guard first.
+Hermes cron jobs live in `~/.hermes/cron/jobs.json` and all deliver `local`. Hermes has no messaging platform (Telegram was removed), so nothing posts to a chat.
+- `hscc-dep-watcher`: daily 08:00
+- `hscc-escalate-watcher`: every 15m
 
 Manage: `hermes cron list|pause|resume <id>`.
 
