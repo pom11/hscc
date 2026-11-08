@@ -1,6 +1,6 @@
 # Health Check Daemon Pattern
 
-Design pattern for HSCC monitoring daemons: modular handlers, file-based state, Telegram alerts.
+Design pattern for HSCC monitoring daemons: modular handlers, file-based state, desktop-notification alerts.
 
 ## Architecture
 
@@ -11,8 +11,8 @@ Design pattern for HSCC monitoring daemons: modular handlers, file-based state, 
 └─────────────┘     └──────────────┘     └──────────┘
                               │                │
                      ┌────────┴──────┐  ┌─────┴──────┐
-                     │ status.json   │  │ Telegram   │
-                     │ alerts.jsonl  │  │ delivery   │
+                     │ status.json   │  │ desktop    │
+                     │ alerts.jsonl  │  │ notify     │
                      └───────────────┘  └────────────┘
 ```
 
@@ -23,7 +23,7 @@ Design pattern for HSCC monitoring daemons: modular handlers, file-based state, 
   "poll_interval": 60,
   "handler_timeout": 10,
   "max_orchestrator_restarts": 1,
-  "telegram_enabled": true,
+  "notify_enabled": true,
   "handlers": ["vllm", "container", "gateway", "nas"]
 }
 ```
@@ -54,8 +54,8 @@ Or on `unknown` (SSH timeout, network unreachable):
 |---|---|
 | orchestrator = `unhealthy` | Auto-restart container (max 1/cycle) |
 | orchestrator = `unknown` | Log warning |
-| any other = `unhealthy` | Telegram alert |
-| ALL = `unknown` | Telegram alert (system may be down) |
+| any other = `unhealthy` | Desktop alert |
+| ALL = `unknown` | Desktop alert (system may be down) |
 | mixed `unknown` + others | Log warning, don't alert |
 
 ## State Files

@@ -4,7 +4,7 @@
 
 - Check every **60s** (not 30s)
 - **Self-heal**: only restart the orchestrator container automatically
-- **Alert on everything else**: notify orchestrator which forwards to user via Telegram
+- **Alert on everything else**: desktop notification + `events.jsonl` event for the operator
 - NOT responsible for agent lifecycle management
 
 ## Idea Pool (Clustered)

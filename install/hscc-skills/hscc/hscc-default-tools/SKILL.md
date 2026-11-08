@@ -61,7 +61,7 @@ These are **no longer HSCC plugins**. The old `hscc-orchestrator`, `hscc-agent-c
 ## Key Rules
 1. **Always prefer HSCC** over raw shell commands for cluster-physical work
 2. **Never bypass HSCC** for cluster ops — go through the hscc-cluster toolset (agent dispatch goes through native kanban)
-3. **Output to Telegram**: strip ANSI codes, use native markdown (`*bold*`, `_italic_`, ```code```)
+3. **Output for chat surfaces** (REPL, app): strip ANSI codes, use native markdown (`*bold*`, `_italic_`, ```code```)
 4. **No AI postprocessing** on cluster status — raw terminal data only
 5. State lives in `~/.hscc/` (override with the `HSCC_HOME` env var)
 6. Node IPs: gateway=192.0.2.10, workers=246/247/248, NAS=249

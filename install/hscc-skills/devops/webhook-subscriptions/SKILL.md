@@ -70,7 +70,7 @@ hermes webhook subscribe <name> \
   --events "event1,event2" \
   --description "What this does" \
   --skills "skill1,skill2" \
-  --deliver telegram \
+  --deliver <platform> \
   --deliver-chat-id "12345" \
   --secret "optional-custom-secret"
 ```
@@ -111,7 +111,7 @@ If no prompt is specified, the full JSON payload is dumped into the agent prompt
 hermes webhook subscribe github-issues \
   --events "issues" \
   --prompt "New GitHub issue #{issue.number}: {issue.title}\n\nAction: {action}\nAuthor: {issue.user.login}\nBody:\n{issue.body}\n\nPlease triage this issue." \
-  --deliver telegram \
+  --deliver <platform> \
   --deliver-chat-id "-100123456789"
 ```
 
@@ -135,7 +135,7 @@ hermes webhook subscribe github-prs \
 hermes webhook subscribe stripe-payments \
   --events "payment_intent.succeeded,payment_intent.payment_failed" \
   --prompt "Payment {data.object.status}: {data.object.amount} cents from {data.object.receipt_email}" \
-  --deliver telegram \
+  --deliver <platform> \
   --deliver-chat-id "-100123456789"
 ```
 
@@ -160,14 +160,14 @@ hermes webhook subscribe alerts \
 For use cases where you just want to push a notification through to a user's chat — no reasoning, no agent loop — add `--deliver-only`. The rendered `--prompt` template becomes the literal message body and is dispatched directly to the target adapter.
 
 Use this for:
-- External service push notifications (Supabase/Firebase webhooks → Telegram)
+- External service push notifications (Supabase/Firebase webhooks → a chat platform)
 - Monitoring alerts that should forward verbatim
 - Inter-agent pings where one agent is telling another agent's user something
 - Any webhook where an LLM round trip would be wasted effort
 
 ```bash
 hermes webhook subscribe antenna-matches \
-  --deliver telegram \
+  --deliver <platform> \
   --deliver-chat-id "123456789" \
   --deliver-only \
   --prompt "🎉 New match: {match.user_name} matched with you!" \
@@ -176,7 +176,7 @@ hermes webhook subscribe antenna-matches \
 
 The POST returns `200 OK` on successful delivery, `502` on target failure — so upstream services can retry intelligently. HMAC auth, rate limits, and idempotency still apply.
 
-Requires `--deliver` to be a real target (telegram, discord, slack, github_comment, etc.) — `--deliver log` is rejected because log-only direct delivery is pointless.
+Requires `--deliver` to be a real target (discord, slack, github_comment, etc.) — `--deliver log` is rejected because log-only direct delivery is pointless.
 
 ## Security
 
@@ -190,7 +190,7 @@ Requires `--deliver` to be a real target (telegram, discord, slack, github_comme
 1. `hermes webhook subscribe` writes to `~/.hermes/webhook_subscriptions.json`
 2. The webhook adapter hot-reloads this file on each incoming request (mtime-gated, negligible overhead)
 3. When a POST arrives matching a route, the adapter formats the prompt and triggers an agent run
-4. The agent's response is delivered to the configured target (Telegram, Discord, GitHub comment, etc.)
+4. The agent's response is delivered to the configured target (Discord, Slack, GitHub comment, etc.)
 
 ## Troubleshooting
 
