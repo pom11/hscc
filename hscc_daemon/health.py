@@ -1887,6 +1887,17 @@ def check_proxy():
     Relaunch hosts follow :func:`_proxy_relaunch_hosts` — under a uniform_pool
     they MUST include the orchestrator node, or the relaunched LB can never
     recover the orchestrator's endpoint.
+    STAY-DOWN (t_ba1424b7, the first thing the body does): when
+    :func:`_operator_down` reports post_boot's durable record — set by
+    `hscc cluster down`, lifted only by `hscc cluster up` — this check writes
+    ``intentional: "operator_down"`` and does NOTHING ELSE. No catalogue probe,
+    no router-drift read, no backend-drift repair, no orphan-listener reap, no
+    ``proxy start``. TRADE-OFF (intended, stated so it is not discovered the
+    hard way): a proxy started BY HAND during a deliberate down
+    (`sparkrun proxy start`) is therefore NOT repaired, NOT reaped and NOT
+    health-checked until the record is lifted — the operator owns the down
+    state, and HSCC will look silently idle while it does.
+
     Relaunch attempts are throttled by a DURABLE cooldown
     (:func:`_proxy_relaunch_cooldown_state`, HSCC_PROXY_RELAUNCH_COOLDOWN_S
     default 300s, stamped in the proxy state file): EVERY attempt stamps the
@@ -1896,6 +1907,27 @@ def check_proxy():
     cooldown and a later genuine down-proxy recovers on its next tick.
     """
     from .state import write_state
+
+    # STAY-DOWN (t_ba1424b7): the operator gate runs BEFORE anything else — no
+    # probe, no drift read, no orphan reap, no relaunch (see the docstring for
+    # what that costs). It exists because the 2026-11-08 manual `cluster down`
+    # was undone at 17:52:02 by this very check: "Worker proxy unhealthy on
+    # :4000" + "repairing proxy backend drift" + a listener reap + relaunch
+    # attempts every few minutes, against a fleet the operator had just turned
+    # off. The autodown gate that covers check_workers never latches for a
+    # manual down, and this check had no operator gate at all.
+    _down = _operator_down()
+    if _down:
+        _reason = _down.get("reason") or "unspecified"
+        log(f"fleet deliberately down — not relaunching (proxy; "
+            f"reason: {_reason})")
+        write_state("proxy", {
+            "ok": True, "port": PROXY_PORT, "last_check": now_iso(),
+            "intentional": "operator_down",
+            "message": f"fleet deliberately down — not relaunching "
+                       f"(proxy; reason: {_reason})",
+        })
+        return True
 
     log("Running proxy check")
     nodes = sorted(serving.KEEPALIVE_NODES)
@@ -3283,6 +3315,35 @@ def _intentional_window():
         return False
 
 
+def _operator_down():
+    """The operator's durable stay-down record, or None when there is none.
+
+    STAY-DOWN (t_ba1424b7): `hscc cluster down` is an INSTRUCTION, not a fault.
+    When it tears the fleet down, :func:`post_boot.clear_expected_up` stamps a
+    ``deliberate_down`` = {set_at, reason} record into ``~/.hscc/expected-up.json``
+    and :func:`post_boot.deliberately_down` is the one predicate that reads it
+    back; the record is lifted only by the next `hscc cluster up` (which
+    re-arms the marker via ``record_expected_up`` and pops it). The healing
+    checks must honour it for exactly as long as it stands.
+
+    This is the module seam for it, same shape as :func:`_router_drift_probe`:
+    the deferred import lives HERE (this file's style for late-bound sibling
+    modules, and it keeps post_boot <-> health free of an import cycle), so
+    tests stub this function rather than the filesystem.
+
+    Fail-safe in the SAME direction as :func:`_intentional_autodown_down`: any
+    exception at all ⇒ None ⇒ supervision proceeds exactly as it did before the
+    record existed. ``deliberately_down`` never raises by contract; the catch is
+    for the layers under it (a post_boot too old to have the predicate, an
+    import failure), where "no verifiable evidence" must never mean "go quiet".
+    """
+    try:
+        from . import post_boot
+        return post_boot.deliberately_down()
+    except Exception:
+        return None
+
+
 def check_workers():
     """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
     keep-alive worker UNIT on its own port and relaunch a crashed one with its
@@ -3302,6 +3363,14 @@ def check_workers():
     relaunch the keep-alive units autodown stopped. That was the third
     resurrection vector. With NO intentional block it behaves exactly as before
     (the negative control the suite pins).
+
+    STAY-DOWN (t_ba1424b7): the same reasoning covers a MANUAL `hscc cluster
+    down`, which never latches the watchdog block. When
+    :func:`_operator_down` reports the durable record, this check writes
+    ``intentional: "operator_down"`` and relaunches NOTHING — the operator owns
+    the down state until the next `hscc cluster up`. The trade-off is symmetric
+    with the autodown gate above: a unit brought up by hand during a deliberate
+    down is not supervised until that next fleet-up.
     """
     from .state import write_state
     from .lifecycle import VLLM_LOAD_GRACE_MINUTES
@@ -3338,6 +3407,32 @@ def check_workers():
             "intentional": "autodown",
             "message": f"{_window_label} — {len(units)} keepalive unit(s) "
                        f"not up",
+        })
+        return True
+
+    # STAY-DOWN (t_ba1424b7): a MANUAL `hscc cluster down` never latches the
+    # autodown watchdog block, so the gate above cannot see it — and the daemon
+    # undid the operator within ~25s (daemon.log 2026-11-08: 17:51:23 cleared
+    # expected_up for 4 unit(s), 17:51:47-54 this check relaunched all three
+    # keepalive units; they sat idle all night). The durable deliberate_down
+    # record is that instruction, so the whole check stands down: no probe, no
+    # relaunch, no auto-heal. Deliberately placed AFTER the autodown gate so
+    # the autodown path stays first and byte-identical (its wording is pinned
+    # elsewhere), and before any probing so nothing is touched.
+    # TRADE-OFF (intended, and it must be stated rather than discovered): while
+    # the record stands, a unit started BY HAND (`sparkrun run ...`) is NOT
+    # supervised until the next `hscc cluster up` lifts the record.
+    _down = _operator_down()
+    if _down:
+        _reason = _down.get("reason") or "unspecified"
+        log(f"fleet deliberately down — not relaunching (workers; "
+            f"reason: {_reason})")
+        write_state("workers", {
+            "ok": True, "total": len(units), "online": 0, "relaunched": [],
+            "down": [], "last_check": now_iso(),
+            "intentional": "operator_down",
+            "message": f"fleet deliberately down — not relaunching "
+                       f"(workers; reason: {_reason})",
         })
         return True
 
