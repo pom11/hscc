@@ -44,15 +44,36 @@ needs_hermes = pytest.mark.skipif(
 SKILL = "sdlc-review"
 
 #: The probe: load the bare name through the same entry point the dispatcher
-#: spawn uses (oneshot -> build_preloaded_skills_prompt) and print the JSON
-#: verdict {"missing": [...]}. HERMES_HOME + cwd are set by the caller.
+#: spawn uses (oneshot -> build_preloaded_skills_prompt) and report whether a
+#: spawn can load it. HERMES_HOME + cwd are set by the caller.
+#:
+#: Do NOT test membership of the bare name in `missing`. A same-tier name
+#: collision is not reported as the bare identifier: hermes keeps the bare name
+#: OUT of `missing` and puts a labelled refusal in its place —
+#: "Ambiguous skill name <id>: use one of <paths>" (agent/skill_commands.py
+#: `ambiguous_skill_label`). `agent.skill_utils.AMBIGUOUS_SKILL_PREFIX` is
+#: hermes' own "one spelling" for every same-tier refusal, so the probe imports
+#: it from the live checkout instead of hard-coding the wording, and any THIRD
+#: spelling comes back as `unrecognised` so the test fails loudly instead of
+#: silently reading a refusal as a successful load. (The bare-name membership
+#: test is exactly what made five layouts here fail as "fixture expectation
+#: drifted from the live resolver" once hermes moved from bare-name-missing to
+#: labelled refusal.)
 _PROBE = '''
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from agent.skill_commands import build_preloaded_skills_prompt
-_missing = build_preloaded_skills_prompt(["%s"])[2]
-print(json.dumps({"missing": sorted(_missing)}))
-''' % SKILL
+from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX as PREFIX
+SKILL = "__SKILL__"
+missing = sorted(build_preloaded_skills_prompt([SKILL])[2])
+refusal = PREFIX + SKILL + ":"
+print(json.dumps({
+    "missing": missing,
+    "refused": any(m == SKILL or m.startswith(refusal) for m in missing),
+    "unrecognised": [m for m in missing
+                     if m != SKILL and not m.startswith(refusal)],
+}))
+'''.replace("__SKILL__", SKILL)
 
 
 def _mk(root: Path, rel: str, content: str):
@@ -63,7 +84,14 @@ def _mk(root: Path, rel: str, content: str):
 
 
 def _real_verdict(home: Path) -> bool:
-    """True when a spawn CAN load the bare name (live resolver says present)."""
+    """True when a spawn CAN load the bare name (live resolver says present).
+
+    The refusal is read from the resolver's OWN vocabulary (see _PROBE): a
+    layout can fail to load either because the name is absent (`missing` holds
+    the bare identifier) or because it collides (`missing` holds an
+    ``Ambiguous skill name`` label instead). Anything the probe could not
+    classify aborts here rather than defaulting to "loads".
+    """
     probe = home / "_probe.py"
     probe.write_text(_PROBE, encoding="utf-8")
     out = subprocess.run(
@@ -71,7 +99,15 @@ def _real_verdict(home: Path) -> bool:
         capture_output=True, text=True, env={**os.environ, "HERMES_HOME": str(home)},
         cwd=str(home), timeout=120)
     assert out.returncode == 0, f"probe failed: {out.stderr[-800:]}"
-    return SKILL not in json.loads(out.stdout.strip())["missing"]
+    payload = json.loads(out.stdout.strip())
+    assert not payload["unrecognised"], (
+        "the live resolver reported this layout with a missing-spelling this "
+        f"test cannot classify: {payload['unrecognised']!r}. Read "
+        "agent.skill_utils.AMBIGUOUS_SKILL_PREFIX (the one spelling of every "
+        "same-tier refusal) and teach _PROBE before trusting any verdict — "
+        "defaulting an unknown shape to 'loads' is the blind spot that hid "
+        "five refused layouts as fixture drift.")
+    return not payload["refused"]
 
 
 # ── fabricated layouts: (name, skills {rel: content}, config.yaml | None) ───

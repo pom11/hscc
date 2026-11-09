@@ -16,14 +16,15 @@ collects:
   completion claims, reaped workers, rate limits, the review lane) across all
   boards, plus ``outcomes``, the same question answered for every card rather
   than for the panel's ``RECENT_LIMIT`` rows;
-* tokens — each running card's OWN worker session (input/output) and the 24 h
-  total over every profile's kanban sessions, read from the profiles'
-  ``state.db``. A run's session comes from the ``owner_admitted`` event hermes
-  records for ``tasks.current_run_id`` (``_session_links``), so cards claimed in
-  the same second under one profile stay distinct; the ``started_at`` window is
-  the labelled fallback for a run whose event has not landed yet
-  (``attach_tokens``). Plus 24 h / 7 d totals for workers and orchestrators
-  (``_token_windows``);
+* tokens — each running card's OWN worker session (input/output), read from the
+  profiles' ``state.db``. A run's session comes from the ``owner_admitted`` event
+  hermes records for ``tasks.current_run_id`` (``_session_links``), so cards
+  claimed in the same second under one profile stay distinct; the ``started_at``
+  window is the labelled fallback for a run whose event has not landed yet
+  (``attach_tokens``). Plus 24 h / 7 d totals per group (``_token_windows``):
+  workers / scheduled / orchestrators / total, where a session is charged whole to
+  every window it was **active** in — the store keeps no per-call time, so nothing
+  can be split across windows, and the table says so rather than implying a split;
 * orchestrators — every session that holds a live turn lease in its own profile
   ``state.db`` (``attach_orchestrators``): profile, session id, turn age,
   lifetime tokens and the session's ``last_activity_description``. The store is
@@ -422,13 +423,12 @@ def attach_tokens(data, hermes_home=None, now=None, ledger_path=None):
     the run's claim. A guess, and it is only ever used when identity is absent.
 
     Either way the row is honestly blank (``None`` → dash, ``tok_match`` None)
-    when nothing matched. ``data["tokens_24h"]`` is ``[in, out]`` summed over
-    every profile's kanban sessions started in the last 24 h (None when no
-    state.db was readable), and ``data["tokens"]`` adds 24 h / 7 d windows for
-    workers and orchestrators (``_token_windows``) — both still by started_at,
-    which is a separate card's scope. The databases are read-only; the one write
-    is the orchestrator token ledger. An unreadable database is skipped, never
-    raised.
+    when nothing matched. ``data["tokens"]`` holds the 24 h / 7 d totals per group
+    (``_token_windows``: workers / scheduled / orchestrators / total, each session
+    charged to the windows it was *active* in) and ``data["tokens_24h"]`` is that
+    table's workers/24 h cell — the same list object, not a second measurement.
+    The databases are read-only; the one write is the orchestrator token ledger.
+    An unreadable database is skipped, never raised.
     """
     home = hermes_home or HERMES_HOME
     now_s = int(now if now is not None else time.time())
@@ -464,54 +464,112 @@ def attach_tokens(data, hermes_home=None, now=None, ledger_path=None):
                   for e in os.scandir(os.path.join(home, "profiles")) if e.is_dir()]
     except OSError:
         pass
-    total, seen = [0, 0], False
-    for path in paths:
-        if not os.path.exists(path):
-            continue
-        try:
-            with _open_ro(path) as conn:
-                row = conn.execute(
-                    "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) "
-                    "FROM sessions WHERE source='kanban' AND started_at >= ?",
-                    (now_s - 86400,)).fetchone()
-        except sqlite3.Error:
-            continue
-        seen = True
-        total[0] += row[0]
-        total[1] += row[1]
-    data["tokens_24h"] = total if seen else None
     data["tokens"] = _token_windows(paths, now_s, ledger_path)
+    # One number, one measurement. `tokens_24h` is the table's own workers/24 h cell
+    # rather than a second query with its own window semantics: it stays because
+    # `--json` has carried it since 2.14.0, and it can no longer disagree with the
+    # table the way the old one did — that version summed `source='kanban'` rows by
+    # `started_at` here while the table summed them over a different source set, so
+    # the same window had two totals on one screen.
+    data["tokens_24h"] = data["tokens"]["workers"]["24h"]
     return data
 
 
-# ── orchestrators ──────────────────────────────────────────────────────────
+# ── token windows ──────────────────────────────────────────────────────────
 #
-# Worker (kanban) and cron sessions are short, so a started_at window counts
-# them exactly. Orchestrator REPL sessions live for weeks and Hermes stores only
-# their lifetime totals (messages.token_count is never filled), so their 24 h /
-# 7 d use is the growth of those totals between samples the monitor itself
-# keeps in a small ledger — "since <first sample>" until it has a week.
+# What the store actually holds, measured on this host against Hermes
+# v0.23.0+7.g0458811 (50 stores, every one opened read-only):
+#
+# * `messages.token_count` is NULL in all **595,776** message rows — the column
+#   exists next to `timestamp` and has never been written. So there is no way to
+#   attribute a token to a moment inside a session; a per-message windowed sum
+#   would be a fabricated split, not a measurement.
+# * `session_model_usage` (all 50 stores, 7,810 rows) does carry input/output/
+#   cache/reasoning per `(session_id, model)`, but its only time columns are
+#   `first_seen`/`last_seen`: one UPSERTed aggregate row per session and model,
+#   no per-call time. It cannot answer "what did this weeks-old REPL spend in the
+#   last 24 h" either.
+#
+# So Hermes stores lifetime totals per session and nothing time-resolved, and the
+# 24 h / 7 d figures for anything long-lived stay the *growth of those totals
+# between samples the monitor itself keeps in a small ledger* — "since <first
+# sample>" until it has a week of them. What a window can honestly mean for the
+# rest is a rule, not a split: a session's lifetime total is charged whole to
+# every window it was **active** in, `COALESCE(last_activity_at, ended_at,
+# started_at) >= window_start`. That predicate is a strict superset of the old
+# `started_at >= window_start`, so it only ever adds a session that really did
+# work inside the window: measured here, the old one missed 7 kanban sessions
+# (58,501,630 in / 684,357 out) that started 7.06 d ago and were active inside
+# 7 d. A still-running session can appear in both windows — nothing splits it —
+# which is why the table says so out loud (`token_table`) and `--json` carries it
+# in `tokens.meta.attribution`.
 
 WINDOWS = (("24h", 86400), ("7d", 7 * 86400))
 LEDGER_PATH = os.path.expanduser("~/.hscc/state/kmon_orch_tokens.json")
 LEDGER_STEP_S = 300          # one sample per 5 min is plenty for a 24 h window
-SHORT_SOURCES = ("kanban", "cron")
+
+#: Machine work a card asked for: the dispatched card itself, the subagents it
+#: delegated, and one-shots. `cron` is deliberately NOT here — a scheduled job is
+#: nobody's card. It used to be billed as orchestrator use, together with every
+#: other source (`source NOT IN ('kanban','cron')` swept `subagent`, `telegram`
+#: and anything unrecognised into that one row), which is why the two rows did not
+#: add up to what they claimed.
+WORKER_SOURCES = ("kanban", "subagent", "oneshot")
+#: Scheduler runs: neither a card nor an operator, so they get a row of their own
+#: instead of hiding inside one of the other two.
+SCHEDULED_SOURCES = ("cron",)
+#: The third group is the complement, never a list: `cli`/`local` REPLs,
+#: `telegram` chats, a NULL source, and any source hermes invents later. A
+#: complement keeps `total` honest — the old catch-all lost NULL-source rows
+#: because SQL `NOT IN` yields NULL (not TRUE) for them, i.e. they vanished from
+#: every row rather than being billed anywhere. Census over the 51 stores on this
+#: host: cron 3620, kanban 1895, cli 1526, telegram 103, subagent 54, oneshot 3,
+#: local 2, NULL 0 — no other value exists here today.
+GROUPS = ("workers", "scheduled", "orchestrators")
+
+#: A session counts in a window when it moved inside it, not when it began.
+_ACTIVE_SINCE = "COALESCE(last_activity_at, ended_at, started_at) >= ?"
 
 
-def _sum_tokens(paths, sql, args=()):
-    total, seen = [0, 0], False
+def group_of(source):
+    """The one token-table group a session source is billed to.
+
+    A partition, not a preference: every source — NULL included — lands in
+    exactly one group, and `total` in the renderer is the sum of these three
+    rows. The suite walks the measured census through this function, so a future
+    source cannot quietly join `workers` or disappear.
+    """
+    if source in WORKER_SOURCES:
+        return "workers"
+    if source in SCHEDULED_SOURCES:
+        return "scheduled"
+    return "orchestrators"
+
+
+def _sum_tokens(paths, queries):
+    """Run every ``(sql, args)`` over each readable store, one connection each.
+
+    One open per database for the whole window set: this scans ~50 stores every
+    tick and the four window queries used to open each of them four separate
+    times. Returns one ``[in, out]`` per query — ``None`` for a query no store
+    could answer, which is how "there is no state.db here" reaches the renderer as
+    a dash rather than a zero. A store that raises is skipped, never raised.
+    """
+    total = [[0, 0] for _ in queries]
+    seen = [False] * len(queries)
     for path in paths:
         if not os.path.exists(path):
             continue
         try:
             with _open_ro(path) as conn:
-                row = conn.execute(sql, args).fetchone()
+                for i, (sql, args) in enumerate(queries):
+                    row = conn.execute(sql, args).fetchone()
+                    total[i][0] += row[0] or 0
+                    total[i][1] += row[1] or 0
+                    seen[i] = True
         except sqlite3.Error:
             continue
-        seen = True
-        total[0] += row[0] or 0
-        total[1] += row[1] or 0
-    return total if seen else None
+    return [t if s else None for t, s in zip(total, seen)]
 
 
 def _ledger_delta(samples, since_s):
@@ -557,33 +615,65 @@ def _update_ledger(path, now_s, cum):
 
 
 def _token_windows(paths, now_s, ledger_path=None):
-    """``{"workers": {...}, "orchestrators": {...}}`` with 24h/7d ``[in, out]``.
+    """``{"workers", "scheduled", "orchestrators", "meta"}`` with 24 h/7 d ``[in, out]``.
 
-    workers = kanban sessions by started_at; orchestrators = cron sessions by
-    started_at plus the ledger growth of every long-lived (cli/gateway) session,
-    with ``since`` = the ledger's first sample when it covers less than 7 days.
+    ``workers`` and ``scheduled`` are windowed sums over the sources ``group_of``
+    puts in that group, and a session is in a window when it was **active** in it
+    (``_ACTIVE_SINCE``) rather than when it began — see the block above
+    ``WINDOWS``. ``orchestrators`` is the growth of the remaining sources between
+    the monitor's own ledger samples, with ``since`` = the ledger's first sample
+    when it covers less than 7 days; those are the sessions that outlive the
+    windows and whose per-call time the store does not keep.
+
+    ``total`` is these three rows added and nothing else is in them: the ledger's
+    cumulative deliberately excludes ``WORKER_SOURCES`` + ``SCHEDULED_SOURCES`` so
+    a card's tokens cannot be billed twice, and it includes NULL-source rows so
+    nothing falls between the rows. Cache/reasoning tokens are tracked by v0.23
+    and deliberately not shown — the columns stay input and output.
     """
-    marks = ",".join("?" * len(SHORT_SOURCES))
-    out = {"workers": {}, "orchestrators": {}}
-    for name, span in WINDOWS:
-        out["workers"][name] = _sum_tokens(
-            paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
-                   "WHERE source='kanban' AND started_at >= ?", (now_s - span,))
-        out["orchestrators"][name] = _sum_tokens(
-            paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
-                   "WHERE source='cron' AND started_at >= ?", (now_s - span,))
-    cum = _sum_tokens(paths, "SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
-                             f"WHERE source NOT IN ({marks})", SHORT_SOURCES)
-    since = None
-    if cum is not None:
+    marks = "(" + ",".join("?" * len(WORKER_SOURCES + SCHEDULED_SOURCES)) + ")"
+    queries, keys = [], []
+    for group, sources in (("workers", WORKER_SOURCES), ("scheduled", SCHEDULED_SOURCES)):
+        sql = ("SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
+               "WHERE source IN (" + ",".join("?" * len(sources)) + ") AND "
+               + _ACTIVE_SINCE)
+        for name, span in WINDOWS:
+            queries.append((sql, sources + (now_s - span,)))
+            keys.append((group, name))
+    queries.append(("SELECT SUM(input_tokens), SUM(output_tokens) FROM sessions "
+                    "WHERE source IS NULL OR source NOT IN " + marks,
+                    WORKER_SOURCES + SCHEDULED_SOURCES))
+    keys.append(("orchestrators", "cum"))
+    vals = dict(zip(keys, _sum_tokens(paths, queries)))
+
+    out = {"workers": {}, "scheduled": {}}
+    for group in ("workers", "scheduled"):
+        for name, _ in WINDOWS:
+            out[group][name] = vals[(group, name)]
+    orch = {}
+    cum = vals[("orchestrators", "cum")]
+    if cum is None:                                   # no readable store at all
+        for name, _ in WINDOWS:
+            orch[name] = None
+    else:
         samples = _update_ledger(ledger_path or LEDGER_PATH, now_s, cum)
         if samples[0][0] > now_s - WINDOWS[-1][1]:
-            since = samples[0][0]
+            orch["since"] = samples[0][0]
         for name, span in WINDOWS:
-            grew = _ledger_delta(samples, now_s - span)
-            base = out["orchestrators"][name] or [0, 0]
-            out["orchestrators"][name] = [base[0] + grew[0], base[1] + grew[1]]
-    out["orchestrators"]["since"] = since
+            orch[name] = _ledger_delta(samples, now_s - span)
+    orch.setdefault("since", None)                    # full 7 d of history: no caveat
+    out["orchestrators"] = orch
+    out["meta"] = {
+        "attribution": "a session's lifetime total, charged whole to every window it "
+                       "was active in (COALESCE(last_activity_at, ended_at, started_at)); "
+                       "the store has no per-call time, so nothing is split across windows",
+        "groups": {"workers": list(WORKER_SOURCES),
+                   "scheduled": list(SCHEDULED_SOURCES),
+                   "orchestrators": "every other source, NULL included (cli, local, "
+                                    "telegram) — growth between ledger samples"},
+        "columns": "input and output only; cache_read/cache_write/reasoning exist in "
+                   "v0.23 and are not counted here",
+    }
     return out
 
 
@@ -824,31 +914,69 @@ def orchestrators_table(rows, width=None) -> Table:
     return t
 
 
+#: Two lines the operator cannot infer from the numbers: which source went into
+#: which row (the old table gave no hint that `subagent` and `telegram` were being
+#: billed as orchestrator use, or that `cron` was not a REPL), and that nothing is
+#: split across windows because the store keeps no per-call time. Kept to two short
+#: lines on purpose — this pane lives in a tmux split and the running table below it
+#: outranks a footnote.
+TOKEN_NOTES = (
+    "workers = kanban+subagent+oneshot · scheduled = cron "
+    "· orchestrators = the rest (cli/local/telegram/NULL)",
+    "lifetime totals charged whole to each window a session was active in "
+    "· in+out only (cache/reasoning not shown)",
+)
+
+
+def token_rows(tokens) -> list:
+    """``[(group, [[in, out] per window]), …]`` — the table's rows as plain numbers.
+
+    This is the only place the arithmetic lives, so the rendered `total` row and any
+    check that "the three groups add up" read the same definition. A cell is ``None``
+    when nothing was readable behind it (no ``state.db``, no ledger); `total` is
+    ``None`` only when every group is, so a dash never becomes a zero. A payload from
+    an older producer that carries fewer groups renders the groups it has.
+    """
+    groups = {g: (tokens.get(g) or {}) for g in GROUPS}
+
+    def window_total(name):
+        parts = [groups[g].get(name) for g in GROUPS]
+        if all(p is None for p in parts):
+            return None
+        return [sum((p or [0, 0])[i] for p in parts) for i in (0, 1)]
+
+    rows = [(g, [groups[g].get(name) for name, _ in WINDOWS]) for g in GROUPS]
+    rows.append(("total", [window_total(name) for name, _ in WINDOWS]))
+    return rows
+
+
 def token_table(tokens) -> list:
-    """The token block: one row per group (workers, orchestrators, total) and
-    in/out per window, then a blank row before the running table."""
-    w, o = tokens["workers"], tokens["orchestrators"]
+    """The token block: one row per group, in/out per window, two notes, blank row.
+
+    Three groups that add up to `total`, not two that overlap. The old table billed
+    every source that was not `kanban` or `cron` — `subagent`, `telegram`, anything
+    unrecognised — as orchestrator use and let `total` absorb them, so the rows
+    could not be reconciled against the sources they were named after. `total` here
+    is the sum of exactly these three rows (``token_rows``), and the notes say which
+    source went into which row and what the cells are made of.
+    """
     t = _plain_table()
     t.add_column("Tokens", no_wrap=True)
     for name, _ in WINDOWS:
         t.add_column(f"{name} in", justify="right", no_wrap=True)
         t.add_column(f"{name} out", justify="right", no_wrap=True)
-
-    def cells(group):
-        out = []
-        for name, _ in WINDOWS:
-            pair = group(name)
-            out += ["-", "-"] if pair is None else [fmt_tokens(pair[0]), fmt_tokens(pair[1])]
-        return out
-
-    total = lambda n: (None if w[n] is None and o[n] is None else
-                       [(w[n] or [0, 0])[i] + (o[n] or [0, 0])[i] for i in (0, 1)])
-    t.add_row("workers", *cells(lambda n: w[n]), style="dim")
-    t.add_row("orchestrators", *cells(lambda n: o[n]), style="dim")
-    t.add_row("total", *cells(total))
-    # a blank row, not a note: `--json` still carries orchestrators.since
-    parts = [t, Text("")]
-    return parts
+    for group, pairs in token_rows(tokens):
+        cells = []
+        for pair in pairs:
+            cells += ["-", "-"] if pair is None else [fmt_tokens(pair[0]),
+                                                      fmt_tokens(pair[1])]
+        t.add_row(group, *cells, style="" if group == "total" else "dim")
+    notes: list[str] = list(TOKEN_NOTES)
+    since = (tokens.get("orchestrators") or {}).get("since")
+    if since:      # the 7 d orchestrator cell is really "since <when>", so say when
+        notes[-1] += " · orch growth since " + datetime.datetime.fromtimestamp(
+            since).strftime("%a %H:%M")
+    return [t] + [Text(n, style="dim") for n in notes] + [Text("")]
 
 
 def ready_table(rows, width=None) -> Table:
@@ -907,13 +1035,11 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
         head.append(f" (≤{per}/profile)", style="dim")
     head.append(f" — {when} — {stamp}", style="title")
     parts = [head]
-    tok24 = data.get("tokens_24h")
-    tok_lines = []
-    if data.get("tokens"):
-        tok_lines = token_table(data["tokens"])
-    elif tok24:
-        tok_lines = [Text(f"tokens 24h in {fmt_tokens(tok24[0])} · out {fmt_tokens(tok24[1])}"
-                          "  (kanban worker sessions, all profiles)", style="dim")]
+    # One token surface, not two. The old view could print a `tokens 24h in …` line
+    # *and* the table, from two different queries over two different source sets, and
+    # leave the operator to reconcile them; the table is the only token output now and
+    # the `tokens_24h` key is one of its own cells (see `attach_tokens`).
+    tok_lines = token_table(data["tokens"]) if data.get("tokens") else []
     parts += tok_lines
     # when every slot is taken the ready cards on other boards strand
     # silently — the one case worth a line of its own

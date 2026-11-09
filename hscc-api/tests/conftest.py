@@ -11,6 +11,18 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# A pytest process must not execv itself mid-run: the first test here that
+# WRITES a hermes state.db (test_gateway_backfill.py::
+# test_backfill_seeds_full_history) drives hermes_state -> context_compressor
+# -> a deferred `from agent.conversation_loop import ...`, which lands on
+# hermes_bootstrap's module-level launch preparation and its os.execv of a
+# "selected generation" interpreter. The exec wipes the running session — rc=1
+# with 0 bytes on stdout and stderr, no summary, no FAILED line, so the leg
+# looks hung rather than broken. Full evidence + the upstream knob:
+# scripts/run_tests.sh ("no mid-run interpreter swap", t_82fa20f5). Set before
+# any hermes import below.
+os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")
+
 import pytest  # noqa: E402
 
 import api_server  # noqa: E402

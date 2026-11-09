@@ -237,7 +237,7 @@ _SESSION_COLS = ("id", "source", "started_at", "input_tokens", "output_tokens",
                                  # legacy rows are the first 5 (see the CREATE TABLE)
 
 
-def _state_db(path, rows, leases=(), *, lease_table=True):
+def _state_db(path, rows, leases=(), *, lease_table=True, nullable_source=False):
     """One profile store: the ``sessions`` table plus (v0.23) the
     ``session_turn_leases`` table hermes writes for every in-flight turn.
 
@@ -246,6 +246,13 @@ def _state_db(path, rows, leases=(), *, lease_table=True):
     NULLs for the v0.23 columns they do not care about. Pass the full 9-tuple
     ``(id, source, started_at, input, output, ended_at, title,
     last_activity_at, last_activity_description)`` when a test needs them.
+
+    ``nullable_source=True`` drops the live ``NOT NULL`` on ``source``. A real
+    store cannot hand the readers a NULL source (measured: ``source IS NULL`` = 0
+    of 7 223 session rows over 51 stores), so this builds the legacy-shaped store
+    whose ONLY purpose is to keep the two readers' NULL-defensive clauses pinned
+    (``_LIVE_TURNS``' ``s.source IS NULL``, the token table's complement, where a
+    bare ``NOT IN`` silently drops the row).
 
     ``leases`` are ``(conversation_id, acquired_at, expires_at)``: one row per
     turn that is running RIGHT NOW. ``lease_table=False`` builds a pre-v0.23
@@ -257,7 +264,9 @@ def _state_db(path, rows, leases=(), *, lease_table=True):
     # by PRAGMA table_info on this host's root store) plus every NOT NULL column
     # with its measured default — so a fixture row has to satisfy the same insert
     # contract the kernel's does, instead of a schema this file invented.
-    c.execute("CREATE TABLE sessions (id TEXT, source TEXT NOT NULL, "
+    c.execute("CREATE TABLE sessions (id TEXT, "
+              + ("source TEXT NOT NULL" if not nullable_source else "source TEXT")
+              + ", "
               "started_at REAL NOT NULL, input_tokens INTEGER, output_tokens INTEGER, "
               "ended_at REAL, title TEXT, last_activity_at REAL, "
               "last_activity_description TEXT, "
@@ -444,24 +453,257 @@ def test_unreadable_or_unparsable_store_leaves_dashes(tmp_path):
     assert r["session_id"] == "local-aaa"             # the good event still wins
 
 
-def test_render_shows_card_tokens_and_24h_total():
+def test_render_shows_card_tokens_and_the_token_table_once():
+    """One token surface, not two that have to be reconciled.
+
+    The old renderer could print a `tokens 24h in … · out …` line *beside* the
+    table — same window, different query, different source set — and `tokens_24h`
+    in the payload was that other measurement. Now the table is the only token
+    output and `tokens_24h` is one of its own cells (pinned by
+    ``test_tokens_24h_is_the_tables_own_cell_not_a_second_measurement``).
+    """
     d = _collect()
     d["running"][0].update(tok_in=18_000_000, tok_out=202_000)
-    d["tokens_24h"] = [1_234_000_000, 3_400_000]
+    d["tokens"] = {"workers": {"24h": [100_000_000, 3_000_000], "7d": [200_000_000, 6_000_000]},
+                   "scheduled": {"24h": [10_000_000, 1_000_000], "7d": [20_000_000, 2_000_000]},
+                   "orchestrators": {"24h": [20_000_000, 200_000], "7d": [70_000_000, 700_000],
+                                     "since": None}}
+    d["tokens_24h"] = d["tokens"]["workers"]["24h"]
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d))
+    lines = buf.getvalue().splitlines()
+    assert "18.0M/202k" in "\n".join(lines)          # the running card's own session
+    body = {}
+    for line in lines:
+        parts = line.split()
+        # `parts[1] != "="` skips the note line, which also starts with "workers"
+        if len(parts) > 1 and parts[0] in kanban_live.GROUPS + ("total",) and parts[1] != "=":
+            body[parts[0]] = parts[1:]
+    assert body["workers"] == ["100.0M", "3.0M", "200.0M", "6.0M"]
+    assert body["scheduled"] == ["10.0M", "1.0M", "20.0M", "2.0M"]
+    assert body["orchestrators"] == ["20.0M", "200k", "70.0M", "700k"]
+    assert body["total"] == ["130.0M", "4.2M", "290.0M", "8.7M"]     # the three added
+    assert "tokens 24h in" not in "\n".join(lines)   # the fallback line is gone
+    # and the two notes say what the rows are made of
+    assert "workers = kanban+subagent+oneshot" in "\n".join(lines)
+
+
+def test_the_partition_bills_every_measured_source_exactly_once():
+    """`group_of` is a partition of the sources measured on this host.
+
+    Census over the 51 stores: cron 3620, kanban 1895, cli 1526, telegram 103,
+    subagent 54, oneshot 3, local 2, NULL 0. The old code had two rows and one
+    catch-all (`source NOT IN ('kanban','cron')`), so `subagent` and `telegram`
+    were billed as orchestrator use and `total` absorbed them without saying so;
+    a NULL source vanished from every row, because SQL `NOT IN` is NULL — not
+    TRUE — for NULL. An unrecognised source must land in `orchestrators`, where
+    the operator can see it, not in `workers` and not nowhere.
+    """
+    measured = ("kanban", "subagent", "oneshot",          # machine work a card asked for
+                "cron",                                   # the scheduler
+                "cli", "local", "telegram", None)         # an operator somewhere
+    assert set(map(kanban_live.group_of, measured)) == set(kanban_live.GROUPS)
+    for src in ("kanban", "subagent", "oneshot"):
+        assert kanban_live.group_of(src) == "workers", src
+    assert kanban_live.group_of("cron") == "scheduled"
+    for src in ("cli", "local", "telegram", None, "whatsapp-invented-next-release"):
+        assert kanban_live.group_of(src) == "orchestrators", src
+    # disjoint, or one session would be counted in two rows and `total` would lie
+    assert not set(kanban_live.WORKER_SOURCES) & set(kanban_live.SCHEDULED_SOURCES)
+    assert tuple(kanban_live.GROUPS) == ("workers", "scheduled", "orchestrators")
+    # the pane says the same thing out loud, so the mapping is not a code secret
+    notes = " ".join(kanban_live.TOKEN_NOTES)
+    for src in ("kanban", "subagent", "oneshot", "cron", "cli", "telegram"):
+        assert src in notes, src
+    for g in kanban_live.GROUPS:
+        assert g in notes, g
+
+
+def test_the_orchestrator_panel_and_the_token_table_agree_on_what_a_worker_is():
+    """A hotspot guard for the two partitions of `sessions.source` in this file.
+
+    `attach_orchestrators` (t_1f14c019) excludes a list of worker-family sources
+    from the live-turn panel; the token table partitions the same column into
+    workers / scheduled / orchestrators. They must stay the same cut of the world:
+    if one grows a source and the other does not, a dispatched run is either an
+    orchestrator in the panel and a worker in the table, or invisible in both. This
+    test does not touch their definitions — it only refuses the drift.
+    """
+    assert set(kanban_live.NON_ORCHESTRATOR_SOURCES) == set(
+        kanban_live.WORKER_SOURCES + kanban_live.SCHEDULED_SOURCES)
+    # and the panel's catch-all side is the token table's orchestrator group
+    for src in ("cli", "local", "telegram", None, "unknown-next-release"):
+        assert kanban_live.group_of(src) == "orchestrators", src
+        assert (src is None or src not in kanban_live.NON_ORCHESTRATOR_SOURCES), src
+
+
+def test_a_card_started_before_the_window_is_charged_to_the_window_it_worked_in(tmp_path):
+    """The attribution case, pinned (D1).
+
+    The old predicate was `started_at >= now-span`: a card that ran 25 h was
+    invisible to 24 h and charged wholly to 7 d. Measured on this host the 7 d
+    column was missing 7 kanban sessions — 58,501,630 in / 684,357 out — that
+    started 7.06 d ago and were active inside 7 d. Nothing is *split*: with
+    `messages.token_count` NULL in all 595,776 message rows there is no per-call
+    time to split by, so the whole lifetime total is charged to each window the
+    session was active in, and the table and `--json` both say that.
+    """
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
+        # started 26 h ago, still moving now: inside the 24 h window
+        ("long", "kanban", NOW - 26 * 3600, 1_000, 100, None, None, NOW - 60, "turn"),
+        # started 30 h ago, last moved 26 h ago: 7 d only
+        ("done", "kanban", NOW - 30 * 3600, 2_000, 200, NOW - 26 * 3600, None,
+         NOW - 26 * 3600, None),
+        # finished 9 d ago: in neither window
+        ("gone", "kanban", NOW - 9 * 86400, 5, 5, NOW - 9 * 86400, None,
+         NOW - 9 * 86400, None),
+    ])
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    t = d["tokens"]
+    assert t["workers"]["24h"] == [1_000, 100]      # `long`, because it was active now
+    assert t["workers"]["7d"] == [3_000, 300]       # `long` + `done`, never `gone`
+
+
+def test_subagent_and_telegram_land_in_the_group_the_table_names(tmp_path):
+    """D2, with a v0.23-shaped fixture: the two sources the old catch-all swallowed.
+
+    `subagent`/`oneshot` are machine work a card asked for, so they join `workers`;
+    `telegram` is an operator talking to an agent, so it is orchestrator-side — and
+    it is charged as *ledger growth*, never as its lifetime total, because these
+    sessions live for months (longest measured activity span: 148 days). `total` is
+    then the sum of the three rows, which is what the card means by "no silent
+    absorption".
+    """
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
+        ("k", "kanban", NOW - 3600, 100, 10),
+        ("sub", "subagent", NOW - 3600, 30, 3),         # was: "orchestrator"
+        ("one", "oneshot", NOW - 3600, 1, 1),           # was: "orchestrator"
+    ])
+    _state_db(tmp_path / "profiles" / "cron-box" / "state.db", [
+        ("c", "cron", NOW - 600, 40, 4),                # was: "orchestrator"
+    ])
+    _state_db(tmp_path / "profiles" / "hscc-orch" / "state.db", [
+        # lifetime totals summing to exactly 5000/500, i.e. the ledger's last sample
+        ("repl", "cli", NOW - 60 * 86400, 4_000, 400, None, None, NOW - 50, "idle"),
+        ("tg", "telegram", NOW - 40 * 86400, 900, 90, None, None, None, None),
+        ("nul", None, NOW - 40 * 86400, 100, 10),       # SQL NOT IN dropped this one
+    ], nullable_source=True)   # a live store cannot write this (0 of 7 223 rows);
+                               # the row exists only to keep the complement NULL-safe
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps([[NOW - 2 * 86400, 1_000, 100],
+                                  [NOW - 3600, 5_000, 500]]))
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW, ledger_path=str(ledger))
+    t = d["tokens"]
+    assert t["workers"]["24h"] == [131, 14]             # kanban + subagent + oneshot
+    assert t["scheduled"]["24h"] == [40, 4]             # cron, on its own row
+    assert t["orchestrators"]["24h"] == [4_000, 400]    # 1000 → 5000 growth, nothing else
+    assert t["orchestrators"]["since"] == NOW - 2 * 86400
+    # the sum the operator is allowed to read as "everything on this host"
+    rows = {g: cells for g, cells in kanban_live.token_rows(t)}
+    assert rows["total"][0] == [131 + 40 + 4_000, 14 + 4 + 400]
+    # and the numbers that would have been there before the partition are not:
+    # neither telegram's lifetime 900/90 nor the NULL row's 100/10 in workers.
+    assert rows["workers"][0] == [131, 14]
+
+
+def test_a_workers_growth_can_never_make_the_orchestrator_row_grow(tmp_path):
+    """The ledger's cumulative is the orchestrator group only (D3).
+
+    `cum` used to be `source NOT IN ('kanban','cron')`, which put every `subagent`,
+    `oneshot` and `telegram` session into the number the ledger differences — so the
+    "orchestrators" row rose when a *card's* delegated subagent did its work. Here a
+    card session and its subagent each grow by 500 in / 50 out between two ticks:
+    `workers` follows both, `orchestrators` does not move at all. (Red at the base
+    commit: there the orchestrator row grows by exactly the subagent's 500/50.)
+    """
+    db = tmp_path / "profiles" / "backend-engineer" / "state.db"
+    _state_db(db, [("k", "kanban", NOW - 3600, 1_000, 100),
+                   ("s", "subagent", NOW - 3600, 500, 50)])
+    ledger = tmp_path / "ledger.json"
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW, ledger_path=str(ledger))
+    assert d["tokens"]["workers"]["24h"] == [1_500, 150]        # card + its subagent
+    assert d["tokens"]["orchestrators"]["24h"] == [0, 0]        # first sample: no history
+    assert json.loads(ledger.read_text()) == [[NOW, 0, 0]]      # worker tokens are not in it
+
+    c = sqlite3.connect(db)                                     # the card keeps working
+    c.execute("UPDATE sessions SET input_tokens=input_tokens+500, "
+              "output_tokens=output_tokens+50")
+    c.commit()
+    c.close()
+    d2 = _collect()
+    kanban_live.attach_tokens(d2, hermes_home=str(tmp_path), now=NOW + 400,
+                              ledger_path=str(ledger))
+    assert d2["tokens"]["workers"]["24h"] == [2_500, 250]       # workers follow the work
+    assert d2["tokens"]["orchestrators"]["24h"] == [0, 0]       # orchestrators do not move
+
+
+def test_a_narrower_ledger_step_costs_nothing_and_stays_non_negative(tmp_path):
+    """Migrating the ledger to the orchestrator group must not make a window negative.
+
+    The cumulative drops by the `subagent`/`oneshot` total (62.7M in on this host)
+    at the first sample after this change, exactly like a deleted session. The
+    per-step floor in ``_ledger_delta`` turns that step into 0 and the growth after
+    it still counts — the guarantee the deleted-session test has always pinned.
+    """
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps([[NOW - 7200, 60_000, 6_000],     # still included
+                                  [NOW - 3600, 55_000, 5_500]]))   # narrowed: a drop
+    _state_db(tmp_path / "profiles" / "hscc-orch" / "state.db",
+              [("r", "cli", NOW - 30 * 86400, 56_000, 5_600)])
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW, ledger_path=str(ledger))
+    o = d["tokens"]["orchestrators"]
+    assert o["24h"] == [1_000, 100]          # only 55_000 → 56_000 counts; the drop is 0
+    assert all(v >= 0 for pair in o.values() if isinstance(pair, list) for v in pair)
+
+
+def test_tokens_24h_is_the_tables_own_cell_not_a_second_measurement(tmp_path):
+    """D4: `--json` must not carry two totals for one window.
+
+    `tokens_24h` predates the table (2.14.0) and summed `source='kanban'` by
+    `started_at` on its own, so it disagreed with the table beside it — different
+    source set, different predicate. It stays as a mirror of the workers/24 h cell,
+    which costs one fewer scan of every store and cannot disagree by construction.
+    """
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
+        ("mine", "kanban", NOW - 5 * 3600, 18_000_000, 202_000),
+        ("sub", "subagent", NOW - 5 * 3600, 4_000, 40),
+    ])
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["tokens_24h"] == d["tokens"]["workers"]["24h"] == [18_004_000, 202_040]
+
+
+def test_no_store_at_all_is_a_dash_in_every_row(tmp_path):
+    """Existing contract, now across all three rows: nothing readable → `-`, no raise."""
+    d = _collect()
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["tokens_24h"] is None
+    for group, cells in kanban_live.token_rows(d["tokens"]):
+        assert all(c is None for c in cells), group      # never a silent 0
     buf = io.StringIO()
     make_console(file=buf, width=160, color_system=None).print(kanban_live.render(d))
     out = buf.getvalue()
-    assert "18.0M/202k" in out
-    assert "tokens 24h in 1.23G · out 3.4M" in out
+    assert out.count("-") >= 8 and "workers" in out and "scheduled" in out
 
 
-def test_token_windows_split_workers_and_orchestrators(tmp_path):
+def test_token_windows_are_three_groups_that_add_up(tmp_path):
+    """`workers` + `scheduled` + `orchestrators` = `total`, by construction.
+
+    Rewritten for the partition: `cron` used to be billed as orchestrator use
+    inside the same row as the REPL growth, which is how `subagent` and
+    `telegram` got in there too. A weeks-old `cli` session is still ledger
+    growth only — its lifetime total must never appear in a window cell.
+    """
     _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db", [
         ("w1", "kanban", NOW - 3600, 100, 10),                 # in 24h and 7d
         ("w2", "kanban", NOW - 3 * 86400, 1_000, 100),         # 7d only
         ("w3", "kanban", NOW - 9 * 86400, 5, 5)])              # neither
     _state_db(tmp_path / "profiles" / "sphoin-orch" / "state.db", [
-        ("c1", "cron", NOW - 600, 40, 4),                      # cron = orchestrator, by started_at
+        ("c1", "cron", NOW - 600, 40, 4),                      # scheduler: its own row
         ("repl", "cli", NOW - 60 * 86400, 9_000, 900)])        # weeks-old REPL: ledger only
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps([[NOW - 8 * 86400, 1_000, 100],   # before the 7d window
@@ -472,12 +714,25 @@ def test_token_windows_split_workers_and_orchestrators(tmp_path):
     t = d["tokens"]
     assert t["workers"]["24h"] == [100, 10]
     assert t["workers"]["7d"] == [1_100, 110]
-    # 24h: cron 40/4 + growth since the sample at/before NOW-24h (5000 → 8000 → 9000)
-    assert t["orchestrators"]["24h"] == [40 + 4_000, 4 + 400]
-    # 7d: cron + growth from the NOW-8d sample (1000 → 9000)
-    assert t["orchestrators"]["7d"] == [40 + 8_000, 4 + 800]
+    assert t["scheduled"]["24h"] == [40, 4] == t["scheduled"]["7d"]
+    # growth since the sample at/before NOW-24h (5000 → 8000 → 9000), cron not in it
+    assert t["orchestrators"]["24h"] == [4_000, 400]
+    # 7d: growth from the NOW-8d sample (1000 → 9000)
+    assert t["orchestrators"]["7d"] == [8_000, 800]
     assert t["orchestrators"]["since"] is None      # ledger already covers 7 days
     assert json.loads(ledger.read_text())[-1] == [NOW, 9_000, 900]
+    # the three rows add up to the row the operator reads as "everything"
+    rows = {g: cells for g, cells in kanban_live.token_rows(t)}
+    for i, (name, _span) in enumerate(kanban_live.WINDOWS):
+        assert rows["total"][i] == [rows["workers"][i][0] + rows["scheduled"][i][0]
+                                    + rows["orchestrators"][i][0],
+                                    rows["workers"][i][1] + rows["scheduled"][i][1]
+                                    + rows["orchestrators"][i][1]], name
+    # --json says what the numbers are, instead of the operator guessing
+    assert t["meta"]["groups"]["workers"] == ["kanban", "subagent", "oneshot"]
+    assert t["meta"]["groups"]["scheduled"] == ["cron"]
+    assert "active in" in t["meta"]["attribution"]
+    assert "reasoning" in t["meta"]["columns"]
 
 
 def test_ledger_survives_a_deleted_session_and_reports_since(tmp_path):
@@ -580,19 +835,19 @@ def test_a_worker_turn_never_renders_as_an_orchestrator(tmp_path):
         ("c-1", "cron", 120),         # a scheduled job
         ("s-1", "subagent", 30),      # a delegated child
         ("o-1", "oneshot", 10),       # `hermes -p X -q ...`, one query and done
-        ("n-1", "telegram", 15),      # a source the exclude list does not name
+        ("n-1", None, 15),           # a source the exclude list does not name
     )
-    # (MON-23-FIELDS) this row used to be `None`. The fixture's `sessions` table
-    # now carries the live column contract, and `source` is `TEXT NOT NULL` there
-    # (measured: 7 223 session rows over 51 stores, `source IS NULL` = 0), so a
-    # NULL source is no longer something a store can hand this reader. The
-    # "unknown source renders rather than vanishing" rule is unchanged and still
-    # pinned — `_LIVE_TURNS`' `s.source IS NULL` clause stays as its author left
-    # it, simply no longer reachable from a real store.
+    # (MON-23-FIELDS) `source` is `TEXT NOT NULL` in every live store (measured:
+    # 7 223 session rows over 51 stores, `source IS NULL` = 0), so this store is
+    # built with `nullable_source=True` — the row exists only to keep
+    # `_LIVE_TURNS`' `s.source IS NULL` branch pinned, which a v0.23-shaped store
+    # can no longer reach. The rule it guards is unchanged: an unknown source
+    # renders rather than vanishing from the section.
     _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db",
               [(cid, src, NOW - age, 1000, 10, None, "card", NOW - age,
                 "receiving stream response") for cid, src, age in worker],
-              leases=[_turn(cid, NOW - age) for cid, src, age in worker])
+              leases=[_turn(cid, NOW - age) for cid, src, age in worker],
+              nullable_source=True)
     d = _collect()
     kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
     assert [r["session"] for r in d["orchestrators"]] == ["n-1"]
