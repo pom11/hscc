@@ -1376,13 +1376,37 @@ def audit(repo=None) -> dict:
     }
 
 
-def a_table(repo=None, surfaces=None) -> dict:
+#: The ONE render width the (A)-only pass may probe, per surface kind.
+#:
+#: ``a_findings_for_surface`` derives every ``kind == "A"`` finding from
+#: ``max(renders)`` alone (:func:`a_findings_for_surface`, rule 1) — the
+#: narrower renders exist only to feed the ``A-WIDTH`` guard, which
+#: :func:`a_table` throws away on the very next line. So probing 80 and 120
+#: beside 500 buys the (A) table nothing at all: it costs two extra CLI
+#: subprocesses per surface whose bytes are parsed and discarded. t_28b0e521
+#: measured 899 interpreter launches for the pass on a healthy tree; restricting
+#: each surface to its authoritative width makes it 331 with a PROVABLY
+#: unchanged table (the A-WIDTH branch is not read here). Not "the two wrap
+#: widths are uninteresting" — (B) still measures them, in the full audit.
+A_TABLE_WIDTHS = {True: (WIDTH_WIDE,), False: (WIDTHS_WRAP[-1],)}
+#          ^ kind != "help"        kind == "help" (no 500 render exists for it)
+
+
+def a_table(repo=None, surfaces=None, stats=None) -> dict:
     """(A)-only pass: {surface command: sorted canonical (A) lines}.
 
     Walks the real surface but derives ONLY class (A) (no sensors, no
     examples), and can be restricted to a set of surface names, so a sibling
     interpreter can produce the table cheaply and the gate can assert it is
-    identical across interpreters (t_cfdcefa9)."""
+    identical across interpreters (t_cfdcefa9).
+
+    ``stats`` is an optional dict filled with ``{"probes": int,
+    "surfaces": int, "secs": float}``. It rides on stderr rather than in the
+    JSON, because the stdout payload IS the compared table and gaining a
+    metadata key there would change what every sibling is asserted against.
+    The gate uses it as a receipt that the walk really executed, so "the
+    sibling answered fast" can never again be mistaken for "the sibling agreed".
+    """
     global REPO
     if repo:
         REPO = Path(repo).resolve()
@@ -1399,6 +1423,9 @@ def a_table(repo=None, surfaces=None) -> dict:
     _seed_sandbox(sandbox)
     prober = Prober(sandbox, canary, Path(os.path.expanduser("~")))
     paths, _fd = build_surface()
+    t_start = time.monotonic()
+    n_probes = 0
+    n_surfaces = 0
     table: dict = {}
     for group, argv, style, kind in paths:
         for inv, flag in invocations_for(argv, kind):
@@ -1407,7 +1434,14 @@ def a_table(repo=None, surfaces=None) -> dict:
                 continue
             if inv[:2] == ["api", "start"]:
                 continue  # never executed (see audit docstring)
-            widths = WIDTHS_ALL if kind != "help" else WIDTHS_WRAP
+            n_surfaces += 1
+            # Authoritative width ONLY — see A_TABLE_WIDTHS. This is the
+            # t_28b0e521 fix: the pass used to render every surface at 80, 120
+            # and 500 and then read only the widest, so two thirds of its
+            # interpreter launches produced bytes that were parsed and thrown
+            # away. 899 launches -> 331, table provably identical.
+            widths = A_TABLE_WIDTHS[kind != "help"]
+            n_probes += len(widths)
             try:
                 renders = {w: prober.run(inv, w) for w in widths}
             except Exception:
@@ -1417,6 +1451,9 @@ def a_table(repo=None, surfaces=None) -> dict:
                 if af["kind"] == "A" and af["detail"] not in lines:
                     lines.append(af["detail"])
     shutil.rmtree(tmp, ignore_errors=True)
+    if stats is not None:
+        stats.update({"probes": n_probes, "surfaces": n_surfaces,
+                      "secs": round(time.monotonic() - t_start, 2)})
     # same semantics as a_count_table(): only surfaces that actually leak
     table = {k: sorted(v) for k, v in sorted(table.items()) if v}
     return table
@@ -1432,17 +1469,27 @@ def main():
                     help="run the (A)-only pass and print the per-surface "
                          "canonical (A) table as JSON (no findings, no "
                          "sensors); SURFACES is an optional comma-separated "
-                         "list of surface names to restrict the walk to — "
-                         "used by the interpreter-independence regression "
-                         "test")
+                         "list of surface names to restrict the walk to "
+                         "(pass '*' for the whole surface) — used by the "
+                         "interpreter-independence regression test")
     args = ap.parse_args()
 
     if args.a_table is not None:
         raw = args.a_table
         surfaces = [s.strip() for s in raw.split(",")
                     if s.strip() and s.strip() != "*"]
-        print(json.dumps(a_table(args.repo, surfaces or None),
-                         indent=2, sort_keys=True))
+        stats: dict = {}
+        table = a_table(args.repo, surfaces or None, stats)
+        print(json.dumps(table, indent=2, sort_keys=True))
+        # The receipt goes to STDERR on purpose: stdout is the compared table,
+        # and a metadata key inside it would silently become part of what every
+        # sibling is asserted equal to. t_28b0e521 — the gate used to have no
+        # way to tell "the sibling walked 331 probes and agreed" from "the
+        # sibling answered instantly having done nothing"; this line is the
+        # difference, and the test asserts on it.
+        print(f"[a-table] surfaces={stats.get('surfaces', 0)} "
+              f"probes={stats.get('probes', 0)} secs={stats.get('secs', 0)}",
+              file=sys.stderr)
         return 0
 
     rep = audit(args.repo)
