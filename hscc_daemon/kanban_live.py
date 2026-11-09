@@ -513,20 +513,23 @@ def _token_windows(paths, now_s, ledger_path=None):
 # session store is the authority, not `ps`, and no argv heuristic is kept.
 #
 # `session_turn_leases(conversation_id, holder, acquired_at, expires_at)` is one
-# row per in-flight turn — measured 50 of 53 stores on this host have it. It is
-# renewed while the turn runs (a 6238 s-old lease was still 254 s from expiry) and
-# it self-expires, so a process that died mid-turn stops being listed after one
-# lease TTL rather than forever. A `sessions` row alone proves nothing: 871
-# `source='cli'` sessions here have `ended_at IS NULL` purely because they died
-# before anything stamped it, which is why `ended_at` is not consulted below.
+# row per in-flight turn. Measured on this host: 52 stores are yielded (the root
+# db plus 51 `profiles/` directories), 51 of them have a `state.db` and 50 of
+# those carry the table — the exception is `profiles/default/state.db`, a 0-byte
+# file. It is renewed while the turn runs (a 6238 s-old lease was still 254 s from
+# expiry) and it self-expires, so a process that died mid-turn stops being listed
+# after one lease TTL rather than forever. A `sessions` row alone proves nothing:
+# 871 `source='cli'` sessions here have `ended_at IS NULL` purely because they
+# died before anything stamped it, which is why `ended_at` is not consulted below.
 
 #: Sessions that are a dispatched worker, a scheduler or a subagent run — never
-#: an operator at a REPL. Measured `source` values on this host: `cli` (1526),
-#: `cron` (3612), `kanban` (1892), `local` (2), `oneshot` (3), `subagent` (54),
-#: `telegram` (103). A live REPL turn is `local` with `created_source='cli'`, so
-#: this is deliberately an EXCLUDE list: an unknown or NULL source renders rather
-#: than vanishing, because a false negative here is an empty panel that looks
-#: like an idle fleet.
+#: an operator at a REPL. Census over the 51 stores on this host: `cron` 3617,
+#: `kanban` 1893, `cli` 1526, `telegram` 103, `subagent` 54, `oneshot` 3,
+#: `local` 2 — and both `local` rows are orchestrator REPL sessions (hscc-orch,
+#: ecofire-flows-orch). A live REPL turn is `local` with `created_source='cli'`;
+#: older REPL sessions are recorded as plain `cli`. So this is deliberately an
+#: EXCLUDE list: an unknown or NULL source renders rather than vanishing, because
+#: a false negative here is an empty panel that looks like an idle fleet.
 NON_ORCHESTRATOR_SOURCES = ("kanban", "cron", "subagent", "oneshot")
 
 # Cheap indexed probe first: this runs every DEFAULT_INTERVAL over ~50 stores,
