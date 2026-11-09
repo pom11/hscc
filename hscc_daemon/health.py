@@ -835,6 +835,26 @@ def check_dgx():
         # the window. Any real fault (no intentional block) fails normally.
         state_entry["intentional"] = "autodown"
         state_entry["message"] = "intentional autodown — serving layer down by design"
+    # STAY-DOWN (t_a19fd5d9): a MANUAL `hscc cluster down` never latches the
+    # autodown watchdog block, so the branch above cannot see it and the stream
+    # read a bare `ok: False` with no reason while the fleet sat down on purpose
+    # — which is what made `hscc verify` false-fail an intentional down. Same
+    # signal the t_ba1424b7 gates read (``_operator_down``), used here only to
+    # EXPLAIN the failure: `ok` stays exactly what the probes determined (the
+    # stream stays truthful — an unhealthy unit is unhealthy), and nothing about
+    # the probes, the returned verdict or any notification changes.
+    # PRECEDENCE (deliberate, keep it this way): this branch sits AFTER the
+    # autodown branch, so when an autodown window AND a leftover stay-down
+    # record both apply the autodown stamp wins — one marker, its existing
+    # wording, and every autodown/verify test stays byte-identical.
+    elif not publish_ok:
+        _down = _operator_down()
+        if _down:
+            _reason = _down.get("reason") or "unspecified"
+            state_entry["intentional"] = "operator_down"
+            state_entry["message"] = (
+                f"fleet deliberately down — dgx unhealthy is expected while the "
+                f"fleet is down, not a fault (reason: {_reason})")
     write_state("dgx", state_entry)
     # Publish the verdict for the in-process readers that must NOT re-run this
     # check (proxy-stall c8-3, see _DGX_VERDICT). Written on EVERY path — ok or
@@ -1023,6 +1043,28 @@ def check_gateway():
         # fails. Tag so verify treats it as expected, not a fault.
         state_data["intentional"] = "autodown"
         state_data["message"] = "intentional autodown — serving layer down by design"
+    # STAY-DOWN (t_a19fd5d9): a MANUAL `hscc cluster down` never latches the
+    # autodown watchdog block, so the branch above cannot see it and the stream
+    # read a bare `ok: False` with no reason while the fleet sat down on purpose
+    # (the gateway's vLLM backend probe fails because the serving layer is down
+    # BY INSTRUCTION). Same signal the t_ba1424b7 gates read (``_operator_down``),
+    # used here only to EXPLAIN the failure: `ok` stays exactly what the probes
+    # determined — the stream stays truthful — and no probe, verdict or
+    # notification changes. Like the autodown branch above, this message wins
+    # over the `probe_degraded` setdefault below (`gateway_job_degraded` is still
+    # published as its own key, so "could not look" stays visible on the stream).
+    # PRECEDENCE (deliberate, keep it this way): AFTER the autodown branch, so
+    # when an autodown window AND a leftover stay-down record both apply the
+    # autodown stamp wins — one marker, its existing wording, and every existing
+    # autodown/verify test stays byte-identical.
+    elif not ok:
+        _down = _operator_down()
+        if _down:
+            _reason = _down.get("reason") or "unspecified"
+            state_data["intentional"] = "operator_down"
+            state_data["message"] = (
+                f"fleet deliberately down — gateway unhealthy is expected while "
+                f"the fleet is down, not a fault (reason: {_reason})")
     if probe_degraded:
         # Surface the reason on the surface that already reads `message`
         # (`hscc check gateway` prints it as Detail). setdefault, so an
