@@ -36,6 +36,22 @@ STATE_NOTIFY_FLOOR_SECONDS = 1800
 # match on one is a STATE signal, not an event.
 _STATE_METRICS = ("failed_dgx", "vllm_down", "watchdog_blocked", "nas_down")
 
+# The SERVING-LAYER signals — the three notify rules in
+# hscc-bootstrap/triggers.default.json whose condition says "the inference
+# stack is not serving": `orch-dgx-down` (failed_dgx), `vllm-down`
+# (vllm_down) and `engine-wedge-detected` (state.engine_wedge.degraded).
+# Their notify stands down while the fleet is deliberately down (STAY-DOWN-
+# NOTIFY, t_50c6edc4), because a deliberate teardown makes all three true by
+# construction and paging about it contradicts the instruction that caused it.
+# `watchdog_blocked` and `nas_down` are NOT here on purpose: a tripped pipeline
+# watchdog and a lost NAS mount are not fleet-serving signals and must keep
+# paging while the fleet is down.
+_OPERATOR_DOWN_SUPPRESSED_METRICS = {
+    "failed_dgx",
+    "vllm_down",
+    "state.engine_wedge.degraded",
+}
+
 
 def load_triggers():
     """Load trigger rules from triggers.json."""
@@ -201,13 +217,107 @@ def _intentional_autodown(watchdog_block_fn=None):
     return bool(block) and block.get("intentional") == "autodown"
 
 
-def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=None):
-    """Fire the action defined by a trigger rule."""
+def _operator_down(deliberately_down_fn=None):
+    """The durable stay-down record {set_at, reason}, or None when there is none.
+
+    STAY-DOWN-NOTIFY (t_50c6edc4): `hscc cluster down` is an INSTRUCTION, not a
+    fault, yet daemon.log 2026-11-08 17:52:19 shows the daemon paging "HSCC:
+    orchestrator/DGX unhealthy" ~1 min after the operator tore the fleet down.
+    The gate reads the ONE predicate D1 established —
+    :func:`post_boot.deliberately_down`, a record inside
+    ``~/.hscc/expected-up.json`` — through the same injectable-seam shape as
+    this function's neighbours already use for :func:`fire_trigger_action`
+    (``watchdog_block_fn`` / ``restart_vllm_fn``), so tests never touch
+    ``~/.hscc``. No parallel flag, nothing cached in memory: the record is on
+    disk or it does not exist.
+
+    WHICH WRITERS THIS TREATS AS A STAY-DOWN (decided here, never by string
+    match): ``post_boot.clear_expected_up(reason)`` has TWO sanctioned callers —
+    ``hscc-cluster/hscc.py`` (``"hscc cluster down"``, the operator) and
+    ``hscc_daemon/autodown.py`` (``"autodown: intentional idle teardown"``, the
+    fleet went idle) — so the record means "someone deliberately cleared the
+    footprint", NOT "an operator typed the verb". BOTH are honoured: a
+    serving-layer page is noise on either, and the idle-teardown path — unlike
+    the healing checks in health.py, which get there first through
+    ``_intentional_window()`` — has no other notify gate. The ``reason`` TEXT is
+    carried into the log line and nowhere else; no substring of it is ever
+    tested, because that would make an operator-chosen string a safety
+    property. Both producer wordings are pinned verbatim in
+    tests/test_trigger.py::test_both_producer_wordings_suppress.
+
+    Fail-safe toward PAGING — the deliberate opposite direction from
+    :func:`_intentional_autodown` (which fails toward restarting, because there
+    a wrong guess costs a resurrection and here it costs an alert): a raising
+    predicate, a non-dict, or a record missing either field reads as NO
+    evidence and the notification goes out exactly as it did before the record
+    existed. Absent evidence must never be able to silence an operator.
+    """
+    if deliberately_down_fn is None:
+        from . import post_boot
+        deliberately_down_fn = post_boot.deliberately_down
+    try:
+        record = deliberately_down_fn()
+    except Exception:
+        return None
+    if not isinstance(record, dict):
+        return None
+    # Both fields are stamped by every sanctioned writer
+    # (post_boot.clear_expected_up); a record without them is not a record this
+    # gate can vouch for, so it fails toward paging rather than quiet.
+    if not record.get("set_at") or not record.get("reason"):
+        return None
+    return record
+
+
+def _serving_layer_notify(rule):
+    """True when a rule's condition is one of the three serving-layer signals.
+
+    Reads the metric from ``rule["condition"]["metric"]`` as D3 specifies, with
+    one documented addition: the shipped ``engine-wedge-detected`` rule keys on
+    ``metric == "event_type"`` and carries its signal in ``condition.value``, so
+    for that rule the serving-layer name lives in the VALUE, not the metric.
+    Matching the metric alone would let the wedge rule page straight through the
+    gate while claiming to be one of the three rules the constant names.
+
+    Nothing else can match: ``nas_down`` / ``watchdog_blocked`` are excluded by
+    the constant itself, and this is only ever consulted from the ``notify``
+    branch, so ``emit_event`` and ``block_pipeline`` are structurally untouched.
+    """
+    condition = rule.get("condition") or {}
+    metric = condition.get("metric", "")
+    if metric in _OPERATOR_DOWN_SUPPRESSED_METRICS:
+        return True
+    return (metric == "event_type"
+            and str(condition.get("value")) in _OPERATOR_DOWN_SUPPRESSED_METRICS)
+
+
+def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=None,
+                        *, deliberately_down_fn=None):
+    """Fire the action defined by a trigger rule.
+
+    ``deliberately_down_fn`` is the STAY-DOWN-NOTIFY seam (see
+    :func:`_operator_down`): keyword-only and defaulted, so every existing
+    caller keeps its behaviour and the real loop gets the real predicate.
+    """
     rule_id = rule.get("id", "?")
     trigger_params = rule.get("trigger_params", {})
     action_type = rule.get("trigger_type", "")
 
     if action_type == "notify":
+        # STAY-DOWN-NOTIFY (t_50c6edc4): a deliberate teardown makes the
+        # serving-layer metrics true BY CONSTRUCTION, so paging on them
+        # contradicts the instruction that caused it. Gate BEFORE the
+        # notification, and only for the serving-layer metrics — never notify
+        # globally. This is NOT the auto_restart gate below and the two are
+        # deliberately kept separate: that one asks "is an automated restart
+        # wanted right now?" (the autodown watchdog block), this one asks "did
+        # someone deliberately take the fleet down?" (the stay-down record).
+        if _serving_layer_notify(rule):
+            down = _operator_down(deliberately_down_fn)
+            if down:
+                log(f"Trigger {rule_id}: notify suppressed — "
+                    f"fleet deliberately down ({down.get('reason')})")
+                return
         title = trigger_params.get("title", f"Trigger: {rule_id}")
         body = trigger_params.get("body", f"Rule {rule_id} fired")
         send_macos_notification(title, body, priority="normal")
@@ -253,8 +363,14 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
 
 def trigger_engine(check_gateway_fn=None,
                    pipeline_watchdog_fn=None, watchdog_block_fn=None,
-                   restart_vllm_fn=None):
+                   restart_vllm_fn=None, *, deliberately_down_fn=None):
     """Evaluate all trigger rules against recent events and state checks.
+
+    ``deliberately_down_fn`` is the STAY-DOWN-NOTIFY seam, threaded straight to
+    :func:`fire_trigger_action` — the real loop (`daemon_ops.run_trigger_loop`)
+    passes nothing and therefore reads the real
+    :func:`post_boot.deliberately_down`. Keyword-only and defaulted like every
+    other seam here, so existing callers are unaffected.
 
     Runs NO health check. Its DGX/gateway/NAS signals (`failed_dgx`,
     `vllm_down`, `watchdog_blocked`, `nas_down`, `state.<stream>`) are answered
@@ -342,6 +458,7 @@ def trigger_engine(check_gateway_fn=None,
                 rule, target,
                 watchdog_block_fn=watchdog_block_fn,
                 restart_vllm_fn=restart_vllm_fn,
+                deliberately_down_fn=deliberately_down_fn,
             )
             # Timestamp what the suppression logic consults, and only that: a
             # discrete event fire must not later silence a degradation alert

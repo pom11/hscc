@@ -6,6 +6,16 @@ _PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+# A pytest process must not execv itself mid-run. Importing hermes code deep
+# inside a test (here: the video-gen e2e file pulling in agent.* ) can reach
+# hermes_bootstrap's module-level launch preparation, which os.execv's the
+# whole interpreter when this python is not hermes' selected dependency
+# generation — the session vanishes with rc=1, no summary, no FAILED lines,
+# nothing on stderr. Full evidence + the upstream knob: scripts/run_tests.sh
+# ("no mid-run interpreter swap", t_82fa20f5). Direct `pytest
+# hscc-bootstrap/tests` runs must be as safe as the runner's.
+os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")
+
 
 # ── hermeticity guard (t_9462260b) ───────────────────────────────────────────
 # Every suite here runs in the *worker env*, which exports HERMES_HOME at the
