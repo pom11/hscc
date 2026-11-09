@@ -18,8 +18,11 @@ collects:
   the labelled fallback for a run whose event has not landed yet
   (``attach_tokens``). Plus 24 h / 7 d totals for workers and orchestrators
   (``_token_windows``);
-* orchestrators — every live ``hermes -p <profile> chat`` REPL with its open
-  session's title, last activity and lifetime tokens (``attach_orchestrators``).
+* orchestrators — every session that holds a live turn lease in its own profile
+  ``state.db`` (``attach_orchestrators``): profile, session id, turn age,
+  lifetime tokens and the session's ``last_activity_description``. The store is
+  the authority, not ``ps`` — v0.23 starts a REPL behind an inline ``-c``
+  bootstrap, so no argv shape reliably identifies one.
 
 The title line shows the global ``kanban.max_in_progress`` slots in use, because
 when every slot is taken the ready cards on other boards strand silently.
@@ -37,7 +40,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import time
 
@@ -499,35 +501,88 @@ def _token_windows(paths, now_s, ledger_path=None):
     return out
 
 
-def _chat_profiles(ps_lines):
-    """Profiles with a live ``hermes -p <profile> chat`` REPL, in ps order.
+# ── live turns (the orchestrators section) ─────────────────────────────────
+#
+# Hermes v0.23 starts a REPL as `python -I -c '<~10 KB bootstrap>' -p <profile>
+# chat`, so `-p <profile> chat` sits at the far end of an argv that begins with
+# the interpreter. The gate this section used to have — an argv[:2] entry naming
+# `hermes` — matched nothing: measured 2026-11-09 with seven REPL processes alive
+# (hscc-orch, ecofire-app-orch, ecofire-bc-orch, ecofire-flows-orch, sphoin-orch,
+# micro-notify-orch, headless-display-orch) it returned [], and the section
+# silently disappeared instead of showing a wrong answer. Decision D3: the
+# session store is the authority, not `ps`, and no argv heuristic is kept.
+#
+# `session_turn_leases(conversation_id, holder, acquired_at, expires_at)` is one
+# row per in-flight turn. Measured on this host: 52 stores are yielded (the root
+# db plus 51 `profiles/` directories), 51 of them have a `state.db` and 50 of
+# those carry the table — the exception is `profiles/default/state.db`, a 0-byte
+# file. It is renewed while the turn runs (a 6238 s-old lease was still 254 s from
+# expiry) and it self-expires, so a process that died mid-turn stops being listed
+# after one lease TTL rather than forever. A `sessions` row alone proves nothing:
+# 871 `source='cli'` sessions here have `ended_at IS NULL` purely because they
+# died before anything stamped it, which is why `ended_at` is not consulted below.
 
-    Kanban workers run ``hermes_cli.main -p X --cli`` (no ``chat``), and the
-    ``zsh -c 'hermes … chat'`` pane wrapper has a shell as argv[0], so both are
-    skipped.
-    """
-    seen = []
-    for line in ps_lines:
-        argv = line.split()
-        if "chat" not in argv or not any(
-                a.endswith("/hermes") or a == "hermes" for a in argv[:2]):
-            continue
-        for flag in ("-p", "--profile"):
-            if flag in argv[:-1]:
-                prof = argv[argv.index(flag) + 1]
-                if prof not in seen:
-                    seen.append(prof)
-    return seen
+#: Sessions that are a dispatched worker, a scheduler or a subagent run — never
+#: an operator at a REPL. Census over the 51 stores on this host: `cron` 3617,
+#: `kanban` 1893, `cli` 1526, `telegram` 103, `subagent` 54, `oneshot` 3,
+#: `local` 2 — and both `local` rows are orchestrator REPL sessions (hscc-orch,
+#: ecofire-flows-orch). A live REPL turn is `local` with `created_source='cli'`;
+#: older REPL sessions are recorded as plain `cli`. So this is deliberately an
+#: EXCLUDE list: an unknown or NULL source renders rather than vanishing, because
+#: a false negative here is an empty panel that looks like an idle fleet.
+NON_ORCHESTRATOR_SOURCES = ("kanban", "cron", "subagent", "oneshot")
 
+# Cheap indexed probe first: this runs every DEFAULT_INTERVAL over ~50 stores,
+# and the join only earns its keep where a live lease actually exists.
+_LIVE_LEASE = "SELECT 1 FROM session_turn_leases WHERE expires_at > ? LIMIT 1"
+
+_LIVE_TURNS = (
+    "SELECT s.id AS id, s.input_tokens AS tok_in, s.output_tokens AS tok_out, "
+    "       s.last_activity_description AS state, l.acquired_at AS acquired_at "
+    "FROM session_turn_leases l JOIN sessions s ON s.id = l.conversation_id "
+    "WHERE l.expires_at > ? "
+    "  AND (s.source IS NULL OR s.source NOT IN (%s)) "
+    "ORDER BY l.acquired_at" % ",".join("?" * len(NON_ORCHESTRATOR_SOURCES)))
 
 _PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
+def _profile_stores(home):
+    """Yield ``(profile, state.db path)`` for every session store: the root
+    database is ``default``, every other one is a ``profiles/<name>/`` directory's
+    own ``state.db``.
+
+    The path is built from the scanned directory, not from ``_state_db_path``,
+    for the same reason ``attach_tokens`` builds it that way: that helper maps
+    the NAME ``default`` onto the root db, so a profile directory literally named
+    ``default`` (which exists on this host) would otherwise be resolved to the
+    root file — opening the root store twice and never opening that directory's
+    own database at all.
+
+    ``_known_profile`` still decides what may become a path. The name is now a
+    scanned directory entry rather than a stranger's argv, but a profile store is
+    only ever addressed by a plain token naming an existing profile directory.
+    """
+    yield "default", _state_db_path(home, None)
+    try:
+        with contextlib.closing(os.scandir(os.path.join(home, "profiles"))) as scan:
+            entries = sorted(scan, key=lambda e: e.name)
+    except OSError:
+        return
+    for e in entries:
+        try:
+            is_dir = e.is_dir()
+        except OSError:
+            continue
+        if is_dir and _known_profile(home, e.name):
+            yield e.name, os.path.join(e.path, "state.db")
+
+
 def _known_profile(home, prof):
-    """True only for a real profile name: the ps argv is any local process's,
-    so a name never becomes a path unless it is a plain token naming an
-    existing ``<home>/profiles/<name>`` directory (or ``default``)."""
+    """True only for a real profile name: a name never becomes a path unless it
+    is a plain token naming an existing ``<home>/profiles/<name>`` directory (or
+    ``default``), whoever or whatever produced the name."""
     if prof == "default":
         return True
     return bool(_PROFILE_RE.fullmatch(prof)) and os.path.isdir(
@@ -540,48 +595,56 @@ def _clean(text):
     return None if text is None else _CONTROL_RE.sub("", str(text))
 
 
-def _ps_lines():
-    try:
-        return subprocess.run(["ps", "-Ao", "args="], capture_output=True, text=True,
-                              timeout=5).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return []
+def attach_orchestrators(data, hermes_home=None, now=None):
+    """Add ``data["orchestrators"]``: one row per orchestrator holding a live turn.
 
+    A row is a session whose ``session_turn_leases`` entry has not expired, read
+    from the store that owns it: ``profile``, ``session`` (the session id),
+    ``turn_s`` (age of the lease's ``acquired_at``), lifetime ``tok_in`` /
+    ``tok_out`` and ``state`` (``sessions.last_activity_description``). A REPL
+    with no lease row is idle and is NOT listed — the section claims *in a turn
+    right now*, which is what its ``(N running)`` header says. Turn liveness
+    comes from the lease alone: ``ended_at`` is not consulted, because a live
+    REPL keeps writing to a session already stamped ended (seen on
+    ecofire-bc-orch) while 871 dead sessions on this host were never stamped at
+    all.
 
-def attach_orchestrators(data, hermes_home=None, now=None, ps_lines=None):
-    """Add ``data["orchestrators"]``: one row per live orchestrator REPL.
+    Worker-family sources (``NON_ORCHESTRATOR_SOURCES``) never render here, so a
+    dispatched card's turn cannot masquerade as an orchestrator — a live kanban
+    lease in a worker profile is exactly what a running card looks like from the
+    store side.
 
-    Each row is the profile's ``cli`` session with the latest message — title,
-    last activity, lifetime input/output tokens. ``ended_at`` is not trusted: a
-    live REPL can keep writing to a session already stamped ended. A profile
-    whose state.db can't be read still gets a row (dashes). Read-only.
+    Read-only: every database goes through ``_open_ro`` and nothing here writes.
+    A store that is missing, unreadable, locked, or predates
+    ``session_turn_leases`` contributes no row and never raises — the rest of the
+    view still renders.
     """
     home = hermes_home or HERMES_HOME
     now_s = int(now if now is not None else time.time())
     rows = []
-    for prof in _chat_profiles(_ps_lines() if ps_lines is None else ps_lines):
-        if not _known_profile(home, prof):
+    for prof, path in _profile_stores(home):
+        if not os.path.exists(path):
             continue
-        row = {"profile": prof, "title": None, "last_s": None,
-               "tok_in": None, "tok_out": None}
-        path = _state_db_path(home, prof)
-        if os.path.exists(path):
-            try:
-                with _open_ro(path) as conn:
-                    hit = conn.execute(
-                        "SELECT s.title, s.input_tokens, s.output_tokens, "
-                        "(SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id=s.id) AS last "
-                        "FROM sessions s WHERE s.source='cli' "
-                        "ORDER BY last DESC LIMIT 1").fetchone()
-            except sqlite3.Error:
-                hit = None
-            if hit:
-                row.update(title=_clean(hit["title"]), tok_in=hit["input_tokens"],
-                           tok_out=hit["output_tokens"],
-                           last_s=None if hit["last"] is None else now_s - int(hit["last"]))
-        rows.append(row)
+        try:
+            with _open_ro(path) as conn:
+                if not conn.execute(_LIVE_LEASE, (now_s,)).fetchone():
+                    continue          # nothing in flight in this store
+                hits = conn.execute(_LIVE_TURNS,
+                                    (now_s, *NON_ORCHESTRATOR_SOURCES)).fetchall()
+        except sqlite3.Error:
+            continue                  # old store, garbage, or locked: no row
+        for h in hits:
+            rows.append({
+                "profile": prof,
+                "session": _clean(h["id"]),
+                "turn_s": None if h["acquired_at"] is None
+                          else now_s - int(h["acquired_at"]),
+                "tok_in": h["tok_in"], "tok_out": h["tok_out"],
+                "state": _clean(h["state"])})
+    rows.sort(key=lambda r: -(r["turn_s"] if r["turn_s"] is not None else -1))
     data["orchestrators"] = rows
     return data
+
 
 
 # ── rendering ──────────────────────────────────────────────────────────────
@@ -635,17 +698,17 @@ def running_table(rows, width=None) -> Table:
 
 def orchestrators_table(rows, width=None) -> Table:
     t = _plain_table()
-    for col, just in (("Profile", "left"), ("Last", "right"), ("Tokens", "right")):
+    for col, just in (("Profile", "left"), ("Session", "left"),
+                      ("Turn", "right"), ("Tokens", "right")):
         t.add_column(col, justify=just, no_wrap=True)
-    t.add_column("Session", no_wrap=True, overflow="ellipsis",
-                 max_width=max(20, (width or 120) - 60))
+    t.add_column("state", no_wrap=True, overflow="ellipsis",
+                 max_width=max(20, (width or 120) - 72))
     for r in rows:
         tok = ("-" if r.get("tok_in") is None
                else f"{fmt_tokens(r['tok_in'])}/{fmt_tokens(r['tok_out'])}")
-        busy = r["last_s"] is not None and r["last_s"] < 120
-        t.add_row(esc(_clean(r["profile"])),
-                  Text(fmt_age(r["last_s"]), style="ok" if busy else "dim"),
-                  Text(tok, style="dim"), esc(r["title"] or "-"))
+        t.add_row(esc(_clean(r["profile"])), esc(r.get("session") or "-"),
+                  Text(fmt_age(r.get("turn_s")), style="ok"),
+                  Text(tok, style="dim"), esc(_clean(r.get("state")) or "-"))
     return t
 
 
