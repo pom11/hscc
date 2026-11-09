@@ -309,9 +309,15 @@ def _identical(paths: list[Path]) -> bool:
 
 def _same_root_rank(cand, root) -> tuple:
     """``(0 for a SKILL.md package / 1 for a legacy flat <name>.md, depth)`` —
-    verbatim mirror of ``agent.skill_utils.skill_candidate_rank`` (upstream
-    called this ``tools/skills_tool._rank_same_root_candidate`` when the first
-    cut was written; the tuple it returns is unchanged)."""
+    mirror of ``agent.skill_utils.skill_candidate_rank`` (upstream called this
+    ``tools/skills_tool._rank_same_root_candidate``; the rename kept the shape
+    and the ordering, NOT the element types: v0.23 returns
+    ``tuple[bool, int]`` — first element ``skill_md.name != "SKILL.md"`` —
+    where the pre-v0.23 predicate built an ``int`` (``0 if SKILL.md else 1``).
+    ``bool`` subclasses ``int``, so the sort key and the ``!=`` gate rank the
+    same either way and the ``int`` this mirror returns stays correct. This
+    mirror also takes a dir-or-``SKILL.md`` candidate and pins a path outside
+    *root* at depth 99 instead of raising ``ValueError``)."""
     is_flat = 1 if (cand.suffix == ".md" and cand.name != "SKILL.md") else 0
     if cand.suffix != ".md":
         md = cand / "SKILL.md"
