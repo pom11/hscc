@@ -1888,8 +1888,10 @@ def check_proxy():
     they MUST include the orchestrator node, or the relaunched LB can never
     recover the orchestrator's endpoint.
     STAY-DOWN (t_ba1424b7, the first thing the body does): when
-    :func:`_operator_down` reports post_boot's durable record — set by
-    `hscc cluster down`, lifted only by `hscc cluster up` — this check writes
+    :func:`_operator_down` reports post_boot's durable record — stamped by
+    `hscc cluster down` (and by autodown's idle teardown), lifted by
+    `hscc cluster up` or by the autodown wake, both of which pop it through
+    ``record_expected_up`` BEFORE anything is launched — this check writes
     ``intentional: "operator_down"`` and does NOTHING ELSE. No catalogue probe,
     no router-drift read, no backend-drift repair, no orphan-listener reap, no
     ``proxy start``. TRADE-OFF (intended, stated so it is not discovered the
