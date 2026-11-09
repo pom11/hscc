@@ -3336,6 +3336,21 @@ def _operator_down():
     record existed. ``deliberately_down`` never raises by contract; the catch is
     for the layers under it (a post_boot too old to have the predicate, an
     import failure), where "no verifiable evidence" must never mean "go quiet".
+
+    WHICH WRITERS THIS TREATS AS A STAY-DOWN (decided here, not by string
+    match): ``clear_expected_up(reason)`` has TWO sanctioned callers —
+    ``hscc-cluster/hscc.py`` ("hscc cluster down", the operator) and
+    ``autodown.py`` ("autodown: intentional idle teardown", the fleet went
+    idle) — so the record means "someone deliberately cleared the footprint",
+    not "an operator typed the verb". BOTH are honoured as a stay-down. The
+    idle-teardown case is normally already caught upstream: that path latches
+    the intentional watchdog block, so ``_intentional_window()`` fires first
+    with its own wording and this gate is never reached (pinned by the
+    precedence test). What reaches HERE is a cleared footprint with no latched
+    block — still a deliberate down, still the operator's to end with
+    `hscc cluster up`. Discriminating on the ``reason`` TEXT is deliberately
+    NOT done: a substring test would make an operator-chosen reason string a
+    safety property.
     """
     try:
         from . import post_boot

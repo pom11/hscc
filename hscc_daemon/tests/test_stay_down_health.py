@@ -236,6 +236,34 @@ class TestWorkersStandDown:
         assert state_mod.read_state("workers")["message"] == _expected_line(
             "workers", reason)
 
+    @pytest.mark.parametrize("producer,reason", [
+        # The TWO sanctioned callers of clear_expected_up, wordings verbatim
+        # (hscc-cluster/hscc.py:547 and hscc_daemon/autodown.py:2319).
+        ("cluster-down-verb", "hscc cluster down"),
+        ("idle-teardown", "autodown: intentional idle teardown"),
+    ])
+    def test_both_record_writers_stand_down(self, tmp_hfcc_dir, monkeypatch,
+                                            marker, producer, reason):
+        """The record means "someone deliberately cleared the footprint", and it
+        has TWO writers — the operator verb and autodown's idle teardown. BOTH
+        are honoured as a stay-down: the gate branches on the record's
+        PRESENCE and never on the `reason` text, because a substring test would
+        make an operator-chosen reason string a safety property. (The
+        idle-teardown shape normally never reaches this gate — it latches the
+        intentional block, so `_intentional_window()` answers first; see
+        test_C_autodown_window_gate_still_wins. This pins what happens when it
+        does reach here.)"""
+        _stand_down(marker, reason=reason)
+        lines, probed, stopped, spawned = _workers_env(tmp_hfcc_dir, monkeypatch)
+
+        assert health.check_workers() is True
+
+        assert (probed, stopped, spawned) == ([], [], [])
+        st = state_mod.read_state("workers")
+        assert st["intentional"] == "operator_down"
+        assert st["message"] == _expected_line("workers", reason)
+        assert _expected_line("workers", reason) in [m for _l, m in lines]
+
     def test_record_without_reason_still_stands_down(self, tmp_hfcc_dir,
                                                     monkeypatch, marker):
         """A malformed record (a dict, but no `reason`) suppresses just the same
