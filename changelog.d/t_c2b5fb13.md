@@ -56,10 +56,12 @@ task: t_c2b5fb13
   hand-writing a marker shape, and one test guards that the fixture really is
   the third state rather than one of the older two. Focused
   `tests/test_post_boot.py tests/test_autodown.py`: **266 passed** at
-  `ed57dd4c` (63 + 203; 258 = 63 + 195 before #263 landed, and 266 measured on
-  the open PR's tip before its merge, so the change is good in either landing
-  order — its files are disjoint from step 1b's). `hscc_daemon` leg of
-  `scripts/run_tests.sh`: **3527 passed, 0 failed** at `ed57dd4c`. 9/9 mutation
+  `0ddee987` (63 + 203). Before #263 landed the same command measured **258**
+  (63 + 195) and on #263's open tip it measured the same **266**, so the change
+  is right in either landing order — its files are disjoint from step 1b's.
+  `hscc_daemon` leg of `scripts/run_tests.sh`: **3566 passed, 0 failed** at
+  `0ddee987` (3501 at the pre-merge `63e3236c`; the delta is main's own new
+  test files, not this diff). 9/9 mutation
   probes caught on a pristine CONTROL green (63 passed), every probe run
   asserting it imported `post_boot` from inside the copy, each mutation reset to
   original on a fresh copy and asserted to have applied before running: the
