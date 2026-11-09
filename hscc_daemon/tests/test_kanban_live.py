@@ -705,3 +705,254 @@ def test_render_shows_orchestrators_and_7d_tokens():
     assert orch == ["sphoin-orch", "local-41d4ee6a", "5m", "97.0M/990k",
                     "receiving", "stream", "response"]
     assert "orchestrator history since" not in out
+
+
+# ── MON-23-FIELDS: every printed field re-verified against the v0.23 schema ──
+#
+# Each case below is the pin for one row of the card's verdict table, and every
+# constant it asserts against is a measurement from the operator's live boards
+# (read-only `mode=ro` over 24 boards) or a file:line in the Hermes kernel, both
+# quoted in the case. Fixtures use the real column sets declared at the top of
+# this file, so `run_id`, `payload`, `outcome` and `ended_at` all exist.
+
+def _ev(c, task_id, kind, at, run_id=None, payload=None):
+    c.execute("INSERT INTO task_events (task_id,run_id,kind,payload,created_at) "
+              "VALUES (?,?,?,?,?)", (task_id, run_id, kind, payload, at))
+
+
+# ── 1. `scheduled` is a status the view must count ──────────────────────────
+
+def _parked(c):
+    """The shape `kanban_db.schedule_task` leaves behind (hermes_cli/kanban_db.py
+    :3869-3890 — `SET status='scheduled'` plus a `scheduled` event). `scheduled` is
+    a column of the default workflow (`hermes_cli/kanban_workflow.py`
+    :113-124 `DEFAULT_WORKFLOW.columns`: triage, todo, scheduled, ready, running,
+    blocked, review, done), so a card parked on a time or an external event was
+    counted nowhere and a board whose only open cards were `scheduled` was skipped
+    as idle by both `boards_table` and `render`'s `live_boards`."""
+    _task(c, "t_park", title="parked until the release", assignee="qa",
+          status="scheduled", created_at=NOW - 4000)
+    _ev(c, "t_park", "scheduled", NOW - 3000,
+        payload=json.dumps({"reason": "waiting on the release tag"}))
+
+
+def test_scheduled_cards_are_counted_and_their_board_is_not_idle():
+    d = _collect(kb=_FakeKb({"alpha": _alpha, "parked": _parked}))
+    parked = next(b for b in d["boards"] if b["name"] == "parked")
+    assert parked["counts"]["scheduled"] == 1
+    assert "scheduled" in kanban_live.STATUS_COLS        # counted ...
+    assert "archived" not in kanban_live.STATUS_COLS     # ... terminal states are not
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "Scheduled" in out, out          # the boards table has the column
+    assert "parked" in out, out             # and a scheduled-only board is on screen
+
+
+# ── 2. `ready` must be aged from the event that queued the card ─────────────
+
+def _queue(c):
+    """Three cards promoted in one second, then the bookkeeping v0.23 really
+    writes: `commented` 4 510, `attached` 330, `edited` 104, `reprioritized` 41 and
+    `heartbeat` 189 650 rows all-time on the live boards. Measured there: 607 tasks
+    whose newest event is not their own `promoted`, the furthest 168 747 s after it.
+    `t_requeue` came back to the queue 5 min ago — the kernel re-queues a reclaimed
+    run with a `reclaimed` event carrying `retry_status` (kanban_db.py:2394-2420)."""
+    for tid in ("t_quiet", "t_talked", "t_requeue"):
+        _task(c, tid, title=f"waiting on a slot {tid}", assignee="qa",
+              status="ready", priority=5, created_at=NOW - 3 * 86400)
+        _ev(c, tid, "promoted", NOW - 6 * 3600)
+    for kind, at in (("commented", NOW - 900), ("edited", NOW - 300),
+                     ("attached", NOW - 60), ("heartbeat", NOW - 30),
+                     ("reprioritized", NOW - 10)):
+        _ev(c, "t_talked", kind, at)
+    _ev(c, "t_requeue", "reclaimed", NOW - 300, run_id=77,
+        payload=json.dumps({"retry_status": "ready"}))
+    # a card created straight into `ready` has no queue event: created_at is the clock
+    _task(c, "t_fresh", title="just created", assignee="qa", status="ready",
+          created_at=NOW - 100)
+
+
+def test_ready_waits_are_aged_from_the_event_that_queued_the_card():
+    d = _collect(kb=_FakeKb({"queue": _queue}))
+    waits = {r["id"]: r["wait_s"] for r in d["ready"]}
+    # the comment/edit/attach/reprioritise/heartbeat storm did NOT reset t_talked
+    assert waits == {"t_quiet": 6 * 3600, "t_talked": 6 * 3600,
+                     "t_requeue": 300, "t_fresh": 100}, waits
+    # and the panel's Waiting column shows the true age, not ~0
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    assert "6h00m" in buf.getvalue()
+
+
+# ── 3. the kernel's own alarms belong in the last-hour panel ────────────────
+
+ALARMS = ("protocol_violation", "suspected_hallucinated_references",
+          "completion_blocked_empty_result", "completion_blocked_hallucination",
+          "changes_requested", "review_requested", "terminal_worker_reaped",
+          "rate_limited")
+
+NOISE = ("heartbeat", "commented", "edited", "attached", "respawn_guarded",
+         "archived", "archive_worker_termination", "workspace_cleanup_deferred_shared",
+         "claim_extended", "worker_result", "dependency_wait", "scheduled",
+         "specified", "owner_admitted", "worker_bound")
+
+
+def _alarms(c):
+    """One card per alarm kind. Measured all-time over the live boards:
+    protocol_violation 354, terminal_worker_reaped 206, review_requested 121,
+    rate_limited 92, suspected_hallucinated_references 35, changes_requested 21,
+    completion_blocked_empty_result 4, completion_blocked_hallucination 2 — every
+    one of them invisible in this view before MON-23-FIELDS (measured live: 3
+    `terminal_worker_reaped` in the last hour, and the panel showed only the
+    `completed` of the same three cards)."""
+    for i, kind in enumerate(ALARMS):
+        _task(c, f"t_{kind}", title=kind, assignee="qa", status="blocked",
+              created_at=NOW - 4000)
+        _ev(c, f"t_{kind}", kind, NOW - 600 - i)
+    _task(c, "t_noise", title="volume, not outcomes", assignee="qa",
+          status="ready", created_at=NOW - 4000)
+    for i, kind in enumerate(NOISE):
+        _ev(c, "t_noise", kind, NOW - 500 - i)
+
+
+def test_the_kernel_alarms_reach_the_panel_and_the_volume_kinds_do_not():
+    d = _collect(kb=_FakeKb({"alarms": _alarms}))
+    kinds = {e["kind"] for e in d["events"]}
+    assert set(ALARMS) <= kinds, sorted(kinds)
+    assert kinds == set(ALARMS), sorted(kinds)      # nothing else leaks in
+    assert not set(NOISE) & kinds
+    # every kind the panel can print has a colour of its own
+    assert set(kanban_live.OUTCOME_KINDS) <= set(kanban_live._EVENT_STYLE)
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "terminal_worker_reaped" in out and "protocol_violation" in out
+    assert "suspected_hallucinated_references" in out
+
+
+# ── 4. Beat: the column, the bar, and an unknown beat ───────────────────────
+
+def _beat(hb_age=None, hb_task=None, started_age=1200):
+    def build(c):
+        started = None if started_age is None else NOW - started_age
+        _run(c, 900, "t_beat", started_at=started,
+             last_heartbeat_at=None if hb_age is None else NOW - hb_age)
+        _task(c, "t_beat", title="beat me", status="running",
+              created_at=NOW - 60, current_run_id=900,
+              last_heartbeat_at=None if hb_task is None else NOW - hb_task)
+    return build
+
+
+def _running_line(row):
+    buf = io.StringIO()
+    make_console(file=buf, width=120, color_system=None).print(
+        kanban_live.running_table([row]))
+    return next(l for l in buf.getvalue().splitlines() if row["id"] in l)
+
+
+def test_beat_is_task_runs_last_heartbeat_at_and_600s_is_the_stale_bar():
+    """`task_runs.last_heartbeat_at` is still the column the kernel writes: live
+    running runs were 0-60 s old when measured, and `task_events.kind='heartbeat'`
+    gaps over 24 h were n=1102, p50 60 s, p95 67 s, max 102 s, ZERO above 600 s.
+    So 600 s stays the bar — about ten missed beats — and this is where it is
+    pinned, against a v0.23-shaped `task_runs` row instead of nowhere."""
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(hb_age=47)}))["running"]
+    assert (row["hb_s"], row["run_s"]) == (47, 1200)
+    assert "47s" in _running_line(row)
+    assert kanban_live.beat_style(row["hb_s"]) == "dim"
+
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(
+        hb_age=kanban_live.STALE_HEARTBEAT_S + 100)}))["running"]
+    assert row["hb_s"] == kanban_live.STALE_HEARTBEAT_S + 100
+    assert "11m" in _running_line(row)
+    assert kanban_live.beat_style(row["hb_s"]) == "error"
+    # the bar is exclusive: a beat exactly at it is still "dim"
+    assert kanban_live.beat_style(kanban_live.STALE_HEARTBEAT_S) == "dim"
+
+    # a task-level beat still counts when the run row has none
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(hb_task=90)}))["running"]
+    assert row["hb_s"] == 90 and kanban_live.beat_style(row["hb_s"]) == "dim"
+    # and a row with NO beat and no start is unknown, not healthy
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(started_age=None)}))["running"]
+    assert (row["hb_s"], row["run_s"]) == (None, None)
+    assert kanban_live.beat_style(row["hb_s"]) == "warn"
+
+
+# ── 5. a running card whose run row is gone must still render ───────────────
+
+def test_a_running_card_with_no_run_row_still_renders():
+    """`tasks.current_run_id` naming a `task_runs` row that is not there (spawn
+    failed, reclaimed mid-flight) must not delete the card from the Running table.
+    The `LEFT JOIN` is what keeps it; measured over 24 live boards there was no
+    dangling id today, so this pins the construction, not a live instance."""
+    def build(c):
+        _task(c, "t_ghost", title="spawn failed", assignee="qa", status="running",
+              created_at=NOW - 300, current_run_id=999)
+
+    d = _collect(kb=_FakeKb({"ghost": build}))
+    (row,) = d["running"]
+    assert row["worker"] == "qa"               # falls back to the assignee
+    assert (row["run_s"], row["hb_s"]) == (None, None)
+    line = _running_line(row)
+    assert "t_ghost" in line and "spawn failed" in line, line   # the card is on screen
+    assert kanban_live.beat_style(row["hb_s"]) == "warn"        # and not styled healthy
+
+
+# ── 6. `Done 24h` must survive the card being archived ──────────────────────
+
+def _archived_done(c):
+    _task(c, "t_arch", title="finished then archived", assignee="qa",
+          status="archived", created_at=NOW - 90000, completed_at=NOW - 600)
+
+
+def _archived_never_done(c):
+    _task(c, "t_no", title="archived unfinished", assignee="qa", status="archived",
+          created_at=NOW - 90000, completed_at=None)
+
+
+def test_done_24h_counts_a_completion_that_was_archived():
+    """The archive path keeps `completed_at` (measured: 54 archived rows across the
+    live boards still carry it — hscc 25 of 110, ecofire-app 10 of 24, flightdeck
+    5 of 19), so a card that finished today and was archived today used to leave
+    the `Done 24h` column, and could take its board out of the view with it. A card
+    that never completed (measured: 212 archived rows with completed_at NULL) stays
+    out."""
+    d = _collect(kb=_FakeKb({"arch": _archived_done, "never": _archived_never_done}))
+    assert next(b for b in d["boards"] if b["name"] == "arch")["done_24h"] == 1
+    assert next(b for b in d["boards"] if b["name"] == "never")["done_24h"] == 0
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "arch" in out and "never" not in out, out
+
+
+# ── 7. the outcome lookup must not be the panel's 12-row slice ──────────────
+
+def _many(c):
+    """16 cards finishing in the window: the panel keeps the newest
+    `RECENT_LIMIT` rows across every board, `outcomes` must answer for all 16,
+    newest kind per card."""
+    for i in range(15):
+        _task(c, f"t_{i:02d}", title=f"card {i}", assignee="qa", status="done",
+              created_at=NOW - 9000, completed_at=NOW - 600 + i)
+        _ev(c, f"t_{i:02d}", "completed", NOW - 600 + i)
+    _task(c, "t_both", title="reaped then completed", assignee="qa", status="done",
+          created_at=NOW - 9000, completed_at=NOW - 60)
+    _ev(c, "t_both", "completed", NOW - 700)
+    _ev(c, "t_both", "terminal_worker_reaped", NOW - 60)
+
+
+def test_outcomes_answer_for_every_card_not_just_the_panels_slice():
+    d = _collect(kb=_FakeKb({"many": _many}))
+    assert len(d["events"]) == kanban_live.RECENT_LIMIT      # the panel is capped
+    assert len(d["outcomes"]["many"]) == 16                   # the lookup is not
+    assert d["outcomes"]["many"]["t_both"] == "terminal_worker_reaped"
+    assert d["outcomes"]["many"]["t_00"] == "completed"
+    # board-keyed, string keys: `hscc kanban monitor --json` must still serialise
+    assert json.loads(json.dumps(d))["outcomes"]["many"]["t_01"] == "completed"
+

@@ -748,6 +748,19 @@ def fmt_age(s) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def beat_style(hb_s) -> str:
+    """Colour for the Beat cell — the one place the staleness bar is applied.
+
+    An UNKNOWN beat is not a healthy beat: `hb_s` is None only when the row has
+    neither a heartbeat nor a start time at all, and `or 0` used to fold that into
+    "0 s old" and paint it dim like a card that just beat. Named rather than
+    inlined so `STALE_HEARTBEAT_S` has a test behind it (MON-23-FIELDS suspect 4).
+    """
+    if hb_s is None:
+        return "warn"
+    return "error" if hb_s > STALE_HEARTBEAT_S else "dim"
+
+
 def _plain_table() -> Table:
     # same borderless grid as `hscc cluster monitor --live`
     return Table(box=None, pad_edge=False, header_style="accent", padding=(0, 2, 0, 0))
@@ -786,16 +799,11 @@ def running_table(rows, width=None) -> Table:
     _title_col(t, width)
     for r in rows:
         run_style = "warn" if (r["run_s"] or 0) > LONG_RUN_S else "ok"
-        # An UNKNOWN beat is not a healthy beat: `hb_s` is None only when the
-        # row has no heartbeat and no start time at all, and `or 0` used to fold
-        # that into "0 s old" and paint it dim like a card that just beat.
-        hb_style = ("warn" if r["hb_s"] is None
-                    else "error" if r["hb_s"] > STALE_HEARTBEAT_S else "dim")
         tok = ("-" if r.get("tok_in") is None
                else f"{fmt_tokens(r['tok_in'])}/{fmt_tokens(r['tok_out'])}")
         t.add_row(esc(r["board"]), esc(r["id"]), esc(r["worker"]),
                   Text(fmt_age(r["run_s"]), style=run_style),
-                  Text(fmt_age(r["hb_s"]), style=hb_style),
+                  Text(fmt_age(r["hb_s"]), style=beat_style(r["hb_s"])),
                   Text(tok, style="dim"), esc(r["title"]))
     return t
 
