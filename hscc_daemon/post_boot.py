@@ -26,6 +26,32 @@ autodown wake, CLEARED by ``hscc cluster down`` / an autodown teardown), so
 human can read off disk — and a unit that was intentionally stopped has no
 marker at all.
 
+THE STAY-DOWN RECORD (t_ab75e987)
+---------------------------------
+An empty ``units`` list alone cannot tell "the operator said stay down" from
+"nobody ever ran cluster up", so the SAME marker file also carries the
+operator's intent: a top-level ``deliberate_down`` key —
+``{"set_at": <now_iso()>, "reason": <str>}`` — written by
+``clear_expected_up(reason)`` and removed (``pop``) by ``record_expected_up``,
+which is what makes ``cluster up`` the end of a stay-down. Read it with the
+module-level predicate ``deliberately_down(path=None) -> dict | None``, the
+one accessor for this fact (callers read ``reason``/``set_at`` off the record;
+it is durable on disk only — nothing here is cached in memory). Fail-safe in
+the SAME convention as ``health._intentional_autodown_down`` and
+``trigger._intentional_autodown``: a missing file, an unreadable file, corrupt
+JSON, a non-dict marker, or a non-dict/empty record all return ``None`` and
+the predicate NEVER raises — with no verifiable evidence every consumer
+supervises exactly as it did before this key existed.
+
+ESCAPE HATCH (the only one): a stay-down is lifted by ``hscc cluster up``, or
+by an autodown wake, which records the footprint pre-launch — nothing else is
+sanctioned. Deleting ``~/.hscc/expected-up.json`` is NOT the override: that
+file is also the post-boot pass's own record of boot baselines and launch
+attempts, so hand-deleting it destroys evidence the relaunch logic needs and
+still does not lift the intent. Because ``deliberately_down()`` returns
+``None`` for a lost file, a hand-deleted marker fails toward "supervision
+proceeds", never toward silence.
+
 GATE ORDER (every pre-existing gate stays UPSTREAM of the single launch)
 ------------------------------------------------------------------------
   1. env kill-switch ``HSCC_POST_BOOT_RELAUNCH=0`` — operator off-switch.
@@ -83,6 +109,12 @@ from .state import now_iso, write_state
 # operators have exactly one surface to inspect for "was the fleet expected
 # to be up?" — conftest redirects this constant for the whole suite.
 EXPECTED_UP_FILE = os.path.expanduser("~/.hscc/expected-up.json")
+
+# The stay-down record inside that marker (D1): {"set_at": iso, "reason": str}.
+# Written by clear_expected_up, removed by record_expected_up, read via
+# deliberately_down(). See THE STAY-DOWN RECORD in the module docstring.
+DELIBERATE_DOWN_KEY = "deliberate_down"
+
 
 # Stream name (hscc check post_boot / verify daemon_streams).
 POST_BOOT_STREAM = "post_boot"
@@ -208,6 +240,10 @@ def record_expected_up(plan, reason, path=None):
     marker["units"] = units
     marker["reason"] = reason
     marker["set_at"] = now_iso()
+    # A fleet-up (or an autodown wake) ENDS the stay-down: the deliberate-down
+    # record is dropped so supervision resumes against a positively-asserted
+    # "expected up" instead of a stale "operator said stay down".
+    marker.pop(DELIBERATE_DOWN_KEY, None)
     ok = _save_marker(marker, path)
     log(f"post_boot: recorded expected_up for {len(units)} unit(s) "
         f"({reason}) — marker {'written' if ok else 'WRITE FAILED'}")
@@ -220,16 +256,59 @@ def clear_expected_up(reason, path=None):
     Baselines/attempts are kept (cheap history, no action authority without
     units); ``cleared_at``/``reason`` make the deliberate stop visible on
     disk. After this the pass is inert until the next fleet-up re-arms it.
+
+    Also stamps the ``deliberate_down`` record (D1) so this state is
+    distinguishable from "nobody ever ran cluster up": an empty ``units`` list
+    is an absence of evidence, the record is positive evidence of the
+    operator's instruction. Read it back with ``deliberately_down()``.
     """
     marker = load_marker(path)
     n = len(marker.get("units") or [])
     marker["units"] = []
     marker["cleared_at"] = now_iso()
     marker["reason"] = reason
+    marker[DELIBERATE_DOWN_KEY] = {"set_at": now_iso(), "reason": reason}
     ok = _save_marker(marker, path)
     log(f"post_boot: cleared expected_up for {n} unit(s) ({reason}) — "
         f"post-reboot relaunch will NOT fire until the next cluster up")
     return ok
+
+
+def deliberately_down(path=None):
+    """The stay-down record {set_at, reason}, or None when there is none.
+
+    ONE accessor for "the operator deliberately brought the fleet down"
+    (D1) — the fact an empty ``units`` list cannot express, since it is equally
+    consistent with a fleet that was never fleet-upped. Callers read
+    ``reason``/``set_at`` off the returned dict; the record is durable on disk
+    only, never mirrored in memory, so a daemon restart cannot lose or invent
+    it.
+
+    Fail-safe, and it NEVER raises (same convention as
+    ``health._intentional_autodown_down`` and ``trigger._intentional_autodown``
+    — no verifiable evidence means supervision proceeds exactly as it did
+    before this key existed, never that it goes quiet): a missing file, an
+    unreadable file, corrupt JSON, a non-dict marker, or a non-dict/empty
+    ``deliberate_down`` value all read as None.
+
+    Read-only and silent by design — no side effects, no logging, no marker
+    write — so it is safe to call from a stream check or a per-tick gate.
+    """
+    path = EXPECTED_UP_FILE if path is None else path
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        # FileNotFoundError / corrupt JSON / an unreadable or unopenable path:
+        # no evidence, not an error.
+        return None
+    if not isinstance(data, dict):
+        return None
+    record = data.get(DELIBERATE_DOWN_KEY)
+    if not isinstance(record, dict) or not record:
+        return None
+    return record
+
 
 
 # ── Boot-id evidence (through sparkrun) ──────────────────────────────────
@@ -339,8 +418,11 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
 
     ``result`` is one of:
       ``disabled``     — operator off-switch; zero I/O.
-      ``no-marker``    — the fleet was not fleet-upped (or was brought down):
-                         nothing is expected up, nothing may be launched.
+      ``no-marker``    — nothing is expected up and nothing may be launched:
+                         either the fleet was never fleet-upped (message names
+                         the absent marker) or the operator deliberately
+                         brought it down (message names the stay-down record,
+                         read via ``deliberately_down()``).
       ``suppressed``   — intentional-autodown window in effect (checked pre-
                          lock AND re-checked under the lock).
       ``boot-unavailable`` — sparkrun could not answer the boot sweep: no
@@ -371,9 +453,22 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
     path = EXPECTED_UP_FILE if path is None else path
     marker = load_marker(path)
     if not (marker.get("units") or []):
-        result.update(result="no-marker",
-                      message="no expected_up marker (fleet not fleet-upped, "
-                              "or brought down on purpose) — nothing to do")
+        # Two DIFFERENT states read the same here (no units): the operator
+        # deliberately brought the fleet down (record present) vs. nobody ever
+        # ran cluster up (nothing to read). Same verdict label and same
+        # no-action/ok semantics — only the wording distinguishes them, so an
+        # operator reading `hscc check post_boot` is not told "not fleet-upped"
+        # when the fleet is in fact under a stay-down.
+        record = deliberately_down(path)
+        if record:
+            message = (f"fleet deliberately down since "
+                       f"{record.get('set_at') or '?'} "
+                       f"({record.get('reason') or 'no reason given'}) "
+                       f"— nothing to do")
+        else:
+            message = ("no expected_up marker (fleet not fleet-upped, "
+                       "or brought down on purpose) — nothing to do")
+        result.update(result="no-marker", message=message)
         return result
 
     if intentional_fn is None:
