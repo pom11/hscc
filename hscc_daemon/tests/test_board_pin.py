@@ -516,3 +516,148 @@ def test_real_hermes_monitor_pass_reports_every_board_not_the_pinned_one(
     assert {r["title"] for r in data["ready"]} == {"alpha-card", "beta-card"}
     text = _warn_text(warnings)
     assert "beta" in text, f"the override must be visible: {text}"
+
+
+# --------------------------------------------------------------------------- #
+# dispatcher_wedge._capped_assignees — a `default` read is a guarded read too
+# (t_147201fa, item 2)
+# --------------------------------------------------------------------------- #
+
+def _cap_conn(runs):
+    """One ``tasks`` table holding ``runs`` = [(id, assignee)], all running —
+    the shape ``_capped_assignees`` counts."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, "
+              "assignee TEXT)")
+    for tid, assignee in runs:
+        c.execute("INSERT INTO tasks (id, status, assignee) VALUES (?, "
+                  "'running', ?)", (tid, assignee))
+    c.commit()
+    return c
+
+
+class _CapLib:
+    """Pin-aware lib for the wedge's per-profile-cap probe.
+
+    Same measured precedence rule as :class:`_PinAwareLib`, but with the columns
+    ``_capped_assignees`` selects. The two boards are deliberately answerable
+    apart: ``alpha`` has two running cards for ``other``, ``default`` two for
+    ``worker``, so the assignee set the probe returns states which file it
+    actually read — the observable, not an internal flag.
+    """
+
+    def __init__(self, root, boards):
+        self.root = str(root)
+        self.slugs = list(boards)
+        self.connects = []
+        self._by_path = {str(self._canonical(s)): _cap_conn(rows)
+                         for s, rows in boards.items()}
+
+    def _canonical(self, slug):
+        if slug in (None, "default"):
+            return pathlib.Path(self.root) / "kanban.db"
+        return (pathlib.Path(self.root) / "kanban" / "boards" / str(slug)
+                / "kanban.db")
+
+    def _fenced(self):
+        return any((os.environ.get(v) or "").strip() for v in FENCE_VARS)
+
+    def list_boards(self):
+        return [{"slug": s} for s in self.slugs]
+
+    def kanban_db_path(self, board=None):
+        pin = (os.environ.get(board_pin.PIN_ENV) or "").strip()
+        if pin and (board is None or self._fenced()):
+            return pathlib.Path(pin)
+        return self._canonical(board)
+
+    def connect_closing(self, board=None):
+        path = str(self.kanban_db_path(board=board))
+        self.connects.append((board, path, os.environ.get(board_pin.PIN_ENV)))
+        return _Ctx(self._by_path[path])
+
+
+def _cap_fleet(root):
+    return _CapLib(root, {
+        "alpha": [("a1", "other"), ("a2", "other")],
+        "default": [("d1", "worker"), ("d2", "worker")],
+    })
+
+
+def _arm_worker(monkeypatch, pin):
+    monkeypatch.setenv(board_pin.PIN_ENV, pin)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+
+
+def test_wedge_capped_assignees_on_default_is_not_steered_by_the_pin(
+        tmp_path, monkeypatch, warnings):
+    """The residual the card names: ``multi`` came from the SLUG, so a
+    ``default`` read took the no-board path a pin still steers.
+
+    ``multi`` is a property of the lib (``autodown.py:310``), so the fix is to
+    stop guessing it from the slug — then ``default`` is resolved and guarded
+    exactly like every other board this gate reads.
+    """
+    from hscc_daemon import dispatcher_wedge as dw
+    lib = _cap_fleet(tmp_path / "kanban-home")
+    pin = str(lib._canonical("alpha"))
+    _arm_worker(monkeypatch, pin)
+
+    # 1. non-vacuity — the shape this change replaced: with multi False a
+    #    `default` read answered with the PINNED board's assignees, and the lib
+    #    saw the pin on that call.
+    with board_pin.open_board(lib, "default", multi=False) as conn:
+        assert {r[0] for r in conn.execute("SELECT assignee FROM tasks")} == {
+            "other"}, "the fixture stopped reproducing the residual"
+    assert lib.connects[-1] == (None, pin, pin), lib.connects
+
+    # 2. the fix — same armed env, same question, default's own rows, and the
+    #    override stated out loud. The pin column is None because the guard took
+    #    it out of the environment for the duration of this open only: that is
+    #    the scrub, observed rather than asserted as a flag.
+    assert dw._capped_assignees(lib, "default", 2) == {"worker"}
+    text = _warn_text(warnings)
+    assert "default" in text, f"the warning must name the board asked for: {text}"
+    assert pin in text, f"the warning must name the pin it overrode: {text}"
+    assert lib.connects[-1] == ("default", str(lib._canonical("default")), None), (
+        f"the guard must open the file it was asked for: {lib.connects}")
+    assert os.environ[board_pin.PIN_ENV] == pin, "the pin must come back verbatim"
+
+
+def test_wedge_capped_assignees_legacy_shape_keeps_the_no_board_call(
+        monkeypatch, warnings):
+    """Companion: a lib that cannot enumerate boards (``multi`` False by the
+    lib-capability rule) must still get the no-``board=`` call verbatim — the
+    legacy single-board path, pin honoured, nothing said."""
+    from hscc_daemon import dispatcher_wedge as dw
+    calls = []
+
+    class _LegacyNoEnum:
+        def connect_closing(self, board=None):
+            calls.append(board)
+            return _Ctx(_cap_conn([("d1", "worker"), ("d2", "worker")]))
+
+    _arm_worker(monkeypatch, "/elsewhere/pinned/kanban.db")
+    assert dw._capped_assignees(_LegacyNoEnum(), "default", 2) == {"worker"}
+    assert calls == [None], "the legacy shape must keep the no-board call"
+    assert not warnings, _warn_text(warnings)
+
+
+def test_wedge_capped_assignees_without_a_pin_passes_board_through(
+        tmp_path, monkeypatch, warnings):
+    """Companion for the daemon/operator environment: no pin → the probe just
+    passes ``board=`` through and resolves the same file its sibling probes do
+    for the same board (which the slug heuristic used to break)."""
+    from hscc_daemon import dispatcher_wedge as dw
+    monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
+    for v in FENCE_VARS:
+        monkeypatch.delenv(v, raising=False)
+    lib = _cap_fleet(tmp_path / "kanban-home")
+    assert dw._capped_assignees(lib, "default", 2) == {"worker"}
+    assert lib.connects == [("default", str(lib._canonical("default")), None)], (
+        lib.connects)
+    assert not warnings, _warn_text(warnings)
+    assert dw._capped_assignees(lib, "alpha", 2) == {"other"}
+    assert lib.connects[-1][0] == "alpha"

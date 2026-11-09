@@ -1338,16 +1338,26 @@ def _capped_assignees(kanban_db, board, max_per_profile):
     Mirrors the dispatcher's per-profile rule: an assignee with ready work
     whose running count is >= ``max_per_profile``. None (no cap configured /
     unreadable) means "no per-profile explanation available".
+
+    ``multi`` here is the LIB's capability, never a property of the slug — the
+    same rule ``autodown._enum_board_names`` uses (``autodown.py:310``,
+    ``hasattr(kanban_db, "list_boards")``) and the same answer the two sibling
+    probes (``_board_snapshot``, ``_any_assignee_under_cap``) were handed by
+    their caller. t_b014c2b8 guarded this read but kept the old
+    ``bool(board) and board != "default"`` heuristic, which sent a ``default``
+    read down the no-board path; a worker's ``HERMES_KANBAN_DB`` still steers
+    that call, and it is not even the same file the siblings read for the same
+    board (``kanban_db_path()`` with no intent follows ``HERMES_KANBAN_BOARD``,
+    ``kanban_db_path(board="default")`` is the legacy flat DB). t_147201fa
+    removed the heuristic, so every board this gate asks about — ``default``
+    included — is resolved the same way and guarded the same way. A lib that
+    cannot enumerate boards still gets the no-``board=`` call verbatim, which is
+    the legacy single-board shape the companion tests pin as unaffected.
     """
     if max_per_profile is None:
         return None
     try:
-        multi = bool(board) and board != "default"
-        # t_b014c2b8: same guard as the two probes above. NOTE the local `multi`
-        # rule keeps treating "default" as the no-board call, so a pin still
-        # steers a `default` read here — a residual this card documents rather
-        # than silently re-shapes (changing it would move the legacy
-        # single-board path the companion tests pin).
+        multi = hasattr(kanban_db, "list_boards")
         with board_pin.open_board(kanban_db, board, multi=multi) as conn:
             rows = conn.execute(
                 "SELECT assignee, COUNT(*) AS n FROM tasks "

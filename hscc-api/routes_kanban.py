@@ -253,6 +253,11 @@ def handle_kanban_running(server, ctx, query, body):
         "boards": data.get("boards", []),
         "tasks": data.get("tasks", []),
         "errors": data.get("errors", []),
+        # t_147201fa: which boards were read DESPITE a worker
+        # ``HERMES_KANBAN_DB`` outranking them. The rows they contributed carry
+        # ``killable: false`` + the same sentence, because the verb refuses them
+        # — a panel that lists cards it cannot stop must say so.
+        "pin_conflicts": data.get("pin_conflicts", []),
         "count": data.get("count", len(data.get("tasks", []))),
     }
     payload["speak"] = _speak_running(payload)
