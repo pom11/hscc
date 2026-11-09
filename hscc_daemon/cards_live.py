@@ -2,11 +2,24 @@
 
 `hscc kanban monitor` answers "who is working on what"; this view answers "what
 is each of them doing right now". Every running card on every board gets a
-bordered panel that follows its worker's transcript (the dispatcher's per-task
-log, ``<kanban root>/logs/<task>.log``). The grid re-flows on every refresh: a
-card that starts gets a panel, a card that stops keeps its panel for
+bordered panel that follows its worker's transcript. The grid re-flows on every
+refresh: a card that starts gets a panel, a card that stops keeps its panel for
 ``LINGER_S`` with its outcome (done / blocked / ...) and then drops out. Cards
 waiting for a slot are listed along the bottom.
+
+Transcript source (``SessionTail`` is the primary, ``LogTail`` the fallback):
+under Hermes v0.23 the dispatcher spawns ``hermes_cli.kanban_worker_client``, a
+thin RPC client that writes ``<kanban root>/logs/<task>.log`` with only its own
+stderr (``Session: local-<hash>``, then ``[kanban-worker-exit] rc=N`` plus the
+final reply at exit). The agent itself runs inside the gateway owner as one
+session per run, so the live transcript is in that session's rows in the
+worker profile's ``state.db`` — which is what ``SessionTail`` follows, by the
+run's own ``session_id``/``session_db`` (``kanban_live._collect_board`` takes
+them from the run's ``owner_admitted`` event). The panel's header carries the
+source it is reading as its first detail field (``src session`` /
+``src log (fallback)``); a panel never mixes the two. The note above
+``SessionTail`` records why the transcript is read with read-only ``sqlite3``
+rather than through ``hermes_state``.
 
 Panel header: board · card · worker, then run time, heartbeat age and the
 worker session's tokens — fields are dropped right-to-left when the panel is
@@ -27,10 +40,12 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import json
 import math
 import os
 import re
 import select
+import sqlite3
 import sys
 import time
 
@@ -50,7 +65,11 @@ LINGER_S = 10                # a finished card's panel stays this long
 INITIAL_TAIL_BYTES = 64 * 1024
 MAX_LINES = 600              # kept per card; the panel shows the tail that fits
 READY_ROWS = 3               # waiting-card lines at the bottom (+N more)
-TOOL_PREFIX = "┊"            # Hermes prints every tool call on a ┊ line
+TOOL_PREFIX = "┊"            # the marker this view prints every tool call with
+SESSION_PAGE = 400           # transcript rows read per tick (appended rows only)
+INITIAL_SESSION_ROWS = 200   # a new session tail starts this many rows back
+PROMPT_PREVIEW = 120         # user-turn preview length (hermes' own timeline does 120)
+ANNOUNCED_MAX = 4096         # call ids remembered so results are not repeated
 OUTCOME_STYLE = {"completed": ("done", "ok"), "blocked": ("blocked", "error"),
                  "gave_up": ("gave up", "error"), "crashed": ("crashed", "error"),
                  "timed_out": ("timed out", "error"),
@@ -96,9 +115,274 @@ def is_tool_line(line: str) -> bool:
     return s.startswith(TOOL_PREFIX) and "preparing " not in s
 
 
+# ── session-store following (the v0.23 transcript source) ─────────────────
+#
+# Under Hermes v0.23 the worker's transcript is NOT in the per-task log the
+# dispatcher writes; it is the run's own session in the worker profile's
+# ``state.db`` (``sessions`` + ``messages``). Reading it through
+# ``hermes_state`` / ``hermes_state_timeline`` was considered and rejected on
+# two measurements (t_a5c49a41):
+#
+#   * ``hermes_state_timeline.get_session_timeline()`` is a *prompt index*, not
+#     a transcript: it runs ``_display_rows_sql(..., users_only=True)`` and
+#     returns ``{"entries": [{row_id, preview, timestamp}]}`` of user turns
+#     collapsed to 120 chars. There is no assistant text and no tool row in it,
+#     so it cannot render this panel at all (and ``db`` is a live ``SessionDB``
+#     handle, not a path or a connection).
+#   * importing that tree into the interpreter that ships ``hscc`` is not
+#     dependable: the import pulls in ``agent.*`` → ``hermes_cli.config`` →
+#     ``hermes_yaml`` → ``ruamel``, and a probe of it left the process running
+#     the standalone Hermes python (at-fail ``sys.path`` had the managed
+#     interpreter's stdlib and ``hermes-agent`` twice, and no hscc
+#     site-packages) — the signature of ``hermes_bootstrap``'s launch
+#     ``os.execv``. A view that re-renders every 0.5 s must not carry a
+#     mid-render re-exec risk, and a heavy import chain buys a monitor nothing.
+#
+# So this reads the same rows with a read-only ``sqlite3`` handle and hermes'
+# own display rules spelled out in the WHERE clause (``active``/``compacted``
+# display set, model-only rows excluded) and hermes' own keyset paging
+# (``get_messages(after_id=...)`` is ``id > ? ORDER BY id``), advancing a row-id
+# cursor so a tick only pays for the rows appended since the last one.
+# Read-only: ``mode=ro``, a 1 s busy timeout, and any ``sqlite3.Error`` is a
+# blank panel, never a traceback.
+
+_MESSAGES_TABLE = "messages"
+
+
+def _open_ro(path: str):
+    """Read-only sqlite handle on ``path``; the caller must close it.
+
+    ``closing()`` because sqlite3's own context manager only ends a
+    transaction — a 0.5 s loop over every running card would leak handles.
+    Mirrors ``kanban_live._open_ro`` on purpose (same guarantee, no import of
+    another card's private helper: that module is a live hotspot this card may
+    not touch).
+    """
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+    conn.row_factory = sqlite3.Row
+    return contextlib.closing(conn)
+
+
+# One page of the transcript. The display set is hermes' own:
+# ``(active = 1 OR compacted = 1)`` plus the model-only exclusion from
+# ``hermes_state_messages.DISPLAY_VISIBLE_SQL`` — CASE so SQLite cannot
+# short-circuit into ``json_extract`` on a row whose metadata is not JSON.
+# ``id > :after ORDER BY id`` is hermes' keyset paging (insertion order, never
+# timestamp: clocks regress).
+TRANSCRIPT_SQL = f"""
+    SELECT id, role, content, tool_name, tool_calls, tool_call_id, display_kind
+    FROM {_MESSAGES_TABLE}
+    WHERE session_id = :sid AND id > :after
+      AND (active = 1 OR compacted = 1)
+      AND CASE WHEN display_metadata IS NULL OR NOT json_valid(display_metadata)
+               THEN 1 ELSE COALESCE(json_extract(display_metadata, '$.model_only'), 0) = 0 END
+    ORDER BY id ASC LIMIT :limit
+"""
+
+
+def _content_text(content) -> str:
+    """Plain text of a ``content`` column: str, or hermes' ``\\x00json:`` parts."""
+    if content is None:
+        return ""
+    if isinstance(content, (bytes, bytearray)):
+        content = content.decode("utf-8", errors="replace")
+    if isinstance(content, str):
+        if content.startswith("\x00json:"):
+            try:
+                content = json.loads(content[len("\x00json:"):])
+            except (TypeError, ValueError):
+                return content[len("\x00json:"):]
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):            # multimodal parts: keep the text ones
+        out = []
+        for part in content:
+            if isinstance(part, str):
+                out.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text") or part.get("content")
+                if isinstance(text, str):
+                    out.append(text)
+        return "\n".join(out)
+    return "" if content is None else str(content)
+
+
+_ARG_KEYS = ("command", "path", "file_path", "pattern", "query", "url", "goal",
+             "title", "note", "reason", "message", "skill", "selector", "text")
+
+
+def _tool_summary(arguments) -> str:
+    """One short line naming what a tool call was pointed at (never raises)."""
+    if not isinstance(arguments, str):
+        arguments = "" if arguments is None else json.dumps(arguments)
+    try:
+        args = json.loads(arguments)
+    except (TypeError, ValueError):
+        args = None
+    value = ""
+    if isinstance(args, dict):
+        for key in _ARG_KEYS:
+            v = args.get(key)
+            if isinstance(v, str) and v.strip():
+                value = v
+                break
+        else:
+            for v in args.values():
+                if isinstance(v, str) and v.strip():
+                    value = v
+                    break
+    elif isinstance(args, list):
+        value = " ".join(str(v) for v in args[:3])
+    else:
+        value = arguments
+    one = " ".join(str(value).split())
+    return one[:110] + "…" if len(one) > 110 else one
+
+
+def render_rows(rows, announced=None) -> list[str]:
+    """Display lines for transcript rows: prose as text, one ``┊`` line per call.
+
+    A tool call is announced by the assistant row whose ``tool_calls`` names it
+    — that is the moment the operator wants to see it, before the result
+    arrives — so the result row (``role='tool'``) is not repeated unless it was
+    never announced (a tail that starts mid-turn). ``announced`` carries the
+    call ids across polls; ``role='user'`` rows become one collapsed preview
+    line so the card prompt reads as a line, not an 8 KB dump.
+    """
+    seen = announced if announced is not None else set()
+    out: list[str] = []
+    for row in rows:
+        role = row["role"]
+        if role == "assistant":
+            text = _content_text(row["content"])
+            for para in text.split("\n"):
+                para = clean_line(para)
+                if para.strip():
+                    out.append(para)
+            calls = row["tool_calls"]
+            if isinstance(calls, str):
+                try:
+                    calls = json.loads(calls)
+                except (TypeError, ValueError):
+                    calls = None
+            for call in calls or []:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") or {}
+                name = fn.get("name") or call.get("name") or "tool"
+                cid = call.get("id") or call.get("call_id")
+                if cid:
+                    seen.add(cid)
+                summary = _tool_summary(fn.get("arguments"))
+                out.append(f"{TOOL_PREFIX} {name}  {summary}".rstrip())
+        elif role == "tool":
+            if row["tool_call_id"] and row["tool_call_id"] in seen:
+                continue
+            out.append(f"{TOOL_PREFIX} {row['tool_name'] or 'tool'}".rstrip())
+        elif role == "user":
+            one = " ".join(_content_text(row["content"]).split())
+            if one:
+                out.append("▸ " + (one[:PROMPT_PREVIEW] + "…"
+                                   if len(one) > PROMPT_PREVIEW else one))
+    return out
+
+
+class SessionTail:
+    """Incremental reader of one run's transcript from the session store.
+
+    Starts at the last ``INITIAL_SESSION_ROWS`` rows and then reads only the
+    rows appended since (``id > cursor``). A missing/unreadable store, a
+    session id that the store has not seen yet or a row set that moved
+    backwards (a rewritten/rewound store) never raise — they restart the tail
+    or add nothing, exactly the guarantees ``LogTail.poll`` gives for a log file.
+    """
+
+    source = "session"
+    label = "session"
+
+    def __init__(self, db_path: str, session_id: str, page: int = SESSION_PAGE):
+        self.path = db_path
+        self.session_id = session_id
+        self.page = page
+        self.cursor = None            # None = not positioned yet
+        self.announced: set[str] = set()
+        self.lines: collections.deque[str] = collections.deque(maxlen=MAX_LINES)
+
+    def _max_id(self, conn) -> int | None:
+        row = conn.execute(f"SELECT MAX(id) AS hi FROM {_MESSAGES_TABLE} "
+                           f"WHERE session_id = ?", (self.session_id,)).fetchone()
+        return row["hi"] if row and row["hi"] is not None else None
+
+    def poll(self) -> bool:
+        """Read appended rows; True when display lines were added."""
+        if not self.path or not self.session_id or not os.path.isfile(self.path):
+            return False
+        try:
+            with _open_ro(self.path) as conn:
+                hi = self._max_id(conn)
+                if hi is None:
+                    return False            # the session has no rows yet
+                if self.cursor is None or hi < self.cursor:
+                    # First look, or the row ids moved backwards (a store that
+                    # was rewritten or rewound): restart the tail from its end
+                    # instead of raising, and forget the ids that anchored
+                    # result lines — they may no longer exist.
+                    self.cursor = max(0, hi - self.page)
+                    self.announced.clear()
+                if hi == self.cursor:
+                    return False            # nothing appended since the last tick
+                rows = conn.execute(TRANSCRIPT_SQL,
+                                    {"sid": self.session_id, "after": self.cursor,
+                                     "limit": self.page}).fetchall()
+        except (sqlite3.Error, OSError):
+            return False                    # unreadable store = no new lines
+        added = False
+        if rows:
+            lines = render_rows(rows, self.announced)
+            if len(self.announced) > ANNOUNCED_MAX:
+                self.announced.clear()      # bounded; costs at most one repeat line
+            for line in lines:
+                self.lines.append(line)
+            added = bool(lines)
+        self.cursor = rows[-1]["id"] if rows else hi
+        return added
+
+    def view(self, tools_only: bool) -> list[str]:
+        rows = list(self.lines)
+        return [r for r in rows if is_tool_line(r)] if tools_only else rows
+
+
+def _session_of(row: dict) -> str | None:
+    """The run's session id that ``kanban_live._collect_board`` put on the row,
+    or None when the owner has not admitted this run (yet)."""
+    sid = row.get("session_id")
+    return sid.strip() if isinstance(sid, str) and sid.strip() else None
+
+
+def make_tail(row: dict, hermes_home: str | None, board: str, task_id: str):
+    """The transcript follower for one running row.
+
+    A session id on the row (the run's ``owner_admitted`` event) selects the
+    session store — ``session_db`` when the owner named one, else the worker
+    profile's own ``state.db`` (``_collect_board`` cannot know the caller's
+    hermes home, so it hands the id and lets the reader resolve the path).
+    Without a session id the panel degrades to the worker LOG file, which under
+    v0.23 carries only the RPC client's stderr; ``tail.source`` is what the
+    header prints so the operator can tell which one they are reading.
+    """
+    sid = _session_of(row)
+    if sid:
+        path = row.get("session_db") or kanban_live._state_db_path(
+            hermes_home or kanban_live.HERMES_HOME, row.get("worker"))
+        return SessionTail(path, sid)
+    return LogTail(log_path(board, task_id, hermes_home))
+
+
 class LogTail:
     """Incremental reader of one worker log: starts at the last
     ``INITIAL_TAIL_BYTES`` and then reads only what was appended."""
+
+    source = "log"
 
     def __init__(self, path: str):
         self.path = path
@@ -147,7 +431,10 @@ class LogTail:
 
 class Monitor:
     """Tracks the running set across refreshes: which cards have panels, the
-    log tail of each, and the lingering panels of cards that just stopped."""
+    transcript tail of each, and the lingering panels of cards that just
+    stopped. Each panel follows ONE source (session store, else worker log);
+    a panel switches source only when the run's session id appears, and then
+    it starts that source clean rather than continuing the old one."""
 
     def __init__(self, board=None, kanban_db=None, hermes_home=None, clock=time.time,
                  collect=None):
@@ -157,7 +444,7 @@ class Monitor:
         self.clock = clock
         self._collect = collect or self._default_collect
         self.cards: dict[tuple, dict] = {}     # (board, id) -> row (+ "ended")
-        self.tails: dict[tuple, LogTail] = {}
+        self.tails: dict[tuple, "LogTail | SessionTail"] = {}
         self.order: list[tuple] = []           # stable panel order
         self.data: dict = {"running": [], "ready": [], "events": [], "caps": (None, None),
                            "errors": [], "boards": []}
@@ -176,9 +463,15 @@ class Monitor:
             outcomes[(e["board"], e["id"])] = e["kind"]
         for key, row in live.items():
             self.cards[key] = dict(row)
-            if key not in self.tails:
-                self.tails[key] = LogTail(log_path(key[0], key[1], self.hermes_home))
-                self.order.append(key)
+            tail = self.tails.get(key)
+            wanted = "session" if _session_of(row) else "log"
+            if tail is None or tail.source != wanted:
+                # New panel — or the owner admitted this run since the last
+                # tick, so the session became readable. Replacing the tail is
+                # what keeps the two sources from ever sharing one panel.
+                self.tails[key] = make_tail(row, self.hermes_home, key[0], key[1])
+                if tail is None:
+                    self.order.append(key)
         for key, row in list(self.cards.items()):
             if key in live:
                 continue
@@ -215,14 +508,25 @@ def grid_shape(n: int, width: int, height: int, cols: int | None = None) -> tupl
     return cols, rows
 
 
-def header_fields(row: dict, now: float) -> tuple[str, list[str]]:
-    """Title (``board · id · worker``) and the droppable detail fields."""
+def header_fields(row: dict, now: float, source: str | None = None) -> tuple[str, list[str]]:
+    """Title (``board · id · worker``) and the droppable detail fields.
+
+    ``source`` — ``session`` (the run's transcript in the session store) or
+    ``log`` (the worker log, the fallback) — goes FIRST so it is the LAST thing
+    ``fit_header`` drops: a panel that is quietly reading the v0.23 RPC client's
+    stderr instead of the worker's transcript has to stay visible as such.
+    """
     title = f"{row['board']} · {row['id']} · {row['worker']}"
     if "ended" in row:
         label, _ = OUTCOME_STYLE.get(row.get("outcome"), (row.get("outcome", "stopped"), "warn"))
         return title, [label]
-    details = [f"run {kanban_live.fmt_age(row.get('run_s'))}",
-               f"beat {kanban_live.fmt_age(row.get('hb_s'))}"]
+    details = []
+    if source == "session":
+        details.append("src session")
+    elif source == "log":
+        details.append("src log (fallback)")
+    details += [f"run {kanban_live.fmt_age(row.get('run_s'))}",
+                f"beat {kanban_live.fmt_age(row.get('hb_s'))}"]
     if row.get("tok_in") is not None:
         details.append(f"tok {fmt_tokens(row['tok_in'])}/{fmt_tokens(row.get('tok_out'))}")
     return title, details
@@ -276,9 +580,9 @@ def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
     """One card: a header rule carrying the title, then the transcript tail.
     No side/bottom border; one blank column on the right separates cards."""
     row = mon.cards[key]
-    title, details = header_fields(row, now)
-    header = fit_header(title, details, max(width - 6, 8))  # "─ " + title + " ─" + gap
     tail = mon.tails.get(key)
+    title, details = header_fields(row, now, tail.source if tail else None)
+    header = fit_header(title, details, max(width - 6, 8))  # "─ " + title + " ─" + gap
     lines = tail.view(tools_only) if tail else []
     body = _body(lines, max(width - 1, 1), max(height - 1, 1), tools_only)
     if "ended" in row:
