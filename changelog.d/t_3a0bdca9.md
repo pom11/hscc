@@ -54,3 +54,13 @@ task: t_3a0bdca9
   The autouse sparkrun fence stayed armed and the operator's real
   `~/.hscc/expected-up.json` was not written by any test — unit tests only, no
   live `cluster down`, no ssh, no sparkrun call.
+  Full suite `bash scripts/run_tests.sh` from a clean worktree at this commit:
+  **11/12 legs green** — including `hscc-commands` (78 passed, the 9 new ones
+  here), `hscc_daemon` (3360) and `hscc-bootstrap` (1164). The `scripts` leg is
+  red and is **not** claimed as green: `1 failed, 336 passed, 2 skipped` on
+  `test_a_table_identical_under_sibling_interpreters`, reproduced **identically**
+  at clean `origin/main@82e098c3` (`1 failed, 336 passed, 2 skipped`, same
+  `subprocess.TimeoutExpired` on the audit's 300 s cap) measured on this same
+  host right after. The cap raises inside `_sibling_a_table` *before* either
+  assert, so no content of this diff can cause or avoid it — attributed
+  pre-existing, and the ALL GREEN stamp is withheld rather than asserted.
