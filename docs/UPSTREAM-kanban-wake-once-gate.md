@@ -319,10 +319,10 @@ session-lifecycle-independent by construction.
      when no authority/route entry serves the key (`gateway/session_automation.py:834-835`)
      or the local route holds no live session (`:844-845`); `deliver_wake` then still
      delivers, through `admit_internal_event` (`gateway/wake.py:149-151`), writing **no
-     admission row at all**. 0 of the 9 observed wakes took that fallback — a live branch,
-     not a hypothetical. So "was event E woken?" is answerable from the fence only *in the
-     affirmative*: a row proves yes, absence proves nothing. §3.1's claim in the board DB
-     remains the authority.
+     admission row at all**. 0 of the 9 observed wakes took it — so the gap is reachable
+     in code rather than common in practice, which is exactly why it must not be reasoned
+     away: absence of a row cannot be read as absence of a wake. §3.1's claim in the
+     board DB remains the authority.
    - **(b) the fence is not a durable index.** On session *retirement* admission rows are
      copied into `state_meta` and removed from `session_admissions`
      (`hermes_state_mutation_retirement.py:103-141`), after which they are reachable only
