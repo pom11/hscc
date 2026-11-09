@@ -404,6 +404,188 @@ class TestMarker:
         assert [u["unit_id"] for u in m["units"]] == ["ok"]
 
 
+# ── The stay-down record (D1, t_ab75e987) ─────────────────────────────────
+class TestDeliberateDownRecord:
+    """`deliberate_down` must make "the operator said stay down" readable off
+    disk, and must NEVER invent that evidence when it is not there."""
+
+    def test_clear_expected_up_stamps_the_record(self, marker_path):
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        rec = pb.deliberately_down(marker_path)
+        assert rec is not None
+        assert rec["reason"] == "hscc cluster down"
+        # set_at must be a timestamp a consumer can compute an age from, not
+        # an opaque string: parseable ISO-8601 and timezone-aware.
+        import datetime
+        stamp = datetime.datetime.fromisoformat(rec["set_at"])
+        assert stamp.tzinfo is not None
+        assert abs((datetime.datetime.now(datetime.timezone.utc)
+                    - stamp).total_seconds()) < 60
+
+
+    def test_record_survives_a_reload_from_disk(self, marker_path):
+        """Durable on disk only: a fresh read (what a restarted daemon does)
+        sees the same record — nothing was ever held in memory."""
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        assert json.load(open(marker_path))["deliberate_down"]["reason"] == \
+            "hscc cluster down"
+        rec = pb.deliberately_down(marker_path)
+        assert rec is not None and rec["reason"] == "hscc cluster down"
+
+    def test_clear_keeps_the_cleared_marker_shape(self, marker_path):
+        """The pre-existing surface is unchanged: units emptied, cleared_at +
+        reason still written, baselines/attempts kept — the record is ADDED."""
+        _write_marker(marker_path, _marker(baseline={HOST_A: BOOT_NEW_A},
+                                           attempts={HOST_A: {"boot_id": "b",
+                                                               "count": 2}}))
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        m = json.load(open(marker_path))
+        assert m["units"] == []
+        assert m["reason"] == "hscc cluster down"
+        assert "cleared_at" in m
+        assert m["boot_baseline"][HOST_A] == BOOT_NEW_A
+        assert m["boot_attempts"][HOST_A]["count"] == 2
+
+    def test_record_expected_up_ends_the_stay_down(self, marker_path):
+        """A `cluster up` (or an autodown wake) is the ONLY sanctioned exit."""
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        assert pb.deliberately_down(marker_path) is not None
+        pb.record_expected_up([{"kind": "orchestrator", "nodes": [HOST_A],
+                                "port": 8000, "unit_id": "orch"}],
+                              "hscc cluster up", path=marker_path)
+        assert pb.deliberately_down(marker_path) is None
+        # and the marker is a live expected-up again
+        assert json.load(open(marker_path))["units"][0]["unit_id"] == "orch"
+
+    def test_record_expected_up_ends_a_stay_down_it_never_stamped(
+            self, marker_path):
+        """pop() must not raise on the normal path (no record present)."""
+        pb.record_expected_up([{"kind": "worker", "nodes": [HOST_B],
+                                "port": 8001, "unit_id": "wk1"}],
+                              "hscc cluster up", path=marker_path)
+        assert pb.deliberately_down(marker_path) is None
+
+    # ── Fail-safe: no evidence ⇒ None, never an exception ────────────────
+    def test_predicate_none_when_file_missing(self, marker_path):
+        assert not os.path.exists(marker_path)
+        assert pb.deliberately_down(marker_path) is None
+
+    def test_predicate_none_on_corrupt_json(self, marker_path):
+        with open(marker_path, "w") as f:
+            f.write("{not json")
+        assert pb.deliberately_down(marker_path) is None
+
+    def test_predicate_none_when_marker_is_not_a_dict(self, marker_path):
+        for body in ('["units"]', '"down"', "42", "null"):
+            with open(marker_path, "w") as f:
+                f.write(body)
+            assert pb.deliberately_down(marker_path) is None, body
+
+    def test_predicate_none_when_record_not_a_dict(self, marker_path):
+        for value in ("yes", 7, ["set_at"], None):
+            _write_marker(marker_path, dict(_marker(with_units=False),
+                                            deliberate_down=value))
+            assert pb.deliberately_down(marker_path) is None, value
+
+    def test_predicate_none_when_record_empty(self, marker_path):
+        """An empty record asserts nothing, so it is not evidence of intent."""
+        _write_marker(marker_path, dict(_marker(with_units=False),
+                                        deliberate_down={}))
+        assert pb.deliberately_down(marker_path) is None
+
+    def test_predicate_never_raises_on_an_unopenable_path(self, tmp_path):
+        """A directory where the marker should be is still 'no evidence'."""
+        assert pb.deliberately_down(str(tmp_path)) is None
+
+    def test_predicate_is_side_effect_free(self, marker_path):
+        """A per-tick gate may call it: no write, no marker mutation."""
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        before = open(marker_path).read()
+        pb.deliberately_down(marker_path)
+        pb.deliberately_down(marker_path)
+        assert open(marker_path).read() == before
+
+    def test_predicate_never_logs(self, marker_path, caplog):
+        """Silent by contract — a stream check must not spam the log."""
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        os.remove(marker_path)
+        with caplog.at_level("DEBUG"):
+            pb.deliberately_down(marker_path)
+            pb.deliberately_down(marker_path)
+        assert caplog.records == []
+
+    def test_predicate_defaults_to_the_module_marker(self, marker_path):
+        """marker_path patches EXPECTED_UP_FILE, so path=None must read it."""
+        pb.clear_expected_up("hscc cluster down")
+        assert pb.deliberately_down()["reason"] == "hscc cluster down"
+
+
+# ── The stay-down in the stream wording ───────────────────────────────────
+class TestDeliberateDownStream:
+    """The two no-units states are DIFFERENT facts and must not read alike;
+    the verdict label and ok semantics stay exactly as pinned."""
+
+    def _stream_message(self, fx, path, monkeypatch):
+        res = _pass(fx, path, monkeypatch=monkeypatch)
+        assert res["result"] == "no-marker"      # pinned label, NOT mutated
+        assert fx.up_calls == [] and fx.lock_acquires == 0
+        return res["message"]
+
+    def test_pass_names_the_stay_down_when_the_record_is_present(
+            self, marker_path, monkeypatch):
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        fx = Fakes(boots={HOST_A: BOOT_NEW_A}, serving=set())
+        msg = self._stream_message(fx, marker_path, monkeypatch)
+        assert "deliberately down" in msg
+        assert "hscc cluster down" in msg            # the reason is surfaced
+        assert "no expected_up marker" not in msg    # the other state's words
+        # ok/no-action semantics untouched: same verdict, still an ok stream.
+        assert "no-marker" in pb._STREAM_OK_RESULTS
+
+
+    def test_pass_still_names_the_absent_marker_when_no_file_exists(
+            self, marker_path, monkeypatch):
+        assert not os.path.exists(marker_path)
+        fx = Fakes(boots={HOST_A: BOOT_NEW_A}, serving=set())
+        msg = self._stream_message(fx, marker_path, monkeypatch)
+        assert msg == ("no expected_up marker (fleet not fleet-upped, "
+                       "or brought down on purpose) — nothing to do")
+        assert "deliberately down" not in msg
+
+    def test_clear_then_pass_launches_nothing_and_reads_as_deliberate(
+            self, marker_path, monkeypatch):
+        """The card's scenario: cluster down, then a fresh boot. Inert AND
+        self-describing."""
+        _write_marker(marker_path, _marker(baseline={HOST_A: BOOT_OLD_A}))
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        fx = Fakes(boots={HOST_A: BOOT_NEW_A}, serving=set())
+        msg = self._stream_message(fx, marker_path, monkeypatch)
+        assert "deliberately down" in msg
+
+    def test_stream_ok_is_true_for_the_stay_down(self, marker_path,
+                                                 monkeypatch):
+        """ok/no-action semantics identical to the absent-marker case: a
+        stay-down is not a fault, so `hscc verify` stays green."""
+        written = {}
+        monkeypatch.setattr(pb, "write_state",
+                            lambda s, d: written.__setitem__(s, d))
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        ok = pb.check_post_boot_relaunch(
+            pass_fn=lambda: pb.run_post_boot_pass(
+                boot_fn=lambda n: {}, probe_fn=lambda u, timeout=5: {"ok": False},
+                up_fn=lambda n: {"success": True},
+                lock_acquire=lambda now=None: True,
+                lock_release=lambda: None,
+                intentional_fn=lambda: False,
+                notify_fn=lambda *a, **k: None,
+                path=marker_path))
+        assert ok is True
+        st = written[pb.POST_BOOT_STREAM]
+        assert st["ok"] is True and st["result"] == "no-marker"
+        assert "deliberately down" in st["message"]
+
+
+
 # ── Boot sweep (the sanctioned sparkrun transport) ───────────────────────
 class TestBootSweep:
     def test_script_reads_boot_id_through_sparkrun_apis(self):
