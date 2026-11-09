@@ -325,20 +325,25 @@ def real_root(tmp_path, monkeypatch):
 
     A real ``pytest.skip`` (GAP-D-1) when hermes_cli cannot be imported in this
     interpreter, so the unit family still runs on a bare venv.
+
+    Everything goes through ``kb`` — the module autodown resolved — and NEVER
+    through a direct ``import hermes_cli.<submodule>``. ``sys.modules`` is shared
+    for the whole pytest process, other files in this suite plant a fake
+    ``hermes_cli.kanban_db`` in it (``test_autodown.TestLoadKanbanDb``,
+    evicted only by that class's finalizer), and importing a real hermes
+    submodule directly would bind its ``_kb`` to whichever of the two happened
+    to be cached — an ``AttributeError`` deep inside hermes that looks like a bug
+    in this card. If the cached module is a fake it simply has no
+    ``create_board`` and this skips.
     """
     from hscc_daemon import autodown
     kb = autodown._load_kanban_db_or_default()
     if kb is None:
         pytest.skip("real hermes_cli not importable: "
                     f"{autodown.kanban_check_state()!r}")
-    import importlib
-    boards_mod = None
-    try:
-        boards_mod = importlib.import_module("hermes_cli.kanban_db_boards")
-    except Exception as exc:  # pragma: no cover — hermes layout changed
-        pytest.skip(f"hermes_cli.kanban_db_boards unavailable: {exc}")
-    if boards_mod is None or not hasattr(boards_mod, "create_board"):
-        pytest.skip("this hermes has no create_board to build fixtures with")
+    if not hasattr(kb, "create_board") or not hasattr(kb, "kanban_db_path"):
+        pytest.skip("resolved hermes_cli is not the real kanban_db "
+                    f"(no create_board/kanban_db_path on {kb.__file__!r})")
     root = tmp_path / "kanban-home"
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
     monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
@@ -346,7 +351,7 @@ def real_root(tmp_path, monkeypatch):
     for v in FENCE_VARS:
         monkeypatch.delenv(v, raising=False)
     for slug in ("alpha", "beta"):
-        boards_mod.create_board(slug)          # tmp root, fence unset
+        kb.create_board(slug)                  # tmp root, fence unset
     # The legacy flat ``default`` DB too, created while the fence is still off:
     # under an armed fence hermes opens ``?mode=ro`` and refuses to create a
     # missing board (scripts/run_tests.sh:121-130 documents exactly that), so a
