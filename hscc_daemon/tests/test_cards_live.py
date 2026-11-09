@@ -1,18 +1,21 @@
 """Tests for hscc_daemon/cards_live.py — `hscc cards monitor`.
 
-Offline only: a fake collector, a fake clock and worker logs under tmp_path.
-NEVER the operator's live boards or ~/.hermes.
+Offline only: a fake collector, a fake clock, worker logs and fake session
+stores under tmp_path. NEVER the operator's live boards or ~/.hermes.
 """
 
 import io
+import json
+import os
+import sqlite3
 
 import pytest
 
 from hscc_daemon import cards_live, kanban_live
 from hscc_daemon.cli_theme import make_console
-from hscc_daemon.cards_live import (LogTail, Monitor, ViewState, clean_line, cmd_cards,
-                                    fit_header, grid_shape, is_tool_line, log_path,
-                                    wrap_tail)
+from hscc_daemon.cards_live import (LogTail, Monitor, SessionTail, ViewState, clean_line,
+                                    cmd_cards, fit_header, grid_shape, is_tool_line,
+                                    log_path, make_tail, render_rows, wrap_tail)
 
 NOW = 1_800_000_000.0
 
@@ -43,11 +46,59 @@ def snap(running=(), ready=(), events=(), cap=10):
 
 def write_log(home, board, tid, text, mode="w"):
     p = log_path(board, tid, str(home))
-    import os
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, mode, encoding="utf-8") as f:
         f.write(text)
     return p
+
+
+def make_store(path, session_id="local-abc", rows=()):
+    """A worker ``state.db`` holding one kanban session and its messages.
+
+    The columns are the live v0.23 shape — ``PRAGMA table_info(messages)`` on
+    the operator's own store (t_a5c49a41): every NOT NULL column
+    (``session_id``/``role``/``timestamp``/``active``/``compacted``/
+    ``_compressed_summary``) plus the ones the reader selects. A fixture that
+    invents its own schema proves nothing about the reader.
+    """
+    os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL,"
+                  " model TEXT, started_at REAL NOT NULL, ended_at REAL,"
+                  " message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER)")
+        c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,"
+                  " role TEXT NOT NULL, content TEXT, tool_call_id TEXT, tool_calls TEXT,"
+                  " tool_name TEXT, timestamp REAL NOT NULL, active INTEGER NOT NULL"
+                  " DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0, display_kind TEXT,"
+                  " display_metadata TEXT, _compressed_summary INTEGER NOT NULL DEFAULT 0)")
+        c.execute("INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', ?)",
+                  (session_id, NOW))
+    for r in rows:
+        add_msg(path, session_id, **r)
+    return str(path)
+
+
+def add_msg(path, session_id, role, content=None, tool_calls=None, tool_name=None,
+            tool_call_id=None, display_metadata=None, active=1, compacted=0):
+    """Append one message row the way the gateway writes it (tool_calls as JSON)."""
+    with sqlite3.connect(path) as c:
+        c.execute("INSERT INTO messages (session_id, role, content, tool_calls, tool_name,"
+                  " tool_call_id, display_metadata, timestamp, active, compacted)"
+                  " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (session_id, role, content,
+                   json.dumps(tool_calls) if tool_calls is not None else None,
+                   tool_name, tool_call_id, display_metadata, NOW, active, compacted))
+
+
+def call(name, arguments, cid):
+    """One entry of an assistant row's ``tool_calls`` JSON, as the API returns it."""
+    return {"id": cid, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+
+def live_session_tail(tmp_path, rows=(), session_id="local-abc", **kw):
+    db = make_store(tmp_path / "profiles" / "w" / "state.db", session_id, rows)
+    return SessionTail(db, session_id, **kw)
 
 
 # ── pure helpers ───────────────────────────────────────────────────────────
@@ -342,3 +393,167 @@ def test_title_always_gold_rule_gold_only_when_focused(tmp_path):
     assert f_rule.title.style == i_rule.title.style == cards_live.TITLE_STYLE
     assert f_rule.style == cards_live.FOCUS_BORDER
     assert i_rule.style == cards_live.IDLE_BORDER
+
+
+# ── the session store: where the v0.23 transcript actually is ──────────────
+
+WORKER_ROWS = [
+    dict(role="user", content="work kanban task t_1\n" + "x" * 8000),
+    dict(role="assistant", content="", tool_calls=[call("kanban_show", {"task_id": "t_1"}, "c1")]),
+    dict(role="tool", content="task body " * 900, tool_name="kanban_show", tool_call_id="c1"),
+    dict(role="assistant", content="I'll start by reading the card."),
+    dict(role="assistant", content="", tool_calls=[call("terminal", {"command": "git status"}, "c2")]),
+    dict(role="tool", content="M hscc_daemon/cards_live.py", tool_name="terminal",
+         tool_call_id="c2"),
+]
+
+
+def test_session_shows_prose_and_one_line_per_tool_call(tmp_path):
+    t = live_session_tail(tmp_path, rows=WORKER_ROWS)
+    assert t.poll() is True
+    lines = t.view(False)
+    assert lines[0].startswith("▸ work kanban task t_1 ")      # the 8 KB card prompt,
+    assert len(lines[0]) == cards_live.PROMPT_PREVIEW + 3     # one collapsed preview
+    assert lines[1] == "┊ kanban_show  t_1"                    # named when it was CALLED
+    assert lines[2] == "I'll start by reading the card."       # the only prose row
+    assert lines[3] == "┊ terminal  git status"
+    assert len(lines) == 4                    # the two result rows add no lines
+
+
+def test_tools_only_shows_only_the_tool_lines(tmp_path):
+    t = live_session_tail(tmp_path, rows=WORKER_ROWS)
+    t.poll()
+    assert t.view(True) == ["┊ kanban_show  t_1", "┊ terminal  git status"]
+    assert all(is_tool_line(r) for r in t.view(True))
+
+
+def test_second_poll_reads_only_the_appended_rows(tmp_path):
+    t = live_session_tail(tmp_path)
+    assert t.poll() is False and t.view(False) == []       # store exists, no rows yet
+    add_msg(t.path, t.session_id, role="assistant", content="one")
+    assert t.poll() is True and t.view(False) == ["one"]
+    assert t.cursor == 1
+    assert t.poll() is False and t.view(False) == ["one"]   # nothing appended
+    add_msg(t.path, t.session_id, role="assistant", content="two")
+    add_msg(t.path, t.session_id, role="assistant", content="",
+            tool_calls=[call("terminal", {"command": "ls"}, "c3")])
+    assert t.poll() is True
+    assert t.view(False) == ["one", "two", "┊ terminal  ls"]
+    assert t.cursor == 3                                    # only the new rows were read
+
+
+def test_a_rewound_store_restarts_the_tail_instead_of_raising(tmp_path):
+    t = live_session_tail(tmp_path, rows=[dict(role="assistant", content=f"m{i}")
+                                          for i in range(5)])
+    t.poll()
+    assert t.view(False) == [f"m{i}" for i in range(5)]
+    with sqlite3.connect(t.path) as c:                      # rows vanished from the end
+        c.execute("DELETE FROM messages WHERE id > 2")
+    assert t.poll() is True                                 # restart, never raise
+    assert t.view(False)[-2:] == ["m0", "m1"]
+
+
+def test_unreadable_or_absent_store_is_an_empty_panel_never_a_traceback(tmp_path):
+    junk = tmp_path / "state.db"
+    junk.write_bytes(b"definitely not a sqlite database")
+    t = SessionTail(str(junk), "local-abc")
+    assert t.poll() is False and t.view(False) == [] and t.view(True) == []
+    missing = SessionTail(str(tmp_path / "absent" / "state.db"), "local-abc")
+    assert missing.poll() is False and missing.view(False) == []
+    empty = SessionTail(make_store(tmp_path / "empty.db"), "other-session")
+    assert empty.poll() is False and empty.view(False) == []
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap([dict(run_row("b", "t_1"), session_id="local-abc")]))
+    mon.refresh()
+    mon.poll_logs()                                         # the poll above, through the app
+    assert "waiting for output" in render_text(mon, width=120, height=12)
+
+
+def test_the_display_set_is_hermes_own(tmp_path):
+    """``active=1 OR compacted=1``, model-only rows excluded, non-JSON metadata kept."""
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="model-only, never shown",
+             display_metadata='{"model_only": true}'),
+        dict(role="user", content="dropped by compression", active=0, compacted=0),
+        dict(role="user", content="kept as a summary", active=0, compacted=1),
+        dict(role="assistant", content="metadata is not json", display_metadata="oops"),
+    ])
+    t.poll()
+    assert t.view(False) == ["▸ kept as a summary", "metadata is not json"]
+
+
+def test_a_tool_result_does_not_repeat_its_call_line(tmp_path):
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="", tool_calls=[call("read_file", {"path": "a.py"}, "c1")]),
+        dict(role="tool", content="print(1)", tool_name="read_file", tool_call_id="c1"),
+    ])
+    t.poll()
+    assert t.view(False) == ["┊ read_file  a.py"]
+
+
+def test_a_result_whose_call_was_never_announced_still_gets_its_line(tmp_path):
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="tool", content="...", tool_name="terminal", tool_call_id="c9"),
+    ])
+    t.poll()
+    assert t.view(False) == ["┊ terminal"]
+
+
+def test_structured_content_shows_its_text_parts(tmp_path):
+    parts = json.dumps(["here is the screenshot", {"type": "image", "url": "x"},
+                        {"type": "text", "text": "and the chart"}])
+    assert render_rows([{"role": "assistant", "content": "\x00json:" + parts,
+                         "tool_calls": None, "tool_call_id": None, "tool_name": None}]) \
+        == ["here is the screenshot", "and the chart"]
+
+
+# ── which source a panel reads ─────────────────────────────────────────────
+
+def test_the_run_session_selects_the_store(tmp_path):
+    row = dict(run_row("b", "t_1"), session_id="local-x")
+    t = make_tail(row, str(tmp_path), "b", "t_1")
+    assert isinstance(t, SessionTail) and t.source == "session"
+    assert t.path == str(tmp_path / "profiles/backend-engineer/state.db")
+    # the owner named the db in its own owner_admitted payload -> it wins
+    row = dict(row, session_db=str(tmp_path / "owner" / "state.db"))
+    assert make_tail(row, str(tmp_path), "b", "t_1").path == row["session_db"]
+    # no session id at all -> the worker log, labelled as the fallback
+    row = {k: v for k, v in row.items() if k != "session_id"}
+    log = make_tail(row, str(tmp_path), "b", "t_1")
+    assert isinstance(log, LogTail) and log.source == "log"
+    assert log.path == log_path("b", "t_1", str(tmp_path))
+
+
+def test_the_header_marks_which_source_is_being_read(tmp_path):
+    rows = [run_row("b", "t_1")]
+    write_log(tmp_path, "b", "t_1", "Session: local-abc\n")
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))
+    mon.refresh()
+    mon.poll_logs()
+    out = render_text(mon, width=160, height=14)
+    assert "src log (fallback)" in out and "Session: local-abc" in out
+    rows[0] = dict(rows[0], session_id="local-abc")
+    mon.refresh()
+    mon.poll_logs()
+    assert "src session" in render_text(mon, width=160, height=14)
+
+
+def test_a_panel_switches_source_cleanly_when_the_owner_admits_the_run(tmp_path):
+    """The owner admits a run ~2 s after the claim; the panel must not mix sources."""
+    write_log(tmp_path, "b", "t_1", "client stderr only\n")
+    make_store(tmp_path / "profiles/backend-engineer/state.db", "local-abc",
+               [dict(role="assistant", content="real worker text")])
+    rows = [run_row("b", "t_1")]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))
+    mon.refresh()
+    mon.poll_logs()
+    assert isinstance(mon.tails[("b", "t_1")], LogTail)
+    assert "client stderr only" in render_text(mon, width=160, height=14)
+    rows[0] = dict(rows[0], session_id="local-abc")
+    mon.refresh()
+    mon.poll_logs()
+    tail = mon.tails[("b", "t_1")]
+    assert isinstance(tail, SessionTail) and tail.view(False) == ["real worker text"]
+    out = render_text(mon, width=160, height=14)
+    assert "real worker text" in out and "client stderr only" not in out
+    assert mon.order == [("b", "t_1")]                      # one panel, not two
