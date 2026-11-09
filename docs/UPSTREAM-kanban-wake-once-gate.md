@@ -8,6 +8,11 @@ Status: **filed upstream** as
 Follows `t_ff520296` (PR #265, merged `2e477e15`), which fixed only the half this
 repo owns. Full attribution for the doubling: `NOTES-t_ff520296.md` (in that commit).
 
+**The one open question is closed.** §9.4 asked which `deliver_wake` branch the
+`hscc-orch` sub takes, because the whole §3.2 half is worthless to us if the answer is
+self-post. `t_12350485` answered it with code plus a 9/9 log-to-fence join: **the push
+branch**. §3.2 stands as written and no follow-up comment is owed on #152206.
+
 **Anchor provenance.** Line numbers below are the fleet-pinned runtime
 (`~/.hermes/hermes-agent` @ `045881137d`). Each was re-checked against upstream `main`
 @ `a5664060c1` and matches, except three in `hermes_cli/kanban_db_notify.py`:
@@ -163,9 +168,17 @@ Insertion points:
   (`gateway/session_automation.py:639`) across a `/new` rotation. An opaque string
   identity would silently stop wakes from surviving a session reset.
 - Default `None` → byte-identical to today: fail-open by construction.
-- This is what makes a same-emitter retry idempotent (the #146361 class) and makes
-  "was event E woken?" answerable from `find_session_admission` without a second
-  store. It is **not** a substitute for §3.1 (see §2.1).
+- This is what makes a same-emitter retry idempotent (the #146361 class). It is also
+  **not** designed against a path we do not take: §9.4 proves the `hscc-orch` notifier
+  wake lands on exactly this branch, nonce and all.
+- It is **not** a substitute for §3.1 (see §2.1), and §9.4 puts numbers on the two
+  limits: the `admit_internal_event` fallback (`gateway/wake.py:149-151`) delivers a
+  wake with **no admission row**, and session retirement moves rows into `state_meta`
+  out of `find_session_admission`'s reach (`hermes_state_mutation_retirement.py:103-141`,
+  `hermes_state_runtime.py:180`). So the fence answers "was event E woken?" only *in the
+  affirmative* — a row proves yes, absence proves nothing — and the dedupe token must be
+  **re-derivable from event identity**, never read back out of the fence. §3.1's claim in
+  the board DB is the authority.
 
 ## 4. Posture — carried from t_ff520296, keep it upstream
 
@@ -195,6 +208,13 @@ deleted and the waker calls `wake_already_claimed(...)` / `try_claim_wake(...)` 
 the same board DB it already opens. That removal is the acceptance test for the
 upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
 
+§3.2 on its own does **not** license this deletion. §9.4 confirms the notifier's wake
+does reach the fence — so the token is worth landing for retry idempotency — but a fence
+row is not a claim: the `admit_internal_event` fallback writes none, and rows do not
+outlive the target session. Deleting `gateway_wake_cursors` /
+`gateway_already_delivered` requires §3.1's claim in the board DB, which is
+session-lifecycle-independent by construction.
+
 ## 6. Tests the upstream PR must carry
 
 | case | pins |
@@ -208,6 +228,8 @@ upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
 | `spawn_failed` (not wake-bearing) → never suppresses | kind boundary |
 | `dedupe=None` → identity shape unchanged | default-off for §3.2 |
 | deterministic dedupe survives `/new` (route wake carried) | `_ROUTE_WAKE_PRODUCERS` parsing |
+| `admit_route_wake` returns False (no live route) → wake still delivered, **no** admission row, other emitter's claim still governs | §9.4(a): a fence row is evidence, not a receipt |
+| target session retired → `find_session_admission` can no longer see the row, the board-DB claim still suppresses | §9.4(b): suppression must not depend on the fence outliving the session |
 
 ## 7. Prior art upstream (read before reviewing; do not re-propose)
 
@@ -251,8 +273,62 @@ upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
    `gateway_already_delivered`, retarget `test_orch_waker_dedupe.py`'s six required
    cases at the public API, and drop the `suppressed=` stopgap wording from the
    stream stamp.
-4. `local`-platform wake branch: confirm whether the hscc-orch sub
+4. ~~`local`-platform wake branch: confirm whether the hscc-orch sub
    (`platform=local`, profile `hscc-orch`) takes the push branch
    (`gateway/wake.py:135`) or the self-post branch (`:153-161`); only the former
    reaches the fence, so a self-post setup needs §3.2's token on
-   `_self_post_chat_completion` too.
+   `_self_post_chat_completion` too.~~ — **resolved by `t_12350485`: the PUSH branch.
+   §3.2 reaches our path, so the ask does NOT extend to `_self_post_chat_completion`.**
+
+   **The branch** (every anchor re-checked at runtime
+   `045881137d6a177cac690b1d373316ce8c271f43`, the same pin as the provenance header;
+   session id redacted to `local-<session-id>`):
+   `platform=local` → `LocalSessionAdapter` (`gateway/session_local.py:21`), which never
+   sets `supports_async_delivery` and so inherits `True`
+   (`gateway/platforms/base.py:1831` — the only `= False` in the tree is
+   `APIServerAdapter`, `gateway/platforms/api_server.py:1039`) → `adapter_supports_push`
+   (`gateway/wake.py:30`, body `:35`) is True → `deliver()` records it at
+   `gateway/kanban_watchers_notifier.py:766` → `wake()` takes the push leg `:646-673` and
+   calls `deliver_wake(..., source=_source)` at `:671` → `gateway/wake.py:135` →
+   `:145 admit_route_wake(runner, adapter, source, text, "kanban-wake", category)` →
+   `gateway/session_automation.py:821` LOCAL case `:838-851` → `admit_automation` `:850`
+   → the `session_admissions` row. The self-post leg (`notifier.py:635`; `wake.py:153-161`,
+   def `:231`) sits behind `adapter_supports_push` being **False**, so it is structurally
+   unreachable for this sub — not merely untaken. `LocalSessionAdapter.__init__` sets
+   `gateway_runner` on purpose (`gateway/session_local.py:27-29`) precisely so this push
+   wake rides the authority FIFO.
+
+   **Runtime proof** (`t_12350485`, read-only via hermes' own `SessionDB(path,
+   read_only=True)` — no CLI, no `sqlite` by hand, no writes): **9** rows in the
+   `hscc-orch` profile's `session_admissions` with
+   `request_id = ["kanban-wake","agent:hscc-orch:local:dm:local-<session-id>","<32-hex uuid4 nonce>"]`,
+   joined **9/9 (0 unmatched)** to the 9 `kanban notifier: woke agent … profile=hscc-orch`
+   lines in the live `gateway.log`, each row carrying the `uuid.uuid4().hex` nonce minted
+   at `gateway/session_automation.py:837` — i.e. the exact token §3.2 replaces, on our
+   path. One task (`t_75b25a6e`) woke twice with two different nonces: the retry
+   amplification §3.2 removes, measured on the branch we actually take.
+
+   **Consequence for the ask:** §3.2 is enough for hscc. It lands on the branch our
+   notifier wake takes, so **nothing is added to NousResearch/hermes-agent#152206** —
+   that follow-up was conditioned on the self-post branch and #152206 stays untouched.
+
+   **Two caveats that survive the resolution** (both measured in the same store; they
+   bind §3.2, and they are why §3.1 is still the load-bearing half):
+
+   - **(a) a fence row is evidence, not a receipt.** `admit_route_wake` returns `False`
+     when no authority/route entry serves the key (`gateway/session_automation.py:834-835`)
+     or the local route holds no live session (`:844-845`); `deliver_wake` then still
+     delivers, through `admit_internal_event` (`gateway/wake.py:149-151`), writing **no
+     admission row at all**. 0 of the 9 observed wakes took it — so the gap is reachable
+     in code rather than common in practice, which is exactly why it must not be reasoned
+     away: absence of a row cannot be read as absence of a wake. §3.1's claim in the
+     board DB remains the authority.
+   - **(b) the fence is not a durable index.** On session *retirement* admission rows are
+     copied into `state_meta` and removed from `session_admissions`
+     (`hermes_state_mutation_retirement.py:103-141`), after which they are reachable only
+     by `admission_id` (`get_session_admission`, `hermes_state_runtime.py:180`);
+     `find_session_admission` (`:187`) no longer sees them. So §3.2's dedupe token must be
+     **re-derivable from event identity**, never read back out of the fence. The
+     `f"kanban:{board}:{task_id}:{sha1(sorted(event_ids))}"` shape in §3.2 already is —
+     keep it that way: no per-wake counter, no clock, nothing that needs the row to
+     still exist.
