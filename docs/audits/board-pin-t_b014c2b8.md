@@ -115,3 +115,71 @@ for our own monitors, and only with a warning naming the override. The mutation
 half of that fence is untouched: under the delegated-child marker hermes still
 opens every board `?mode=ro` (`kanban_db_connect.py:713-727`
 `kanban_path_is_fenced`), and every write surface keeps the fence.
+
+## 4. STEP 3 — upstream issue draft (NOT opened from here)
+
+Deliberately not filed from this card: it names file:line in hermes source and
+an operator-visible path shape, and this board has previously shipped reports
+with live addresses in them. An operator (or the next card that owns upstream
+contact) should re-check the rendered body and open it upstream. hscc's
+mitigation above does not depend on it being accepted.
+
+> **Title:** `kanban_db`: an explicit `board=` is silently overridden by
+> `HERMES_KANBAN_DB` inside a worker/delegation fence — no warning, and
+> `list_boards()` still reports every board
+>
+> **Component:** `hermes_cli/kanban_db.py` board resolution.
+>
+> **What happens**
+>
+> `_board_path()` (`hermes_cli/kanban_db.py:540-555`) returns `Path(pin)` when
+> `HERMES_KANBAN_DB` is set and `_explicit_board_intent_pinned()`
+> (`kanban_db.py:522` → `agent/delegation_context.py:76-93`) is true — i.e. for
+> every dispatched worker (`HERMES_KANBAN_TASK`) and every delegated child or
+> descendant (`HERMES_DELEGATED_CHILD_CONTEXT`), not just the in-process case.
+> The caller's explicit `board=` argument is discarded, silently.
+>
+> **Why that is a trap for programmatic callers**
+>
+> The fence is invisible and asymmetric: `list_boards()` is *not* affected, so a
+> reader that enumerates boards and then opens each slug via
+> `connect_closing(board=slug)` — the documented, correct-looking pattern — opens
+> the SAME pinned file once per slug. Measured in a worker shell with the pin at
+> `<hermes-root>/kanban/boards/hscc/kanban.db`:
+>
+> ```
+> _explicit_board_intent_pinned()     -> True
+> list_boards()                       -> 24 slugs
+> kanban_db_path(board="default")      -> …/boards/hscc/kanban.db
+> kanban_db_path(board="some-other")   -> …/boards/hscc/kanban.db
+> ```
+>
+> The output is not an error. It is a full, well-formed, plausible panel whose
+> numbers describe one board while reading as a statement about all 24 — the
+> worst failure shape, because every downstream judgement inherits it. This bit
+> a monitoring/verification tool in production use (HSCC `hscc kanban monitor`,
+> card t_b014c2b8); the QA worker only found it by comparing against a run with
+> the env vars unset.
+>
+> **Requested change (no precedence change asked for)**
+>
+> Keep the fence — it is a real isolation property and we rely on the mutation
+> half of it. Just make the override observable at the point it happens:
+>
+> 1. when `slug is not None` and the pin wins anyway, emit one warning per
+>    process naming both the pinned path and the board that was asked for
+>    (e.g. `_kb._log.warning("kanban board=%r ignored: %s pins %r (worker fence
+>    active)", …)`). Today a *human* running `hermes kanban --board X` from a
+>    worker shell gets no signal at all either.
+> 2. consider surfacing it programmatically too — e.g. `kanban_db_path(board=X)`
+>    could expose a `board_resolution_was_pinned(board, path)` helper, or return
+>    the slug it actually resolved, so callers can assert intent without
+>    re-deriving path rules or mutating `os.environ`.
+>
+> A third option we did **not** take, so it is on the record: hscc works around
+> this by removing `HERMES_KANBAN_DB` from `os.environ` around its own read-only
+> opens (with a warning naming both values) and by refusing writes outright when
+> the pin would win. That works, but it is a caller-side workaround for a
+> silent resolver decision, and it weakens the read half of a fence hermes
+> intends to enforce — better fixed where the decision is made.
+

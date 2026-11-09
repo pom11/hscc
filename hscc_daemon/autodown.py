@@ -22,6 +22,7 @@ import sys
 import time
 from typing import Optional
 
+from . import board_pin
 from .daemon_ops import log
 from .state import now_iso
 from .desktop import send_macos_notification
@@ -389,8 +390,14 @@ def board_db_paths(kanban_db=None, *, include_archived: bool = False) -> dict:
         slug = entry.get("slug")
         path = None
         if resolve is not None:
+            # t_b014c2b8: hermes resolves a worker's HERMES_KANBAN_DB ahead of
+            # this board= argument, so a naive call hands every slug the SAME
+            # pinned file — exactly what the comment above forbids. Asking the
+            # guard keeps hermes as the only path authority (it asks hermes'
+            # resolver twice, with and without the pin) and drops the pin for
+            # this resolution when it would outrank the slug we enumerated.
             try:
-                path = str(resolve(board=slug))
+                path = board_pin.resolve_board_db_path(kanban_db, slug)
             except Exception:  # pragma: no cover — resolver is pure path math
                 path = None
         if not path:
@@ -461,12 +468,12 @@ def _board_has_active_work(kanban_db, board, multi):
     reason the same way the unreachable-kanban case already is.
     """
     try:
-        if multi:
-            with kanban_db.connect_closing(board=board) as conn:
-                row = _probe_active(conn)
-        else:
-            with kanban_db.connect_closing() as conn:
-                row = _probe_active(conn)
+        # t_b014c2b8: this is the idle predicate — reading only the pinned board
+        # here can answer "quiet" while another board holds work, so the read
+        # must be the board named, not the one the env pins. mode stays "read":
+        # this probe never writes and must keep failing safe on any error.
+        with board_pin.open_board(kanban_db, board, multi=multi) as conn:
+            row = _probe_active(conn)
     except Exception as e:
         label = board if board else "default"
         _note_kanban_unavailable(f"board {label!r} unreadable: {e}")
@@ -562,12 +569,11 @@ def list_stale_tasks(kanban_db=None, now=None, board=None,
             continue
         result["boards"].append(label)
         try:
-            if multi:
-                with kanban_db.connect_closing(board=b) as conn:
-                    rows = _all_non_terminal(conn)
-            else:
-                with kanban_db.connect_closing() as conn:
-                    rows = _all_non_terminal(conn)
+            # t_b014c2b8: same guard as _board_has_active_work — this is the
+            # listing of that same board set, and the two must agree (see the
+            # single-enumeration contract in the docstring).
+            with board_pin.open_board(kanban_db, b, multi=multi) as conn:
+                rows = _all_non_terminal(conn)
         except Exception as e:
             result["errors"].append(f"board {label!r} unreadable: {e}")
             continue
@@ -630,12 +636,17 @@ def archive_stale_task(task_id, kanban_db=None):
     for b in boards:
         label = b if b else "default"
         try:
-            if multi:
-                with kanban_db.connect_closing(board=b) as conn:
-                    found = _archive_one(conn, task_id)
-            else:
-                with kanban_db.connect_closing() as conn:
-                    found = _archive_one(conn, task_id)
+            # t_b014c2b8: this UPDATE is a write, and task ids are per-board —
+            # scanning under a worker's HERMES_KANBAN_DB would archive a
+            # DIFFERENT board's card with the same id while reporting the board
+            # we named. Writes are never scrubbed: the guard refuses, naming
+            # both values, and the refusal must not be swallowed by the
+            # keep-scanning handler below (that one is for unreadable boards).
+            with board_pin.open_board(kanban_db, b, multi=multi,
+                                      mode="write") as conn:
+                found = _archive_one(conn, task_id)
+        except board_pin.BoardPinConflict:
+            raise
         except Exception:
             # Unreadable board — cannot say the id is (not) here; keep scanning
             # the other boards so a not-found result is only returned after
