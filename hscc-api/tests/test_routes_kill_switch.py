@@ -198,3 +198,60 @@ def test_kill_get_not_allowed(running, token, fakes):
                            method="GET")
     assert status == 405
     assert fakes["kill_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# the board-pin observable (t_147201fa) — the panel must say what it cannot stop
+# --------------------------------------------------------------------------- #
+
+_PIN_MSG = ("kanban board-pin conflict: HERMES_KANBAN_DB='/pins/alpha/kanban.db' "
+            "outranks the explicit board='beta' this caller asked for")
+
+
+def test_running_surfaces_pin_conflicts(running, token, fakes, monkeypatch):
+    """The listing passes the conflict through, per row and per panel.
+
+    A row shown as un-killable without a reason is the trap the card names; the
+    panel now carries the sentence the verb will raise.
+    """
+    _install(monkeypatch, {"list_running": lambda: {
+        "boards": ["alpha", "beta"],
+        "tasks": [
+            {"board": "alpha", "id": "t_a", "title": "mine", "assignee": "worker",
+             "status": "running", "pid": 1, "host_local": True,
+             "started_at": None, "killable": True, "pin_conflict": None},
+            {"board": "beta", "id": "t_b", "title": "not mine",
+             "assignee": "worker", "status": "running", "pid": 2,
+             "host_local": True, "started_at": None, "killable": False,
+             "pin_conflict": _PIN_MSG},
+        ],
+        "errors": [], "pin_conflicts": [_PIN_MSG], "count": 2,
+    }})
+    status, payload = _req(running, token, "/v1/kanban/running")
+    assert status == 200
+    assert payload["count"] == 2
+    assert payload["pin_conflicts"] == [_PIN_MSG], payload
+    by_id = {t["id"]: t for t in payload["tasks"]}
+    assert by_id["t_a"]["killable"] is True
+    assert by_id["t_b"]["killable"] is False
+    assert by_id["t_b"]["pin_conflict"] == _PIN_MSG
+
+
+def test_kill_refused_under_a_pin_is_a_failed_kill_naming_both(
+        running, token, fakes, monkeypatch):
+    """The refusal must arrive as a failed kill naming both boards — never as
+    404 "not running" (the card IS running; we refuse to touch it) and never as
+    a 200 that reads like a stopped worker.
+    """
+    from hscc_daemon import board_pin
+
+    def refusing(task_id):
+        raise board_pin.BoardPinConflict(_PIN_MSG)
+
+    _install(monkeypatch, {"kill_running": refusing})
+    status, payload = _req(running, token, "/v1/kanban/task/t_b/kill",
+                           body={"confirm": True}, method="POST")
+    assert status == 502, payload
+    assert payload["error"]["code"] == "kill_failed"
+    assert "beta" in payload["error"]["message"], payload
+    assert "/pins/alpha/kanban.db" in payload["error"]["message"], payload

@@ -183,3 +183,74 @@ mitigation above does not depend on it being accepted.
 > silent resolver decision, and it weakens the read half of a fence hermes
 > intends to enforce — better fixed where the decision is made.
 
+## 5. The two named residuals, decided (t_147201fa)
+
+Both surfaces §2a/§2c left open are decided here, so the decision lives next to
+the measurement it comes from.
+
+### 5a. `kill_switch` — guard the read, refuse the verb, ONE scan for both
+
+Option (a) of the follow-up card. `hscc_daemon/kill_switch.py` now has a single
+`_scan_running_tasks` behind both the listing and the verb:
+
+| surface | before | after |
+|---|---|---|
+| `list_running_tasks` (was `:155`) | fenced read → ONE pinned board presented as the fleet | `open_board(mode="read")` → warns once per (pin, board) naming both values, reads the real fleet |
+| find-by-id behind the kill (was `:206`) | fenced read → could match a **different** board's same-id card and signal the wrong worker | the same scan (so the row the verb acts on is the row the listing showed), then `BoardPinConflict` naming both values for any board the pin outranks, **before** a pid is read |
+| per-row | — | `killable` + `pin_conflict`; listing-level `pin_conflicts` |
+
+Why (a) and not (b) (refuse the whole verb): the listing is also the operator's
+fleet panel (`hscc-api/routes_activity.py:55` wraps it), and refusing a *read*
+would take away observability for a reason unrelated to the destructive act —
+while §3's own principle is that a silently-misdirected *read* misinforms and a
+*write* mutates. The trap (a) allows — a panel showing cards the verb will not
+touch — is closed structurally: one scan, one per-board verdict, and the row's
+`pin_conflict` sentence is literally the exception message the verb raises
+(pinned by a test that walks every row and compares the two).
+
+The hazard this removes is worse than the misinformation: task ids are
+per-board, so before this change `kill <id>` from a worker shell searched only
+the pinned board and could resolve the id to a card that lives elsewhere, then
+SIGTERM/SIGKILL the worker it found there.
+
+### 5b. `dispatcher_wedge` — `multi` is a property of the LIB, never of the slug
+
+`_capped_assignees` computed `multi = bool(board) and board != "default"`. That
+is a slug-shaped guess about a lib capability; `autodown.py:310` derives the
+same flag as `hasattr(kanban_db, "list_boards")`, and that is the value the two
+sibling probes were handed by their caller. Two consequences, both from hermes'
+own resolver (`hermes_cli/kanban_db.py:540-566`):
+
+* a `default` read took the no-`board=` path — the one path §3 leaves unguarded
+  — so a worker pin still steered exactly one of the gate's three reads; and
+* `kanban_db_path()` with no intent follows `get_current_board()`
+  (`HERMES_KANBAN_BOARD`), while `kanban_db_path(board="default")` is the legacy
+  flat `<root>/kanban.db`. So the gate compared **two different files for one
+  board** whenever `HERMES_KANBAN_BOARD` is set: the siblings read the flat DB,
+  `_capped_assignees` read the pinned/current board.
+
+Fixed by `multi = hasattr(kanban_db, "list_boards")`. This is the
+`t_dad0da32` option (a) direction ("`default` is a real board") for that site.
+
+### 5c. What t_147201fa deliberately did NOT change
+
+* `dispatcher_wedge.py:1254` (`list_argv`) and `:1384` (`show_argv`, both after
+  this card's edit) still build CLI argv with
+  `["--board", board] if board and board != "default"`. Leaving them is
+  *inconsistent* with 5b in exactly one environment — `HERMES_KANBAN_BOARD` set
+  (a worker shell): the SQL probes now read the flat `default` DB while the two
+  CLI probes ask for the current board. In the daemon (no `HERMES_KANBAN_BOARD`)
+  both resolve to the flat DB, which is why this never showed up. The remaining
+  half belongs to `t_dad0da32`, and 5b settles the direction it should take:
+  `default` is a real board, so the argv builders should pass `--board default`.
+* The gate's CLI reads run `hermes` as a **subprocess**
+  (`_default_gate_cli_runner`, `dispatcher_wedge.py:1216`, inherited
+  environment). A worker `HERMES_KANBAN_DB` + fence marker therefore outranks
+  `--board` inside that child too, and no in-process guard can reach it —
+  `board_pin` is powerless across `subprocess.run`. `scripts/run_tests.sh:150`
+  unsets `HERMES_DELEGATED_CHILD_CONTEXT` but not `HERMES_KANBAN_DB`, so even
+  the test harness does not exercise this. Carded separately
+  (`t_8616f2a5`): the only two honest shapes are scrubbing the pin from the
+  child's environment for these reads (with the same warning) or refusing the
+  gate under a conflicting pin.
+
