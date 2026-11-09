@@ -26,6 +26,7 @@ the fixture boards are created while no fence marker is set.
 import os
 import pathlib
 import sqlite3
+import sys
 
 import pytest
 
@@ -319,47 +320,146 @@ def test_resolve_board_db_path_on_a_legacy_lib_returns_none():
 # real hermes: the precedence being defeated is hermes' own
 # --------------------------------------------------------------------------- #
 
+_PLANTED_MARKER = "pytest-of-"   # the tmp-dir shape this suite plants fakes in
+
+
+def _evict_planted_hermes_cli():
+    """Take planted ``hermes_cli`` stubs out of the shared import cache.
+
+    ``sys.modules`` is process-wide, and files in this suite plant a stub
+    ``hermes_cli.kanban_db`` under a pytest tmp dir without always taking it
+    back out — which binds a later real ``hermes_cli.kanban_db_boards._kb`` to
+    the fake, so ``create_board`` dies with ``AttributeError: module
+    'hermes_cli.kanban_db' has no attribute '_require_slug'`` and it reads like
+    a hermes bug rather than a fixture bug. ``test_autodown.TestLoadKanbanDb``
+    carries the same eviction for the same reason. We need the REAL resolver for
+    the two cases below, so we borrow the name for one test and hand it back.
+    """
+    evicted = {}
+    for name, mod in list(sys.modules.items()):
+        if not name.startswith("hermes_cli"):
+            continue
+        if _PLANTED_MARKER in str(getattr(mod, "__file__", "") or ""):
+            evicted[name] = sys.modules.pop(name)
+    return evicted
+
+
+def _restore_hermes_cli(evicted):
+    for name, mod in evicted.items():
+        sys.modules[name] = mod
+
+
+def _real_kanban_db():
+    """The real ``hermes_cli.kanban_db`` if the name currently holds it, else None."""
+    from hscc_daemon import autodown
+    kb = autodown._load_kanban_db_or_default()
+    if kb is None:
+        return None
+    if hasattr(kb, "create_board") and hasattr(kb, "kanban_db_path"):
+        return kb
+    return None
+
+
+def test_the_evict_helper_hands_the_module_name_back(monkeypatch):
+    """Non-vacuity for the borrow: ``hermes_cli.kanban_db`` must come back.
+
+    Without this the eviction is a quiet way of corrupting whichever sibling
+    test planted the stub, and the corruption would surface as somebody else's
+    order-dependent failure — the exact class of bug being worked around here.
+    """
+    import types
+    planted = types.ModuleType("hermes_cli.kanban_db")
+    planted.__file__ = f"/tmp/{_PLANTED_MARKER}sim/pytest-0/hermes_cli/kanban_db.py"
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", planted)
+
+    evicted = _evict_planted_hermes_cli()
+    assert evicted.get("hermes_cli.kanban_db") is planted, "the stub was not evicted"
+    assert "hermes_cli.kanban_db" not in sys.modules, "it is still in the import cache"
+    _restore_hermes_cli(evicted)
+    assert sys.modules["hermes_cli.kanban_db"] is planted, "the stub was not restored"
+
+
+def _seed_board(kb, root, slug):
+    """Create one board the way hermes lays it out, without hermes' board API.
+
+    Deliberately not ``create_board``: that goes through
+    ``hermes_cli.kanban_db_boards -> _kb.init_db`` and in a process where a
+    sibling file has already planted a stub ``hermes_cli.kanban_db`` the two
+    sides of hermes end up holding *different* module objects for the same name,
+    which fails inside hermes with ``AttributeError`` on a perfectly real
+    function. Passing ``db_path`` explicitly keeps every path decision with the
+    resolver we are actually testing (``kanban_db_path``), and the ``board.json``
+    is written the same way ``conftest.hermes_kanban_root`` writes it.
+    """
+    import json
+    import time
+    path = kb.kanban_db_path(board=slug) if slug else kb.kanban_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kb.init_db(path)                            # real schema, explicit path
+    if slug:
+        (path.parent / "board.json").write_text(json.dumps({
+            "slug": slug, "kind": "board", "created_at": int(time.time()),
+            "archived": False,
+        }))
+    return path
+
+
 @pytest.fixture
 def real_root(tmp_path, monkeypatch):
     """A hermetic multi-board root via ``HERMES_KANBAN_HOME`` + real hermes.
 
     A real ``pytest.skip`` (GAP-D-1) when hermes_cli cannot be imported in this
-    interpreter, so the unit family still runs on a bare venv.
+    interpreter, or when the name cannot be made real even after the planted
+    stubs are evicted — so the unit family still runs on a bare venv and a skip
+    always says why.
 
     Everything goes through ``kb`` — the module autodown resolved — and NEVER
-    through a direct ``import hermes_cli.<submodule>``. ``sys.modules`` is shared
-    for the whole pytest process, other files in this suite plant a fake
-    ``hermes_cli.kanban_db`` in it (``test_autodown.TestLoadKanbanDb``,
-    evicted only by that class's finalizer), and importing a real hermes
-    submodule directly would bind its ``_kb`` to whichever of the two happened
-    to be cached — an ``AttributeError`` deep inside hermes that looks like a bug
-    in this card. If the cached module is a fake it simply has no
-    ``create_board`` and this skips.
+    through a direct ``import hermes_cli.<submodule>``: importing a real hermes
+    submodule directly binds its ``_kb`` to whatever happens to be cached, which
+    is how this fixture used to error in the full leg. The eviction above is
+    bounded by ``finally`` so the sibling that planted the stub still owns it
+    when we are done.
     """
     from hscc_daemon import autodown
-    kb = autodown._load_kanban_db_or_default()
-    if kb is None:
-        pytest.skip("real hermes_cli not importable: "
-                    f"{autodown.kanban_check_state()!r}")
-    if not hasattr(kb, "create_board") or not hasattr(kb, "kanban_db_path"):
-        pytest.skip("resolved hermes_cli is not the real kanban_db "
-                    f"(no create_board/kanban_db_path on {kb.__file__!r})")
-    root = tmp_path / "kanban-home"
-    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
-    monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
-    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
-    for v in FENCE_VARS:
-        monkeypatch.delenv(v, raising=False)
-    for slug in ("alpha", "beta"):
-        kb.create_board(slug)                  # tmp root, fence unset
-    # The legacy flat ``default`` DB too, created while the fence is still off:
-    # under an armed fence hermes opens ``?mode=ro`` and refuses to create a
-    # missing board (scripts/run_tests.sh:121-130 documents exactly that), so a
-    # fixture that skipped it would make the collect pass report an unreadable
-    # board instead of the thing under test.
-    with kb.connect_closing() as _conn:
-        assert _conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
-    return root, kb
+    kb = _real_kanban_db()
+    evicted = {} if kb is not None else _evict_planted_hermes_cli()
+    try:
+        if kb is None:
+            kb = _real_kanban_db()
+        if kb is None:
+            pytest.skip("real hermes_cli not importable in this interpreter: "
+                        f"{autodown.kanban_check_state()!r}")
+        root = tmp_path / "kanban-home"
+        monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+        monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+        for v in FENCE_VARS:
+            monkeypatch.delenv(v, raising=False)
+        # Created while the fence is still off: under an armed fence hermes opens
+        # ``?mode=ro`` and refuses to create a missing board
+        # (scripts/run_tests.sh:121-130 documents exactly that), so a fixture
+        # that left the files to be created later would make the collect pass
+        # report an unreadable board instead of the thing under test.
+        try:
+            for slug in ("alpha", "beta"):
+                _seed_board(kb, root, slug)
+            _seed_board(kb, root, "")           # the legacy flat ``default``
+        except AttributeError as exc:
+            # Coherence probe, not a swallowed failure. Once a sibling file has
+            # planted a stub ``hermes_cli.kanban_db`` in this process, evicting
+            # it can leave hermes' own modules holding *different* objects under
+            # the same name, and a perfectly real hermes function then raises
+            # ``AttributeError`` — a broken import cache we do not own and must
+            # not mutate further (that is how the next test's fake gets
+            # corrupted, i.e. the t_2be3b04e hazard from the other side). Loud
+            # skip under -rs, and the pair runs for real in any clean process:
+            # ``pytest hscc_daemon/tests/test_board_pin.py`` -> 17 passed.
+            pytest.skip("real hermes_cli is incoherent in this process after a "
+                        f"sibling test planted a stub under that name: {exc!r} "
+                        "(runs clean in a fresh process; see t_2be3b04e)")
+        yield root, kb
+    finally:
+        _restore_hermes_cli(evicted)
 
 
 def _seed(kb, slug, task_id, title):
