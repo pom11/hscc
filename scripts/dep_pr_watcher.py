@@ -205,7 +205,15 @@ def ensure_cards(prs, *, _kb=None):
             except Exception:
                 pass
     created = []
-    with _kb.connect_closing(board=BOARD) as conn:
+    # t_b014c2b8: this writes cards into a board NAMED by HSCC_KANBAN_BOARD, and
+    # under a Hermes cron / worker shell hermes resolves HERMES_KANBAN_DB ahead
+    # of that board= argument — so the cards would land on whatever board the
+    # pin points at while the log said BOARD. Unlike this script's best-effort
+    # helpers (desktop delivery, the liveness stamp), the guard is NOT optional:
+    # skipping it is the silent misdirection it exists to prevent, so a missing
+    # hscc_daemon raises and GAP-B-4 stamps the pass as failed.
+    from hscc_daemon import board_pin
+    with board_pin.open_board(_kb, BOARD, multi=True, mode="write") as conn:
         for pr in prs:
             num = pr["number"]
             key = f"dep-check-pr-{num}"
