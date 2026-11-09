@@ -21,25 +21,43 @@ string, both measured on this host (2026-10-27/28):
   (b) GENUINE ABSENCE — the profile never had the skill at all
       (ecofire-bc-orch: review-lane spawns died 3x, dispatcher gave_up).
 
-Hermes' exact resolution rule, read from source (2026-10-28) — replicated by
-``scan_skill_names`` / ``resolution`` below:
+Hermes' exact resolution rule, re-read from source at v0.23.0-7-g045881137d
+(first cut read it 2026-10-28; upstream has since renamed the internals) —
+replicated by ``scan_skill_names`` / ``resolution`` below:
 
   * candidates are collected by DIRECTORY NAME (or frontmatter ``name:``) for
     every ``SKILL.md`` under EVERY search dir, at ANY depth
-    (``_collect_skill_candidates`` + ``agent.skill_utils.iter_skill_index_files``);
+    (``tools.skills_tool._collect_skill_candidates`` +
+    ``agent.skill_utils.iter_skill_index_files``);
   * more than one candidate -> refusal, UNLESS all candidates live under ONE
     search root AND are provably the same skill: one realpath (symlink view)
-    or byte-identical ``SKILL.md`` (``_provably_same_skill``) AND the two
-    shallowest rank distinctly (``_rank_same_root_candidate`` + the
-    ``rank[0] != rank[1]`` gate) — two identical copies at the SAME depth
-    still refuse;
+    or byte-identical ``SKILL.md`` (``agent.skill_utils.provably_same_skill``)
+    AND the two shallowest rank distinctly
+    (``agent.skill_utils.skill_candidate_rank`` inside
+    ``agent.skill_utils.pick_skill_candidate``, reached from
+    ``tools.skills_tool.locate_skill`` — the ``rank[0] != rank[1]`` gate) — two
+    identical copies at the SAME depth still refuse;
+  * v0.23 adds a CROSS-TIER precedence step in front of that gate (project >
+    local > ``skills.create_dir`` > ``skills.external_dirs``): a lower-tier copy
+    is shadowed, never ambiguous. The mirror models only the local tier plus
+    external dirs, which is the tier every hscc-managed profile uses today;
+    ``test_skill_resolver_xval`` is the standing gate on that agreement.
   * legacy flat ``<name>.md`` files anywhere under a root also count as
     candidates;
   * a name listed under ``skills.disabled`` loads off-disk but counts as
     MISSING for a preload spawn (``build_preloaded_skills_prompt`` passes
     ``disabled_as_missing=True``).
 
-Search roots for a profile spawn (``_skill_search_dirs``):
+  A refusal reaches a preload spawn as a label, not an identifier: v0.23 puts
+  ``"Ambiguous skill name <name>: use one of <path>, …"`` in
+  ``build_preloaded_skills_prompt``'s missing list (``agent.skill_utils.
+  AMBIGUOUS_SKILL_PREFIX`` + ``agent.skill_commands.ambiguous_skill_label``).
+  Anything cross-validating against that list must read the LOADED side, not
+  string-match the identifier out of it — card t_7a24e388 lost three handovers
+  to exactly that mistake.
+
+Search roots for a profile spawn (``agent.skill_utils.get_skill_search_roots``,
+with ``tools.skills_tool._skills_dir`` as its local tier):
 ``<profile HERMES_HOME>/skills`` plus ``skills.external_dirs`` from the
 profile's own ``config.yaml`` (the root ``~/.hermes/skills`` is NOT a fallback
 — a profile session resolves ONLY against its own tree). Identical copies
@@ -291,7 +309,9 @@ def _identical(paths: list[Path]) -> bool:
 
 def _same_root_rank(cand, root) -> tuple:
     """``(0 for a SKILL.md package / 1 for a legacy flat <name>.md, depth)`` —
-    verbatim mirror of ``tools/skills_tool._rank_same_root_candidate``."""
+    verbatim mirror of ``agent.skill_utils.skill_candidate_rank`` (upstream
+    called this ``tools/skills_tool._rank_same_root_candidate`` when the first
+    cut was written; the tuple it returns is unchanged)."""
     is_flat = 1 if (cand.suffix == ".md" and cand.name != "SKILL.md") else 0
     if cand.suffix != ".md":
         md = cand / "SKILL.md"
@@ -326,8 +346,10 @@ def resolution(skills_roots, name: str, *, disabled=()) -> dict:
 
     RANK GATE (round-2 review B2, the one the first cut got wrong): hermes
     collapses same-root identical copies ONLY when the top two rank distinctly
-    (``tools/skills_tool.py:524`` — ``if _rank_same_root_candidate(ranked[0],
-    root) != _rank_same_root_candidate(ranked[1], root)``). Two byte-identical
+    (``agent.skill_utils.pick_skill_candidate`` — ``if candidates[ranked[0]][2]
+    != candidates[ranked[1]][2]``, with rank from ``skill_candidate_rank``;
+    upstream called the same predicate ``_rank_same_root_candidate`` in the
+    2026-10-28 reading of ``tools/skills_tool.py``). Two byte-identical
     copies at the SAME depth (``catA/x/SKILL.md`` + ``catB/x/SKILL.md``) keep
     2 candidates -> "Refusing to guess" -> the name lands in ``missing`` for a
     spawn. Accepting them as ``ok`` made doctor read reviewer-readiness GREEN
@@ -432,7 +454,11 @@ def profile_skill_roots(profile_home) -> list[Path]:
     """The scan set for a profile session: its own ``skills`` dir plus the
     external dirs from its own config. (NOT the root home — hermes has no
     fallback from a profile HERMES_HOME to ``~/.hermes``; grounded in
-    ``tools/skills_tool._skill_search_dirs`` + ``_skills_dir``.)"""
+    ``agent.skill_utils.get_skill_search_roots``, whose local tier is
+    ``tools/skills_tool._skills_dir``; upstream called the whole thing
+    ``tools/skills_tool._skill_search_dirs``. The project and
+    ``skills.create_dir`` tiers are deliberately not modelled here — see the
+    module docstring.)"""
     home = Path(profile_home).expanduser()
     roots = [home / "skills"]
     roots += external_dirs_for_home(home)
@@ -616,9 +642,10 @@ def guard_write(skills_root, name: str, target_rel: str,
 
     ``extra_roots`` extends the scan set (e.g. a profile's external_dirs).
     The root-vs-profile spread is NOT a concern: a profile session scans only
-    its own roots (``tools/skills_tool._skill_search_dirs``), so a copy in the
-    root home cannot collide with a profile's copy for a profile spawn — and
-    vice versa. Grounded 2026-10-28; documented in the PR body.
+    its own roots (``agent.skill_utils.get_skill_search_roots``), so a copy in
+    the root home cannot collide with a profile's copy for a profile spawn —
+    and vice versa. Grounded 2026-10-28, re-confirmed at v0.23; documented in
+    the PR body.
     """
     target = Path(skills_root) / target_rel
     target_real = os.path.realpath(str(target))
