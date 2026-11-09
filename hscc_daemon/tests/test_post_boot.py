@@ -9,7 +9,11 @@ Proof shape (the card's acceptance list):
   * the marker is set by cluster up / wake and cleared by cluster down /
     teardown (the two verbs + autodown hooks, pinned separately in their own
     suites — here the marker layer itself is pinned);
-  * missing evidence (boot sweep failed, node unseen) -> no action.
+  * missing evidence (boot sweep failed, node unseen) -> no action;
+  * the THREE no-units states (`stay-down record` / `marker present with an
+    empty footprint` / `no readable marker`) share one verdict — `no-marker`,
+    ok — and print three different sentences, none of which anything may
+    branch on (t_c2b5fb13).
 
 All side-effects are injected (boot fetcher, probe, up_fn, lock fns, notifier,
 marker path) so the pass never shells out. The autouse _isolate_hscc fixture
@@ -522,7 +526,7 @@ class TestDeliberateDownRecord:
 
 # ── The stay-down in the stream wording ───────────────────────────────────
 class TestDeliberateDownStream:
-    """The two no-units states are DIFFERENT facts and must not read alike;
+    """The THREE no-units states are DIFFERENT facts and must not read alike;
     the verdict label and ok semantics stay exactly as pinned."""
 
     def _stream_message(self, fx, path, monkeypatch):
@@ -584,6 +588,251 @@ class TestDeliberateDownStream:
         assert st["ok"] is True and st["result"] == "no-marker"
         assert "deliberately down" in st["message"]
 
+
+
+# ── The third no-units state: marker present, footprint empty ─────────────
+# t_c2b5fb13. `units: []` with NO deliberate_down record is a THIRD fact —
+# "nothing is expected up and nobody holds a standing stay-down order" — left
+# behind by the empty-plan autodown wake (t_9c437f03 step 1b: record_expected_up
+# with []). Before this card gate 2 printed the absent-marker sentence for it,
+# which told the operator the marker file did not exist (it does) and dropped
+# the marker's own `reason`, the only breadcrumb that a wake tried and could not
+# describe the fleet. Display only: the verdict stays `no-marker` (a member of
+# _STREAM_OK_RESULTS), so `hscc verify` and the trigger engine are unaffected.
+WAKE_REASON = "autodown wake: empty plan (nothing to start)"
+
+
+def _empty_footprint(path, reason=WAKE_REASON, cleared=True):
+    """Reach the third state through the SANCTIONED writers only — the exact
+    sequence step 1b performs: a stay-down, then a wake whose plan was empty
+    (records [], pops the record, keeps cleared_at/baselines). Returns the
+    marker PATH so it composes with the `_pass` helpers."""
+    pb.clear_expected_up("hscc cluster down", path=path)
+    assert pb.record_expected_up([], reason, path=path) is True
+    if not cleared:
+        m = json.load(open(path))
+        m.pop("cleared_at", None)
+        _write_marker(path, m)
+    return path
+
+
+class TestEmptyFootprintStream:
+    """One verdict, three sentences. The wording is the deliverable; the
+    inertness is the acceptance criterion."""
+
+    def _msg(self, path, monkeypatch):
+        fx = Fakes(boots={HOST_A: BOOT_NEW_A}, serving=set())
+        res = _pass(fx, path, monkeypatch=monkeypatch)
+        assert res["result"] == "no-marker"      # pinned label, NOT mutated
+        # Inert exactly as before: no sweep, no probe, no lock, no launch.
+        assert fx.boot_calls == 0 and fx.up_calls == []
+        assert fx.lock_acquires == 0 and fx.notices == []
+        assert res["actions"] == [] and res["observed"] == {}
+        return res["message"]
+
+    def test_the_fixture_is_the_third_state_not_one_of_the_old_two(
+            self, marker_path):
+        """Guard the fixture itself: if this shape ever stops being the third
+        state, every wording test below silently tests something else."""
+        _empty_footprint(marker_path)
+        m = json.load(open(marker_path))
+        assert m["units"] == []
+        assert pb.deliberately_down(marker_path) is None      # no stay-down
+        assert pb.marker_file_readable(marker_path) is True   # file IS there
+
+    def test_pass_prints_the_empty_footprint_and_its_breadcrumb(
+            self, marker_path, monkeypatch):
+        msg = self._msg(_empty_footprint(marker_path), monkeypatch)
+        assert "no expected_up marker" not in msg    # the absent-marker lie
+        assert "deliberately down" not in msg        # not a stay-down either
+        assert "EMPTY footprint" in msg
+        assert WAKE_REASON in msg                    # breadcrumb survives
+
+    def test_pass_surfaces_cleared_at_when_the_marker_carries_it(
+            self, marker_path, monkeypatch):
+        _empty_footprint(marker_path)
+        cleared_at = json.load(open(marker_path))["cleared_at"]
+        assert cleared_at                            # written by the teardown
+        msg = self._msg(marker_path, monkeypatch)
+        assert "cleared_at: " in msg and cleared_at in msg
+
+    def test_pass_does_not_invent_a_cleared_at_when_there_is_none(
+            self, marker_path, monkeypatch):
+        _empty_footprint(marker_path, cleared=False)
+        msg = self._msg(marker_path, monkeypatch)
+        assert "cleared_at" not in msg
+        assert WAKE_REASON in msg                    # still tells you why
+
+    def test_any_reason_is_printed_verbatim_including_another_state_s_words(
+            self, marker_path, monkeypatch):
+        """The message quotes what the marker SAYS — empty, missing, or wording
+        that belongs to a different state. Printing it cannot promote it."""
+        for reason in ("", "hscc cluster down",
+                       "fleet deliberately down since X (operator)",
+                       "no expected_up marker (fleet not fleet-upped, or "
+                       "brought down on purpose) — nothing to do",
+                       "relaunch everything now", "🔥 Ünïcode \x00 control"):
+            _empty_footprint(marker_path, reason=reason)
+            msg = self._msg(marker_path, monkeypatch)
+            assert (reason or "no reason given") in msg, reason
+            assert "EMPTY footprint" in msg, reason
+
+    def test_a_corrupt_marker_still_reads_as_the_absent_marker(
+            self, marker_path, monkeypatch):
+        """Fail-safe direction unchanged: an unreadable marker is ABSENCE of
+        evidence, so it keeps the wording that promises nothing rather than
+        claiming an empty footprint we never actually read."""
+        with open(marker_path, "w") as f:
+            f.write("{ not json")
+        assert pb.marker_file_readable(marker_path) is False
+        assert self._msg(marker_path, monkeypatch).startswith(
+            "no expected_up marker")
+
+    def test_the_three_states_are_three_different_sentences(
+            self, marker_path, monkeypatch):
+        pb.clear_expected_up("hscc cluster down", path=marker_path)
+        stayed_down = self._msg(marker_path, monkeypatch)
+        _empty_footprint(marker_path)
+        empty_footprint = self._msg(marker_path, monkeypatch)
+        os.remove(marker_path)
+        no_marker = self._msg(marker_path, monkeypatch)
+        assert len({stayed_down, empty_footprint, no_marker}) == 3
+        for key, own in (("deliberately down", stayed_down),
+                         ("EMPTY footprint", empty_footprint),
+                         ("no expected_up marker", no_marker)):
+            assert key in own
+            for other in (stayed_down, empty_footprint, no_marker):
+                if other is not own:
+                    assert key not in other, (key, other)
+
+    def test_stream_surfaces_the_breadcrumb_verbatim(self, marker_path,
+                                                     monkeypatch):
+        """`hscc check post_boot` prints res["message"] verbatim, so the
+        breadcrumb must survive the stream write intact — and stay ok=True so
+        a fleet that simply has nothing expected up never pages anyone."""
+        written = {}
+        monkeypatch.setattr(pb, "write_state",
+                            lambda s, d: written.__setitem__(s, d))
+        _empty_footprint(marker_path)
+        ok = pb.check_post_boot_relaunch(
+            pass_fn=lambda: pb.run_post_boot_pass(
+                boot_fn=lambda n: {}, probe_fn=lambda u, timeout=5: {"ok": False},
+                up_fn=lambda n: {"success": True},
+                lock_acquire=lambda now=None: True,
+                lock_release=lambda: None,
+                intentional_fn=lambda: False,
+                notify_fn=lambda *a, **k: None,
+                path=marker_path))
+        assert ok is True
+        st = written[pb.POST_BOOT_STREAM]
+        assert st["ok"] is True and st["result"] == "no-marker"
+        assert "EMPTY footprint" in st["message"]
+        assert WAKE_REASON in st["message"]
+
+
+class TestMarkerFileReadable:
+    """The display-only presence predicate: never raises, never writes, never
+    logs, and answers False for anything that is not a readable JSON object."""
+
+    def test_shapes(self, marker_path):
+        assert pb.marker_file_readable(marker_path) is False      # absent
+        _write_marker(marker_path, _marker(with_units=False))
+        assert pb.marker_file_readable(marker_path) is True
+        for body in ("{", "[1,2]", '"a string"', "null", ""):
+            with open(marker_path, "w") as f:
+                f.write(body)
+            assert pb.marker_file_readable(marker_path) is False, body
+        _write_marker(marker_path, _marker())
+        assert pb.marker_file_readable(marker_path) is True
+
+    def test_never_creates_the_file_and_never_logs(self, marker_path, caplog):
+        with caplog.at_level("DEBUG"):
+            assert pb.marker_file_readable(marker_path) is False
+            assert pb.marker_file_readable(marker_path) is False
+        assert not os.path.exists(marker_path)
+        assert caplog.records == []
+
+    def test_a_directory_path_is_false_not_an_exception(self, tmp_path):
+        assert pb.marker_file_readable(str(tmp_path)) is False
+
+    def test_defaults_to_the_module_marker(self, marker_path):
+        assert pb.marker_file_readable() is False
+        _write_marker(marker_path, _marker(with_units=False))
+        assert pb.marker_file_readable() is True
+
+
+# The reason strings a marker can carry: benign, hostile-to-the-reader (the
+# verbatim wording of ANOTHER state), imperative, empty, non-ASCII.
+PROSE_VARIANTS = [
+    "", "x", "hscc cluster down",
+    "autodown wake: empty plan (nothing to start)",
+    "fleet deliberately down since 2026-11-09T00:00:00Z (operator)",
+    "no expected_up marker (fleet not fleet-upped, or brought down on "
+    "purpose) — nothing to do",
+    "relaunch everything now",
+    "🔥 Ünïcode \x00 control",
+]
+
+
+def _seed_no_units(path, state, reason):
+    """Put the marker in one of the three no-units states with a chosen
+    `reason`, through the sanctioned writers (state `absent` = no file)."""
+    if state == "record":
+        pb.clear_expected_up(reason, path=path)
+    elif state == "empty-footprint":
+        pb.clear_expected_up("seed", path=path)
+        assert pb.record_expected_up([], reason, path=path) is True
+    else:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+class TestWordingIsNotBehaviour:
+    """The PR #243 rule, mechanically: gate 2's verdict is a function of the
+    marker's STRUCTURE (non-empty units? record a dict? file readable?) and
+    never of any prose. Reword a reason — or reword gate 2 itself — and no
+    verdict, no stream ok, and no launch may move."""
+
+    @pytest.mark.parametrize("state", ["record", "empty-footprint", "absent"])
+    def test_no_units_verdict_is_invariant_to_the_reason(
+            self, marker_path, monkeypatch, state):
+        for reason in PROSE_VARIANTS:
+            _seed_no_units(marker_path, state, reason)
+            fx = Fakes(boots={HOST_A: BOOT_NEW_A}, serving=set())
+            res = _pass(fx, marker_path, monkeypatch=monkeypatch)
+            assert res["result"] == "no-marker", (state, reason)
+            assert res["actions"] == [] and res["observed"] == {}, (state, reason)
+            assert fx.boot_calls == 0 and fx.up_calls == [], (state, reason)
+            assert fx.lock_acquires == 0 and fx.notices == [], (state, reason)
+        # and it is an ok outcome for every one of those wordings
+        assert "no-marker" in pb._STREAM_OK_RESULTS
+
+    def test_launch_authority_reads_units_never_prose(self, marker_path,
+                                                      monkeypatch):
+        """The same claim from the other side: with a NON-EMPTY footprint the
+        pass behaves identically whatever `reason` claims — even with a
+        hand-stamped `deliberate_down`, a shape no sanctioned writer produces
+        (record_expected_up pops it). Nothing here vetoes a launch by reading
+        text, and nothing here arms one by writing it."""
+        outcomes = []
+        for reason in PROSE_VARIANTS + [None]:
+            m = _marker(baseline={HOST_A: BOOT_OLD_A, HOST_B: BOOT_OLD_B})
+            m["reason"] = reason
+            if reason is None:
+                m[pb.DELIBERATE_DOWN_KEY] = {"set_at": "2026-11-09T00:00:00Z",
+                                             "reason": "hand-stamped"}
+            _write_marker(marker_path, m)
+            fx = Fakes(boots={HOST_A: BOOT_NEW_A, HOST_B: BOOT_OLD_B},
+                       serving=set())
+            res = _pass(fx, marker_path, monkeypatch=monkeypatch)
+            assert res["result"] == "launched", reason
+            assert res["actions"] == ["orch"], reason
+            assert fx.up_calls == [[HOST_A]], reason
+            outcomes.append((res["result"], tuple(res["actions"]),
+                             json.dumps(res["observed"], sort_keys=True)))
+        assert len(set(outcomes)) == 1
 
 
 # ── Boot sweep (the sanctioned sparkrun transport) ───────────────────────
