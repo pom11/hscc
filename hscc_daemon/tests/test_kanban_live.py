@@ -553,6 +553,20 @@ def test_the_root_store_is_profile_default(tmp_path):
     assert [(r["profile"], r["session"]) for r in d["orchestrators"]] == [("default", "r-1")]
 
 
+def test_a_profile_dir_named_default_is_its_own_store(tmp_path):
+    """`_state_db_path` maps the NAME `default` onto the root db, so resolving a
+    scanned directory through it opened the root store twice and never opened
+    `profiles/default/state.db` — a doubled row and a lost one, from one bug.
+    This host really has a `profiles/default/` directory, so it is not academic."""
+    _state_db(tmp_path / "state.db",
+              [("root-sid", "cli", NOW - 60, 1, 1)], leases=[_turn("root-sid", NOW - 60)])
+    _state_db(tmp_path / "profiles" / "default" / "state.db",
+              [("dir-sid", "cli", NOW - 30, 2, 2)], leases=[_turn("dir-sid", NOW - 30)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert sorted(r["session"] for r in d["orchestrators"]) == ["dir-sid", "root-sid"]
+
+
 def test_orchestrators_survive_a_missing_unreadable_or_old_store(tmp_path):
     """The reported failure mode is a section that vanishes; one bad store must
     never take the good ones, or the view, down with it."""
