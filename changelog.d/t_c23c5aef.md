@@ -49,8 +49,13 @@ task: t_c23c5aef
   softer.
 
 - **Verified:** 25 new tests in
-  `hscc_daemon/tests/test_cluster_down_benign_render.py`, green; the `hscc_daemon`
-  leg green; 7/7 mutation probes caught with a pristine CONTROL green (each on a
-  fresh copy at an absolute scratch path, every substitution asserted to have
-  applied, including restoring `cluster_render.py` to `f2cbae3f` and watching the
-  new file go red).
+  `hscc_daemon/tests/test_cluster_down_benign_render.py`, green; `hscc_daemon`
+  leg green at the merged HEAD (3441 passed) and `scripts` leg green there too
+  (350 passed, 2 skipped); at the pre-merge commit `45f8e8d9` the whole
+  `bash scripts/run_tests.sh` ran **11/12 legs green**, the single red being
+  `test_a_table_identical_under_sibling_interpreters`' own 300 s subprocess cap —
+  which raises before its asserts, and which `origin/main` had already fixed in
+  #260 after my branch point. 7/7 mutation probes caught with a pristine CONTROL
+  green (each on a fresh copy at an absolute scratch path, every substitution
+  asserted to have applied, including restoring `cluster_render.py` to `f2cbae3f`
+  and watching the new file go red).
