@@ -417,6 +417,84 @@ def _intentional_window_label(verdict):
     return "intentionally down by autodown"
 
 
+def _operator_down_verdict(deliberately_down_fn=None):
+    """Return the durable stay-down record ``{set_at, reason}``, or None.
+
+    STAY-DOWN-VERIFY (t_97f2b38c) — the READER half. An operator who types
+    `hscc cluster down` has given an instruction, not caused a fault, yet the
+    serving streams (dgx, gateway, workers, proxy) truthfully report
+    ``ok: False`` because the models really are stopped. ``hscc verify`` that
+    calls an instruction RED is worse than useless: it trains the operator to
+    ignore the command, and a scheduled check pages for nothing. So the command
+    needs ONE durable fact saying "off because someone said so" — that fact is
+    :func:`post_boot.deliberately_down`, read here through the same injectable
+    seam shape as :func:`_intentional_window_verdict` and
+    ``trigger._operator_down``, so tests never touch ``~/.hscc`` and this module
+    never re-implements (or drifts from) the record's shape. Nothing is cached
+    in memory: the record is on disk or it does not exist.
+
+    WHICH WRITERS THIS TREATS AS A STAY-DOWN (decided here, never by string
+    match): ``post_boot.clear_expected_up(reason)`` has three sanctioned callers
+    — ``hscc-cluster/hscc.py`` (``"hscc cluster down"``, the operator),
+    ``hscc-commands`` (``"/cluster-down"``, the same instruction on another
+    surface) and ``autodown.py`` (``"autodown: intentional idle teardown"``,
+    the fleet went idle) — so the record means "someone deliberately cleared the
+    footprint", NOT "an operator typed the verb". ALL THREE are honoured, and
+    the ``reason`` TEXT is copied into the label and nowhere else: no substring
+    of it is ever tested, because that would make an operator-chosen string a
+    safety property. Pinned verbatim in
+    tests/test_verify_stay_down.py::test_every_record_producer_wording_excuses.
+
+    INDEPENDENT of the autodown window above (D2): a manual `cluster down`
+    never latches the intentional watchdog block, so
+    :func:`_intentional_window_verdict` is None in exactly the case this record
+    explains. Not merged with it, and not a replacement for it — the autodown
+    wording, labels and branch stay byte-identical, and check_daemon_streams
+    judges the window branch FIRST, so a stream tagged ``autodown`` during a
+    window keeps the autodown wording even when a record is also present.
+
+    Fail-safe toward REPORTING FAULTS (D1) — the opposite direction from
+    ``trigger._operator_down`` (which fails toward paging): a raising predicate,
+    a non-dict, or a record with no ``set_at`` reads as NO evidence and
+    ``hscc verify`` reports every ``ok is False`` stream exactly as it did
+    before this record existed. A lost or corrupt marker must never be able to
+    make a real fault invisible. NEVER raises.
+    """
+    if deliberately_down_fn is None:
+        from . import post_boot
+        deliberately_down_fn = post_boot.deliberately_down
+    try:
+        record = deliberately_down_fn()
+    except Exception:
+        return None
+    if not isinstance(record, dict):
+        return None
+    # `set_at` is stamped by every sanctioned writer
+    # (post_boot.clear_expected_up); a value without it is not a record this
+    # gate can vouch for, so it fails toward reporting the fault. `reason` is
+    # deliberately NOT required — it only decorates the label, and a record
+    # that has a timestamp but no reason still says "deliberately down".
+    if not record.get("set_at"):
+        return None
+    return record
+
+
+def _operator_down_label(record):
+    """Human wording for a confirmed stay-down record, so the operator reading
+    ``hscc verify`` sees WHY the serving layer is off instead of a wall of red
+    — the streams here are unhealthy for a reason the operator chose, which is
+    precisely why they are not a fault. The reason is read off the record so
+    the line names the real cause: ``fleet deliberately down (hscc cluster
+    down)``. A record whose reason is missing or blank renders as
+    ``fleet deliberately down`` — the verdict never depends on the reason text,
+    so the label must not invent one. Callers only invoke it on a confirmed
+    record (see :func:`_operator_down_verdict`)."""
+    reason = record.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return f"fleet deliberately down ({reason.strip()})"
+    return "fleet deliberately down"
+
+
 def _live_stream_intervals():
     """Return the live daemon's per-stream check cadence (stream -> seconds).
 
@@ -495,6 +573,15 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     WITHOUT the intentional marker (or outside a confirmed intentional window)
     still fails — the intended negative control.
 
+    A second, INDEPENDENT excuse covers the deliberate `hscc cluster down`
+    (t_97f2b38c, see :func:`_operator_down_verdict`): a stream that carries its
+    own ``intentional == "operator_down"`` marker AND is confirmed by the
+    durable stay-down record is excused the same way — non-failing, and named in
+    the detail as ``fleet deliberately down (<reason>)`` so the operator sees
+    the instruction rather than a fault. Same two-key agreement, different
+    evidence: the window branch above still wins (it is judged first), and a
+    stream that cannot explain itself stays a fault.
+
     Staleness is per-stream, keyed off the stream's OWN cadence
     (``daemon_ops.PERIODIC_INTERVALS`` — the live loop's source of truth), not
     one flat window. A stream that only checks every 900s (nas) must not be
@@ -559,12 +646,19 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     now = datetime.now(timezone.utc)
     issues = []
     expected = []
+    expected_operator = []  # t_97f2b38c: excused by the stay-down record
     unchecked = []      # GAP-F-2: dict-shaped but nothing assertable
     unrecognized = []   # GAP-F-1: non-dict JSON (e.g. the cards-monitor ledger)
     checked = 0
     window_verdict = _intentional_window_verdict()
     window_label = (_intentional_window_label(window_verdict)
                     if window_verdict else None)
+    # The parallel excuse for a deliberate `cluster down` (see
+    # _operator_down_verdict): its OWN evidence, read once per pass like the
+    # window verdict above, never merged with it.
+    operator_record = _operator_down_verdict()
+    operator_label = (_operator_down_label(operator_record)
+                      if operator_record else None)
 
     for fn in sorted(json_files):
         filepath = os.path.join(state_dir, fn)
@@ -613,6 +707,17 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
                 reason = data.get("message") or data.get("reason") or "autodown"
                 expected.append(f"{fn}: {window_label} ({reason})")
                 # fall through to the recency check below — stale is still stale
+            elif (operator_label
+                    and data.get("intentional") == "operator_down"):
+                # The deliberate-down excuse, judged AFTER the window branch so
+                # an autodown-tagged stream in an autodown window keeps its
+                # wording (D2: two independent reasons, never merged). Same
+                # two-key agreement as above — this stream's OWN marker AND the
+                # durable record — so a stream that does not explain itself is
+                # still a fault. The label already names the record's reason, so
+                # this line carries no second parenthetical.
+                expected_operator.append(f"{fn}: {operator_label}")
+                # fall through to the recency check below — stale is still stale
             else:
                 issues.append(f"{fn}: ok=False")
 
@@ -635,10 +740,20 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     # failure can never hide the un-verifiable files and vice versa.
     aside = "; ".join(unrecognized + unchecked)
 
-    expected_note = (
-        f"{window_label}: {'; '.join(expected)}"
-        if expected else ""
-    )
+    # Both excuses render through the SAME convention — "<label>: <the streams it
+    # covers>" — and are joined, because a fleet can genuinely mix them: the
+    # proxy's stay-down gate sits above its own autodown tagging (health.py), so
+    # one tick of an idle teardown can tag proxy operator_down while the other
+    # streams are tagged autodown. With only autodown streams this string is
+    # exactly what the check produced before this second excuse existed.
+    notes = []
+    if expected:
+        notes.append(f"{window_label}: {'; '.join(expected)}")
+    if expected_operator:
+        notes.append(f"{operator_label}: {'; '.join(expected_operator)}")
+    expected_note = "; ".join(notes)
+    excused = len(expected) + len(expected_operator)
+
     if issues:
         detail = "; ".join(issues)
         if expected_note:
@@ -656,7 +771,7 @@ def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     if expected_note:
         return {
             "name": "daemon_streams", "ok": None if partial else True,
-            "detail": (f"ok={checked - len(expected)} healthy, {expected_note}"
+            "detail": (f"ok={checked - excused} healthy, {expected_note}"
                        + (f"; {aside}" if aside else "")),
         }
     if partial:
