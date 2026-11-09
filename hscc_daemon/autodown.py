@@ -2620,6 +2620,11 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
           do NOT claim ``up`` when zero units were started/confirmed (§8,
           audit F7). Record the failure loudly and leave the block latched.
       2. Record ``wake_source`` + ``wake_at``.
+      2a. Re-arm the post-boot ``expected_up`` marker (t_576964d5, moved up by
+          t_278b35b2) — BEFORE any start is issued, so a wake that later times
+          out still ends the durable ``deliberate_down`` stay-down instead of
+          pinning the fleet down forever. Fail-soft, like ``cmd_cluster_up``'s
+          own pre-launch record.
       3. Start the serving layer back up — EVERY unit in serving.json:
          orchestrator FIRST (§4.3), then workers. The wake plan comes from the
          shared ``serving.fleet_up_plan()`` — the same source of truth
@@ -2745,6 +2750,43 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     save_config(cfg)
     log("Autodown autoup: state=waking, wake recorded")
 
+    # -- 2a. Re-arm the post-boot expected_up marker BEFORE launching -------
+    # (t_576964d5; moved up from post-readiness by t_278b35b2.)
+    # WHY PRE-LAUNCH: this record is what ends the durable ``deliberate_down``
+    # stay-down (``record_expected_up`` pops it — post_boot D1). Recorded only
+    # after a CONFIRMED wake, a wake that later times out returned early from
+    # ``_handle_wake_timeout`` and never reached it, so the fleet stayed pinned
+    # "deliberately down" forever and every stay-down consumer — the post-boot
+    # pass, check_workers, check_proxy — stood down permanently: nothing could
+    # ever heal again. Like ``cmd_cluster_up`` (hscc-cluster/hscc.py), the
+    # marker says what the fleet SHOULD be running even if this wake's own
+    # launches then fail, so it is written BEFORE the first unit starts and the
+    # failure paths (empty plan above excepted, where nothing was ever
+    # claimed) all inherit an already-cleared stay-down.
+    # WHY THIS IS SAFE FOR THE POST-BOOT PASS: gate 3 of post_boot's gate order
+    # (``autodown.classify`` / ``intentional_window``) refuses to resurrect
+    # anything while the block is latched or the state is ``waking``, and BOTH
+    # hold here — the block is cleared only at step 5 (after readiness) and
+    # state is ``waking`` since step 1 — and gate 6 additionally requires the
+    # autodown lock this wake is holding. A fresh marker can therefore never
+    # arm a relaunch mid-wake.
+    # THE TWO STAY-DOWN WORDINGS (reviewer note on PR #243): the record being
+    # popped here was stamped by one of TWO sanctioned paths —
+    # ``clear_expected_up("hscc cluster down")`` (the operator) or
+    # ``clear_expected_up("autodown: intentional idle teardown")`` (idle
+    # teardown, autodown.py:5a). This wake lifts the stay-down for BOTH, and
+    # for neither does it read or branch on ``reason``: a wake is a fleet-up,
+    # and fleet-up is the sanctioned escape hatch from a stay-down (post_boot
+    # module docstring). The ``reason`` discriminator belongs to the consumers
+    # that READ ``deliberately_down()``; branching on it here would let an
+    # operator-worded stay-down re-pin a fleet we are actively waking.
+    # Fail-soft: a marker problem never breaks the wake.
+    try:
+        from . import post_boot as _pb
+        _pb.record_expected_up(plan, reason="autodown wake")
+    except Exception as e:
+        log(f"Autodown: post_boot marker record failed ({e})", "WARN")
+
     # -- 3. Start the serving layer back up (orchestrator FIRST, §4.3) -----
     # The start subprocess (`sparkrun run --no-follow`) is NOT a quick status
     # call. On real hardware the launch phase alone takes 40s+ (the wake-fails
@@ -2812,15 +2854,8 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # -- 6. Set state up + clear wake bookkeeping AND down_since (§4.6) ------
     _record_wake_success()
 
-    # -- 6a. Re-arm the post-boot expected_up marker (t_576964d5) ----------
-    # The wake just brought the WHOLE serving layer up: re-record the
-    # fleet-up footprint so a later HOST reboot can again be told apart from
-    # an intentional stop. Fail-soft: a marker problem never breaks the wake.
-    try:
-        from . import post_boot as _pb
-        _pb.record_expected_up(plan, reason="autodown wake")
-    except Exception as e:
-        log(f"Autodown: post_boot marker record failed ({e})", "WARN")
+    # NOTE: the post-boot expected_up marker was already re-armed at step 2a,
+    # BEFORE the launch phase — one record per wake, not two (t_278b35b2).
 
     # -- 7. Notify operator (§4.7) ------------------------------------------
     if notify:
