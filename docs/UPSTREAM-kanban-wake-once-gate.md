@@ -1,9 +1,18 @@
 # UPSTREAM: make a kanban event wake its recipient **once** across emitters
 
 Card `t_f26d89c0` · base `origin/main` @ `2e477e15` · hermes live install `045881137d`
-Status: **proposal pending upstream** — nothing here is implemented in hermes.
+Status: **filed upstream** as
+[NousResearch/hermes-agent#152206](https://github.com/NousResearch/hermes-agent/issues/152206)
+— proposed, not implemented. Cross-linked into #144882 (the wake-path map) and #146361
+(same `uuid4` root cause).
 Follows `t_ff520296` (PR #265, merged `2e477e15`), which fixed only the half this
 repo owns. Full attribution for the doubling: `NOTES-t_ff520296.md` (in that commit).
+
+**Anchor provenance.** Line numbers below are the fleet-pinned runtime
+(`~/.hermes/hermes-agent` @ `045881137d`). Each was re-checked against upstream `main`
+@ `a5664060c1` and matches, except three in `hermes_cli/kanban_db_notify.py`:
+`claim_unseen_events_for_sub` :352 → :372, `_cas_cursor` :384 → :404,
+`rewind_notify_cursor` :421 → :441.
 
 ## TL;DR — the ruling
 
@@ -44,7 +53,7 @@ session's durable FIFO:
   The third element — the dedupe token — is **random per call**.
 - The fence it feeds is exact-identity keyed, and it works:
   `hermes_state_runtime.py:130` `admit_session_input()` returns the existing row on an
-  exact replay (`hermes_state_runtime.py:155-166`), the row lives under a UNIQUE
+  exact replay (`hermes_state_runtime.py:157-160`), the row lives under a UNIQUE
   `(principal_id, target_session_id, request_id)` key, and
   `hermes_state_runtime.py:187` `find_session_admission()` is a **public read** of
   exactly that key ("the admission at its exact durable identity").
@@ -63,7 +72,7 @@ turn N times) has no idempotency key to hang on.
 Three facts each kill a slice of that idea. Verified, not assumed.
 
 1. **A cross-emitter duplicate is an error, not a replay.** `admit_session_input`
-   replays only when `payload_digest` matches (`hermes_state_runtime.py:159`);
+   replays only when `payload_digest` matches (`hermes_state_runtime.py:158`);
    otherwise it raises `RuntimeStoreError('admission_conflict',
    ADMITTED_REQUEST_CONFLICT)` (`hermes_state_runtime.py:38`). The two emitters build
    different text, so identical identities across emitters produce a *refusal*, not a
@@ -149,7 +158,7 @@ Insertion points:
 `f"kanban:{board}:{task_id}:{sha1(sorted(event_ids))}"`.
 
 - Keep the identity a JSON **list whose first element is the producer** —
-  `move_route_wakes()` (`gateway/session_automation.py:641`) parses `request_id` and
+  `move_route_wakes()` (`gateway/session_automation.py:653`) parses `request_id` and
   only carries route wakes whose head is in `_ROUTE_WAKE_PRODUCERS`
   (`gateway/session_automation.py:639`) across a `/new` rotation. An opaque string
   identity would silently stop wakes from surviving a session reset.
@@ -232,10 +241,10 @@ upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
 
 ## 9. LEFT
 
-1. File §3 + §6 against hermes as one issue (anchors: `session_automation.py:837`,
-   `hermes_state_runtime.py:187`, `kanban_watchers_notifier.py:748`,
-   `kanban_db_notify.py:352`), cross-linking #144882 / #146361 / #129862 rather than
-   opening a competing third fix.
+1. ~~File §3 + §6 against hermes as one issue~~ — **done**: filed as
+   [hermes-agent#152206](https://github.com/NousResearch/hermes-agent/issues/152206)
+   with the anchors above (re-verified on upstream `main`, not just the pinned fork),
+   cross-linked into #144882 and #146361 rather than opening a competing third fix.
 2. Upstream PR: §3.2 is small and self-contained (3 signatures + 1 test module) —
    worth landing first; §3.1 needs the migration + notifier insertion.
 3. hscc side after upstream ships: delete `gateway_wake_cursors` /
