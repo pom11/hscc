@@ -54,7 +54,7 @@ def real_plugin(tmp_path, monkeypatch):
     operator config in a test; the config-resolution ladder is covered by the
     stubbed suite)."""
     monkeypatch.setenv("HSCC_PROXY_API_KEY", "sk-test-fake")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # cache/videos lands here
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # cache/generated/videos lands here
     import importlib.util
     spec = importlib.util.spec_from_file_location("hscc_openai_compat_real", _PLUGIN_PATH)
     assert spec is not None and spec.loader is not None
@@ -88,9 +88,15 @@ def test_real_sdk_round_trip_against_fake_server(real_plugin, real_fake_server, 
                 "duration", "provider"):
         assert key in res, f"missing core response key: {key}"
     assert res["duration"] == 5
-    # the MP4 really landed in the (redirected) hermes cache
+    # the MP4 really landed in the (redirected) hermes cache.
+    # NOT `$HERMES_HOME/cache/videos` — generated deliverables live under
+    # `cache/generated/<media>/` (agent/provider_media.py GENERATED_SUBDIR:
+    # deliberately OUTSIDE the transient cache dir so the sweeper cannot delete
+    # a deliverable), i.e. `cache/generated/videos/`. The old glob looked two
+    # levels up and matched nothing, so this proved only that a save happened
+    # somewhere.
     from pathlib import Path
-    saved = list(Path(tmp_path, "cache", "videos").glob("openai_compat_*.mp4"))
+    saved = list(Path(tmp_path, "cache", "generated", "videos").glob("openai_compat_*.mp4"))
     assert saved, "provider did not save the downloaded bytes via core save_bytes_video"
     assert saved[0].read_bytes() == FAKE_MP4
     # the SDK sent the bearer key on every hop
@@ -107,7 +113,7 @@ def test_real_sdk_relative_url_download_uses_core_save_url(real_plugin, real_fak
     res = p.generate("relative url cat", model="Wan2.2-T2V-A14B")
     assert res["success"] is True, res.get("error")
     from pathlib import Path
-    assert list(Path(tmp_path, "cache", "videos").glob("openai_compat_*.mp4"))
+    assert list(Path(tmp_path, "cache", "generated", "videos").glob("openai_compat_*.mp4"))
     assert real_fake_server.content_headers == ["Bearer sk-test-fake"]
 
 

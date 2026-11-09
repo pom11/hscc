@@ -20,6 +20,27 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
+# ━━━ no mid-run interpreter swap (t_82fa20f5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# A pytest process must never replace its own image mid-suite. It can: a
+# deferred import chain inside hermes_state's write path
+# (append_messages_batch -> _display_dedupe_key -> context_compressor
+# ._is_synthetic_compression_user_turn -> `from agent.conversation_loop import`
+# -> agent.process_bootstrap -> hermes_bootstrap) reaches hermes_bootstrap's
+# MODULE-LEVEL launch preparation, which calls
+# `os.execv(selected_python, relaunch_command(...))` (hermes_bootstrap.py:599)
+# when the running interpreter is not the selected dependency generation.
+# execv discards the running session: no summary, no FAILED lines, no traceback
+# on either stream — just rc=1. Measured on this host at origin/main 882b40cf:
+# `pytest hscc-api/tests` died inside test_gateway_backfill.py::
+# test_backfill_seeds_full_history with 0 bytes on stdout AND stderr, and
+# `pytest hscc-bootstrap/tests` died at its 1161st of 1164 tests inside
+# test_video_gen_openai_compat_e2e.py — the two "legs that never finish".
+# `prepare_launch` honours HERMES_DISABLE_LAZY_INSTALLS (venv_sync.py:456) and
+# returns None, so the guard below removes the hazard instead of hiding it: if
+# the selected generation really is stale, an import now fails loudly with an
+# ImportError naming the package, which is what a test harness should report.
+export HERMES_DISABLE_LAZY_INSTALLS="${HERMES_DISABLE_LAZY_INSTALLS:-1}"
+
 # `scripts` is the one entry that is NOT a deployed plugin (it is absent from
 # install_payload.DEFAULT_PAYLOAD): it is the repo's own tooling dir, and
 # scripts/tests holds the suites for scripts/address_guard.py,
