@@ -547,7 +547,15 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 def _profile_stores(home):
     """Yield ``(profile, state.db path)`` for every session store: the root
-    database is ``default``, every other one is ``profiles/<name>/state.db``.
+    database is ``default``, every other one is a ``profiles/<name>/`` directory's
+    own ``state.db``.
+
+    The path is built from the scanned directory, not from ``_state_db_path``,
+    for the same reason ``attach_tokens`` builds it that way: that helper maps
+    the NAME ``default`` onto the root db, so a profile directory literally named
+    ``default`` (which exists on this host) would otherwise be resolved to the
+    root file — opening the root store twice and never opening that directory's
+    own database at all.
 
     ``_known_profile`` still decides what may become a path. The name is now a
     scanned directory entry rather than a stranger's argv, but a profile store is
@@ -555,8 +563,8 @@ def _profile_stores(home):
     """
     yield "default", _state_db_path(home, None)
     try:
-        entries = sorted(os.scandir(os.path.join(home, "profiles")),
-                         key=lambda e: e.name)
+        with contextlib.closing(os.scandir(os.path.join(home, "profiles"))) as scan:
+            entries = sorted(scan, key=lambda e: e.name)
     except OSError:
         return
     for e in entries:
@@ -565,7 +573,7 @@ def _profile_stores(home):
         except OSError:
             continue
         if is_dir and _known_profile(home, e.name):
-            yield e.name, _state_db_path(home, e.name)
+            yield e.name, os.path.join(e.path, "state.db")
 
 
 def _known_profile(home, prof):
