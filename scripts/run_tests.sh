@@ -41,6 +41,22 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 # ImportError naming the package, which is what a test harness should report.
 export HERMES_DISABLE_LAZY_INSTALLS="${HERMES_DISABLE_LAZY_INSTALLS:-1}"
 
+# ── no per-test 5 s compaction probe (t_ecb84764) ───────────────────────────
+# enable_plugins.enable() ends with a REAL `urlopen(timeout=5)` sanity-probe of
+# the fleet compaction endpoint. That is right for bootstrap on a real machine.
+# It is not right for a test suite: hscc-bootstrap/tests/conftest.py pins
+# HSCC_SERVING_JSON at a missing file for determinism, which selects the
+# FALLBACK COMPACT_URL, and that address is unreachable rather than refused
+# (refused returns instantly, unreachable burns the whole timeout). So every
+# test calling enable() paid 5.04 s of dead wall time — 66 cases = 333 s, 48 %
+# of the 700 s hscc-bootstrap leg — and tests that shell out to the real
+# bootstrap.sh paid it again per stage. Full measurement: changelog.d entry.
+# Set in the RUNNER (not just an autouse fixture) because the children need it
+# too: a monkeypatch only reaches this process, and half the cost is in
+# subprocess-spawning tests. Read per call in _skip_compaction_probe(); the
+# operator path still probes, because nothing here exports it outside the suite.
+export HSCC_SKIP_COMPACT_PROBE="${HSCC_SKIP_COMPACT_PROBE:-1}"
+
 # `scripts` is the one entry that is NOT a deployed plugin (it is absent from
 # install_payload.DEFAULT_PAYLOAD): it is the repo's own tooling dir, and
 # scripts/tests holds the suites for scripts/address_guard.py,

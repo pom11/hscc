@@ -16,6 +16,14 @@ if _PLUGIN_DIR not in sys.path:
 # hscc-bootstrap/tests` runs must be as safe as the runner's.
 os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")
 
+# Direct `pytest hscc-bootstrap/tests` runs must be as fast as the runner's, for
+# the same reason as the line above: enable_plugins.enable() ends with a real
+# urlopen(timeout=5) of the compaction endpoint, and the fallback COMPACT_URL
+# this conftest selects (via the pinned HSCC_SERVING_JSON below) is unreachable,
+# so each enable() case would burn the full 5 s. 66 cases = 333 s = 48 % of the
+# leg. scripts/run_tests.sh exports the same knob for the children it spawns.
+os.environ.setdefault("HSCC_SKIP_COMPACT_PROBE", "1")
+
 
 # ── hermeticity guard (t_9462260b) ───────────────────────────────────────────
 # Every suite here runs in the *worker env*, which exports HERMES_HOME at the
