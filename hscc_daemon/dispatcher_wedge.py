@@ -100,6 +100,7 @@ import os
 import re
 import time
 
+from . import board_pin
 from .daemon_ops import log
 
 DISPATCHER_STREAM = "dispatcher"
@@ -309,8 +310,11 @@ def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile,
     """
     lanes = "'ready', 'review'" if include_review else "'ready'"
     try:
-        with kanban_db.connect_closing(board=board) if multi \
-                else kanban_db.connect_closing() as conn:
+        # t_b014c2b8: read-only probe of ONE named board — under a worker's
+        # HERMES_KANBAN_DB hermes would open the pinned DB while we believed we
+        # were looking at `board`, which is how a wedge detector ends up
+        # restarting the gateway for a stall on a board it never read.
+        with board_pin.open_board(kanban_db, board, multi=multi) as conn:
             waiting = [r[0] for r in conn.execute(
                 "SELECT DISTINCT assignee FROM tasks "
                 f"WHERE status IN ({lanes}) "
@@ -453,8 +457,11 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
     lane to spawn into.
     """
     try:
-        with kanban_db.connect_closing(board=board) if multi \
-                else kanban_db.connect_closing() as conn:
+        # t_b014c2b8: read-only probe of ONE named board — under a worker's
+        # HERMES_KANBAN_DB hermes would open the pinned DB while we believed we
+        # were looking at `board`, which is how a wedge detector ends up
+        # restarting the gateway for a stall on a board it never read.
+        with board_pin.open_board(kanban_db, board, multi=multi) as conn:
             proven = True
             if hasattr(kanban_db, "has_spawnable_ready"):
                 ready = kanban_db.has_spawnable_ready(conn)
@@ -1336,8 +1343,12 @@ def _capped_assignees(kanban_db, board, max_per_profile):
         return None
     try:
         multi = bool(board) and board != "default"
-        with (kanban_db.connect_closing(board=board) if multi
-              else kanban_db.connect_closing()) as conn:
+        # t_b014c2b8: same guard as the two probes above. NOTE the local `multi`
+        # rule keeps treating "default" as the no-board call, so a pin still
+        # steers a `default` read here — a residual this card documents rather
+        # than silently re-shapes (changing it would move the legacy
+        # single-board path the companion tests pin).
+        with board_pin.open_board(kanban_db, board, multi=multi) as conn:
             rows = conn.execute(
                 "SELECT assignee, COUNT(*) AS n FROM tasks "
                 "WHERE status = 'running' AND assignee IS NOT NULL "

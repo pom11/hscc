@@ -36,6 +36,7 @@ import json
 import sys
 
 from hscc_daemon import autodown
+from hscc_daemon import board_pin
 from hscc_daemon import cli_theme as theme
 
 HELP_TEXT = """\
@@ -198,14 +199,16 @@ def list_blocked_tasks(kanban_db=None):
     if kanban_db is None:
         return {"boards": 0, "tasks": [], "errors": ["kanban lib unreachable"]}
 
-    boards, _multi = _board_names(kanban_db)
+    boards, multi = _board_names(kanban_db)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     tasks = []
     errors = []
 
     for board in boards:
         try:
-            with kanban_db.connect_closing(board=board) as conn:
+            # t_b014c2b8: read of the whole fleet — a worker shell's pin would
+            # otherwise re-read one board once per slug.
+            with board_pin.open_board(kanban_db, board, multi=multi) as conn:
                 rows = conn.execute(
                     "SELECT id, assignee, created_at, block_kind, status, "
                     "last_failure_error, consecutive_failures, title "
@@ -255,11 +258,16 @@ def recover_blocked_task(task_id, reason=None, kanban_db=None):
     if kanban_db is None:
         return None, False
 
-    boards, _multi = _board_names(kanban_db)
+    boards, multi = _board_names(kanban_db)
 
     for board in boards:
         try:
-            with kanban_db.connect_closing(board=board) as conn:
+            # t_b014c2b8: a write of a named task id, and ids repeat across
+            # boards — under a worker's pin this UPDATE would flip a DIFFERENT
+            # board's blocked card to ready (and log the recovery against the
+            # board we named). Refuse instead, naming both values.
+            with board_pin.open_board(kanban_db, board, multi=multi,
+                                      mode="write") as conn:
                 cur = conn.execute(
                     "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
@@ -274,6 +282,8 @@ def recover_blocked_task(task_id, reason=None, kanban_db=None):
                 conn.commit()
                 _record_recovery(conn, task_id, reason, board)
             return (board if board else "default"), True
+        except board_pin.BoardPinConflict:
+            raise
         except Exception:
             # A write error on one board must not abort the scan.
             continue

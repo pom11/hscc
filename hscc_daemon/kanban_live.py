@@ -55,6 +55,7 @@ from rich.table import Table
 from rich.text import Text
 
 from hscc_daemon import autodown
+from hscc_daemon import board_pin
 from hscc_daemon.cli_theme import esc
 from hscc_daemon.cluster_live import fmt_tokens
 from hscc_daemon.daemon_ops import log
@@ -371,8 +372,15 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
         if board is not None and label != board:
             continue
         try:
-            ctx = kanban_db.connect_closing(board=b) if multi else kanban_db.connect_closing()
-            with ctx as conn:
+            # t_b014c2b8: this is the surface the bug was found on. In a
+            # dispatched worker shell hermes resolves a worker's
+            # HERMES_KANBAN_DB ahead of board=, while list_boards() still
+            # reports every slug — so the loop below re-reads ONE pinned DB once
+            # per board and renders it as the fleet, errors: [] and all.
+            # open_board warns once (naming the pin, the board and both
+            # resolved paths) and reads the board named; multi=False (a lib that
+            # cannot enumerate) keeps the old no-board call verbatim.
+            with board_pin.open_board(kanban_db, b, multi=multi) as conn:
                 counts, done_24h, run, ready, ev, outcome_of = _collect_board(
                     conn, label, now_s, now_s - RECENT_WINDOW_S)
         except Exception as e:  # noqa: BLE001
