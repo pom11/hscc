@@ -230,6 +230,138 @@ def test_attach_tokens_without_state_db_leaves_dashes(tmp_path):
     assert "Tokens" in buf.getvalue()
 
 
+# ── per-run session identity (MON-23-SESSION-ID) ──────────────────────────
+#
+# Under Hermes v0.23 the dispatcher dials the profile owner, which admits each
+# run into ONE gateway session and records it in the board as the
+# `owner_admitted` task_event for `tasks.current_run_id`
+# (payload keys: birth, db, pid, request_id, session_id). `task_runs` has no
+# session column, so that event is the only board-side run -> session link.
+# Cards claimed in the same second — what the operator hit on ecofire-bc with
+# t_a727e3b8 / t_2e818869 / t_48c90037 — are indistinguishable to a
+# started_at window, so identity is the only thing that can attribute tokens.
+
+
+def _tri_board(db_path, run_started_at):
+    """Builder for three cards claimed in the SAME second by one profile, each
+    with its own `owner_admitted` event naming `<db_path>`. Mirrors the real
+    `task_events` schema (run_id + payload are already in SCHEMA)."""
+    cards = (("t_a727e3b8", 392, "local-aaa"),
+             ("t_2e818869", 393, "local-bbb"),
+             ("t_48c90037", 394, "local-ccc"))
+
+    def build(c):
+        for i, (tid, run_id, sid) in enumerate(cards):
+            c.execute("INSERT INTO task_runs VALUES (?,?,?,'running',?,?)",
+                      (run_id, tid, "ecofire-bc-engineer", run_started_at, NOW - 30))
+            c.execute("INSERT INTO tasks (id,title,assignee,status,created_at,current_run_id) "
+                      "VALUES (?,?,?,'running',?,?)",
+                      (tid, f"job {i}", "ecofire-bc-engineer", run_started_at, run_id))
+            c.execute("INSERT INTO task_events (task_id,run_id,kind,payload,created_at) "
+                      "VALUES (?,?,?,?,?)",
+                      (tid, run_id, "owner_admitted",
+                       json.dumps({"birth": 1.5, "db": db_path, "pid": 20411,
+                                   "request_id": f'kanban:["tri","{tid}",{run_id}]',
+                                   "session_id": sid}),
+                       run_started_at))
+    return build
+
+
+def test_collect_links_each_running_card_to_its_run_session(tmp_path):
+    """collect() puts the run's session_id and the owner's own db on the row."""
+    db = tmp_path / "owner" / "state.db"
+    _state_db(db, [])                             # the owner's own store
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(db), NOW - 600)}))
+    rows = {r["id"]: r for r in d["running"]}
+    assert [rows[t]["session_id"] for t in
+            ("t_a727e3b8", "t_2e818869", "t_48c90037")] == ["local-aaa", "local-bbb", "local-ccc"]
+    assert all(r["session_db"] == str(db) for r in rows.values())
+    assert all(r["tok_match"] is None for r in rows.values())   # not attached yet
+
+    # A payload naming a file that is not there is not a path this module will
+    # invent from board data: session_db stays None, so attach_tokens uses
+    # _state_db_path(home, worker) — and identity still travels on the row.
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(tmp_path / "gone" / "state.db"), NOW - 600)}))
+    assert all(r["session_db"] is None and r["session_id"] for r in d["running"])
+
+
+def test_three_cards_started_in_one_second_get_three_distinct_token_pairs(tmp_path):
+    """The reported bug: all three printed `1.4M/22k` because every window
+    matched the same `ORDER BY started_at LIMIT 1` session row."""
+    started = NOW - 600                      # identical claim second for all three
+    db = tmp_path / "profiles" / "ecofire-bc-engineer" / "state.db"
+    _state_db(db, [
+        ("local-aaa", "kanban", started + 2, 1_000_000, 12_000),
+        ("local-bbb", "kanban", started + 2, 2_738_286, 34_510),
+        ("local-ccc", "kanban", started + 2, 2_386_590, 33_859),
+    ])
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(db), started)}))
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    by_card = {r["id"]: (r["tok_in"], r["tok_out"]) for r in d["running"]}
+    assert by_card == {"t_a727e3b8": (1_000_000, 12_000),
+                       "t_2e818869": (2_738_286, 34_510),
+                       "t_48c90037": (2_386_590, 33_859)}
+    assert len(set(by_card.values())) == 3
+    assert {r["tok_match"] for r in d["running"]} == {"session"}
+
+
+def test_known_session_id_never_falls_back_to_the_window(tmp_path):
+    """A run WITH an `owner_admitted` event must not be matched by time: the
+    window would happily hand back the neighbouring card's session."""
+    started = NOW - 600
+    db = tmp_path / "profiles" / "ecofire-bc-engineer" / "state.db"
+    _state_db(db, [("local-neighbour", "kanban", started + 1, 999, 9)])   # inside the window
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(db), started)}))
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    r = next(r for r in d["running"] if r["id"] == "t_a727e3b8")
+    assert (r["tok_in"], r["tok_out"], r["tok_match"]) == (None, None, None)
+
+
+def test_run_without_owner_admitted_event_uses_the_window(tmp_path):
+    """A brand-new run is admitted to its session ~2 s after the claim, so it
+    legitimately has no event yet — the window stays as the labelled fallback."""
+    db = tmp_path / "profiles" / "backend-engineer" / "state.db"
+    _state_db(db, [("mine", "kanban", NOW - 5 * 3600 + 2, 18_000_000, 202_000)])
+    d = _collect()                                    # `_alpha`: no owner_admitted
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    r = d["running"][0]
+    assert (r["session_id"], r["session_db"]) == (None, None)
+    assert (r["tok_in"], r["tok_out"], r["tok_match"]) == (18_000_000, 202_000, "window")
+
+
+def test_owner_admitted_payload_db_wins_over_the_profile_path(tmp_path):
+    """The owner's `db` is authoritative — the profile dir may hold a copy."""
+    started = NOW - 600
+    owner = tmp_path / "elsewhere" / "state.db"
+    _state_db(owner, [("local-aaa", "kanban", started + 2, 111, 1)])
+    _state_db(tmp_path / "profiles" / "ecofire-bc-engineer" / "state.db",
+              [("local-aaa", "kanban", started + 2, 777, 7)])   # stale copy
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(owner), started)}))
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    r = next(r for r in d["running"] if r["id"] == "t_a727e3b8")
+    assert (r["tok_in"], r["tok_out"]) == (111, 1)
+
+
+def test_unreadable_or_unparsable_store_leaves_dashes(tmp_path):
+    started = NOW - 600
+    garbage = tmp_path / "elsewhere" / "state.db"
+    garbage.parent.mkdir(parents=True)
+    garbage.write_bytes(b"not a database at all")
+    d = _collect(kb=_FakeKb({"tri": _tri_board(str(garbage), started)}))
+    kanban_live.attach_tokens(d, hermes_home=str(tmp_path), now=NOW)
+    assert all((r["tok_in"], r["tok_out"]) == (None, None) for r in d["running"])
+
+    # a payload that is not JSON (or absent) must not break the board either
+    def _junk(c):
+        _tri_board("/nonexistent/state.db", started)(c)
+        c.execute("INSERT INTO task_events (task_id,run_id,kind,payload,created_at) "
+                  "VALUES ('t_a727e3b8',392,'owner_admitted','{broken',?)", (NOW,))
+    d = _collect(kb=_FakeKb({"tri": _junk}))
+    assert not d["errors"]
+    r = next(r for r in d["running"] if r["id"] == "t_a727e3b8")
+    assert r["session_id"] == "local-aaa"             # the good event still wins
+
+
 def test_render_shows_card_tokens_and_24h_total():
     d = _collect()
     d["running"][0].update(tok_in=18_000_000, tok_out=202_000)

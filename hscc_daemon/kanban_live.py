@@ -10,11 +10,14 @@ collects:
 * per-board counts by status, plus cards finished in the last 24 h;
 * recent outcomes — completed / blocked / gave_up / crashed / timed_out /
   spawn_failed / reclaimed events across all boards;
-* tokens — each running card's worker session (input/output) and the 24 h
+* tokens — each running card's OWN worker session (input/output) and the 24 h
   total over every profile's kanban sessions, read from the profiles'
-  ``state.db`` (``attach_tokens``; the dispatcher tags worker sessions
-  ``source='kanban'`` and they open ~2 s after the run claims the card);
-  plus 24 h / 7 d totals for workers and orchestrators (``_token_windows``);
+  ``state.db``. A run's session comes from the ``owner_admitted`` event hermes
+  records for ``tasks.current_run_id`` (``_session_links``), so cards claimed in
+  the same second under one profile stay distinct; the ``started_at`` window is
+  the labelled fallback for a run whose event has not landed yet
+  (``attach_tokens``). Plus 24 h / 7 d totals for workers and orchestrators
+  (``_token_windows``);
 * orchestrators — every live ``hermes -p <profile> chat`` REPL with its open
   session's title, last activity and lifetime tokens (``attach_orchestrators``).
 
@@ -57,7 +60,7 @@ OUTCOME_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out",
                  "decomposed", "spawned")
 STATUS_COLS = ("running", "ready", "todo", "review", "blocked", "triage")
 HERMES_HOME = os.path.expanduser("~/.hermes")
-SESSION_MATCH_S = 900        # worker session opens within this of the run claim
+SESSION_MATCH_S = 900        # fallback only: window for a run with no session id
 
 # Nominal Hermes agent source tree — the same location (and the same env
 # override) autodown._load_kanban_db_or_default resolves kanban_db from.
@@ -149,6 +152,58 @@ def _q(conn, sql, args=()):
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
+def _owner_db_path(value):
+    """The ``db`` the session owner recorded in its own ``owner_admitted``
+    payload — the authoritative place that run's session lives, which is not
+    necessarily ``<home>/profiles/<worker>/state.db`` (the owner may run Hermes
+    from another root).
+
+    It is board DATA, not operator config, so it only becomes a path when it is
+    a plain absolute path to an existing regular file; anything else returns
+    None and the caller falls back to the profile default. Same reasoning as
+    ``_known_profile`` for a ps argv: an unvalidated string from a DB never
+    becomes a filesystem path here.
+    """
+    if not isinstance(value, str):
+        return None
+    path = _CONTROL_RE.sub("", value).strip()
+    return path if path and os.path.isabs(path) and os.path.isfile(path) else None
+
+
+def _session_links(conn, run_ids):
+    """``{run_id: {"session_id": str|None, "session_db": str|None}}`` for the
+    running cards, from the board's own ``owner_admitted`` events.
+
+    Under Hermes v0.23 the dispatcher spawns ``hermes_cli.kanban_worker_client``,
+    which only dials the profile owner; the agent then runs INSIDE the gateway as
+    one session per run, and the owner records that session on the board as the
+    ``owner_admitted`` event for ``tasks.current_run_id``. ``task_runs`` has no
+    session column, so this event is the only board-side run -> session link —
+    and the only thing that can tell two cards claimed in the same second apart.
+    The latest event per run wins (a retried attempt re-admits); an unparseable
+    payload is skipped rather than failing the board.
+    """
+    ids = [i for i in dict.fromkeys(run_ids) if i is not None]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    links = {}
+    for e in _q(conn, f"SELECT run_id, payload FROM task_events "
+                      f"WHERE kind='owner_admitted' AND run_id IN ({marks}) ORDER BY id", ids):
+        try:
+            payload = json.loads(e["payload"]) if e["payload"] else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        sid = payload.get("session_id")
+        links[e["run_id"]] = {
+            "session_id": sid.strip() if isinstance(sid, str) and sid.strip() else None,
+            "session_db": _owner_db_path(payload.get("db")),
+        }
+    return links
+
+
 def _collect_board(conn, label, now_s, since_s):
     counts = {r["status"]: r["n"] for r in _q(
         conn, "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")}
@@ -156,9 +211,10 @@ def _collect_board(conn, label, now_s, since_s):
                         "AND completed_at >= ?", (now_s - 86400,))[0]["n"]
     running = _q(conn, """
         SELECT t.id, t.title, t.assignee, t.last_heartbeat_at AS hb_task,
-               r.profile, r.started_at, r.last_heartbeat_at AS hb_run
+               t.current_run_id, r.profile, r.started_at, r.last_heartbeat_at AS hb_run
         FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id
         WHERE t.status = 'running'""")
+    links = _session_links(conn, [r["current_run_id"] for r in running])
     ready = _q(conn, """
         SELECT t.id, t.title, t.assignee, t.priority,
                (SELECT MAX(e.created_at) FROM task_events e
@@ -175,12 +231,20 @@ def _collect_board(conn, label, now_s, since_s):
     for r in running:
         beats = [x for x in (r["hb_run"], r["hb_task"], r["started_at"]) if x]
         hb = max(beats) if beats else None
+        link = links.get(r["current_run_id"]) or {}
         out_run.append({
             "board": label, "id": r["id"], "title": r["title"],
             "worker": r["profile"] or r["assignee"] or "?",
             "started_at": r["started_at"],
             "run_s": now_s - r["started_at"] if r["started_at"] else None,
             "hb_s": now_s - hb if hb else None,
+            # The run's own session, from its `owner_admitted` event. session_db
+            # is the path the OWNER named; None means it named none (or named an
+            # unreadable one) and the reader uses _state_db_path(home, worker).
+            # Consumed by attach_tokens and by the cards-monitor transcript.
+            "session_id": link.get("session_id"),
+            "session_db": link.get("session_db"),
+            "tok_match": None,
         })
     out_ready = [{
         "board": label, "id": r["id"], "title": r["title"],
@@ -255,35 +319,57 @@ def _open_ro(path):
 def attach_tokens(data, hermes_home=None, now=None, ledger_path=None):
     """Add worker-session token counts to a ``collect()`` result, in place.
 
-    Each running card gets ``tok_in``/``tok_out`` from the first
-    ``source='kanban'`` session its worker profile opened within
-    ``SESSION_MATCH_S`` of the run's claim (None when not found), and
-    ``data["tokens_24h"]`` is ``[in, out]`` summed over every profile's kanban
-    sessions started in the last 24 h (None when no state.db was readable).
-    ``data["tokens"]`` adds 24h/7d windows for workers and orchestrators
-    (``_token_windows``). The databases are read-only; the one write is the
-    orchestrator token ledger. An unreadable database is skipped, never raised.
+    Each running card gets ``tok_in``/``tok_out`` from ITS OWN worker session and
+    ``tok_match`` says how that session was found:
+
+    ``"session"`` — the run's ``owner_admitted`` event named the session, so it
+    is read by identity (``WHERE id=?``). This is the normal v0.23 path and the
+    window query does not run at all: several cards claimed in the same second
+    under one profile are otherwise indistinguishable, and were reported as one
+    shared token pair.
+
+    ``"window"`` — labelled FALLBACK only, for a run with no ``owner_admitted``
+    event yet (the owner admits ~2 s after the claim): the first
+    ``source='kanban'`` session its profile opened within ``SESSION_MATCH_S`` of
+    the run's claim. A guess, and it is only ever used when identity is absent.
+
+    Either way the row is honestly blank (``None`` → dash, ``tok_match`` None)
+    when nothing matched. ``data["tokens_24h"]`` is ``[in, out]`` summed over
+    every profile's kanban sessions started in the last 24 h (None when no
+    state.db was readable), and ``data["tokens"]`` adds 24 h / 7 d windows for
+    workers and orchestrators (``_token_windows``) — both still by started_at,
+    which is a separate card's scope. The databases are read-only; the one write
+    is the orchestrator token ledger. An unreadable database is skipped, never
+    raised.
     """
     home = hermes_home or HERMES_HOME
     now_s = int(now if now is not None else time.time())
     for r in data["running"]:
-        r["tok_in"] = r["tok_out"] = None
-        if not r.get("started_at"):
-            continue
-        path = _state_db_path(home, r["worker"])
+        r["tok_in"] = r["tok_out"] = r["tok_match"] = None
+        # The owner's own path when its event named one, else the profile default.
+        path = r.get("session_db") or _state_db_path(home, r["worker"])
         if not os.path.exists(path):
+            continue
+        sid = r.get("session_id")
+        if sid:
+            sql, args, match = ("SELECT input_tokens, output_tokens FROM sessions "
+                                "WHERE id=?", (sid,), "session")
+        elif r.get("started_at"):
+            sql = ("SELECT input_tokens, output_tokens FROM sessions "
+                   "WHERE source='kanban' AND started_at BETWEEN ? AND ? "
+                   "ORDER BY started_at LIMIT 1")
+            args = (r["started_at"] - 5, r["started_at"] + SESSION_MATCH_S)
+            match = "window"
+        else:
             continue
         try:
             with _open_ro(path) as conn:
-                row = conn.execute(
-                    "SELECT input_tokens, output_tokens FROM sessions "
-                    "WHERE source='kanban' AND started_at BETWEEN ? AND ? "
-                    "ORDER BY started_at LIMIT 1",
-                    (r["started_at"] - 5, r["started_at"] + SESSION_MATCH_S)).fetchone()
+                row = conn.execute(sql, args).fetchone()
         except sqlite3.Error:
             continue
         if row:
             r["tok_in"], r["tok_out"] = row["input_tokens"], row["output_tokens"]
+            r["tok_match"] = match
     paths = [_state_db_path(home, None)]
     try:
         paths += [os.path.join(e.path, "state.db")
