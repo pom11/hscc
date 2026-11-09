@@ -951,6 +951,31 @@ def _compact_models_url(compact_url):
     return url + "/models"
 
 
+def _skip_compaction_probe(env=None):
+    """True when the network sanity-probe is opted out via HSCC_SKIP_COMPACT_PROBE.
+
+    WHY THIS EXISTS (t_ecb84764). `_probe_compaction_endpoint()` is a real
+    `urlopen(timeout=5)` against the fleet compaction endpoint, and `enable()`
+    calls it. That is correct for bootstrap on a real machine — one probe, one
+    warning if the model is missing. It is not correct inside the test suite:
+    conftest pins HSCC_SERVING_JSON at a missing file for determinism
+    (t_417610e6), which selects the FALLBACK COMPACT_URL, and that address is
+    unreachable rather than refused. A refused port returns instantly; an
+    unreachable one burns the whole 5 s connect timeout, so every test that
+    calls `enable()` as if it were the pure config function it looks like paid
+    5.04 s of dead wall time — measured 66 cases = 333 s, 48 % of the whole
+    700 s hscc-bootstrap leg. Tests that shell out to the real bootstrap.sh pay
+    it again per stage, which is why an autouse monkeypatch could not fix it
+    (it only patches this process); an env opt-out reaches the children too.
+
+    Read per call, not at import, so `monkeypatch.setenv` works and a child
+    process's own env is honoured. Unset/empty/0/false => probe runs, so the
+    operator path is unchanged by default.
+    """
+    v = (env if env is not None else os.environ).get("HSCC_SKIP_COMPACT_PROBE", "")
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _probe_compaction_endpoint():
     """Sanity-probe the compaction endpoint at bootstrap.
 
@@ -968,6 +993,13 @@ def _probe_compaction_endpoint():
 
     if not COMPACT_URL:
         return True  # no aux endpoint configured — nothing to probe
+
+    if _skip_compaction_probe():
+        # Deliberate opt-out (tests, or an operator who knows the orch is down).
+        # Report "nothing to warn about" rather than False: False is the
+        # unreachable-endpoint verdict and callers/ readers must not confuse an
+        # opt-out with a failed probe.
+        return True
 
     models_url = _compact_models_url(COMPACT_URL)
     try:

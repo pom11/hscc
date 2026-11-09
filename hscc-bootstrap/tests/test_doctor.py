@@ -1440,6 +1440,12 @@ class TestDoctorFixNoopWhenFresh:
             config_path=str(config_path),
             hermes_home=hermes_home,
             _cluster_runner=lambda: '[{"name":"x"}]',
+            # Same scenario, no socket: this case is "nothing to fix", and the
+            # endpoint it was probing (the unreachable base_url in the cfg
+            # above) is a 10 s urlopen timeout paid to SIMULATE unreachability
+            # that _fake_http_unreachable already models in 0 s. run_doctor_fix
+            # now forwards _http_get to run_doctor, so the checks honour it too.
+            _http_get=_fake_http_unreachable,
         )
         assert res["fixes_applied"] == []
 

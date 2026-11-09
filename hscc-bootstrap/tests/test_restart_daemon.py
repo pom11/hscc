@@ -358,8 +358,13 @@ def _setup(tmp_path, mode="normal", preexisting_pid=None, *, launchd=False,
         "STUB_LAST_PID": str(last_pid),
         "STUB_MODE": mode,
         "STUB_INVOKED": str(tmp_path / "invoked.txt"),
+        # Poll budget: 3 attempts, near-zero interval. The ATTEMPTS count is the
+        # behaviour under test (the helper must poll until the supervisor reports
+        # a changed pid, and must give up after the budget) — the 1 s interval is
+        # not, and it was 5 of these loops x ~3 s of wall per test, which is why
+        # this file showed up as the leg's slowest at 26.6 s (t_ecb84764).
         "POLL_ATTEMPTS": "3",
-        "POLL_INTERVAL": "1",
+        "POLL_INTERVAL": "0.05",
         # ── service-layer stubs (never the real ones) ──
         "HSCC_LAUNCHCTL": str(launchctl),
         "HSCC_LAUNCHD_LABEL": LAUNCHD_LABEL,
@@ -381,7 +386,7 @@ def _setup(tmp_path, mode="normal", preexisting_pid=None, *, launchd=False,
         "STUB_SYSTEMD_RESTART_ERR": systemd_restart_err,
         "STUB_ORPHAN_PIDS": "" if orphan_pids is None else ",".join(str(p) for p in orphan_pids),
         "LAUNCHD_POLL_ATTEMPTS": "3",
-        "LAUNCHD_POLL_INTERVAL": "1",
+        "LAUNCHD_POLL_INTERVAL": "0.05",
     })
     if systemd_unit:
         # name the unit explicitly so a candidate-list change cannot silently
