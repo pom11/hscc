@@ -15,15 +15,18 @@ string, both measured on this host (2026-10-27/28):
       named ``sdlc-review`` (a stale flat copy from an old HSCC bootstrap at
       ``<skills>/sdlc-review``, plus the builtin category copy at
       ``<skills>/devops/sdlc-review``). Hermes' resolver
-      (``tools/skills_tool._locate_skill``) refuses to guess
-      ("Skill name collision ... refusing to guess"), the load fails, the name
-      lands in the ``missing`` list.
+      (``tools.skills_tool.locate_skill`` — upstream had it as
+      ``_locate_skill`` until ``93fafc4d6f`` made the lookup helpers public in
+      v0.22.3) refuses to guess ("Skill name collision ... refusing to guess"),
+      the load fails, the name lands in the ``missing`` list.
   (b) GENUINE ABSENCE — the profile never had the skill at all
       (ecofire-bc-orch: review-lane spawns died 3x, dispatcher gave_up).
 
 Hermes' exact resolution rule, re-read from source at v0.23.0-7-g045881137d
-(first cut read it 2026-10-28; upstream has since renamed the internals) —
-replicated by ``scan_skill_names`` / ``resolution`` below:
+(the first cut recorded the pre-rename spellings on 2026-10-28, and they were
+ALREADY stale at that reading — the renames landed 2026-10-04 and 2026-10-18,
+i.e. v0.21.5 / v0.22.3, and none of the four old names exist in the upstream
+tree dated 2026-10-28) — replicated by ``scan_skill_names`` / ``resolution``:
 
   * candidates are collected by DIRECTORY NAME (or frontmatter ``name:``) for
     every ``SKILL.md`` under EVERY search dir, at ANY depth
@@ -98,8 +101,12 @@ from pathlib import Path
 REVIEW_SKILL = "sdlc-review"
 
 #: Names hermes' scanner prunes (mirrors agent.skill_utils.EXCLUDED_SKILL_DIRS
-#: + the org mirror gate). Kept as a local copy on purpose: hscc-bootstrap has
-#: no hermes import at runtime and must work from the deployed plugins tree.
+#: + the org mirror gate — EXCEPT upstream's one later addition, DIST_SWAP_DIR
+#: ``.hermes-dist``, which is NOT in the frozenset below: a profile-distribution
+#: staging dir under a skills root would still be scanned here. Adding it is a
+#: behaviour change, not a docstring one, so it is reported, not silently
+#: folded in. Kept as a local copy on purpose: hscc-bootstrap has no hermes
+#: import at runtime and must work from the deployed plugins tree.
 EXCLUDED_SKILL_DIRS = frozenset((
     ".git", ".github", ".hub", ".archive", ".curator_backups", ".locks",
     ".venv", "venv", "node_modules", "site-packages", "__pycache__",
@@ -297,7 +304,9 @@ def _skill_md_of(p: Path) -> Path:
 
 def _identical(paths: list[Path]) -> bool:
     """True when every candidate's markdown is one file (same realpath) or
-    byte-identical — hermes' ``_provably_same_skill`` predicate."""
+    byte-identical — hermes' ``agent.skill_utils.provably_same_skill``
+    predicate (upstream had it as ``tools/skills_tool._provably_same_skill``
+    until ``f525ecdb9c``, 2026-10-04)."""
     try:
         mds = [_skill_md_of(p) for p in paths]
         if len({os.path.realpath(str(m)) for m in mds}) == 1:
@@ -309,9 +318,15 @@ def _identical(paths: list[Path]) -> bool:
 
 def _same_root_rank(cand, root) -> tuple:
     """``(0 for a SKILL.md package / 1 for a legacy flat <name>.md, depth)`` —
-    verbatim mirror of ``agent.skill_utils.skill_candidate_rank`` (upstream
-    called this ``tools/skills_tool._rank_same_root_candidate`` when the first
-    cut was written; the tuple it returns is unchanged)."""
+    mirror of ``agent.skill_utils.skill_candidate_rank`` (upstream called this
+    ``tools/skills_tool._rank_same_root_candidate``; the rename kept the shape
+    and the ordering, NOT the element types: v0.23 returns
+    ``tuple[bool, int]`` — first element ``skill_md.name != "SKILL.md"`` —
+    where the pre-v0.23 predicate built an ``int`` (``0 if SKILL.md else 1``).
+    ``bool`` subclasses ``int``, so the sort key and the ``!=`` gate rank the
+    same either way and the ``int`` this mirror returns stays correct. This
+    mirror also takes a dir-or-``SKILL.md`` candidate and pins a path outside
+    *root* at depth 99 instead of raising ``ValueError``)."""
     is_flat = 1 if (cand.suffix == ".md" and cand.name != "SKILL.md") else 0
     if cand.suffix != ".md":
         md = cand / "SKILL.md"
@@ -348,8 +363,9 @@ def resolution(skills_roots, name: str, *, disabled=()) -> dict:
     collapses same-root identical copies ONLY when the top two rank distinctly
     (``agent.skill_utils.pick_skill_candidate`` — ``if candidates[ranked[0]][2]
     != candidates[ranked[1]][2]``, with rank from ``skill_candidate_rank``;
-    upstream called the same predicate ``_rank_same_root_candidate`` in the
-    2026-10-28 reading of ``tools/skills_tool.py``). Two byte-identical
+    upstream had it as ``tools/skills_tool._rank_same_root_candidate`` until
+    ``905ef4efdf`` moved it here on 2026-10-04 — before the 2026-10-28
+    reading this file dates its first cut from). Two byte-identical
     copies at the SAME depth (``catA/x/SKILL.md`` + ``catB/x/SKILL.md``) keep
     2 candidates -> "Refusing to guess" -> the name lands in ``missing`` for a
     spawn. Accepting them as ``ok`` made doctor read reviewer-readiness GREEN
@@ -456,7 +472,8 @@ def profile_skill_roots(profile_home) -> list[Path]:
     fallback from a profile HERMES_HOME to ``~/.hermes``; grounded in
     ``agent.skill_utils.get_skill_search_roots``, whose local tier is
     ``tools/skills_tool._skills_dir``; upstream called the whole thing
-    ``tools/skills_tool._skill_search_dirs``. The project and
+    ``tools/skills_tool._skill_search_dirs``, public again today as
+    ``tools/skills_tool.skill_search_dirs``. The project and
     ``skills.create_dir`` tiers are deliberately not modelled here — see the
     module docstring.)"""
     home = Path(profile_home).expanduser()
@@ -524,14 +541,19 @@ def duplicate_names(skills_root) -> dict:
     return dup
 
 
-#: Opt-out marker's CANONICAL location (round-2 review B3): the profile HOME,
-#: written by ``hermes_cli/profiles._finish_profile_layout`` (:1349) for
-#: ``--no-skills`` and read by ``tools/skills_sync`` (:368, :468) via
-#: ``_hermes_home()``. NOT inside ``skills/`` — a marker there is nothing
-#: upstream ever reads, and a guard that only checks that path is dead code
-#: (measured on this host: 14 profiles carry the home marker, 0 the skills/
-#: one). ``hermes_cli/profiles.has_bundled_skills_opt_out`` is the upstream
-#: predicate; this mirrors it.
+#: Opt-out marker's CANONICAL location (round-2 review B3): the profile HOME.
+#: v0.23 writes it in ``hermes_cli.profiles_initialization`` —
+#: ``finish_profile_layout`` seeds ``profile_dir / NO_BUNDLED_SKILLS_MARKER``
+#: for ``--no-skills`` — and toggles it in
+#: ``tools.skills_sync_bundled_ops.set_bundled_skills_opt_out``; the READ is
+#: ``tools.skills_sync.sync_skills`` running
+#: ``(_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()`` on the constant
+#: ``hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER``. There is no
+#: ``has_bundled_skills_opt_out`` predicate at v0.23 — that ``.exists()`` IS
+#: the predicate, and it is what this mirrors. NOT inside ``skills/`` — a
+#: marker there is nothing upstream ever reads, and a guard that only checks
+#: that path is dead code (re-measured at v0.23 over 53 homes: 14 carry the
+#: home marker, 0 the skills/ one).
 NO_BUNDLED_MARKER = ".no-bundled-skills"
 
 
