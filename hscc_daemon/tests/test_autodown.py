@@ -2453,6 +2453,14 @@ class TestWakeClearsStayDownBeforeLaunching:
         monkeypatch.setattr(_pb, "record_expected_up",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 OSError("disk on fire")))
+        # fail-SOFT must not decay into fail-SILENT: the only reason the fleet
+        # may end up still pinned down after a wake is a reason an operator can
+        # see, so the marker failure has to surface at WARN (a DEBUG downgrade
+        # is the mutation this pin exists to catch).
+        logged = []
+        monkeypatch.setattr(
+            ad, "log",
+            lambda msg, level="INFO", *a, **k: logged.append((level, str(msg))))
         res = ad.autoup(
             serving_path=serving, run_cmd_fn=runner,
             http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
@@ -2466,6 +2474,12 @@ class TestWakeClearsStayDownBeforeLaunching:
             assert json.load(f).get("intentional") is None
         # Fail-soft means the stay-down was NOT cleared (no fake success).
         assert _pb.deliberately_down() is not None
+        # ...and it is loud about it.
+        warns = [(lvl, m) for lvl, m in logged
+                 if "post_boot marker record failed" in m]
+        assert warns, "the marker failure must be reported, not swallowed"
+        assert warns[0][0] == "WARN", f"expected WARN, got {warns[0][0]!r}"
+        assert "disk on fire" in warns[0][1], "the cause must reach the log"
 
     # -- reviewer note (PR #243): BOTH wordings, never branched on ----------
     @pytest.mark.parametrize("wording", [_OPERATOR, _TEARDOWN])
