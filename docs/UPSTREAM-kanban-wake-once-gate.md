@@ -251,8 +251,62 @@ upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
    `gateway_already_delivered`, retarget `test_orch_waker_dedupe.py`'s six required
    cases at the public API, and drop the `suppressed=` stopgap wording from the
    stream stamp.
-4. `local`-platform wake branch: confirm whether the hscc-orch sub
+4. ~~`local`-platform wake branch: confirm whether the hscc-orch sub
    (`platform=local`, profile `hscc-orch`) takes the push branch
    (`gateway/wake.py:135`) or the self-post branch (`:153-161`); only the former
    reaches the fence, so a self-post setup needs §3.2's token on
-   `_self_post_chat_completion` too.
+   `_self_post_chat_completion` too.~~ — **resolved by `t_12350485`: the PUSH branch.
+   §3.2 reaches our path, so the ask does NOT extend to `_self_post_chat_completion`.**
+
+   **The branch** (every anchor re-checked at runtime
+   `045881137d6a177cac690b1d373316ce8c271f43`, the same pin as the provenance header;
+   session id redacted to `local-<session-id>`):
+   `platform=local` → `LocalSessionAdapter` (`gateway/session_local.py:21`), which never
+   sets `supports_async_delivery` and so inherits `True`
+   (`gateway/platforms/base.py:1831` — the only `= False` in the tree is
+   `APIServerAdapter`, `gateway/platforms/api_server.py:1039`) → `adapter_supports_push`
+   (`gateway/wake.py:30`, body `:35`) is True → `deliver()` records it at
+   `gateway/kanban_watchers_notifier.py:766` → `wake()` takes the push leg `:646-673` and
+   calls `deliver_wake(..., source=_source)` at `:671` → `gateway/wake.py:135` →
+   `:145 admit_route_wake(runner, adapter, source, text, "kanban-wake", category)` →
+   `gateway/session_automation.py:821` LOCAL case `:838-851` → `admit_automation` `:850`
+   → the `session_admissions` row. The self-post leg (`notifier.py:635`; `wake.py:153-161`,
+   def `:231`) sits behind `adapter_supports_push` being **False**, so it is structurally
+   unreachable for this sub — not merely untaken. `LocalSessionAdapter.__init__` sets
+   `gateway_runner` on purpose (`gateway/session_local.py:27-29`) precisely so this push
+   wake rides the authority FIFO.
+
+   **Runtime proof** (`t_12350485`, read-only via hermes' own `SessionDB(path,
+   read_only=True)` — no CLI, no `sqlite` by hand, no writes): **9** rows in the
+   `hscc-orch` profile's `session_admissions` with
+   `request_id = ["kanban-wake","agent:hscc-orch:local:dm:local-<session-id>","<32-hex uuid4 nonce>"]`,
+   joined **9/9 (0 unmatched)** to the 9 `kanban notifier: woke agent … profile=hscc-orch`
+   lines in the live `gateway.log`, each row carrying the `uuid.uuid4().hex` nonce minted
+   at `gateway/session_automation.py:837` — i.e. the exact token §3.2 replaces, on our
+   path. One task (`t_75b25a6e`) woke twice with two different nonces: the retry
+   amplification §3.2 removes, measured on the branch we actually take.
+
+   **Consequence for the ask:** §3.2 is enough for hscc. It lands on the branch our
+   notifier wake takes, so **nothing is added to NousResearch/hermes-agent#152206** —
+   that follow-up was conditioned on the self-post branch and #152206 stays untouched.
+
+   **Two caveats that survive the resolution** (both measured in the same store; they
+   bind §3.2, and they are why §3.1 is still the load-bearing half):
+
+   - **(a) a fence row is evidence, not a receipt.** `admit_route_wake` returns `False`
+     when no authority/route entry serves the key (`gateway/session_automation.py:834-835`)
+     or the local route holds no live session (`:844-845`); `deliver_wake` then still
+     delivers, through `admit_internal_event` (`gateway/wake.py:149-151`), writing **no
+     admission row at all**. 0 of the 9 observed wakes took that fallback — a live branch,
+     not a hypothetical. So "was event E woken?" is answerable from the fence only *in the
+     affirmative*: a row proves yes, absence proves nothing. §3.1's claim in the board DB
+     remains the authority.
+   - **(b) the fence is not a durable index.** On session *retirement* admission rows are
+     copied into `state_meta` and removed from `session_admissions`
+     (`hermes_state_mutation_retirement.py:103-141`), after which they are reachable only
+     by `admission_id` (`get_session_admission`, `hermes_state_runtime.py:180`);
+     `find_session_admission` (`:187`) no longer sees them. So §3.2's dedupe token must be
+     **re-derivable from event identity**, never read back out of the fence. The
+     `f"kanban:{board}:{task_id}:{sha1(sorted(event_ids))}"` shape in §3.2 already is —
+     keep it that way: no per-wake counter, no clock, nothing that needs the row to
+     still exist.
