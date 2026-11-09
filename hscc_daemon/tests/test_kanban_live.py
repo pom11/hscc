@@ -452,6 +452,24 @@ def test_the_partition_bills_every_measured_source_exactly_once():
         assert g in notes, g
 
 
+def test_the_orchestrator_panel_and_the_token_table_agree_on_what_a_worker_is():
+    """A hotspot guard for the two partitions of `sessions.source` in this file.
+
+    `attach_orchestrators` (t_1f14c019) excludes a list of worker-family sources
+    from the live-turn panel; the token table partitions the same column into
+    workers / scheduled / orchestrators. They must stay the same cut of the world:
+    if one grows a source and the other does not, a dispatched run is either an
+    orchestrator in the panel and a worker in the table, or invisible in both. This
+    test does not touch their definitions — it only refuses the drift.
+    """
+    assert set(kanban_live.NON_ORCHESTRATOR_SOURCES) == set(
+        kanban_live.WORKER_SOURCES + kanban_live.SCHEDULED_SOURCES)
+    # and the panel's catch-all side is the token table's orchestrator group
+    for src in ("cli", "local", "telegram", None, "unknown-next-release"):
+        assert kanban_live.group_of(src) == "orchestrators", src
+        assert (src is None or src not in kanban_live.NON_ORCHESTRATOR_SOURCES), src
+
+
 def test_a_card_started_before_the_window_is_charged_to_the_window_it_worked_in(tmp_path):
     """The attribution case, pinned (D1).
 
