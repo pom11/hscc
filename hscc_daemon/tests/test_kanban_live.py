@@ -4,6 +4,7 @@ Offline only: a fake Hermes kanban lib over real in-memory sqlite boards with
 the columns the collector reads. NEVER the operator's live boards or ~/.hermes.
 """
 
+import inspect
 import io
 import json
 import sqlite3
@@ -22,9 +23,8 @@ NOW = 1_800_000_000
 def _no_real_hermes_home(tmp_path, monkeypatch):
     # attach_tokens() defaults to ~/.hermes; never read the operator's DBs here.
     monkeypatch.setattr(kanban_live, "HERMES_HOME", str(tmp_path / "hermes-home"))
-    # ...nor write the real orchestrator ledger or read the real process list.
+    # ...nor write the real orchestrator ledger.
     monkeypatch.setattr(kanban_live, "LEDGER_PATH", str(tmp_path / "ledger.json"))
-    monkeypatch.setattr(kanban_live, "_ps_lines", lambda: [])
 
 SCHEMA = """
 CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
@@ -192,12 +192,36 @@ def test_hscc_kanban_dispatcher_keeps_json_for_delegated_verbs(monkeypatch, caps
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
 
 
-def _state_db(path, rows):
+_SESSION_COLS = 9          # see the CREATE TABLE below; legacy rows are the first 5
+
+
+def _state_db(path, rows, leases=(), *, lease_table=True):
+    """One profile store: the ``sessions`` table plus (v0.23) the
+    ``session_turn_leases`` table hermes writes for every in-flight turn.
+
+    ``rows`` keeps the historical ``(id, source, started_at, input_tokens,
+    output_tokens)`` shape — the columns the token tests read — padded with
+    NULLs for the v0.23 columns they do not care about. Pass the full 9-tuple
+    ``(id, source, started_at, input, output, ended_at, title,
+    last_activity_at, last_activity_description)`` when a test needs them.
+
+    ``leases`` are ``(conversation_id, acquired_at, expires_at)``: one row per
+    turn that is running RIGHT NOW. ``lease_table=False`` builds a pre-v0.23
+    store with no lease table at all.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(path)
     c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, "
-              "input_tokens INTEGER, output_tokens INTEGER)")
-    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?)", rows)
+              "input_tokens INTEGER, output_tokens INTEGER, ended_at REAL, "
+              "title TEXT, last_activity_at REAL, last_activity_description TEXT)")
+    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                  [tuple(r) + (None,) * (_SESSION_COLS - len(r)) for r in rows])
+    if lease_table:
+        c.execute("CREATE TABLE session_turn_leases (conversation_id TEXT PRIMARY KEY, "
+                  "holder TEXT, acquired_at REAL, expires_at REAL)")
+        c.executemany("INSERT INTO session_turn_leases VALUES (?,?,?,?)",
+                      [(cid, f"pid=20411:turn={cid}:platform=cli", acq, exp)
+                       for cid, acq, exp in leases])
     c.commit()
     c.close()
 
@@ -418,49 +442,166 @@ def test_ledger_samples_at_most_every_step(tmp_path):
     assert json.loads(ledger.read_text()) == [[NOW, 1, 1], [NOW + 400, 3, 3]]
 
 
-def test_chat_profiles_skips_workers_and_pane_wrappers():
-    ps = [
-        "/venv/bin/python /Users/x/.local/bin/hermes -p sphoin-orch chat --continue sphoin",
-        "zsh -c /Users/x/.local/bin/hermes -p ecofire-flows-orch chat --continue ecofire-flows; exec zsh",
-        "/venv/bin/python /Users/x/.local/bin/hermes -p ecofire-flows-orch chat --continue ecofire-flows",
-        "/venv/bin/python -m hermes_cli.main -p backend-engineer --cli --accept-hooks",
-        "/venv/bin/python -m hermes_cli.main gateway run --replace",
-        "vim notes-about-hermes-chat.md",
-    ]
-    assert kanban_live._chat_profiles(ps) == ["sphoin-orch", "ecofire-flows-orch"]
+# ── orchestrators: live turns from the session store (t_1f14c019) ─────────
+#
+# Hermes v0.23 starts a REPL as `python3 -I -c '<~10 KB bootstrap>' -p <profile>
+# chat ...`, so argv[0] is the interpreter and argv[1] is `-I`: the old
+# `_chat_profiles()` gate (an argv[:2] entry ending in `/hermes`) matched nothing
+# and the section silently disappeared — measured 2026-11-09 with seven REPL
+# processes alive. Turn liveness is a store fact now: `session_turn_leases` holds
+# one row per in-flight turn, renewed while the turn runs and self-expiring, so
+# `ps` is gone rather than merely demoted.
+
+def _turn(cid, acquired_at, expires_at=NOW + 300):
+    """A `session_turn_leases` row `(conversation_id, acquired_at, expires_at)`.
+
+    hermes renews `expires_at` while the turn runs — measured a 6238 s-old lease
+    still 254 s from expiry — so a live turn is simply `expires_at > now`, however
+    long it has been going. Pass a past `expires_at` for a turn that died.
+    """
+    return (cid, acquired_at, expires_at)
 
 
-def _orch_db(path, sessions, messages):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(path)
-    c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, ended_at REAL, "
-              "title TEXT, input_tokens INTEGER, output_tokens INTEGER)")
-    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL)")
-    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", sessions)
-    c.executemany("INSERT INTO messages (session_id, timestamp) VALUES (?,?)", messages)
-    c.commit()
-    c.close()
+def test_orchestrator_detection_keeps_no_process_list_dependency():
+    """D3 was "the store over `ps`", and the card forbids leaving a dead argv
+    heuristic behind as a fallback that can only produce false negatives."""
+    assert not hasattr(kanban_live, "_chat_profiles")
+    assert not hasattr(kanban_live, "_ps_lines")
+    assert "subprocess" not in vars(kanban_live)
+    assert "ps_lines" not in inspect.signature(
+        kanban_live.attach_orchestrators).parameters
 
 
-def test_attach_orchestrators_picks_the_cli_session_with_latest_message(tmp_path):
-    _orch_db(tmp_path / "profiles" / "sphoin-orch" / "state.db", [
-        ("old", "cli", NOW - 90 * 86400, None, "stale", 1, 1),
-        ("live", "cli", NOW - 9 * 86400, None, "sphoin", 97_000_000, 990_000),
-        ("done", "cli", NOW - 86400, NOW - 3600, "closed", 5, 5),      # older activity
-        ("ended-live", "cli", NOW - 3 * 86400, NOW - 7200, "ended", 3, 3),  # stamped ended, older msgs
-        ("job", "cron", NOW - 60, None, "cron run", 7, 7)],
-        [("old", NOW - 80 * 86400), ("live", NOW - 30), ("done", NOW - 3700),
-         ("ended-live", NOW - 600), ("job", NOW - 5)])
-    (tmp_path / "profiles" / "kronos-orch").mkdir(parents=True)                    # no state.db
-    ps = ["/v/python /u/.local/bin/hermes -p sphoin-orch chat --continue sphoin",
-          "/v/python /u/.local/bin/hermes -p kronos-orch chat --continue kronos"]
+def test_a_live_turn_lease_is_the_only_thing_that_makes_a_working_orchestrator(tmp_path):
+    """One row per live lease, read from the store that owns it: profile, session
+    id, turn age, lifetime tokens, and `last_activity_description` as state."""
+    _state_db(tmp_path / "profiles" / "hscc-orch" / "state.db",
+              [("local-41d4ee6a", "local", NOW - 7200, 1_685_225, 10_065,
+                None, "hscc", NOW - 40, "receiving stream response")],
+              leases=[_turn("local-41d4ee6a", NOW - 323)])
     d = _collect()
-    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
-    s, k = d["orchestrators"]
-    assert (s["profile"], s["title"], s["last_s"]) == ("sphoin-orch", "sphoin", 30)
-    assert (s["tok_in"], s["tok_out"]) == (97_000_000, 990_000)
-    assert k == {"profile": "kronos-orch", "title": None, "last_s": None,
-                 "tok_in": None, "tok_out": None}
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["orchestrators"] == [{
+        "profile": "hscc-orch", "session": "local-41d4ee6a", "turn_s": 323,
+        "tok_in": 1_685_225, "tok_out": 10_065, "state": "receiving stream response"}]
+
+
+def test_a_repl_without_a_lease_is_idle_and_not_listed(tmp_path):
+    """CHOSEN AND PINNED: an idle REPL is not listed at all. The section header
+    says "(N running)", and `ended_at IS NULL` proves nothing — 871 `cli`
+    sessions on the measured host are NULL there purely because the process died
+    before anything stamped it."""
+    _state_db(tmp_path / "profiles" / "sphoin-orch" / "state.db",
+              [("idle-repl", "local", NOW - 9 * 86400, 9_000, 900, None, "sphoin",
+                NOW - 4000, "awaiting input")])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["orchestrators"] == []
+
+
+def test_an_expired_lease_is_not_listed(tmp_path):
+    """The lease self-expires, so a REPL killed mid-turn drops out within one TTL
+    instead of haunting the view forever."""
+    _state_db(tmp_path / "profiles" / "sphoin-orch" / "state.db",
+              [("dead", "local", NOW - 900, 9_000, 900, None, "sphoin", NOW - 900,
+                "receiving stream response")],
+              leases=[_turn("dead", NOW - 900, expires_at=NOW - 180)])   # expired 180 s ago
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["orchestrators"] == []
+
+
+def test_a_worker_turn_never_renders_as_an_orchestrator(tmp_path):
+    """A dispatched card holds a live lease too — that is what makes it a running
+    card. Only interactive sources may show in this section. `oneshot` is a
+    single non-interactive invocation, so it is excluded alongside the three the
+    card named; `local` is excluded nowhere, because a v0.23 REPL turn's source
+    measures `local` with `created_source='cli'`, NOT `cli`."""
+    worker = (
+        ("k-1", "kanban", 60),        # a running card's turn
+        ("c-1", "cron", 120),         # a scheduled job
+        ("s-1", "subagent", 30),      # a delegated child
+        ("o-1", "oneshot", 10),       # `hermes -p X -q ...`, one query and done
+        ("n-1", None, 15),            # unknown/NULL source: NOT excluded
+    )
+    _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db",
+              [(cid, src, NOW - age, 1000, 10, None, "card", NOW - age,
+                "receiving stream response") for cid, src, age in worker],
+              leases=[_turn(cid, NOW - age) for cid, src, age in worker])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert [r["session"] for r in d["orchestrators"]] == ["n-1"]
+
+
+def test_two_live_turns_in_one_store_are_two_rows_oldest_turn_first(tmp_path):
+    _state_db(tmp_path / "profiles" / "hscc-orch" / "state.db",
+              [("a", "local", NOW - 900, 10, 1, None, "a", NOW - 10, "a"),
+               ("b", "local", NOW - 3600, 20, 2, None, "b", NOW - 20, "b")],
+              leases=[_turn("a", NOW - 900), _turn("b", NOW - 3600)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert [r["session"] for r in d["orchestrators"]] == ["b", "a"]   # like running_table
+    assert [r["turn_s"] for r in d["orchestrators"]] == [3600, 900]
+
+
+def test_the_root_store_is_profile_default(tmp_path):
+    _state_db(tmp_path / "state.db",
+              [("r-1", "cli", NOW - 60, 5, 5, None, "root", NOW - 5, "thinking")],
+              leases=[_turn("r-1", NOW - 60)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert [(r["profile"], r["session"]) for r in d["orchestrators"]] == [("default", "r-1")]
+
+
+def test_orchestrators_survive_a_missing_unreadable_or_old_store(tmp_path):
+    """The reported failure mode is a section that vanishes; one bad store must
+    never take the good ones, or the view, down with it."""
+    _state_db(tmp_path / "profiles" / "good-orch" / "state.db",
+              [("g", "local", NOW - 60, 7, 7, None, "good", NOW - 10, "thinking")],
+              leases=[_turn("g", NOW - 60)])
+    (tmp_path / "profiles" / "no-db-orch").mkdir(parents=True)             # no state.db
+    garbage = tmp_path / "profiles" / "garbage-orch"
+    garbage.mkdir()
+    (garbage / "state.db").write_bytes(b"not a database at all")           # unreadable
+    _state_db(tmp_path / "profiles" / "old-orch" / "state.db",             # pre-v0.23
+              [("x", "cli", NOW - 60, 3, 3)], lease_table=False)
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert [(r["profile"], r["session"]) for r in d["orchestrators"]] == [("good-orch", "g")]
+
+
+def test_a_store_with_no_lease_table_at_all_is_skipped_without_a_crash(tmp_path):
+    """Every store here predates `session_turn_leases`: the probe misses and the
+    join never runs, so nothing raises out of the view."""
+    _state_db(tmp_path / "profiles" / "ancient-orch" / "state.db",
+              [("x", "cli", NOW - 60, 3, 3)], lease_table=False)
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["orchestrators"] == []
+
+
+def test_orchestrators_state_is_cleaned_and_dashes_stay_honest(tmp_path):
+    """`last_activity_description` is a db string; it can carry control chars."""
+    _state_db(tmp_path / "profiles" / "ok-orch" / "state.db",
+              [("s", "local", NOW - 60, 5, 5, None, "t", NOW - 1, "\x1b[2Jboom\x07")],
+              leases=[_turn("s", NOW - 60)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert d["orchestrators"][0]["state"] == "[2Jboom"
+
+
+def test_a_profile_dir_that_is_not_a_plain_token_never_becomes_a_path(tmp_path):
+    """The guard moved from argv to the directory scan: a name is only ever a
+    path if it is a plain token naming an existing profiles/<name> directory."""
+    _state_db(tmp_path / "state.db", [("s", "local", NOW - 60, 1, 1)],
+              leases=[_turn("s", NOW - 60)])
+    weird = tmp_path / "profiles" / ".. hidden .."
+    _state_db(weird / "state.db",
+              [("s", "local", NOW - 60, 1, 1, None, None, NOW, "leak")],
+              leases=[_turn("s", NOW - 60)])
+    d = _collect()
+    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
+    assert [r["profile"] for r in d["orchestrators"]] == ["default"]
 
 
 def test_render_shows_orchestrators_and_7d_tokens():
@@ -468,8 +609,9 @@ def test_render_shows_orchestrators_and_7d_tokens():
     d["tokens"] = {"workers": {"24h": [400_000_000, 6_000_000], "7d": [2_000_000_000, 30_000_000]},
                    "orchestrators": {"24h": [20_000_000, 300_000], "7d": [90_000_000, 1_000_000],
                                      "since": NOW - 3600}}
-    d["orchestrators"] = [{"profile": "sphoin-orch", "title": "sphoin", "last_s": 30,
-                           "tok_in": 97_000_000, "tok_out": 990_000}]
+    d["orchestrators"] = [{"profile": "sphoin-orch", "session": "local-41d4ee6a",
+                           "turn_s": 323, "tok_in": 97_000_000, "tok_out": 990_000,
+                           "state": "receiving stream response"}]
     buf = io.StringIO()
     make_console(file=buf, width=200, color_system=None).print(kanban_live.render(d))
     out = buf.getvalue()
@@ -480,31 +622,7 @@ def test_render_shows_orchestrators_and_7d_tokens():
     assert next(l for l in lines if l.startswith("orchestrators ")).split()[1:] == ["20.0M", "300k", "90.0M", "1.0M"]
     assert next(l for l in lines if l.startswith("total")).split()[1:] == ["420.0M", "6.3M", "2.09G", "31.0M"]
     assert "orchestrators (1 running)" in out
-    assert "sphoin-orch" in out and "97.0M/990k" in out
+    orch = next(l for l in lines if l.startswith("sphoin-orch")).split()
+    assert orch == ["sphoin-orch", "local-41d4ee6a", "5m", "97.0M/990k",
+                    "receiving", "stream", "response"]
     assert "orchestrator history since" not in out
-
-
-def test_attach_orchestrators_trusts_messages_not_ended_at(tmp_path):
-    # a live REPL whose only session is already stamped ended (seen on ecofire-bc-orch)
-    _orch_db(tmp_path / "profiles" / "bc-orch" / "state.db",
-             [("seed", "cli", NOW - 30 * 86400, NOW - 86400, "ecofire-bc", 1_000, 10)],
-             [("seed", NOW - 90)])
-    d = _collect()
-    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW,
-                                     ps_lines=["/v/p /u/bin/hermes -p bc-orch chat --continue ecofire-bc"])
-    assert d["orchestrators"][0]["title"] == "ecofire-bc"
-    assert d["orchestrators"][0]["last_s"] == 90
-
-
-def test_attach_orchestrators_never_turns_a_foreign_argv_into_a_path(tmp_path):
-    outside = tmp_path / "elsewhere" / "state.db"
-    _orch_db(outside, [("x", "cli", NOW - 60, None, "leak", 1, 1)], [("x", NOW - 1)])
-    _orch_db(tmp_path / "profiles" / "ok-orch" / "state.db",
-             [("s", "cli", NOW - 60, None, "\x1b[2Jboom\x07", 5, 5)], [("s", NOW - 1)])
-    ps = ["/v/p /u/bin/hermes -p ../../elsewhere chat",       # traversal
-          "/v/p /u/bin/hermes -p ghost-orch chat",           # no such profile dir
-          "/v/p /u/bin/hermes -p ok-orch chat"]
-    d = _collect()
-    kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW, ps_lines=ps)
-    assert [r["profile"] for r in d["orchestrators"]] == ["ok-orch"]
-    assert d["orchestrators"][0]["title"] == "[2Jboom"      # control chars stripped
