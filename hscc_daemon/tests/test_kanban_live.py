@@ -27,14 +27,54 @@ def _no_real_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(kanban_live, "LEDGER_PATH", str(tmp_path / "ledger.json"))
 
 SCHEMA = """
-CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
-  priority INTEGER DEFAULT 0, created_at INTEGER, completed_at INTEGER,
-  last_heartbeat_at INTEGER, current_run_id INTEGER);
+-- The measured live shape, not an invention: PRAGMA table_info on the operator's
+-- hscc board (t_455e857f), so a fixture cannot drift from what the collector
+-- actually reads. task_events carries run_id + payload, task_runs carries
+-- outcome/ended_at/metadata — the columns an older fixture silently lacked.
+CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, body TEXT, assignee TEXT,
+  status TEXT, priority INTEGER, created_by TEXT, created_at INTEGER,
+  started_at INTEGER, completed_at INTEGER, workspace_kind TEXT,
+  workspace_path TEXT, branch_name TEXT, project_id INTEGER, claim_lock TEXT,
+  claim_expires INTEGER, tenant TEXT, result TEXT, idempotency_key TEXT,
+  consecutive_failures INTEGER, worker_pid INTEGER, last_failure_error TEXT,
+  max_runtime_seconds INTEGER, last_heartbeat_at INTEGER, current_run_id INTEGER,
+  workflow_template_id INTEGER, current_step_key TEXT, skills TEXT,
+  model_override TEXT, provider_override TEXT, max_retries INTEGER,
+  goal_mode INTEGER, goal_max_turns INTEGER, session_id TEXT, block_kind TEXT,
+  block_recurrences INTEGER, reasoning_effort TEXT, completion_contract TEXT,
+  worker_started_at INTEGER);
 CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT,
-  status TEXT, started_at INTEGER, last_heartbeat_at INTEGER);
+  step_key TEXT, status TEXT, claim_lock TEXT, claim_expires INTEGER,
+  worker_pid INTEGER, max_runtime_seconds INTEGER, last_heartbeat_at INTEGER,
+  started_at INTEGER, ended_at INTEGER, outcome TEXT, summary TEXT,
+  metadata TEXT, error TEXT, worker_started_at INTEGER);
 CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
   run_id INTEGER, kind TEXT, payload TEXT, created_at INTEGER);
 """
+
+# Named columns for the fixtures: the tables are now as wide as the live ones, so
+# a positional ``INSERT … VALUES (…)`` would be both unreadable and fragile.
+_TASK_COLS = ("id", "title", "assignee", "status", "priority", "created_at",
+              "completed_at", "last_heartbeat_at", "current_run_id")
+_RUN_COLS = ("id", "task_id", "profile", "status", "started_at", "last_heartbeat_at",
+             "ended_at", "outcome")
+
+
+def _task(c, tid, title="t", assignee="backend-engineer", status="ready",
+          priority=0, created_at=None, completed_at=None, last_heartbeat_at=None,
+          current_run_id=None):
+    c.execute(f"INSERT INTO tasks ({','.join(_TASK_COLS)}) VALUES "
+              f"({','.join('?' * len(_TASK_COLS))})",
+              (tid, title, assignee, status, priority, created_at, completed_at,
+               last_heartbeat_at, current_run_id))
+
+
+def _run(c, run_id, task_id, profile="backend-engineer", status="running",
+         started_at=None, last_heartbeat_at=None, ended_at=None, outcome=None):
+    c.execute(f"INSERT INTO task_runs ({','.join(_RUN_COLS)}) VALUES "
+              f"({','.join('?' * len(_RUN_COLS))})",
+              (run_id, task_id, profile, status, started_at, last_heartbeat_at,
+               ended_at, outcome))
 
 
 class _Ctx:
@@ -69,8 +109,7 @@ class _FakeKb:
 
 
 def _alpha(c):
-    c.execute("INSERT INTO task_runs VALUES (1,'t_run','backend-engineer','running',?,?)",
-              (NOW - 5 * 3600, NOW - 30))
+    _run(c, 1, "t_run", started_at=NOW - 5 * 3600, last_heartbeat_at=NOW - 30)
     c.execute("INSERT INTO tasks (id,title,assignee,status,created_at,current_run_id) "
               "VALUES ('t_run','long job','backend-engineer','running',?,1)", (NOW - 9000,))
     c.execute("INSERT INTO tasks (id,title,assignee,status,priority,created_at) "
@@ -192,7 +231,10 @@ def test_hscc_kanban_dispatcher_keeps_json_for_delegated_verbs(monkeypatch, caps
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
 
 
-_SESSION_COLS = 9          # see the CREATE TABLE below; legacy rows are the first 5
+_SESSION_COLS = ("id", "source", "started_at", "input_tokens", "output_tokens",
+                 "ended_at", "title", "last_activity_at", "last_activity_description")
+                                 # the reader-facing subset of the live 65 columns;
+                                 # legacy rows are the first 5 (see the CREATE TABLE)
 
 
 def _state_db(path, rows, leases=(), *, lease_table=True):
@@ -211,11 +253,27 @@ def _state_db(path, rows, leases=(), *, lease_table=True):
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(path)
-    c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, "
-              "input_tokens INTEGER, output_tokens INTEGER, ended_at REAL, "
-              "title TEXT, last_activity_at REAL, last_activity_description TEXT)")
-    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
-                  [tuple(r) + (None,) * (_SESSION_COLS - len(r)) for r in rows])
+    # The reader-facing columns of the live `sessions` table (65 columns measured
+    # by PRAGMA table_info on this host's root store) plus every NOT NULL column
+    # with its measured default — so a fixture row has to satisfy the same insert
+    # contract the kernel's does, instead of a schema this file invented.
+    c.execute("CREATE TABLE sessions (id TEXT, source TEXT NOT NULL, "
+              "started_at REAL NOT NULL, input_tokens INTEGER, output_tokens INTEGER, "
+              "ended_at REAL, title TEXT, last_activity_at REAL, "
+              "last_activity_description TEXT, "
+              "rewind_count INTEGER NOT NULL DEFAULT 0, "
+              "archived INTEGER NOT NULL DEFAULT 0, "
+              "hidden INTEGER NOT NULL DEFAULT 0, "
+              "pinned INTEGER NOT NULL DEFAULT 0, "
+              "compression_fallback_streak INTEGER NOT NULL DEFAULT 0, "
+              "compression_ineffective_count INTEGER NOT NULL DEFAULT 0, "
+              "git_metadata_generation INTEGER NOT NULL DEFAULT 0, "
+              "runtime_revision INTEGER NOT NULL DEFAULT 0, "
+              "runtime_generation INTEGER NOT NULL DEFAULT 0, "
+              "transcript_revision INTEGER NOT NULL DEFAULT 0)")
+    c.executemany(f"INSERT INTO sessions ({','.join(_SESSION_COLS)}) VALUES "
+                  f"({','.join('?' * len(_SESSION_COLS))})",
+                  [tuple(r) + (None,) * (len(_SESSION_COLS) - len(r)) for r in rows])
     if lease_table:
         c.execute("CREATE TABLE session_turn_leases (conversation_id TEXT PRIMARY KEY, "
                   "holder TEXT, acquired_at REAL, expires_at REAL)")
@@ -276,8 +334,8 @@ def _tri_board(db_path, run_started_at):
 
     def build(c):
         for i, (tid, run_id, sid) in enumerate(cards):
-            c.execute("INSERT INTO task_runs VALUES (?,?,?,'running',?,?)",
-                      (run_id, tid, "ecofire-bc-engineer", run_started_at, NOW - 30))
+            _run(c, run_id, tid, profile="ecofire-bc-engineer",
+                 started_at=run_started_at, last_heartbeat_at=NOW - 30)
             c.execute("INSERT INTO tasks (id,title,assignee,status,created_at,current_run_id) "
                       "VALUES (?,?,?,'running',?,?)",
                       (tid, f"job {i}", "ecofire-bc-engineer", run_started_at, run_id))
@@ -522,8 +580,15 @@ def test_a_worker_turn_never_renders_as_an_orchestrator(tmp_path):
         ("c-1", "cron", 120),         # a scheduled job
         ("s-1", "subagent", 30),      # a delegated child
         ("o-1", "oneshot", 10),       # `hermes -p X -q ...`, one query and done
-        ("n-1", None, 15),            # unknown/NULL source: NOT excluded
+        ("n-1", "telegram", 15),      # a source the exclude list does not name
     )
+    # (MON-23-FIELDS) this row used to be `None`. The fixture's `sessions` table
+    # now carries the live column contract, and `source` is `TEXT NOT NULL` there
+    # (measured: 7 223 session rows over 51 stores, `source IS NULL` = 0), so a
+    # NULL source is no longer something a store can hand this reader. The
+    # "unknown source renders rather than vanishing" rule is unchanged and still
+    # pinned — `_LIVE_TURNS`' `s.source IS NULL` clause stays as its author left
+    # it, simply no longer reachable from a real store.
     _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db",
               [(cid, src, NOW - age, 1000, 10, None, "card", NOW - age,
                 "receiving stream response") for cid, src, age in worker],
