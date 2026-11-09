@@ -2616,9 +2616,20 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
       1. Mark ``state: "waking"`` (idempotent guard on entry).
       1a. Build the wake plan. An EMPTY plan means we cannot determine what
           to start (serving.json missing/corrupt ⇒ ``load_serving`` returned
-          None). This is a FAILURE, not a success: do NOT clear the block and
-          do NOT claim ``up`` when zero units were started/confirmed (§8,
-          audit F7). Record the failure loudly and leave the block latched.
+          None). This is a FAILURE, not a success: do NOT claim ``up`` when
+          zero units were started/confirmed (§8, audit F7) — record it loudly
+          (``critical`` notify + honest ``state: "error"``) and clear the block
+          so the layer is never left down AND unsupervised (the v1.9.0 residual;
+          the ``state`` is ``"error"``, NOT ``"down"``, because cycle()'s
+          self-heal would re-latch a ``"down"`` and undo exactly that).
+      1b. End the durable ``deliberate_down`` stay-down on that failure too
+          (t_9c437f03) — same sanctioned popper as step 2a, with the EMPTY
+          plan. A wake has been requested, which IS the escape hatch from a
+          stay-down, so the teardown's order is revoked even though this wake
+          starts nothing; leaving it stamped would re-suppress supervision
+          (``check_workers`` / ``check_proxy`` / the trigger notify gate)
+          through the door step 1a's block clear just opened. Cannot arm a
+          relaunch: post_boot gate 2 needs NON-EMPTY ``units``. Fail-soft.
       2. Record ``wake_source`` + ``wake_at``.
       2a. Re-arm the post-boot ``expected_up`` marker (t_576964d5, moved up by
           t_278b35b2) — BEFORE any start is issued, so a wake that later times
@@ -2654,7 +2665,10 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     down and unsupervised"). It clears ``intentional`` too, letting the
     watchdog resume and heal whatever is actually there, and records an
     honest ``state: "error"`` (NOT ``"up"`` — nothing was started) with the
-    reason.
+    reason. It also ENDS the ``deliberate_down`` stay-down (§1b), because the
+    block-clear alone does not achieve that principle: a stamp there stands
+    ``check_workers`` / ``check_proxy`` / the notify gate down through the very
+    door the clear just opened.
 
     Returns a result dict with ``result`` in
     (``up`` | ``busy`` | ``already-waking`` | ``start-failed`` | ``not-ready`` |
@@ -2732,6 +2746,48 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # and re-suppress the watchdog (undoing this fix). "error" means "the
     # layer is not up; autodown has released it to the watchdog".
     if not plan:
+        # -- 1b. End the stay-down BEFORE releasing the watchdog (t_9c437f03) --
+        # INTENTIONAL: an empty-plan wake CLEARS the durable ``deliberate_down``
+        # stay-down, through the same sanctioned popper step 2a uses
+        # (``post_boot.record_expected_up``) with the EMPTY plan. Read this as a
+        # decision, not an oversight — the three alternatives were weighed:
+        #   * leaving it set — rejected. Its meaning is "the fleet stays down
+        #     until the next fleet-up" (post_boot D1/ESCAPE HATCH), and step 1a
+        #     is reachable ONLY from ``autoup()``: by the time we are here a
+        #     fleet-up has already been requested, so the order the record
+        #     enforces has been revoked. Worse, it would cancel the one thing
+        #     this failure path exists to do: clearing ``intentional`` just
+        #     lines below is justified by "never leave the layer down AND
+        #     unsupervised", yet a stamped stay-down re-suppresses supervision
+        #     through the other door — ``health.check_workers`` and
+        #     ``health.check_proxy`` stand down entirely on
+        #     ``deliberately_down()``, and ``trigger`` stops notifying. One
+        #     line releases supervision, the missing line pins it back: the same
+        #     wedge class t_278b35b2 removed at step 2a, reached two statements
+        #     earlier.
+        #   * clearing with a NEW record shape (an "empty-plan" stand-down) —
+        #     rejected. A new shape belongs to post_boot.py, and as framed it
+        #     either keeps ``deliberately_down()`` truthy (that is "leave it
+        #     set" wearing a nicer label) or does not (this branch, plus a
+        #     breadcrumb the operator can already get: ``cleared_at`` survives
+        #     here, and autodown.json carries ``state: "error"`` + this reason).
+        # WHY CLEARING CANNOT ARM A RELAUNCH: launch authority needs NON-EMPTY
+        # ``units`` (post_boot gate 2), and an empty plan writes ``units: []``,
+        # so the post-boot pass stays inert. This releases SUPERVISION, never
+        # LAUNCH. The resulting state — ``units: []`` and no ``deliberate_down``
+        # — means "nothing is expected up and nobody holds a standing stay-down
+        # order": the pass reports ``no-marker``, and every consumer supervises
+        # exactly as it did before the record existed.
+        # The marker ``reason`` names the empty plan for the human reading
+        # ``~/.hscc/expected-up.json``; it is DISPLAY ONLY — no consumer may
+        # branch on it (or on record presence alone), same rule as step 2a.
+        # Fail-soft: a marker problem never blocks the failure path.
+        try:
+            from . import post_boot as _pb
+            _pb.record_expected_up(
+                plan, reason="autodown wake: empty plan (nothing to start)")
+        except Exception as e:
+            log(f"Autodown: post_boot stay-down clear failed ({e})", "WARN")
         # The block was latched intentional (as teardown left it); clear it so
         # the watchdog resumes supervision. State → "error" (honest: nothing
         # started), reason records the failure for status + operator action.
@@ -2761,8 +2817,9 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # ever heal again. Like ``cmd_cluster_up`` (hscc-cluster/hscc.py), the
     # marker says what the fleet SHOULD be running even if this wake's own
     # launches then fail, so it is written BEFORE the first unit starts and the
-    # failure paths (empty plan above excepted, where nothing was ever
-    # claimed) all inherit an already-cleared stay-down.
+    # failure paths (the empty plan at 1b included, which records the EMPTY
+    # footprint for exactly that reason) all inherit an already-cleared
+    # stay-down.
     # WHY THIS IS SAFE FOR THE POST-BOOT PASS: gate 3 of post_boot's gate order
     # (``autodown.classify`` / ``intentional_window``) refuses to resurrect
     # anything while the block is latched or the state is ``waking``, and BOTH
