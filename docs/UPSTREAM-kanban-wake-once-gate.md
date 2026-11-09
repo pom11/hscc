@@ -8,6 +8,11 @@ Status: **filed upstream** as
 Follows `t_ff520296` (PR #265, merged `2e477e15`), which fixed only the half this
 repo owns. Full attribution for the doubling: `NOTES-t_ff520296.md` (in that commit).
 
+**The one open question is closed.** §9.4 asked which `deliver_wake` branch the
+`hscc-orch` sub takes, because the whole §3.2 half is worthless to us if the answer is
+self-post. `t_12350485` answered it with code plus a 9/9 log-to-fence join: **the push
+branch**. §3.2 stands as written and no follow-up comment is owed on #152206.
+
 **Anchor provenance.** Line numbers below are the fleet-pinned runtime
 (`~/.hermes/hermes-agent` @ `045881137d`). Each was re-checked against upstream `main`
 @ `a5664060c1` and matches, except three in `hermes_cli/kanban_db_notify.py`:
@@ -163,9 +168,17 @@ Insertion points:
   (`gateway/session_automation.py:639`) across a `/new` rotation. An opaque string
   identity would silently stop wakes from surviving a session reset.
 - Default `None` → byte-identical to today: fail-open by construction.
-- This is what makes a same-emitter retry idempotent (the #146361 class) and makes
-  "was event E woken?" answerable from `find_session_admission` without a second
-  store. It is **not** a substitute for §3.1 (see §2.1).
+- This is what makes a same-emitter retry idempotent (the #146361 class). It is also
+  **not** designed against a path we do not take: §9.4 proves the `hscc-orch` notifier
+  wake lands on exactly this branch, nonce and all.
+- It is **not** a substitute for §3.1 (see §2.1), and §9.4 puts numbers on the two
+  limits: the `admit_internal_event` fallback (`gateway/wake.py:149-151`) delivers a
+  wake with **no admission row**, and session retirement moves rows into `state_meta`
+  out of `find_session_admission`'s reach (`hermes_state_mutation_retirement.py:103-141`,
+  `hermes_state_runtime.py:180`). So the fence answers "was event E woken?" only *in the
+  affirmative* — a row proves yes, absence proves nothing — and the dedupe token must be
+  **re-derivable from event identity**, never read back out of the fence. §3.1's claim in
+  the board DB is the authority.
 
 ## 4. Posture — carried from t_ff520296, keep it upstream
 
@@ -195,6 +208,13 @@ deleted and the waker calls `wake_already_claimed(...)` / `try_claim_wake(...)` 
 the same board DB it already opens. That removal is the acceptance test for the
 upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
 
+§3.2 on its own does **not** license this deletion. §9.4 confirms the notifier's wake
+does reach the fence — so the token is worth landing for retry idempotency — but a fence
+row is not a claim: the `admit_internal_event` fallback writes none, and rows do not
+outlive the target session. Deleting `gateway_wake_cursors` /
+`gateway_already_delivered` requires §3.1's claim in the board DB, which is
+session-lifecycle-independent by construction.
+
 ## 6. Tests the upstream PR must carry
 
 | case | pins |
@@ -208,6 +228,8 @@ upstream API: if the stopgap cannot be deleted cleanly, the API is wrong.
 | `spawn_failed` (not wake-bearing) → never suppresses | kind boundary |
 | `dedupe=None` → identity shape unchanged | default-off for §3.2 |
 | deterministic dedupe survives `/new` (route wake carried) | `_ROUTE_WAKE_PRODUCERS` parsing |
+| `admit_route_wake` returns False (no live route) → wake still delivered, **no** admission row, other emitter's claim still governs | §9.4(a): a fence row is evidence, not a receipt |
+| target session retired → `find_session_admission` can no longer see the row, the board-DB claim still suppresses | §9.4(b): suppression must not depend on the fence outliving the session |
 
 ## 7. Prior art upstream (read before reviewing; do not re-propose)
 
