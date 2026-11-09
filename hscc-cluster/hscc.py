@@ -571,6 +571,14 @@ _REAL_FAILURE_MARKERS = (
     "cannot determine running workloads",
     "teardown did not run",
     "teardown did not confirm",
+    # `Error: could not query <host>: …` (sparkrun/cli/_stop_logs.py:209-210).
+    # Never softened, whatever the reason text: an unqueryable host is NOT
+    # "nothing was running" — sparkrun's own comment at :208-209 says it may be
+    # running containers we never saw. Same doctrine the sibling slash-verb
+    # card adopted for the same shapes (t_3a0bdca9 / PR #256). Note this does
+    # NOT match the summary line "hosts that could be queried" (queried, not
+    # "could not query"), so the already-down shape itself stays classifiable.
+    "could not query",
 )
 
 STAY_DOWN_CONFIRMATION = (

@@ -147,6 +147,28 @@ class TestDownOutputRendering:
         assert "benign_no_workloads" not in res
         assert "ERROR" in "\n".join(mod._human_lines("down", res))
 
+    def test_unqueryable_host_is_never_called_already_down(self, monkeypatch):
+        """`could not query <host>` is never softened whatever the reason text
+        — an unqueryable host may be running containers we never saw
+        (sparkrun/cli/_stop_logs.py:208-210; same doctrine as PR #256). The
+        reason here is deliberately NOT one of the other real-failure markers,
+        so only this rule can catch it."""
+        mod, res, _ = self._down(
+            monkeypatch, 1,
+            "No sparkrun containers found on the hosts that could be queried.",
+            "Error: could not query 10.0.0.246: connection reset by peer")
+        assert "benign_no_workloads" not in res
+        assert "ERROR" in "\n".join(mod._human_lines("down", res))
+
+    def test_already_down_summary_alone_is_still_benign(self, monkeypatch):
+        """...and the new rule must not swallow the summary line itself: "hosts
+        that could be queried" is not "could not query"."""
+        mod, res, _ = self._down(
+            monkeypatch, 1,
+            "No sparkrun containers found on the hosts that could be queried.")
+        assert res["benign_no_workloads"] is True
+        assert "[ok]OK[/]" in "\n".join(mod._human_lines("down", res))
+
     def test_unknown_nonzero_output_stays_error(self, monkeypatch):
         """No known already-down marker => the exit code still rules."""
         mod, res, _ = self._down(monkeypatch, 1,
