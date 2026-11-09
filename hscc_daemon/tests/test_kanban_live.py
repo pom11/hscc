@@ -27,10 +27,12 @@ def _no_real_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(kanban_live, "LEDGER_PATH", str(tmp_path / "ledger.json"))
 
 SCHEMA = """
--- The measured live shape, not an invention: PRAGMA table_info on the operator's
--- hscc board (t_455e857f), so a fixture cannot drift from what the collector
--- actually reads. task_events carries run_id + payload, task_runs carries
--- outcome/ended_at/metadata — the columns an older fixture silently lacked.
+-- The measured live shape, not an invention: `PRAGMA table_info` on the operator's
+-- hscc board, so a fixture cannot drift from what the collector actually reads.
+-- Before this card the fixture declared 9 task columns against the live 39 and 6
+-- task_runs columns against the live 17 — `outcome`, `ended_at` and `metadata` did
+-- not exist in a test board at all. (`task_events` was already the live 6 columns,
+-- `run_id` and `payload` included; it stays as measured, not as rewritten.)
 CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, body TEXT, assignee TEXT,
   status TEXT, priority INTEGER, created_by TEXT, created_at INTEGER,
   started_at INTEGER, completed_at INTEGER, workspace_kind TEXT,
