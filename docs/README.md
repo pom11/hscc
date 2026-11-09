@@ -219,6 +219,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/worktree-hygiene-2026-10-05.md` — worktree / `wt-*` branch hygiene for the primary checkout.
 - `docs/audits/DISPATCHER_HOLD_UPSTREAM_2026-10-17.md` — upstream report: the Hermes dispatcher counts benign holds as "stuck".
 - `docs/audits/board-pin-t_b014c2b8.md` — audit + decision record for `hscc_daemon/board_pin.py`: measured proof that `HERMES_KANBAN_DB` outranks an explicit `board=` inside a worker/delegation fence, every board-opening surface in this repo with `file:line`, which are guarded as reads vs refused as writes, and the (unfiled) upstream issue draft. **live**
+- `docs/audits/wedge-default-board-pin-t_dad0da32.md` — decision record for the residual left by the card above: `dispatcher_wedge` rebuilt `multi` from the *slug* (`board != "default"`), so `default` was the one board the pin guard could not see; why (a) "default is a real board" was chosen over refusing, and why `multi` is read from autodown's enumeration instead of `bool(board)`. **live**
 - `docs/audits/telegram-removal-plan.md` — plan for removing Telegram from hscc_daemon / bootstrap / scripts / cluster / api.
 - `docs/audits/telegram-removal-report.md` — the removal, shipped (t_07fd5b86).
 - `docs/audits/architect-rewrite-card.md` — card spec: project digest (bounded archive digest).
