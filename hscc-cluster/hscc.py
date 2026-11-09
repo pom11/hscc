@@ -519,6 +519,97 @@ def _post_boot_module():
             return None
 
 
+# ── "already down" classification (t_1244b3b4, D6) ───────────────────────
+#
+# A ``down`` verb whose fleet held nothing is a SUCCESS for the operator, but
+# sparkrun's CLI exits 1 on several of those paths (see the note on
+# ``_benign_no_workloads_note``), and the raw exit code is what ``success``
+# reports. These markers let the renderer say OK + why, WITHOUT touching the
+# ``--json`` contract: ``success`` keeps meaning "sparkrun exited 0" (the
+# daemon, scripts and the iOS console dump this dict raw), and the verdict is
+# carried in the ADDITIVE ``benign_no_workloads`` / ``benign_note`` keys.
+_ALREADY_DOWN_MARKERS = (
+    # sparkrun/api/_resolve.py:477 JobNotFound — the per-host shape that lands
+    # in StopAllResult.hosts_failed (_stop_all.py:240-242) while the other
+    # hosts stopped fine.
+    "no running workload matches intent",
+    # sparkrun/cli/_stop_logs.py:217
+    "no sparkrun containers running",
+    # sparkrun/cli/_stop_logs.py:215 (only benign when NO real error rides
+    # along with it — see the real-failure markers below)
+    "no sparkrun containers found",
+    "no containers running",
+    "no containers found",
+    "nothing to stop",
+    "already stopped",
+    "already down",
+)
+
+# Anything with one of these is a genuine failure even when an already-down
+# line is present too: an unqueryable host is NOT "nothing was running"
+# (sparkrun's own docstring in api/_stop_all.py says so — it may be running
+# containers we never saw).
+_REAL_FAILURE_MARKERS = (
+    "permission denied",
+    "permission-denied",
+    "authentication",
+    "auth failed",
+    "unauthorized",
+    "ssh:",
+    "ssh_exchange",
+    "could not resolve hostname",
+    "connection refused",
+    "network is unreachable",
+    "host is down",
+    "no route to host",
+    "timed out",
+    "timeout",
+    "docker: ",
+    "docker daemon",
+    "command not found",
+    "traceback (most recent call last)",
+    "cannot determine running workloads",
+    "teardown did not run",
+    "teardown did not confirm",
+)
+
+STAY_DOWN_CONFIRMATION = (
+    "fleet marked deliberately down — the daemon will not relaunch workers, "
+    "the proxy or the notifier until `hscc cluster up`")
+
+
+def _benign_no_workloads_note(res):
+    """Short note when a nonzero sparkrun exit only says "already down".
+
+    Returns ``None`` (=> render ERROR) unless the combined stdout+stderr of a
+    FAILED run matches an already-down shape and carries no real-failure
+    signature. The exit code itself is never rewritten here.
+
+    Which shapes this covers, from sparkrun's own exit paths:
+      * ``cli/_stop_logs.py:246-247`` ``if not result.success: sys.exit(1)``
+        with ``StopAllResult.success`` (``api/_models.py:614-617``) False
+        because ``hosts_failed`` holds a per-host ``JobNotFound("No running
+        workload matches intent …")`` from ``api/_resolve.py:477`` — caught
+        into ``hosts_failed`` at ``api/_stop_all.py:240-242``. That is the
+        reported shape: ``Stopped 4 job(s), 4 container(s) across 4 host(s).``
+        on stdout AND exit 1 on one clean run.
+      * ``cli/_stop_logs.py:213-216`` (nothing discovered + a discovery error)
+        and ``:217`` (nothing discovered at all).
+    """
+    if res.get("success") or res.get("returncode") == 0:
+        return None
+    text = "\n".join(p for p in (res.get("output", ""), res.get("error", ""))
+                     ).lower()
+    if not text.strip():
+        return None
+    if any(m in text for m in _REAL_FAILURE_MARKERS):
+        return None
+    if not any(m in text for m in _ALREADY_DOWN_MARKERS):
+        return None
+    return ("nothing to stop — the fleet was already down "
+            "(sparkrun exited nonzero on an already-down host)")
+
+
 def cmd_cluster_down(dry_run=False):
     """Stop ALL sparkrun workloads across the fleet. ``[--dry-run]``.
 
@@ -533,6 +624,22 @@ def cmd_cluster_down(dry_run=False):
     direction: the marker is cleared even when the stop itself failed,
     because "down, no relaunch" is always the safe reading of a deliberate
     `cluster down`). ``--dry-run`` touches nothing.
+
+    t_1244b3b4 (D6 + D1), two output fixes on the same verb:
+
+      1. A nonzero sparkrun exit whose output only says "already down" (a
+         per-host ``JobNotFound`` riding along with a clean ``Stopped N
+         job(s)…`` line, or nothing running at all) is SUCCESS for a down
+         verb. It is reported that way WITHOUT moving the machine contract:
+         ``success`` stays "sparkrun exited 0" and the verdict rides in the
+         ADDITIVE ``benign_no_workloads`` / ``benign_note`` keys that
+         ``_human_lines`` renders as OK + the note (see
+         ``_benign_no_workloads_note`` for the exact sparkrun shapes).
+      2. After a REAL down that successfully cleared the marker, one
+         confirming line names the stay-down the operator just claimed
+         (``STAY_DOWN_CONFIRMATION``) — including when nothing needed
+         stopping. The WARN path is unchanged and prints no confirmation,
+         because nothing was claimed; ``--dry-run`` prints nothing extra.
     """
     serving = _load_daemon_serving()
     if serving is None:
@@ -540,13 +647,22 @@ def cmd_cluster_down(dry_run=False):
                          "requires the daemon's serving module)"}
     cmd = serving.fleet_down_cmd()
     res = _run_or_print(cmd, dry_run)
-    if not dry_run:
-        pb = _post_boot_module()
-        if pb is not None:
-            try:
-                pb.clear_expected_up("hscc cluster down")
-            except Exception as e:
-                print(f"WARN: expected_up marker clear failed: {e}")
+    if dry_run:
+        return res
+    note = _benign_no_workloads_note(res)
+    if note:
+        res["benign_no_workloads"] = True
+        res["benign_note"] = note
+    pb = _post_boot_module()
+    cleared = False
+    if pb is not None:
+        try:
+            pb.clear_expected_up("hscc cluster down")
+            cleared = True
+        except Exception as e:
+            print(f"WARN: expected_up marker clear failed: {e}")
+    if cleared:
+        print(STAY_DOWN_CONFIRMATION)
     return res
 
 
@@ -972,8 +1088,16 @@ def _human_lines(cmd: str, result) -> list:
 
     if cmd in ("down", "up", "stop"):
         ok = bool(result.get("success", result.get("ok")))
-        tag = "OK" if ok else "ERROR"
-        lines.append(f"[{'ok' if ok else 'error'}]{tag}[/]")
+        # t_1244b3b4 (D6): an already-down fleet is a SUCCESS for a down verb.
+        # The verdict arrives in the ADDITIVE benign_* keys set by
+        # cmd_cluster_down, so the `--json` `success` field still means
+        # "sparkrun exited 0" and only the human view changes.
+        benign = (not ok) and bool(result.get("benign_no_workloads"))
+        shown_ok = ok or benign
+        tag = "OK" if shown_ok else "ERROR"
+        lines.append(f"[{'ok' if shown_ok else 'error'}]{tag}[/]")
+        if benign and result.get("benign_note"):
+            lines.append(f"[dim]{esc(str(result['benign_note']))}[/dim]")
         if result.get("command"):
             cmdline = result["command"]
             lines.append("[label]command[/label]  "
