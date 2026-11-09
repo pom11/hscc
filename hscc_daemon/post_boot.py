@@ -43,6 +43,15 @@ JSON, a non-dict marker, or a non-dict/empty record all return ``None`` and
 the predicate NEVER raises — with no verifiable evidence every consumer
 supervises exactly as it did before this key existed.
 
+THREE states, not two, leave gate 2 with empty ``units``: the record present
+(stay-down), the marker file present with an empty footprint and NO record
+("nothing is expected up and nobody holds a standing stay-down order" — what an
+empty-plan autodown wake leaves behind, t_9c437f03 step 1b), and no readable
+marker at all. All three are the same verdict (`no-marker`, ok, no launch);
+``run_post_boot_pass`` prints which one it found, and prints the marker's own
+``reason`` in the middle state because it is the only breadcrumb that a wake
+tried. Printing is not branching: nothing reads that prose.
+
 ESCAPE HATCH (the only one): a stay-down is lifted by ``hscc cluster up``, or
 by an autodown wake, which records the footprint pre-launch — nothing else is
 sanctioned. Deleting ``~/.hscc/expected-up.json`` is NOT the override: that
@@ -310,6 +319,32 @@ def deliberately_down(path=None):
     return record
 
 
+def marker_file_readable(path=None):
+    """True when the marker FILE exists and parses as a JSON object.
+
+    DISPLAY-ONLY (t_c2b5fb13) — it exists so gate 2 can name which of its
+    no-units states the fleet is in, and nothing may ever branch on it to
+    decide what to do. The read-only distinction it draws is between facts an
+    operator can check on disk: ``False`` means there is no marker evidence at
+    all (absent / unreadable / corrupt / not an object — the same absence
+    ``load_marker`` reads as an empty marker and ``deliberately_down`` reads as
+    ``None``), ``True`` means the file is there with a footprint nobody has
+    filled in. Fail-safe in the same direction as everything else here: an
+    exception reading the file answers ``False``, which is the wording that
+    promises nothing.
+
+    Silent by design (no log, no write), same as ``deliberately_down``.
+    """
+    path = EXPECTED_UP_FILE if path is None else path
+    try:
+        with open(path) as f:
+            return isinstance(json.load(f), dict)
+    except Exception:
+        # FileNotFoundError / corrupt JSON / unreadable path: no marker to
+        # speak of, which is exactly what the caller's other wording says.
+        return False
+
+
 
 # ── Boot-id evidence (through sparkrun) ──────────────────────────────────
 def fetch_boot_ids(nodes, run_fn=None, venv_python_fn=None):
@@ -418,11 +453,14 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
 
     ``result`` is one of:
       ``disabled``     — operator off-switch; zero I/O.
-      ``no-marker``    — nothing is expected up and nothing may be launched:
-                         either the fleet was never fleet-upped (message names
-                         the absent marker) or the operator deliberately
-                         brought it down (message names the stay-down record,
-                         read via ``deliberately_down()``).
+      ``no-marker``    — nothing is expected up and nothing may be launched.
+                         ONE label for three states, told apart by the message
+                         alone (t_c2b5fb13): the operator deliberately brought
+                         the fleet down (message names the stay-down record,
+                         read via ``deliberately_down()``); the marker file is
+                         present with an EMPTY footprint (message names its
+                         ``reason``/``cleared_at``); or there is no readable
+                         marker at all (fleet never fleet-upped).
       ``suppressed``   — intentional-autodown window in effect (checked pre-
                          lock AND re-checked under the lock).
       ``boot-unavailable`` — sparkrun could not answer the boot sweep: no
@@ -453,18 +491,40 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
     path = EXPECTED_UP_FILE if path is None else path
     marker = load_marker(path)
     if not (marker.get("units") or []):
-        # Two DIFFERENT states read the same here (no units): the operator
-        # deliberately brought the fleet down (record present) vs. nobody ever
-        # ran cluster up (nothing to read). Same verdict label and same
-        # no-action/ok semantics — only the wording distinguishes them, so an
-        # operator reading `hscc check post_boot` is not told "not fleet-upped"
-        # when the fleet is in fact under a stay-down.
+        # THREE different states read the same here (no units) and all three
+        # are the same verdict: `no-marker`, ok=True, no action, no launch —
+        # launch authority needs NON-EMPTY units, so no wording here can arm
+        # one. Only the WORDING distinguishes them, so an operator reading
+        # `hscc check post_boot` is told which state the fleet is actually in
+        # instead of being told "not fleet-upped" in two states that aren't:
+        #   * stay-down record present (D1) — somebody holds a standing
+        #     stay-down order, and its reason + set_at are the answer;
+        #   * marker FILE present with an EMPTY footprint (t_c2b5fb13) —
+        #     nothing is expected up and nobody holds a stay-down order. This
+        #     is what an empty-plan autodown wake leaves behind (t_9c437f03
+        #     step 1b records `units: []` and pops the record): the marker's
+        #     own `reason` is then the only breadcrumb that a wake tried and
+        #     could not describe the fleet, so it is printed here;
+        #   * no readable marker at all — the fleet was never fleet-upped, or
+        #     the file was deleted/corrupted (absence of evidence, which is
+        #     how `load_marker` and `deliberately_down` both fail-safe).
+        # `reason` / `cleared_at` are PRINTED, never matched: no branch here
+        # reads prose, and no verdict depends on it (the PR #243 rule —
+        # pinned by test_wording_is_never_a_behavioural_input).
         record = deliberately_down(path)
         if record:
             message = (f"fleet deliberately down since "
                        f"{record.get('set_at') or '?'} "
                        f"({record.get('reason') or 'no reason given'}) "
                        f"— nothing to do")
+        elif marker_file_readable(path):
+            bits = [f"reason: \"{marker.get('reason') or 'no reason given'}\""]
+            if marker.get("cleared_at"):
+                bits.append(f"cleared_at: {marker['cleared_at']}")
+            message = ("expected_up marker present with an EMPTY footprint "
+                       "(nothing is expected up and nobody holds a standing "
+                       "stay-down order; " + "; ".join(bits) + ") "
+                       "— nothing to do")
         else:
             message = ("no expected_up marker (fleet not fleet-upped, "
                        "or brought down on purpose) — nothing to do")
