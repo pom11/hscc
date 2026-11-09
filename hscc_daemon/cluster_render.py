@@ -215,11 +215,72 @@ def render_info(console: Console, result: dict) -> int:
 
 # ── cluster stop / down / up (fleet ops) ──────────────────────────────────
 
+def _fleet_op_verdict(result: dict) -> tuple[bool, bool]:
+    """(shown_ok, benign) for a fleet-op result dict — the ONE verdict rule here.
+
+    t_c23c5aef (the twin half of t_1244b3b4's D6). ``hscc cluster down`` has two
+    human renderers, and the standalone one
+    (``hscc-cluster/hscc.py::_human_lines``) already says OK for a run whose
+    nonzero sparkrun exit only meant "the fleet was not running"; this renderer
+    still said ERROR because it read ``success`` alone. It now applies the SAME
+    two-line rule, so the unified CLI and the standalone view cannot disagree:
+
+        ok     = no ``error`` key and ``success``
+        benign = (not ok) and the engine said so
+        shown  = ok or benign
+
+    ``benign`` reads the ADDITIVE ``benign_no_workloads`` key that
+    ``cmd_cluster_down`` sets, and nothing else. **This module deliberately
+    holds no marker table of its own** — the classification of sparkrun's
+    output lives in exactly one place (``_benign_no_workloads_note`` in
+    ``hscc-cluster/hscc.py``). A second copy here is how the two renderers start
+    disagreeing about whether a fleet is down with no test able to see it,
+    because each copy looks self-consistent (the same shape as ``2f90f711``'s
+    kinds-vs-labels split). The verdict below is a pure function of the KEYS:
+    it never re-reads ``output``/``error`` text, which is what
+    ``tests/test_cluster_down_benign_render.py`` pins.
+
+    What did NOT move:
+      * ``success`` still means "sparkrun exited 0" — the ``--json`` machine
+        contract (daemon, scripts, the iOS console dump that dict raw) is
+        untouched; the verdict arrives only in the additive keys.
+      * A genuine failure stays red. The engine sets the benign keys only when
+        the run carried no real-failure signature and did match an already-down
+        shape, so anything it did not classify — ssh/docker/auth/timeout, a host
+        it ``could not query``, unknown wording — arrives WITHOUT the keys and
+        still rules by the exit code. Absence of a benign key is never evidence
+        of success, and a NON-EMPTY ``error`` key on a result the engine did not
+        classify (a structural failure, e.g. the missing-``serving`` dict) still
+        vetoes.
+
+    One asymmetry is deliberate and measured: the unified view is allowed to be
+    STRICTER than the standalone one, never softer. ``_human_lines`` has no
+    ``error``-key veto at all, so ``{success: True, error: "…"}`` reads OK there
+    and ERROR here. Pinned that way round in
+    ``tests/test_cluster_down_benign_render.py`` — a red panel the operator
+    chases is a cheaper mistake than a green one they trust.
+    """
+    # ``not err``, NOT ``err is None``. ``_run_or_print`` always sets ``error``
+    # (the captured stderr, ``""`` when there was none) and ``_object_error``
+    # hands that ``""`` back, so the old ``is None`` read treated a CLEAN stop as
+    # a failure: measured at f2cbae3f, ``{success: True, returncode: 0,
+    # error: ""}`` rendered a red panel and returned 1 out of the unified CLI —
+    # the operator's "ERROR on a clean stop", second half. Nothing upstream can
+    # rescue that shape either: ``_benign_no_workloads_note`` returns None for
+    # any rc-0 run by design, so no benign key ever exists on a clean stop. The
+    # veto belongs on a NON-EMPTY error string, which is the only thing in that
+    # key that has ever meant "error".
+    err = _object_error(result)
+    ok = (not err) and bool(result.get("success", True))
+    benign = (not ok) and bool(result.get("benign_no_workloads"))
+    return (ok or benign), benign
+
+
 def _render_fleet_op(console: Console, title: str, result: dict) -> int:
     """stop/down/up share a shape: a status Panel + the raw command output."""
     dry_run = bool(result.get("dry_run"))
-    ok = _object_error(result) is None and result.get("success", True)
-    status = "ok" if ok else "error"
+    shown_ok, benign = _fleet_op_verdict(result)
+    status = "ok" if shown_ok else "error"
 
     lines = []
     if result.get("command"):
@@ -228,6 +289,9 @@ def _render_fleet_op(console: Console, title: str, result: dict) -> int:
         lines.append(f"[label]command[/label]  {esc(cmd_str)}")
     if dry_run:
         lines.append("[dim]--dry-run: nothing executed[/dim]")
+    if benign and result.get("benign_note"):
+        # Same note the standalone view prints, dimmed under the OK verdict.
+        lines.append(f"[dim]{esc(str(result['benign_note']))}[/dim]")
     for key in ("output", "error"):
         if result.get(key):
             lines.append(f"[label]{key}[/label]")
@@ -236,7 +300,7 @@ def _render_fleet_op(console: Console, title: str, result: dict) -> int:
     result_lines = list(lines) or ["[dim]command completed[/dim]"]
     console.print(theme.make_status_panel("\n".join(result_lines), status=status,
                                           title=title))
-    return 0 if ok else 1
+    return 0 if shown_ok else 1
 
 
 def render_stop(console: Console, result: dict) -> int:

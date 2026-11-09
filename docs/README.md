@@ -46,6 +46,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 - `docs/WHY.md` — why HSCC exists: the gaps stock Hermes leaves open (cluster control, role roster, review dispatch, autonomy, bootstrap) against what HSCC adds, plus a worked end-to-end example. Linked from the root README. **live**
 - `docs/COMPAT-7.30.md` — compat audit of hermes-agent upstream v2026.7.30 (v0.19.1) vs the HSCC fork+patches (patches 0001–0006). **superseded** by `docs/audits/NOTES_t_507108a7.md` (patches re-carried onto v2026.9.11); the live pins live in `hscc-bootstrap/runtime-versions.json`. **record**
 - `docs/hermes-017-new-features.md` — feature digest of hermes-agent 0.17.0 (kanban lifecycle hooks etc.) as adopted by HSCC. **superseded** by later runtime bumps (pin is v2026.9.24 per `hscc-bootstrap/runtime-versions.json`). **record**
+- `docs/UPSTREAM-kanban-wake-once-gate.md` — upstream proposal (t_f26d89c0): make one kanban event wake its recipient once across the two emitters — the hermes root cause (`uuid4` wake identity), the board-DB wake claim, and what `orch_waker` retires when it lands. **live** (pending upstream decision)
 
 ## Roadmap & handoffs
 

@@ -439,25 +439,228 @@ def build_message(board: str, pending) -> str:
             + " — review/merge/unblock as needed, then carry on.")
 
 
+# ── cross-channel wake dedupe (t_ff520296) ─────────────────────────────────
+# ONE kanban state change used to cost the orchestrator TWO wakes, because two
+# emitters read the same ``task_events`` row and each decided on its own:
+#
+#   * hermes' gateway kanban notifier — ``gateway/kanban_watchers_notifier.py``
+#     ``build_wake_text()`` -> ``deliver_wake``. It dedupes per SUBSCRIPTION on
+#     ``kanban_notify_subs.last_event_id``, advanced atomically by
+#     ``hermes_cli.kanban_db_notify.claim_unseen_events_for_sub``.
+#   * this waker — which deduped only per BOARD on the scan watermark
+#     ``st["last"][board]``, and whose ``pending`` held rendered TEXT lines, so
+#     after a nudge it had forgotten which events it delivered.
+#
+# The notifier is hermes-owned and cannot be changed from this repo, so the
+# dedupe lands here, on OUR side, and it consults the durable record the other
+# emitter already keeps: its own subscription cursor, in the SAME board DB this
+# module already opens read-only. No second ledger is invented.
+#
+# Suppression is by EVENT IDENTITY — (task, kind, event created_at, event id) —
+# never by wall-clock proximity and never by task status, so two genuine state
+# changes one second apart stay two wakes, and a ``done`` card nobody delivered
+# still wakes (crash, missed tick, gateway down).
+#: ``delivery_mode`` values that make the gateway notifier WAKE an agent (hermes
+#: ``kanban_db_notify._NOTIFY_DELIVERY_MODES``). A plain ``notify`` sub only
+#: sends a chat ping — nobody takes a turn, so its cursor proves nothing.
+GATEWAY_WAKE_MODES = ("notify+wake", "wake")
+#: Event kinds the gateway notifier can actually wake for: hermes'
+#: ``_WAKE_KINDS`` ∩ ``_EVENT_FORMATTERS``. Deliberately NARROWER than
+#: :data:`KINDS` — ``spawn_failed`` is ours alone, and the notifier's cursor
+#: advances silently past kinds it has no formatter for. Suppressing on a kind
+#: the gateway never wakes for would drop the only copy of that wake, which is
+#: the silent-inert failure class this module has already shipped once.
+GATEWAY_WAKE_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out",
+                      "review_requested", "changes_requested",
+                      "block_loop_detected")
+#: Hermes' per-subscription notification table (in every board DB). Read-only
+#: here — this module writes nothing to a board.
+SUBS_TABLE = "kanban_notify_subs"
+#: Columns :func:`gateway_wake_cursors` needs from that table; a board whose
+#: schema lacks any of them yields "no knowledge" (fail-open), never a guess.
+_SUBS_REQUIRED_COLUMNS = frozenset(
+    ("task_id", "last_event_id", "created_at", "notifier_profile", "delivery_mode"))
+
+
+def event_identity(ev) -> list:
+    """Portable identity for one event row — the dedupe key, nothing else.
+
+    ``[task_id, kind, created_at, event_id]`` from ``scan_board``'s SELECT. All
+    four parts matter: the event id is what a cursor can be compared against,
+    and (task, kind, created_at) is what a human reads in the suppression log
+    and what survives a board DB being rebuilt under a new id sequence (where
+    the id test simply stops matching — fail-open, the safe direction).
+    """
+    ev_id, task, _run_id, kind, _payload, created_at, _title = ev
+    at = created_at if isinstance(created_at, (int, float)) else 0
+    try:
+        ev_id = int(ev_id)
+    except (TypeError, ValueError):
+        ev_id = -1  # never compares equal to a real cursor: fail-open
+    return [str(task), str(kind), int(at), ev_id]
+
+
+def _clean_identity(raw):
+    """Validate one persisted pending identity, or None when absent/malformed.
+
+    A malformed identity does not poison the entry — it makes the entry
+    UNSUPPRESSIBLE, so it goes out. Losing a dedupe is a doubled wake; trusting
+    a junk identity is a dropped one.
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    task, kind, at, ev_id = raw
+    if not isinstance(task, str) or not isinstance(kind, str):
+        return None
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return None
+    if isinstance(ev_id, bool) or not isinstance(ev_id, int):
+        return None
+    return [task, str(kind), int(at), int(ev_id)]
+
+
 def _clean_pending(entries):
-    """Keep only well-formed ``[ts, line]`` entries (defence for hand-edited
-    or half-written state the takeover inherits)."""
+    """Keep only well-formed ``[ts, line]`` (+ optional identity) entries.
+
+    The stopgap's schema is ``[ts, line]`` and stays readable verbatim — the
+    third element is additive, and an entry lacking one is never suppressed
+    (fail-open). That covers the takeover file, a hand-edited state, and a
+    rollback to a waker build that never writes identities at all.
+    """
     out = []
     for e in entries or []:
         try:
             ts, line = e[0], e[1]
         except (TypeError, IndexError, KeyError):
             continue
-        if isinstance(line, str) and isinstance(ts, (int, float)):
-            out.append([ts, line])
+        if not (isinstance(line, str) and isinstance(ts, (int, float))):
+            continue
+        ident = _clean_identity(e[2]) if len(e) > 2 else None
+        out.append([ts, line, ident] if ident is not None else [ts, line])
     return out
+
+
+def gateway_wake_cursors(db_path, tasks, orch_profile) -> dict:
+    """``{task_id: [(claimed_through_event_id, sub_created_at), …]}`` for subs
+    whose wake lands in ``orch_profile`` — the gateway's own delivery record.
+
+    Read with the same discipline as :func:`scan_board` (``mode=ro`` URI,
+    :data:`SQLITE_TIMEOUT_S`): the waker observes a board, it never mutates one.
+
+    Three filters, each one there to stop this ledger from suppressing a wake
+    the gateway never actually delivered:
+
+      * ``notifier_profile = orch_profile`` — only a subscription whose wake is
+        delivered INTO the orchestrator this waker would nudge counts. A human's
+        Telegram sub says nothing about the orchestrator's pane.
+      * ``delivery_mode`` ∈ :data:`GATEWAY_WAKE_MODES` — the notifier only takes
+        a turn for those (``wake_agent``, notifier :518); a ``notify`` sub's
+        cursor advances with no wake at all.
+      * the row pair ``(last_event_id, created_at)`` is returned rather than a
+        bare max, because :func:`gateway_already_delivered` must be able to
+        reject a sub that was registered AFTER the event: ``add_notify_sub``
+        seeds a new sub caught-up to ``MAX(id)``, and that cursor is a policy
+        ("never replay history at boot"), not a delivery.
+
+    Every failure path — missing table, older schema, locked DB, junk row —
+    yields ``{}``, i.e. "I do not know", i.e. deliver. This function must never
+    raise into the tick and must never guess.
+    """
+    tasks = [str(t) for t in (tasks or ()) if t]
+    if not tasks or not orch_profile:
+        return {}
+    try:
+        uri = Path(_resolve(db_path)).absolute().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_S)
+    except (sqlite3.Error, OSError, ValueError):
+        return {}
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({SUBS_TABLE})")}
+        if not _SUBS_REQUIRED_COLUMNS.issubset(cols):
+            return {}
+        marks = ",".join("?" * len(tasks))
+        modes = ",".join("?" * len(GATEWAY_WAKE_MODES))
+        rows = conn.execute(
+            f"SELECT task_id, last_event_id, created_at FROM {SUBS_TABLE} "
+            f"WHERE task_id IN ({marks}) AND notifier_profile = ? "
+            f"AND delivery_mode IN ({modes})",
+            (*tasks, str(orch_profile), *GATEWAY_WAKE_MODES)).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    out: dict = {}
+    for task, claimed, sub_created in rows:
+        try:
+            out.setdefault(str(task), []).append(
+                (int(claimed or 0), int(sub_created or 0)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def gateway_already_delivered(ident, cursors) -> bool:
+    """Has the gateway notifier already claimed THIS exact event for a wake?
+
+    True only when some orchestrator-targeted wake sub of the same task was
+    registered STRICTLY BEFORE the event (``sub_created < at``) and its cursor
+    has passed the event id (``claimed >= ev_id``). Both halves are identity
+    tests on the two rows; no two events are ever compared to each other and no
+    wall-clock window is involved, so distinct events cannot collapse.
+
+    The strict ``<`` is the fail-open half: a sub created in the same second as
+    the event may have been seeded caught-up without ever delivering it, and a
+    same-second sub that legitimately existed costs at most one doubled wake —
+    the status quo — while the opposite choice drops wakes outright.
+
+    Kinds outside :data:`GATEWAY_WAKE_KINDS` are never suppressed: the notifier
+    has no wake path for them, so its cursor is not evidence of a delivery.
+    """
+    if not ident or not cursors:
+        return False
+    task, kind, at, ev_id = ident
+    if kind not in GATEWAY_WAKE_KINDS:
+        return False
+    for claimed, sub_created in cursors.get(task, ()):
+        if sub_created < at and claimed >= ev_id:
+            return True
+    return False
+
+
+def _suppress_gateway_delivered(pend, db_path, profile, ledger):
+    """``(kept, suppressed)`` — pending lines the gateway already woke for.
+
+    Called at DELIVERY-DECISION time, not at scan time, which is what makes the
+    rule hold in either order: the notifier claims on a ~5 s cadence while a
+    batch cannot be sent before ``debounce_s`` has aged it, so by the moment
+    this waker is about to speak, an event the gateway delivered is already
+    claimed. Entries with no validated identity are kept (fail-open).
+    """
+    if not any(len(p) > 2 for p in pend):
+        return pend, []
+    tasks = sorted({p[2][0] for p in pend if len(p) > 2})
+    try:
+        cursors = ledger(db_path, tasks, profile) or {}
+    except Exception as e:  # noqa: BLE001 — "cannot know" must mean "deliver"
+        LOG.warning("orch-waker: gateway wake ledger unreadable (%s) — "
+                    "delivering anyway; a doubled wake beats a dropped one", e)
+        return pend, []
+    if not cursors:
+        return pend, []
+    keep, gone = [], []
+    for p in pend:
+        if len(p) > 2 and gateway_already_delivered(p[2], cursors):
+            gone.append(p[2])
+        else:
+            keep.append(p)
+    return keep, gone
 
 
 def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
          state_path=None, boards_dir=None, hermes_home=None,
          warned=None, debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
          report=None, orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-         backoff_s=DEFAULT_BACKOFF_S):
+         backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None):
     """One waker pass: scan every board, batch/debounce/rate-limit, decide.
 
     Applies and PERSISTS the state file (the only side effect); returns the
@@ -510,14 +713,28 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                            seconds — no inject attempt, therefore no audit line,
                            pending keeps batching. A success clears the board's
                            counter; so does an ``orch_map`` edit.
+      * ``wake_ledger``    — ``(db_path, task_ids, orch_profile) ->
+                           {task: [(claimed_through_id, sub_created_at), …]}``,
+                           the gateway notifier's own delivery record (t_ff520296),
+                           consulted at delivery time so ONE event wakes the
+                           orchestrator ONCE. Defaults to
+                           :func:`gateway_wake_cursors` (read-only board read,
+                           same discipline as :func:`scan_board`); injectable so
+                           tests and any other emitter own the answer. Every
+                           failure path in it means "unknown" and therefore
+                           DELIVER — the dedupe is fail-open by construction.
     """
     if now is None:
         import time
         now = time.time()
+    if wake_ledger is None:
+        wake_ledger = gateway_wake_cursors
     st = load_state(state_path)
     if report is not None:
         report["unevaluable"] = False
         report.pop("backoff", None)
+        report.pop("suppressed", None)
+    suppressed: list = []
     if boards is None:
         enum = board_enumeration(boards_dir, hermes_home)
         targets = enum["boards"]
@@ -578,13 +795,34 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
             st["last"][b] = max(st["last"][b], ev[0])
             line = describe(ev)
             if line is not None:
-                st["pending"].setdefault(b, []).append([now, line])
+                # The identity rides with the line (t_ff520296): without it the
+                # batch is just prose and the waker can never tell whether THIS
+                # event was already delivered by the other emitter.
+                st["pending"].setdefault(b, []).append([now, line, event_identity(ev)])
 
         target = has_orch(b) if has_orch is not None else True
         if b in paused or not target:
             st["pending"].pop(b, None)
             continue
         pend = _clean_pending(st["pending"].get(b))
+        # ── one event, one orchestrator wake (t_ff520296) ──────────────────
+        # The gateway kanban notifier delivers its own wake for the very same
+        # task_events row. Before deciding to speak, drop from this batch every
+        # event its own subscription cursor says it already claimed for THIS
+        # orchestrator profile. Dropped BEFORE the debounce math on purpose: a
+        # line nobody needs must not hold the batch open and delay a line
+        # somebody does. The drop is persisted either way below, so a suppressed
+        # event is never re-examined (and never re-logged) on a later tick.
+        pend, gone = _suppress_gateway_delivered(
+            pend, targets[b],
+            target if isinstance(target, str) and target else orch_name(b),
+            wake_ledger)
+        for ident in gone:
+            LOG.info("orch-waker %s: %s/%s event id=%s already delivered by the "
+                     "gateway notifier — wake suppressed",
+                     b, ident[0], ident[1], ident[3])
+        suppressed.extend({"board": b, "task": i[0], "kind": i[1],
+                           "event_id": i[3], "event_at": i[2]} for i in gone)
         if not pend:
             st["pending"].pop(b, None)
             continue
@@ -652,6 +890,12 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
         st.pop(MAP_STATE_KEY, None)
     if backoff_report and report is not None:
         report["backoff"] = backoff_report
+    if suppressed and report is not None:
+        # Fail-LOUD, the t_fa9a2faf rule: a dedupe that swallowed EVERY event
+        # would look exactly like a healthy quiet board in the logs, so the
+        # count leaves the module on the same channel the backoff uses and the
+        # daemon stamps it on the stream where doctor/verify can see it.
+        report["suppressed"] = suppressed
     save_state(st, state_path)
     return decisions
 
@@ -1122,7 +1366,8 @@ def effective_scan_interval(cfg=None, path=None) -> int:
 
 # ── W3: the daemon-loop entry + the status surface ──────────────────────────
 
-def _tick_message(nudged: int, failed: int, decided: int, backoff=()) -> str:
+def _tick_message(nudged: int, failed: int, decided: int, backoff=(),
+                  suppressed: int = 0) -> str:
     """The stream stamp's human ``message`` for a scan tick.
 
     The pre-existing shape is preserved verbatim (``"N nudged, M failed, K
@@ -1130,9 +1375,15 @@ def _tick_message(nudged: int, failed: int, decided: int, backoff=()) -> str:
     names the boards currently skipped (t_f1122b7a). A waker that is silently
     skipping a board because its pane is gone must say so in the one field the
     doctor already prints — otherwise "steady" would read healthy forever.
+
+    Same argument for ``suppressed`` (t_ff520296): wakes this tick withheld
+    because the gateway notifier had already delivered that exact event are
+    named here, so "steady" can never hide a dedupe that is eating events.
     """
     base = (f"{nudged} nudged, {failed} failed, {decided} decided" if decided
             else "steady")
+    if suppressed:
+        base += f" — {suppressed} wake(s) suppressed as gateway-delivered"
     if backoff:
         names = ", ".join(f"{e.get('board')} ({e.get('retry_in_s')}s)"
                           for e in backoff[:3])
@@ -1297,11 +1548,16 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
         nudged = sum(1 for d in decisions if d.get("ok") is True)
         failed = sum(1 for d in decisions if d.get("ok") is False)
         backoff = report.get("backoff") or []
+        # t_ff520296: the count of wakes this tick DROPPED because the gateway
+        # notifier had already delivered that exact event. Stamped, not just
+        # logged — a dedupe that ate everything must show up as a big number
+        # here rather than as a suspiciously quiet "steady".
+        suppressed = len(report.get("suppressed") or [])
         entry.update(ok=True, decisions=len(decisions), nudged=nudged,
                      delivery_failed=failed, last_scan=now,
-                     backoff=backoff,
+                     backoff=backoff, suppressed=suppressed,
                      message=_tick_message(nudged, failed, len(decisions),
-                                           backoff))
+                                           backoff, suppressed))
         return entry
     except Exception as e:  # noqa: BLE001 — the stream must survive anything
         LOG.exception("orch-waker: daemon tick failed")
@@ -1579,7 +1835,7 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
              audit_path=None, warned=None, report=None,
              debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
              orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-             backoff_s=DEFAULT_BACKOFF_S):
+             backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None):
     """One waker pass wired end to end: scan -> decide -> inject -> audit.
 
     The public entry (W3 calls it every ~30 s from the daemon loop). Defaults
@@ -1622,7 +1878,7 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
             report=report,
             debounce_s=debounce_s, min_gap_s=min_gap_s,
             orch_map=orch_map, fail_threshold=fail_threshold,
-            backoff_s=backoff_s)
+            backoff_s=backoff_s, wake_ledger=wake_ledger)
     except Exception:  # noqa: BLE001 — the daemon loop must survive anything
         LOG.exception("orch-waker: tick failed — will retry next tick")
         if report is not None:

@@ -11,6 +11,1164 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.6] - 2026-11-09
+
+### Added
+- **`post_boot` now carries a durable "deliberately down" record.**
+  `clear_expected_up` only emptied the marker's `units` list, so no consumer
+  could tell "the operator ran `hscc cluster down`" from "nobody ever ran
+  `hscc cluster up`" — and the daemon relaunched a fleet the operator had
+  just brought down. `clear_expected_up(reason)` now also writes
+  `deliberate_down = {"set_at": <now_iso()>, "reason": <str>}` inside the
+  existing `~/.hscc/expected-up.json` (one surface for "was the fleet
+  expected to be up?"), `record_expected_up` `pop`s it — a fleet-up or an
+  autodown wake ends the stay-down — and the module-level predicate
+  `deliberately_down(path=None)` returns the record or `None`. Fail-safe in
+  the same direction as `health._intentional_autodown_down` and
+  `trigger._intentional_autodown`: missing file, unreadable file, corrupt
+  JSON, non-dict marker or a non-dict/empty record all read as `None` and the
+  predicate never raises, so no evidence means supervision proceeds exactly
+  as before. The post-boot pass now reports
+  `fleet deliberately down since <set_at> (<reason>)` where it used to say the
+  marker was absent; the verdict stays `no-marker` and every ok/no-action
+  semantic is unchanged. No consumer reads the predicate yet, so this is safe
+  to merge alone — the health/trigger/autodown gates are separate cards.
+
+### Changed
+- Shipped skills no longer describe Telegram delivery. Hermes runs without a messaging platform, so the hscc skills now name desktop notifications + events.jsonl and local cron delivery, and the webhook example uses a <platform> placeholder.
+
+### Fixed
+- **`hscc cluster down` printed `ERROR` on a run that had just stopped the
+  whole fleet, and never said what it had just claimed.** Two separate output
+  bugs on the same verb, both fixed in `hscc-cluster/hscc.py`:
+
+  1. **An already-down fleet is a SUCCESS for a `down` verb (D6).** sparkrun's
+     `stop --all` exits 1 on paths that mean "already down": the summary
+     `Stopped 4 job(s), 4 container(s) across 4 host(s).` goes to stdout at
+     `sparkrun/cli/_stop_logs.py:241-243` and `sys.exit(1)` then fires at
+     `:246-247` on `not result.success`, where `StopAllResult.success`
+     (`sparkrun/api/_models.py:614-617`) is `not hosts_failed and not
+     discovery_errors` — so ONE host whose workload was already gone
+     (`JobNotFound("No running workload matches intent …")`, raised at
+     `sparkrun/api/_resolve.py:477` and caught into `hosts_failed` at
+     `sparkrun/api/_stop_all.py:241-242`) turns a clean 4/4 teardown into exit
+     1. `_run_or_print` reports that exit code as `success`, so `_human_lines`
+     rendered `ERROR`. The verdict is now carried in two ADDITIVE keys —
+     `benign_no_workloads` + `benign_note` — set by
+     `_benign_no_workloads_note()` and rendered as `OK` + the note. **The
+     `--json` machine contract did not move**: `success` still means
+     "sparkrun exited 0" (the daemon, scripts and the iOS console dump this
+     dict raw via `_emit_result`/`--json`; `hscc-api/routes_ops.py:554`
+     `payload = dict(result)` just passes the new keys through). A genuine
+     failure still renders `ERROR` — an ssh/docker/auth/timeout signature
+     anywhere in the output outranks the already-down wording, because an
+     unqueryable host is NOT "nothing was running" (sparkrun's own
+     `api/_stop_all.py` docstring says so — it may be running containers we
+     never saw). `Error: could not query <host>: …` is therefore never
+     softened whatever its reason text, the same doctrine the sibling
+     slash-verb card adopted for these very shapes (`t_3a0bdca9` / PR #256);
+     the summary line `hosts that could be queried` is not that marker, so
+     the already-down shape itself stays classifiable.
+  2. **A real `cluster down` now says it claimed the stay-down (D1).**
+     `clear_expected_up` (t_ab75e987) stamps the durable `deliberate_down`
+     record, so after a real down that cleared it the verb prints one
+     confirming line naming what the daemon will now not relaunch. It prints
+     for the benign case too — the stay-down is claimed even when nothing
+     needed stopping, which was already the documented intent of the verb. The
+     existing `WARN` on a failed clear is unchanged and prints NO confirmation
+     (nothing was claimed), and `--dry-run` still prints nothing extra and
+     touches nothing.
+- **`hscc kanban monitor` showed no orchestrators at all.** The section was
+  gated on the process list: `_chat_profiles()` kept only an argv whose first
+  two entries named `hermes` and which contained `chat`. Hermes v0.23 launches
+  a REPL as `python -I -c '<~10 KB bootstrap>' -p <profile> chat --continue X`,
+  so `argv[1]` is `-I` and nothing matched — measured on a host with seven REPL
+  processes alive, the deployed 2.15.5 CLI reported `orchestrators: []` while
+  every one of them was up. A false negative of that shape is invisible, so the
+  gate is gone rather than widened: `attach_orchestrators` now reads turn
+  liveness from the session stores, joining `session_turn_leases` (one row per
+  in-flight turn, renewed while the turn runs and self-expiring) onto `sessions`
+  where `expires_at > now`, per profile db plus the root db as `default`.
+  Sessions from worker-family sources (`kanban`, `cron`, `subagent`, `oneshot`)
+  are excluded so a dispatched card's turn can never render as an orchestrator,
+  and the row now answers what the operator asked: **Profile · Session · Turn ·
+  Tokens · state**, `state` being `sessions.last_activity_description` through
+  `_clean()` and Turn the age of the lease from `fmt_age`. A REPL with no lease
+  is idle and is not listed. `_known_profile` still decides what may become a
+  path, now over the scanned profile-directory names; a store that is missing,
+  unreadable or predates `session_turn_leases` yields no row and no raise. The
+  probe (`SELECT 1 ... LIMIT 1`) runs per db and the join only where a live
+  lease exists, for the 5 s loop over ~50 stores.
+- **An autodown wake that timed out left the fleet pinned "deliberately down"
+  forever.** The wake re-armed the post-boot `expected_up` marker — the act
+  that `pop`s the durable `deliberate_down` stay-down record (t_ab75e987) — at
+  step 6a, i.e. only after `_wait_ready` confirmed every unit healthy. The
+  readiness-timeout path returns early from `_handle_wake_timeout` and never
+  reaches that step, so a wake that failed to come up left the stay-down record
+  stamped by the teardown that preceded it: the post-boot pass, `check_workers`
+  and `check_proxy` all stood down on `deliberately_down()` and **nothing could
+  ever heal again** — the one state this fleet must never wedge in. The record
+  now happens at step **2a**, before the first unit is started, exactly like
+  `cmd_cluster_up`, which records pre-launch on purpose: the marker says what
+  the fleet SHOULD be running even if this command's own launches then fail.
+  The fail-soft `try`/`except` + `WARN` is unchanged, and `_clear_intentional_
+  block` stays deliberately AFTER readiness (clearing it early would let the
+  first watchdog tick see a still-loading cluster and latch the breaker).
+  Doing this early is safe for the post-boot pass because gate 3 of its gate
+  order (`autodown.classify` / `intentional_window`) already refuses to
+  resurrect anything while the block is latched or the state is `waking` — both
+  are true for the whole wake — and gate 6 additionally requires the autodown
+  lock the wake is holding. The wake lifts the stay-down for BOTH sanctioned
+  wordings (`hscc cluster down` and `autodown: intentional idle teardown`)
+  without reading or branching on `reason`: a wake is a fleet-up, and fleet-up
+  is the sanctioned escape hatch from a stay-down.
+- **`scripts/tests/test_cli_help_surface.py::test_a_table_identical_under_sibling_interpreters`
+  was never flaky — it was over budget, and the budget was being spent on work
+  its own logic discards.** Counted, not guessed: the `(A)`-only pass walks
+  **169 surface paths / 331 invocations** and rendered each one at *every*
+  width (80, 120 **and** 500 for `flag`/`flag2`; 80 and 120 for `help`) —
+  **955 `prober.run` calls, 899 distinct `(argv, width)` CLI subprocess
+  launches**. It then keeps only `a_findings_for_surface()`'s `kind == "A"`
+  entries, and that function derives every `A` finding from `max(renders)`
+  *alone* (its own rule 1: "only the WIDEST render available is authoritative").
+  The narrower renders exist only to feed the `A-WIDTH` guard, which `a_table`
+  throws away on the very next line. So **570 of 899 interpreter launches
+  produced bytes that were parsed and discarded**, and they were the difference
+  between clearing the cap and missing it: per-probe cost measured
+  **0.32–0.35 s**, and `899 × 0.35 ≈ 315 s` against `timeout=300`.
+  `a_table()` now probes each surface at its one authoritative width
+  (`A_TABLE_WIDTHS`: `WIDTH_WIDE` for `flag`/`flag2`, `WIDTHS_WRAP[-1]` for
+  `help`) — **899 → 329 launches, 2.7× fewer, table provably unchanged**
+  because the deleted renders could only ever have contributed the `A-WIDTH`
+  branch this function never reads. The full audit is untouched: (B) still
+  measures 80 and 120 and the `A-WIDTH` guard still runs there.
+- **Measured, same harness, 14-core host, 8 CPU spinners + 8 concurrent
+  `import rich, yaml` churners (load average 9.1–9.4), `nice -n 10`, 2 runs
+  per arm.** Before: **312.55 s, 312.00 s** — the card's
+  `subprocess.TimeoutExpired … timed out after 300 seconds`, reproduced on the
+  first loaded run with no diff applied. After: **114.80 s, 115.11 s**. The
+  per-probe unit cost is the same on both arms (0.323 s vs 0.353 s), which is
+  the evidence that the win is *not launching the probes* rather than catching
+  a quieter moment — the shape the card asked for, and the reason the numbers
+  are stated instead of the fix being asserted.
+- **Why `--a-table ''` walked the whole surface at all, and why that is correct.**
+  `scripts/tests/cli_help_a_counts.json` ships `{"counts": {}, "lines": {}}`:
+  zero `flightdeck` leaks **is** the contract, so
+  `surfaces = sorted(report["a_counts"])` is `[]`, which became
+  `--a-table ''` → `want = None` → full walk. Reading the code alone that looks
+  like an accidental empty-list-means-all bug — but "fixing" it to walk nothing
+  would have made the gate assert `{} == {}` having executed **zero** probes: a
+  test that can only pass. The strong reading is the right one. With no local
+  leak, the sibling's job is to prove it independently finds nothing **either**,
+  across the whole surface. The full walk stays, is now affordable, and is no
+  longer accidental: the gate passes `--a-table '*'` explicitly, so the argv in
+  a future `TimeoutExpired` names a deliberate whole-surface walk instead of an
+  empty string that reads like a caller bug.
+- **No cache, deliberately.** A per-group cache would have certified the very
+  thing this gate tests: the `(A)` table must be re-derived per interpreter,
+  because GATE-313 is precisely argparse's help column differing between
+  CPythons. The legitimate reuse axis was "the same `argv` rendered at three
+  widths", and that axis is now simply not launched — cheaper to delete than to
+  memoise, and it adds no invalidation surface to a test whose whole value is
+  that it re-derives everything.
+- **`/cluster-down` cleared nothing, so the daemon resurrected the fleet it had
+  just stopped.** This is the same bug as `hscc cluster down`, on the *second*
+  surface and worse: the slash verb ran `sparkrun stop --all --hosts <node>`
+  per node and never called `clear_expected_up` at all, so there was no
+  stay-down intent on disk anywhere for `check_workers` / `check_proxy` to read.
+  It now claims the record through the SAME entry point as the CLI verb —
+  `post_boot.clear_expected_up("/cluster-down")` (D1/D5), reached by a fail-soft
+  `_post_boot_module()` in the tolerance style of `hscc-cluster/hscc.py:501-519`
+  (a `post_boot` import failure or a raising clear must never break the verb —
+  it prints `⚠️ stay-down marker could NOT be written (…)` instead). **Written
+  even when a node's stop failed**, the same fail-safe direction the CLI verb
+  documents at `hscc-cluster/hscc.py:530-535`: "down, no relaunch" is always the
+  safe reading of a deliberate down. The unconfirmed/`--dry-run` preview path
+  touches nothing — no stop, no marker. The confirmed output gains one line
+  naming the record and the escape hatch together, because **there is no
+  `/cluster-up` slash verb**: `fleet marked deliberately down — the daemon will
+  not relaunch workers, the proxy or the notifier until `hscc cluster up``.
+  **Output truthfulness (D6):** a node whose stop output says there was nothing
+  to stop is marked `○ <node>: nothing running`, not `❌ … stopped — <err>` —
+  sparkrun exits 1 on `Error: No running workload matches intent …` for a node
+  that was already down, which used to read as a failure the operator had to
+  chase. The mark is applied on the exit-0 `No sparkrun containers running.`
+  spelling too, because `✅ … stopped` there claims a stop that never happened.
+  Deliberately *not* matched: `Error: could not query <host>: …` / `No …
+  containers found on the hosts that could be queried.` — a host that could not
+  be queried may still be running containers, so calling it "nothing running"
+  would be a new lie replacing an old one. A real error keeps `❌` with its
+  error tail.
+- **`hscc kanban monitor` printed five fields the v0.23 board kernel no longer
+  matches.** Swept every field both monitors print against the live stores
+  (read-only, 24 boards). `scheduled` was not one of the counted statuses, so a
+  card parked on a time or an external event was counted nowhere — and a board
+  whose only open cards were `scheduled` was skipped as idle by the boards table
+  *and* by the section's own live-board filter, so it vanished entirely. A
+  `ready` card's waiting age came from `MAX(task_events.created_at)` over every
+  kind, and v0.23 writes `commented`/`edited`/`attached`/`reprioritized` (and a
+  `heartbeat` every ~60 s): 607 live tasks had a newest event that was not their
+  own `promoted`, so their age was silently reset to ~0 — now aged from the
+  queueing event (`READY_CLOCK_KINDS`, mirroring the kernel's own status-changing
+  list) with `created_at` as fallback. `Done 24h` counted `status='done'` only,
+  but the archive path keeps `completed_at` (54 live archived rows still carry
+  it), so finishing today and being archived today dropped the card out of the
+  column and could take its board out of the view. The *last hour* panel could
+  not show the kernel's own alarms — `protocol_violation`,
+  `terminal_worker_reaped`, `suspected_hallucinated_references`,
+  `completion_blocked_empty_result`, `changes_requested`, `review_requested`,
+  `rate_limited` — because they were not in `OUTCOME_KINDS`, so a reaped worker
+  read as a clean `completed`. `Beat` was measured fine (`task_runs
+  .last_heartbeat_at` still written; heartbeat gaps p50 60 s, none > 600 s in
+  24 h) but an *unknown* beat rendered as freshly-beaten; it is `warn` now.
+- **`hscc cards monitor` labelled a stopped card from a 12-row panel and had no
+  label at all for the new outcome kinds.** `Monitor._outcomes()` read
+  `collect()["events"]` — the newest `RECENT_LIMIT` rows shared across every
+  board — so a card that stopped behind 12 busier events lingered as a bare
+  `stopped`. `collect()` now also returns `outcomes: {board: {card: kind}}` for
+  every card with an outcome in the window, and the cards monitor prefers it
+  (the events pass stays as the fallback for a collector without it).
+  `OUTCOME_STYLE` gained a label and a colour for every kind the board can
+  deliver, which it previously lacked by construction: the kinds live in
+  `kanban_live`, the labels in `cards_live`, and nothing checked they agreed.
+- **A deliberate `hscc cluster down` still paged the operator.** The fleet was
+  torn down at 17:51:23 and daemon.log recorded
+  `macOS notification sent: HSCC: orchestrator/DGX unhealthy` at 17:52:19. The
+  page came from the shipped `orch-dgx-down` rule (`condition.metric ==
+  failed_dgx`, `trigger_type: notify`): a teardown makes that metric — and
+  `vllm_down` and the engine wedge — true BY CONSTRUCTION, and
+  `trigger.fire_trigger_action` had a gate on `auto_restart`
+  (`_intentional_autodown`) but none on `notify` and no knowledge of a manual
+  `cluster down` at all. The notify branch now checks the serving-layer rules
+  against t_ab75e987's durable record through one new seam,
+  `trigger._operator_down(deliberately_down_fn=None)` (deferred `post_boot`
+  import, any exception ⇒ `None`), threaded through
+  `trigger_engine(..., deliberately_down_fn=None)` so the real loop passes
+  nothing and reads the real predicate. Suppression is per-rule, never global,
+  and covers exactly the three serving-layer signals named by
+  `_OPERATOR_DOWN_SUPPRESSED_METRICS` — `failed_dgx`, `vllm_down`,
+  `state.engine_wedge.degraded` — logging one INFO line
+  `Trigger <rule_id>: notify suppressed — fleet deliberately down (<reason>)`
+  before `send_macos_notification` can run. `nas_down` and `watchdog_blocked`
+  keep firing: a lost NAS mount and a tripped watchdog are not fleet-serving
+  signals. `emit_event` and `block_pipeline` are structurally untouched (the
+  gate lives inside the `notify` branch only), and the `auto_restart` gate is
+  byte-identical — the two gates answer different questions and are deliberately
+  not merged.
+  **Which writers count as a stay-down (decided, not string-matched):**
+  `clear_expected_up(reason)` has two sanctioned callers —
+  `hscc-cluster/hscc.py:547` (`hscc cluster down`, the operator) and
+  `hscc_daemon/autodown.py:2319` (`autodown: intentional idle teardown`) — so
+  the record means "someone deliberately cleared the footprint", not "an
+  operator typed the verb", and BOTH are honoured: the idle teardown has no
+  other notify gate (health.py's checks get there first via
+  `_intentional_window()`, the trigger engine does not). `reason` is copied into
+  the log line and nowhere else — no substring of it is ever tested, so an
+  operator-chosen wording cannot become a safety property (pinned verbatim for
+  both producers, plus a third arbitrary wording, in
+  `hscc_daemon/tests/test_trigger.py`). Fail-safe direction is toward PAGING: a
+  raising predicate, a non-dict, or a record missing `set_at`/`reason` reads as
+  no evidence and the page goes out as it did before the record existed.
+  One spec detail worth flagging: the shipped `engine-wedge-detected` rule keys
+  on `metric == "event_type"` and carries `state.engine_wedge.degraded` in
+  `condition.value`, so matching `condition.metric` alone would have left that
+  rule paging straight through the gate — `_serving_layer_notify` matches the
+  value for `event_type`-keyed rules and nothing else.
+- **`hscc kanban monitor` printed the same token pair for every running
+  card.** `attach_tokens` matched a running card to a worker session with a
+  900 s `started_at` window in the worker profile's `state.db`. Under Hermes
+  v0.23 each run is one gateway session, and cards claimed in the same second
+  under one profile are indistinguishable to a window — three concurrent
+  ecofire-bc cards all printed `1.4M/22k`. `collect()` now resolves each
+  running row's `session_id` / `session_db` from the `owner_admitted` task
+  event hermes writes for `tasks.current_run_id` (the only board-side run to
+  session link, because `task_runs` has no session column), and `attach_tokens`
+  reads that session by identity, so the window query does not run at all when
+  an id is known. The window stays only as the labelled fallback
+  (`tok_match: "window"`) for a run whose event has not landed yet, and a run
+  nothing matches still renders an honest dash.
+- **The `hscc-bootstrap` leg's unnamed 98 % failure cluster is named, and it
+  was never a resolver bug.** `pytest --collect-only -q hscc-bootstrap/tests`
+  collects **1164** tests; the `-q` band is 72 dots wide and pytest truncates
+  the percentage, so the orch logs' `............................F.FFFF` at
+  `98 %` decodes to collection indices **1109, 1111, 1112, 1113, 1114** — five
+  parametrised cases of
+  `test_skill_resolver_xval.py::test_mirror_agrees_with_live_resolver`
+  (`flat vs category DIFFERENT content (June collision)`,
+  `two categories byte-identical (EQUAL rank -> refuses) #B2`,
+  `two categories DIFFERENT content -> refuses`,
+  `BOM'd frontmatter renames a dir onto the name #S1`,
+  `frontmatter name beyond the old 40-line window #S1`). All five failed
+  `assert True is False` on the *live-resolver* half, with the message
+  "fixture expectation drifted from the live resolver". The resolver had not
+  drifted: it still refuses every one of those layouts. What changed is the
+  **vocabulary of the refusal** — a same-tier collision no longer puts the bare
+  name in `missing`, it puts `Ambiguous skill name <id>: use one of <paths>`
+  there (`agent/skill_commands.py:ambiguous_skill_label`, and
+  `agent/skill_utils.py:407` `AMBIGUOUS_SKILL_PREFIX`, "the one spelling of
+  every same-tier refusal"). `_real_verdict` asked `SKILL not in missing`, so a
+  labelled refusal read as a successful load and the fixture looked wrong while
+  the resolver was right. Probe output, one layout, verbatim:
+  `missing=['Ambiguous skill name sdlc-review: use one of catA/sdlc-review,
+  catB/sdlc-review']`. The predicate now asks hermes in hermes' own words —
+  `_PROBE` imports `AMBIGUOUS_SKILL_PREFIX` from the live checkout instead of
+  hard-coding the wording — and a spelling it cannot classify returns as
+  `unrecognised` and **fails the test** rather than defaulting to "loads", so
+  the next vocabulary change cannot hide the way this one did. Verified on this
+  host: that file went **5 failed, 6 passed → 11 passed**, and the *second*
+  assertion (mirror vs live, the cross-validation the file exists for) now
+  actually runs for all eleven layouts instead of aborting before it for five.
+- **Two `video_gen` e2e tests were asserting a path core never used.**
+  `test_real_sdk_round_trip_against_fake_server` and
+  `test_real_sdk_relative_url_download_uses_core_save_url` globbed
+  `$HERMES_HOME/cache/videos/openai_compat_*.mp4`, but generated deliverables
+  live in `cache/generated/<media>/` — `agent/provider_media.py:GENERATED_SUBDIR`,
+  deliberately outside the transient cache dir so the sweeper cannot delete a
+  deliverable. `res["success"]` was `True` the whole time; only the glob was
+  two levels too high. `5 passed` after the fix, including
+  `saved[0].read_bytes() == FAKE_MP4`, which is the assertion that proves the
+  bytes are the ones the fake server served. These two had **never** reported a
+  failure to anyone because the leg never survived to print one (next bullet).
+- **The two "legs that never finish" were one cause: a pytest process replacing
+  its own image mid-run.** `hermes_bootstrap.py:599` runs at *module import
+  time*, and when the running interpreter is not hermes' selected dependency
+  generation it calls `os.execv(selected_python, relaunch_command(...))`.
+  Nothing in the harness imports it at startup — a **deferred** import deep in
+  the state-db write path reaches it:
+  `hermes_state.append_messages_batch → _display_dedupe_key →
+  context_compressor._is_synthetic_compression_user_turn → from
+  agent.conversation_loop import … → agent.process_bootstrap → hermes_bootstrap`.
+  `execv` discards the process image, so the session leaves **no summary, no
+  `FAILED` line and nothing on either stream** — measured: `pytest
+  hscc-api/tests` died inside `test_gateway_backfill.py::
+  test_backfill_seeds_full_history` with **0 bytes on stdout and 0 bytes on
+  stderr, rc=1**, and `pytest hscc-bootstrap/tests` died at its **1161st of
+  1164** tests, inside `test_video_gen_openai_compat_e2e.py`. Both reproduce
+  byte-identically at `origin/main` `882b40cf` with no PR diff, and both are
+  gone under `HERMES_DISABLE_LAZY_INSTALLS=1`, which `venv_sync.prepare_launch`
+  honours (`venv_sync.py:456`) by returning `None`. The guard is now set by
+  `scripts/run_tests.sh` for every leg and by the `hscc-bootstrap` / `hscc-api`
+  `tests/conftest.py` so a direct `pytest <leg>/tests` is as safe as the runner.
+  This removes the hazard rather than hiding it: if the selected generation
+  really is stale, an import now raises an `ImportError` naming the package,
+  which is what a test harness should report instead of vanishing.
+- **`hscc verify` reported a deliberate `cluster down` as a faulty serving
+  layer.** After the operator tore the fleet down on purpose, the command still
+  printed `✗ daemon_streams … dgx.json: ok=False; gateway.json: ok=False`, so
+  the one command that is supposed to be trustworthy cried wolf during normal,
+  intended operation — and a scheduled check paged for nothing. The only excuse
+  verify had was the AUTO DOWN path (`_intentional_window_verdict()` +
+  `intentional == "autodown"`), which a manual `cluster down` can never open:
+  that verb never latches the intentional watchdog block. `check_daemon_streams`
+  now carries a SECOND, independent excuse beside it — a stream whose own state
+  says `intentional: "operator_down"` (written by t_ba1424b7's workers/proxy
+  gates and t_a19fd5d9's dgx/gateway stamp) AND which the durable record
+  confirms is reported as excused, through the same `expected`-list machinery and
+  the same `ok`/detail conventions as the autodown path, so `hscc verify --json`
+  emits the same KIND of record and only the label differs. The new reader is
+  `_operator_down_verdict(deliberately_down_fn=None)` (the injectable seam over
+  `post_boot.deliberately_down`, the sibling of `_intentional_window_verdict`)
+  and `_operator_down_label(record)`, which derives the human wording from the
+  record so the line names the real cause:
+  `fleet deliberately down (hscc cluster down)`.
+  **Two keys must agree, exactly as on the autodown path:** marker without
+  record ⇒ still a fault (a lost or corrupt marker can never hide a real fault —
+  the seam's fail-safe direction is toward REPORTING faults, the opposite of
+  `trigger._operator_down`'s toward paging); record without marker ⇒ still a
+  fault (a stream that does not explain itself is a fault, the existing
+  contract). An excused tick is not an exempt stream: the recency rule still
+  applies, so a stay-down stream that goes silent is `stale` and RED.
+  **Autodown stays first, byte-identical (D2):** the window branch is judged
+  before the new `elif`, so an autodown-tagged stream inside a window keeps the
+  `intentionally down by autodown` / `waking from autodown (serving layer
+  starting)` wording even when a stay-down record is also present — which is the
+  NORMAL idle-teardown state, since `autodown.teardown()` stamps the record
+  itself. `hscc_daemon/tests/test_verify_stay_down.py` pins that equality by
+  asserting the two rows are EQUAL as dicts with and without the record. The two
+  labels are joined when a fleet really mixes them (the proxy's stay-down gate
+  sits above its own autodown tagging, so one tick of a wake can tag `proxy`
+  `operator_down` while the rest are tagged `autodown`).
+  **Which writers count as a stay-down (decided, not guessed):**
+  `clear_expected_up(reason)` has three sanctioned callers on main —
+  `hscc-cluster/hscc.py:547` (`hscc cluster down`), `hscc-commands`
+  (`/cluster-down`) and `hscc_daemon/autodown.py` (`autodown: intentional idle
+  teardown`) — so the record means "someone deliberately cleared the footprint",
+  not "an operator typed the verb". ALL THREE are honoured; `reason` is copied
+  into the label and nowhere else, and no substring of it is ever tested —
+  a substring test would make an operator-chosen string a safety property. All
+  three verbatim wordings are pinned by one parametrised test. A record with a
+  `set_at` but no `reason` still excuses, and renders the bare
+  `fleet deliberately down` (no invented reason, no empty parentheses).
+- **The `hscc kanban monitor` token table billed sessions to the wrong window and
+  the wrong row.** Two defects, both measured against Hermes v0.23.0+7.g0458811
+  on this host (50 stores, every one opened `mode=ro`).
+  *Window:* the sum was `WHERE started_at >= now-span`, i.e. a session's lifetime
+  total charged entirely to the window it **began** in — a card that ran 25 h was
+  invisible to 24 h and wholly in 7 d. It is now `COALESCE(last_activity_at,
+  ended_at, started_at) >= now-span`: a session lands in every window it was
+  **active** in. Strictly a superset of the old predicate, so it can only add a
+  session that really did work inside the window; live here it recovered 6 kanban
+  sessions (49,534,334 in / 647,871 out) the 7 d cell had been dropping. Nothing
+  is split across windows, because nothing in the store can split it —
+  `messages.token_count` is NULL in all **595,776** message rows on this host, and
+  `session_model_usage` (7,810 rows) carries only `first_seen`/`last_seen` per
+  `(session, model)`, no per-call time. The rule is now stated in the pane and in
+  `tokens.meta.attribution` instead of being implied.
+  *Partition:* there were two rows and one catch-all, `source NOT IN
+  ('kanban','cron')`, so `subagent` (54 sessions, 62.6M in), `telegram` (103,
+  354.5M) and anything unrecognised were billed as orchestrator use while `total`
+  absorbed them without saying so — and the same catch-all silently dropped
+  NULL-source rows, because SQL `NOT IN` is NULL, not TRUE, for NULL. Three groups
+  now cover the census exactly once: **workers** = `kanban`/`subagent`/`oneshot`,
+  **scheduled** = `cron`, **orchestrators** = every other source with NULL included
+  (`cli`, `local`, `telegram`, and any source Hermes adds later — a complement, so
+  a new source renders rather than vanishing). `total` is the sum of exactly those
+  three, defined once in `token_rows()` and read by both the renderer and the
+  suite, and the mapping is printed under the table.
+  The orchestrator ledger stays — with no time-resolved usage in the store it is
+  the only thing that can answer "what did a weeks-old REPL spend in 24 h" — but
+  its cumulative is narrowed to the orchestrator group, so a card's delegated
+  subagent can no longer inflate the orchestrator row. `tokens_24h` is now the
+  table's own workers/24 h cell rather than a second query with its own source set
+  and predicate, so `--json` cannot carry two totals for one window, and the
+  `tokens 24h in …` fallback line (which used to sit beside the table) is gone: one
+  token surface. `cache_read`/`cache_write`/`reasoning` stay out of the columns on
+  purpose — the first two are zero in every row of every store here, reasoning is
+  real (109.3M on the kanban side) — and that exclusion is now named in the pane
+  and in `tokens.meta.columns` rather than being silent.
+- **`hscc verify` false-failed a deliberate `cluster down` even after the
+  stay-down gates landed.** t_ba1424b7 stopped `check_workers` and `check_proxy`
+  from undoing the down, and t_50c6edc4 stopped the notifier paging — but the
+  two checks that *probe* rather than heal kept writing a bare `ok: False` with
+  no explanation while the fleet sat down on purpose. `hscc verify` excuses a
+  stream only when the stream data carries its own `intentional` marker **and**
+  `autodown.classify` confirms the window, and a manual down latches no watchdog
+  block, so neither half held: an operator who typed `cluster down` still got a
+  RED fleet for obeying their own instruction. `check_dgx` and `check_gateway`
+  now read the same durable record the t_ba1424b7 gates read, through the same
+  `health._operator_down()` seam, and — **only on a tick that is already
+  failing** — stamp `intentional: "operator_down"` plus a message naming the
+  record's reason
+  (`fleet deliberately down — dgx unhealthy is expected while the fleet is
+  down, not a fault (reason: hscc cluster down)`).
+  **Streams stay truthful (D1):** `ok` is exactly what the probes determined.
+  A unit that is not serving is not serving; a stamp explains a failure, it
+  never launders one. Nothing about what the probes probe, what `ok` means, the
+  returned verdicts or any notification changed, and a *healthy* stream during a
+  stay-down is deliberately **not** stamped.
+  **Precedence:** the new branch sits *after* the existing autodown branch, so
+  when an autodown window and a leftover stay-down record both apply the
+  autodown stamp wins — one marker, its existing wording, every existing
+  autodown/verify test byte-identical. t_b543e530's invariant is untouched: a
+  degraded (unverified) fleet-visibility read is still never excused, record or
+  no record, because an unknown fleet state must not be claimed down by design.
+  **Fail-safe:** a predicate that raises stamps nothing — the check behaves
+  exactly as it did before the record existed ("no verifiable evidence" must
+  never mean "go quiet"). This is the writer half; the reader half (verify
+  excusing an `operator_down` stream) is a separate card, so `hscc verify` is
+  unchanged by this fragment until that one lands.
+- **`hscc cards monitor` panels were empty for the whole run.** The panel
+  tailed `<kanban root>/logs/<task>.log`, but under Hermes v0.23 that file is
+  written by `hermes_cli/kanban_worker_client` — the thin RPC client the
+  dispatcher spawns — so it holds only the client's own stderr: `Session:
+  local-<hash>` at start and `[kanban-worker-exit] rc=N` plus the final reply at
+  exit. Measured on live cards: 80 bytes for an entire run. The agent runs
+  inside the gateway owner as one session per run, so a panel now follows that
+  session — `SessionTail` reads the run's `messages` rows from `session_db` by
+  the `session_id` `kanban_live.collect()` resolves from the run's
+  `owner_admitted` event, with a row-id cursor so a 0.5 s tick only pays for
+  appended rows. Assistant text renders as text, each tool call as one `┊` line
+  (named at call time, so a slow tool shows up while it runs, not when it
+  returns), the user turn as one collapsed preview; `t` still filters to the
+  tool lines. The display set is hermes' own (`active`/`compacted`, model-only
+  rows excluded) and the store is opened `mode=ro`: an unreadable or absent
+  store is an empty panel, never a traceback. The log file stays as the fallback
+  for a row whose owner has not admitted the run yet, and each panel header now
+  says which source it is reading (`src session` / `src log (fallback)`) — a
+  panel never mixes them; when the id lands later the panel restarts on the
+  session. Reading through `hermes_state_timeline` was measured and rejected: it
+  is a users-only prompt index (`_display_rows_sql(users_only=True)`, 120-char
+  previews — no assistant text, no tool rows at all), and importing that tree
+  into the interpreter that ships `hscc` re-execs the process into the
+  standalone Hermes python.
+- **The daemon undid `hscc cluster down` in ~25 seconds.** After
+  `post_boot` cleared the marker at 17:51:23, `check_workers` relaunched all
+  three keepalive units (17:51:47-54 — they then sat idle all night) and
+  `check_proxy` decided the proxy was unhealthy on :4000 (17:52:02), "repaired
+  proxy backend drift", reaped an orphan listener and retried every few minutes.
+  Only the orch unit respected the intent. `check_workers`' only suppression
+  gate was `_intentional_window()`, keyed on the AUTO DOWN watchdog block — a
+  manual `cluster down` never latches that block — and `check_proxy` had no
+  operator gate at all. Both now read t_ab75e987's durable record through one
+  new seam, `health._operator_down()` (deferred `post_boot` import, swallows any
+  exception into `None`, so "no verifiable evidence" can never mean "go quiet"):
+  `check_workers` gates immediately **after** the existing autodown gate (that
+  path stays first and byte-identical) and `check_proxy` gates at the very top
+  of its body, before any probe, drift read, orphan reap or `proxy start`. A
+  standing down skips both checks entirely: one INFO line
+  `fleet deliberately down — not relaunching (<area>; reason: <reason>)` and
+  stream state `ok: true` + `intentional: "operator_down"`, so `hscc verify`
+  reads the idle tick as intent, not as a healed fleet.
+  **Which writers count as a stay-down (decided, not guessed):**
+  `clear_expected_up(reason)` has two sanctioned callers —
+  `hscc-cluster/hscc.py:547` (`hscc cluster down`, the operator) and
+  `hscc_daemon/autodown.py:2319` (`autodown: intentional idle teardown`) — so
+  the record means "someone deliberately cleared the footprint", not "an
+  operator typed the verb". **Both** are honoured. The gate branches on the
+  record's *presence* and never on the `reason` text: a substring test would
+  make an operator-chosen reason string a safety property. The idle-teardown
+  shape normally never reaches this gate anyway — that path latches the
+  intentional watchdog block, so `_intentional_window()` answers first with its
+  own wording; both wordings are pinned by tests.
+  **TRADE-OFF, intended and now written down:** while the record stands, HSCC
+  supervises *nothing* in the serving layer. A proxy started by hand
+  (`sparkrun proxy start`) gets no drift repair, no orphan reap and no health
+  check; a unit started by hand gets no auto-heal. Neither is supervised again
+  until the record is lifted — by `hscc cluster up`, or by the autodown wake,
+  which reaches the same `record_expected_up` pop *before* it launches anything,
+  so a wake (even one that later times out) can never leave the fleet pinned
+  down by this gate. That is the only override, and the only way out of a
+  stay-down that was itself lost (a deleted marker file reads
+  as "no evidence", i.e. supervision resumes). "The operator owns the down
+  state" cuts both ways: HSCC is deliberately, silently idle in the meantime.
+- **The `hscc-bootstrap` leg was 48 % one network probe, not the restart-daemon
+  tests it was blamed for.** The leg was reported as "11.5 min, most of it in
+  `test_restart_daemon.py`, and the `-q` progress line lags so it reads as a
+  hang" (t_ecb84764, from t_82fa20f5). Both premises measured false at
+  `e1334386`, and the real cost was a third thing nobody had named.
+  `pytest -q --durations=0 hscc-bootstrap/tests` on this host:
+  **1164 passed in 700.37 s**, `sum(durations)=696.3 s` = 99 % of wall, so the
+  table accounts for the leg rather than sampling it. File ranking:
+  `test_enable_plugins.py` **335.8 s (48.2 %)**, `test_doctor.py` 100.8 s
+  (14.5 %), `test_bootstrap_isolated.py` 86.8 s (12.5 %),
+  `test_bootstrap_dry_run.py` 52.7 s (7.6 %),
+  `test_bootstrap_node_recovery_stage.py` 34.9 s (5.0 %), and
+  **`test_restart_daemon.py` 27.6 s (4.0 %)** — the 6th file, so stubbing its
+  launchctl path or marking its behavioural subset could have won at most 27 s
+  of 700. The durations are quantised at 5.01/5.02/5.03/10.01/10.02 s, which is
+  the tell: `enable_plugins.enable()` ends with `_probe_compaction_endpoint()`,
+  a real `urllib.request.urlopen(models_url, timeout=5)`. That probe is correct
+  for bootstrap on a real machine (one probe, one warning). It is not correct
+  inside the suite, because `hscc-bootstrap/tests/conftest.py` pins
+  `HSCC_SERVING_JSON` at a missing file for determinism (t_417610e6), which
+  selects the **fallback** `COMPACT_URL`, and that address is *unreachable*
+  rather than *refused* — a refused port answers instantly, an unreachable one
+  spends the whole connect timeout. Measured in exactly that environment:
+  `enable() wall=5.05s` / `enable() with probe stubbed wall=0.01s`
+  (`saved_per_call=5.04s`), warning text `<urlopen error timed out>`. 66 tests
+  call `enable()` → 66 × 5.04 s = 333 s of dead wall time, matching the
+  measured 335.8 s.
+- **Fix: `HSCC_SKIP_COMPACT_PROBE`, defaulted on by the runner.** An opt-out
+  rather than an autouse `monkeypatch`, because roughly half the cost is in
+  tests that shell out to the real `bootstrap.sh` — a monkeypatch only reaches
+  this process, an exported env reaches the children. `scripts/run_tests.sh`
+  exports it (beside `HERMES_DISABLE_LAZY_INSTALLS` from #252, same shape and
+  same reason), `hscc-bootstrap/tests/conftest.py` sets it so a direct
+  `pytest hscc-bootstrap/tests` is as fast as the runner's, and
+  `_skip_compaction_probe()` reads it per call so `monkeypatch.setenv` and a
+  child's own env both work. Default stays OFF, so bootstrap still probes. The
+  opt-out returns "nothing to warn about", never the `False` that means
+  "endpoint unreachable", so an opt-out cannot be misread as a failed probe.
+  `hscc-api/tests` does not import `enable_plugins`, so it is not wired there.
+  `hscc-bootstrap/tests/test_compaction_probe_optout.py` pins all three
+  directions, including that the probe **does** still call `urlopen` with
+  `timeout=5` when the knob is off — otherwise the tests would pass equally
+  well against a deleted probe. Result for the affected file:
+  **114 passed in 2.31 s** (was 335.8 s), every formerly-5 s case now 0.01 s.
+- **How the misdiagnosis happened, so the next reader does not repeat it.** The
+  evidence for "restart_daemon dominates" was a `ps` sample: pytest's only
+  child was `bash <worktree>/hscc-bootstrap/restart_daemon.sh`. That child does
+  not identify the test file. `bootstrap.sh:774` runs
+  `"$BOOT_DIR/restart_daemon.sh"`, and `test_bootstrap_isolated.py:45` runs the
+  real worktree `bootstrap.sh` — so the isolated/dry-run bootstrap tests spawn
+  exactly that child. It proves "a bootstrap.sh is running", not which file
+  owns the minute.
+- **And the `-q` lag premise, measured.** A controlled probe (10 tests × 1 s
+  sleep, stdout+stderr redirected to a file, sampled once a second, pytest
+  9.1.1 on the venv interpreter) shows the dot band reaching the redirected
+  file **live, one dot per completed test**, with `PYTHONUNBUFFERED=1`
+  byte-for-byte identical. The band is not sitting unflushed. What *is* true is
+  worse for a reader: the `[ NN%]` marker is a **test-count** percent printed
+  only once per full 72-dot line, and nothing in the log carries elapsed time —
+  while this leg's wall time is wildly non-uniform in collection order (at
+  24.6 % of tests ≈ 41 % of wall was already spent; the 39–48 % band is ~48 %
+  of the run). "43 %" therefore cannot distinguish 10 s in from 300 s in, and
+  carries no liveness signal at all. That, not a flush, is the slow-vs-stopped
+  ambiguity that cost this suite several wasted legs.
+- **Progress made observable: `scripts/leg_heartbeat.sh`, run per leg.** The
+  mechanism is a heartbeat line carrying **elapsed wall seconds** and the pytest
+  process's **own CPU seconds** — the only pair that separates slow from
+  stopped (`cpu` rising = progressing; `cpu` flat = blocked, go look). Chosen
+  over the three candidates on evidence, recorded in the file's header:
+  `PYTHONUNBUFFERED` was measured and does nothing (see above), `-rA` prints its
+  per-test report only in the end-of-run summary so it cannot help a mid-run
+  reader, `-v` streams per test but still carries no elapsed time and rewrites
+  the format every other reader greps, and a pytest-side per-test hook cannot
+  fire during the one test you are stuck in — which is the case being asked
+  about. Cadence `HSCC_LEG_HEARTBEAT_SECONDS` (default 30 s ≈ 24 lines for a
+  whole suite, 0 disables). Two deliberate properties, both pinned by
+  `scripts/tests/test_leg_heartbeat.py`: pytest stays in the FOREGROUND and the
+  watcher is passed the runner's pid instead (a backgrounded job in a
+  non-interactive shell gets SIG_IGN on SIGINT, which would break Ctrl-C for
+  everyone), and the liveness gate rejects ZOMBIES — `kill -0` succeeds on an
+  un-reaped pid, so the naive gate lets an orphaned watcher print a dead pid
+  forever while holding the log's write end of the pipe open, which manufactures
+  precisely the "leg that cannot finish" this heartbeat exists to disprove.
+  `first_child=` names what the leg is waiting on, with the warning attached
+  that got this card filed: a child names the SCRIPT it runs, not the test file
+  that owns it — `restart_daemon.sh` is spawned both by its own tests and by
+  `bootstrap.sh:774`. Use `--durations` to convict, never `ps`.
+- **`run_doctor_fix` did not honour its own `_http_get` seam, so 4 more tests
+  each paid a 10 s timeout.** Its docstring says "``_http_get`` is injectable
+  for tests (mirrors ``_check_models_served``) so the endpoint probe never needs
+  the real network in the test suite" — and it is, for the Card D alias
+  conversion at the end. But the `run_doctor(hermes_home, _cluster_runner=...)`
+  call that *starts* the function never forwarded it, so `run_doctor` built its
+  checks with `_http_get=None` and `_check_models_served` fell back to
+  `_http_get_default`, a real `urlopen(timeout=10)` against the unreachable
+  `base_url` in the caller's own fixture config. Same class as the probe above,
+  different timeout: durations of exactly 10.04 s x 4. `run_doctor` already
+  accepts and forwards `_http_get` (doctor.py:1934, :1999), so the fix is the
+  one argument that was missing. `TestDoctorFixNoopWhenFresh` never injected the
+  seam at all, and was paying a real 10 s to *simulate* an unreachable endpoint
+  that the file's existing `_fake_http_unreachable` models in 0 s — same
+  scenario, now without the socket. All 325 doctor tests (11 files): **4.04 s**,
+  slowest single test 0.46 s; `test_doctor.py` was 100.8 s at baseline.
+  Nothing left in the leg lands on a quantised 5 s / 10 s / 15 s boundary.
+- **The file this card blamed is now also the cheapest it has ever been, for the
+  right reason.** `test_restart_daemon.py` polls through `POLL_ATTEMPTS` ×
+  `POLL_INTERVAL`, and the suite pinned `POLL_INTERVAL=1`, so the five
+  give-up-after-the-budget cases each slept ~3 s of pure wall — 26.6 s for the
+  file. The behaviour under test is the ATTEMPT budget and the verdict after it
+  (poll until the supervisor reports a changed pid; then `unchanged` rc 2 / `no
+  pid` rc 3), not the length of one tick, so the interval is now 0.05 s:
+  **37 passed in 11.66 s**, slowest case 0.92 s, and what is left is the bash +
+  stub subprocess spawn each case legitimately pays.
+
+### Verified
+- `hscc-cluster/tests/test_cluster_down_output.py`: **15 new cases** (10 render
+  + 5 stay-down), fakes only — `run_cmd` is always a fake, and the leg's
+  sparkrun fence reports zero live execs. `cd hscc-cluster && <venv>/bin/python
+  -m pytest -q tests/test_cluster_down_output.py tests/test_cluster_up_post_boot_hooks.py`:
+  **24 passed** (15 new + the 9 pre-existing hook tests, unchanged).
+  Pins: rc 0 + `Stopped 4 job(s), 4 container(s) across 4 host(s).` → `OK`;
+  nonzero + `No sparkrun containers running.` and, separately, `No running
+  workload matches intent …` → `OK` + the note, with `success` still `False`
+  and **no key lost** — asserted twice, once against the documented key set and
+  once by diffing the dict against what the same command returns straight from
+  `_run_or_print`, so a rewrite that dropped `error`/`returncode` fails there.
+  nonzero + `Error: failed to stop containers on 10.0.0.x: ssh: Permission
+  denied` → `ERROR` and no benign key; a mixed already-down + unqueryable-host
+  run → `ERROR`; unknown future wording → `ERROR`; an `up` result without the
+  keys → `ERROR` (the renderer honours the keys, it never invents them).
+  Stay-down: a real down calls `clear_expected_up` EXACTLY once and prints the
+  line; the benign path prints it too; `--dry-run` calls neither `run_cmd` nor
+  the clear and prints neither line; the WARN path prints no stay-down claim.
+- `hscc-cluster` leg: **1100 passed, 3 skipped** (the same 3 opt-in skips as
+  before: 2 diffusion-fixture, 1 live-sparkrun). Note for the next worker: the
+  bare `cd hscc-cluster && pytest -q` form in the card body errors the whole
+  leg (1100 errors) because pytest then imports `hscc-cluster/__init__.py` as a
+  package init — use the leg runner's own form,
+  `python -m pytest -q -rs "$ROOT/hscc-cluster/tests" -p no:cacheprovider`.
+- No live fleet call, no ssh, no sparkrun executed anywhere: unit fakes only.
+- **8 mutation probes, 8 caught**, each on a fresh `shutil.copytree` of the
+  tree (`.git` ignored) at an absolute scratch path, reset to the pristine
+  source before every probe, with a pristine CONTROL that stayed green
+  (24 passed) — a probe whose target string failed to match once is a false
+  "missed", so each one asserts its substitution actually applied. (1) benign
+  classification never fires — 3 red; (2) `_REAL_FAILURE_MARKERS` no longer
+  outrank the already-down wording — 1 red (the mixed
+  already-down + `ssh: Permission denied` case, i.e. the softening-this-card-
+  exists-for guard); (3) the renderer ignores `benign_no_workloads` — 2 red;
+  (4) the stay-down line printed even when `clear_expected_up` raised — 1 red;
+  (5) `--dry-run` fell through to the claim — 2 red; (6) a benign result
+  dropped the `error` key — 3 red (both `--json` pins bite); (7) `success`
+  flipped to `True` on the benign path — 4 red, so the machine contract is
+  pinned from both directions; (8) the `could not query` never-softened rule
+  removed — 1 red, caught by exactly the test that pins it.
+- Known gap, deliberately NOT touched (outside this card's allowlist): the
+  unified `hscc cluster down` path renders through
+  `hscc_daemon/cluster_render.py:218-221` (`_render_fleet_op`), which still
+  keys its panel on `success` alone and so still shows the error panel for the
+  benign shape. It needs the same two-line `benign_no_workloads` read, and
+  `hscc-api/routes_ops.py:550` still 502s on any non-empty `error` string.
+- `hscc_daemon/tests/test_kanban_live.py`: 26 -> **34** cases, green. The v0.23
+  store fixtures (`_state_db` now also builds `session_turn_leases`) fail against
+  the pre-change module — 9 failed / 24 passed, red first — including the
+  regression that the section vanishes when argv is the `-c` bootstrap and the
+  one that a live `kanban` lease must not appear as an orchestrator. The module
+  no longer imports `subprocess` at all and the suite pins that.
+- `scripts/run_tests.sh` (12 legs): the leg containing this change,
+  **hscc_daemon — 3295 passed** (3287 before it). Nine of the twelve legs green;
+  the three that were not — `hscc-bootstrap`, `hscc-api`, `scripts` — are the
+  same three the parent card handed over unfixed on this loaded host (`scripts`
+  is its own 300 s subprocess timeout; the other two lost their summaries
+  mid-progress, so those failures stay unnamed here and are not claimed either
+  way).
+- Locked or transiently failing store: contributes no row, the rest still render.
+  Seen for real — one `OperationalError` on the 380 MB root db during a 51-store
+  census, then 6/6 clean reads of the same query; the tick that hits it simply
+  has no `default` row.
+- Real CLI, read-only, live orchestrator. The watch caught `hscc-orch` 107 s
+  into a real turn (`source='local'`, `created_source='cli'`,
+  `expires_at` 253 s away): the deployed 2.15.5 `hscc kanban monitor --json`
+  printed `orchestrators: []` over 23 boards with 3 cards running, while the
+  same command through this worktree's `kanban_live` rendered
+
+      orchestrators (1 running)
+      Profile    Session                              Turn  Tokens     state
+      hscc-orch  local-41d4ee6a7b91…0c6d1              1m  12.0M/85k  receiving stream response
+
+  Three `kanban`-source leases were live at the same instant and stayed out of
+  the section, as intended. (`PYTHONPATH` was tried to run the deployed binary
+  against this worktree and did NOT take effect — the deployed `hscc_cli`
+  resolves `hscc_daemon` from its own venv — so that pair proves nothing and the
+  "after" above is the same CLI dispatch through the worktree module, whose
+  `__file__` the capture prints. The store-side SQL the fix runs (`mode=ro`) is
+  pasted on the card so every field is traceable to its `sessions` and
+  `session_turn_leases` rows.)
+- Cost, measured over the operator's real stores (52 yielded — the root db plus
+  51 profile directories, one of which has no `state.db`): `attach_orchestrators`
+  **avg 15.9 ms** per tick (best 14.9, worst 18.3 over 10 ticks) against
+  `attach_tokens` **avg 106.7 ms** on the same host — the new pass is ~15% of the
+  work the view already does every `DEFAULT_INTERVAL` (5 s). The probe earns its
+  keep: at the measured instants 1–3 of the 51 stores held a live lease, so the
+  join ran only there, and a store with no lease table at all is skipped by the
+  same guard without opening a cursor on `sessions`.
+- Measured against Hermes v0.23.0+7.g0458811: 50 of the 51 stores on this host
+  that have a `state.db` carry
+  `session_turn_leases(conversation_id, holder, acquired_at, expires_at)` — the
+  exception is `profiles/default/state.db`, a 0-byte file with no tables at all,
+  skipped by the same guard that covers a pre-v0.23 store, while the root
+  `~/.hermes/state.db` does have the table (0 rows) and `sessions`. The live
+  REPL turn's `sessions.source` is `local` with `created_source='cli'`, NOT
+  `cli` — which is why the source filter is an exclude list and not a
+  `source='cli'` match. 871 `cli` sessions here have `ended_at IS NULL` because
+  they died before anything stamped it, so `ended_at` is not used for liveness.
+- `hscc-bootstrap/tests/test_skill_guard.py`: **46 passed** — same count as
+  `main`, no test touched.
+- No-behaviour proof against `origin/main` (`1fb14c0f`): AST dump equal with
+  every docstring blanked; bytecode equal over all **42** code objects
+  (`co_code`, consts, names, varnames, arg counts, flags, stacksize) with
+  string constants sentinelised, AND equal by-value with the docstrings blanked
+  — so the only thing that differs is docstring prose; **0 of 44** changed
+  lines lies outside a docstring or a comment. Re-run green under the hermes
+  venv (3.14.10) and conda `p313` (3.13.12) too. Worth recording how it failed
+  first: comparing nested code objects by identity says DIFFERS for any two
+  compiles — they must be compared by `co_consts` position, which is the
+  semantic load index.
+- Read-only as required: upstream inspected with `git show`/`rg` only, nothing
+  restarted, no store written. `~/.hermes` touched only to re-verify the marker
+  count the fixed block claims — **14 of 53** homes carry `.no-bundled-skills`,
+  **0** carry it under `skills/`.
+- `hscc_daemon/tests/test_autodown.py`: 187 -> **195** cases (8 new), in a
+  `TestWakeClearsStayDownBeforeLaunching` class wired with the module's own
+  injected fakes — no live fleet call, no ssh, no sparkrun (the sparkrun and
+  `gh` fences both report zero live calls). The regression this card exists
+  for: a wake that hits the readiness TIMEOUT is asserted to have left
+  `deliberately_down()` `None` with the full footprint recorded, and a spy
+  runner that snapshots the marker from disk on *every* start pins the
+  ORDERING — the 3-unit footprint is already recorded while unit #1 is being
+  launched. Plus a failed launch, a clean wake, the `teardown()` half still
+  setting the record, fail-soft (a raising `record_expected_up` leaves the wake
+  returning `up`, all units started, and the failure on the log at `WARN`),
+  and both stay-down wordings parametrised so neither can re-pin a fleet
+  mid-wake.
+- `cd hscc_daemon && <venv>/bin/python -m pytest -q tests/test_autodown.py
+  tests/test_post_boot.py`: **242 passed** (195 + 47).
+- **6 mutation probes, 6 caught**, each applied to a fresh `shutil.copytree`
+  of the tree with a pristine control (a first P3 attempt reported "missed"
+  because the probe's own target string was a raw literal — harness bug,
+  reproduced and fixed; the probe genuinely catches): (1) the record moved back
+  to after `_wait_ready` — the original bug, verbatim, caught by exactly the
+  three ordering/timeout/launch tests; (2) the record removed from the wake;
+  (3) `record_expected_up` no longer `pop`s the stay-down; (4) the fail-soft
+  `try` removed; (5) the wake branching on `reason` to refuse the operator
+  wording; (6) the marker failure downgraded from `WARN` to `DEBUG`.
+- `pytest scripts/tests -q -rs`, measured as a **back-to-back pair in one
+  sequential job** on the same host and window (counts move with `main`, so
+  they are only meaningful as a pair): `origin/main` `f2cbae3f` →
+  **1 failed, 346 passed, 2 skipped in 650.27 s**; this branch `a65766a2` →
+  **350 passed, 2 skipped in 464.29 s**. The counts reconcile exactly:
+  346 passed + 1 failed + this card's 3 new tests = 350. The baseline arm's
+  failure is verbatim the card's —
+  `subprocess.TimeoutExpired: Command '['/opt/homebrew/bin/python3.12',
+  '…/hscc_cli_help_audit.py', …, '--a-table', '']' timed out after 300
+  seconds` — and it reproduced at **load average 1.85**, i.e. on a near-idle
+  box, so the honest characterisation is "a budget that was never sized for the
+  work", not "the box happened to be busy". The leg is also **186 s faster**.
+  `pytest scripts/tests/test_cli_help_surface.py -q -rs` alone: **25 passed,
+  1 skipped in 437.51 s**.
+- Per-interpreter `(A)`-only pass, the measurement the card asked for
+  (14 cores, sibling `~/miniconda3/envs/p313`, `nice -n 10`):
+  **quiet host (load avg 1.50) 240.73 s → 119.01 s**;
+  **loaded host (load avg 9.1–9.4, 8 CPU spinners + 8 concurrent
+  `import rich, yaml` churners) 312.55 s / 312.00 s → 114.80 s / 115.11 s**
+  (2 runs per arm). Neither of the card's two candidate stories in its pure
+  form: not "20 s quiet degrading to 320 s loaded" — the per-launch cost is a
+  stable 0.25–0.36 s on both arms — but "~240 s quiet / ~312 s loaded against a
+  300 s cap", i.e. the sized-budget story, fixed by removing the work rather
+  than only by sizing the budget. One caveat kept visible: the quiet row ran
+  `a_table()` in-process (second arm inheriting warm import state) while the
+  loaded row ran the real CLI command line, so treat the quiet *absolute*
+  figure as approximate and the ~2.3–2.7× reduction as the load-bearing number.
+- The reduction is pinned, not asserted, because the committed `(A)` table is
+  `{}` and a green tree comparing `{} == {}` cannot observe a width change at
+  all: `test_a_table_probes_only_the_authoritative_width` (checks
+  `A_TABLE_WIDTHS[kind] == (max(full widths),)` against both sides of the seam)
+  and `test_a_table_wide_only_equals_all_widths_on_a_leaking_surface`
+  (synthesises a leaking surface; the `(A)` set must not move by one entry).
+- The anti-vacuity receipt fails closed, and is pinned by
+  `test_a_table_receipt_parser_never_invents_probes`: a missing or malformed
+  `[a-table] … probes=N` line reads as **zero** probes and therefore fails,
+  never as a default that satisfies `A_TABLE_MIN_PROBES` (329 — measured off a
+  real receipt, `[a-table] surfaces=329 probes=329`).
+- Out of scope, untouched, deliberately: `hscc-bootstrap/tests/test_restart_daemon.py`
+  is `t_ecb84764`'s, and `hscc_daemon/tests` / `hscc-bootstrap/tests` were not
+  run here because neither is affected by a change confined to
+  `scripts/hscc_cli_help_audit.py`'s `(A)`-only pass and its gate.
+- **"No behaviour change" is proven, not taken from the commit message**, three
+  ways, on `HEAD~1..HEAD` of `hscc-bootstrap/skill_guard.py`: the AST with every
+  docstring `Expr` removed is **equal**; the recursive bytecode fingerprint
+  (line-table metadata excluded, since a longer docstring shifts line numbers and
+  a shifted line table is not a behaviour change) is **equal**; and walking the
+  `-U0` hunks, **0 of the 57 changed lines** fall outside a docstring or comment.
+  `git diff --stat` names `hscc-bootstrap/skill_guard.py` alone, +42/−15.
+- **Every cited symbol was checked to exist in the live upstream checkout**, not
+  assumed — `v0.23.0-7-g045881137d`: `agent/skill_utils.py:407`
+  `AMBIGUOUS_SKILL_PREFIX`, `:413` `get_skill_search_roots`, `:433`
+  `provably_same_skill`, `:445` `skill_candidate_rank`, `:452`
+  `pick_skill_candidate`, `:878` `iter_skill_index_files`;
+  `tools/skills_tool.py:93` `_skills_dir`, `:405` `_collect_skill_candidates`,
+  `:534` `locate_skill`; `agent/skill_commands.py:285` `ambiguous_skill_label`,
+  `:953` `build_preloaded_skills_prompt` with `disabled_as_missing=True` at
+  `:978`/`:1023`. The three substantive claims check out verbatim: the rank gate
+  is literally `if candidates[ranked[0]][2] != candidates[ranked[1]][2]` inside
+  `pick_skill_candidate`; the tier order is literally
+  `TIER_PROJECT, TIER_LOCAL, TIER_CREATE_DIR, TIER_EXTERNAL = range(4)` and
+  `locate_skill`'s own docstring says `project > local > create_dir > external`;
+  the local tier is `tools.skills_tool._skills_dir`, passed at
+  `tools/skills_tool.py:223-224`, and `hermes_constants.py:1276` makes it
+  `get_hermes_home() / "skills"` — which is what grounds the module's "a profile
+  session resolves ONLY against its own tree".
+- **One imprecision found and reported rather than quietly corrected.** The
+  commit says of `_same_root_rank` that upstream `skill_candidate_rank` is a
+  rename of `_rank_same_root_candidate` and "the tuple it returns is unchanged".
+  The *comparison semantics* are unchanged, the *tuple* is not: v0.23 returns
+  `(skill_md.name != "SKILL.md", len(...parts))` — a `tuple[bool, int]`,
+  `agent/skill_utils.py:445-449` — where the pre-v0.23
+  `_rank_same_root_candidate` returned `(0 if SKILL.md else 1, depth)`, ints.
+  `bool` subclasses `int` so `False == 0` / `True == 1` and both the sort key and
+  the `!=` gate behave identically, and the mirror's own `is_flat` int is equally
+  correct either way. Left as-is per the card's rule (say so with the source line
+  rather than editing a citation to match the mirror); a reader comparing the two
+  implementations should know the first element changed type.
+- **Counts**, both on the cherry-picked head, with the leg's own environment
+  (`HERMES_DISABLE_LAZY_INSTALLS=1`, `env -u HERMES_DELEGATED_CHILD_CONTEXT`,
+  `-p no:cacheprovider`, interpreter `~/.hermes/hermes-agent/venv/bin/python`):
+  `hscc-bootstrap/tests/test_skill_guard.py` **46 passed** in 0.16 s;
+  `hscc-bootstrap/tests` leg **1164 passed** in 695.23 s (rc=0) — 1164, matching
+  the collection count named by t_82fa20f5, so nothing silently dropped out.
+  Also re-ran the standing gate the new docstring names,
+  `hscc-bootstrap/tests/test_skill_resolver_xval.py`: **11 passed** in 1.80 s —
+  the mirror still agrees with the live resolver on all eleven layouts, which is
+  the assertion the "we model only the local tier" claim rests on.
+  `python3 scripts/changelog_fragments.py check`: OK, 19 fragment entries
+  consistent; `CHANGELOG.md` untouched.
+- `hscc-commands/tests/test_cluster_down_stay_down.py`: **9** new cases on this
+  dir's existing `cmdlib._run` fake style — confirmed down with every node
+  "nothing running" (no `❌` anywhere, `○` per node, `clear_expected_up` called
+  **once** with the verbatim `/cluster-down` reason, summary line present); the
+  exit-0 already-down spelling is not a `✅` either; a real error keeps its
+  `❌` + tail and the `could not query` shape is never softened to `○`; the
+  marker is still stamped when a node's stop failed; the summary line names
+  `hscc cluster up` and the absence of a `/cluster-up` verb in one breath; an
+  unconfirmed invocation calls neither `cmdlib._run` nor `clear_expected_up`;
+  and the two fail-soft shapes — `hscc_daemon` poisoned in `sys.modules` so the
+  **real** import tolerance is what returns `None` (not a patched seam), and a
+  raising `clear_expected_up` — both warn with `⚠️` and still complete the verb.
+  Focused run: `cd hscc-commands && pytest -q tests/` -> **78 passed** (69
+  pre-existing + 9 new). All five mutation probes of the new code caught (marker
+  call dropped, reason reworded, already-down rule disabled, already-down rule
+  widened to `could not query`, the ⚠️ branch replaced by the success line).
+  The autouse sparkrun fence stayed armed and the operator's real
+  `~/.hscc/expected-up.json` was not written by any test — unit tests only, no
+  live `cluster down`, no ssh, no sparkrun call.
+  Full suite `bash scripts/run_tests.sh` from a clean worktree at this commit:
+  **11/12 legs green** — including `hscc-commands` (78 passed, the 9 new ones
+  here), `hscc_daemon` (3360) and `hscc-bootstrap` (1164). The `scripts` leg is
+  red and is **not** claimed as green: `1 failed, 336 passed, 2 skipped` on
+  `test_a_table_identical_under_sibling_interpreters`, reproduced **identically**
+  at clean `origin/main@82e098c3` (`1 failed, 336 passed, 2 skipped`, same
+  `subprocess.TimeoutExpired` on the audit's 300 s cap) measured on this same
+  host right after. The cap raises inside `_sibling_a_table` *before* either
+  assert, so no content of this diff can cause or avoid it — attributed
+  pre-existing, and the ALL GREEN stamp is withheld rather than asserted.
+- `hscc_daemon/tests/test_kanban_live.py` 42 -> **49**, `test_cards_live.py`
+  41 -> **45** (the three monitor files: 92 -> **103**, measured back-to-back
+  against `origin/main` `82e098c3` in a throwaway worktree): one pin per drifted
+  field (scheduled counting + visibility, the
+  ready clock against a `commented`/`edited`/`heartbeat` storm, the alarms in
+  the panel and the volume kinds not, `Done 24h` across an archive, the
+  uncapped outcome lookup, the 600 s beat bar and an unknown beat). The
+  fixtures now declare the **measured** live column sets — `tasks` 39 columns
+  (the fixture had 9), `task_runs` 17 (it had 6, so `outcome`, `ended_at` and
+  `metadata` did not exist in a test board), `sessions` 19 reader-facing +
+  NOT-NULL columns (it had 9 invented ones) with the live `source NOT NULL`
+  contract (measured: 7 223 session rows over 51 stores, `source IS NULL` = 0) —
+  while `task_events`, which already matched the live 6, is left as measured; the
+  two tests
+  that pin a NULL-defensive clause build an explicitly legacy-shaped store
+  instead of quietly relaxing the live contract for everyone. 8 mutation
+  probes (drop `scheduled`, naive ready clock, pre-v0.23 `OUTCOME_KINDS`,
+  `done`-only 24 h, capped lookup, `or 0` beat, ignored outcome map, missing
+  label) are all caught against a green pristine control.
+- `hscc_daemon/tests/test_kanban_live.py`: 20 -> **26** cases, green. The
+  three-cards-claimed-in-one-second regression fails against the pre-change
+  code (red first: 6 failed / 20 passed). `scripts/run_tests.sh`: the
+  `hscc_daemon` leg — the one containing this change — **3287 passed**.
+- Real CLI, read-only, live boards. `hscc kanban monitor` snapshot over 23
+  boards with four cards running printed four distinct pairs (`4.1M/33k`,
+  `9.7M/64k`, `861k/14k`, `3.7M/35k`), the two concurrent `backend-engineer`
+  cards distinct. The reported collision replayed from the operator's own
+  rows — three `ecofire-bc` cards all claimed in the same second — gives
+  `2485760/34972` on all three through the old code, and `2485760/34972`,
+  `2738286/34510`, `1663459/26170` through this change, each matching its own
+  `session_id` and the totals in the worker's own `state.db`.
+- `hscc-bootstrap/tests/test_skill_resolver_xval.py`: **11 passed** (was
+  5 failed / 6 passed). `hscc-bootstrap/tests/test_video_gen_openai_compat_e2e.py`:
+  **5 passed** (was: hard exit after 1 of 5, rc=1, no report).
+  `hscc-api/tests/test_gateway_backfill.py`: **9 passed** (was: hard exit before
+  the first dot, rc=1, 0 bytes). Each of the last two also verified with the
+  env var explicitly *unset* (`env -u HERMES_DISABLE_LAZY_INSTALLS`), to prove
+  the `conftest.py` guard is what does it and not the calling shell.
+- Attribution, explicitly, of the things that are **not** the cause. None of
+  the seven failures, and neither silent death, touches conda: the only
+  conda-shaped line anywhere in this suite's logs is
+  `subprocess.TimeoutExpired: Command '[…/miniconda3/envs/p313/bin/python',
+  '…/scripts/hscc_cli_help_audit.py', …]' timed out after 300 seconds` in the
+  `scripts` leg, which the card already explains as that test's own 300 s
+  subprocess timeout under load and which is a different finding on a different
+  leg. The "conda unexpected error" report the card asks about did **not**
+  appear in any run I made here — not in `hscc-bootstrap`, not in `hscc-api`,
+  not in the four orch logs, and `conda info --envs` answers cleanly on this
+  host (`conda 26.3.2`, three envs listed, no error), so I am recording it as
+  not-reproduced-rather-than-explained rather than claiming a root cause for it.
+  Nor is any of it load: the five xval cases and the two e2e cases reproduced
+  identically at 0 % CPU and in isolation, in 1.8 s and 2.1 s respectively.
+- `hscc_daemon/tests/test_verify_stay_down.py`: **44** new cases — the four
+  card acceptance shapes (marker+record ⇒ not a fault and the human detail
+  carries the label with the record's reason; marker + record file missing /
+  corrupt / four shapeless values / a raising predicate ⇒ STILL a fault; record
+  + unmarked stream ⇒ STILL a fault; autodown window ⇒ labels and verdicts
+  byte-identical with the record present AND absent) plus the both-markers
+  precedence case, a mixed-fleet row that carries both labels, the
+  stale-excused-stream-is-still-red case, the exact `hscc verify --json` record
+  shape against the autodown row, and 15 direct cases on the two helpers.
+  Focused runs (`hscc_daemon`, this venv): the card's trio
+  `tests/test_verify.py tests/test_verify_state_schema.py
+  tests/test_stay_down_streams.py` -> **128 passed** with those files
+  **unmodified**, and those three plus `tests/test_verify_stay_down.py
+  tests/test_stay_down_health.py tests/test_post_boot.py tests/test_trigger.py
+  tests/test_health.py` -> **458 passed**. All seven
+  mutation probes of the new code are caught against a green pristine control
+  (158 passed): record branch disabled (10 red), marker requirement dropped
+  (4), the two-key AND weakened to OR (11), the label reworded (10), the
+  record's `reason` never rendered (10), the record's `set_at` shape check
+  removed (6), the two branches' precedence inverted (6). Each probe ran on a
+  fresh `shutil.copytree` of the worktree (no `.git`, absolute scratch path),
+  every anchor was asserted to occur exactly once before writing so a
+  non-matching target cannot report a false MISSED, and a guard test pinned into
+  every copy asserted `verify.__file__` was inside the copy. Unit tests only — no
+  live `cluster down`, no ssh, no sparkrun call.
+- `hscc_daemon/tests/test_kanban_live.py`: 34 -> **42** cases, green. Red first
+  against the pre-change module at the base commit `572b71cb` with the same
+  fixtures — **9 failed / 33 passed** — and the nine are the cases this card asked
+  to be pinned: a session that starts before the window and is still running inside
+  it (24 h and 7 d pinned to the chosen semantics), a `subagent` + `telegram` + NULL
+  fixture asserting which group each lands in and that `total` is the sum of the
+  stated groups, `tokens_24h` being the table's own cell, three groups that add up,
+  a worker's growth never moving the orchestrator row, the `-` cells with no
+  `state.db`, and a guard that the token table's partition and the orchestrator
+  panel's exclude list (t_1f14c019) stay the same cut of `sessions.source`. The
+  ledger's "a deleted session must not make a window negative" guarantee stays
+  green, and a new case pins the same floor across the narrowing of the ledger's
+  source set.
+- `hscc_daemon` leg, measured back-to-back with `run_tests.sh`'s own invocation (one
+  pytest process per dir, `-q -rs -p no:cacheprovider`,
+  `HERMES_DELEGATED_CHILD_CONTEXT` unset): **3360 passed** at this branch's merged
+  HEAD vs **3352 passed** at the same `origin/main` tip (`4f6a14fb`) in a throwaway
+  probe worktree — **+8**, exactly the eight net new cases in
+  `test_kanban_live.py` (34 -> 42 test functions). Run from inside a delegated child
+  (that marker set) the same dir reports one fewer, because one case is gated on it;
+  the count is quoted with the marker unset because that is how the script runs it.
+  Main moved twice while this card ran (#248 `t_278b35b2`, #249 `t_a5c49a41`), so the
+  leg was re-measured after each merge rather than quoted from an earlier tip.
+  The rest of `scripts/run_tests.sh` (12 legs) from this branch: green
+  hscc-commands 69, hscc-roles 219, hscc-cluster 1085 + 3 skipped, hscc-project 1462,
+  sparkrun-hermes 12, memori_byodb 11, .github/scripts 129, comfyui-sparkrun 132. Not
+  green, and none of them in this diff: hscc-bootstrap (exit 1), hscc-api (exit 1),
+  scripts (1 failed / 336 passed / 2 skipped) — the same three legs both parents
+  handed over; see order 3 for what this run finally named about the first.
+- Real CLI, read-only, **same second** before/after (both headers stamped
+  `14:39:14`; `before` = deployed 2.15.5 `hscc kanban monitor`, `after` = the same
+  dispatch through this worktree's `kanban_live`, whose `__file__` the capture
+  prints — `PYTHONPATH` does not redirect the deployed binary, so the pair is not
+  two processes racing, it is one view re-rendered):
+
+      BEFORE                                Tokens         24h in  24h out   7d in  7d out
+      workers        140.4M     1.1M   1.37G   19.9M      workers        140.4M     1.1M   1.42G   20.5M
+      orchestrators   33.0M     346k  749.6M    7.6M      scheduled        9.1M     119k  161.8M    2.8M
+      total          173.3M     1.5M   2.12G   27.5M      orchestrators   23.9M     227k  587.9M    4.8M
+                                                        total          173.3M     1.5M   2.17G   28.2M
+
+  Read the two together and the change is arithmetic, not opinion: `workers 24h`
+  is identical (140.4M — measured 0 kanban rows straddle the 24 h boundary right now
+  and 0 `subagent`/`oneshot` rows have tokens inside it, so the attribution fix had
+  nothing to move there); `scheduled` is `cron` lifted out of the orchestrator row
+  (33.0M − 9.1M = 23.9M, 749.6M − 161.8M = 587.9M); `total 24h` is unchanged
+  (173.3M / 1.5M — a re-partition moves rows, it does not invent tokens); and the
+  only figures that grew are the ones that were missing work: `workers 7d`
+  1.37G -> 1.42G and `total 7d` 2.12G -> 2.17G, `total 7d out` 27.5M -> 28.2M, which
+  is the 49,534,334 in / 647,871 out the `started_at` predicate was dropping.
+- Every cell traced to rows by the store-side SQL that produces it (attached):
+  `workers 24h` = 24 rows / 139,988,643 in, `workers 7d` = 244 rows /
+  1,423,617,163, `scheduled 24h` = 297 rows / 9,013,651, `scheduled 7d` = 722 rows /
+  161,657,371 — those print on screen as 140.0M / 1.42G / 9.0M / 161.8M. The
+  orchestrator cells are not a row sum and are not taken on trust either:
+  `_ledger_delta` over the monitor's own 2,254 live samples gives 23,879,083 in /
+  227,414 out (24 h) and 587,887,683 / 4,820,946 (7 d), matching the table.
+- Migration, because the ledger is shared state: narrowing its source set drops the
+  cumulative by the `subagent`/`oneshot` total at the first sample the new code
+  writes, exactly like a deleted session — `_ledger_delta`'s per-step floor turns
+  that step into 0, never a negative window, so there is nothing to clean up. The
+  one thing a human should know: running the **old** binary again *after* a
+  new-code sample would step the cumulative back up and have that step counted as
+  growth, so do not alternate the two against one ledger. (This capture wrote no
+  sample at all — the live 2.15.5 monitor sampled 2 s before it, inside
+  `LEDGER_STEP_S` — so the operator's history is untouched by the review.)
+- Read-only: every store read is `sqlite3 file:…?mode=ro`; the only file the view
+  can write remains the module's pre-existing token ledger, through the existing
+  `_update_ledger` path and nothing else. Nothing was restarted.
+- The `hscc-bootstrap` 5-F cluster that t_754dca65 and t_1f14c019 both handed over
+  unnamed ("5 F's at 98 %, summary lost, needs a clean re-run on an unloaded host")
+  is not starvation and does not need an unloaded host: it is
+  `test_skill_resolver_xval.py::test_mirror_agrees_with_live_resolver` in 5 of its
+  11 params, deterministic, **5 failed / 6 passed in 1.7 s standalone**, identical
+  at base `572b71cb`, with `assert True is False` at line 123 — the fixture's
+  expected verdict for a flat-vs-category skill layout has drifted from the live
+  hermes resolver on this host. The *missing summary* is a separate leg-level
+  truncation, not a second failure mode. Carded for whoever owns the bootstrap
+  resolver mirror; outside this card's file list, so not touched here.
+- `hscc_daemon/tests/test_post_boot.py`: 29 -> **47** cases (18 new) — the
+  record + its reason/`set_at`, `record_expected_up` ending the stay-down, the
+  preserved cleared-marker shape, six fail-safe shapes (missing file, corrupt
+  JSON, non-dict marker, non-dict record, empty record, unopenable path) plus
+  "no write, no log line", and the two stream wordings. All seven mutation
+  probes of the new code (no stamp, no `pop`, weakened record/marker
+  validation, an escaping read error, the old wording, a mutated verdict
+  label) are caught by the suite. Unit tests only — no live `cluster down`,
+  no ssh, no sparkrun call.
+- `hscc_daemon/tests/test_stay_down_health.py`: **19** new cases — both skips
+  (nothing probed, nothing relaunched, nothing reaped; the D2 wording and state
+  shape; `reason` carried verbatim; **both sanctioned record writers** —
+  `hscc cluster down` (hscc-cluster/hscc.py:547) and `autodown: intentional
+  idle teardown` (hscc_daemon/autodown.py:2319) — standing the check down; a
+  record without a `reason` still stands down) and the fail-safe side:
+  fleet-meant-to-be-up, marker absent, corrupt JSON, three non-record shapes, a
+  raising predicate, a post_boot too old to have the predicate, the
+  autodown-window gate still winning when both apply, and `record_expected_up`
+  (a fleet-up) resuming supervision on the next tick.
+  Focused run: `pytest -q tests/test_stay_down_health.py tests/test_health.py
+  tests/test_post_boot.py` -> **218 passed**. All six mutation probes of the new
+  code (either gate disabled, wording reworded, `intentional` marker dropped,
+  autodown gate demoted, the exception-swallow removed) are caught. Unit tests
+  only — no live `cluster down`, no ssh, no sparkrun call.
+
+### Docs
+- **`skill_guard`'s rank citation said something the source contradicts.** The
+  clause PR #255 landed in `_same_root_rank` asserted that renaming
+  `tools/skills_tool._rank_same_root_candidate` into
+  `agent.skill_utils.skill_candidate_rank` left "the tuple it returns ...
+  unchanged". It did not: `agent/skill_utils.py:445-449` at
+  `v0.23.0-7-g045881137d` returns `(skill_md.name != "SKILL.md",
+  len(skill_md.relative_to(root).parts))` — `tuple[bool, int]` — where the
+  pre-rename predicate built an `int` (`is_flat = 0 if skill_md.name ==
+  "SKILL.md" else 1`). `bool` subclasses `int`, so the sort key and
+  `pick_skill_candidate`'s `!=` gate rank the same either way and the `int`
+  this mirror returns stays correct: wording only, no behaviour, no test. The
+  same clause stopped claiming "verbatim" (the mirror takes a dir-or-`SKILL.md`
+  candidate and pins a path outside the root at depth 99 instead of raising
+  `ValueError`) and dropped a timing claim that measured backwards.
+- **The pre-v0.23 spellings were stale the day the first cut wrote them.** The
+  module docstring said "first cut read it 2026-10-28; upstream has since
+  renamed the internals" — backwards. At the upstream commit dated 2026-10-28
+  (`ee987d9885`) none of `_rank_same_root_candidate`, `_provably_same_skill`,
+  `_locate_skill` or `_skill_search_dirs` existed in `tools/skills_tool.py` or
+  `agent/skill_utils.py`; the renames landed 2026-10-04 (`905ef4efdf`,
+  `f525ecdb9c`, first tag `rc.36-v0.21.5`) and 2026-10-18 (`93fafc4d6f`, first
+  tag `rc.1-v0.22.3`). Fixed in the module docstring, `_identical` and
+  `resolution`, each old spelling kept inline as history the way the file does
+  it, and the resolver named by its live `tools.skills_tool.locate_skill`.
+- **The `.no-bundled-skills` block cited three dead symbols and three stale
+  line numbers.** `hermes_cli/profiles._finish_profile_layout` (:1349),
+  `tools/skills_sync` (:368, :468) and
+  `hermes_cli/profiles.has_bundled_skills_opt_out` no longer exist at v0.23.
+  The live trio is `hermes_cli.profiles_initialization.finish_profile_layout`
+  (seeds `profile_dir / NO_BUNDLED_SKILLS_MARKER` for `--no-skills`),
+  `tools.skills_sync.sync_skills` — the read is one
+  `(_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()` — and
+  `tools.skills_sync_bundled_ops.set_bundled_skills_opt_out`, over the constant
+  `hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER`. Cites symbols, not line
+  numbers, like the rest of the file now.
+- **One mirror drift found, stated, deliberately NOT fixed here.**
+  `EXCLUDED_SKILL_DIRS` claimed to mirror `agent.skill_utils.EXCLUDED_SKILL_DIRS`;
+  it is one entry behind — upstream added `DIST_SWAP_DIR` (`.hermes-dist`,
+  `agent/skill_utils.py:26,29`). Widening the frozenset changes what the scan
+  prunes, so it is a behaviour change with its own test budget: the divergence
+  is said in the comment and reported for its own card instead of riding in on
+  a docstring diff.
+- **`skill_guard`'s upstream citations were all stale; they are re-grounded on
+  the v0.23 names.** `hscc-bootstrap/skill_guard.py` is the doctor's faithful
+  mirror of hermes' skill-resolution rule, and its value depends entirely on a
+  reader being able to open the upstream source the mirror claims to copy. It
+  could not: every citation named pre-v0.23 internals that v0.23 renamed or
+  moved out of `tools/skills_tool` into `agent.skill_utils`. The module
+  docstring, `_same_root_rank`, `resolution`, `profile_skill_roots` and
+  `guard_write` now cite the live symbols —
+  `agent.skill_utils.provably_same_skill`, `agent.skill_utils.skill_candidate_rank`
+  reached from `agent.skill_utils.pick_skill_candidate` via
+  `tools.skills_tool.locate_skill`, `agent.skill_utils.get_skill_search_roots`
+  (local tier = `tools.skills_tool._skills_dir`), `tools.skills_tool._collect_skill_candidates`
+  — with the pre-v0.23 spelling (`_provably_same_skill`,
+  `_rank_same_root_candidate`, `_skill_search_dirs`) kept inline as history so a
+  reader holding an older checkout is not stranded either.
+- **The guaranteed-stale line-number citation is gone.** `resolution`'s RANK
+  GATE paragraph cited `tools/skills_tool.py:524`. A line number into a moving
+  upstream is wrong by construction the moment upstream moves a line, and it
+  was: the predicate it pointed at now lives in
+  `agent.skill_utils.pick_skill_candidate` (`if candidates[ranked[0]][2] !=
+  candidates[ranked[1]][2]`, rank from `skill_candidate_rank`). Cite symbols,
+  not line numbers.
+- **The cross-tier precedence the mirror deliberately does NOT model is now
+  named, with its reason.** v0.23 puts a tier step in front of the same-tier
+  rank gate (`project > local > skills.create_dir > skills.external_dirs`,
+  `agent.skill_utils.get_skill_search_roots`, `TIER_PROJECT…TIER_EXTERNAL`): a
+  lower-tier copy is *shadowed*, never ambiguous. The mirror models only the
+  local tier plus external dirs — the tier every hscc-managed profile uses
+  today — and the docstring now says so and names
+  `test_skill_resolver_xval` as the standing gate on that agreement, so the
+  next reader sees a deliberate scope limit rather than a bug.
+- **A refusal reaches a preload spawn as a label, not an identifier — recorded
+  in the module where the next person will hit it.** v0.23 puts
+  `"Ambiguous skill name <name>: use one of <paths>"` into
+  `build_preloaded_skills_prompt`'s missing list
+  (`agent.skill_utils.AMBIGUOUS_SKILL_PREFIX`,
+  `agent.skill_commands.ambiguous_skill_label`). Anything cross-validating
+  against that list must read the **loaded** side, not string-match the
+  identifier out of it — a `SKILL not in missing` oracle reads a labelled
+  refusal as a successful load. That one mistake cost three handovers
+  (t_7a24e388).
 ## [2.15.5] - 2026-11-06
 
 ### Fixed
