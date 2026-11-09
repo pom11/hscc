@@ -32,10 +32,14 @@ sparkrun, or touches a live fleet — unit tests over a tmp state dir only.
 """
 
 import json
+import urllib.error
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hscc_daemon import post_boot as pb
+from hscc_daemon import state as st
 from hscc_daemon.state import now_iso
 
 # The three sanctioned `clear_expected_up(reason)` wordings on current main,
@@ -436,3 +440,486 @@ class TestVerdictHelpers:
             self, record, expected):
         from hscc_daemon.verify import _operator_down_label
         assert _operator_down_label(record) == expected
+
+
+# ── t_374d7363: the two LIVE-PROBE rows (proxy + chat round-trip) ──────────
+#
+# Same instruction, different shape of evidence. These two rows do not read a
+# stream — they hit the serving layer over HTTP right now, so they have no
+# `intentional` key of their own to agree with the durable record. The card's
+# design question is what the second key is; the answer pinned here is THE
+# DAEMON'S OWN CURRENT STAY-DOWN STAMP on the stream that supervises what the
+# row probes (`proxy` for the proxy row; the serving-layer supervisors for the
+# chat row), which is a DIFFERENT writer from post_boot's record, so the two
+# really are independent. Both keys, or the row reports its fault.
+#
+# The shape a deliberate `hscc cluster down` actually leaves (read, not run —
+# see the card/PR evidence): `cmd_cluster_down` runs one
+# `sparkrun stop --all --cluster …`, which sweeps the DGX hosts for containers
+# (sparkrun/api/_stop_all.py) and never touches the proxy, a LOCAL process on
+# :4000 (health.check_proxy). So the proxy SURVIVES, its discovery sweep prunes
+# the dead backends, and it answers 200 `{"data": []}` ⇒
+# `detail == "no models in data list"` (health.py:1108-1113 documents that exact
+# body). The `connection error:` shape only happens if the proxy itself died,
+# which `cluster down` does not do — both shapes are covered below anyway.
+
+PROXY_EXCUSED = (f"{LABEL_OPERATOR}: serving layer not serving "
+                 f"models, none expected")
+PROXY_WINDOW = (f"{AUTO_LABEL}: serving layer not serving "
+                f"models, none expected")
+CHAT_EXCUSED = f"{LABEL_OPERATOR}: serving layer not serving, chat not expected"
+CHAT_WINDOW = f"{AUTO_LABEL}: serving layer not serving, chat not expected"
+SERVING_SUPERVISORS = ("workers", "dgx", "gateway", "proxy")
+
+
+@pytest.fixture
+def daemon_state(tmp_path, monkeypatch):
+    """The daemon's OWN state funnel (`state.STATE_DIR`) redirected to a tmp dir
+    — the directory `state.read_state` reads, which is what the stay-down witness
+    is read through. Deliberately a different fixture from `state_dir` above:
+    that one is `check_daemon_streams`'s argument, this one is the funnel."""
+    d = tmp_path / "daemon-state"
+    d.mkdir()
+    monkeypatch.setattr(st, "STATE_DIR", str(d))
+    return d
+
+
+def _ago(seconds):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+def _daemon_stamp(name, age_s=0, **extra):
+    """`~/.hscc/state/<name>.json` the way the daemon's stay-down supervisor
+    writes it (health.check_proxy / check_workers / check_dgx / check_gateway),
+    through the production `state.write_state` funnel."""
+    data = {"ok": True, "intentional": "operator_down",
+            "last_check": _ago(age_s),
+            "message": f"fleet deliberately down — not relaunching ({name})",
+            **extra}
+    st.write_state(name, data)
+    return data
+
+
+def _proxy_http(data_list, calls=None):
+    """Stand in for `urlopen`: 200 + a parseable /v1/models body."""
+    def _fake(req, timeout=None):
+        if calls is not None:
+            calls.append(req)
+        resp = MagicMock()
+        resp.status = 200
+        resp.read.return_value = json.dumps({"data": data_list}).encode()
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+    return _fake
+
+
+def _dead_proxy(calls=None):
+    """Stand in for a proxy process that is not there at all."""
+    def _fake(req, timeout=None):
+        if calls is not None:
+            calls.append(req)
+        raise urllib.error.URLError("Connection refused")
+    return _fake
+
+
+def _serving_file(tmp_path, units=({"nodes": ["10.0.0.1"], "port": 8000},)):
+    p = tmp_path / "serving.json"
+    p.write_text(json.dumps({"units": list(units)}))
+    return str(p)
+
+
+def _failing_probe(calls):
+    """Every unit answers the way a stopped container answers: nothing."""
+    def _probe(node, port, timeout=None, max_tokens=None):
+        calls.append((node, port))
+        return {"ok": False, "error": "Connection refused", "status": None}
+    return _probe
+
+
+class TestProxyRowDuringDeliberateDown:
+    """check_proxy — the row that survives the down with an empty catalogue."""
+
+    def test_empty_catalogue_is_excused_without_touching_the_proxy(
+            self, marker, daemon_state):
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy", port=4000)
+        calls = []
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([{"id": "m"}], calls)):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": True, "detail": PROXY_EXCUSED}
+        # The excuse is decided BEFORE probing — the daemon's own stay-down gates
+        # all refuse to touch the serving layer while the record stands.
+        assert calls == []
+
+    def test_human_row_is_the_exact_line_the_operator_reads(self, marker,
+                                                            daemon_state):
+        """The deliverable: one line, the record's own reason, no invented text,
+        no empty parentheses, no second parenthetical."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker, reason=REASON_OPERATOR)
+        _daemon_stamp("proxy")
+        calls = []
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([], calls)):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["detail"] == PROXY_EXCUSED
+        assert "()" not in result["detail"]
+
+    @pytest.mark.parametrize("reason", [REASON_OPERATOR, REASON_SLASH,
+                                        REASON_IDLE])
+    def test_every_record_producer_wording_excuses_the_proxy_row(
+            self, marker, daemon_state, reason):
+        """Same rule as the stream reader: all three sanctioned writers of the
+        record stand the proxy row down; the reason is data, never a test."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker, reason=reason)
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is True
+        assert f"fleet deliberately down ({reason})" in result["detail"]
+
+    def test_record_without_reason_renders_the_bare_label(self, marker,
+                                                          daemon_state):
+        from hscc_daemon.verify import check_proxy
+        _write_raw(marker, {pb.DELIBERATE_DOWN_KEY: {"set_at": now_iso()}})
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["detail"] == (
+            f"{LABEL_BARE}: serving layer not serving models, none expected")
+
+    def test_excused_row_has_no_new_json_key(self, marker, daemon_state):
+        """`hscc verify --json` dumps these dicts — same keys as the row it
+        mirrors (the autodown-excused proxy row), or the machine view changed."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            stay_down = check_proxy(url="http://localhost:4000/v1/models")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([{"id": "m"}])):
+            healthy = check_proxy(url="http://localhost:4000/v1/models")
+        assert set(stay_down) == set(healthy) == {"name", "ok", "detail"}
+
+    # ── the negative controls: either key alone is the shape of the bug ─────
+
+    def test_empty_catalogue_still_fails_without_the_witness(self, marker,
+                                                             daemon_state):
+        """Record present, but the daemon has NOT stamped this process down ⇒
+        an unexplained empty catalogue is a real fault (D1)."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": False,
+                          "detail": "no models in data list"}
+
+    def test_empty_catalogue_still_fails_without_the_record(self, marker,
+                                                            daemon_state):
+        """Witness present, record missing ⇒ a stale claim of a stay-down must
+        not hide a proxy that serves nothing."""
+        from hscc_daemon.verify import check_proxy
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is False
+        assert result["detail"] == "no models in data list"
+
+    def test_dead_proxy_still_fails_without_the_witness(self, marker,
+                                                        daemon_state):
+        """The other shape the card names (proxy process gone). Excused only on
+        both keys; here the witness is absent, so `connection error` still
+        reports."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_dead_proxy()):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is False
+        assert result["detail"].startswith("connection error:")
+
+    def test_dead_proxy_is_excused_when_both_keys_agree(self, marker,
+                                                        daemon_state):
+        """A `cluster down` does not kill the proxy, but a down the operator
+        caused that ALSO lost the process is still the operator's instruction —
+        the excuse is about the fleet, not about which shape came back."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy")
+        calls = []
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_dead_proxy(calls)):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": True, "detail": PROXY_EXCUSED}
+        assert calls == []
+
+    def test_stamp_the_daemon_stopped_renewing_is_not_evidence(self, marker,
+                                                               daemon_state):
+        """A stay-down stamp days old means the daemon stopped supervising — the
+        row must report, not trust a leftover."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy", age_s=3 * 24 * 3600)
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is False
+        assert result["detail"] == "no models in data list"
+
+    def test_an_autodown_stamp_is_not_a_stay_down_witness(self, marker,
+                                                          daemon_state):
+        """Two independent excuses, two markers. No window is in effect here, so
+        `autodown` in that key explains nothing and the fault still reports."""
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy", intentional="autodown")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is False
+
+    def test_a_foreign_marker_value_is_not_evidence(self, marker,
+                                                    daemon_state):
+        from hscc_daemon.verify import check_proxy
+        _stand_down(marker)
+        _daemon_stamp("proxy", intentional="operator_offline")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result["ok"] is False
+
+    def test_window_wording_still_wins_and_stays_byte_identical(
+            self, tmp_path, marker, daemon_state, monkeypatch):
+        """D2/precedence: with an autodown window AND a stay-down record AND a
+        stay-down stamp, the row renders exactly what it rendered before this
+        excuse existed."""
+        from hscc_daemon.verify import check_proxy
+        _arm_intentional(tmp_path, monkeypatch)
+        _stand_down(marker)
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen",
+                   side_effect=_proxy_http([])):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": True, "detail": PROXY_WINDOW}
+        assert LABEL_BARE not in result["detail"]
+
+    def test_a_serving_proxy_reports_the_stay_down_before_its_models(
+            self, marker, daemon_state):
+        """The excuse is judged BEFORE the probe (nothing is touched while the
+        record stands), so during a deliberate down the row says the fleet is
+        off on purpose even if the LB still lists a stale catalogue. That is the
+        same consequence the autodown window gate above already has, and the
+        daemon's own proxy supervisor made the same trade-off on purpose
+        (health.check_proxy: a hand-started proxy is not health-checked while the
+        record stands). Without the witness the very same body is the
+        `2 models available` row it always was — the excuse never rewrites a
+        healthy verdict into a failing one."""
+        from hscc_daemon.verify import check_proxy
+        body = _proxy_http([{"id": "m1"}, {"id": "m2"}])
+        _stand_down(marker)
+        _daemon_stamp("proxy")
+        with patch("hscc_daemon.verify.urllib.request.urlopen", side_effect=body):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": True, "detail": PROXY_EXCUSED}
+        (daemon_state / "proxy.json").unlink()
+        with patch("hscc_daemon.verify.urllib.request.urlopen", side_effect=body):
+            result = check_proxy(url="http://localhost:4000/v1/models")
+        assert result == {"name": "proxy", "ok": True,
+                          "detail": "2 models available"}
+
+
+class TestChatRoundtripDuringDeliberateDown:
+    """check_chat_roundtrip — the row that probes EVERY serving.json unit."""
+
+    @pytest.mark.parametrize("witness", SERVING_SUPERVISORS)
+    def test_excused_by_any_serving_layer_supervisor(self, marker, daemon_state,
+                                                     witness):
+        """The row's subject is the whole serving layer, so any one of the
+        supervisors freshly standing down (plus the record) is the agreement.
+        `workers` alone covers an orchestrator-only fleet, which stamps nothing
+        else; `dgx` alone covers a fleet with no keep-alive units."""
+        from hscc_daemon.verify import check_chat_roundtrip
+        _stand_down(marker)
+        _daemon_stamp(witness)
+        calls = []
+        result = check_chat_roundtrip(
+            serving_path=_serving_file(daemon_state),
+            probe=_failing_probe(calls))
+        assert result == {"name": "chat_roundtrip", "ok": True,
+                          "detail": CHAT_EXCUSED}
+        assert calls == []
+
+    def test_no_witness_probes_every_unit_and_fails(self, marker, daemon_state):
+        from hscc_daemon.verify import check_chat_roundtrip
+        _stand_down(marker)
+        calls = []
+        result = check_chat_roundtrip(
+            serving_path=_serving_file(daemon_state),
+            probe=_failing_probe(calls))
+        assert len(calls) == 1
+        assert result["ok"] is False
+        assert "did not answer" in result["detail"]
+
+    def test_witness_without_the_record_still_probes_and_fails(
+            self, marker, daemon_state):
+        from hscc_daemon.verify import check_chat_roundtrip
+        _daemon_stamp("workers")
+        calls = []
+        result = check_chat_roundtrip(
+            serving_path=_serving_file(daemon_state),
+            probe=_failing_probe(calls))
+        assert len(calls) == 1
+        assert result["ok"] is False
+
+    def test_stale_witness_still_probes_and_fails(self, marker, daemon_state):
+        from hscc_daemon.verify import check_chat_roundtrip
+        _stand_down(marker)
+        _daemon_stamp("workers", age_s=3 * 24 * 3600)
+        calls = []
+        result = check_chat_roundtrip(
+            serving_path=_serving_file(daemon_state),
+            probe=_failing_probe(calls))
+        assert len(calls) == 1
+        assert result["ok"] is False
+
+    def test_window_wording_still_wins_and_stays_byte_identical(
+            self, tmp_path, marker, daemon_state, monkeypatch):
+        from hscc_daemon.verify import check_chat_roundtrip
+        _arm_intentional(tmp_path, monkeypatch)
+        _stand_down(marker)
+        _daemon_stamp("workers")
+        calls = []
+        result = check_chat_roundtrip(serving_path=_serving_file(tmp_path),
+                                      probe=_failing_probe(calls))
+        assert result == {"name": "chat_roundtrip", "ok": True,
+                          "detail": CHAT_WINDOW}
+        assert calls == []
+        assert LABEL_BARE not in result["detail"]
+
+    def test_missing_serving_file_is_excused_before_it_is_even_read(
+            self, marker, daemon_state, tmp_path):
+        """The stay-down gate sits BEFORE the serving.json load (nothing is
+        touched while the record stands), so a serving.json this row could not
+        read is part of the down state. Control below: witness gone ⇒ the
+        pre-existing `ok: None` unverified row, unchanged."""
+        from hscc_daemon.verify import check_chat_roundtrip
+        _stand_down(marker)
+        _daemon_stamp("workers")
+        result = check_chat_roundtrip(
+            serving_path=str(tmp_path / "nope.json"),
+            probe=_failing_probe([]))
+        assert result == {"name": "chat_roundtrip", "ok": True,
+                          "detail": CHAT_EXCUSED}
+        (daemon_state / "workers.json").unlink()
+        result = check_chat_roundtrip(
+            serving_path=str(tmp_path / "nope.json"),
+            probe=_failing_probe([]))
+        assert result["ok"] is None
+        assert "unverified" in result["detail"]
+
+
+class TestStayDownWitnessHelper:
+    """The second key itself: fail-safe, per-stream cadence, never raising."""
+
+    def test_a_fresh_stamp_is_current(self, daemon_state):
+        from hscc_daemon.verify import _stay_down_witness_current
+        _daemon_stamp("proxy")
+        assert _stay_down_witness_current("proxy") is True
+
+    def test_a_naive_timestamp_is_read_as_utc(self, daemon_state):
+        from hscc_daemon.verify import _stay_down_witness_current
+        _daemon_stamp("proxy", last_check=_ago(60).replace("+00:00", ""))
+        assert _stay_down_witness_current("proxy") is True
+
+    @pytest.mark.parametrize("case", [
+        "no-timestamp", "unparseable-timestamp", "marker-null",
+        "marker-missing", "marker-autodown", "marker-foreign-value"])
+    def test_a_stamp_that_says_nothing_current_is_not_evidence(
+            self, daemon_state, case):
+        """Every way a stay-down stamp can fail to be CURRENT evidence reads as
+        NO evidence, so the row reports its fault. `write_state` stamps its own
+        fresh `timestamp`, so a case that means "no timestamp" has to null BOTH
+        keys the reader falls back through."""
+        from hscc_daemon.verify import _stay_down_witness_current
+        now = now_iso()
+        stamp = {
+            "no-timestamp": {"intentional": "operator_down",
+                             "last_check": None, "timestamp": None},
+            "unparseable-timestamp": {"intentional": "operator_down",
+                                      "last_check": "yesterday"},
+            "marker-null": {"intentional": None, "last_check": now},
+            "marker-missing": {"last_check": now},
+            "marker-autodown": {"intentional": "autodown", "last_check": now},
+            "marker-foreign-value": {"intentional": "operator_offline",
+                                     "last_check": now},
+        }[case]
+        st.write_state("proxy", stamp)
+        assert _stay_down_witness_current("proxy") is False
+
+    def test_a_non_dict_stream_is_not_evidence(self, daemon_state):
+        from hscc_daemon.verify import _stay_down_witness_current
+        (daemon_state / "proxy.json").write_text(json.dumps([1, 2, 3]))
+        assert _stay_down_witness_current("proxy") is False
+
+    def test_a_missing_state_dir_is_not_evidence(self, tmp_path, monkeypatch):
+        from hscc_daemon.verify import _stay_down_witness_current
+        monkeypatch.setattr(st, "STATE_DIR", str(tmp_path / "absent"))
+        assert _stay_down_witness_current("proxy") is False
+
+    def test_a_raising_reader_is_swallowed_into_no_evidence(self, monkeypatch):
+        from hscc_daemon.verify import _stay_down_witness_current
+
+        def _boom(*a, **kw):
+            raise RuntimeError("unreadable")
+        monkeypatch.setattr(st, "read_state", _boom)
+        assert _stay_down_witness_current("proxy") is False
+
+    def test_the_bound_scales_with_that_streams_own_cadence(self, daemon_state):
+        """600 s floor for a fast stream, ~2 cycles for a slow one (nas: 900 s
+        ⇒ 2*900+90) — the same rule check_daemon_streams applies to staleness,
+        so a slow supervisor is never judged by a fast stream's window."""
+        from hscc_daemon.verify import _stay_down_witness_current
+        _daemon_stamp("nas", age_s=1200)
+        assert _stay_down_witness_current("nas") is True
+        _daemon_stamp("proxy", age_s=1200)
+        assert _stay_down_witness_current("proxy") is False
+
+    def test_verdict_needs_both_keys_and_injects_its_predicate(self):
+        from hscc_daemon.verify import _stay_down_probe_verdict
+        record = {"set_at": "2026-11-09T12:00:00+00:00",
+                  "reason": REASON_OPERATOR}
+        # No witness stream on disk: even a confirmed record excuses nothing.
+        assert _stay_down_probe_verdict(("proxy",),
+                                        deliberately_down_fn=lambda: record) is None
+        # Witness + injected record: excused, through the seam (no ~/.hscc read).
+        import hscc_daemon.verify as v
+        original = v._stay_down_witness_current
+        v._stay_down_witness_current = lambda name, now=None: True
+        try:
+            assert _stay_down_probe_verdict(
+                ("proxy",), deliberately_down_fn=lambda: record) == LABEL_OPERATOR
+        finally:
+            v._stay_down_witness_current = original
+        # Witness agrees, record predicate raises ⇒ no evidence ⇒ report.
+        def _boom():
+            raise OSError("unreadable")
+        assert _stay_down_probe_verdict(("proxy",),
+                                        deliberately_down_fn=_boom) is None
+
+    def test_verdict_without_any_witness_name_never_excuses(self, marker,
+                                                            daemon_state):
+        """An empty witness tuple is a caller bug, and the fail-safe direction
+        says it excuses nothing."""
+        from hscc_daemon.verify import _stay_down_probe_verdict
+        _stand_down(marker)
+        _daemon_stamp("proxy")
+        assert _stay_down_probe_verdict(()) is None

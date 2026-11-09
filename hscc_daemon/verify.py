@@ -495,6 +495,105 @@ def _operator_down_label(record):
     return "fleet deliberately down"
 
 
+# How long a daemon stay-down stamp counts as CURRENT evidence for a live-probe
+# row (t_374d7363). Same convention :func:`check_daemon_streams` uses for
+# staleness: a 600 s floor, never less than ~2 full check cycles of THAT stream
+# plus jitter — so a stream the daemon is still renewing (proxy/workers/dgx/
+# gateway all tick at 60 s) always counts, and one it stopped renewing does not.
+_STAY_DOWN_WITNESS_FLOOR_S = 600
+_STAY_DOWN_WITNESS_EXTRA_CYCLES = 2
+_STAY_DOWN_WITNESS_JITTER_S = 90
+
+
+def _stay_down_witness_current(name, now=None):
+    """True when the daemon has JUST stamped stay-down on stream ``name``.
+
+    The stream is read through the daemon's own funnel
+    (``state.read_state``) — the same published file ``check_daemon_streams``
+    reads, not a second copy of the fact. True requires ALL of: the stream is a
+    dict, it carries ``intentional == "operator_down"`` (the marker the
+    stay-down supervisors write — health.py proxy/workers, dgx/gateway), and its
+    ``last_check``/``timestamp`` is inside :data:`_STAY_DOWN_WITNESS_FLOOR_S`
+    scaled by that stream's own cadence.
+
+    Fail-safe toward REPORTING FAULTS, identical in direction to
+    :func:`_operator_down_verdict` (D1): unreadable file, non-dict, no marker,
+    no timestamp, unparseable timestamp, a timestamp in an uncomparable shape,
+    or a stamp the daemon stopped renewing ⇒ False ⇒ the caller reports the
+    fault exactly as before this marker existed. NEVER raises.
+    """
+    from . import state as _state
+    try:
+        data = _state.read_state(name)
+        if not isinstance(data, dict):
+            return False
+        if data.get("intentional") != "operator_down":
+            return False
+        ts_str = data.get("last_check") or data.get("timestamp")
+        if not ts_str:
+            return False
+        ts = datetime.fromisoformat(ts_str)
+    except Exception:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    limit = max(_STAY_DOWN_WITNESS_FLOOR_S,
+                _STAY_DOWN_WITNESS_EXTRA_CYCLES
+                * (_live_stream_intervals().get(name) or 0)
+                + _STAY_DOWN_WITNESS_JITTER_S)
+    try:
+        return (now - ts) <= timedelta(seconds=limit)
+    except TypeError:
+        # naive/aware mix or a non-datetime: no usable evidence, not a pass.
+        return False
+
+
+def _stay_down_probe_verdict(witnesses, deliberately_down_fn=None, now=None):
+    """Excuse label for a LIVE-PROBE row during a deliberate down, else None.
+
+    STAY-DOWN-VERIFY-2 (t_374d7363). ``check_proxy`` and
+    ``check_chat_roundtrip`` are not stream readers — they probe the serving
+    layer over HTTP right now, so there is no ``intentional`` key of their own
+    to agree with the durable record. That does NOT mean the record alone can
+    excuse them: one key is one key, and a stale ``deliberate_down`` record is
+    exactly the thing that would otherwise hide a dead serving layer (the
+    2026-11-08 incident was a fleet left down while surfaces still insisted it
+    was supervising).
+
+    So the second key is the DAEMON'S OWN CURRENT STATEMENT about the thing this
+    row probes, read off the stream the daemon writes when it stands that part
+    of the serving layer down:
+
+    * ``check_proxy`` probes the local LiteLLM proxy on :4000 — witnessed by the
+      stream that supervises THAT PROCESS (``proxy``, health.check_proxy's
+      stay-down gate), one witness, per-component, as strict as
+      :func:`check_daemon_streams`'s own-marker rule.
+    * ``check_chat_roundtrip`` probes EVERY unit in ``serving.json`` — its
+      subject is the serving layer as a whole, so its witnesses are the
+      streams that supervise it (``workers``, ``dgx``, ``gateway``, ``proxy``),
+      and ANY one of them freshly stamped is enough. "Any", not "all", on
+      purpose: ``check_workers`` stamps nothing at all when serving.json
+      declares no keep-alive units, and an orchestrator-only fleet would then
+      never be excusable — while "all" buys nothing, because during a real
+      stay-down every one of those supervisors takes the same gate on the same
+      tick.
+
+    Both keys must be present: the record says the operator ordered the stay-down,
+    the witness says the daemon is obeying it RIGHT NOW. Either alone ⇒ None ⇒
+    the row reports its fault. Fail-safe direction is the same as every other
+    stay-down gate in this module: an inability to read either key reads as NO
+    EVIDENCE. NEVER raises.
+    """
+    record = _operator_down_verdict(deliberately_down_fn)
+    if record is None:
+        return None
+    if not any(_stay_down_witness_current(name, now=now) for name in witnesses):
+        return None
+    return _operator_down_label(record)
+
+
 def _live_stream_intervals():
     """Return the live daemon's per-stream check cadence (stream -> seconds).
 
@@ -820,6 +919,18 @@ def check_proxy(url=None, timeout=None):
     HTTP layer, and the proxy is SUPPOSED to be down), so the safe reading
     while in the intentional window is to not report a fault; any real proxy
     problem surfaces as soon as the wake completes.
+
+    NON-failing during a deliberate `hscc cluster down` as well (t_374d7363),
+    with the SAME two-key agreement this module's stream reader uses: this
+    stream's own CURRENT ``intentional == "operator_down"`` stamp (written by the
+    daemon's own proxy supervisor, which stands this process down while the
+    record stands) AND post_boot's durable stay-down record. The counter-argument
+    — "a proxy the operator started by hand should still be checked" — is already
+    settled by that supervisor: ``health.check_proxy`` explicitly does not repair,
+    reap or health-check a hand-started proxy while the record stands, so verify
+    would be the lone surface contradicting a trade-off the fleet took on
+    purpose. Either key missing or stale ⇒ the probe runs and the row fails
+    exactly as before.
     """
     if url is None:
         url = "http://localhost:4000/v1/models"
@@ -831,6 +942,22 @@ def check_proxy(url=None, timeout=None):
         window_label = _intentional_window_label(window_verdict)
         return {"name": "proxy", "ok": True,
                 "detail": f"{window_label}: serving layer not serving "
+                          f"models, none expected"}
+
+    # STAY-DOWN (t_374d7363): the deliberate `cluster down` half of the excuse
+    # the window above already grants, judged AFTER it so the autodown wording
+    # stays first and byte-identical. A manual down stops the model containers
+    # on the DGX nodes (`sparkrun stop --all`) and never touches this proxy,
+    # which is a local process on the daemon host — so it SURVIVES the down,
+    # its discovery sweep prunes the dead backends, and it answers 200 with
+    # `{"data": []}`: the "no models in data list" failure below, for as long as
+    # the record stands. Two keys, same shape as check_daemon_streams: the
+    # stream that supervises THIS PROCESS (health.check_proxy's own stay-down
+    # gate) currently stamped `operator_down`, AND the durable record.
+    stay_down = _stay_down_probe_verdict(("proxy",))
+    if stay_down:
+        return {"name": "proxy", "ok": True,
+                "detail": f"{stay_down}: serving layer not serving "
                           f"models, none expected"}
 
     try:
@@ -1547,6 +1674,15 @@ def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
     serving layer is down by design — mirrors ``check_proxy``. ``ok`` is None
     (unverified) only when serving.json is missing/unparseable or the probe
     module is unavailable.
+
+    Excused the same way during a deliberate `hscc cluster down` (t_374d7363):
+    this row probes EVERY unit in serving.json, and `sparkrun stop --all` stopped
+    all of them, so a RED here reports the operator's own instruction as a faulty
+    serving layer. Its two keys are the durable stay-down record AND a serving
+    layer supervision stream (workers/dgx/gateway/proxy) freshly stamped
+    ``intentional == "operator_down"`` — see :func:`_stay_down_probe_verdict`.
+    Either key missing or stale ⇒ every unit is really probed and the row fails
+    as before.
     """
     if probe is None:
         if _health is None or not hasattr(_health, "_probe_unit_generation"):
@@ -1571,6 +1707,21 @@ def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
         return {"name": "chat_roundtrip", "ok": True,
                 "detail": f"{_intentional_window_label(window_verdict)}: "
                           f"serving layer not serving, chat not expected"}
+
+    # STAY-DOWN (t_374d7363): same excuse for the deliberate `cluster down`,
+    # judged AFTER the window so that wording stays first, and BEFORE any
+    # probing so nothing is touched (the rule every stay-down gate in the daemon
+    # follows). `sparkrun stop --all` stopped every unit this row probes, so each
+    # probe would answer "connection refused" and the row would call the serving
+    # layer faulty for an instruction the operator gave on purpose. Witnesses are
+    # the streams that supervise the serving layer, because THIS row's subject is
+    # the whole serving layer, not one process (see
+    # :func:`_stay_down_probe_verdict`); the durable record must still agree.
+    stay_down = _stay_down_probe_verdict(("workers", "dgx", "gateway", "proxy"))
+    if stay_down:
+        return {"name": "chat_roundtrip", "ok": True,
+                "detail": f"{stay_down}: serving layer not serving, "
+                          f"chat not expected"}
 
     serving_data = None
     if _serving is not None:
