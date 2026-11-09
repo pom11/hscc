@@ -2262,6 +2262,239 @@ class TestAutoup:
 
 
 # ---------------------------------------------------------------------------
+# STAY-DOWN-WAKE (t_278b35b2) — the wake must clear the stay-down BEFORE it
+# launches, so a wake that fails cannot pin the fleet "deliberately down".
+# ---------------------------------------------------------------------------
+
+import hscc_daemon.post_boot as _pb
+
+
+def _seed_stay_down(reason):
+    """Stamp a stay-down the way a real clear does (both sanctioned paths).
+
+    Uses the production writer, not a hand-written dict, so the record shape is
+    the one ``deliberately_down()`` actually reads — and so the two wordings the
+    reviewer note on PR #243 names are pinned by their real callers' strings:
+    ``hscc cluster down`` (hscc-cluster/hscc.py) and
+    ``autodown: intentional idle teardown`` (``teardown()`` step 5a).
+    """
+    _pb.clear_expected_up(reason)
+    assert _pb.deliberately_down() is not None, "seeding failed"
+    assert _pb.load_marker()["units"] == []
+
+
+class TestWakeClearsStayDownBeforeLaunching:
+    """D4: the wake re-arms ``expected_up`` BEFORE the launch phase (step 2a).
+
+    The record is what ends the durable ``deliberate_down`` stay-down, so while
+    it sat at step 6a (post-readiness) a wake whose readiness wait TIMED OUT
+    returned early from ``_handle_wake_timeout`` and never recorded anything:
+    the stay-down stayed stamped, the post-boot pass / check_workers /
+    check_proxy all stood down on ``deliberately_down()`` — and nothing could
+    ever heal. Every case here seeds a stay-down first and asserts the wake
+    ended it, on the SUCCESS path and on both failure paths.
+    """
+
+    _OPERATOR = "hscc cluster down"
+    _TEARDOWN = "autodown: intentional idle teardown"
+
+    def _setup(self, tmp_path, monkeypatch, autodown_file, results=None):
+        """Same wiring as ``TestAutoup._setup`` (block + serving + stub notify)."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        serving = _write_serving(tmp_path)
+        _lifecycle.save_watchdog_block(
+            {"blocked": True, "intentional": "autodown",
+             "reason": ad.WATCHDOG_TEARDOWN_REASON,
+             "blocked_at": NOW.isoformat(), "failures": []})
+        _write_down_cfg(autodown_file)
+        runner = _FakeRunner(block_file, results=results)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        return serving, runner, block_file
+
+    # -- the ordering itself: recorded while the FIRST start is issued ------
+    def test_marker_already_recorded_at_the_moment_of_the_first_start(
+            self, tmp_path, monkeypatch, autodown_file):
+        """At the first launch call the marker is ALREADY re-armed.
+
+        The runner snapshots the marker from disk on every call, so this pins
+        the ORDERING rather than a post-hoc end state: if the record ever moves
+        back to after the launch (or after readiness), the snapshot taken
+        during call #1 shows no units and this fails.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                 autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        seen = []
+
+        def runner_spy(cmd, timeout=30):
+            # Snapshot BEFORE delegating, i.e. at the instant the start runs.
+            seen.append({"units": len(_pb.load_marker()["units"]),
+                         "stay_down": _pb.deliberately_down()})
+            return runner(cmd, timeout=timeout)
+
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner_spy,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert len(seen) == 3, "one snapshot per unit start"
+        for snap in seen:
+            assert snap["stay_down"] is None, (
+                "a stay-down was still stamped while a unit was being started")
+            assert snap["units"] == 3, (
+                "expected_up must carry the FULL footprint before the first "
+                "launch, as cmd_cluster_up does")
+
+    # -- 1. clean wake ------------------------------------------------------
+    def test_clean_wake_ends_the_stay_down(self, tmp_path, monkeypatch,
+                                           autodown_file):
+        """Success ⇒ marker re-armed with the full plan, no stay-down left."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                 autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert _pb.deliberately_down() is None
+        marker = _pb.load_marker()
+        assert {u["unit_id"] for u in marker["units"]} == {"orch", "wk1",
+                                                           "wk-keep"}
+        assert marker["reason"] == "autodown wake"
+
+    # -- 2. THE regression: readiness TIMEOUT --------------------------------
+    def test_readiness_timeout_wake_left_no_stay_down(self, tmp_path,
+                                                     monkeypatch,
+                                                     autodown_file):
+        """THE bug this card exists for: a timed-out wake must not re-pin.
+
+        Pre-fix the record sat after ``_wait_ready``, so this path returned from
+        ``_handle_wake_timeout`` having recorded NOTHING — the teardown's
+        stay-down survived a wake attempt forever and every stay-down consumer
+        (post-boot pass, check_workers, check_proxy) stayed stood down.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                 autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_DownProbe(), clock=_AdvancingClock(0, 1),
+            sleep_fn=_noop_sleep, wake_grace_minutes=0, notify=False,
+        )
+        # The failure path we are pinning really ran.
+        assert res["result"] == "not-ready"
+        assert "READINESS TIMEOUT" in ad.load_config()["reason"]
+        # ...and the stay-down is GONE anyway, with the footprint recorded.
+        assert _pb.deliberately_down() is None, (
+            "a wake that timed out left the fleet pinned deliberately down — "
+            "nothing would ever heal again")
+        assert len(_pb.load_marker()["units"]) == 3
+
+    # -- 3. launch command fails --------------------------------------------
+    def test_failed_launch_left_no_stay_down(self, tmp_path, monkeypatch,
+                                             autodown_file):
+        """A start command that fails ⇒ the record was already set pre-launch."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                 autodown_file, results=[False])
+        _seed_stay_down(self._TEARDOWN)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "start-failed"
+        assert len(runner.calls) == 1        # died on the orchestrator
+        assert _pb.deliberately_down() is None
+        assert len(_pb.load_marker()["units"]) == 3
+
+    # -- 4. teardown still SETS the stay-down (autodown.py step 5a) ---------
+    def test_teardown_still_sets_the_stay_down(self, tmp_path, monkeypatch,
+                                               autodown_file):
+        """The other half of the pair: a teardown pins the fleet DOWN.
+
+        Pinned so the two ends of this lifecycle cannot silently both move: the
+        wake clears (2a), the teardown sets (5a). Uses the real ``teardown()``
+        so the wording is ``teardown``'s own string, not one typed here.
+        """
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        serving = _write_serving(tmp_path)
+        _write_idle_cfg(autodown_file)
+        runner = _FakeRunner(block_file)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        agents = tmp_path / "agents.json"
+        agents.write_text(json.dumps({"agents": [{"name": "a",
+                                                  "status": "idle"}]}))
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]),
+            agents_file=str(agents),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        record = _pb.deliberately_down()
+        assert record is not None
+        assert record["reason"] == self._TEARDOWN
+        assert record["set_at"]
+        assert _pb.load_marker()["units"] == []
+
+    # -- 5. fail-soft: a marker failure must not break the wake -------------
+    def test_record_expected_up_raising_does_not_break_the_wake(
+            self, tmp_path, monkeypatch, autodown_file):
+        """A marker write failure WARNs and the wake proceeds untouched."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                 autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        monkeypatch.setattr(_pb, "record_expected_up",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                OSError("disk on fire")))
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        # The wake itself is unaffected: every unit still started, state up.
+        assert res["result"] == "up"
+        assert len(runner.calls) == 3
+        assert ad.load_config()["state"] == "up"
+        with open(block_file) as f:
+            assert json.load(f).get("intentional") is None
+        # Fail-soft means the stay-down was NOT cleared (no fake success).
+        assert _pb.deliberately_down() is not None
+
+    # -- reviewer note (PR #243): BOTH wordings, never branched on ----------
+    @pytest.mark.parametrize("wording", [_OPERATOR, _TEARDOWN])
+    def test_both_stay_down_wordings_are_lifted_by_a_wake(
+            self, tmp_path, monkeypatch, autodown_file, wording):
+        """Neither wording may re-pin a fleet mid-wake, and success is
+        reached without reading ``reason`` at all.
+
+        The record this card pops comes from TWO sanctioned writers — the
+        operator's ``hscc cluster down`` and autodown's idle teardown. A wake is
+        a fleet-up and fleet-up is the sanctioned escape hatch from either, so
+        the wake must clear both. Pinning the two exact strings also catches a
+        future "branch on reason here" change: it would leave one of these two
+        stamped after a successful wake and fail here.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        _seed_stay_down(wording)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert _pb.deliberately_down() is None, (
+            f"a wake refused to lift the stay-down worded {wording!r}")
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — cycle() wake seam (§4): state=down + fresh activity ⇒ autoup
 # ---------------------------------------------------------------------------
 
