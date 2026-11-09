@@ -277,7 +277,12 @@ def test_takeover_continues_from_hand_written_stopgap_state(tmp_path):
     assert st["last"]["b"] == 3                            # watermark advanced
     assert st["sent"]["b"] == NOW - 1000                   # failure: sent NOT stamped
     assert [p[1] for p in st["pending"]["b"]] == dec[0]["lines"]
-    assert all(isinstance(p, list) and len(p) == 2 for p in st["pending"]["b"])
+    # Schema (t_ff520296): the stopgap-inherited entry stays exactly
+    # ``[ts, line]`` — readable verbatim, and never suppressible because it has
+    # no identity to compare — while a freshly scanned entry carries its event
+    # identity as a third element. The two shapes must coexist.
+    assert [len(p) for p in st["pending"]["b"]] == [2, 3]
+    assert st["pending"]["b"][1][2] == ["t_9", "review_requested", NOW, 3]
 
 
 def test_failed_inject_keeps_pending_for_retry(tmp_path, state_path):
