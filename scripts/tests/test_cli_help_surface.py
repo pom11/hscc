@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -317,15 +318,36 @@ def test_a_counts_match_committed_table(report, a_counts_baseline):
         "width-dependent again")
 
 
-def _sibling_a_table(py: str, surfaces: list) -> tuple:
-    """Run the sibling's (A)-only pass; (table, failure_text_or_None).
+def _sibling_a_table(py: str, surfaces: list, timeout: int | None = None) -> tuple:
+    """Run the sibling's (A)-only pass; (table, failure_text_or_None, receipt).
 
     Shared driver so the gate AND its anti-vacuity receipt cannot drift into
-    two different notions of "the sibling ran" (t_36d9d8fb)."""
+    two different notions of "the sibling ran" (t_36d9d8fb).
+
+    ``surfaces`` empty means "no surface has an (A) line locally", which is the
+    GREEN state (``cli_help_a_counts.json`` ships ``{}`` — zero ``flightdeck``
+    leaks is the contract, not an absence of data). It is emphatically NOT
+    "nothing to check": the sibling's job then is to prove it independently
+    finds nothing either, across the whole surface. That is sent as the
+    explicit ``'*'`` rather than as ``""`` -> ``None``, because an empty string
+    in the argv of a future ``TimeoutExpired`` reads like a bug in the caller
+    and has already cost this card a wrong first theory (t_28b0e521).
+
+    ``receipt`` is the audit's ``[a-table] surfaces=N probes=N secs=N`` stderr
+    line, parsed into a dict. It is the only thing that distinguishes "the
+    sibling walked every probe and agreed" from "the sibling answered instantly
+    having done nothing", and :func:`_receipt_probes` makes the gate fail on
+    the second reading instead of accepting it.
+
+    ``timeout`` is left to the caller because the budget is calibrated against
+    the interpreter that is about to run the pass — see :func:`_a_table_timeout`
+    and the measurement block beside it.
+    """
     proc = subprocess.run(
         [py, str(REPO / "scripts" / "hscc_cli_help_audit.py"),
-         "--repo", str(REPO), "--a-table", ",".join(surfaces)],
-        capture_output=True, text=True, timeout=300)
+         "--repo", str(REPO), "--a-table", ",".join(surfaces) or "*"],
+        capture_output=True, text=True,
+        timeout=timeout if timeout is not None else A_TABLE_TIMEOUT_SECS)
     if proc.returncode != 0:
         # A non-zero exit means the sibling could not complete the pass at all
         # — a broken interpreter or an import error inside it, NOT a table
@@ -333,11 +355,131 @@ def _sibling_a_table(py: str, surfaces: list) -> tuple:
         # `stderr[-400:]` character cut could (and did) land inside a
         # `# noqa: E402` source line echoed by the traceback and blame a lint
         # code that nothing ever reported.
-        return None, (_root_cause(proc) or proc.stderr.strip()[-400:])
+        return None, (_root_cause(proc) or proc.stderr.strip()[-400:]), {}
     try:
-        return json.loads(proc.stdout), None
+        return json.loads(proc.stdout), None, _parse_a_receipt(proc.stderr)
     except Exception as e:                                     # noqa: BLE001
-        return None, f"(A) table unparseable: {type(e).__name__}: {e}"
+        return None, f"(A) table unparseable: {type(e).__name__}: {e}", {}
+
+
+# ── the (A)-only pass time budget (t_28b0e521) ───────────────────────────
+#
+# This cap was a bare `timeout=300` and the pass needed ~312 s on a loaded
+# box, so the leg died in `subprocess.TimeoutExpired` for weeks. The real
+# defect was redundant work (the pass rendered every surface at 80, 120 AND
+# 500 and read only the widest — 899 CLI launches where 331 suffice), and that
+# is fixed in `hscc_cli_help_audit.a_table`. This budget is the SECOND half:
+# a cap that is a constant is still a flake generator on a box whose
+# contention varies 5x between an idle tree and five workers plus reviewer
+# legs, which is exactly the spread that produced the three identical reports
+# this card cites.
+#
+# MEASURED on this host (14 cores), sibling = `~/miniconda3/envs/p313`,
+# load = 8 CPU spinners + 8 concurrent `python -c 'import rich, yaml'`
+# churners (load average 9.1-9.4), `nice -n 10`, 2 runs each:
+#
+#   899 probes (before):  312.55 s   312.00 s     -> blew the 300 s cap
+#   331 probes (after):   see the changelog entry for this card
+#   single CLI --help probe, same load: see A_TABLE_PROBE_SECS_MEASURED
+#
+# So the budget is not "300 became 900". It is: measure what ONE probe costs
+# this interpreter under the load that actually exists right now, multiply by
+# the number of probes this pass will launch, and keep a generous safety
+# factor. A busy box therefore gets a bigger budget instead of a red leg, and
+# a wedged pass is still caught — the ceiling below is what bounds it, so the
+# budget can never grow into an infinite hang.
+A_TABLE_PROBE_SECS_MEASURED = 0.35   # measured, loaded host; see block above
+A_TABLE_TIMEOUT_FLOOR_SECS = 180     # never tighter, even on an idle box
+A_TABLE_TIMEOUT_CEIL_SECS = 900      # a wedge must still surface as a failure
+A_TABLE_TIMEOUT_SAFETY = 4.0         # slack for contention rising MID-walk
+A_TABLE_TIMEOUT_SECS = 600           # documented default; see _a_table_timeout
+
+#: The probe count the whole-surface (A)-only walk must launch on a healthy
+#: tree: 331 invocations (`MIN_PROBES`, the audit's own floor) minus the two
+#: `api start` invocations the (A)-only pass never executes. MEASURED on this
+#: host via the receipt: `[a-table] surfaces=329 probes=329`. The gate asserts
+#: the sibling's receipt against it, so the pass cannot satisfy its budget by
+#: doing less work — the property that makes a generous budget safe here rather
+#: than a way to hide a hang.
+A_TABLE_MIN_PROBES = 329
+
+
+def _a_table_timeout(py: str, n_probes_hint: int = A_TABLE_MIN_PROBES) -> int:
+    """Calibrate the (A)-only budget against THIS interpreter, right now.
+
+    The unit of work the whole pass is made of is one CLI launch
+    (``python -m hscc_daemon.hscc <argv> --help``), so this times three real
+    ones of exactly that and takes the median — a direct measurement of the
+    contention that exists at this moment, under the same interpreter the pass
+    will run under. No load-average heuristic, no per-host constant. Costs
+    ~1-2 s, against a pass that costs minutes.
+
+    On a calibration failure it returns :data:`A_TABLE_TIMEOUT_SECS`, the
+    documented constant: an unmeasurable box must not be able to authorise a
+    one-second budget by accident.
+
+    The probe honours the audit's own safety model rather than re-deriving it:
+    HOME points at a throwaway dir seeded with ``.hscc/cluster.json``, because
+    "we only ever run ``--help``" is exactly the assumption this repo refuses
+    to make about the operator's real ``~/.hscc`` (see the audit's Safety model
+    block). Seeding the cluster file also keeps the probe measuring the same
+    code path the real pass measures, instead of an absent-config branch.
+    """
+    home = Path(tempfile.mkdtemp(prefix="a-table-calib-home-"))
+    try:
+        (home / ".hscc").mkdir(parents=True, exist_ok=True)
+        # Address guard: 10.0.0.x is the documented LAN placeholder, never a
+        # real host (same convention as the audit's own seed).
+        (home / ".hscc" / "cluster.json").write_text(
+            '{"gateway": {"host": "10.0.0.1"}, "workers": [],'
+            ' "nasDevices": []}')
+        env = {**os.environ,
+               "HOME": str(home),
+               "PYTHONPATH": os.pathsep.join(
+                   [str(REPO), str(REPO / "hscc-project")]),
+               "COLUMNS": "500", "NO_COLOR": "1", "TERM": "dumb"}
+        costs = []
+        for _ in range(3):
+            t0 = time.monotonic()
+            try:
+                subprocess.run([py, "-m", "hscc_daemon.hscc", "--help"],
+                               capture_output=True, text=True, timeout=60,
+                               env=env, cwd=str(home))
+            except Exception:                                    # noqa: BLE001
+                return A_TABLE_TIMEOUT_SECS
+            costs.append(time.monotonic() - t0)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    unit = max(sorted(costs)[len(costs) // 2], A_TABLE_PROBE_SECS_MEASURED)
+    return int(min(max(n_probes_hint * unit * A_TABLE_TIMEOUT_SAFETY,
+                       A_TABLE_TIMEOUT_FLOOR_SECS),
+                   A_TABLE_TIMEOUT_CEIL_SECS))
+
+
+#: The audit's per-run receipt line, parsed. Absent receipt -> {} -> the gate
+#: treats it as ZERO probes: a pass that cannot prove it walked is a failure,
+#: never a pass. That default is deliberate — it is the same "unrecognised
+#: shape fails, never defaults to ok" rule t_82fa20f5 landed for the
+#: cross-validation probe, applied here to the sibling walk.
+_A_RECEIPT_RE = None
+
+
+def _parse_a_receipt(stderr: str) -> dict:
+    import re as _re
+    global _A_RECEIPT_RE
+    if _A_RECEIPT_RE is None:
+        _A_RECEIPT_RE = _re.compile(
+            r"\[a-table\]\s+surfaces=(\d+)\s+probes=(\d+)\s+secs=([\d.]+)")
+    for ln in reversed((stderr or "").splitlines()):
+        m = _A_RECEIPT_RE.search(ln)
+        if m:
+            return {"surfaces": int(m.group(1)), "probes": int(m.group(2)),
+                    "secs": float(m.group(3))}
+    return {}
+
+
+def _receipt_probes(receipt: dict) -> int:
+    return int(receipt.get("probes", 0) or 0)
 
 
 def test_a_table_identical_under_sibling_interpreters(report):
@@ -351,7 +493,17 @@ def test_a_table_identical_under_sibling_interpreters(report):
     longer hide until its own full-suite leg runs. Skips only when this host
     has no runnable sibling; the skip reason NAMES every candidate that was
     dropped and why, so a host that loses its siblings says so instead of
-    looking green (t_36d9d8fb)."""
+    looking green (t_36d9d8fb).
+
+    Two things stop this becoming a test that only passes on an idle box
+    (t_28b0e521): the budget is CALIBRATED against the sibling's own measured
+    probe cost rather than being a constant, and the sibling's receipt must
+    report the full probe walk — so the pass cannot buy its way inside the
+    budget by doing less work. A timeout is re-raised as an assertion that
+    states the measured per-probe cost it budgeted against, instead of
+    surfacing as a bare ``subprocess.TimeoutExpired`` traceback with no
+    number in it, which is what made three separate cards re-diagnose this
+    from scratch."""
     surfaces = sorted(report["a_counts"])
     siblings = _sibling_interpreters()
     if not siblings:
@@ -360,15 +512,40 @@ def test_a_table_identical_under_sibling_interpreters(report):
                     " on PATH"
                     + (f" (dropped -> {dropped})" if dropped else ""))
     for py in siblings:
-        table, failed = _sibling_a_table(py, surfaces)
-        assert failed is None, (
-            f"sibling {py} could not run the (A)-only pass: {failed}")
-        assert table == report["a_counts"], (
-            f"(A) table differs under sibling interpreter {py} "
-            f"({' '.join(_py_version(py))}) — finding identity became "
-            f"interpreter-dependent again:\n"
-            f"  sibling: {json.dumps(table, indent=2)}\n"
-            f"  local:   {json.dumps(report['a_counts'], indent=2)}")
+        budget = _a_table_timeout(py)
+        try:
+            table, failed, receipt = _sibling_a_table(py, surfaces,
+                                                      timeout=budget)
+        except subprocess.TimeoutExpired as e:
+            pytest.fail(
+                f"sibling {py} did not finish the (A)-only pass inside its"
+                f" calibrated budget of {budget}s (median CLI --help probe"
+                f" measured just before the walk; see the measurement block"
+                f" beside A_TABLE_TIMEOUT_SECS). This pass launches"
+                f" ~{A_TABLE_MIN_PROBES} CLI subprocesses; a timeout here"
+                f" means the box is starved or the pass is wedged, NOT that"
+                f" the (A) table drifted.\n  stdout tail:"
+                f" {(e.stdout or '')[-300:]!r}\n  stderr tail:"
+                f" {(e.stderr or '')[-300:]!r}")
+        else:
+            assert failed is None, (
+                f"sibling {py} could not run the (A)-only pass: {failed}")
+            # The walk must have actually happened. Without this the sibling
+            # could answer `{}` in 0.1 s and the equality below would pass
+            # while having compared nothing (t_28b0e521 requirement: never
+            # green merely because the box happened to be free).
+            assert _receipt_probes(receipt) >= A_TABLE_MIN_PROBES, (
+                f"sibling {py} reported only {receipt!r} for the (A)-only"
+                f" walk — a healthy whole-surface pass launches >="
+                f" {A_TABLE_MIN_PROBES} CLI probes. The sibling answered"
+                f" without walking the surface, so the table equality below"
+                f" would be vacuous.")
+            assert table == report["a_counts"], (
+                f"(A) table differs under sibling interpreter {py} "
+                f"({' '.join(_py_version(py))}) — finding identity became "
+                f"interpreter-dependent again:\n"
+                f"  sibling: {json.dumps(table, indent=2)}\n"
+                f"  local:   {json.dumps(report['a_counts'], indent=2)}")
 
 
 def _py_version(py: str) -> list:
@@ -487,7 +664,7 @@ def test_sibling_gate_still_runs_a_real_sibling():
          GATE-313."""
     siblings = _sibling_interpreters()
     for py in siblings:
-        table, failed = _sibling_a_table(py, ["no-such-surface-xyz"])
+        table, failed, _receipt = _sibling_a_table(py, ["no-such-surface-xyz"])
         assert failed is None, (
             f"selected sibling {py} cannot run the (A)-only contract: {failed}")
         assert table == {}, f"unexpected (A) table for a phantom surface: {table}"
@@ -576,6 +753,86 @@ def test_a_count_table_shape():
           {"command": "hscc y --help", "kind": "A-WIDTH", "detail": "d"}]
     assert audit_mod.a_count_table(fs) == {
         "hscc x --help": ["a flightdeck", "b flightdeck"]}
+
+
+# ── the (A)-only width reduction is table-preserving (t_28b0e521) ─────────
+#
+# `a_table` stopped rendering the 80/120 widths, which is what cut the sibling
+# pass from 899 CLI subprocesses to 329 (measured 312.55 s -> 114.80 s on a
+# loaded host — the difference between blowing the cap and clearing it). That
+# is only legitimate if the table cannot change. These two pins are the proof,
+# one by construction and one by example; without them the cut is an opinion.
+
+def test_a_table_probes_only_the_authoritative_width():
+    """PROOF BY CONSTRUCTION: the width dropped is never the width read.
+
+    `a_findings_for_surface` derives every kind-"A" detail from `max(renders)`
+    alone. So if the width the (A)-only pass keeps IS the widest width the full
+    audit probes for that kind, the (A) table it produces is the same table —
+    the only findings removed are the A-WIDTH entries `a_table` never reads.
+    This assertion is that identity, checked against both sides of the seam
+    rather than against literals.
+    """
+    for kind_flag, full_widths in ((True, audit_mod.WIDTHS_ALL),
+                                   (False, audit_mod.WIDTHS_WRAP)):
+        kept = audit_mod.A_TABLE_WIDTHS[kind_flag]
+        assert kept == (max(full_widths),), (
+            f"kind_flag={kind_flag}: the (A)-only pass keeps {kept} but the "
+            f"full audit probes {full_widths} — it must keep exactly the "
+            f"widest, which is the only render a_findings_for_surface reads "
+            f"for class (A). If this fires, the (A)-only table is NOT the "
+            f"same table the full audit computes.")
+
+
+def test_a_table_wide_only_equals_all_widths_on_a_leaking_surface():
+    """PROOF BY EXAMPLE: a surface that DOES leak gives one identical table.
+
+    The committed (A) table is `{}` (zero leaks is the contract), so on a green
+    tree a width change cannot be observed by comparing tables — `{}` compared
+    with `{}` proves nothing. This synthesises the case the fixture cannot: a
+    wide line carrying a violation plus narrow renders that are genuine wrap
+    fragments of it. Dropping the narrow widths must not move the (A) set by a
+    single entry, and the A-WIDTH-only divergence must be exactly what is lost.
+    """
+    wide = ("doctor          self-check: is flightdeck's view of the fleet "
+            "trustworthy right now")
+    wrapped = "doctor self-check: is flightdeck's view of the fleet"
+    all_w = _renders(wide, w80_text=wrapped)
+    wide_only = {500: all_w[500]}
+
+    def a_lines(renders):
+        return sorted(f["detail"] for f
+                      in audit_mod.a_findings_for_surface(renders)
+                      if f["kind"] == "A")
+
+    assert a_lines(wide_only) == a_lines(all_w), (
+        "the (A)-only pass's narrower probe set changed the (A) table — the "
+        "width reduction in a_table is NOT table-preserving")
+    # And name precisely what the reduced pass gives up, so nobody later
+    # "restores" it believing the (A) table was losing information:
+    assert [f["kind"] for f in audit_mod.a_findings_for_surface(all_w)
+            if f["kind"] == "A-WIDTH"] == [], (
+        "fixture drifted: this narrow render is a fragment, so A-WIDTH must "
+        "be empty and nothing at all is lost by the reduction")
+
+
+def test_a_table_receipt_parser_never_invents_probes():
+    """The anti-vacuity receipt fails CLOSED.
+
+    `_parse_a_receipt` feeding `A_TABLE_MIN_PROBES` is the only thing between
+    "the sibling walked 329 probes" and "the sibling answered instantly". A
+    missing or malformed line must read as ZERO probes (a failure), never as a
+    default that satisfies the floor.
+    """
+    good = ("[a-table] surfaces=329 probes=329 secs=114.80\n")
+    assert _parse_a_receipt(good) == {"surfaces": 329, "probes": 329,
+                                      "secs": 114.80}
+    assert _receipt_probes(_parse_a_receipt("")) == 0
+    assert _receipt_probes(_parse_a_receipt("Traceback ...")) == 0
+    assert _receipt_probes({}) == 0
+    # A receipt that under-reports must not be coerced up to the floor.
+    assert _receipt_probes(_parse_a_receipt(
+        "[a-table] surfaces=1 probes=1 secs=0.5")) < A_TABLE_MIN_PROBES
 
 
 def test_styles_recorded(report):
