@@ -28,7 +28,7 @@ Printed from **inside** the failing test in the failing combination
 (`-p diag_plugin`, a throwaway pytest plugin that dumps `sys.modules`):
 
 ```
-sys.modules["hermes_cli"]                  __file__ = /private/var/folders/…/pytest-of-desac/pytest-973/test_state_resets_to_ok_on_suc0/hermes-agent/hermes_cli/__init__.py
+sys.modules["hermes_cli"]                  __file__ = /private/var/folders/…/pytest-of-<user>/pytest-973/test_state_resets_to_ok_on_suc0/hermes-agent/hermes_cli/__init__.py
 sys.modules["hermes_cli.kanban_db"]        __file__ = …/test_state_resets_to_ok_on_suc0/hermes-agent/hermes_cli/kanban_db.py   list_boards = False
 sys.modules["hermes_cli.kanban_db_connect"]._kb      -> …/test_resolves_from_hermes_agen0/hermes-agent/hermes_cli/kanban_db.py
 sys.modules["hermes_cli.kanban_db_dispatch"]._kb     -> …/test_state_resets_to_ok_on_suc0/hermes-agent/hermes_cli/kanban_db.py
