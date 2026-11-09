@@ -14,8 +14,9 @@ import pytest
 from hscc_daemon import cards_live, kanban_live
 from hscc_daemon.cli_theme import make_console
 from hscc_daemon.cards_live import (LogTail, Monitor, SessionTail, ViewState, clean_line,
-                                    cmd_cards, fit_header, grid_shape, is_tool_line,
-                                    log_path, make_tail, render_rows, wrap_tail)
+                                    cmd_cards, fit_header, grid_shape, header_fields,
+                                    is_tool_line, log_path, make_tail, render_rows,
+                                    wrap_tail)
 
 NOW = 1_800_000_000.0
 
@@ -39,9 +40,10 @@ def run_row(board, tid, worker="backend-engineer", run_s=120, hb_s=5, tok=(1500,
             "tok_in": tok[0] if tok else None, "tok_out": tok[1] if tok else None}
 
 
-def snap(running=(), ready=(), events=(), cap=10):
+def snap(running=(), ready=(), events=(), cap=10, outcomes=None):
     return {"running": list(running), "ready": list(ready), "events": list(events),
-            "caps": (cap, None), "errors": [], "boards": [{"name": "b"}]}
+            "caps": (cap, None), "errors": [], "boards": [{"name": "b"}],
+            "outcomes": outcomes or {}}
 
 
 def write_log(home, board, tid, text, mode="w"):
@@ -218,6 +220,72 @@ def test_monitor_unknown_outcome_is_stopped(tmp_path):
     mon._collect = lambda: snap([])
     mon.refresh()
     assert mon.cards[("b", "t_1")]["outcome"] == "stopped"
+
+
+# ── MON-23-FIELDS: the outcome label a lingering panel shows ────────────────
+
+def test_every_outcome_kind_the_board_can_deliver_has_a_label():
+    """`header_fields` takes its label from `OUTCOME_STYLE`, but the kinds come
+    from `kanban_live.OUTCOME_KINDS` — two files, and nothing used to check they
+    agreed, so an admitted kind rendered as raw snake_case under a blanket warn
+    (measured live: a panel whose last word was `terminal_worker_reaped`)."""
+    missing = sorted(set(kanban_live.OUTCOME_KINDS) - set(cards_live.OUTCOME_STYLE))
+    assert not missing, missing
+    for kind, (label, colour) in cards_live.OUTCOME_STYLE.items():
+        assert label and colour, kind
+        assert " " not in label or label != kind, kind   # a real label, not the kind
+
+
+def _lingering(mon, outcome_kind, events=()):
+    """One card live on one tick, gone on the next, with `outcome_kind` the only
+    thing the collector says about how it stopped."""
+    mon.refresh()                                   # card is live
+    mon._collect = lambda: snap([], events=events,
+                                outcomes={"b": {"t_1": outcome_kind}})
+    mon.refresh()
+    return mon.cards[("b", "t_1")]
+
+
+def test_a_lingering_panel_labels_the_kernels_own_alarms(tmp_path):
+    for kind, want in (("terminal_worker_reaped", "worker reaped"),
+                       ("protocol_violation", "protocol violation"),
+                       ("suspected_hallucinated_references", "hallucinated refs"),
+                       ("completion_blocked_empty_result", "empty result"),
+                       ("changes_requested", "changes requested"),
+                       ("review_requested", "in review")):
+        mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                      collect=lambda: snap([run_row("b", "t_1")]))
+        row = _lingering(mon, kind)
+        assert row["outcome"] == kind
+        # the same label the panel paints, read off the header fields
+        assert header_fields(row, NOW, None)[1] == [want], kind
+
+
+def test_a_card_the_last_hour_panel_capped_away_still_gets_its_outcome(tmp_path):
+    """`events` is the panel's newest `RECENT_LIMIT` rows shared across every
+    board, so a card that stopped behind 12 busier events had no label at all and
+    lingered as a bare `stopped`. `outcomes` answers for every card."""
+    busier = [{"board": "other", "id": f"t_{i}", "kind": "completed", "at": NOW + i}
+              for i in range(kanban_live.RECENT_LIMIT)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap([run_row("b", "t_1")]))
+    row = _lingering(mon, "crashed", events=busier)
+    assert row["outcome"] == "crashed", row["outcome"]
+    assert header_fields(row, NOW, None)[1] == ["crashed"]
+
+
+def test_a_collector_without_the_outcomes_map_still_labels_from_events(tmp_path):
+    """The fallback stays: an older collector (or a stub) that reports only
+    `events` must keep labelling what the panel happens to show."""
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap([run_row("b", "t_1")]))
+    mon.refresh()
+    mon._collect = lambda: {"running": [], "ready": [], "caps": (10, None),
+                            "errors": [], "boards": [{"name": "b"}],
+                            "events": [{"board": "b", "id": "t_1", "kind": "gave_up",
+                                        "at": NOW}]}
+    mon.refresh()
+    assert mon.cards[("b", "t_1")]["outcome"] == "gave_up"
 
 
 # ── rendering ──────────────────────────────────────────────────────────────

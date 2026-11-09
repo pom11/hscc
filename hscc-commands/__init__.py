@@ -370,11 +370,110 @@ def cmd_heal(raw_args):
     return "\n".join(lines)
 
 
+# ── stay-down intent (D1/D5, t_3a0bdca9) ─────────────────────────────────────
+
+# The reason string THIS surface stamps into the durable record. One string per
+# surface on purpose: `hscc cluster down` stamps its own, the autodown teardown
+# stamps its own — a reader can tell which verb claimed the down, but no gate
+# may branch on this text (presence is the signal; see t_ba1424b7).
+STAY_DOWN_REASON = "/cluster-down"
+
+# The summary line, with the way back up named in the SAME line: there is no
+# `/cluster-up` slash verb, so an operator who reads only this line is not left
+# guessing which surface lifts the record.
+STAY_DOWN_SUMMARY = (
+    "fleet marked deliberately down — the daemon will not relaunch workers, the "
+    "proxy or the notifier until `hscc cluster up` (no `/cluster-up` slash verb "
+    "exists; that CLI command is what clears the record)"
+)
+
+
+def _post_boot_module():
+    """Import the daemon's post_boot module, or None when unavailable.
+
+    Best-effort on purpose, copied from the sanctioned style in
+    ``hscc-cluster/hscc.py`` (`_post_boot_module`): the stay-down marker is an
+    ENHANCEMENT to this verb — a post_boot import failure must never break
+    `/cluster-down`. The caller reports the missing marker instead of failing.
+    """
+    try:
+        from hscc_daemon import post_boot
+        return post_boot
+    except Exception:
+        try:
+            import os
+            import sys
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            from hscc_daemon import post_boot
+            return post_boot
+        except Exception:
+            return None
+
+
+def _claim_stay_down():
+    """Stamp the deliberate-down record for this surface. Return None, or the
+    error text when the marker could NOT be written.
+
+    Fail-safe in the direction the CLI verb already documents
+    (``hscc-cluster/hscc.py``:530-535): the marker is written even when a node's
+    stop failed — ``/cluster-down`` IS the operator's "stay down" intent, and
+    "down, no relaunch" is always the safe reading of it. The only thing that
+    stops the stamp is post_boot itself being unavailable.
+    """
+    pb = _post_boot_module()
+    if pb is None:
+        return "hscc_daemon.post_boot is not importable from this install"
+    try:
+        pb.clear_expected_up(STAY_DOWN_REASON)
+        return None
+    except Exception as e:  # marker problem must never break the verb
+        return str(e)
+
+
+# The shapes sparkrun's own stop path uses for "there was nothing to stop",
+# evidenced against the installed CLI (sparkrun/cli/_stop_logs.py):
+#   :123-125  JobNotFound -> `Error: No running workload matches intent <id>
+#             on hosts <hosts>` on stderr, exit 1 (what `--all` hits on a node
+#             whose containers already went away);
+#   :217      `No <app> containers running.` on stdout, exit 0.
+# Deliberately NOT matched: `No <app> containers found on the hosts that could
+# be queried.` (:215, exit 1) — that one prints alongside
+# `Error: could not query <host>: …`, and a host that could not be queried may
+# still be running containers, so calling it "nothing running" would be a lie.
+_ALREADY_DOWN_MARKERS = (
+    "no running workload matches intent",
+    "no running workload matched",
+    "no sparkrun containers running",
+)
+
+
+def _was_already_down(out, err):
+    """True when this node's stop output says there was nothing to stop.
+
+    Checked on BOTH successful and failed stops: a node with nothing running was
+    not "stopped", and the honest mark for it is `○ … nothing running` rather
+    than `❌` (a failure the operator has to chase) or `✅` (a stop that did not
+    happen) — D6's output-truthfulness rule.
+    """
+    blob = f"{out}\n{err}".lower()
+    return any(m in blob for m in _ALREADY_DOWN_MARKERS)
+
+
 def cmd_cluster_down(raw_args):
     """Stop all vLLM units across the cluster — leaves hosts up. Confirm-first.
 
     Uses sparkrun stop per node (parallel). Pairs with /cluster-docker-prune +
-    /cluster-restart for a clean recycle without a full reboot."""
+    /cluster-restart for a clean recycle without a full reboot.
+
+    t_3a0bdca9 (D1/D5/D6): a real (confirmed) down ALSO claims the stay-down
+    intent, exactly like the `hscc cluster down` CLI verb — without it this
+    surface left no record on disk and `check_workers`/`check_proxy` relaunched
+    the fleet it had just stopped. Fail-soft and after the stops; the
+    unconfirmed/--dry-run preview path touches nothing. Marks are truthful: a
+    node that had nothing running reports `○ … nothing running`, not `❌`.
+    """
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     workers = cmdlib.worker_units(units)
@@ -415,11 +514,26 @@ def cmd_cluster_down(raw_args):
     with ThreadPoolExecutor(max_workers=max(1, len(node_list))) as pool:
         results = list(pool.map(_stop, node_list))
 
-    for node, (ok, _o, err) in results:
+    # D1/D5: claim the stay-down intent BEFORE the summary is rendered, so the
+    # operator's output and the disk agree by the time they read the first
+    # line. Fail-soft — a marker problem is reported, never fatal.
+    marker_error = _claim_stay_down()
+
+    for node, (ok, out, err) in results:
+        if _was_already_down(out, err):
+            # D6: nothing was running here — not a failure, and not a stop.
+            lines.append(f"  ○ {node}: nothing running")
+            continue
         mark = "✅" if ok else "❌"
         tail = "" if ok else f" — {err[:140]}"
         lines.append(f"  {mark} {node}: stopped{tail}")
     lines.append("")
+    if marker_error:
+        lines.append(f"⚠️ stay-down marker could NOT be written ({marker_error}) "
+                     "— the daemon MAY relaunch these units. `hscc cluster down` "
+                     "(the CLI verb) writes the same marker.")
+    else:
+        lines.append(STAY_DOWN_SUMMARY)
     lines.append("All units stopped. Next: `/cluster-docker-prune confirm` then "
                  "`/cluster-restart confirm`.")
     return "\n".join(lines)

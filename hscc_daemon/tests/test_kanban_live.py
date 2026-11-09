@@ -27,14 +27,56 @@ def _no_real_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(kanban_live, "LEDGER_PATH", str(tmp_path / "ledger.json"))
 
 SCHEMA = """
-CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
-  priority INTEGER DEFAULT 0, created_at INTEGER, completed_at INTEGER,
-  last_heartbeat_at INTEGER, current_run_id INTEGER);
+-- The measured live shape, not an invention: `PRAGMA table_info` on the operator's
+-- hscc board, so a fixture cannot drift from what the collector actually reads.
+-- Before this card the fixture declared 9 task columns against the live 39 and 6
+-- task_runs columns against the live 17 — `outcome`, `ended_at` and `metadata` did
+-- not exist in a test board at all. (`task_events` was already the live 6 columns,
+-- `run_id` and `payload` included; it stays as measured, not as rewritten.)
+CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, body TEXT, assignee TEXT,
+  status TEXT, priority INTEGER, created_by TEXT, created_at INTEGER,
+  started_at INTEGER, completed_at INTEGER, workspace_kind TEXT,
+  workspace_path TEXT, branch_name TEXT, project_id INTEGER, claim_lock TEXT,
+  claim_expires INTEGER, tenant TEXT, result TEXT, idempotency_key TEXT,
+  consecutive_failures INTEGER, worker_pid INTEGER, last_failure_error TEXT,
+  max_runtime_seconds INTEGER, last_heartbeat_at INTEGER, current_run_id INTEGER,
+  workflow_template_id INTEGER, current_step_key TEXT, skills TEXT,
+  model_override TEXT, provider_override TEXT, max_retries INTEGER,
+  goal_mode INTEGER, goal_max_turns INTEGER, session_id TEXT, block_kind TEXT,
+  block_recurrences INTEGER, reasoning_effort TEXT, completion_contract TEXT,
+  worker_started_at INTEGER);
 CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT,
-  status TEXT, started_at INTEGER, last_heartbeat_at INTEGER);
+  step_key TEXT, status TEXT, claim_lock TEXT, claim_expires INTEGER,
+  worker_pid INTEGER, max_runtime_seconds INTEGER, last_heartbeat_at INTEGER,
+  started_at INTEGER, ended_at INTEGER, outcome TEXT, summary TEXT,
+  metadata TEXT, error TEXT, worker_started_at INTEGER);
 CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
   run_id INTEGER, kind TEXT, payload TEXT, created_at INTEGER);
 """
+
+# Named columns for the fixtures: the tables are now as wide as the live ones, so
+# a positional ``INSERT … VALUES (…)`` would be both unreadable and fragile.
+_TASK_COLS = ("id", "title", "assignee", "status", "priority", "created_at",
+              "completed_at", "last_heartbeat_at", "current_run_id")
+_RUN_COLS = ("id", "task_id", "profile", "status", "started_at", "last_heartbeat_at",
+             "ended_at", "outcome")
+
+
+def _task(c, tid, title="t", assignee="backend-engineer", status="ready",
+          priority=0, created_at=None, completed_at=None, last_heartbeat_at=None,
+          current_run_id=None):
+    c.execute(f"INSERT INTO tasks ({','.join(_TASK_COLS)}) VALUES "
+              f"({','.join('?' * len(_TASK_COLS))})",
+              (tid, title, assignee, status, priority, created_at, completed_at,
+               last_heartbeat_at, current_run_id))
+
+
+def _run(c, run_id, task_id, profile="backend-engineer", status="running",
+         started_at=None, last_heartbeat_at=None, ended_at=None, outcome=None):
+    c.execute(f"INSERT INTO task_runs ({','.join(_RUN_COLS)}) VALUES "
+              f"({','.join('?' * len(_RUN_COLS))})",
+              (run_id, task_id, profile, status, started_at, last_heartbeat_at,
+               ended_at, outcome))
 
 
 class _Ctx:
@@ -69,8 +111,7 @@ class _FakeKb:
 
 
 def _alpha(c):
-    c.execute("INSERT INTO task_runs VALUES (1,'t_run','backend-engineer','running',?,?)",
-              (NOW - 5 * 3600, NOW - 30))
+    _run(c, 1, "t_run", started_at=NOW - 5 * 3600, last_heartbeat_at=NOW - 30)
     c.execute("INSERT INTO tasks (id,title,assignee,status,created_at,current_run_id) "
               "VALUES ('t_run','long job','backend-engineer','running',?,1)", (NOW - 9000,))
     c.execute("INSERT INTO tasks (id,title,assignee,status,priority,created_at) "
@@ -192,10 +233,13 @@ def test_hscc_kanban_dispatcher_keeps_json_for_delegated_verbs(monkeypatch, caps
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
 
 
-_SESSION_COLS = 9          # see the CREATE TABLE below; legacy rows are the first 5
+_SESSION_COLS = ("id", "source", "started_at", "input_tokens", "output_tokens",
+                 "ended_at", "title", "last_activity_at", "last_activity_description")
+                                 # the reader-facing subset of the live 65 columns;
+                                 # legacy rows are the first 5 (see the CREATE TABLE)
 
 
-def _state_db(path, rows, leases=(), *, lease_table=True):
+def _state_db(path, rows, leases=(), *, lease_table=True, nullable_source=False):
     """One profile store: the ``sessions`` table plus (v0.23) the
     ``session_turn_leases`` table hermes writes for every in-flight turn.
 
@@ -205,17 +249,42 @@ def _state_db(path, rows, leases=(), *, lease_table=True):
     ``(id, source, started_at, input, output, ended_at, title,
     last_activity_at, last_activity_description)`` when a test needs them.
 
+    ``nullable_source=True`` drops the live ``NOT NULL`` on ``source``. A real
+    store cannot hand the readers a NULL source (measured: ``source IS NULL`` = 0
+    of 7 223 session rows over 51 stores), so this builds the legacy-shaped store
+    whose ONLY purpose is to keep the two readers' NULL-defensive clauses pinned
+    (``_LIVE_TURNS``' ``s.source IS NULL``, the token table's complement, where a
+    bare ``NOT IN`` silently drops the row).
+
     ``leases`` are ``(conversation_id, acquired_at, expires_at)``: one row per
     turn that is running RIGHT NOW. ``lease_table=False`` builds a pre-v0.23
     store with no lease table at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(path)
-    c.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, "
-              "input_tokens INTEGER, output_tokens INTEGER, ended_at REAL, "
-              "title TEXT, last_activity_at REAL, last_activity_description TEXT)")
-    c.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
-                  [tuple(r) + (None,) * (_SESSION_COLS - len(r)) for r in rows])
+    # The reader-facing columns of the live `sessions` table (65 columns measured
+    # by PRAGMA table_info on this host's root store) plus every NOT NULL column
+    # with its measured default — so a fixture row has to satisfy the same insert
+    # contract the kernel's does, instead of a schema this file invented.
+    c.execute("CREATE TABLE sessions (id TEXT, "
+              + ("source TEXT NOT NULL" if not nullable_source else "source TEXT")
+              + ", "
+              "started_at REAL NOT NULL, input_tokens INTEGER, output_tokens INTEGER, "
+              "ended_at REAL, title TEXT, last_activity_at REAL, "
+              "last_activity_description TEXT, "
+              "rewind_count INTEGER NOT NULL DEFAULT 0, "
+              "archived INTEGER NOT NULL DEFAULT 0, "
+              "hidden INTEGER NOT NULL DEFAULT 0, "
+              "pinned INTEGER NOT NULL DEFAULT 0, "
+              "compression_fallback_streak INTEGER NOT NULL DEFAULT 0, "
+              "compression_ineffective_count INTEGER NOT NULL DEFAULT 0, "
+              "git_metadata_generation INTEGER NOT NULL DEFAULT 0, "
+              "runtime_revision INTEGER NOT NULL DEFAULT 0, "
+              "runtime_generation INTEGER NOT NULL DEFAULT 0, "
+              "transcript_revision INTEGER NOT NULL DEFAULT 0)")
+    c.executemany(f"INSERT INTO sessions ({','.join(_SESSION_COLS)}) VALUES "
+                  f"({','.join('?' * len(_SESSION_COLS))})",
+                  [tuple(r) + (None,) * (len(_SESSION_COLS) - len(r)) for r in rows])
     if lease_table:
         c.execute("CREATE TABLE session_turn_leases (conversation_id TEXT PRIMARY KEY, "
                   "holder TEXT, acquired_at REAL, expires_at REAL)")
@@ -276,8 +345,8 @@ def _tri_board(db_path, run_started_at):
 
     def build(c):
         for i, (tid, run_id, sid) in enumerate(cards):
-            c.execute("INSERT INTO task_runs VALUES (?,?,?,'running',?,?)",
-                      (run_id, tid, "ecofire-bc-engineer", run_started_at, NOW - 30))
+            _run(c, run_id, tid, profile="ecofire-bc-engineer",
+                 started_at=run_started_at, last_heartbeat_at=NOW - 30)
             c.execute("INSERT INTO tasks (id,title,assignee,status,created_at,current_run_id) "
                       "VALUES (?,?,?,'running',?,?)",
                       (tid, f"job {i}", "ecofire-bc-engineer", run_started_at, run_id))
@@ -521,7 +590,8 @@ def test_subagent_and_telegram_land_in_the_group_the_table_names(tmp_path):
         ("repl", "cli", NOW - 60 * 86400, 4_000, 400, None, None, NOW - 50, "idle"),
         ("tg", "telegram", NOW - 40 * 86400, 900, 90, None, None, None, None),
         ("nul", None, NOW - 40 * 86400, 100, 10),       # SQL NOT IN dropped this one
-    ])
+    ], nullable_source=True)   # a live store cannot write this (0 of 7 223 rows);
+                               # the row exists only to keep the complement NULL-safe
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps([[NOW - 2 * 86400, 1_000, 100],
                                   [NOW - 3600, 5_000, 500]]))
@@ -767,12 +837,19 @@ def test_a_worker_turn_never_renders_as_an_orchestrator(tmp_path):
         ("c-1", "cron", 120),         # a scheduled job
         ("s-1", "subagent", 30),      # a delegated child
         ("o-1", "oneshot", 10),       # `hermes -p X -q ...`, one query and done
-        ("n-1", None, 15),            # unknown/NULL source: NOT excluded
+        ("n-1", None, 15),           # a source the exclude list does not name
     )
+    # (MON-23-FIELDS) `source` is `TEXT NOT NULL` in every live store (measured:
+    # 7 223 session rows over 51 stores, `source IS NULL` = 0), so this store is
+    # built with `nullable_source=True` — the row exists only to keep
+    # `_LIVE_TURNS`' `s.source IS NULL` branch pinned, which a v0.23-shaped store
+    # can no longer reach. The rule it guards is unchanged: an unknown source
+    # renders rather than vanishing from the section.
     _state_db(tmp_path / "profiles" / "backend-engineer" / "state.db",
               [(cid, src, NOW - age, 1000, 10, None, "card", NOW - age,
                 "receiving stream response") for cid, src, age in worker],
-              leases=[_turn(cid, NOW - age) for cid, src, age in worker])
+              leases=[_turn(cid, NOW - age) for cid, src, age in worker],
+              nullable_source=True)
     d = _collect()
     kanban_live.attach_orchestrators(d, hermes_home=str(tmp_path), now=NOW)
     assert [r["session"] for r in d["orchestrators"]] == ["n-1"]
@@ -885,3 +962,254 @@ def test_render_shows_orchestrators_and_7d_tokens():
     assert orch == ["sphoin-orch", "local-41d4ee6a", "5m", "97.0M/990k",
                     "receiving", "stream", "response"]
     assert "orchestrator history since" not in out
+
+
+# ── MON-23-FIELDS: every printed field re-verified against the v0.23 schema ──
+#
+# Each case below is the pin for one row of the card's verdict table, and every
+# constant it asserts against is a measurement from the operator's live boards
+# (read-only `mode=ro` over 24 boards) or a file:line in the Hermes kernel, both
+# quoted in the case. Fixtures use the real column sets declared at the top of
+# this file, so `run_id`, `payload`, `outcome` and `ended_at` all exist.
+
+def _ev(c, task_id, kind, at, run_id=None, payload=None):
+    c.execute("INSERT INTO task_events (task_id,run_id,kind,payload,created_at) "
+              "VALUES (?,?,?,?,?)", (task_id, run_id, kind, payload, at))
+
+
+# ── 1. `scheduled` is a status the view must count ──────────────────────────
+
+def _parked(c):
+    """The shape `kanban_db.schedule_task` leaves behind (hermes_cli/kanban_db.py
+    :3869-3890 — `SET status='scheduled'` plus a `scheduled` event). `scheduled` is
+    a column of the default workflow (`hermes_cli/kanban_workflow.py`
+    :113-124 `DEFAULT_WORKFLOW.columns`: triage, todo, scheduled, ready, running,
+    blocked, review, done), so a card parked on a time or an external event was
+    counted nowhere and a board whose only open cards were `scheduled` was skipped
+    as idle by both `boards_table` and `render`'s `live_boards`."""
+    _task(c, "t_park", title="parked until the release", assignee="qa",
+          status="scheduled", created_at=NOW - 4000)
+    _ev(c, "t_park", "scheduled", NOW - 3000,
+        payload=json.dumps({"reason": "waiting on the release tag"}))
+
+
+def test_scheduled_cards_are_counted_and_their_board_is_not_idle():
+    d = _collect(kb=_FakeKb({"alpha": _alpha, "parked": _parked}))
+    parked = next(b for b in d["boards"] if b["name"] == "parked")
+    assert parked["counts"]["scheduled"] == 1
+    assert "scheduled" in kanban_live.STATUS_COLS        # counted ...
+    assert "archived" not in kanban_live.STATUS_COLS     # ... terminal states are not
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "Scheduled" in out, out          # the boards table has the column
+    assert "parked" in out, out             # and a scheduled-only board is on screen
+
+
+# ── 2. `ready` must be aged from the event that queued the card ─────────────
+
+def _queue(c):
+    """Three cards promoted in one second, then the bookkeeping v0.23 really
+    writes: `commented` 4 510, `attached` 330, `edited` 104, `reprioritized` 41 and
+    `heartbeat` 189 650 rows all-time on the live boards. Measured there: 607 tasks
+    whose newest event is not their own `promoted`, the furthest 168 747 s after it.
+    `t_requeue` came back to the queue 5 min ago — the kernel re-queues a reclaimed
+    run with a `reclaimed` event carrying `retry_status` (kanban_db.py:2394-2420)."""
+    for tid in ("t_quiet", "t_talked", "t_requeue"):
+        _task(c, tid, title=f"waiting on a slot {tid}", assignee="qa",
+              status="ready", priority=5, created_at=NOW - 3 * 86400)
+        _ev(c, tid, "promoted", NOW - 6 * 3600)
+    for kind, at in (("commented", NOW - 900), ("edited", NOW - 300),
+                     ("attached", NOW - 60), ("heartbeat", NOW - 30),
+                     ("reprioritized", NOW - 10)):
+        _ev(c, "t_talked", kind, at)
+    _ev(c, "t_requeue", "reclaimed", NOW - 300, run_id=77,
+        payload=json.dumps({"retry_status": "ready"}))
+    # a card created straight into `ready` has no queue event: created_at is the clock
+    _task(c, "t_fresh", title="just created", assignee="qa", status="ready",
+          created_at=NOW - 100)
+
+
+def test_ready_waits_are_aged_from_the_event_that_queued_the_card():
+    d = _collect(kb=_FakeKb({"queue": _queue}))
+    waits = {r["id"]: r["wait_s"] for r in d["ready"]}
+    # the comment/edit/attach/reprioritise/heartbeat storm did NOT reset t_talked
+    assert waits == {"t_quiet": 6 * 3600, "t_talked": 6 * 3600,
+                     "t_requeue": 300, "t_fresh": 100}, waits
+    # and the panel's Waiting column shows the true age, not ~0
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    assert "6h00m" in buf.getvalue()
+
+
+# ── 3. the kernel's own alarms belong in the last-hour panel ────────────────
+
+ALARMS = ("protocol_violation", "suspected_hallucinated_references",
+          "completion_blocked_empty_result", "completion_blocked_hallucination",
+          "changes_requested", "review_requested", "terminal_worker_reaped",
+          "rate_limited")
+
+NOISE = ("heartbeat", "commented", "edited", "attached", "respawn_guarded",
+         "archived", "archive_worker_termination", "workspace_cleanup_deferred_shared",
+         "claim_extended", "worker_result", "dependency_wait", "scheduled",
+         "specified", "owner_admitted", "worker_bound")
+
+
+def _alarms(c):
+    """One card per alarm kind. Measured all-time over the live boards:
+    protocol_violation 354, terminal_worker_reaped 206, review_requested 121,
+    rate_limited 92, suspected_hallucinated_references 35, changes_requested 21,
+    completion_blocked_empty_result 4, completion_blocked_hallucination 2 — every
+    one of them invisible in this view before MON-23-FIELDS (measured live: 3
+    `terminal_worker_reaped` in the last hour, and the panel showed only the
+    `completed` of the same three cards)."""
+    for i, kind in enumerate(ALARMS):
+        _task(c, f"t_{kind}", title=kind, assignee="qa", status="blocked",
+              created_at=NOW - 4000)
+        _ev(c, f"t_{kind}", kind, NOW - 600 - i)
+    _task(c, "t_noise", title="volume, not outcomes", assignee="qa",
+          status="ready", created_at=NOW - 4000)
+    for i, kind in enumerate(NOISE):
+        _ev(c, "t_noise", kind, NOW - 500 - i)
+
+
+def test_the_kernel_alarms_reach_the_panel_and_the_volume_kinds_do_not():
+    d = _collect(kb=_FakeKb({"alarms": _alarms}))
+    kinds = {e["kind"] for e in d["events"]}
+    assert set(ALARMS) <= kinds, sorted(kinds)
+    assert kinds == set(ALARMS), sorted(kinds)      # nothing else leaks in
+    assert not set(NOISE) & kinds
+    # every kind the panel can print has a colour of its own
+    assert set(kanban_live.OUTCOME_KINDS) <= set(kanban_live._EVENT_STYLE)
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "terminal_worker_reaped" in out and "protocol_violation" in out
+    assert "suspected_hallucinated_references" in out
+
+
+# ── 4. Beat: the column, the bar, and an unknown beat ───────────────────────
+
+def _beat(hb_age=None, hb_task=None, started_age=1200):
+    def build(c):
+        started = None if started_age is None else NOW - started_age
+        _run(c, 900, "t_beat", started_at=started,
+             last_heartbeat_at=None if hb_age is None else NOW - hb_age)
+        _task(c, "t_beat", title="beat me", status="running",
+              created_at=NOW - 60, current_run_id=900,
+              last_heartbeat_at=None if hb_task is None else NOW - hb_task)
+    return build
+
+
+def _running_line(row):
+    buf = io.StringIO()
+    make_console(file=buf, width=120, color_system=None).print(
+        kanban_live.running_table([row]))
+    return next(l for l in buf.getvalue().splitlines() if row["id"] in l)
+
+
+def test_beat_is_task_runs_last_heartbeat_at_and_600s_is_the_stale_bar():
+    """`task_runs.last_heartbeat_at` is still the column the kernel writes: live
+    running runs were 0-60 s old when measured, and `task_events.kind='heartbeat'`
+    gaps over 24 h were n=1102, p50 60 s, p95 67 s, max 102 s, ZERO above 600 s.
+    So 600 s stays the bar — about ten missed beats — and this is where it is
+    pinned, against a v0.23-shaped `task_runs` row instead of nowhere."""
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(hb_age=47)}))["running"]
+    assert (row["hb_s"], row["run_s"]) == (47, 1200)
+    assert "47s" in _running_line(row)
+    assert kanban_live.beat_style(row["hb_s"]) == "dim"
+
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(
+        hb_age=kanban_live.STALE_HEARTBEAT_S + 100)}))["running"]
+    assert row["hb_s"] == kanban_live.STALE_HEARTBEAT_S + 100
+    assert "11m" in _running_line(row)
+    assert kanban_live.beat_style(row["hb_s"]) == "error"
+    # the bar is exclusive: a beat exactly at it is still "dim"
+    assert kanban_live.beat_style(kanban_live.STALE_HEARTBEAT_S) == "dim"
+
+    # a task-level beat still counts when the run row has none
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(hb_task=90)}))["running"]
+    assert row["hb_s"] == 90 and kanban_live.beat_style(row["hb_s"]) == "dim"
+    # and a row with NO beat and no start is unknown, not healthy
+    (row,) = _collect(kb=_FakeKb({"alpha": _beat(started_age=None)}))["running"]
+    assert (row["hb_s"], row["run_s"]) == (None, None)
+    assert kanban_live.beat_style(row["hb_s"]) == "warn"
+
+
+# ── 5. a running card whose run row is gone must still render ───────────────
+
+def test_a_running_card_with_no_run_row_still_renders():
+    """`tasks.current_run_id` naming a `task_runs` row that is not there (spawn
+    failed, reclaimed mid-flight) must not delete the card from the Running table.
+    The `LEFT JOIN` is what keeps it; measured over 24 live boards there was no
+    dangling id today, so this pins the construction, not a live instance."""
+    def build(c):
+        _task(c, "t_ghost", title="spawn failed", assignee="qa", status="running",
+              created_at=NOW - 300, current_run_id=999)
+
+    d = _collect(kb=_FakeKb({"ghost": build}))
+    (row,) = d["running"]
+    assert row["worker"] == "qa"               # falls back to the assignee
+    assert (row["run_s"], row["hb_s"]) == (None, None)
+    line = _running_line(row)
+    assert "t_ghost" in line and "spawn failed" in line, line   # the card is on screen
+    assert kanban_live.beat_style(row["hb_s"]) == "warn"        # and not styled healthy
+
+
+# ── 6. `Done 24h` must survive the card being archived ──────────────────────
+
+def _archived_done(c):
+    _task(c, "t_arch", title="finished then archived", assignee="qa",
+          status="archived", created_at=NOW - 90000, completed_at=NOW - 600)
+
+
+def _archived_never_done(c):
+    _task(c, "t_no", title="archived unfinished", assignee="qa", status="archived",
+          created_at=NOW - 90000, completed_at=None)
+
+
+def test_done_24h_counts_a_completion_that_was_archived():
+    """The archive path keeps `completed_at` (measured: 54 archived rows across the
+    live boards still carry it — hscc 25 of 110, ecofire-app 10 of 24, flightdeck
+    5 of 19), so a card that finished today and was archived today used to leave
+    the `Done 24h` column, and could take its board out of the view with it. A card
+    that never completed (measured: 212 archived rows with completed_at NULL) stays
+    out."""
+    d = _collect(kb=_FakeKb({"arch": _archived_done, "never": _archived_never_done}))
+    assert next(b for b in d["boards"] if b["name"] == "arch")["done_24h"] == 1
+    assert next(b for b in d["boards"] if b["name"] == "never")["done_24h"] == 0
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "arch" in out and "never" not in out, out
+
+
+# ── 7. the outcome lookup must not be the panel's 12-row slice ──────────────
+
+def _many(c):
+    """16 cards finishing in the window: the panel keeps the newest
+    `RECENT_LIMIT` rows across every board, `outcomes` must answer for all 16,
+    newest kind per card."""
+    for i in range(15):
+        _task(c, f"t_{i:02d}", title=f"card {i}", assignee="qa", status="done",
+              created_at=NOW - 9000, completed_at=NOW - 600 + i)
+        _ev(c, f"t_{i:02d}", "completed", NOW - 600 + i)
+    _task(c, "t_both", title="reaped then completed", assignee="qa", status="done",
+          created_at=NOW - 9000, completed_at=NOW - 60)
+    _ev(c, "t_both", "completed", NOW - 700)
+    _ev(c, "t_both", "terminal_worker_reaped", NOW - 60)
+
+
+def test_outcomes_answer_for_every_card_not_just_the_panels_slice():
+    d = _collect(kb=_FakeKb({"many": _many}))
+    assert len(d["events"]) == kanban_live.RECENT_LIMIT      # the panel is capped
+    assert len(d["outcomes"]["many"]) == 16                   # the lookup is not
+    assert d["outcomes"]["many"]["t_both"] == "terminal_worker_reaped"
+    assert d["outcomes"]["many"]["t_00"] == "completed"
+    # board-keyed, string keys: `hscc kanban monitor --json` must still serialise
+    assert json.loads(json.dumps(d))["outcomes"]["many"]["t_01"] == "completed"
+

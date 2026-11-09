@@ -41,6 +41,32 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 # ImportError naming the package, which is what a test harness should report.
 export HERMES_DISABLE_LAZY_INSTALLS="${HERMES_DISABLE_LAZY_INSTALLS:-1}"
 
+# ── no per-test 5 s compaction probe (t_ecb84764) ───────────────────────────
+# enable_plugins.enable() ends with a REAL `urlopen(timeout=5)` sanity-probe of
+# the fleet compaction endpoint. That is right for bootstrap on a real machine.
+# It is not right for a test suite: hscc-bootstrap/tests/conftest.py pins
+# HSCC_SERVING_JSON at a missing file for determinism, which selects the
+# FALLBACK COMPACT_URL, and that address is unreachable rather than refused
+# (refused returns instantly, unreachable burns the whole timeout). So every
+# test calling enable() paid 5.04 s of dead wall time — 66 cases = 333 s, 48 %
+# of the 700 s hscc-bootstrap leg — and tests that shell out to the real
+# bootstrap.sh paid it again per stage. Full measurement: changelog.d entry.
+# Set in the RUNNER (not just an autouse fixture) because the children need it
+# too: a monkeypatch only reaches this process, and half the cost is in
+# subprocess-spawning tests. Read per call in _skip_compaction_probe(); the
+# operator path still probes, because nothing here exports it outside the suite.
+export HSCC_SKIP_COMPACT_PROBE="${HSCC_SKIP_COMPACT_PROBE:-1}"
+
+# ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
+# Every leg's consumer reads a REDIRECTED file, and pytest's -q band carries no
+# elapsed time anywhere, while its [ NN%] is a test-COUNT percent printed once
+# per 72-dot line — on a leg whose wall time is 48 % one file, "43 %" tells a
+# dispatcher nothing about whether to keep waiting. scripts/leg_heartbeat.sh
+# carries the full reason (including why PYTHONUNBUFFERED and -rA were measured
+# and rejected); this runner only sets the cadence and starts the watcher.
+# 30 s costs ~24 lines per full suite. 0 disables.
+HEARTBEAT_SECONDS="${HSCC_LEG_HEARTBEAT_SECONDS:-30}"
+
 # `scripts` is the one entry that is NOT a deployed plugin (it is absent from
 # install_payload.DEFAULT_PAYLOAD): it is the repo's own tooling dir, and
 # scripts/tests holds the suites for scripts/address_guard.py,
@@ -110,9 +136,21 @@ for d in "${DIRS[@]}"; do
   # leg genuinely skips, the next reader has to be able to see WHY from the
   # canonical runner's output without re-running anything — a bare "N skipped"
   # does not tell an operator whether the guard ran or never got a tap.
+  # Heartbeat per leg (see the HSCC_LEG_HEARTBEAT_SECONDS block above for the
+  # why). Started BEFORE pytest and reaped right after, so its elapsed clock is
+  # the leg's own, and the runner's $$ is passed rather than a pytest pid so
+  # pytest stays in the foreground (a backgrounded job in a non-interactive
+  # shell gets SIG_IGN on SIGINT, which would break Ctrl-C for everyone).
+  LEG_T0="$(date +%s)"
+  HB_PID=""
+  if [ "${HEARTBEAT_SECONDS:-0}" -gt 0 ] 2>/dev/null; then
+    bash "$ROOT/scripts/leg_heartbeat.sh" "$d" "$$" "$LEG_T0" "$HEARTBEAT_SECONDS" &
+    HB_PID=$!
+  fi
   env -u HERMES_DELEGATED_CHILD_CONTEXT \
     "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider "$@"
   code=$?
+  [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
   if [ $code -eq 0 ]; then
     summary+=("  ✓ $d")
   else

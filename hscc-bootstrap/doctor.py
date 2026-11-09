@@ -2440,7 +2440,8 @@ def run_doctor_fix(config_path: Optional[str] = None,
     (mirrors ``_check_models_served``) so the endpoint probe never needs the
     real network in the test suite.
     """
-    checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner)
+    checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner,
+                               _http_get=_http_get)
     fixes_applied: list[str] = []
     alias_conversion_refused: list[str] = []
 

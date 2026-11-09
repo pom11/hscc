@@ -6,10 +6,16 @@ use: ``autodown._load_kanban_db_or_default`` + ``autodown._enum_board_names``)
 collects:
 
 * running cards — board, worker profile, run time, heartbeat age, title;
-* ready cards — waiting for a slot (global cap or per-profile cap);
-* per-board counts by status, plus cards finished in the last 24 h;
-* recent outcomes — completed / blocked / gave_up / crashed / timed_out /
-  spawn_failed / reclaimed events across all boards;
+* ready cards — waiting for a slot (global cap or per-profile cap), aged from the
+  event that queued them (``READY_CLOCK_KINDS``), not from the newest event of
+  any kind;
+* per-board counts by status (``STATUS_COLS``, which includes the kernel's
+  ``scheduled``), plus cards finished in the last 24 h;
+* recent outcomes — the kinds in ``OUTCOME_KINDS`` (the terminal set plus the
+  kernel's own alarms: protocol violations, suspected hallucinations, empty
+  completion claims, reaped workers, rate limits, the review lane) across all
+  boards, plus ``outcomes``, the same question answered for every card rather
+  than for the panel's ``RECENT_LIMIT`` rows;
 * tokens — each running card's OWN worker session (input/output), read from the
   profiles' ``state.db``. A run's session comes from the ``owner_admitted`` event
   hermes records for ``tasks.current_run_id`` (``_session_links``), so cards
@@ -58,10 +64,67 @@ RECENT_WINDOW_S = 3600
 RECENT_LIMIT = 12
 STALE_HEARTBEAT_S = 600      # a running card silent this long is suspicious
 LONG_RUN_S = 4 * 3600        # fleet-check rule: >4h on an atomic card = look at it
+
+#: What the *last hour* panel — and the cards monitor's lingering-panel outcome,
+#: which reads this same list — treats as something happening TO a card. v0.23
+#: writes ~35 event kinds (measured over 24 live boards); these are the ones an
+#: operator can act on. Kinds deliberately left out, and why:
+#: ``heartbeat`` (189 650 all-time) and ``commented`` (4 510) are volume, not
+#: outcomes; ``claimed``/``owner_admitted``/``worker_bound`` are dispatch
+#: bookkeeping (``spawned`` stays: the panel has always reported a start);
+#: ``respawn_guarded`` (2 660) is a guard firing normally; ``archived`` (249) and
+#: ``archive_worker_termination`` are housekeeping of the archive path;
+#: ``edited``/``attached``/``linked``/``unlinked``/``assigned``/``dependency_wait``/
+#: ``scheduled``/``specified`` are state bookkeeping (``scheduled`` is now counted
+#: as its own column instead); ``workspace_cleanup_deferred_shared``,
+#: ``claim_extended`` and ``worker_result`` are internal.
 OUTCOME_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out",
                  "spawn_failed", "reclaimed", "block_loop_detected",
-                 "decomposed", "spawned")
-STATUS_COLS = ("running", "ready", "todo", "review", "blocked", "triage")
+                 "decomposed", "spawned",
+                 # the kernel's own alarms, none of which reached the panel
+                 # before MON-23-FIELDS (measured all-time over 24 boards:
+                 # protocol_violation 354, terminal_worker_reaped 206,
+                 # review_requested 121, rate_limited 92,
+                 # suspected_hallucinated_references 35, changes_requested 21,
+                 # completion_blocked_empty_result 4,
+                 # completion_blocked_hallucination 2):
+                 "protocol_violation", "suspected_hallucinated_references",
+                 "completion_blocked_empty_result", "completion_blocked_hallucination",
+                 "changes_requested", "review_requested",
+                 "terminal_worker_reaped", "rate_limited")
+
+#: The event kinds that put a card INTO the dispatch queue, and therefore the
+#: only ones allowed to define how long it has been waiting for a slot
+#: (MON-23-FIELDS). ``ready`` used to be aged from ``MAX(task_events.created_at)``
+#: over EVERY kind, so a ``commented`` (4 510 all-time), ``edited`` (104) or
+#: ``attached`` (330) event reset a waiting card to ~0 s — measured: 607 tasks
+#: whose newest event is not their own ``promoted``, the furthest 168 747 s after
+#: it. While a card sits ``ready`` the newest of these IS the transition that
+#: landed it there: this mirrors hermes' own list of status-changing kinds
+#: (``hermes_cli/kanban_db.py`` ``_resume_status_from_events``, :2022-2027) plus
+#: the promote/queue-entry writers (``promoted_manual`` :3519, ``scheduled``→
+#: ``unblocked`` :3560-3595). ``tasks.created_at`` is the fallback for a card
+#: created straight into ``ready``.
+READY_CLOCK_KINDS = ("promoted", "promoted_manual", "unblocked", "review_reopened",
+                     "changes_requested", "reclaimed", "status")
+
+#: Statuses the boards table counts. ``scheduled`` is a real column of the
+#: default workflow (``hermes_cli/kanban_workflow.py`` ``DEFAULT_WORKFLOW.columns``
+#: = triage, todo, scheduled, ready, running, blocked, review, done) and
+#: ``kanban_db.schedule_task`` (:3869-3890) parks cards in it, so a card waiting
+#: on a time or an external event used to be counted nowhere — and a board whose
+#: only open cards were ``scheduled`` was skipped as "idle" by both
+#: ``boards_table`` and ``render``'s ``live_boards``. ``archived`` is the ninth
+#: status and is deliberately NOT a column here: it is terminal, not open (266
+#: live rows would make every board look busy and no board ever idle).
+STATUS_COLS = ("running", "ready", "todo", "scheduled", "review", "blocked", "triage")
+
+#: Statuses whose ``completed_at`` still counts as "finished in the last 24 h".
+#: The archive path keeps ``completed_at`` (measured: 54 archived rows across the
+#: live boards still carry it, 25 on hscc alone), so a card that finished today
+#: and was archived today used to disappear from the ``Done 24h`` column — and a
+#: board whose only recent activity was that could disappear with it.
+DONE_24H_STATUSES = ("done", "archived")
 HERMES_HOME = os.path.expanduser("~/.hermes")
 SESSION_MATCH_S = 900        # fallback only: window for a run with no session id
 
@@ -210,19 +273,26 @@ def _session_links(conn, run_ids):
 def _collect_board(conn, label, now_s, since_s):
     counts = {r["status"]: r["n"] for r in _q(
         conn, "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")}
-    done_24h = _q(conn, "SELECT COUNT(*) AS n FROM tasks WHERE status='done' "
-                        "AND completed_at >= ?", (now_s - 86400,))[0]["n"]
+    # "finished in the last 24 h", which is what the column says — an archived
+    # card that completed inside the window still finished inside it (see
+    # DONE_24H_STATUSES for the measurement).
+    done_24h = _q(conn, f"SELECT COUNT(*) AS n FROM tasks WHERE status "
+                        f"IN ({','.join('?' * len(DONE_24H_STATUSES))}) "
+                        "AND completed_at >= ?",
+                  (*DONE_24H_STATUSES, now_s - 86400))[0]["n"]
     running = _q(conn, """
         SELECT t.id, t.title, t.assignee, t.last_heartbeat_at AS hb_task,
                t.current_run_id, r.profile, r.started_at, r.last_heartbeat_at AS hb_run
         FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id
         WHERE t.status = 'running'""")
     links = _session_links(conn, [r["current_run_id"] for r in running])
-    ready = _q(conn, """
+    marks_ready = ",".join("?" * len(READY_CLOCK_KINDS))
+    ready = _q(conn, f"""
         SELECT t.id, t.title, t.assignee, t.priority,
                (SELECT MAX(e.created_at) FROM task_events e
-                 WHERE e.task_id = t.id) AS last_event_at, t.created_at
-        FROM tasks t WHERE t.status = 'ready'""")
+                 WHERE e.task_id = t.id AND e.kind IN ({marks_ready})) AS ready_at,
+               t.created_at
+        FROM tasks t WHERE t.status = 'ready'""", READY_CLOCK_KINDS)
     marks = ",".join("?" * len(OUTCOME_KINDS))
     events = _q(conn, f"""
         SELECT e.task_id, e.kind, e.created_at, t.title, t.assignee
@@ -230,6 +300,16 @@ def _collect_board(conn, label, now_s, since_s):
         WHERE e.created_at >= ? AND e.kind IN ({marks})
         ORDER BY e.created_at DESC LIMIT ?""",
                 (since_s, *OUTCOME_KINDS, RECENT_LIMIT))
+    # Every card that had an outcome in the window, newest kind each — NOT the
+    # panel's RECENT_LIMIT slice. `cards_live.Monitor.refresh` asks "what
+    # happened to the card whose panel is lingering", and 12 rows shared across
+    # every board cannot answer that for a card that stopped behind 12 busier
+    # events. Same predicate as `events`, no LIMIT, so the two never disagree.
+    outcome_of = {}
+    for e in _q(conn, f"SELECT task_id, kind FROM task_events "
+                      f"WHERE created_at >= ? AND kind IN ({marks}) ORDER BY created_at",
+                (since_s, *OUTCOME_KINDS)):
+        outcome_of[e["task_id"]] = e["kind"]          # ascending: newest wins
     out_run = []
     for r in running:
         beats = [x for x in (r["hb_run"], r["hb_task"], r["started_at"]) if x]
@@ -252,24 +332,28 @@ def _collect_board(conn, label, now_s, since_s):
     out_ready = [{
         "board": label, "id": r["id"], "title": r["title"],
         "worker": r["assignee"] or "?", "priority": r["priority"] or 0,
-        "wait_s": now_s - (r["last_event_at"] or r["created_at"] or now_s),
+        "wait_s": now_s - (r["ready_at"] or r["created_at"] or now_s),
     } for r in ready]
     out_ev = [{"board": label, "id": e["task_id"], "kind": e["kind"],
                "at": e["created_at"], "title": e["title"] or "",
                "worker": e["assignee"] or "?"} for e in events]
-    return counts, done_24h, out_run, out_ready, out_ev
+    return counts, done_24h, out_run, out_ready, out_ev, outcome_of
 
 
 def collect(kanban_db=None, now=None, board=None, read_caps=None):
     """One read-only pass over every board (or just ``board``).
 
     Returns ``{boards: [{name, counts, done_24h}], running: [...], ready: [...],
-    events: [...], caps: (global, per_profile), errors: [...], at: epoch}``.
-    Unreadable boards are reported in ``errors`` and never stop the pass.
+    events: [...], outcomes: {board: {card: kind}}, caps: (global, per_profile),
+    errors: [...], at: epoch}``. ``outcomes`` is the newest outcome kind of every
+    card that had one in the last hour (the panel-capped ``events`` is not enough
+    for that question — see ``_collect_board``), keyed by board then card id so
+    the ``--json`` payload stays serialisable. Unreadable boards are reported in
+    ``errors`` and never stop the pass.
     """
     now_s = int(now if now is not None else time.time())
     result = {"boards": [], "running": [], "ready": [], "events": [],
-              "caps": (None, None), "errors": [], "at": now_s}
+              "outcomes": {}, "caps": (None, None), "errors": [], "at": now_s}
     if kanban_db is None:
         kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
@@ -289,7 +373,7 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
         try:
             ctx = kanban_db.connect_closing(board=b) if multi else kanban_db.connect_closing()
             with ctx as conn:
-                counts, done_24h, run, ready, ev = _collect_board(
+                counts, done_24h, run, ready, ev, outcome_of = _collect_board(
                     conn, label, now_s, now_s - RECENT_WINDOW_S)
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"board {label!r} unreadable: {e}")
@@ -298,6 +382,8 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
         result["running"] += run
         result["ready"] += ready
         result["events"] += ev
+        if outcome_of:
+            result["outcomes"][label] = outcome_of
     result["running"].sort(key=lambda r: -(r["run_s"] or 0))
     result["ready"].sort(key=lambda r: (-r["priority"], -r["wait_s"]))
     result["events"].sort(key=lambda e: -e["at"])
@@ -752,6 +838,19 @@ def fmt_age(s) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def beat_style(hb_s) -> str:
+    """Colour for the Beat cell — the one place the staleness bar is applied.
+
+    An UNKNOWN beat is not a healthy beat: `hb_s` is None only when the row has
+    neither a heartbeat nor a start time at all, and `or 0` used to fold that into
+    "0 s old" and paint it dim like a card that just beat. Named rather than
+    inlined so `STALE_HEARTBEAT_S` has a test behind it (MON-23-FIELDS suspect 4).
+    """
+    if hb_s is None:
+        return "warn"
+    return "error" if hb_s > STALE_HEARTBEAT_S else "dim"
+
+
 def _plain_table() -> Table:
     # same borderless grid as `hscc cluster monitor --live`
     return Table(box=None, pad_edge=False, header_style="accent", padding=(0, 2, 0, 0))
@@ -765,7 +864,21 @@ def _title_col(t: Table, width):
 _EVENT_STYLE = {"completed": "ok", "spawned": "dim", "blocked": "warn",
                 "decomposed": "warn", "reclaimed": "warn",
                 "block_loop_detected": "warn", "gave_up": "error",
-                "crashed": "error", "timed_out": "error", "spawn_failed": "error"}
+                "crashed": "error", "timed_out": "error", "spawn_failed": "error",
+                # MON-23-FIELDS: the kinds OUTCOME_KINDS newly admits. The
+                # kernel's own alarms are errors — a protocol violation, a
+                # suspected hallucination, an empty completion claim, a worker
+                # the kernel had to reap out from under a live session, a
+                # provider rate limit — and the review lane is a warn: it needs
+                # someone, not a pager.
+                "protocol_violation": "error",
+                "suspected_hallucinated_references": "error",
+                "completion_blocked_empty_result": "error",
+                "completion_blocked_hallucination": "error",
+                "terminal_worker_reaped": "error",
+                "rate_limited": "warn",
+                "changes_requested": "warn",
+                "review_requested": "warn"}
 
 
 def running_table(rows, width=None) -> Table:
@@ -776,12 +889,11 @@ def running_table(rows, width=None) -> Table:
     _title_col(t, width)
     for r in rows:
         run_style = "warn" if (r["run_s"] or 0) > LONG_RUN_S else "ok"
-        hb_style = "error" if (r["hb_s"] or 0) > STALE_HEARTBEAT_S else "dim"
         tok = ("-" if r.get("tok_in") is None
                else f"{fmt_tokens(r['tok_in'])}/{fmt_tokens(r['tok_out'])}")
         t.add_row(esc(r["board"]), esc(r["id"]), esc(r["worker"]),
                   Text(fmt_age(r["run_s"]), style=run_style),
-                  Text(fmt_age(r["hb_s"]), style=hb_style),
+                  Text(fmt_age(r["hb_s"]), style=beat_style(r["hb_s"])),
                   Text(tok, style="dim"), esc(r["title"]))
     return t
 
