@@ -70,12 +70,30 @@ SESSION_PAGE = 400           # transcript rows read per tick (appended rows only
 INITIAL_SESSION_ROWS = 200   # a new session tail starts this many rows back
 PROMPT_PREVIEW = 120         # user-turn preview length (hermes' own timeline does 120)
 ANNOUNCED_MAX = 4096         # call ids remembered so results are not repeated
+#: Label + colour for the outcome a lingering panel shows. EVERY kind
+#: ``kanban_live.OUTCOME_KINDS`` can deliver has an entry here (MON-23-FIELDS):
+#: without one the header printed the raw snake_case kind under a blanket warn
+#: rule, and the two constants lived in different files with nothing checking
+#: that they agreed. ``test_every_outcome_kind_has_a_label`` pins it.
 OUTCOME_STYLE = {"completed": ("done", "ok"), "blocked": ("blocked", "error"),
                  "gave_up": ("gave up", "error"), "crashed": ("crashed", "error"),
                  "timed_out": ("timed out", "error"),
                  "spawn_failed": ("spawn failed", "error"),
                  "reclaimed": ("reclaimed", "warn"),
-                 "block_loop_detected": ("block loop", "error")}
+                 "block_loop_detected": ("block loop", "error"),
+                 # board bookkeeping that can legitimately be a panel's last word
+                 "decomposed": ("decomposed", "warn"),
+                 "spawned": ("spawned", "dim"),
+                 # the kernel's own alarms (kanban_live.OUTCOME_KINDS)
+                 "protocol_violation": ("protocol violation", "error"),
+                 "suspected_hallucinated_references": ("hallucinated refs", "error"),
+                 "completion_blocked_empty_result": ("empty result", "error"),
+                 "completion_blocked_hallucination": ("hallucinated result", "error"),
+                 "terminal_worker_reaped": ("worker reaped", "error"),
+                 "rate_limited": ("rate limited", "warn"),
+                 # the review lane: needs a person, not a pager
+                 "changes_requested": ("changes requested", "warn"),
+                 "review_requested": ("in review", "warn")}
 
 # The hscc palette is all gold; a wall of ~10 transcripts in it is too loud.
 # Each card is a single header rule (no box — more room for the transcript):
@@ -446,21 +464,38 @@ class Monitor:
         self.cards: dict[tuple, dict] = {}     # (board, id) -> row (+ "ended")
         self.tails: dict[tuple, "LogTail | SessionTail"] = {}
         self.order: list[tuple] = []           # stable panel order
-        self.data: dict = {"running": [], "ready": [], "events": [], "caps": (None, None),
-                           "errors": [], "boards": []}
+        self.data: dict = {"running": [], "ready": [], "events": [], "outcomes": {},
+                           "caps": (None, None), "errors": [], "boards": []}
 
     def _default_collect(self):
         return kanban_live.attach_tokens(
             kanban_live.collect(kanban_db=self.kanban_db, board=self.board),
             hermes_home=self.hermes_home)
 
+    def _outcomes(self) -> dict:
+        """``{(board, card): kind}`` for every card that had an outcome in the
+        last hour, newest kind each.
+
+        ``collect()``'s ``outcomes`` is the authority: it answers the question for
+        every card. ``data["events"]`` is the panel's newest-``RECENT_LIMIT`` rows
+        shared across every board, which cannot answer it for a card that stopped
+        behind 12 busier events — that card used to linger as a bare ``stopped``.
+        The events pass stays as the fallback so a collector that predates
+        ``outcomes`` (or a test stub) still labels what it can.
+        """
+        outcomes = {}
+        for board, by_card in (self.data.get("outcomes") or {}).items():
+            for card_id, kind in (by_card or {}).items():
+                outcomes[(board, card_id)] = kind
+        for e in sorted(self.data.get("events", []), key=lambda e: e["at"]):
+            outcomes.setdefault((e["board"], e["id"]), e["kind"])
+        return outcomes
+
     def refresh(self):
         now = self.clock()
         self.data = self._collect()
         live = {(r["board"], r["id"]): r for r in self.data["running"]}
-        outcomes = {}
-        for e in sorted(self.data.get("events", []), key=lambda e: e["at"]):
-            outcomes[(e["board"], e["id"])] = e["kind"]
+        outcomes = self._outcomes()
         for key, row in live.items():
             self.cards[key] = dict(row)
             tail = self.tails.get(key)
