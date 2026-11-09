@@ -2509,6 +2509,259 @@ class TestWakeClearsStayDownBeforeLaunching:
 
 
 # ---------------------------------------------------------------------------
+# STAY-DOWN-WAKE residual (t_9c437f03) — an EMPTY wake plan (step 1a) returned
+# before step 2a, so the teardown's stay-down survived a wake that had already
+# revoked it. Decided: (a) CLEARED, at step 1b.
+# ---------------------------------------------------------------------------
+
+class TestEmptyPlanWakeEndsTheStayDown:
+    """The empty-plan failure must end the stay-down, not inherit it.
+
+    ``if not plan:`` is the one ``autoup()`` exit that used to run *before* the
+    marker step, so the ``deliberate_down`` record the preceding teardown
+    stamped stayed set. That left the two supervision surfaces contradicting
+    each other from one code path: ``_clear_intentional_block`` + ``state:
+    "error"`` said "released to the watchdog" (``classify()`` -> ``healthy``,
+    ``intentional_window()`` False) while ``deliberately_down()`` told
+    ``check_workers`` / ``check_proxy`` / the trigger notify gate to stand down
+    — the fleet down AND unsupervised, which is the half-state this path exists
+    to prevent. The decision and the rejected alternatives are in the card
+    (comment t_9c437f03) and in the step-1b comment; these cases pin the
+    outcome, the ordering, and the one property that makes clearing safe: an
+    empty plan claims NO footprint, so post_boot gate 2 keeps the relaunch pass
+    inert. Every case uses the module's injected fakes — no fleet call, no ssh.
+    """
+
+    _OPERATOR = "hscc cluster down"
+    _TEARDOWN = "autodown: intentional idle teardown"
+
+    def _setup(self, tmp_path, monkeypatch, autodown_file):
+        """Same wiring as ``TestWakeClearsStayDownBeforeLaunching._setup``:
+        a latched intentional block (as teardown leaves it) + a DOWN config.
+
+        Returns ``(runner, block_file, notified)`` — the runner records/ refutes
+        any start being issued, ``notified`` collects the operator notices.
+        """
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        _lifecycle.save_watchdog_block(
+            {"blocked": True, "intentional": "autodown",
+             "reason": ad.WATCHDOG_TEARDOWN_REASON,
+             "blocked_at": NOW.isoformat(), "failures": []})
+        _write_down_cfg(autodown_file)
+        runner = _FakeRunner(block_file)
+        notified = []
+        monkeypatch.setattr(
+            ad, "send_macos_notification",
+            lambda title, msg, priority="normal": notified.append(
+                (title, msg, priority)))
+        return runner, block_file, notified
+
+    @staticmethod
+    def _undescribable_serving(tmp_path, corrupt):
+        """The empty-plan precondition, both shapes: missing serving.json, or
+        present-but-unparseable (both ⇒ ``load_serving`` -> None)."""
+        if corrupt:
+            bad = tmp_path / "serving.json"
+            bad.write_text('{"units": [ {"id": "orch"')   # truncated JSON
+            return str(bad)
+        return str(tmp_path / "nope" / "serving.json")     # does not exist
+
+    def _wake(self, tmp_path, runner, corrupt=False, **kw):
+        return ad.autoup(
+            serving_path=self._undescribable_serving(tmp_path, corrupt),
+            run_cmd_fn=runner, http_check_fn=_HealthyProbe(),
+            clock=lambda: 0.0, sleep_fn=_noop_sleep, **kw)
+
+    # -- the decision, both wordings, both empty-plan shapes ----------------
+    @pytest.mark.parametrize("wording", [_OPERATOR, _TEARDOWN])
+    @pytest.mark.parametrize("corrupt", [False, True],
+                             ids=["serving-missing", "serving-corrupt"])
+    def test_empty_plan_wake_ends_the_stay_down(self, tmp_path, monkeypatch,
+                                                autodown_file, wording,
+                                                corrupt):
+        """Empty plan ⇒ the stay-down is GONE, and the failure is still loud.
+
+        Everything the pre-existing empty-plan contract guaranteed is asserted
+        in the same breath, because the fix must not cost any of it: result
+        ``no-units`` (never ``up``), zero starts, honest ``state: "error"`` with
+        the reason naming the empty plan, the block cleared, and the ``critical``
+        notify. Both producer wordings clear identically and neither is ever
+        read — the PR #243 reviewer rule (never branch on record presence, or on
+        a prose ``reason``) applies to this path exactly as it does to step 2a.
+        """
+        runner, block_file, notified = self._setup(tmp_path, monkeypatch,
+                                                   autodown_file)
+        _seed_stay_down(wording)                      # via the production writer
+        assert _pb.load_marker()["units"] == []       # teardown cleared them
+
+        res = self._wake(tmp_path, runner, corrupt=corrupt, notify=True)
+
+        # 1. THE decision: nobody is stood down any more.
+        assert _pb.deliberately_down() is None, (
+            "an empty-plan wake left the fleet pinned 'deliberately down': "
+            "check_workers / check_proxy / the notify gate would all stand down "
+            "on an order the wake itself just revoked")
+        # 2. No footprint was claimed (what makes clearing safe).
+        marker = _pb.load_marker()
+        assert marker["units"] == [], (
+            "an undescribable fleet must not gain an expected_up footprint — "
+            "that is what would arm a relaunch")
+        assert "empty plan" in marker["reason"], (
+            "the marker should say WHY it is empty, for whoever reads the file")
+        # The teardown's own evidence survives (clearing is not erasing).
+        assert marker.get("cleared_at"), "cleared_at is teardown evidence"
+        # 3. The existing empty-plan contract, unchanged.
+        assert res["result"] == "no-units"
+        assert res["started"] == [] and res["ready"] == []
+        assert runner.calls == [], "an empty plan must issue no start"
+        cfg = ad.load_config()
+        assert cfg["state"] == "error", "honest state: nothing was started"
+        assert "empty wake plan" in cfg["reason"]
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        # 4. Still loud — the critical notify is the operator-action signal
+        #    that (b) 'leave it set' wrongly relied on the record for.
+        assert any(t == "HSCC Autodown Wake Failed" and p == "critical"
+                   for t, _m, p in notified), (
+            f"expected a critical wake-failed notify, got {notified!r}")
+
+    # -- ordering: the block is never released while the order still stands --
+    def test_stay_down_ended_before_the_watchdog_is_released(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Pin the ORDER inside step 1a, not just the end state.
+
+        ``_clear_intentional_block`` is what says "the watchdog owns this now";
+        the stay-down must already be gone when it runs, or there is an instant
+        (and on a crash, a durable one) where the block is released while
+        ``deliberate_down`` still tells the checks to stand down. A spy on the
+        block clear snapshots the record at the moment of release.
+        """
+        runner, block_file, _notified = self._setup(tmp_path, monkeypatch,
+                                                    autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        seen = []
+        real_clear = ad._clear_intentional_block
+
+        def spy(reason=None):
+            seen.append({"block_written_before": json.load(open(block_file)),
+                         "stay_down": _pb.deliberately_down()})
+            return real_clear(reason=reason)
+
+        monkeypatch.setattr(ad, "_clear_intentional_block", spy)
+        res = self._wake(tmp_path, runner, notify=False)
+        assert res["result"] == "no-units"
+        assert len(seen) == 1, "the empty-plan path clears the block once"
+        # The block was still latched when we got there (so the snapshot is of
+        # the real hand-off moment) and the stay-down was ALREADY gone.
+        assert seen[0]["block_written_before"].get("intentional") == "autodown"
+        assert seen[0]["stay_down"] is None, (
+            "the watchdog was released while a stay-down still stood the "
+            "healing checks down")
+
+    # -- what clearing must NOT do: arm a relaunch ---------------------------
+    def test_clearing_the_stay_down_arms_no_relaunch(self, tmp_path,
+                                                     monkeypatch,
+                                                     autodown_file):
+        """Safety half of the decision, measured at post_boot's own gate.
+
+        Clearing a stay-down normally means "a unit may now be relaunched", so
+        this is the property the whole choice rests on: with ``units: []`` the
+        pass must stop at gate 2 (``no-marker``) and never reach the boot sweep,
+        the probe, the lock or the launch surface. If an implementation ever
+        records a footprint on this path, this test fails here rather than in a
+        relaunch against a corrupt serving.json.
+        """
+        from hscc_daemon import heal_lease
+        runner, _bf, _notified = self._setup(tmp_path, monkeypatch,
+                                             autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        assert self._wake(tmp_path, runner, notify=False)["result"] == "no-units"
+
+        touched = []
+        monkeypatch.setattr(_pb, "POST_BOOT_ENABLED", True)
+        monkeypatch.setattr(heal_lease, "acquire",
+                            lambda *a, **k: touched.append("lease") or
+                            (True, {}))
+        monkeypatch.setattr(heal_lease, "release", lambda *a, **k: None)
+        res = _pb.run_post_boot_pass(
+            boot_fn=lambda *a, **k: touched.append("boot") or {"dgx-1": "b"},
+            probe_fn=lambda *a, **k: touched.append("probe") or {"ok": False},
+            up_fn=lambda *a, **k: touched.append("UP") or {"success": True},
+            lock_acquire=lambda *a, **k: touched.append("lock") or True,
+            lock_release=lambda *a, **k: touched.append("unlock"),
+            intentional_fn=lambda *a, **k: touched.append("intentional")
+            or False,
+            notify_fn=lambda *a, **k: None)
+        assert res["result"] == "no-marker"
+        assert touched == [], (
+            f"an empty-plan wake must not create launch authority, got {touched}")
+
+    # -- fail-soft, loudly ---------------------------------------------------
+    def test_stay_down_clear_failure_is_fail_soft_and_loud(
+            self, tmp_path, monkeypatch, autodown_file):
+        """A marker failure must not break the failure path — and must not be
+        silent about leaving the fleet pinned (the PR #248 WARN lesson, applied
+        to step 1b)."""
+        runner, block_file, notified = self._setup(tmp_path, monkeypatch,
+                                                   autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        monkeypatch.setattr(_pb, "record_expected_up",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                OSError("disk on fire")))
+        logged = []
+        monkeypatch.setattr(
+            ad, "log",
+            lambda msg, level="INFO", *a, **k: logged.append((level, str(msg))))
+
+        res = self._wake(tmp_path, runner, notify=True)
+
+        # The failure path itself is untouched.
+        assert res["result"] == "no-units"
+        assert ad.load_config()["state"] == "error"
+        with open(block_file) as f:
+            assert json.load(f).get("intentional") is None
+        assert any(t == "HSCC Autodown Wake Failed" for t, _m, _p in notified)
+        # Fail-soft is not fail-silent: the record really is still set, and the
+        # only reason the fleet may still be pinned must be visible at WARN.
+        assert _pb.deliberately_down() is not None, (
+            "a failed marker write must not pretend the stay-down ended")
+        warns = [(lvl, m) for lvl, m in logged
+                 if "stay-down clear failed" in m]
+        assert warns, "the marker failure must be reported, not swallowed"
+        assert warns[0][0] == "WARN", f"expected WARN, got {warns[0][0]!r}"
+        assert "disk on fire" in warns[0][1], "the cause must reach the log"
+
+    # -- consumers: the point of the whole thing ----------------------------
+    def test_stay_down_consumers_resume_after_an_empty_plan_wake(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The consumer-facing statement of the fix.
+
+        ``health._operator_down`` (check_workers + check_proxy) and
+        ``trigger._operator_down`` (the serving-layer notify gate) are the two
+        readers this wedge silences. Both are asserted stood down BEFORE the
+        wake and supervising AFTER it, through their own production seams — not
+        by re-reading the file the test wrote.
+        """
+        from hscc_daemon import health as _health
+        from hscc_daemon import trigger as _trigger
+        runner, _bf, _notified = self._setup(tmp_path, monkeypatch,
+                                             autodown_file)
+        _seed_stay_down(self._TEARDOWN)
+        assert _health._operator_down(), "seeding failed (health reader)"
+        assert _trigger._operator_down(), "seeding failed (trigger reader)"
+
+        assert self._wake(tmp_path, runner, notify=False)["result"] == "no-units"
+
+        assert _health._operator_down() is None, (
+            "check_workers/check_proxy still stand down after the wake")
+        assert _trigger._operator_down() is None, (
+            "the serving-layer notify gate is still muted after the wake")
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — cycle() wake seam (§4): state=down + fresh activity ⇒ autoup
 # ---------------------------------------------------------------------------
 
