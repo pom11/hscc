@@ -43,6 +43,9 @@ import pytest
 from hscc_daemon import orch_waker as ow
 
 NOW = 1_800_000_000
+#: The delivery-decision clock: 95 s after the collect tick, i.e. past
+#: ``DEBOUNCE_S`` (90) and still with nothing sent, so ``MIN_GAP_S`` is inert.
+DELIVER = NOW + 95
 BOARD = "hscc"
 ORCH = "hscc-orch"          # what ow.orch_name("hscc") resolves to
 TASK = "t_24e1fd68"
@@ -159,13 +162,14 @@ class FakeClaims:
     # -- helpers ----------------------------------------------------------
     def rows(self):
         conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
         try:
             return [dict(r) for r in conn.execute(
                 "SELECT profile, task_id, event_id, emitter, claimed_at, "
                 "confirmed_at FROM kanban_wake_claims "
                 "ORDER BY profile, task_id, event_id", ())]
         except sqlite3.Error:
-            return []
+            return []                 # absent table = no claims, the safe read
         finally:
             conn.close()
 
@@ -237,7 +241,13 @@ class FakeClaims:
                     conn.commit()
                     held.add((task, ev_id))
             except sqlite3.Error:
-                continue              # cannot claim -> not held -> deliver
+                # Absent table / unreadable board: hermes' `try_claim_wake`
+                # answers True here (`_wake_claim_open(..., fallback=True)`) —
+                # "cannot claim" means YOU OWE IT, so the caller delivers. The
+                # opposite reading is what turns a missing table into a
+                # silently silent waker, and it is the mistake this fake was
+                # written to be able to catch.
+                held.add((task, ev_id))
             finally:
                 conn.close()
         return held
@@ -299,15 +309,38 @@ def ids_of(path):
 
 
 def seen_once(db, state_path, *, at=NOW - 1):
-    """Tick a never-seen board once so the next tick tails from its watermark."""
+    """Tick a never-seen board once so the next tick tails from its watermark.
+
+    Without this the waker tail-starts and the event is invisible forever.
+    """
     ow.tick(now=at, boards={BOARD: str(db)}, state_path=state_path)
     return at
 
 
-def deliver_tick(now, db, state_path, inject, claims, **kw):
-    """The delivery-decision tick (matured past the default debounce)."""
+def collect(db, state_path, *, at=NOW):
+    """Scan what was added since into ``pending``, stamping the batch at ``at``.
+
+    Separate from :func:`deliver_tick` because two tests need to decide for
+    themselves whether delivery is wired at all (``inject=None``) — and the
+    stamp is what the debounce clock then measures from.
+    """
+    ow.tick(now=at, boards={BOARD: str(db)}, state_path=state_path)
+    return at
+
+
+def deliver_tick(db, state_path, inject, claims, *, at=DELIVER, **kw):
+    """Collect, then make the delivery decision (matured past the debounce).
+
+    The sequence mirrors ``test_orch_waker_dedupe.py``, which is the only shape
+    the product can actually produce: the batch is scanned on one tick and
+    spoken on a later one, because ``debounce_s`` cannot have elapsed inside a
+    single pass. A test that ticks once with a fresh event asserts on a batch
+    the waker is not allowed to send yet — which is how "no wake" would pass
+    for the wrong reason.
+    """
+    collect(db, state_path)
     kw.setdefault("has_orch", lambda b: ORCH)
-    return ow.tick(now=now, boards={BOARD: str(db)}, state_path=state_path,
+    return ow.tick(now=at, boards={BOARD: str(db)}, state_path=state_path,
                    inject=inject, wake_claim=claims, **kw)
 
 
@@ -328,7 +361,7 @@ def test_claims_before_sending_and_confirms_on_accepted_wake(tmp_path):
     ev_id = ids_of(db)[0]
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, FakeClaims(db))
+    decisions = deliver_tick(db, state, inject, FakeClaims(db))
 
     assert [d["ok"] for d in decisions] == [True]
     assert len(inject.calls) == 1
@@ -349,9 +382,9 @@ def test_claim_is_keyed_on_the_recipient_profile_not_the_board(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
 
-    deliver_tick(NOW + 1000, db, state, StubInject(ok=True), claims,
+    deliver_tick(db, state, StubInject(ok=True), claims,
                  has_orch=lambda b: "orion-orch")
 
     assert [(r["profile"], r["task_id"]) for r in claims.rows()] == [
@@ -370,14 +403,15 @@ def test_refused_wake_releases_the_claim_so_the_other_emitter_still_owes_it(tmp_
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
 
-    decisions = deliver_tick(NOW + 1000, db, state, StubInject(ok=False), claims)
+    decisions = deliver_tick(db, state, StubInject(ok=False), claims)
 
     assert [d["ok"] for d in decisions] == [False]
     assert claims.rows() == []
     assert ("release", ORCH, ((TASK, ids_of(db)[0]),)) in claims.asked
-    assert TASK in state_doc(state)["pending"][BOARD], "pending kept for retry"
+    kept = [p[2][0] for p in state_doc(state)["pending"][BOARD]]
+    assert kept == [TASK], "pending kept for retry"
 
 
 def test_raising_inject_releases_the_claim_too(tmp_path):
@@ -385,10 +419,9 @@ def test_raising_inject_releases_the_claim_too(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
 
-    decisions = deliver_tick(NOW + 1000, db, state,
-                             StubInject(raises=RuntimeError), claims)
+    decisions = deliver_tick(db, state, StubInject(raises=RuntimeError), claims)
 
     assert [d["ok"] for d in decisions] == [False]
     assert claims.rows() == []
@@ -404,11 +437,11 @@ def test_confirmed_claim_by_the_other_emitter_suppresses_our_wake(tmp_path):
     seen_once(db, state)
     add_events(db, [event()])
     ev_id = ids_of(db)[0]
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed(ORCH, TASK, ev_id, emitter=GATEWAY_EMITTER, confirmed_at=NOW + 5)
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert decisions == [], "nothing left to send"
     assert inject.calls == []
@@ -425,14 +458,14 @@ def test_the_dropped_duplicate_is_persisted_and_never_re_examined(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed(ORCH, TASK, ids_of(db)[0], emitter=GATEWAY_EMITTER,
                 confirmed_at=NOW + 5)
     inject = StubInject(ok=True)
 
-    deliver_tick(NOW + 1000, db, state, inject, claims)
+    deliver_tick(db, state, inject, claims)
     first = state_doc(state)
-    deliver_tick(NOW + 2000, db, state, inject, claims)
+    deliver_tick(db, state, inject, claims, at=NOW + 400)
     second = state_doc(state)
 
     assert inject.calls == []
@@ -446,12 +479,12 @@ def test_live_unconfirmed_lease_suppresses(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed(ORCH, TASK, ids_of(db)[0], emitter=GATEWAY_EMITTER,
-                claimed_at=NOW + 990)     # 10 s old, inside the 120 s lease
+                claimed_at=DELIVER - 10)  # 10 s old, inside the 120 s lease
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert decisions == []
     assert inject.calls == []
@@ -467,12 +500,12 @@ def test_expired_lease_is_not_a_hold_the_wake_goes_out(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed(ORCH, TASK, ids_of(db)[0], emitter=GATEWAY_EMITTER,
                 claimed_at=NOW - 500)     # far past the lease
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert [d["ok"] for d in decisions] == [True]
     assert len(inject.calls) == 1
@@ -487,12 +520,12 @@ def test_claim_held_for_another_profile_does_not_suppress(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed("telegram-user", TASK, ids_of(db)[0], emitter=GATEWAY_EMITTER,
                 confirmed_at=NOW + 5)
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert [d["ok"] for d in decisions] == [True]
     assert len(inject.calls) == 1
@@ -516,11 +549,11 @@ def test_spawn_failed_is_never_suppressed_and_never_claimed(tmp_path):
     seen_once(db, state)
     add_events(db, [event(kind="spawn_failed")])
     ev_id = ids_of(db)[0]
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     claims.seed(ORCH, TASK, ev_id, emitter=GATEWAY_EMITTER, confirmed_at=NOW + 5)
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert [d["ok"] for d in decisions] == [True]
     assert len(inject.calls) == 1
@@ -528,35 +561,93 @@ def test_spawn_failed_is_never_suppressed_and_never_claimed(tmp_path):
             or "spawn_failed" in decisions[0]["msg"])
     for method, _profile, keys in claims.asked:
         assert keys == (), f"{method} must never be asked about spawn_failed"
-    assert [r for r in claims.rows() if r["event_id"] == ev_id] == []
+    rows = claims.rows()
+    assert [r for r in rows if r["emitter"] == ow.WAKE_CLAIM_EMITTER] == [], \
+        "the waker must not claim an event the gateway cannot wake for"
+    assert [r["confirmed_at"] for r in rows if r["event_id"] == ev_id] == [NOW + 5], \
+        "and must not settle the other emitter's row either"
 
 
-@pytest.mark.parametrize("kind", sorted(
-    set(ow.KINDS) - set(ow.GATEWAY_WAKE_KINDS)))
-def test_every_kind_outside_the_gateway_wake_set_is_never_asked_about(tmp_path, kind):
+def test_scanned_but_not_wake_bearing_kind_is_never_claimed(tmp_path):
+    """A pending batch of ONLY non-wake-bearing kinds never touches the table.
+
+    ``spawn_failed`` is in :data:`KINDS` (so it reaches ``pending``) but outside
+    :data:`GATEWAY_WAKE_KINDS` (the gateway cannot wake for it), and a
+    ``comment``-style row is outside both. Neither may be claimed or suppressed:
+    a row written here would be honoured by the other emitter for a wake it can
+    never make.
+    """
     db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
     state = tmp_path / "state.json"
     seen_once(db, state)
-    add_events(db, [event(kind=kind)])
-    claims = FakeClaims(db)
-    claims.seed(ORCH, TASK, ids_of(db)[0], emitter=GATEWAY_EMITTER,
-                confirmed_at=NOW + 5)
-    inject = StubInject(ok=True)
+    add_events(db, [event(kind="spawn_failed")])
+    claims = FakeClaims(db, now=DELIVER)
+    asked = []
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    class Spy:
+        def suppressions(self, d, profile, idents):
+            asked.append(("suppress", [i[1] for i in idents]))
+            return set()
+
+        def take(self, d, profile, idents):
+            asked.append(("take", [i[1] for i in idents]))
+            return {ow._claim_key(i) for i in idents}
+
+        def confirm(self, d, profile, idents):
+            asked.append(("confirm", [i[1] for i in idents]))
+
+        def release(self, d, profile, idents):
+            asked.append(("release", [i[1] for i in idents]))
+
+    decisions = deliver_tick(db, state, StubInject(ok=True), Spy())
 
     assert [d["ok"] for d in decisions] == [True]
-    assert [k for _m, _p, keys in claims.asked for k in keys] == []
+    assert asked == [], f"the table was consulted for a non-wake kind: {asked}"
+    assert claims.rows() == []
+
+
+def test_every_wake_bearing_kind_the_batch_carries_is_asked_about():
+    """The positive half of the filter: each claimable kind is put to the table.
+
+    ``spawn_failed`` is deliberately absent — it is scannable (:data:`KINDS`)
+    but not claimable, which is the asymmetry the test above pins.
+    """
+    asked = []
+
+    class Spy:
+        def suppressions(self, d, profile, idents):
+            asked.extend(i[1] for i in idents)
+            return set()
+
+        def take(self, d, profile, idents):
+            return {ow._claim_key(i) for i in idents}
+
+        def confirm(self, d, profile, idents):
+            pass
+
+        def release(self, d, profile, idents):
+            pass
+
+    pend = [[NOW, f"line {k}", [TASK, k, NOW, n]]
+            for n, k in enumerate(ow.GATEWAY_WAKE_KINDS, start=1)]
+    ow._suppress_claimed(pend, "db", ORCH, Spy())
+
+    assert sorted(asked) == sorted(ow.GATEWAY_WAKE_KINDS)
 
 
 def test_claim_layer_partitions_wake_bearing_kinds_on_both_sides():
-    """A kind outside the wake set cannot reach the table even by accident."""
+    """A kind outside the wake set cannot reach the table even by accident.
+
+    Both halves in one: the suppressed event is dropped, the two non-wake-
+    bearing ones survive DESPITE a table that claims to hold them, and the only
+    kind the table was ever asked about is the one the gateway can wake for.
+    """
     asked = []
 
     class Spy:
         def suppressions(self, db, profile, idents):
             asked.append(("suppress", [i[1] for i in idents]))
-            return set()
+            return {(TASK, 1)}          # "completed" is owed by someone else
 
         def take(self, db, profile, idents):
             asked.append(("take", [i[1] for i in idents]))
@@ -568,11 +659,14 @@ def test_claim_layer_partitions_wake_bearing_kinds_on_both_sides():
         def release(self, db, profile, idents):
             asked.append(("release", [i[1] for i in idents]))
 
-    idents = [["t_a", "completed", NOW, 1], [t_a := "t_b", "spawn_failed", NOW, 2],
-              ["t_c", "comment", NOW, 3]]
-    kept = ow._claim_held_out(idents, "db", ORCH, Spy())
-    assert kept == [["t_a", "completed", NOW, 1]]
-    assert asked[0] == ("suppress", ["completed"])
+    pend = [[NOW, "line a", [TASK, "completed", NOW, 1]],
+            [NOW, "line b", ["t_b", "spawn_failed", NOW, 2]],
+            [NOW, "line c", ["t_c", "comment", NOW, 3]]]
+    kept, gone = ow._suppress_claimed(pend, "db", ORCH, Spy())
+
+    assert [p[2][1] for p in kept] == ["spawn_failed", "comment"]
+    assert [i[1] for i in gone] == ["completed"]
+    assert asked == [("suppress", ["completed"])]
 
 
 # --------------------------------------------------------------------------- #
@@ -589,15 +683,16 @@ def test_no_claim_when_delivery_is_not_wired(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
+    collect(db, state)
 
-    decisions = ow.tick(now=NOW + 1000, boards={BOARD: str(db)},
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)},
                         state_path=state, has_orch=lambda b: ORCH,
                         wake_claim=claims)
 
     assert [d["ok"] for d in decisions] == [None]
     assert claims.rows() == []
-    assert [m for m, _p, _k in claims.asked] == ["suppress"]
+    assert [m for m, _p, _k in claims.asked] == ["suppressions"]
 
 
 def test_no_claim_while_the_dead_pane_backoff_is_armed(tmp_path):
@@ -606,16 +701,16 @@ def test_no_claim_while_the_dead_pane_backoff_is_armed(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)
+    claims = FakeClaims(db, now=DELIVER)
     for _ in range(3):
-        deliver_tick(NOW + 1000, db, state, StubInject(ok=False), claims)
+        deliver_tick(db, state, StubInject(ok=False), claims)
     claims.asked.clear()
 
-    decisions = deliver_tick(NOW + 1001, db, state, StubInject(ok=True), claims,
+    decisions = deliver_tick(db, state, StubInject(ok=True), claims,
                              fail_threshold=3, backoff_s=900)
 
     assert decisions == []
-    assert [m for m, _p, _k in claims.asked] == ["suppress"]
+    assert [m for m, _p, _k in claims.asked] == ["suppressions"]
     assert [r for r in claims.rows() if r["emitter"] == ow.WAKE_CLAIM_EMITTER] == []
 
 
@@ -631,7 +726,7 @@ def test_exploding_claim_layer_still_delivers(tmp_path, caplog):
     inject = StubInject(ok=True)
 
     with caplog.at_level("WARNING"):
-        decisions = deliver_tick(NOW + 1000, db, state, inject,
+        decisions = deliver_tick(db, state, inject,
                                  ExplodingClaims(db))
 
     assert [d["ok"] for d in decisions] == [True]
@@ -647,10 +742,10 @@ def test_absent_claim_table_delivers(tmp_path):
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
-    claims = FakeClaims(db)          # every read hits "no such table"
+    claims = FakeClaims(db, now=DELIVER)          # every read hits "no such table"
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert [d["ok"] for d in decisions] == [True]
     assert len(inject.calls) == 1
@@ -665,7 +760,7 @@ def test_unreadable_board_path_delivers(tmp_path):
     claims = FakeClaims(tmp_path / "gone.db")
     inject = StubInject(ok=True)
 
-    decisions = deliver_tick(NOW + 1000, db, state, inject, claims)
+    decisions = deliver_tick(db, state, inject, claims)
 
     assert [d["ok"] for d in decisions] == [True]
 
@@ -731,6 +826,7 @@ def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
     adapter = ow.BoardWakeClaim(lib=lib, connect=conn)
     idents = [[TASK, "completed", NOW, 7]]
 
+    adapter.suppressions("db.sqlite", ORCH, idents)
     assert adapter.take("db.sqlite", ORCH, idents) == {(TASK, 7)}
     adapter.confirm("db.sqlite", ORCH, idents)
     adapter.release("db.sqlite", ORCH, idents)
@@ -738,7 +834,7 @@ def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
     assert ("claim", ORCH, TASK, 7, ow.WAKE_CLAIM_EMITTER) in lib.calls
     assert ("confirm", ORCH, TASK, 7, ow.WAKE_CLAIM_EMITTER) in lib.calls
     assert ("release", ORCH, TASK, 7, ow.WAKE_CLAIM_EMITTER) in lib.calls
-    assert [w for w, _p in conn.uris] == [False, True, True], \
+    assert [w for w, _p in conn.uris] == [False, True, True, True], \
         "reads open the board read-only; only claim writes open it read-write"
 
 
@@ -784,29 +880,40 @@ def test_adapter_without_hermes_helpers_owes_everything():
     assert conn.uris == [], "no helpers means no board is opened at all"
 
 
-def test_load_wake_claim_lib_requires_all_four_helpers(monkeypatch):
-    """Half-installed §3.1 is 'no knowledge', never a partial claim path."""
+class _PartialNotify:
+    """A §3.1 half-installed: one helper present, three missing."""
+    try_claim_wake = staticmethod(lambda *a, **k: True)
+
+
+class _FullNotify:
+    """What hermes_cli.kanban_db_notify must expose for the waker to use it."""
+    try_claim_wake = staticmethod(lambda *a, **k: True)
+    confirm_wake = staticmethod(lambda *a, **k: True)
+    release_wake = staticmethod(lambda *a, **k: True)
+    wake_already_claimed = staticmethod(lambda *a, **k: set())
+
+
+def test_load_wake_claim_lib_requires_all_four_helpers():
+    """Half-installed §3.1 is "no knowledge", never a partial claim path.
+
+    A waker that wrote claims its own Hermes could not read (or could read but
+    never settle) would mute the other emitter for a wake nobody can finish —
+    so the gate is all four callables or none.
+    """
+    assert ow._load_wake_claim_lib(notify=_PartialNotify) is None
+    assert ow._load_wake_claim_lib(notify=_FullNotify) is _FullNotify
+
+
+def test_load_wake_claim_lib_returns_none_without_hermes(monkeypatch):
+    """The hermes-import seam says "cannot reach Hermes" -> no claim layer.
+
+    No sys.modules surgery here: the seam is the loader's own, so this test
+    cannot poison the real ``hermes_cli`` for a sibling test in the same
+    process (t_2be3b04e is exactly that collision).
+    """
     from hscc_daemon import autodown
-
-    class Partial:
-        try_claim_wake = staticmethod(lambda *a, **k: True)
-
-    monkeypatch.setattr(autodown, "_load_kanban_db_or_default", lambda: object())
-    import sys
-    sys.modules.pop("hermes_cli.kanban_db_notify", None)
-    sys.modules.pop("hermes_cli", None)
-    import types
-    pkg = types.ModuleType("hermes_cli")
-    notify = types.ModuleType("hermes_cli.kanban_db_notify")
-    notify.try_claim_wake = Partial.try_claim_wake
-    pkg.kanban_db_notify = notify
-    sys.modules["hermes_cli"] = pkg
-    sys.modules["hermes_cli.kanban_db_notify"] = notify
-    try:
-        assert ow._load_wake_claim_lib() is None
-    finally:
-        sys.modules.pop("hermes_cli.kanban_db_notify", None)
-        sys.modules.pop("hermes_cli", None)
+    monkeypatch.setattr(autodown, "_load_kanban_db_or_default", lambda: None)
+    assert ow._load_wake_claim_lib() is None
 
 
 def test_default_adapter_is_used_when_the_seam_is_omitted(tmp_path, monkeypatch):
@@ -823,8 +930,9 @@ def test_default_adapter_is_used_when_the_seam_is_omitted(tmp_path, monkeypatch)
     state = tmp_path / "state.json"
     seen_once(db, state)
     add_events(db, [event()])
+    collect(db, state)
 
-    decisions = ow.tick(now=NOW + 1000, boards={BOARD: str(db)},
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)},
                         state_path=state, has_orch=lambda b: ORCH,
                         inject=StubInject(ok=True))
 

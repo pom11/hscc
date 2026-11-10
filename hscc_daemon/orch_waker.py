@@ -17,8 +17,13 @@ where the stopgap left off).
 
 Purity contract (this module and nothing else in W1):
   * ZERO side effects beyond the state file — no subprocess, no tmux, no
-    network, no writes to any kanban.db (every board connection is opened
-    ``mode=ro``).
+    network — and exactly ONE write to a kanban.db: an additive row in the
+    ``kanban_wake_claims`` table this waker is a citizen of (t_2cd692f0,
+    hermes-agent#152206 §3.1), taken through hermes' own helpers on the tick
+    that sends a wake. Every other board connection — the scan, the cursor
+    ledger, the claim read — is opened ``mode=ro``, and tasks, events, runs and
+    subscriptions are still NEVER written from here: the waker observes a board
+    and records only who owes the wake.
   * The clock is injected (``now`` argument), delivery is an injected
     callable (``inject``), orch resolution is an injected callable
     (``has_orch``), and the paused-board set is an injected collection —
@@ -33,9 +38,12 @@ listdirs ``~/.hermes/kanban/boards`` or re-derives hermes' path rules. What it
 DOES own is how it then opens what the seam reported: it does not reuse
 ``kanban_db.connect_closing``, because that opens read-write and runs
 schema-init/migrations — a pure waker must not be able to mutate a board, so it
-opens the reported paths as read-only URIs itself. Board resolution stays
-injectable (``boards=`` dict or slug list) so tests and W2 fully control the
-target set.
+opens the reported paths as read-only URIs itself (the ONE exception is
+:class:`BoardWakeClaim`'s writes, which open ``mode=rw`` directly — never the
+bare path, so a missing board fails instead of being created, and no
+schema-init or migration path is reachable from here either). Board resolution
+stays injectable (``boards=`` dict or slug list) so tests and W2 fully control
+the target set.
 """
 
 from __future__ import annotations
@@ -474,7 +482,9 @@ GATEWAY_WAKE_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out",
                       "review_requested", "changes_requested",
                       "block_loop_detected")
 #: Hermes' per-subscription notification table (in every board DB). Read-only
-#: here — this module writes nothing to a board.
+#: here, as every board read is: the only thing this module ever writes to a
+#: board is an additive ``kanban_wake_claims`` row (see the purity contract and
+#: :class:`BoardWakeClaim`) — never a subscription, a task or an event.
 SUBS_TABLE = "kanban_notify_subs"
 #: Columns :func:`gateway_wake_cursors` needs from that table; a board whose
 #: schema lacks any of them yields "no knowledge" (fail-open), never a guess.
@@ -656,11 +666,301 @@ def _suppress_gateway_delivered(pend, db_path, profile, ledger):
     return keep, gone
 
 
+# --- Wake-once claim (hermes-agent#152206 §3.1) ----------------------------
+#
+# The cursor ledger above is the gateway notifier's OWN bookkeeping: it says
+# "the notifier consumed this event", not "the orchestrator was woken" — a
+# ``notify`` sub, a seeded catch-up cursor and a wake that raised all advance it.
+# The board DB now carries the durable answer instead: ``kanban_wake_claims``,
+# keyed by event identity alone — (profile, task_id, event_id), where
+# ``event_id`` is the ``task_events.id`` every pending entry already carries in
+# :func:`event_identity`. That table is HERMES': its lease, its CAS, its
+# fail-open verdicts live in ``hermes_cli.kanban_db_notify`` and are tested
+# there. What lives here is only the citizenship — call those four helpers with
+# the right key, at the right moment, and treat every unknown as "deliver".
+#
+# The timing is the whole design:
+#   * ``suppressions`` (read-only) runs at delivery-DECISION time, next to the
+#     cursor ledger, so an event the other emitter already owes cannot hold the
+#     batch open through the debounce and delay a line somebody does need;
+#   * ``take`` runs after every gate, immediately BEFORE the keystroke — a
+#     claim taken on a tick that then decides not to speak (debounce, min-gap,
+#     armed backoff, ``inject=None``) would hold the lease and mute the gateway
+#     notifier for ``lease_s`` for a wake nobody sent. That is a dropped wake
+#     dressed as a dedupe, the one outcome this table exists to prevent;
+#   * ``confirm`` only on an accepted wake, ``release`` on a refused one
+#     (``WakeNotAccepted`` — here: an inject that returns falsy or raises), so a
+#     dead pane leaves no row behind.
+#: Name this emitter writes into ``kanban_wake_claims.emitter``. Distinct from
+#: the gateway notifier's, because confirm/release are HOLDER-ONLY in hermes'
+#: helpers: one shared name would let this waker settle (or delete) a lease it
+#: never took, and a lease it took by name is the only thing that makes an
+#: expired-lease take-over auditable.
+WAKE_CLAIM_EMITTER = "hscc-orch-waker"
+#: The four helpers this module borrows. A Hermes missing ANY of them is
+#: treated as having none: a half-installed §3.1 would let this waker write
+#: claims nobody else can read, which is a dedupe that dedupes nothing.
+_WAKE_CLAIM_HELPERS = ("try_claim_wake", "confirm_wake", "release_wake",
+                       "wake_already_claimed")
+#: Sentinel: "resolve hermes at first use". ``lib=None`` means the opposite —
+#: this caller KNOWS there are no helpers — so tests can pin the no-hermes
+#: posture without depending on what happens to be installed on the host.
+_AUTO = object()
+
+
+def _load_wake_claim_lib(notify=None):
+    """``hermes_cli.kanban_db_notify`` with its §3.1 helpers, or None.
+
+    Reached through the repo's ONE hermes-import seam (``autodown.
+    _load_kanban_db_or_default``), which resolves ``HERMES_AGENT_PATH`` /
+    ``~/.hermes/hermes-agent`` and owns the ``sys.path`` dance — this module
+    never touches the board DB's Python side by hand. Returns None (never
+    raises) for a Hermes that predates §3.1: the waker then has no claim
+    knowledge, which means it delivers — the same verdict as every other
+    unknown here.
+
+    ``notify`` is a test seam for the module itself.
+    """
+    if notify is None:  # noqa: SIM108 - the import is the point, not a lookup
+        from . import autodown
+        if autodown._load_kanban_db_or_default() is None:
+            return None
+        try:
+            from hermes_cli import kanban_db_notify as notify  # noqa: PLC0415
+        except Exception:
+            return None
+    for name in _WAKE_CLAIM_HELPERS:
+        if not callable(getattr(notify, name, None)):
+            return None
+    return notify
+
+
+def _claim_connect(db_path, *, write):
+    """One connection to a board for the claim layer. Raises on any failure.
+
+    ``mode=ro`` for reads (unchanged discipline) and ``mode=rw`` — never the
+    bare path — for the claim writes: ``rw`` FAILS on a missing file instead of
+    creating one, so a stale enumeration entry can never leave a phantom board
+    DB behind, and the schema-init/migration path still never runs from here.
+    """
+    uri = Path(_resolve(db_path)).absolute().as_uri() + (
+        "?mode=rw" if write else "?mode=ro")
+    return sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_S)
+
+
+def _claim_key(ident):
+    """The claim row's key for a pending identity, minus the profile.
+
+    ``(task_id, event_id)`` — the pair is unique WITHIN one board DB (each
+    board is its own sqlite file, and ``event_id`` is that file's
+    ``task_events.id``), which is why the adapter addresses rows this way and
+    why no board slug is needed.
+    """
+    return (ident[0], ident[3])
+
+
+class BoardWakeClaim:
+    """This waker's view of the board's ``kanban_wake_claims`` table.
+
+    Plumbing, not policy: it opens the board, calls hermes' helper, and returns
+    what hermes answered. It deliberately holds NO kind filter — deciding which
+    kinds may be claimed belongs to the delivery decision
+    (:func:`_suppress_claimed` / :func:`_claim_take`), exactly where
+    :func:`gateway_already_delivered` already keeps its own, so the table is
+    only ever asked about wake-bearing events.
+
+    Every method fails open towards DELIVERING: a read that cannot happen
+    suppresses nothing, and a write that cannot happen leaves the wake owed by
+    US (deliver) rather than by an unseen holder (suppress). The except is
+    deliberately broader than ``sqlite3.Error``: hermes' ``write_txn`` refuses a
+    delegated-child context with ``PermissionError``, which is not a sqlite
+    error and must not escape into the tick and cost an owed delivery.
+
+    ``lib`` / ``connect`` are seams: tests pin the key and the fail-open
+    verdicts without hermes installed, and never a real board.
+    """
+
+    def __init__(self, lib=_AUTO, connect=None, emitter=WAKE_CLAIM_EMITTER):
+        self.lib = _load_wake_claim_lib() if lib is _AUTO else lib
+        self.connect = connect or _claim_connect
+        self.emitter = emitter
+
+    def _run(self, db_path, *, write, what, op):
+        """``what(conn)``, or None when anything about it failed.
+
+        Returning None (not raising, not an empty answer) is what lets each
+        caller pick ITS fail-open verdict: "suppress nothing" for a read is a
+        different value from "owe it all" for a write.
+        """
+        if self.lib is None:
+            return None
+        conn = None
+        try:
+            conn = self.connect(db_path, write=write)
+            return what(conn)
+        except Exception as e:  # noqa: BLE001 — see the class docstring
+            LOG.warning("orch-waker: wake claim %s unavailable on %s (%s) — "
+                        "failing open towards delivering", op, db_path, e)
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+
+    def suppressions(self, db_path, profile, idents):
+        """Keys (task, event) that must NOT be woken again for ``profile``.
+
+        hermes' ``wake_already_claimed`` answers — a confirmed delivery
+        suppresses, an unconfirmed lease only until it expires. No knowledge is
+        the empty set, i.e. deliver.
+        """
+        if self.lib is None or not idents:
+            return set()
+        by_task: dict = {}
+        for ident in idents:
+            by_task.setdefault(ident[0], []).append(ident[3])
+        lib = self.lib
+
+        def what(conn):
+            out = set()
+            for task, event_ids in by_task.items():
+                for ev_id in lib.wake_already_claimed(
+                        conn, profile=profile, task_id=task,
+                        event_ids=event_ids):
+                    out.add((task, int(ev_id)))
+            return out
+
+        return self._run(db_path, write=False, what=what, op="read") or set()
+
+    def take(self, db_path, profile, idents):
+        """Keys this waker now holds a claim for — the ones it owes a wake.
+
+        Not-held means a live lease or a confirmed delivery by the OTHER
+        emitter, which is exactly the event to drop from this batch.
+        """
+        if self.lib is None or not idents:
+            return {_claim_key(i) for i in idents}
+        lib, emitter = self.lib, self.emitter
+
+        def what(conn):
+            got = set()
+            for ident in idents:
+                if lib.try_claim_wake(conn, profile=profile, task_id=ident[0],
+                                      event_id=ident[3], emitter=emitter):
+                    got.add(_claim_key(ident))
+            return got
+
+        res = self._run(db_path, write=True, what=what, op="claim")
+        return {_claim_key(i) for i in idents} if res is None else res
+
+    def confirm(self, db_path, profile, idents):
+        """Settle the held claims as delivered (after the keystroke landed)."""
+        if self.lib is None or not idents:
+            return
+        lib, emitter = self.lib, self.emitter
+
+        def what(conn):
+            for ident in idents:
+                lib.confirm_wake(conn, profile=profile, task_id=ident[0],
+                                 event_id=ident[3], emitter=emitter)
+            return True
+
+        self._run(db_path, write=True, what=what, op="confirm")
+
+    def release(self, db_path, profile, idents):
+        """Hand the held claims back — the send was refused, so the wake is
+        owed again (by this waker on its next tick, or by the other emitter)."""
+        if self.lib is None or not idents:
+            return
+        lib, emitter = self.lib, self.emitter
+
+        def what(conn):
+            for ident in idents:
+                lib.release_wake(conn, profile=profile, task_id=ident[0],
+                                 event_id=ident[3], emitter=emitter)
+            return True
+
+        self._run(db_path, write=True, what=what, op="release")
+
+
+def _wake_claim_asked(pend):
+    """Identities of ``pend`` that may be claimed at all.
+
+    ONLY a kind the gateway notifier can actually wake for
+    (:data:`GATEWAY_WAKE_KINDS`). ``spawn_failed`` is this waker's kind alone
+    and a ``changes_requested``-style row the notifier has no formatter for is
+    nobody's wake: claiming either one writes a row the other emitter will
+    honour, which drops the only copy of that wake.
+    """
+    return [p[2] for p in pend
+            if len(p) > 2 and p[2] and p[2][1] in GATEWAY_WAKE_KINDS]
+
+
+def _suppress_claimed(pend, db_path, profile, claims):
+    """``(kept, suppressed)`` — pending lines the wake-once table already owes.
+
+    The claim-table twin of :func:`_suppress_gateway_delivered`, at the same
+    moment (delivery-DECISION time, before the debounce math). Entries with no
+    validated identity and entries whose kind the gateway never wakes for are
+    kept unconditionally, and so is everything when the table cannot be read.
+    """
+    ask = _wake_claim_asked(pend)
+    if not ask:
+        return pend, []
+    try:
+        held = claims.suppressions(db_path, profile, ask) or set()
+    except Exception as e:  # noqa: BLE001 — "cannot know" must mean "deliver"
+        LOG.warning("orch-waker: wake-once claim table unreadable (%s) — "
+                    "delivering anyway; a doubled wake beats a dropped one", e)
+        return pend, []
+    if not held:
+        return pend, []
+    keep, gone = [], []
+    for p in pend:
+        if len(p) > 2 and p[2] and p[2][1] in GATEWAY_WAKE_KINDS \
+                and _claim_key(p[2]) in held:
+            gone.append(p[2])
+        else:
+            keep.append(p)
+    return keep, gone
+
+
+def _claim_take(pend, db_path, profile, claims):
+    """``(kept, suppressed)`` — take the claim for what is about to be sent.
+
+    Called after every gate and immediately before the keystroke. A kept entry
+    is one this waker now holds the claim for (and therefore owes, and will
+    confirm or release in the same tick); a dropped one is an event the other
+    emitter holds or has already delivered. An unreadable table leaves
+    everything kept — we act as though the wake is ours, which is the direction
+    that can only ever double a wake.
+    """
+    ask = _wake_claim_asked(pend)
+    if not ask:
+        return pend, []
+    try:
+        got = claims.take(db_path, profile, ask) or set()
+    except Exception as e:  # noqa: BLE001 — "cannot claim" must mean "deliver"
+        LOG.warning("orch-waker: wake-once claim could not be taken (%s) — "
+                    "delivering anyway; a doubled wake beats a dropped one", e)
+        return pend, []
+    keep, gone = [], []
+    for p in pend:
+        if len(p) > 2 and p[2] and p[2][1] in GATEWAY_WAKE_KINDS \
+                and _claim_key(p[2]) not in got:
+            gone.append(p[2])
+        else:
+            keep.append(p)
+    return keep, gone
+
+
 def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
          state_path=None, boards_dir=None, hermes_home=None,
          warned=None, debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
          report=None, orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-         backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None):
+         backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None, wake_claim=None):
     """One waker pass: scan every board, batch/debounce/rate-limit, decide.
 
     Applies and PERSISTS the state file (the only side effect); returns the
@@ -723,12 +1023,29 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                            tests and any other emitter own the answer. Every
                            failure path in it means "unknown" and therefore
                            DELIVER — the dedupe is fail-open by construction.
+      * ``wake_claim``     — the board's ``kanban_wake_claims`` table (t_2cd692f0,
+                           hermes-agent#152206 §3.1): the durable record of who
+                           owes ``orch_profile`` a wake for THIS event, shared
+                           with the gateway notifier. ``(db_path, profile,
+                           idents)``-keyed methods ``suppressions`` / ``take`` /
+                           ``confirm`` / ``release``; defaults to
+                           :class:`BoardWakeClaim`, which borrows hermes' own
+                           four helpers (same key, same lease, same fail-open
+                           verdicts). Consulted at delivery time like the ledger
+                           and for the same reason — ONE event, ONE orchestrator
+                           wake — but for what the cursor cannot prove. Claimed
+                           only on the tick that actually sends (see the block
+                           comment in the loop); released on a refused send.
+                           Injectable so tests own the answer without a Hermes
+                           that has §3.1 installed.
     """
     if now is None:
         import time
         now = time.time()
     if wake_ledger is None:
         wake_ledger = gateway_wake_cursors
+    if wake_claim is None:
+        wake_claim = BoardWakeClaim()
     st = load_state(state_path)
     if report is not None:
         report["unevaluable"] = False
@@ -823,6 +1140,24 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                      b, ident[0], ident[1], ident[3])
         suppressed.extend({"board": b, "task": i[0], "kind": i[1],
                            "event_id": i[3], "event_at": i[2]} for i in gone)
+        # ── the shared wake-once claim: same moment, same reason ─────────
+        # (t_2cd692f0, hermes-agent#152206 §3.1). The cursor above can only
+        # report what the notifier CONSUMED; this table is what either emitter
+        # OWES or DELIVERED, keyed by the same event id. Read-only here — the
+        # claim itself is taken below, only on the tick that sends — and dropped
+        # before the debounce math for the same reason as the ledger: a line
+        # nobody owes must not hold the batch open and delay a line somebody
+        # does. Non-wake-bearing kinds (spawn_failed first among equals) are not
+        # even asked about, so they can never be suppressed by a claim.
+        orch_profile = (target if isinstance(target, str) and target
+                        else orch_name(b))
+        pend, gone = _suppress_claimed(pend, targets[b], orch_profile, wake_claim)
+        for ident in gone:
+            LOG.info("orch-waker %s: %s/%s event id=%s wake already claimed by "
+                     "another emitter — wake suppressed",
+                     b, ident[0], ident[1], ident[3])
+        suppressed.extend({"board": b, "task": i[0], "kind": i[1],
+                           "event_id": i[3], "event_at": i[2]} for i in gone)
         if not pend:
             st["pending"].pop(b, None)
             continue
@@ -849,17 +1184,61 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
             fails.pop(b, None)
         if now - pend[0][0] < debounce_s or now - st["sent"].get(b, 0) < min_gap_s:
             continue
+        if inject is None:
+            # Report-only pass (the W1 default): the decision is returned and
+            # `pending` is kept — and NOTHING is claimed. A claim taken on a
+            # tick that cannot send would hold the lease and mute the gateway
+            # notifier for `lease_s` for a wake nobody ever sent, which is a
+            # dropped wake dressed as a dedupe.
+            decisions.append(dict(
+                {"board": b, "msg": build_message(b, pend),
+                 "lines": list(dict.fromkeys(p[1] for p in pend))}, ok=None))
+            continue
+        # ── take the claim, immediately before the keystroke ──────────────
+        # After EVERY gate (debounce, min-gap, dead-pane backoff) and before
+        # `inject`, so a claim is only ever held by a waker that is about to
+        # speak. What comes back un-held is an event the other emitter holds or
+        # has already delivered: it goes out of THIS batch, and the batch is
+        # rebuilt without it so the nudge never mentions a card the
+        # orchestrator was already woken for.
+        pend, gone = _claim_take(pend, targets[b], orch_profile, wake_claim)
+        for ident in gone:
+            LOG.info("orch-waker %s: %s/%s event id=%s wake claimed by the "
+                     "other emitter at send time — wake suppressed",
+                     b, ident[0], ident[1], ident[3])
+        suppressed.extend({"board": b, "task": i[0], "kind": i[1],
+                           "event_id": i[3], "event_at": i[2]} for i in gone)
+        if not pend:
+            st["pending"].pop(b, None)
+            continue
+        st["pending"][b] = pend
+        owed = _wake_claim_asked(pend)          # what this send must settle
         msg = build_message(b, pend)
         decision = {"board": b, "msg": msg,
                     "lines": list(dict.fromkeys(p[1] for p in pend))}
-        if inject is None:
-            decisions.append(dict(decision, ok=None))
-            continue
         try:
             ok = bool(inject(b, msg))
         except Exception as e:  # noqa: BLE001 — a waker never crashes on delivery
             ok = False
             LOG.warning("orch-waker %s: inject raised: %s", b, e)
+        # ── settle the claim the way the send went (t_2cd692f0) ───────────
+        # ok=True  -> confirm: the orchestrator took (or queued) the turn; the
+        #             row becomes the receipt that suppresses the other emitter.
+        # ok=False -> WakeNotAccepted: the row must GO, not sit there pretending
+        #             a refused keystroke was a delivery. An unconfirmed lease
+        #             left behind mutes the gateway notifier for `lease_s` for a
+        #             wake that never happened — and holder-only release means
+        #             this only ever deletes a row this waker itself took.
+        # Best-effort both ways: the send already happened, so a claim layer
+        # that is down must never turn a delivered wake into a failed one.
+        if owed:
+            try:
+                (wake_claim.confirm if ok else wake_claim.release)(
+                    targets[b], orch_profile, owed)
+            except Exception as e:  # noqa: BLE001 — the send is already done
+                LOG.warning("orch-waker %s: wake claim not settled after a %s "
+                            "send (%s) — the lease expires on its own",
+                            b, "accepted" if ok else "refused", e)
         decision["ok"] = ok
         if ok:
             st["sent"][b] = now
