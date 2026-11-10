@@ -814,6 +814,42 @@ class SpyConnect:
         return sqlite3.connect(str(db_path))
 
 
+def test_claim_connect_writes_for_real_and_never_creates_a_board(tmp_path):
+    """`write=True` must be a real write — and must never create a board.
+
+    The gap this test closes (found by mutation probe, t_2cd692f0): every other
+    adapter test injects a `connect` seam, so nothing pinned what
+    :func:`_claim_connect` does with the flag. Flip ``mode=rw`` to ``mode=ro``
+    and every claim fails open — the waker keeps delivering (safe) and the
+    cross-emitter dedupe quietly stops existing, which is this module's
+    documented silent-inert failure class. So both halves are asserted
+    behaviourally, not by string-matching a URI.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    row = ("hscc-orch", TASK, 7, ow.WAKE_CLAIM_EMITTER, NOW, None)
+
+    ro = ow._claim_connect(db, write=False)
+    try:
+        with pytest.raises(sqlite3.Error):
+            ro.execute("INSERT INTO kanban_wake_claims VALUES (?, ?, ?, ?, ?, ?)",
+                       row)
+    finally:
+        ro.close()
+
+    rw = ow._claim_connect(db, write=True)
+    try:
+        rw.execute("INSERT INTO kanban_wake_claims VALUES (?, ?, ?, ?, ?, ?)", row)
+        rw.commit()
+    finally:
+        rw.close()
+    assert FakeClaims(db, now=NOW).rows()[0]["emitter"] == ow.WAKE_CLAIM_EMITTER
+
+    missing = tmp_path / "absent" / "kanban.db"
+    with pytest.raises(sqlite3.Error):
+        ow._claim_connect(missing, write=True)
+    assert not missing.exists(), "a stale enumeration entry must not mint a board"
+
+
 def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
     """The adapter is plumbing: same (profile, task, event_id), same emitter.
 
