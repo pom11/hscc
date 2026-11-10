@@ -707,7 +707,7 @@ def test_the_waker_claims_exactly_the_wake_bearing_ids_of_a_mixed_batch(tmp_path
     # on the delivery tick's report alone would miss a line eaten one tick early.
     collect_report, deliver_report = {}, {}
     ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
-            report=collect_report)
+            wake_claim=claims, report=collect_report)
     decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
                         inject=inject, has_orch=lambda b: ORCH,
                         wake_claim=claims, report=deliver_report)
@@ -772,7 +772,7 @@ def test_a_spawn_failed_below_the_gateway_cursor_still_wakes(tmp_path):
     # suppression runs before the debounce math), not by the one that speaks.
     collect_report, deliver_report = {}, {}
     ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
-            report=collect_report)
+            wake_claim=claims, report=collect_report)
     decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
                         inject=inject, has_orch=lambda b: ORCH,
                         wake_claim=claims, report=deliver_report)
@@ -795,6 +795,75 @@ def test_a_spawn_failed_below_the_gateway_cursor_still_wakes(tmp_path):
     assert claims.asked == []
     assert claims.rows() == []
     assert spawn_id not in {r["event_id"] for r in claims.rows()}
+
+
+def test_a_claim_layer_answering_wider_than_asked_cannot_suppress_a_spawn_failed(tmp_path):
+    """Defence in depth: the KIND filter is the last line, not the ask filter.
+
+    Mutation this kills: ``_suppress_claimed`` trusting ``held`` alone and
+    dropping its own :data:`GATEWAY_WAKE_KINDS` test from the keep/gone loop.
+    Measured, that mutation is INVISIBLE to the entire suite (54 passed) because
+    it is unreachable while :func:`orch_waker._wake_claim_asked` filters the ask
+    — the table is never told about a non-wake-bearing id, so it can never
+    answer about one. Redundant by construction is not the same as pinned: the
+    redundancy holds only as long as the filter above it does.
+
+    So this closes it from the other side instead of pretending it is reachable.
+    A claim layer that answers about an id it was never asked about — hermes
+    drift, a half-migrated schema whose ``event_ids`` filter stops applying, a
+    second adapter sharing the table — still cannot drop the ``spawn_failed``
+    line, because the delivery decision filters on kind itself. The
+    ``suppressions`` call recording is the anti-vacuity half: it shows the waker
+    asked about one id and took an answer about a different one.
+    """
+    class AnswerTooWide:
+        """A claims layer that returns MORE than it was asked for."""
+
+        def __init__(self, extra):
+            self.extra = extra
+            self.asked = []
+
+        def suppressions(self, db, profile, idents):
+            # Answers ONLY about the id it was never asked for — the asked one
+            # is genuinely unheld, so the sole thing that could drop a line here
+            # is a keep/gone loop that trusts `held` without checking the kind.
+            self.asked.append([i[3] for i in idents])
+            return self.extra
+
+        def take(self, db, profile, idents):
+            return {ow._claim_key(i) for i in idents}
+
+        def confirm(self, db, profile, idents):
+            pass
+
+        def release(self, db, profile, idents):
+            pass
+
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    state = tmp_path / "state.json"
+    seen_once(db, state)
+    add_events(db, [event(kind="completed"), event(kind="spawn_failed")])
+    completed_id, spawn_id = ids_of(db)
+    claims = AnswerTooWide({(TASK, spawn_id)})
+    inject = StubInject(ok=True)
+    collect_report, deliver_report = {}, {}
+    ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
+            wake_claim=claims, report=collect_report)
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
+                        inject=inject, has_orch=lambda b: ORCH,
+                        wake_claim=claims, report=deliver_report)
+
+    # the waker put exactly one id to the table on each of the two ticks…
+    assert claims.asked == [[completed_id], [completed_id]], \
+        "the ask filter itself widened: this test's premise is gone"
+    # …and the extra key it was handed suppressed nothing.
+    assert [d["ok"] for d in decisions] == [True]
+    assert len(inject.calls) == 1
+    assert decisions[0]["lines"] == [f"{TASK} done — {TITLE}",
+                                     f"{TASK} spawn failed — {TITLE}"]
+    assert collect_report.get("suppressed", []) == [] and \
+        deliver_report.get("suppressed", []) == [], \
+        "a key nobody asked about was allowed to drop a wake"
 
 
 # --------------------------------------------------------------------------- #
