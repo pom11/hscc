@@ -814,6 +814,22 @@ class SpyConnect:
         return sqlite3.connect(str(db_path))
 
 
+@pytest.fixture
+def claim_db(tmp_path):
+    """Board path for the adapter tests: absolute, per-test, never in the repo.
+
+    These four tests inject :class:`SpyConnect`, which hands the path straight
+    to ``sqlite3.connect`` — so the bare relative literal this fixture replaces
+    (``"db.sqlite"``) resolved against the pytest CWD and minted a 0-byte
+    ``db.sqlite`` in the repo root on every run. Invisible to ``git status``
+    since ``*.sqlite`` is ignored, and shared (so colliding) between two
+    workers on one checkout. The real :func:`orch_waker._claim_connect`
+    absolutises anyway (``Path(...).absolute().as_uri()``), so an absolute path
+    exercises the same code and no assertion here changes.
+    """
+    return str(tmp_path / "claims.sqlite")
+
+
 def test_claim_connect_writes_for_real_and_never_creates_a_board(tmp_path):
     """`write=True` must be a real write — and must never create a board.
 
@@ -850,7 +866,7 @@ def test_claim_connect_writes_for_real_and_never_creates_a_board(tmp_path):
     assert not missing.exists(), "a stale enumeration entry must not mint a board"
 
 
-def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
+def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds(claim_db):
     """The adapter is plumbing: same (profile, task, event_id), same emitter.
 
     The kind filter lives in the waker's decision (``_claim_held_out``), where
@@ -862,10 +878,10 @@ def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
     adapter = ow.BoardWakeClaim(lib=lib, connect=conn)
     idents = [[TASK, "completed", NOW, 7]]
 
-    adapter.suppressions("db.sqlite", ORCH, idents)
-    assert adapter.take("db.sqlite", ORCH, idents) == {(TASK, 7)}
-    adapter.confirm("db.sqlite", ORCH, idents)
-    adapter.release("db.sqlite", ORCH, idents)
+    adapter.suppressions(claim_db, ORCH, idents)
+    assert adapter.take(claim_db, ORCH, idents) == {(TASK, 7)}
+    adapter.confirm(claim_db, ORCH, idents)
+    adapter.release(claim_db, ORCH, idents)
 
     assert ("claim", ORCH, TASK, 7, ow.WAKE_CLAIM_EMITTER) in lib.calls
     assert ("confirm", ORCH, TASK, 7, ow.WAKE_CLAIM_EMITTER) in lib.calls
@@ -874,17 +890,17 @@ def test_adapter_passes_hermes_its_own_key_emitter_and_never_filters_kinds():
         "reads open the board read-only; only claim writes open it read-write"
 
 
-def test_adapter_reads_through_hermes_and_returns_their_answer():
+def test_adapter_reads_through_hermes_and_returns_their_answer(claim_db):
     lib = RecordingLib(claimed={(TASK, 7)})
     adapter = ow.BoardWakeClaim(lib=lib, connect=SpyConnect())
-    out = adapter.suppressions("db.sqlite", ORCH,
+    out = adapter.suppressions(claim_db, ORCH,
                                [[TASK, "completed", NOW, 7],
                                 [TASK, "blocked", NOW, 8]])
     assert out == {(TASK, 7)}
 
 
 @pytest.mark.parametrize("op", ["read", "claim", "confirm", "release"])
-def test_adapter_fails_open_when_hermes_raises(op):
+def test_adapter_fails_open_when_hermes_raises(op, claim_db):
     """Not just sqlite3.Error.
 
     ``write_txn`` refuses a delegated-child context with PermissionError, which
@@ -895,24 +911,24 @@ def test_adapter_fails_open_when_hermes_raises(op):
     adapter = ow.BoardWakeClaim(lib=lib, connect=SpyConnect())
     idents = [[TASK, "completed", NOW, 7]]
     if op == "read":
-        assert adapter.suppressions("db.sqlite", ORCH, idents) == set()
+        assert adapter.suppressions(claim_db, ORCH, idents) == set()
     elif op == "claim":
-        assert adapter.take("db.sqlite", ORCH, idents) == {(TASK, 7)}, \
+        assert adapter.take(claim_db, ORCH, idents) == {(TASK, 7)}, \
             "'cannot claim' means 'you owe it' — deliver, never suppress"
     else:
-        getattr(adapter, op)("db.sqlite", ORCH, idents)   # must not raise
+        getattr(adapter, op)(claim_db, ORCH, idents)   # must not raise
 
 
-def test_adapter_without_hermes_helpers_owes_everything():
+def test_adapter_without_hermes_helpers_owes_everything(claim_db):
     """A Hermes that predates §3.1 has no table to consult: deliver."""
     conn = SpyConnect()
     adapter = ow.BoardWakeClaim(lib=None, connect=conn)
     idents = [[TASK, "completed", NOW, 7], ["t_b", "blocked", NOW, 8]]
 
-    assert adapter.suppressions("db.sqlite", ORCH, idents) == set()
-    assert adapter.take("db.sqlite", ORCH, idents) == {(TASK, 7), ("t_b", 8)}
-    adapter.confirm("db.sqlite", ORCH, idents)
-    adapter.release("db.sqlite", ORCH, idents)
+    assert adapter.suppressions(claim_db, ORCH, idents) == set()
+    assert adapter.take(claim_db, ORCH, idents) == {(TASK, 7), ("t_b", 8)}
+    adapter.confirm(claim_db, ORCH, idents)
+    adapter.release(claim_db, ORCH, idents)
     assert conn.uris == [], "no helpers means no board is opened at all"
 
 
