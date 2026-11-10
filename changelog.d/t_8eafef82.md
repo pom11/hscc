@@ -65,3 +65,37 @@ for the duration of this one import" out of the live function, plants a fake
 tree that records `sys.path` at import time (so the snapshot proves the window
 was open during the import), and then requires `sys.path` to be byte-identical
 to before the call.
+
+## Measured, not reasoned
+
+Two probes (scripts in the card thread) run the real chain against the real
+`~/.hermes/hermes-agent` tree in the daemon's own interpreter. Pre-fix the agent
+dir was `sys.path[0]` after a resolve; at this commit it is absent, and the chain
+still works: `list_boards()` returned the operator's 23 boards,
+`board_db_paths()` resolved every per-board DB, a `LIMIT 1` probe read 480 tasks
+off the real board, and re-running `list_boards()` with `hermes_cli` evicted from
+`sys.modules` returned 23 again. The probe also records every `find_spec` attempt
+for any `hermes*` name made during those calls: **zero** — so no consumer
+triggers a fresh top-level import at call time, which is the only way restoring
+`sys.path` could have broken a later call. (That is also why the sites that *call*
+into Hermes keep the call inside the window: it costs nothing and does not rely
+on that measurement staying true.)
+
+Five mutation probes, each on a copy of the tree with the original restored
+before the next probe, provenance asserted inside every run, control green:
+
+| mutation | what it restores | result |
+|---|---|---|
+| M1 | `finally` never restores (the pre-fix observable) | 11/11 new tests red |
+| M2 | refcount dropped, naive `finally` | the two-thread test + the nested test red |
+| M3 | `autodown` plain `sys.path.insert` alongside the window | the acceptance test red |
+| M4 | wedge caps reader back to a bare import | its order-independence test red |
+| M5 | wedge review-dispatch reader back to a bare import | its order test red |
+
+And in the keg venv (the one `/opt/homebrew/bin/hscc` runs in) `_review_dispatch
+_config_state()` now answers `True` in a fresh process, where pre-fix it answered
+`None` until something leaked. `kanban_live._read_caps()` reports `(None, None)`
+with an empty `reason` in both interpreters because `kanban.max_in_progress` is
+genuinely unset on this box (measured through `hermes_cli.config.load_config()`),
+not because the read failed — the distinction GAP-D-4 exists to keep.
+
