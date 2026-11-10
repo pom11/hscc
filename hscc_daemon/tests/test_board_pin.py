@@ -27,10 +27,17 @@ import os
 import pathlib
 import sqlite3
 import sys
+import tempfile
 
 import pytest
 
 from hscc_daemon import board_pin
+
+# The ONE "is this a planted fake?" rule, shared with conftest and test_autodown
+# (t_b62da70c) — see the comment above ``_real_kanban_db`` for what this file
+# adds on top of it (the borrow/restore, which is its own business).
+from hscc_daemon.tests.hermes_cli_plant import (
+    evict_planted, is_planted_path, restore_planted)
 
 NOW = 1_800_000_000
 
@@ -319,34 +326,21 @@ def test_resolve_board_db_path_on_a_legacy_lib_returns_none():
 # --------------------------------------------------------------------------- #
 # real hermes: the precedence being defeated is hermes' own
 # --------------------------------------------------------------------------- #
-
-_PLANTED_MARKER = "pytest-of-"   # the tmp-dir shape this suite plants fakes in
-
-
-def _evict_planted_hermes_cli():
-    """Take planted ``hermes_cli`` stubs out of the shared import cache.
-
-    ``sys.modules`` is process-wide, and files in this suite plant a stub
-    ``hermes_cli.kanban_db`` under a pytest tmp dir without always taking it
-    back out — which binds a later real ``hermes_cli.kanban_db_boards._kb`` to
-    the fake, so ``create_board`` dies with ``AttributeError: module
-    'hermes_cli.kanban_db' has no attribute '_require_slug'`` and it reads like
-    a hermes bug rather than a fixture bug. ``test_autodown.TestLoadKanbanDb``
-    carries the same eviction for the same reason. We need the REAL resolver for
-    the two cases below, so we borrow the name for one test and hand it back.
-    """
-    evicted = {}
-    for name, mod in list(sys.modules.items()):
-        if not name.startswith("hermes_cli"):
-            continue
-        if _PLANTED_MARKER in str(getattr(mod, "__file__", "") or ""):
-            evicted[name] = sys.modules.pop(name)
-    return evicted
-
-
-def _restore_hermes_cli(evicted):
-    for name, mod in evicted.items():
-        sys.modules[name] = mod
+#
+# Which resident ``hermes_cli`` counts as a planted fake is decided by the ONE
+# predicate — ``hermes_cli_plant``, shared with conftest and ``test_autodown``
+# (t_b62da70c). This file used to keep a private substring rule of its own
+# (``_PLANTED_MARKER``) and that was the third definition of the same hazard.
+# What IS this file's own business, and why it calls ``evict_planted`` instead
+# of leaning on conftest's autouse fixture, is the BORROW: ``real_root`` needs
+# the real resolver for one test, so it takes the planted name for the length of
+# the fixture and hands it back in ``finally`` — the stub belongs to the sibling
+# file that planted it, and an unreturned borrow is exactly the cross-file
+# corruption PR #270 was written against. Without the borrow the failure is
+# loud but misleading: a later real ``hermes_cli.kanban_db_boards._kb`` stays
+# bound to the fake and ``create_board`` dies with ``AttributeError: module
+# 'hermes_cli.kanban_db' has no attribute '_require_slug'``, which reads like a
+# hermes bug rather than a fixture bug.
 
 
 def _real_kanban_db():
@@ -366,16 +360,26 @@ def test_the_evict_helper_hands_the_module_name_back(monkeypatch):
     Without this the eviction is a quiet way of corrupting whichever sibling
     test planted the stub, and the corruption would surface as somebody else's
     order-dependent failure — the exact class of bug being worked around here.
+
+    The stub's ``__file__`` is built under the temp root the SHARED predicate
+    recognises, and that is asserted before anything else: the point is that
+    this file no longer has a rule of its own to satisfy. (It used to hardcode a
+    ``/tmp`` path that matched only its own private substring, and would not
+    have looked planted to conftest at all.)
     """
     import types
     planted = types.ModuleType("hermes_cli.kanban_db")
-    planted.__file__ = f"/tmp/{_PLANTED_MARKER}sim/pytest-0/hermes_cli/kanban_db.py"
+    planted.__file__ = os.path.join(tempfile.gettempdir(), "hscc-planted-sim",
+                                    "hermes_cli", "kanban_db.py")
+    assert is_planted_path(planted.__file__), (
+        "the stub does not look planted to the one predicate: "
+        + planted.__file__)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", planted)
 
-    evicted = _evict_planted_hermes_cli()
+    evicted = evict_planted()
     assert evicted.get("hermes_cli.kanban_db") is planted, "the stub was not evicted"
     assert "hermes_cli.kanban_db" not in sys.modules, "it is still in the import cache"
-    _restore_hermes_cli(evicted)
+    restore_planted(evicted)
     assert sys.modules["hermes_cli.kanban_db"] is planted, "the stub was not restored"
 
 
@@ -416,13 +420,13 @@ def real_root(tmp_path, monkeypatch):
     Everything goes through ``kb`` — the module autodown resolved — and NEVER
     through a direct ``import hermes_cli.<submodule>``: importing a real hermes
     submodule directly binds its ``_kb`` to whatever happens to be cached, which
-    is how this fixture used to error in the full leg. The eviction above is
-    bounded by ``finally`` so the sibling that planted the stub still owns it
-    when we are done.
+    is how this fixture used to error in the full leg. The borrow (``evict_planted``
+    — the shared predicate's, not a copy) is bounded by ``finally`` so the sibling
+    that planted the stub still owns it when we are done.
     """
     from hscc_daemon import autodown
     kb = _real_kanban_db()
-    evicted = {} if kb is not None else _evict_planted_hermes_cli()
+    evicted = {} if kb is not None else evict_planted()
     try:
         if kb is None:
             kb = _real_kanban_db()
@@ -459,7 +463,7 @@ def real_root(tmp_path, monkeypatch):
                         "(runs clean in a fresh process; see t_2be3b04e)")
         yield root, kb
     finally:
-        _restore_hermes_cli(evicted)
+        restore_planted(evicted)
 
 
 def _seed(kb, slug, task_id, title):

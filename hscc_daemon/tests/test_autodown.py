@@ -15,6 +15,11 @@ import pytest
 
 import hscc_daemon.autodown as ad
 
+# The ONE definition of "is this a planted fake ``hermes_cli``?" (t_b62da70c).
+# Imported, never copied: this class used to carry a private version of the rule
+# that had to keep agreeing with conftest's by hand.
+from hscc_daemon.tests.hermes_cli_plant import evict_planted
+
 # The whole-fleet stop command built by the shared builder, scoped to the
 # configured cluster. Referenced here (not hardcoded) so these assertions stay
 # in sync with serving.fleet_down_cmd().
@@ -750,7 +755,7 @@ class TestLoadKanbanDb:
         return agent
 
     @pytest.fixture(autouse=True)
-    def _evict_planted_hermes_cli(self, tmp_path):
+    def _evict_planted_hermes_cli(self):
         """Never leak the planted fake into the rest of the process.
 
         The resolver ``import``s whatever ``HERMES_AGENT_PATH`` points at, so a
@@ -761,14 +766,19 @@ class TestLoadKanbanDb:
         hermes' ``list_boards``/``kanban_db_path`` (``autodown.board_db_paths``,
         used by ``orch_waker``), and a leaked fake silently shrinks the board
         set to one. So the class that plants the fake removes it again.
+
+        The rule that says which modules are the plant is conftest's — i.e.
+        ``hermes_cli_plant``, the ONE predicate (t_b62da70c). This fixture used
+        to carry its own copy (this test's ``tmp_path`` OR a substring of the
+        pytest tmp-dir marker), so "planted" had three definitions that had to
+        agree by hand; the narrow temp-root rule is strictly the same set here,
+        because ``tmp_path`` lives under that root.
         """
         yield
-        import sys
-        for name in [n for n in sys.modules if n.startswith("hermes_cli")]:
-            origin = str(getattr(sys.modules[name], "__file__", "") or "")
-            if str(tmp_path).rstrip("/") in origin or (
-                    origin and "pytest-of-" in origin):
-                del sys.modules[name]
+        # The borrow ``evict_planted`` hands back is deliberately dropped: this
+        # class owns the fake it planted and no later test should be holding the
+        # name. conftest's autouse fixture is the process-wide guarantee.
+        evict_planted()
 
     def test_resolves_from_hermes_agent_path(self, tmp_path, monkeypatch):
         """HERMES_AGENT_PATH points at a dir with hermes_cli ⇒ it resolves and
