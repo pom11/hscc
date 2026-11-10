@@ -20,6 +20,48 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
+# ━━━ the sibling interpreter is THIN on purpose (t_02c98915) ━━━━━━━━━━━━━━━
+# HSCC_TEST_PY exists so the suite can be run under a second CPython (the
+# dual-interpreter stamp: hermes' own venv, then e.g. ~/miniconda3/envs/p313).
+# That sibling is a THIN pytest env — pytest, and not hermes' runtime deps. It
+# is thin by design: hermes resolves its own dependency generation at runtime
+# (see the execv guard below, t_82fa20f5), so a hand-maintained second copy of
+# those deps drifts, and drift shows up as wrong-green rather than red.
+#
+# Some tests therefore cannot run there AT ALL: they build a real
+# ``hermes_state.SessionDB``, or drive ``hermes_cli.kanban_db`` / hermes' profile
+# predicates through the production resolvers, and hermes' own imports need
+# ruamel.yaml (hermes_yaml), which the thin env lacks. Those tests SKIP, with the
+# import error itself as the reason, through ONE capability probe per leg:
+#
+#   hscc_daemon   tests/real_hermes.py   require_real_hermes /
+#                                        real_predicate_or_skip
+#   hscc-project  tests/test_session_discovery.py::_require_hermes_state,
+#                 tests/test_mcp_server.py::_hermes_kanban_error
+#   hscc-api      tests/hermes_gap.py    require_hermes_state
+#
+# THE STAMP RULE. Under a sibling interpreter a leg is GREEN when the only
+# non-passing lines are skips whose reason names the missing hermes import
+# (`-rs`, below, is what makes them visible). So:
+#   * a FAILED test in a sibling leg is a REGRESSION — or one of the gated
+#     tests failing for a reason that is not "hermes not importable", which is
+#     also a finding, not an environment artefact;
+#   * a NEW skip that does not name that reason is a test that quietly stopped
+#     running: make the same gate decision deliberately, do not let a bare
+#     ``skip()`` become the default answer;
+#   * never "fix" a red sibling leg by installing hermes' deps into the sibling
+#     env. That is the option this repo considered and rejected; the measurement,
+#     the 21-test roster and the reasoning are in
+#     docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md.
+# Compare legs one-dir-per-process, exactly as this loop does — a merged-dir
+# baseline counts cross-file isolation failures as environment failures and gives
+# a wrong answer (see the header above, and
+# hscc_daemon/tests/test_hermes_cli_import_isolation.py).
+#
+# What the sibling leg loses is stated plainly: it does not exercise
+# hermes-integration code paths. It never did on a thin env — that test simply
+# used to fail instead of saying so.
+
 # ━━━ no mid-run interpreter swap (t_82fa20f5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # A pytest process must never replace its own image mid-suite. It can: a
 # deferred import chain inside hermes_state's write path

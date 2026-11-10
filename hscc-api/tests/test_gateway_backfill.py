@@ -39,19 +39,17 @@ from gateway_driver import GatewayConfig, GatewayDriver, backfill_named_session
 # same honest-optional pattern as test_gateway_driver's corpus skip — while
 # running fully under the hermes venv. (The parent's test_session_resolver has
 # the identical dependency; this is a documented env gap, not a regression.)
-try:
-    from hermes_state import SessionDB as _SessionDB  # noqa: F401
-    _HAS_HERMES_STATE = True
-except Exception:
-    _HAS_HERMES_STATE = False
+# t_02c98915: the probe itself moved to :mod:`hermes_gap` so this file,
+# ``test_gateway_store_tail`` and ``test_session_resolver`` share ONE definition
+# of the gap and cannot drift to three postures (three copies, one skip reason
+# each, was exactly how the resolver's six tests ended up hard-failing).
+from hermes_gap import require_hermes_state
 
 
 @pytest.fixture
 def hs_state():
     """Skip the whole state-db-backed test when hermes_state is unavailable."""
-    if not _HAS_HERMES_STATE:
-        pytest.skip("hermes_state not importable on this interpreter "
-                    "(needs the hermes-agent runtime / hermes venv)")
+    require_hermes_state()
     yield
 
 
@@ -76,6 +74,9 @@ def _write_registry(tmp_path: Path, projects):
 
 
 def _make_state_db(state_path: Path):
+    # Every real-SessionDB case in this file opens through here, so the gate is
+    # on the helper, not on each test (t_02c98915).
+    require_hermes_state()
     from hermes_state import SessionDB
     return SessionDB(db_path=state_path)
 

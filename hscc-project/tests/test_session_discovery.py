@@ -28,6 +28,28 @@ from flightdeck.commands import project as project_cmd
 from flightdeck.core import registry
 from flightdeck.core import session_discovery
 
+# t_02c98915 — the three `mode=ro` proofs below build a REAL
+# ``hermes_state.SessionDB``, which needs HERMES' own runtime deps in the
+# *test* interpreter (hermes_state -> hermes_yaml -> ruamel). The canonical
+# runner selects its interpreter through ``HSCC_TEST_PY`` and the sanctioned
+# sibling is deliberately a thin pytest env, so those tests skip there with the
+# import error as their reason instead of hard-failing it — the posture
+# ``hscc-api``'s ``hs_state`` fixture already uses, and the measurement + the
+# decision behind it are in docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md.
+try:
+    from hermes_state import SessionDB  # noqa: F401  (the probe IS the import)
+    _HERMES_STATE_ERROR = None
+except Exception as _exc:  # noqa: BLE001 — the exception IS the report
+    _HERMES_STATE_ERROR = f"{type(_exc).__name__}: {_exc}"
+
+
+def _require_hermes_state():
+    """Skip the calling test when this interpreter cannot run hermes' SessionDB."""
+    if _HERMES_STATE_ERROR is not None:
+        pytest.skip("hermes_state not importable on this interpreter "
+                    f"({_HERMES_STATE_ERROR}) — needs the hermes-agent runtime, "
+                    "not just pytest (t_02c98915)")
+
 
 # --------------------------------------------------------------------------- #
 # Fakes (mirror the fake session DB shapes in test_project.py)
@@ -464,7 +486,13 @@ def test_discovery_malformed_mapping_behaves_as_today(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _real_sdb_seed(tmp_path):
-    """Create a temp state.db, seed it read-write, return (path, orch_row)."""
+    """Create a temp state.db, seed it read-write, return (path, orch_row).
+
+    The gate is here rather than on each test because every real-``SessionDB``
+    case in this file passes through this seed — a new one cannot appear
+    ungated.
+    """
+    _require_hermes_state()
     from hermes_state import SessionDB
 
     db_path = Path(tmp_path) / "state.db"
