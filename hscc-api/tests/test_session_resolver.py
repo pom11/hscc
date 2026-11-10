@@ -32,6 +32,7 @@ import pytest
 import api_server
 import routes_orchestrator
 import routes_session  # noqa: F401  (registers the new /session route)
+from hermes_gap import require_hermes_state
 from routes_orchestrator import (
     OrchestratorError,
     UnknownProjectError,
@@ -59,7 +60,15 @@ def _write_registry(tmp_path: Path, projects):
 
 
 def _make_state_db(state_path: Path):
-    """Return a fresh hermes_state.SessionDB against ``state_path``."""
+    """Return a fresh hermes_state.SessionDB against ``state_path``.
+
+    Gated (t_02c98915) here rather than on each test because every real-DB case
+    in this file — the four resolver tests and the two endpoint tests — opens its
+    state.db through this helper, so a new one cannot appear ungated. The three
+    tests that never touch a state.db (unknown project, no board, read failure)
+    are unaffected and keep running on a thin interpreter.
+    """
+    require_hermes_state()
     from hermes_state import SessionDB
     return SessionDB(db_path=state_path)
 

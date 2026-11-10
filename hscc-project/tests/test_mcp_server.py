@@ -44,6 +44,24 @@ NOW = 1_700_000_000
 BEFORE = NOW - _STALE
 
 
+# t_02c98915 — this file's contract is "every external surface is injected", and
+# for the board it is true of the CARD list but not of the watermark read:
+# ``standup.gather_data`` calls ``kanban.list_board_watermarks``, which loads
+# HERMES' real kanban library (``hermes_cli.kanban_db`` -> ``utils`` ->
+# ``hermes_yaml`` -> ``ruamel``). Under a thin sibling interpreter (see
+# docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md) that import is what
+# failed, so the parity test skips naming the reason instead of failing the leg
+# for the environment.
+def _hermes_kanban_error():
+    """Why ``flightdeck`` cannot load the real kanban lib here, else ``None``."""
+    from flightdeck.core import kanban
+    try:
+        kanban._load_kanban_db()
+        return None
+    except Exception as exc:  # noqa: BLE001 — the exception IS the report
+        return f"{type(exc).__name__}: {exc}"
+
+
 # --------------------------------------------------------------------------- #
 # helpers: fixture builders + the CLI-path capture
 # --------------------------------------------------------------------------- #
@@ -146,7 +164,18 @@ def test_console_script_declared():
 # --------------------------------------------------------------------------- #
 
 def test_standup_thin_adapter(monkeypatch):
-    """flightdeck_standup == `flightdeck standup` for the same fixture."""
+    """flightdeck_standup == `flightdeck standup` for the same fixture.
+
+    Gated (t_02c98915): BOTH sides of the parity read board watermarks through
+    HERMES' real kanban library, so on an interpreter without hermes' runtime
+    deps there is no CLI output to compare against — see
+    :func:`_hermes_kanban_error`.
+    """
+    err = _hermes_kanban_error()
+    if err is not None:
+        pytest.skip("real hermes_cli.kanban_db not importable on this "
+                    f"interpreter ({err}); standup's watermark read needs it "
+                    "(t_02c98915)")
     monkeypatch.setattr(
         registry, "load_registry",
         lambda path: [_project(verify="cd /repo && run_tests")],

@@ -31,22 +31,20 @@ import pytest
 
 import gateway_driver as gd
 from gateway_driver import (backfill_named_session, tail_named_session)
+from hermes_gap import require_hermes_state
 from session_event import get_store, reset_stores
-
-try:
-    from hermes_state import SessionDB  # noqa: F401
-    _HAS_HERMES_STATE = True
-except Exception:
-    _HAS_HERMES_STATE = False
 
 
 @pytest.fixture
 def hs_state():
     """Skip the whole state-db-backed test when hermes_state is unavailable
-    (the p313 interpreter lacks it — same documented env gap as backfill)."""
-    if not _HAS_HERMES_STATE:
-        pytest.skip("hermes_state not importable on this interpreter "
-                    "(needs the hermes-agent runtime / hermes venv)")
+    (the p313 interpreter lacks it — same documented env gap as backfill).
+
+    The probe itself is :mod:`hermes_gap` — ONE definition for the leg, so
+    ``test_session_resolver``'s real-DB cases cannot drift to a second posture
+    (t_02c98915).
+    """
+    require_hermes_state()
     yield
 
 
@@ -80,6 +78,9 @@ def _write_registry(tmp_path: Path, projects):
 
 
 def _make_state_db(state_path: Path):
+    # Every real-SessionDB case in this file opens through here, so the gate is
+    # on the helper, not on each test (t_02c98915).
+    require_hermes_state()
     from hermes_state import SessionDB
     return SessionDB(db_path=state_path)
 
