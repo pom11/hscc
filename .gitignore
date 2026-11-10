@@ -72,3 +72,5 @@ wt/
 # PVB protocol-violation-bound test's fake HERMES_HOME (test_protocol_violation_bound.py:54)
 # — should be moved to a self-cleaning temp dir; ignore in the interim (t_a52ab9f4).
 *_pvb_tmp_home*/
+*.sqlite
+*.sqlite3
