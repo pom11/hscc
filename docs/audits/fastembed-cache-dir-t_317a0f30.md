@@ -19,8 +19,12 @@ spawn time: 7x87 MB model caches, one per cwd an agent has run in.*
 | 87M | `~/.hermes/kanban/boards/hscc/workspaces/t_2b2a78ae` |
 | 87M | `~/.hermes/hermes-agent` |
 
-Nine directories, 783 MB, one model. Every one of them holds the same tree:
-`models--Qdrant--all-MiniLM-L6-v2-onnx/{blobs,refs,snapshots}`.
+Nine directories, **88,984 KB each — 782.1 MB total** (`du -sk` over the list
+above), one model. Every one of them holds the same tree:
+`models--Qdrant--all-MiniLM-L6-v2-onnx/{blobs,refs,snapshots}`, and the largest
+blob hashes identically (`sha256 bbd7b466…`) in the four trees compared — the two
+under `~`, the one in `hscc`, and one freshly downloaded by this card's probe. So
+"nine copies of one model" is measured, not inferred from equal sizes.
 
 Two of them are not agent workspaces at all — the `hscc` repo root (a pytest
 leg runs with the repo root as cwd) and `~/.hermes/hermes-agent` (the gateway's
@@ -113,12 +117,33 @@ concurrent that was not already concurrent across two agents in two workspaces.
 ## Verification actually run
 
 `scripts/verify_fastembed_cache_dir.py` is the acceptance probe the card asked
-for: it runs from a scratch cwd, pins the cache through the shipped helper,
-loads the real embedding model through the real SDK, and asserts (a) the model
-appears under the shared dir and (b) the cwd gained no `.fastembed_cache`.
-Measured output is recorded in `changelog.d/t_317a0f30.md`. The pytest leg
-covers the same contract offline (env semantics, the import-time wiring, the
-runner export) so a regression names itself without needing the network.
+for: it runs from a scratch cwd, loads the real embedding model through the real
+SDK, and asserts **where the bytes land** — because exporting a name the library
+ignores would pass any env-var check. Three child processes, each with its own
+scratch cwd and its own `$HOME`, each making a real `memori.embed_texts` call
+that returned a 384-dim vector:
+
+| case | what pinned the cache | landed in the pinned dir | cwd gained `.fastembed_cache` |
+|---|---|---|---|
+| `red` | nothing | — (target never written) | **yes** — 16 files, 182,204,112 B |
+| `green` | `FASTEMBED_CACHE_DIR` → a fresh, **non-existent** dir | **yes** — 16 files, 182,204,112 B | no |
+| `plugin` | unset in the env; `import memori_byodb` set it | **yes** — under `$HOME/.cache/fastembed` | no |
+
+Three things that make the `green` row worth more than a printed env var: the
+directory named did **not** exist beforehand, so the library created it; the tree
+that appeared is byte-identical in content to the nine on disk (`du -sk` 88,984 KB,
+same blob hash); and `red` runs the same program with nothing pinned, so if the
+override were ignored on this platform the two rows would look identical — they do
+not. Each probe run also prints the pre-existing root count before and after
+(`9 before, 9 after`) so a probe that added a tenth root would report itself.
+
+`memori/_cache_env.py`'s twin, `memori_byodb/tests/test_cache_env.py` (23 tests)
+and `scripts/tests/test_run_tests_fastembed_cache.py` (6 tests) cover the same
+contract offline, so a regression names itself without needing the network: env
+semantics including both fail-open branches, the import-time wiring in a child
+process with a tmp `$HOME`, the call-site ordering as text, the runner export
+extracted from `run_tests.sh` and executed under bash, and the two provider copies
+not drifting.
 
 ## Deliberately NOT done
 

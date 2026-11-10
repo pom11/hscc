@@ -10,9 +10,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._paths import PLUGIN_NAME, config_path
-from .client import MemoriAgentClient, MemoriApiError
-from .tools import TOOL_SCHEMAS
+# Order is the contract: this must run before anything in this package can reach
+# the memori SDK, because the vendored fastembed crate defaults its model cache
+# to the RELATIVE path `.fastembed_cache` — 87 MB per cwd (t_317a0f30,
+# docs/audits/fastembed-cache-dir-t_317a0f30.md). This provider is the CLOUD
+# variant and may not embed locally at all today; the pin is here so switching
+# providers cannot re-open the bug, and the module is kept identical to the
+# BYODB provider's copy (pinned by memori_byodb/tests/test_cache_env.py).
+from ._cache_env import ensure_shared_cache_env  # noqa: E402
+
+ensure_shared_cache_env()
+
+from ._paths import PLUGIN_NAME, config_path  # noqa: E402
+from .client import MemoriAgentClient, MemoriApiError  # noqa: E402
+from .tools import TOOL_SCHEMAS  # noqa: E402
 
 try:  # pragma: no cover - exercised inside Hermes, absent in local unit tests.
     from agent.memory_provider import MemoryProvider  # ty: ignore[unresolved-import]
