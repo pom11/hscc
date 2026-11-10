@@ -145,6 +145,17 @@ process with a tmp `$HOME`, the call-site ordering as text, the runner export
 extracted from `run_tests.sh` and executed under bash, and the two provider copies
 not drifting.
 
+Suite runs backing this change (py 3.14.9 venv, legs invoked exactly as
+`scripts/run_tests.sh` invokes them — one pytest process per dir, with
+`HERMES_DISABLE_LAZY_INSTALLS=1` and `HSCC_SKIP_COMPACT_PROBE=1`, board pins
+scrubbed): `memori_byodb` 23 passed; `scripts` 363 passed / 2 skipped in 569 s
+(9:29); `hscc-bootstrap/tests/test_install_payload.py` 43 passed. The full
+`scripts` leg earned its keep: it caught the one thing the new tests could not
+see, a `readme_lint` DOC-UNLISTED failure created by adding this very file
+without enumerating it in `docs/README.md` (fixed in `2262b06a`). The
+sibling-interpreter (3.13) legs are **not** run here — a dual-interpreter stamp
+at the merge SHA is still owed by whoever lands the branch.
+
 ## Deliberately NOT done
 
 * **The nine existing caches were not deleted.** The card says so, and they are
