@@ -4,17 +4,16 @@ task: t_2eb97ebb
 - **The sqlite ignore rules are on `main` and now have a changelog entry; the
   card that asked for them had gone stale, not wrong.** `*.sqlite` and
   `*.sqlite3` are in `.gitignore` and live, measured in a clean checkout of
-  `main` at `789130dc`: `git check-ignore -v` names the **rules**, not
+  `main` at `fc7c1caf`: `git check-ignore -v` names the **rules**, not
   positions — `…:*.sqlite  db.sqlite`, `…:*.sqlite3  probe.sqlite3` and
   `…:*.sqlite  hscc_daemon/nested.sqlite` — and a planted repo-root `db.sqlite`
-  is invisible to `git add -A`. No line number is quoted, on purpose:
+  is invisible to `git add -A`. No line number is quoted, deliberately:
   `grep -n sqlite .gitignore` answered 75-76 at `8df6a352` and 84-85 at
-  `789130dc` only because an unrelated block landed above them, so a pinned
-  number goes false while the rule `check-ignore` names has not moved.
-  No repo-root
-  `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD | grep -i sqlite` →
-  only `hscc-api/tests_gateway/diag_sqlite.py`, a source file), so the deletion
-  half of `071fdb4e` is moot.
+  `fc7c1caf`, moved only by blocks other cards appended above them, so a pinned
+  number goes false while the rule `check-ignore` names has not moved. No
+  repo-root `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD |
+  grep -i sqlite` → only `hscc-api/tests_gateway/diag_sqlite.py`, a source
+  file), so the deletion half of `071fdb4e` is moot.
   **Nothing was landed by this card except this file.** The card's ask was
   written against `main` at `06a12aaf`; PR #275 squash-merged at
   `2026-11-10T02:54:34Z` into `8df6a352` and its head already carried
@@ -25,19 +24,24 @@ task: t_2eb97ebb
   card: in a squash-merged repo, ancestry cannot answer "did this change land".**
   `git merge-base --is-ancestor 071fdb4e main` is `false` *at* `8df6a352` — the
   squash rewrote the commit — while the content is present and effective, and it
-  is `false` at `789130dc` too. The question "is this change on `main`" is a
+  is `false` at `fc7c1caf` too. The question "is this change on `main`" is a
   **tree** question, and the tree answer is scoped to the rules and pinned to a
-  sha: `git diff --stat 071fdb4e 8df6a352 -- .gitignore` is **empty** (the file
-  was byte-identical there, and that is what answered the question). It is *not*
-  empty at `0a4db383` or later — `git diff --stat 071fdb4e 0a4db383 -- .gitignore`
-  is `.gitignore | 9 +++++++++` — because #279 appended its unrelated
-  `.fastembed_cache/` block to the same file, and every added line in that diff
-  is that block: `git diff 071fdb4e origin/main -- .gitignore | grep -ci sqlite`
-  is `0`, so the two sqlite rules are still unchanged between the two trees.
-  The durable form of the claim is therefore "the tree matched at `8df6a352`, and
-  the only divergence since is later, unrelated content" — not "the file is
-  byte-identical to `main`", which a stranger's append can falsify without moving
-  the change one inch. Any card that opens on an ancestry check plus a
+  sha: `git diff --stat 071fdb4e 8df6a352 -- .gitignore` is **empty** — the file
+  was byte-identical there, and that is what answered the question. It is *not*
+  empty at `0a4db383` or later (`git diff --stat 071fdb4e 0a4db383 -- .gitignore`
+  is `.gitignore | 9 +++++++++`, #279's unrelated `.fastembed_cache/` block), and
+  the divergence grew again when #283 added the sidecar rules. What survives all
+  of that is the **deletion column**: `git diff --numstat 071fdb4e origin/main
+  -- .gitignore` reads `18 0` at `fc7c1caf` — eighteen lines added by other
+  cards, **zero** removed — and `git show origin/main:.gitignore | grep -cx
+  '*.sqlite'` is `1`, so neither rule has been edited since `071fdb4e`. The
+  durable claim is therefore "the tree matched at `8df6a352`, and everything
+  since is additive", not "the file is byte-identical to `main`": an append by
+  someone else falsifies the latter without moving this change one inch. (Worth
+  recording because this entry's own first correction repeated the mistake: it
+  asserted the diff contained no sqlite line, and #283 merged a block full of
+  them minutes later. The deletion column and `check-ignore` naming the rule were
+  both still true.) Any card that opens on an ancestry check plus a
   `git branch -a --contains` roster is asserting where the *commit* is, not
   whether the *change* is, and will go stale the moment the PR it waits on merges.
 - **The changelog half was the only real gap.** `071fdb4e`'s own stat is
@@ -54,23 +58,27 @@ task: t_2eb97ebb
 kind: Verified
 task: t_2eb97ebb
 
-- **The class `071fdb4e` claimed to close is still open at the sidecar
-  variants, and this card deliberately did not close it.** `*.sqlite` does not
-  match a WAL-mode connection's companions: in the same clean clone of
-  `origin/main`, `git check-ignore -v db.sqlite-wal db.sqlite-shm
-  db.sqlite-journal` exits 1 with no output and `git add -A --dry-run .` answers
-  `add 'db.sqlite-journal' / add 'db.sqlite-shm' / add 'db.sqlite-wal'`. Three
-  lines would close it, left to their own card instead: the ask here named two
-  specific rules, and `.gitignore` is a live collision hotspot — open PR #279
-  appends its block at the same end-of-file hunk (`9 0 .gitignore`), so a second
-  EOF append would conflict for no benefit.
+- **What `071fdb4e` did not close: the WAL sidecar variants — left to their own
+  card on purpose, and their record is not this one's.** `*.sqlite` matches no
+  sidecar: measured at `8df6a352` in a clean clone, `git check-ignore -v
+  db.sqlite-wal db.sqlite-shm db.sqlite-journal` exited 1 with no output and
+  `git add -A --dry-run .` answered `add 'db.sqlite-journal' / add
+  'db.sqlite-shm' / add 'db.sqlite-wal'`. t_4e553569 landed those three rules
+  (`*.sqlite-wal` / `-shm` / `-journal`, PR #283), so this entry claims nothing
+  about whether the class is open now — it is that card's record, and the
+  `*.sqlite3-*` variants are a further card's subject. The ask here named two
+  specific rules and `.gitignore` was a live collision hotspot: PR #279 was
+  appending its block at the same end-of-file hunk (`9 0 .gitignore`), so a
+  second EOF append would have conflicted for no benefit.
 - **No `check-ignore` false-negative from the trailing-slash rule** (skill
   `cwd-model-caches`): both patterns are file patterns with no trailing `/`, so
   they match paths git has never seen — the probe planted files that were brand
-  new to the clone and every one still got a line-numbered match. No directory
+  new to the clone and every one still got a rule-naming match. No directory
   pattern was added by this card, so the caveat never engages.
-- **`python3 scripts/changelog_fragments.py check` → `OK — [Unreleased] is
-  pointer, 8 fragment entries consistent`**, exit 0, with this file present, and
+- **This card's gate run** of `python3 scripts/changelog_fragments.py check`
+  printed `OK — [Unreleased] is pointer, 8 fragment entries consistent`, exit 0,
+  with this file present (that count is the roster as of that run, not a
+  constant — it reads 13 once #279-#283's fragments landed).
   `changelog_fragments.py list` shows this card contributing exactly two entries
-  (`Fixed` + `Verified`). `CHANGELOG.md` untouched — the diff is this one new
-  file (`git status --short` → `?? changelog.d/t_2eb97ebb.md`).
+  (`Fixed` + `Verified`). `CHANGELOG.md` untouched — the diff was this one new
+  file.
