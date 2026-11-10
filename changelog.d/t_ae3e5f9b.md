@@ -9,13 +9,15 @@ task: t_ae3e5f9b
   would put 87 MB of model weights into the object store **permanently** — a
   `git rm` afterwards does not get the blobs back out.
   The rule is `.fastembed_cache/` in the *Runtime data — machine-specific state,
-  never source* block, not next to the sqlite rules the card pointed at:
-  **`*.sqlite` / `*.sqlite3` are not on `main`.** They were added by `071fdb4e`
-  and `git merge-base --is-ancestor 071fdb4e main` says NO — that commit exists
-  only on `fix/t_56f66242-pr275-db-sqlite`, `wt/t_cda8adf0` and `prep/t_899bff0b-post-pr275`,
-  so the sqlite gap that PR #275 exposed is still open on `main` and needs its
-  own card. Runtime state is also the truer home: this is not a source-tree
-  artifact at all.
+  never source* block rather than beside the sqlite rules the card pointed at,
+  because runtime state is the truer home: this is not a source-tree artifact at
+  all. The sqlite rules are not this entry's claim to make, and it makes none of
+  its own: `*.sqlite` / `*.sqlite3` did reach `main` — `071fdb4e` landed with
+  PR #275's squash `8df6a352` — and `changelog.d/t_2eb97ebb.md` (PR #281) is the
+  fragment that records them, so nothing here re-states or re-measures them. The
+  pattern `*.sqlite` does not match WAL sidecars (`db.sqlite-wal` / `-shm` /
+  `-journal`) — those are t_4e553569's subject, not this entry's, and whether they
+  are ignored now is its record to make, not this fragment's.
   **What writes it, so the rule is justified rather than swallowed:** no `.py` in
   this repo mentions fastembed (`grep -rn "fastembed" --include=*.py .` → 0 hits),
   because it is a *transitive* write. `memori_byodb/_client.py:90` does
