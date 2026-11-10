@@ -303,3 +303,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 - `docs/audits/t_3969ace6_memori_capture.md` — root cause of memori_byodb silence since 2026-06-13.
 - `docs/audits/t_57e5b3f7_memori_capture_fix.md` — fix: capture never wrote conversation/facts.
 - `docs/audits/t_9e8732b8_memori_profile_capture.md` — capture still not working after the first "deployed" fix.
+
+### memori embedding cache (record)
+
+- `docs/audits/fastembed-cache-dir-t_317a0f30.md` — why the memori SDK's vendored `fastembed` crate wrote one 87 MB model cache per cwd (nine roots / 782 MB measured on this host), the red/green proof that `FASTEMBED_CACHE_DIR` is honoured by the compiled crate, and why the pin lives at provider import rather than in the hermes-owned gateway launchd plist. **record** (t_317a0f30)
