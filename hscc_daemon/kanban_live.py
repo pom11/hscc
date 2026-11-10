@@ -50,6 +50,7 @@ import sqlite3
 import time
 
 from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -387,7 +388,14 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
             # open_board warns once (naming the pin, the board and both
             # resolved paths) and reads the board named; multi=False (a lib that
             # cannot enumerate) keeps the old no-board call verbatim.
-            with board_pin.open_board(kanban_db, b, multi=multi) as conn:
+            #
+            # t_a594ce03: _open_board_ro reads hermes' resolved path with a
+            # read-only sqlite handle instead of connect_closing(), which runs
+            # schema init/writability and imports hermes_state — a module the
+            # brew libexec venv does not ship, so every board used to come back
+            # "unreadable: No module named 'hermes_state'" there. The path
+            # still comes from hermes' own resolver via board_pin.
+            with _open_board_ro(kanban_db, b, multi=multi) as conn:
                 counts, done_24h, run, ready, ev, outcome_of = _collect_board(
                     conn, label, now_s, now_s - RECENT_WINDOW_S)
         except Exception as e:  # noqa: BLE001
@@ -418,6 +426,35 @@ def _open_ro(path):
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
     conn.row_factory = sqlite3.Row
     return contextlib.closing(conn)
+
+
+def _open_board_ro(kanban_db, board, multi=True):
+    """A read-only connection to exactly ``board``, without ``hermes_state``.
+
+    ``kanban_db.connect_closing()`` is the WRITE-capable door: it runs schema
+    init/migrations and a writability preflight, and that preflight imports
+    ``hermes_state`` (``kanban_db_connect.py:766``). The brew libexec venv does
+    not ship that module, so every board read under ``/opt/homebrew/bin/hscc``
+    used to fail with ``No module named 'hermes_state'`` (t_a594ce03) even
+    though a monitor only needs SELECTs.
+
+    Hermes stays the only path authority: ``board_pin.resolve_board_db_path``
+    asks its ``kanban_db_path(board=...)`` (scrubbing a worker's
+    ``HERMES_KANBAN_DB`` pin when it would outrank the board we named), and the
+    file is opened ``mode=ro`` exactly like :func:`_open_ro` already does for
+    session stores. A lib without that resolver (a minimal injected fake, or a
+    Hermes predating it) falls back to the old ``board_pin.open_board`` call
+    unchanged. The direct open also removes the monitor's schema-init write
+    from every 5 s tick, which is the right shape for a read-only view.
+    """
+    if multi and board is not None:
+        try:
+            path = board_pin.resolve_board_db_path(kanban_db, board)
+        except Exception:  # noqa: BLE001 — resolver failure = use the old door
+            path = None
+        if path:
+            return _open_ro(path)
+    return board_pin.open_board(kanban_db, board, multi=multi)
 
 
 def attach_tokens(data, hermes_home=None, now=None, ledger_path=None):
@@ -1037,6 +1074,20 @@ def events_table(events, now_s) -> Table:
     return t
 
 
+def board_error_panel(errors, title="board read failed"):
+    """A loud red panel listing EVERY board-read error.
+
+    Used when a pass read no boards at all: the calm ``no worker is running``
+    line describes a healthy idle fleet, and on a blind install (t_a594ce03:
+    all 23 boards ``No module named 'hermes_state'``) it was the only thing an
+    operator saw. A panel is deliberately used instead of the old footer slice
+    so no error is truncated to the last two lines.
+    """
+    body = Group(*(Text(esc(err), style="error") for err in errors))
+    return Panel(body, title=Text(title, style="error"),
+                 border_style="error")
+
+
 def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=None) -> Group:
     cap, per = data["caps"]
     n_run = len(data["running"])
@@ -1061,11 +1112,17 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
     warn = full and bool(data["ready"])
     if warn:
         parts.append(Text("global cap full: other boards' ready cards wait", style="warn"))
-    parts.append(running_table(data["running"], width) if data["running"]
-                 else Text("no worker is running", style="dim"))
+    blind = not data["boards"] and bool(data["errors"])
+    if data["running"]:
+        parts.append(running_table(data["running"], width))
+    elif not blind:
+        parts.append(Text("no worker is running", style="dim"))
+    if blind:
+        parts.append(board_error_panel(data["errors"]))
     tok_height = sum(r.row_count + 1 if isinstance(r, Table) else 1 for r in tok_lines)
     used_lines = (1 + (1 if warn else 0) + tok_height
-                  + (len(data["running"]) + 1 if data["running"] else 1))
+                  + (len(data["running"]) + 1 if data["running"]
+                     else (len(data["errors"]) + 3 if blind else 1)))
     # Optional sections in priority order; in a short pane (`--live` in a tmux
     # split) the lower ones are dropped instead of scrolling the view.
     live_boards = [b for b in data["boards"]
@@ -1092,8 +1149,9 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
         parts += section
         if budget is not None:
             budget -= need
-    for err in data["errors"]:
-        parts.append(Text(esc(err), style="error"))
+    if not blind:
+        for err in data["errors"]:
+            parts.append(Text(esc(err), style="error"))
     if not snapshot:
         parts.append(Text("Ctrl-C to quit", style="dim"))
     return Group(*parts)

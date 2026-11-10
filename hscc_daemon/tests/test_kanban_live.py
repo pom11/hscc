@@ -169,6 +169,81 @@ def test_board_filter_and_unreadable_board_does_not_stop_the_pass():
     assert [b["name"] for b in d["boards"]] == ["beta"] and not d["running"]
 
 
+class _PathKb:
+    """A lib with hermes' path resolver, whose writable door is blind.
+
+    Exactly the brew shape of t_a594ce03: list_boards/kanban_db_path work, but
+    connect_closing cannot run because ``hermes_state`` is not installed.
+    """
+
+    def __init__(self, paths):
+        self.paths = dict(paths)
+
+    def list_boards(self):
+        return [{"slug": s} for s in self.paths]
+
+    def kanban_db_path(self, board=None):
+        return self.paths[board]
+
+    def connect_closing(self, board=None):
+        raise ModuleNotFoundError("No module named 'hermes_state'")
+
+
+def _board_file(tmp_path, name, build):
+    p = tmp_path / f"{name}.db"
+    c = sqlite3.connect(p)
+    c.row_factory = sqlite3.Row
+    c.executescript(SCHEMA)
+    build(c)
+    c.commit()
+    c.close()
+    return str(p)
+
+
+def test_collect_reads_boards_without_importing_hermes_state(tmp_path, monkeypatch):
+    """t_a594ce03: the board read must not need ``hermes_state`` importable.
+
+    The import is blocked outright (not merely absent), and the lib's
+    ``connect_closing`` raises the exact brew error, so only a direct read-only
+    sqlite open of hermes' resolved path can make this pass.
+    """
+    import builtins
+
+    kb = _PathKb({"alpha": _board_file(tmp_path, "alpha", _alpha),
+                  "beta": _board_file(tmp_path, "beta", _beta)})
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "hermes_state" or name.startswith("hermes_state."):
+            raise ModuleNotFoundError("No module named 'hermes_state'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    d = kanban_live.collect(kanban_db=kb, now=NOW, read_caps=lambda: (6, 2))
+    assert [b["name"] for b in d["boards"]] == ["alpha", "beta"]
+    assert d["errors"] == []
+    assert [(r["board"], r["id"]) for r in d["running"]] == [("alpha", "t_run")]
+    assert [(r["board"], r["id"]) for r in d["ready"]] == [("alpha", "t_rdy")]
+
+
+def test_render_blind_board_read_is_loud_never_no_worker_running():
+    """The kanban monitor had the same hole as cards: all boards unreadable
+    painted "no worker is running" (t_a594ce03)."""
+    d = {"boards": [], "running": [], "ready": [], "events": [],
+         "outcomes": {}, "caps": (None, None), "at": NOW,
+         "errors": [f"board 'b{i}' unreadable: No module named 'hermes_state'"
+                    for i in range(23)]}
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "board read failed" in out
+    assert "no worker is running" not in out
+    for err in d["errors"]:
+        assert err in out, err
+    assert kanban_live.board_error_panel(d["errors"]).border_style == "error"
+
+
 def test_render_escapes_titles_and_flags_full_cap():
     d = _collect()
     d["caps"] = (1, 2)
