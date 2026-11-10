@@ -1939,7 +1939,7 @@ class TestLanCurlFallback:
         stub = curl_seam()
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         for i in range(4):
-            doctor._http_get_default(f"http://10.0.0.{i}:4000/v1/models")
+            doctor._http_get_default(f"http://192.0.2.{i}:4000/v1/models")
         assert len(stub.argvs) == 4
         assert capsys.readouterr().err.count(doctor.LAN_CURL_FALLBACK_NOTICE) == 1
 

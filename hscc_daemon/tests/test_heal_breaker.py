@@ -88,7 +88,7 @@ class TestCountingAndTrip:
         trip. (Deliberate: a fleet-wide fault deserves fleet-wide healing; the
         breaker stops the case where one host is being destroyed.)"""
         for i in range(small_threshold * 3):
-            assert heal_breaker.note_heal(f"10.0.0.{10 + i}")["tripped"] is False
+            assert heal_breaker.note_heal(f"192.0.2.{10 + i}")["tripped"] is False
 
 
 class TestWindowAndSelfRecovery:

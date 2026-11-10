@@ -279,7 +279,7 @@ def test_install_writes_the_exact_dropin_content_and_reexecs():
     assert base64.b64decode(b64).decode() == nr.DROPIN_CONTENT
     assert "systemctl daemon-reexec" in cmd
     # And no real address leaked into the script.
-    assert "10.0.0." not in cmd
+    assert "192.0.2." not in cmd
 
 
 def test_second_run_is_a_noop(tmp_path):

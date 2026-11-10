@@ -195,7 +195,7 @@ class TestCheckUnitServingAliases:
         res = health.check_unit_serving_aliases(serving_data=_serving())
         assert res["ok"] is True
         assert len(seen) == 3
-        assert all(u.startswith("http://10.0.0.") and u.endswith("/v1/models")
+        assert all(u.startswith("http://192.0.2.") and u.endswith("/v1/models")
                    for u in seen)
 
 

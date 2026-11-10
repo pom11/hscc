@@ -35,7 +35,7 @@ class FakeTopo:
 
 def _topo(n=3):
     return FakeTopo(FakeNode("192.0.2.1"),
-                    [FakeNode(f"10.0.0.{2+i}") for i in range(n)])
+                    [FakeNode(f"192.0.2.{2+i}") for i in range(n)])
 
 
 def _coster(per_gpu=30.0, fits=True, tp=1):

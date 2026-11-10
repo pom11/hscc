@@ -90,7 +90,7 @@ class TestBootstrapDefaultTemplate:
     def test_returns_basic_4_node_with_many_workers(self):
         mock_data = {
             "workers": [
-                {"ip": f"10.0.0.{i}"} for i in range(246, 252)
+                {"ip": "10.0.0.x"} for i in range(246, 252)
             ]  # 6 workers
         }
         with patch.object(Path, "exists", return_value=True):

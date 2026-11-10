@@ -122,7 +122,7 @@ class _FakeTopo:
 
 def _integration_topology(n=3):
     return _FakeTopo(_FakeNode("192.0.2.1"),
-                     [_FakeNode(f"10.0.0.{2 + i}") for i in range(n)])
+                     [_FakeNode(f"192.0.2.{2 + i}") for i in range(n)])
 
 
 class TestPreviewServeDeltaPresent:

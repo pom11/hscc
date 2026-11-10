@@ -26,7 +26,7 @@ class FakeTopo:
 
 def _topo(n_workers=3, vram=120.0):
     return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
-                    workers=[FakeNode(f"10.0.0.{2+i}", vram) for i in range(n_workers)])
+                    workers=[FakeNode(f"192.0.2.{2+i}", vram) for i in range(n_workers)])
 
 
 def _coster(per_gpu=30.0, fits=True, tp=1):
@@ -196,7 +196,7 @@ def test_all_shipped_templates_resolve_and_fit():
         name = yaml.safe_load(open(f))["name"]
         tpl = ct._load_intent(name)
         topo = FakeTopo(FakeNode("192.0.2.1"),
-                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+                        [FakeNode(f"192.0.2.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo)              # real recipe_cost (files on disk)
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
 
@@ -224,12 +224,12 @@ def test_all_shipped_templates_resolve_and_fit_hermetically(monkeypatch):
         name = yaml.safe_load(open(f))["name"]
         tpl = ct._load_intent(name)
         topo = FakeTopo(FakeNode("192.0.2.1"),
-                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+                        [FakeNode(f"192.0.2.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo, _coster=_coster(per_gpu=30.0))
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
         # every unit landed on a node of THIS topology, none invented
         nodes = {u.node for fam in plan.families for u in fam.units}
-        assert nodes <= {f"10.0.0.{1 + i}" for i in range(nnode)}, f"{name}: stray node"
+        assert nodes <= {f"192.0.2.{1 + i}" for i in range(nnode)}, f"{name}: stray node"
 
 
 # ── multi-node tp spanning ───────────────────────────────────────────────────
@@ -389,7 +389,7 @@ class TestUnitAwareReserved:
                           "workers": "remaining"}]})
         # 4-node cluster; serving.json records orch=[.1,.2], reasoning=[.3,.4].
         topo = FakeTopo(orchestrator=FakeNode("192.0.2.1"),
-                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+                        workers=[FakeNode(f"192.0.2.{2+i}") for i in range(3)])
         reserved = {
             "192.0.2.1": {"kind": "orchestrator", "family": None, "model": "o"},
             "192.0.2.2": {"kind": "orchestrator", "family": None, "model": "o"},
@@ -655,7 +655,7 @@ class TestExplicitPlacement:
     def _topo4(self):
         # 4-node cluster: gateway .1 + workers .2/.3/.4 (like 4node-dual-dsv4)
         return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
-                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+                        workers=[FakeNode(f"192.0.2.{2+i}") for i in range(3)])
 
     def _running_reasoning(self, nodes):
         # Running-family reserved bookkeeping — mirrors serving.json.

@@ -378,7 +378,7 @@ def test_notice_appears_exactly_once_across_many_fallbacks(curl_seam, monkeypatc
     stub = curl_seam()
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
     for i in range(5):
-        cl._http_get(f"http://10.0.0.{i}:8000/metrics", 3)
+        cl._http_get(f"http://192.0.2.{i}:8000/metrics", 3)
     assert len(stub.argvs) == 5
     assert capsys.readouterr().err.count(cl.LAN_CURL_FALLBACK_NOTICE) == 1
 

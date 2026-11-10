@@ -47,7 +47,7 @@ class FakeTopo:
 
 def _topo(n_workers=2, vram=120.0):
     return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
-                    workers=[FakeNode(f"10.0.0.{2+i}", vram) for i in range(n_workers)])
+                    workers=[FakeNode(f"192.0.2.{2+i}", vram) for i in range(n_workers)])
 
 
 def _coster(per_gpu=30.0, fits=True):
