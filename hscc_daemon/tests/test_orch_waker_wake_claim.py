@@ -669,6 +669,203 @@ def test_claim_layer_partitions_wake_bearing_kinds_on_both_sides():
     assert asked == [("suppress", ["completed"])]
 
 
+def test_the_waker_claims_exactly_the_wake_bearing_ids_of_a_mixed_batch(tmp_path):
+    """The EXACT claim set of a mixed batch: one id asked, one never touched.
+
+    Mutation this kills — three of them, all fail-CLOSED, all invisible to an
+    outcome-only assertion because the batch still goes out and ``ok`` is still
+    True:
+
+      * ``_wake_claim_asked`` losing its :data:`GATEWAY_WAKE_KINDS` filter — the
+        set put to the table goes from the wake-bearing ids to EVERY id in the
+        batch, so a ``spawn_failed`` row is claimed and the gateway notifier
+        then honours it for an event it can never wake for;
+      * ``_suppress_claimed`` honouring a held claim for a kind the gateway
+        cannot wake for (the seeded row below is exactly that bait);
+      * ``_claim_take`` dropping a pending line for a kind it never asked about
+        — with the ask filtered but the drop not, `got` can never contain a
+        ``spawn_failed`` key, so the waker stops waking for its own kind.
+
+    Every one of them drops the only copy of a wake this module is the sole
+    emitter for. So nothing here asserts on the outcome alone: the assertions are
+    on the ids each method was asked about, the rows this waker wrote, the other
+    emitter's row, and the lines that survived into the nudge.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    state = tmp_path / "state.json"
+    seen_once(db, state)
+    add_events(db, [event(kind="completed"), event(kind="spawn_failed")])
+    completed_id, spawn_id = ids_of(db)
+    claims = FakeClaims(db, now=DELIVER)
+    # A row that exists and must NEVER be honoured here: the gateway "delivered"
+    # an event it has no wake path for.
+    claims.seed(ORCH, TASK, spawn_id, emitter=GATEWAY_EMITTER,
+                confirmed_at=NOW + 5)
+    inject = StubInject(ok=True)
+    # Suppression is decided at the FIRST mature tick and `report` is per-tick,
+    # so both ticks of the product's real sequence get their own — an assertion
+    # on the delivery tick's report alone would miss a line eaten one tick early.
+    collect_report, deliver_report = {}, {}
+    ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
+            wake_claim=claims, report=collect_report)
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
+                        inject=inject, has_orch=lambda b: ORCH,
+                        wake_claim=claims, report=deliver_report)
+
+    # (1) the nudge that went out still carries BOTH lines, in scan order.
+    assert [d["ok"] for d in decisions] == [True]
+    assert len(inject.calls) == 1
+    assert decisions[0]["lines"] == [f"{TASK} done — {TITLE}",
+                                     f"{TASK} spawn failed — {TITLE}"]
+    assert collect_report.get("suppressed", []) == [] and \
+        deliver_report.get("suppressed", []) == [], \
+        "the claim layer ate a line: a non-wake-bearing wake was dropped"
+    # (2) each method was asked about exactly the wake-bearing id, never the
+    # other one — and always under the orchestrator's profile.
+    assert {m: ks for m, _p, ks in claims.asked} == {
+        "suppressions": ((TASK, completed_id),),
+        "take": ((TASK, completed_id),),
+        "confirm": ((TASK, completed_id),)}
+    assert {p for _m, p, _k in claims.asked} == {ORCH}
+    # (3) the table itself: this waker wrote exactly one row, settled it, and
+    # left the other emitter's row byte-identical.
+    by_id = {r["event_id"]: r for r in claims.rows()}
+    assert sorted(by_id) == sorted([completed_id, spawn_id])
+    mine = by_id[completed_id]
+    assert (mine["profile"], mine["task_id"], mine["emitter"]) == (
+        ORCH, TASK, ow.WAKE_CLAIM_EMITTER)
+    assert mine["confirmed_at"] is not None
+    assert by_id[spawn_id]["emitter"] == GATEWAY_EMITTER
+    assert by_id[spawn_id]["confirmed_at"] == NOW + 5, \
+        "a row this waker never asked about is not its to settle"
+
+
+def test_a_spawn_failed_below_the_gateway_cursor_still_wakes(tmp_path):
+    """The cursor gate is a KIND gate — pinned inside this file's harness.
+
+    Mutation this kills: deleting ``if kind not in GATEWAY_WAKE_KINDS: return
+    False`` from :func:`orch_waker.gateway_already_delivered`. Without it the
+    waker reads the notifier's cursor as proof of a delivery for kinds the
+    notifier can never wake for, and the ``spawn_failed`` line is dropped
+    silently — the silent-inert class the comment on
+    :data:`orch_waker.GATEWAY_WAKE_KINDS` says this module has already shipped
+    once. The 29 tests of this file did not see that mutation because none of
+    them puts a subscription on the board: with no sub, the cursor channel
+    answers "I do not know" and the gate is never exercised.
+
+    The anti-vacuity half is the second event in the SAME batch behind the SAME
+    cursor: a ``completed`` row, which that cursor DOES suppress. A board with
+    only a ``spawn_failed`` on it passes when there is nothing to suppress with;
+    here the cursor is demonstrably armed, so the surviving wake can only be
+    explained by the kind gate.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    state = tmp_path / "state.json"
+    seen_once(db, state)
+    add_events(db, [event(kind="completed"), event(kind="spawn_failed")])
+    completed_id, spawn_id = ids_of(db)
+    add_sub(db, TASK, claimed=max(ids_of(db)))   # the gateway consumed BOTH rows
+    claims = FakeClaims(db, now=DELIVER)
+    inject = StubInject(ok=True)
+    # Each tick of the real sequence gets its own report: the cursor suppression
+    # is recorded by the tick that made that decision (the collect tick, because
+    # suppression runs before the debounce math), not by the one that speaks.
+    collect_report, deliver_report = {}, {}
+    ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
+            wake_claim=claims, report=collect_report)
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
+                        inject=inject, has_orch=lambda b: ORCH,
+                        wake_claim=claims, report=deliver_report)
+
+    # the cursor really was positioned to suppress this batch's events…
+    assert collect_report.get("suppressed") == [
+        {"board": BOARD, "task": TASK, "kind": "completed",
+         "event_id": completed_id, "event_at": NOW}]
+    # …and at the send itself nothing more was suppressed — the survivor is the
+    # wake, not another casualty.
+    assert deliver_report.get("suppressed", []) == []
+    # …and the non-wake-bearing one behind the same cursor still woke, alone.
+    assert [d["ok"] for d in decisions] == [True]
+    assert len(inject.calls) == 1
+    assert decisions[0]["lines"] == [f"{TASK} spawn failed — {TITLE}"]
+    assert inject.calls[0][1] == (
+        f"[orch-waker] board {BOARD}: {TASK} spawn failed — {TITLE}"
+        " — review/merge/unblock as needed, then carry on.")
+    # the survivor is not a claimable kind, so the claim layer stayed shut.
+    assert claims.asked == []
+    assert claims.rows() == []
+    assert spawn_id not in {r["event_id"] for r in claims.rows()}
+
+
+def test_a_claim_layer_answering_wider_than_asked_cannot_suppress_a_spawn_failed(tmp_path):
+    """Defence in depth: the KIND filter is the last line, not the ask filter.
+
+    Mutation this kills: ``_suppress_claimed`` trusting ``held`` alone and
+    dropping its own :data:`GATEWAY_WAKE_KINDS` test from the keep/gone loop.
+    Measured, that mutation is INVISIBLE to the entire suite (54 passed) because
+    it is unreachable while :func:`orch_waker._wake_claim_asked` filters the ask
+    — the table is never told about a non-wake-bearing id, so it can never
+    answer about one. Redundant by construction is not the same as pinned: the
+    redundancy holds only as long as the filter above it does.
+
+    So this closes it from the other side instead of pretending it is reachable.
+    A claim layer that answers about an id it was never asked about — hermes
+    drift, a half-migrated schema whose ``event_ids`` filter stops applying, a
+    second adapter sharing the table — still cannot drop the ``spawn_failed``
+    line, because the delivery decision filters on kind itself. The
+    ``suppressions`` call recording is the anti-vacuity half: it shows the waker
+    asked about one id and took an answer about a different one.
+    """
+    class AnswerTooWide:
+        """A claims layer that returns MORE than it was asked for."""
+
+        def __init__(self, extra):
+            self.extra = extra
+            self.asked = []
+
+        def suppressions(self, db, profile, idents):
+            # Answers ONLY about the id it was never asked for — the asked one
+            # is genuinely unheld, so the sole thing that could drop a line here
+            # is a keep/gone loop that trusts `held` without checking the kind.
+            self.asked.append([i[3] for i in idents])
+            return self.extra
+
+        def take(self, db, profile, idents):
+            return {ow._claim_key(i) for i in idents}
+
+        def confirm(self, db, profile, idents):
+            pass
+
+        def release(self, db, profile, idents):
+            pass
+
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    state = tmp_path / "state.json"
+    seen_once(db, state)
+    add_events(db, [event(kind="completed"), event(kind="spawn_failed")])
+    completed_id, spawn_id = ids_of(db)
+    claims = AnswerTooWide({(TASK, spawn_id)})
+    inject = StubInject(ok=True)
+    collect_report, deliver_report = {}, {}
+    ow.tick(now=NOW, boards={BOARD: str(db)}, state_path=state,
+            wake_claim=claims, report=collect_report)
+    decisions = ow.tick(now=DELIVER, boards={BOARD: str(db)}, state_path=state,
+                        inject=inject, has_orch=lambda b: ORCH,
+                        wake_claim=claims, report=deliver_report)
+
+    # the waker put exactly one id to the table on each of the two ticks…
+    assert claims.asked == [[completed_id], [completed_id]], \
+        "the ask filter itself widened: this test's premise is gone"
+    # …and the extra key it was handed suppressed nothing.
+    assert [d["ok"] for d in decisions] == [True]
+    assert len(inject.calls) == 1
+    assert decisions[0]["lines"] == [f"{TASK} done — {TITLE}",
+                                     f"{TASK} spawn failed — {TITLE}"]
+    assert collect_report.get("suppressed", []) == [] and \
+        deliver_report.get("suppressed", []) == [], \
+        "a key nobody asked about was allowed to drop a wake"
+
+
 # --------------------------------------------------------------------------- #
 # a tick that does not deliver must not claim
 # --------------------------------------------------------------------------- #
