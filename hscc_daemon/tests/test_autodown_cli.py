@@ -1039,9 +1039,9 @@ class TestSubcommandHelpRealCLI:
         home = tmp_path / "home"
         (home / ".hscc").mkdir(parents=True)
         # Seed cluster.json so module import never shells out (address guard:
-        # 10.0.0.1 is the documented LAN placeholder, never a real host).
+        # 192.0.2.1 is the documented LAN placeholder, never a real host).
         (home / ".hscc" / "cluster.json").write_text(json.dumps(
-            {"gateway": {"host": "10.0.0.1"}, "workers": [],
+            {"gateway": {"host": "192.0.2.1"}, "workers": [],
              "nasDevices": []}))
         (home / ".hscc" / "autodown.json").write_text(json.dumps(
             {"enabled": True, "state": "up", "idle_minutes": 10,

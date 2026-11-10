@@ -70,7 +70,7 @@ LITELLM_OK = """\
 model_list:
 - model_name: worker-model
   litellm_params:
-    api_base: http://10.0.0.1:8000/v1
+    api_base: http://192.0.2.1:8000/v1
 litellm_settings:
   drop_params: true
   callbacks:
@@ -85,7 +85,7 @@ LITELLM_NO_ROUTER = """\
 model_list:
 - model_name: worker-model
   litellm_params:
-    api_base: http://10.0.0.1:8000/v1
+    api_base: http://192.0.2.1:8000/v1
 litellm_settings:
   drop_params: true
   callbacks:
@@ -774,7 +774,7 @@ class TestProxyStreamCarriesDrift:
         state_dir = tmp_hfcc_dir / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-        monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: self._SERVING_NO_UNITS)
         monkeypatch.setattr(health, "_proxy_models_probe",
                             lambda url, timeout=5: {
@@ -824,7 +824,7 @@ class TestProxyStreamCarriesDrift:
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: {
             "version": 2, "units": [
                 {"id": "w1", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.1"], "port": 8001}]})
+                 "nodes": ["192.0.2.1"], "port": 8001}]})
         monkeypatch.setattr(health, "run_cmd", lambda args, **k: {"ok": False})
         assert health.check_proxy() is False
         entry = self._entry(state_dir)

@@ -39,9 +39,9 @@ def _reset_recover_state():
     recover._recover_units.clear()
 
 
-UNIT_A = {"unit": "worker-a", "node": "10.0.0.10", "port": 8000,
+UNIT_A = {"unit": "worker-a", "node": "192.0.2.10", "port": 8000,
           "model": "qwen-a", "recipe": "qwen-a.yaml"}
-UNIT_B = {"unit": "worker-b", "node": "10.0.0.11", "port": 8000,
+UNIT_B = {"unit": "worker-b", "node": "192.0.2.11", "port": 8000,
           "model": "qwen-b", "recipe": "qwen-b.yaml"}
 
 
@@ -358,7 +358,7 @@ class TestHealLeaseSingleFlight:
         rec = Recorders()
         recover.RECOVER_CONSECUTIVE_WEDGES = 1
         s = _stream(wedged=[UNIT_A])
-        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+        assert heal_lease.acquire("worker-relaunch", "192.0.2.2:8001")[0] is True
 
         r = recover.recover_engine_wedge(
             stream_state=s,
@@ -463,9 +463,9 @@ class TestContainerIdResolution:
     """
 
     ID = [  # normalised identity entries (uniform pool: same recipe/model)
-        {"container_id": "cid-node1-8000", "hosts": ["10.0.0.11"],
+        {"container_id": "cid-node1-8000", "hosts": ["192.0.2.11"],
          "port": 8000, "model": "m", "recipe": "r.yaml"},
-        {"container_id": "cid-node2-8001", "hosts": ["10.0.0.12"],
+        {"container_id": "cid-node2-8001", "hosts": ["192.0.2.12"],
          "port": 8001, "model": "m", "recipe": "r.yaml"},
     ]
 
@@ -479,40 +479,40 @@ class TestContainerIdResolution:
 
     # ── (a) unique match ──────────────────────────────────────────────────
     def test_unique_identity_match_resolves(self):
-        unit = {"unit": "worker-a", "node": "10.0.0.12", "port": 8001}
+        unit = {"unit": "worker-a", "node": "192.0.2.12", "port": 8001}
         assert recover._resolve_container_id(
             self._status(entries=self.ID), unit) == "cid-node2-8001"
 
     def test_unique_identity_match_string_port(self):
         """serve_cmd ports are strings; the probe's may be int — must agree."""
-        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": "8000"}
+        unit = {"unit": "worker-a", "node": "192.0.2.11", "port": "8000"}
         assert recover._resolve_container_id(
             self._status(entries=self.ID), unit) == "cid-node1-8000"
 
     # ── (b) zero match ────────────────────────────────────────────────────
     def test_zero_identity_match_is_none(self):
-        unit = {"unit": "ghost", "node": "10.0.0.99", "port": 9999}
+        unit = {"unit": "ghost", "node": "192.0.2.99", "port": 9999}
         assert recover._resolve_container_id(
             self._status(entries=self.ID), unit) is None
 
     def test_node_match_wrong_port_is_none(self):
-        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": 8001}
+        unit = {"unit": "worker-a", "node": "192.0.2.11", "port": 8001}
         assert recover._resolve_container_id(
             self._status(entries=self.ID), unit) is None
 
     # ── (c) multi match -> ambiguous -> fail-safe ─────────────────────────
     def test_multi_identity_match_is_ambiguous_none(self):
         dup = [
-            {"container_id": "cid-x", "hosts": ["10.0.0.13"], "port": 8000},
-            {"container_id": "cid-y", "hosts": ["10.0.0.13"], "port": 8000},
+            {"container_id": "cid-x", "hosts": ["192.0.2.13"], "port": 8000},
+            {"container_id": "cid-y", "hosts": ["192.0.2.13"], "port": 8000},
         ]
-        unit = {"unit": "worker-a", "node": "10.0.0.13", "port": 8000}
+        unit = {"unit": "worker-a", "node": "192.0.2.13", "port": 8000}
         assert recover._resolve_container_id(
             self._status(entries=dup), unit) is None
 
     def test_identity_entry_with_missing_cid_is_none(self):
-        e = [{"container_id": "?", "hosts": ["10.0.0.11"], "port": 8000}]
-        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": 8000}
+        e = [{"container_id": "?", "hosts": ["192.0.2.11"], "port": 8000}]
+        unit = {"unit": "worker-a", "node": "192.0.2.11", "port": 8000}
         assert recover._resolve_container_id(
             self._status(entries=e), unit) is None
 
@@ -545,16 +545,16 @@ class TestContainerIdResolution:
         """The resolver consumes a raw classify_cluster_status to_dict()."""
         data = {
             "groups": {"cid_group": {
-                "meta": {"hosts": ["10.0.0.20", "10.0.0.21"],
+                "meta": {"hosts": ["192.0.2.20", "192.0.2.21"],
                          "overrides": {"port": 8000}}}},
             "solo_entries": [{
-                "cluster_id": "cid_solo", "host": "10.0.0.22",
+                "cluster_id": "cid_solo", "host": "192.0.2.22",
                 "meta": {"port": 8002, "overrides": {"port": 8002}}}],
         }
         assert recover._resolve_container_id(
-            data, {"node": "10.0.0.21", "port": 8000}) == "cid_group"
+            data, {"node": "192.0.2.21", "port": 8000}) == "cid_group"
         assert recover._resolve_container_id(
-            data, {"node": "10.0.0.22", "port": 8002}) == "cid_solo"
+            data, {"node": "192.0.2.22", "port": 8002}) == "cid_solo"
 
     # ── (d) the REAL orch case ────────────────────────────────────────────
     def test_real_orch_case_resolves(self):
@@ -572,10 +572,10 @@ class TestContainerIdResolution:
                  "meta": {"hosts": [h], "port": p,
                           "overrides": {"port": p},
                           "model": model, "recipe": recipe}}
-                for h, p in (("10.0.0.244", 8000), ("10.0.0.246", 8001),
-                             ("10.0.0.247", 8002), ("10.0.0.248", 8003))],
+                for h, p in (("192.0.2.244", 8000), ("192.0.2.246", 8001),
+                             ("192.0.2.247", 8002), ("192.0.2.248", 8003))],
         })
-        orch_wedged = {"unit": "orch", "node": "10.0.0.244", "port": 8000,
+        orch_wedged = {"unit": "orch", "node": "192.0.2.244", "port": 8000,
                        "status": "wedged",
                        "message": "HTTP 200 but no generated tokens",
                        "last_success": 1791600000.0, "stalled_for_s": 240}
@@ -584,7 +584,7 @@ class TestContainerIdResolution:
             for _ in range(4)], "raw_output": ""}
         status["identity"] = entries
         assert recover._resolve_container_id(status, orch_wedged) == \
-            "sparkrun_10.0.0.244_tok"
+            "sparkrun_192.0.2.244_tok"
         # And the legacy branch ALONE (identity absent) still fails on this
         # shape — proof the identity path, not luck, is what fixed it.
         del status["identity"]
@@ -597,7 +597,7 @@ class TestIdentityWiring:
     resolver never saw node+port-matchable entries)."""
 
     def _wedged_stream(self):
-        return {"wedged": [{"unit": "orch", "node": "10.0.0.11", "port": 8000,
+        return {"wedged": [{"unit": "orch", "node": "192.0.2.11", "port": 8000,
                             "status": "wedged"}],
                 "ok_units": [], "loading": [], "down": [], "ok": False}
 
@@ -614,9 +614,9 @@ class TestIdentityWiring:
                 "raw_output": ""},
             stop_fn=rec.stop_fn, up_fn=rec.up_fn,
             identity_fn=lambda: [
-                {"container_id": "cid-orch", "hosts": ["10.0.0.11"],
+                {"container_id": "cid-orch", "hosts": ["192.0.2.11"],
                  "port": 8000},
-                {"container_id": "cid-sibling", "hosts": ["10.0.0.12"],
+                {"container_id": "cid-sibling", "hosts": ["192.0.2.12"],
                  "port": 8001}],
             lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
             intentional_fn=_intentional_false, now=0.0)
@@ -652,8 +652,8 @@ class TestIdentityWiring:
             status_fn=lambda: {"workloads": []},
             stop_fn=rec.stop_fn, up_fn=rec.up_fn,
             identity_fn=lambda: [
-                {"container_id": "x", "hosts": ["10.0.0.11"], "port": 8000},
-                {"container_id": "y", "hosts": ["10.0.0.11"], "port": 8000}],
+                {"container_id": "x", "hosts": ["192.0.2.11"], "port": 8000},
+                {"container_id": "y", "hosts": ["192.0.2.11"], "port": 8000}],
             lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
             intentional_fn=_intentional_false, now=0.0)
         assert r["result"] == "suppressed"
@@ -693,10 +693,10 @@ class TestFetchIdentityEntries:
     def test_parses_solo_entries(self, monkeypatch):
         import json as _json
         self._patch_transport(monkeypatch, _json.dumps({"groups": {},
-            "solo_entries": [{"cluster_id": "cid_1", "host": "10.0.0.11",
+            "solo_entries": [{"cluster_id": "cid_1", "host": "192.0.2.11",
                               "meta": {"overrides": {"port": 8000}}}]}))
         entries = recover.fetch_identity_entries()
-        assert entries == [{"container_id": "cid_1", "hosts": ["10.0.0.11"],
+        assert entries == [{"container_id": "cid_1", "hosts": ["192.0.2.11"],
                             "port": 8000, "model": "", "recipe": ""}]
 
     def test_unresolvable_venv_returns_empty(self, monkeypatch):

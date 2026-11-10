@@ -136,7 +136,7 @@ class _CurlStub:
         return self.rc, self.out, self.err
 
 
-def _errno65(host="10.0.0.1"):
+def _errno65(host="192.0.2.1"):
     return urllib.error.URLError(OSError(65, "No route to host", host))
 
 
@@ -162,11 +162,11 @@ class TestLanCurlFallback:
                                                                  monkeypatch):
         stub = curl_seam(out=b'{"data": [{"id": "worker-model"}]}')
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        got = ct._http_get_default("http://10.0.0.1:4000/v1/models")
+        got = ct._http_get_default("http://192.0.2.1:4000/v1/models")
         assert got == '{"data": [{"id": "worker-model"}]}'
         assert stub.argvs == [["/usr/bin/curl", "-sS", "--fail", "-L",
                                "--max-time", "10",
-                               "http://10.0.0.1:4000/v1/models"]]
+                               "http://192.0.2.1:4000/v1/models"]]
 
     @pytest.mark.parametrize("url", [
         "https://api.example.com/v1/models",   # public: not the TCC story
@@ -185,20 +185,20 @@ class TestLanCurlFallback:
     def test_errno113_does_not_fall_back(self, curl_seam, monkeypatch):
         """113 is Linux EHOSTUNREACH = genuinely no route; it stays an error."""
         stub = curl_seam()
-        exc = urllib.error.URLError(OSError(113, "No route to host", "10.0.0.1"))
+        exc = urllib.error.URLError(OSError(113, "No route to host", "192.0.2.1"))
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
         with pytest.raises(urllib.error.URLError) as ei:
-            ct._http_get_default("http://10.0.0.1:4000/v1/models")
+            ct._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.reason.errno == 113
         assert stub.argvs == []
 
     def test_httperror_from_urlopen_is_untouched(self, curl_seam, monkeypatch):
         stub = curl_seam()
-        exc = urllib.error.HTTPError("http://10.0.0.1:4000/v1/models", 401,
+        exc = urllib.error.HTTPError("http://192.0.2.1:4000/v1/models", 401,
                                      "unauthorized", None, None)
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
         with pytest.raises(urllib.error.HTTPError) as ei:
-            ct._http_get_default("http://10.0.0.1:4000/v1/models")
+            ct._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.code == 401
         assert stub.argvs == []
 
@@ -207,7 +207,7 @@ class TestLanCurlFallback:
         curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         with pytest.raises(urllib.error.HTTPError) as ei:
-            ct._http_get_default("http://10.0.0.1:4000/v1/models")
+            ct._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.code == 401
 
     def test_probe_reports_error_not_unreachable_over_the_fallback(self, curl_seam,
@@ -216,7 +216,7 @@ class TestLanCurlFallback:
         through curl is still 'error' (reachable, wrong auth/path)."""
         curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        status, detail = ct._probe_served_models("http://10.0.0.1:4000/v1")
+        status, detail = ct._probe_served_models("http://192.0.2.1:4000/v1")
         assert status == "error"
         assert "401" in detail[0]
 
@@ -225,7 +225,7 @@ class TestLanCurlFallback:
         again on a TCC-denied interpreter instead of refusing every write."""
         curl_seam(out=json.dumps({"data": [{"id": "worker-model"}]}).encode())
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        assert ct._probe_served_models("http://10.0.0.1:4000/v1") == \
+        assert ct._probe_served_models("http://192.0.2.1:4000/v1") == \
             ("ok", ["worker-model"])
 
     def test_api_key_never_reaches_argv_and_travels_in_a_0600_file(self, curl_seam,
@@ -250,18 +250,18 @@ class TestLanCurlFallback:
 
         monkeypatch.setattr(ct, "_lan_curl_run", spy)
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        ct._http_get_default("http://10.0.0.1:4000/v1/models", api_key=key)
+        ct._http_get_default("http://192.0.2.1:4000/v1/models", api_key=key)
         assert captured["body"] == f"Authorization: Bearer {key}\n"
         assert captured["mode"] == "0o600"
         assert not os.path.exists(captured["path"])   # unlinked after the request
-        assert stub.argvs[0][-1] == "http://10.0.0.1:4000/v1/models"
+        assert stub.argvs[0][-1] == "http://192.0.2.1:4000/v1/models"
 
     def test_notice_printed_exactly_once_across_fallbacks(self, curl_seam,
                                                           monkeypatch, capsys):
         stub = curl_seam()
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         for i in range(4):
-            ct._http_get_default(f"http://10.0.0.{i}:4000/v1/models")
+            ct._http_get_default(f"http://192.0.2.{i}:4000/v1/models")
         assert len(stub.argvs) == 4
         assert capsys.readouterr().err.count(ct.LAN_CURL_FALLBACK_NOTICE) == 1
 
@@ -272,7 +272,7 @@ class TestLanCurlFallback:
         ct._lan_curl_reset_notice()
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         with pytest.raises(urllib.error.URLError) as ei:
-            ct._http_get_default("http://10.0.0.1:4000/v1/models")
+            ct._http_get_default("http://192.0.2.1:4000/v1/models")
         msg = str(ei.value)
         assert "No route to host" in msg               # original kept, not replaced
         assert "curl fallback unavailable" in msg      # + the one-line hint

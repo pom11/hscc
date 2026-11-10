@@ -89,14 +89,14 @@ class TestSshCmd:
     def test_builds_ssh_command(self, fake_subprocess):
         from hscc_daemon.util import ssh_cmd
         fake_subprocess.set_result(stdout="reachable", returncode=0)
-        result = ssh_cmd("10.0.0.1", "echo hello")
+        result = ssh_cmd("192.0.2.1", "echo hello")
         assert result["ok"] is True
         assert result["output"] == "reachable"
 
     def test_ssh_failure(self, fake_subprocess):
         from hscc_daemon.util import ssh_cmd
         fake_subprocess.set_result(stdout="", stderr="Connection refused", returncode=1)
-        result = ssh_cmd("10.0.0.1", "ls")
+        result = ssh_cmd("192.0.2.1", "ls")
         assert result["ok"] is False
 
 
@@ -148,10 +148,10 @@ class TestHttpCheck:
 
         def _throw(*a, **kw):
             raise urllib.error.URLError(
-                OSError(65, "No route to host", "10.0.0.10"))
+                OSError(65, "No route to host", "192.0.2.10"))
 
         monkeypatch.setattr("urllib.request.urlopen", _throw)
-        result = util.http_check("http://10.0.0.10:8000/health", timeout=5)
+        result = util.http_check("http://192.0.2.10:8000/health", timeout=5)
         assert result["ok"] is False
         assert "Local Network" in result["output"]
         assert "No route to host" in result["output"]
@@ -176,10 +176,10 @@ class TestHttpCheck:
 
         def _throw(*a, **kw):
             raise urllib.error.URLError(
-                OSError(61, "Connection refused", "10.0.0.10"))
+                OSError(61, "Connection refused", "192.0.2.10"))
 
         monkeypatch.setattr("urllib.request.urlopen", _throw)
-        result = util.http_check("http://10.0.0.10:8000/health", timeout=5)
+        result = util.http_check("http://192.0.2.10:8000/health", timeout=5)
         assert result["ok"] is False
         assert "Local Network" not in result["output"]
 

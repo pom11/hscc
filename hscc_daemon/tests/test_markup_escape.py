@@ -182,7 +182,7 @@ def test_cluster_render_markup_survives():
                            "container_id": f"c{MARK_BOTH}"}],
             "idle_hosts": [f"dgx-a{MARK_CLOSE}"], "total_hosts": 3}),
         ("render_hosts", {
-            "hosts": [{"name": f"node{MARK_CLOSE}", "ip": "10.0.0.1",
+            "hosts": [{"name": f"node{MARK_CLOSE}", "ip": "192.0.2.1",
                        "role": f"worker{MARK_BOTH}"}],
             "saved_clusters": {"output": f"cluster show -> /x{MARK_CLOSE}"}}),
         ("render_monitor", {"output": f"raw monitor line {MARK_BOTH}"}),

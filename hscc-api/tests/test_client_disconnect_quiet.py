@@ -48,13 +48,13 @@ def test_disconnect_prints_no_traceback(monkeypatch, capsys, exc_cls):
     try:
         raise exc_cls("peer went away")
     except exc_cls:
-        srv.handle_error(None, ("10.0.0.7", 51234))
+        srv.handle_error(None, ("192.0.2.7", 51234))
 
     err = capsys.readouterr().err
     assert "Traceback" not in err, "a disconnect must not print a stack trace"
     assert rec.called is False, "must not delegate to socketserver's printer"
     # Still visible, just quiet: one line naming the peer and the condition.
-    assert "10.0.0.7" in err
+    assert "192.0.2.7" in err
     assert exc_cls.__name__ in err
 
 
@@ -65,7 +65,7 @@ def test_a_real_error_still_prints(monkeypatch):
     try:
         raise ValueError("a real bug")
     except ValueError:
-        srv.handle_error(None, ("10.0.0.7", 51234))
+        srv.handle_error(None, ("192.0.2.7", 51234))
 
     assert rec.called is True, (
         "a non-disconnect error was swallowed — this filter must never hide "

@@ -38,38 +38,38 @@ def lease_file(tmp_hfcc_dir, monkeypatch):
 
 class TestLeaseBasics:
     def test_first_acquirer_wins_and_records_who_and_subject(self, lease_file):
-        ok, rec = heal_lease.acquire("auto-heal", "10.0.0.2:8001")
+        ok, rec = heal_lease.acquire("auto-heal", "192.0.2.2:8001")
         assert ok is True
         assert rec["who"] == "auto-heal"
-        assert rec["subject"] == "10.0.0.2:8001"
+        assert rec["subject"] == "192.0.2.2:8001"
         # Durable: the record exists on disk, not just in memory.
         assert os.path.exists(lease_file)
         on_disk = json.load(open(lease_file))
         assert on_disk["who"] == "auto-heal"
 
     def test_second_mechanism_is_refused_and_sees_the_holder(self, lease_file):
-        assert heal_lease.acquire("auto-heal", "10.0.0.2:8001")[0] is True
+        assert heal_lease.acquire("auto-heal", "192.0.2.2:8001")[0] is True
         ok, holder = heal_lease.acquire("proxy-relaunch", "proxy :4000")
         assert ok is False
         assert holder["who"] == "auto-heal"
         # The refused caller must be able to SAY what is in flight.
         assert "auto-heal" in heal_lease.describe(holder)
-        assert "10.0.0.2:8001" in heal_lease.describe(holder)
+        assert "192.0.2.2:8001" in heal_lease.describe(holder)
 
     def test_release_lets_the_next_mechanism_in(self, lease_file):
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001")
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001")
         heal_lease.release("auto-heal")
-        assert heal_lease.acquire("worker-relaunch", "10.0.0.3:8002")[0] is True
+        assert heal_lease.acquire("worker-relaunch", "192.0.2.3:8002")[0] is True
 
     def test_same_mechanism_renews_rather_than_self_blocks(self, lease_file):
         """One repair has several steps; the second must not be blocked by its
         own claim (that would deadlock a mechanism against itself)."""
-        assert heal_lease.acquire("auto-heal", "10.0.0.2:8001")[0] is True
-        ok, _ = heal_lease.acquire("auto-heal", "10.0.0.2:8001")
+        assert heal_lease.acquire("auto-heal", "192.0.2.2:8001")[0] is True
+        ok, _ = heal_lease.acquire("auto-heal", "192.0.2.2:8001")
         assert ok is True
 
     def test_release_by_non_owner_is_ignored(self, lease_file):
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001")
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001")
         heal_lease.release("proxy-relaunch")          # not ours -> no-op
         assert heal_lease.held_by("auto-heal") is True
 
@@ -85,7 +85,7 @@ class TestLeaseBounded:
     """The property that separates a lease from a lock: it ALWAYS expires."""
 
     def test_expired_lease_is_readable_as_absent(self, lease_file):
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001", ttl=100)
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001", ttl=100)
         later = heal_lease._now() + 200
         assert heal_lease.read_lease(now=later) is None
         assert heal_lease.held_by(now=later) is False
@@ -93,7 +93,7 @@ class TestLeaseBounded:
     def test_leaked_lease_does_not_disable_healing_forever(self, lease_file):
         """A holder killed before ``release`` (crash, SIGKILL, daemon restarted
         mid-repair) must not suppress every repair for the whole TTL."""
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001", ttl=60)
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001", ttl=60)
         assert heal_lease.acquire("proxy-relaunch", "proxy")[0] is False
         # TTL elapses (no release ever happened) -> healing resumes.
         assert heal_lease.acquire("proxy-relaunch", "proxy",
@@ -128,9 +128,9 @@ class TestLeaseDurability:
         precisely the test-isolation failure this audit is about. If the module
         ever caches lease state in memory, the foreign-file form fails loudly.
         """
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001", ttl=600)
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001", ttl=600)
         now = heal_lease._now()
-        foreign = {"who": "auto-heal", "subject": "10.0.0.2:8001",
+        foreign = {"who": "auto-heal", "subject": "192.0.2.2:8001",
                    "acquired": now - 5.0, "until": now + 600.0, "pid": 999999}
         with open(lease_file, "w") as f:
             json.dump(foreign, f)
@@ -148,7 +148,7 @@ class TestLeaseDurability:
         assert heal_lease.acquire("proxy-relaunch", "proxy")[0] is True
 
     def test_renew_extends_an_existing_claim(self, lease_file):
-        heal_lease.acquire("auto-heal", "10.0.0.2:8001", ttl=60)
+        heal_lease.acquire("auto-heal", "192.0.2.2:8001", ttl=60)
         assert heal_lease.renew(ttl=600) is True
         # Still held well past the ORIGINAL window.
         assert heal_lease.held_by(now=heal_lease._now() + 120) is True

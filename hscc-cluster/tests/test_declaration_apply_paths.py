@@ -28,8 +28,8 @@ import recipe_cost as rc                   # noqa: E402
 
 from _capture_apply_golden import FakeNode, FakeTopo  # noqa: E402
 
-ORCH = "10.0.0.1"
-W = ["10.0.0.2", "10.0.0.3"]
+ORCH = "192.0.2.1"
+W = ["192.0.2.2", "192.0.2.3"]
 
 
 def _cost(recipe):
@@ -88,7 +88,7 @@ class TestEndpointsDecision:
         # proxy-alias doctrine: the declared orchestrator target is the POOL
         # front, never a node address.
         assert d["chat"]["url"] == "http://localhost:4000/v1"
-        assert "10.0.0." not in d["chat"]["url"]
+        assert "192.0.2." not in d["chat"]["url"]
 
     def test_under_uniform_pool_an_omitted_delegation_keeps_the_pool(self):
         """§1.2: under uniform_pool EVERY hermes-facing consumer resolves to the

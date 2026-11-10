@@ -26,6 +26,10 @@ legitimately need a tailnet-shaped host — 100.64.0.0/24 is reserved as the
 SANCTIONED FIXTURE BLOCK (100.64.0.1, 100.64.0.3, ...). Anything else in CGNAT,
 or anything on the live LAN, is a real address and must not be committed.
 
+The operator's LAN moved to the 10.0.0.x range, so a concrete 10.0.0.N is now
+a real address. Only the documented ``10.0.0.x`` placeholder is allowed; the
+older 192.168.88.x branch stays banned because published history still carries it.
+
 Stdlib only, no network, no config files: the pre-commit hook runs this on every
 commit, so anything it costs gets paid by every commit in the repo.
 """
@@ -45,7 +49,8 @@ FORBIDDEN = re.compile(
     r"\b(?:"
     r"100\.(?:6[5-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"  # CGNAT above 100.64
     r"|100\.64\.(?!0\.)\d{1,3}\.\d{1,3}"                          # 100.64.x, x != 0
-    r"|192\.168\.88\.\d{1,3}"                                      # the live LAN
+    r"|192\.168\.88\.\d{1,3}"                                      # the old live LAN
+    r"|10\.0\.0\.\d{1,3}"                                          # the live LAN
     r")\b"
 )
 

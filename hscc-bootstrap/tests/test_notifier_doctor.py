@@ -33,8 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import doctor_notifier_mask as dnm  # noqa: E402
 import install_notifier_mask as nm  # noqa: E402
 
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 SVC = nm.NOTIFIER_SERVICE
 TIMER = nm.NOTIFIER_TIMER
 
@@ -421,7 +421,7 @@ class TestWiredIntoDoctor:
         (home / ".hscc").mkdir()
         import doctor
         monkeypatch.setattr(doctor, "_run_cluster_list", lambda: (
-            '[{"name": "t", "default": true, "hosts": ["10.0.0.1", "10.0.0.2"],'
+            '[{"name": "t", "default": true, "hosts": ["192.0.2.1", "192.0.2.2"],'
             ' "cache_dir": ""}]'))
         # Hermetic: the sibling `sparkrun cluster vs serving` check must not
         # reach a real sparkrun either. With HOME redirected it would otherwise

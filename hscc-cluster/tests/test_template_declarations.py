@@ -23,7 +23,7 @@ import yaml
 import cluster_template as ct
 import template_intent as ti
 
-COMPUTE = ["10.0.0.244", "10.0.0.245", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+COMPUTE = ["192.0.2.244", "192.0.2.245", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
 EXISTS = lambda r: True
 
 
@@ -114,15 +114,15 @@ class TestEndpoints:
 
     def test_address_target_under_uniform_pool_is_the_spec_error_line(self):
         """§7's example line, reproduced byte-for-byte."""
-        errs, _ = _check(_v4_uniform(endpoints={"chat": "10.0.0.1:8000"}))
-        assert ("endpoints.chat -> '10.0.0.1:8000': uniform_pool endpoints "
+        errs, _ = _check(_v4_uniform(endpoints={"chat": "192.0.2.1:8000"}))
+        assert ("endpoints.chat -> '192.0.2.1:8000': uniform_pool endpoints "
                 "must name a family (family-<name>) or 'orchestrator', never "
                 "an address") in errs
 
     def test_host_shaped_target_without_a_port_is_also_an_address(self):
         """§1.1: 'A target is never an address' covers a host-shaped string, not
         only host:port — a colon is sufficient but not necessary."""
-        for bad in ("10.0.0.1", "node-1.example.com"):
+        for bad in ("192.0.2.1", "node-1.example.com"):
             errs, _ = _check(_v4_uniform(endpoints={"chat": bad}))
             assert any("never an address" in e for e in errs), \
                 f"{bad!r} accepted as a uniform_pool target"
@@ -136,7 +136,7 @@ class TestEndpoints:
     def test_address_target_is_allowed_when_not_uniform_pool(self):
         """§1.3: under a role split an explicit pin is legal, so the guard must
         NOT fire there. This is the exemption, pinned."""
-        errs, _ = _check(_v4(endpoints={"chat": "10.0.0.1:8000"}))
+        errs, _ = _check(_v4(endpoints={"chat": "192.0.2.1:8000"}))
         assert not any("never an address" in e for e in errs), errs
 
     def test_dangling_family_target_reuses_the_routing_error_voice(self):
@@ -184,10 +184,10 @@ class TestEndpoints:
     def test_routing_address_target_under_uniform_pool_is_refused(self):
         """§5 row 1 names both blocks: `routing` is covered too, and only under
         uniform_pool."""
-        errs, _ = _check(_v4_uniform(routing={"delegation": "10.0.0.1:8000"}))
-        assert any("routing.delegation -> '10.0.0.1:8000': uniform_pool "
+        errs, _ = _check(_v4_uniform(routing={"delegation": "192.0.2.1:8000"}))
+        assert any("routing.delegation -> '192.0.2.1:8000': uniform_pool "
                    "endpoints must name a family" in e for e in errs)
-        errs, _ = _check(_v4(routing={"delegation": "10.0.0.1:8000"}))
+        errs, _ = _check(_v4(routing={"delegation": "192.0.2.1:8000"}))
         assert not any("never an address" in e for e in errs)
 
 
@@ -549,8 +549,8 @@ class TestPlanLevelEndpointLeg:
              "families": [{"name": "coding", "models": [{"recipe": "same.yaml"}],
                            "workers": 2, "proxy": proxy_flag}],
              "endpoints": endpoints}
-        topo = _FakeTopo(_FakeNode("10.0.0.1"),
-                         [_FakeNode("10.0.0.2"), _FakeNode("10.0.0.3")])
+        topo = _FakeTopo(_FakeNode("192.0.2.1"),
+                         [_FakeNode("192.0.2.2"), _FakeNode("192.0.2.3")])
         return ti.resolve(ti.ClusterTemplate.from_dict(d), topo,
                           _coster=lambda r: _rc_cost(r))
 
@@ -577,8 +577,8 @@ class TestPlanLevelEndpointLeg:
              "families": [{"name": "coding", "models": [{"recipe": "same.yaml"}],
                            "workers": 2, "proxy": False}],
              "endpoints": {"chat": "family-coding"}}
-        topo = _FakeTopo(_FakeNode("10.0.0.1"),
-                         [_FakeNode("10.0.0.2"), _FakeNode("10.0.0.3")])
+        topo = _FakeTopo(_FakeNode("192.0.2.1"),
+                         [_FakeNode("192.0.2.2"), _FakeNode("192.0.2.3")])
         plan = ti.resolve(ti.ClusterTemplate.from_dict(d), topo,
                           _coster=lambda r: _rc_cost(r))
         assert ct.validate_resolved_plan(plan) == []
@@ -625,8 +625,8 @@ class TestV4RoundTrip:
                         proxy={"families": {"coding": {
                             "routing": "least-in-flight"}}},
                         caps={"max_in_progress": 6})
-        topo = _FakeTopo(_FakeNode("10.0.0.1"),
-                         [_FakeNode("10.0.0.2"), _FakeNode("10.0.0.3")])
+        topo = _FakeTopo(_FakeNode("192.0.2.1"),
+                         [_FakeNode("192.0.2.2"), _FakeNode("192.0.2.3")])
         plan = ti.resolve(ti.ClusterTemplate.from_dict(d), topo,
                           _coster=lambda r: _rc_cost(r))
         text = json.dumps(ti.to_serving_json(plan))
@@ -689,9 +689,9 @@ V3_NON_UNIFORM = {
 
 def _render_v3_non_uniform():
     tpl = ti.ClusterTemplate.from_dict(copy.deepcopy(V3_NON_UNIFORM))
-    plan = ti.resolve(tpl, _FakeTopo(_FakeNode("10.0.0.1"),
-                                     [_FakeNode("10.0.0.2"),
-                                      _FakeNode("10.0.0.3")]),
+    plan = ti.resolve(tpl, _FakeTopo(_FakeNode("192.0.2.1"),
+                                     [_FakeNode("192.0.2.2"),
+                                      _FakeNode("192.0.2.3")]),
                       _coster=_rc_cost)
 
     def serving(url, api_key=None):
@@ -757,5 +757,5 @@ class TestOverreachGuard:
         # directly — exactly what t_ac795424 left alone, and what a v4
         # overreach would have rewritten.
         assert golden["hermes_config"]["providers"][0]["base_url"] == \
-            "http://10.0.0.1:8000/v1"
+            "http://192.0.2.1:8000/v1"
         assert len(golden["routing_preview"]["routing"]) == 3

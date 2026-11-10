@@ -5,10 +5,10 @@
 
 set -u
 EXPECTED=(
-  "10.0.0.244:nvidia/Qwen3.6-35B-A3B-NVFP4"
-  "10.0.0.246:Qwen/Qwen3.6-27B-FP8"
-  "10.0.0.247:Qwen/Qwen3.6-27B-FP8"
-  "10.0.0.248:Qwen/Qwen3.6-27B-FP8"
+  "192.0.2.244:nvidia/Qwen3.6-35B-A3B-NVFP4"
+  "192.0.2.246:Qwen/Qwen3.6-27B-FP8"
+  "192.0.2.247:Qwen/Qwen3.6-27B-FP8"
+  "192.0.2.248:Qwen/Qwen3.6-27B-FP8"
 )
 TIMEOUT=5
 PROBLEMS=()

@@ -49,20 +49,20 @@ def test_stage_exists_and_flag_wired():
 
 
 def test_all_armed_renders_ok():
-    out = run('{"results": [{"host": "10.0.0.1", "action": "installed"},'
-              ' {"host": "10.0.0.2", "action": "unchanged"}],'
+    out = run('{"results": [{"host": "192.0.2.1", "action": "installed"},'
+              ' {"host": "192.0.2.2", "action": "unchanged"}],'
               ' "ok": true, "skipped_reason": null}')
     assert out.startswith("OK|node-recovery sysctls armed+read-back-verified on 2/2")
 
 
 def test_failures_never_render_as_green():
-    out = run('{"results": [{"host": "10.0.0.1", "action": "failed",'
+    out = run('{"results": [{"host": "192.0.2.1", "action": "failed",'
               ' "error": "read-back mismatch — kernel.panic: expected \'10\' got \'0\'"},'
-              ' {"host": "10.0.0.2", "action": "drift", "note": "left untouched"}],'
+              ' {"host": "192.0.2.2", "action": "drift", "note": "left untouched"}],'
               ' "ok": false, "skipped_reason": null}')
     assert out.startswith("WARN|"), f"failures rendered as OK: {out}"
-    assert "WARN|10.0.0.1: read-back mismatch" in out
-    assert "WARN|10.0.0.2: left untouched" in out
+    assert "WARN|192.0.2.1: read-back mismatch" in out
+    assert "WARN|192.0.2.2: left untouched" in out
     assert "some nodes FAILED" in out
 
 
@@ -73,7 +73,7 @@ def test_optout_renders_ok_skip():
 
 
 def test_stdout_noise_cannot_hide_the_json():
-    payload = ('{"results": [{"host": "10.0.0.1", "action": "installed"}],'
+    payload = ('{"results": [{"host": "192.0.2.1", "action": "installed"}],'
                ' "ok": true, "skipped_reason": null}')
     out = run("some stderr chatter\n" + payload)
     assert out.startswith("OK|")

@@ -56,31 +56,31 @@ def small_threshold(monkeypatch):
 class TestCountingAndTrip:
     def test_actions_below_the_cap_are_allowed(self, ledger, small_threshold):
         for _ in range(small_threshold):
-            res = heal_breaker.note_heal("10.0.0.2")
+            res = heal_breaker.note_heal("192.0.2.2")
             assert res["tripped"] is False
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
 
     def test_action_beyond_the_cap_trips(self, ledger, small_threshold):
         for _ in range(small_threshold):
-            heal_breaker.note_heal("10.0.0.2")
-        res = heal_breaker.note_heal("10.0.0.2")
+            heal_breaker.note_heal("192.0.2.2")
+        res = heal_breaker.note_heal("192.0.2.2")
         assert res["tripped"] is True
         assert res["count"] == small_threshold + 1
         assert res["suspended_s"] > 0
 
     def test_suspension_blocks_further_heals(self, ledger, small_threshold):
         for _ in range(small_threshold + 1):
-            heal_breaker.note_heal("10.0.0.2")
-        assert heal_breaker.suspended("10.0.0.2") > 0
+            heal_breaker.note_heal("192.0.2.2")
+        assert heal_breaker.suspended("192.0.2.2") > 0
 
     def test_strikes_are_per_node(self, ledger, small_threshold):
         """A tripped node must NOT disable healing on the rest of the fleet —
         that would turn a targeted breaker into a cluster-wide outage."""
         for _ in range(small_threshold + 1):
-            heal_breaker.note_heal("10.0.0.2")
-        assert heal_breaker.suspended("10.0.0.2") > 0
-        assert heal_breaker.suspended("10.0.0.3") == 0.0
-        assert heal_breaker.note_heal("10.0.0.3")["tripped"] is False
+            heal_breaker.note_heal("192.0.2.2")
+        assert heal_breaker.suspended("192.0.2.2") > 0
+        assert heal_breaker.suspended("192.0.2.3") == 0.0
+        assert heal_breaker.note_heal("192.0.2.3")["tripped"] is False
 
     def test_a_storm_of_different_nodes_does_not_trip_any_single_one(
             self, ledger, small_threshold):
@@ -88,7 +88,7 @@ class TestCountingAndTrip:
         trip. (Deliberate: a fleet-wide fault deserves fleet-wide healing; the
         breaker stops the case where one host is being destroyed.)"""
         for i in range(small_threshold * 3):
-            assert heal_breaker.note_heal(f"10.0.0.{10 + i}")["tripped"] is False
+            assert heal_breaker.note_heal(f"192.0.2.{10 + i}")["tripped"] is False
 
 
 class TestWindowAndSelfRecovery:
@@ -99,11 +99,11 @@ class TestWindowAndSelfRecovery:
         w = heal_breaker.HEAL_BREAKER_WINDOW_S
         base = 1_000_000.0
         for _ in range(small_threshold):
-            heal_breaker.note_heal("10.0.0.2", now=base - w - 10)
+            heal_breaker.note_heal("192.0.2.2", now=base - w - 10)
         # All strikes are outside the window: this next one is the FIRST of a
         # fresh window, so it must not trip.
-        assert heal_breaker.note_heal("10.0.0.2", now=base)["tripped"] is False
-        assert heal_breaker.suspended("10.0.0.2", now=base) == 0.0
+        assert heal_breaker.note_heal("192.0.2.2", now=base)["tripped"] is False
+        assert heal_breaker.suspended("192.0.2.2", now=base) == 0.0
 
     def test_suspension_expires_on_its_own(self, ledger, small_threshold):
         """CRITICAL: self-recovery. A latch with no expiry strands a node
@@ -111,32 +111,32 @@ class TestWindowAndSelfRecovery:
         w = heal_breaker.HEAL_BREAKER_WINDOW_S
         base = 1_000_000.0
         for _ in range(small_threshold + 1):
-            heal_breaker.note_heal("10.0.0.2", now=base)
-        assert heal_breaker.suspended("10.0.0.2", now=base) > 0
+            heal_breaker.note_heal("192.0.2.2", now=base)
+        assert heal_breaker.suspended("192.0.2.2", now=base) > 0
         # The oldest strike leaving the window drops the count back under the
         # cap, and healing resumes with no operator action.
-        assert heal_breaker.suspended("10.0.0.2", now=base + w + 1) == 0.0
+        assert heal_breaker.suspended("192.0.2.2", now=base + w + 1) == 0.0
 
     def test_suspension_shortens_as_strikes_age(self, ledger, small_threshold):
         w = heal_breaker.HEAL_BREAKER_WINDOW_S
         base = 1_000_000.0
         for i in range(small_threshold + 1):
-            heal_breaker.note_heal("10.0.0.2", now=base + i)
-        half = heal_breaker.suspended("10.0.0.2", now=base + w / 2)
+            heal_breaker.note_heal("192.0.2.2", now=base + i)
+        half = heal_breaker.suspended("192.0.2.2", now=base + w / 2)
         assert 0 < half < w
 
     def test_operator_clear_restores_healing_immediately(self, ledger,
                                                          small_threshold):
         for _ in range(small_threshold + 1):
-            heal_breaker.note_heal("10.0.0.2")
-        assert heal_breaker.suspended("10.0.0.2") > 0
-        assert heal_breaker.clear("10.0.0.2", "investigated, fixed") is True
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+            heal_breaker.note_heal("192.0.2.2")
+        assert heal_breaker.suspended("192.0.2.2") > 0
+        assert heal_breaker.clear("192.0.2.2", "investigated, fixed") is True
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
         # The clear is itself recorded, so the ledger is auditable.
-        assert "10.0.0.2" in json.load(open(ledger))["_cleared"]
+        assert "192.0.2.2" in json.load(open(ledger))["_cleared"]
 
     def test_clear_of_an_unknown_node_is_a_noop(self, ledger):
-        assert heal_breaker.clear("10.0.0.9") is False
+        assert heal_breaker.clear("192.0.2.9") is False
 
 
 class TestDurability:
@@ -164,7 +164,7 @@ class TestDurability:
         monkeypatch.setenv("HSCC_HEAL_BREAKER_MAX", str(small_threshold))
         monkeypatch.setattr(heal_breaker, "HEAL_BREAKER_FILE", live_path)
         for _ in range(small_threshold):
-            heal_breaker.note_heal("10.0.0.2")
+            heal_breaker.note_heal("192.0.2.2")
         assert os.path.exists(live_path)
 
         import importlib
@@ -172,51 +172,51 @@ class TestDurability:
         importlib.reload(hb)          # fresh module, fresh constants
         try:
             assert hb.HEAL_BREAKER_FILE == live_path   # same file, new process
-            assert hb.strike_count("10.0.0.2") == small_threshold
+            assert hb.strike_count("192.0.2.2") == small_threshold
             # Not yet tripped; the NEXT action is the one that trips — proving
             # the restarted process inherited the count instead of starting over.
-            assert hb.suspended("10.0.0.2") == 0.0
-            assert hb.note_heal("10.0.0.2")["tripped"] is True
+            assert hb.suspended("192.0.2.2") == 0.0
+            assert hb.note_heal("192.0.2.2")["tripped"] is True
         finally:
             importlib.reload(hb)      # restore real constants for other tests
 
     def test_ledger_is_readable_json_a_human_can_inspect(self, ledger,
                                                          small_threshold):
-        heal_breaker.note_heal("10.0.0.2")
+        heal_breaker.note_heal("192.0.2.2")
         data = json.load(open(ledger))
-        assert "10.0.0.2" in data
-        assert isinstance(data["10.0.0.2"], list)
+        assert "192.0.2.2" in data
+        assert isinstance(data["192.0.2.2"], list)
 
 
 class TestAlertOnce:
     def test_first_trip_alerts(self, ledger):
-        assert heal_breaker.should_alert("10.0.0.2") is True
+        assert heal_breaker.should_alert("192.0.2.2") is True
 
     def test_repeated_trips_inside_the_cooldown_stay_silent(self, ledger):
         """The suppressed ticks must not re-notify. The 2026-10-08 NAS rule
         fired 178 macOS notifications in 11 minutes by conflating the strike
         ledger with the notify cooldown."""
-        assert heal_breaker.should_alert("10.0.0.2") is True
+        assert heal_breaker.should_alert("192.0.2.2") is True
         for _ in range(20):
-            assert heal_breaker.should_alert("10.0.0.2") is False
+            assert heal_breaker.should_alert("192.0.2.2") is False
 
     def test_alert_is_per_node(self, ledger):
-        assert heal_breaker.should_alert("10.0.0.2") is True
-        assert heal_breaker.should_alert("10.0.0.3") is True
+        assert heal_breaker.should_alert("192.0.2.2") is True
+        assert heal_breaker.should_alert("192.0.2.3") is True
 
     def test_alert_cooldown_expires(self, ledger):
         base = 1_000_000.0
-        assert heal_breaker.should_alert("10.0.0.2", now=base) is True
-        assert heal_breaker.should_alert("10.0.0.2", now=base + 1) is False
+        assert heal_breaker.should_alert("192.0.2.2", now=base) is True
+        assert heal_breaker.should_alert("192.0.2.2", now=base + 1) is False
         later = base + heal_breaker.HEAL_BREAKER_NOTIFY_COOLDOWN_S + 1
-        assert heal_breaker.should_alert("10.0.0.2", now=later) is True
+        assert heal_breaker.should_alert("192.0.2.2", now=later) is True
 
     def test_recovering_then_tripping_again_can_alert_again(self, ledger):
         """A node that heals and later fails afresh must be able to raise a
         NEW alert — otherwise one trip silences the breaker forever."""
-        assert heal_breaker.should_alert("10.0.0.2") is True
-        assert heal_breaker.reset_alert("10.0.0.2") is True
-        assert heal_breaker.should_alert("10.0.0.2") is True
+        assert heal_breaker.should_alert("192.0.2.2") is True
+        assert heal_breaker.reset_alert("192.0.2.2") is True
+        assert heal_breaker.should_alert("192.0.2.2") is True
 
 
 class TestCorruptionSafety:
@@ -224,27 +224,27 @@ class TestCorruptionSafety:
     cluster. Every failure mode here must FAIL OPEN (allow healing)."""
 
     def test_missing_file_is_not_tripped(self, ledger):
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
 
     def test_garbage_file_fails_open(self, ledger):
         with open(ledger, "w") as f:
             f.write("this is not json {{{")
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
         # And a write still works after the bad read (it re-initialises).
-        assert heal_breaker.note_heal("10.0.0.2")["tripped"] is False
+        assert heal_breaker.note_heal("192.0.2.2")["tripped"] is False
 
     def test_corrupt_timestamp_drops_that_node_rather_than_locking_it(
             self, ledger):
         """A non-numeric strike must NOT be interpretable as 'suspended
         forever'."""
         with open(ledger, "w") as f:
-            json.dump({"10.0.0.2": ["nonsense", 123]}, f)
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+            json.dump({"192.0.2.2": ["nonsense", 123]}, f)
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
 
     def test_top_level_list_fails_open(self, ledger):
         with open(ledger, "w") as f:
             json.dump(["not", "a", "mapping"], f)
-        assert heal_breaker.suspended("10.0.0.2") == 0.0
+        assert heal_breaker.suspended("192.0.2.2") == 0.0
 
 
 class TestBreakerStopsARealStorm:
@@ -257,12 +257,12 @@ class TestBreakerStopsARealStorm:
         state_dir = tmp_hfcc_dir / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
                   "recipe": "~/r/orch.yaml", "model": "M"}]
         for n in nodes:
             units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
                           "nodes": [n], "recipe": "~/r/27b.yaml", "model": "W"})
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 1, "units": units})
         health._worker_relaunch_at.clear()
@@ -283,7 +283,7 @@ class TestBreakerStopsARealStorm:
             self, tmp_hfcc_dir, monkeypatch, small_threshold):
         """Force-recreate the same node repeatedly and the breaker must cut it
         off: after the cap, ``_autoheal_worker_fn`` is never called again."""
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_DEBOUNCE", 1)
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_COOLDOWN_MINUTES", 0)
         heals = []
@@ -294,19 +294,19 @@ class TestBreakerStopsARealStorm:
             health.check_workers()
         # Capped: we got at most (max) heals, then the breaker held the door.
         assert len(heals) == small_threshold
-        assert heal_breaker.suspended("10.0.0.2") > 0
+        assert heal_breaker.suspended("192.0.2.2") > 0
         # And the node is reported DOWN (not silently marked online) — the
         # breaker pauses repair, it does not pretend the unit recovered.
         from hscc_daemon.state import read_state
         st = read_state("workers")
-        assert st is not None and "w-10.0.0.2" in json.dumps(st)
+        assert st is not None and "w-192.0.2.2" in json.dumps(st)
 
     def test_the_lease_is_released_even_when_the_breaker_says_no(
             self, tmp_hfcc_dir, monkeypatch, small_threshold):
         """A breaker that leaked the lease would disable ALL healing on every
         node until the TTL expired — strictly worse than no breaker."""
         from hscc_daemon import heal_lease
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_DEBOUNCE", 1)
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_COOLDOWN_MINUTES", 0)
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -314,7 +314,7 @@ class TestBreakerStopsARealStorm:
         for _ in range(small_threshold + 3):
             health.check_workers()
         # Tripped...
-        assert heal_breaker.suspended("10.0.0.2") > 0
+        assert heal_breaker.suspended("192.0.2.2") > 0
         # ...yet nothing is held: another mechanism can still lease immediately.
         ok, holder = heal_lease.acquire("worker-relaunch", "anything")
         assert ok is True, f"lease leaked by the breaker path: {holder}"
@@ -323,7 +323,7 @@ class TestBreakerStopsARealStorm:
     def test_trips_notify_exactly_once_through_the_real_path(
             self, tmp_hfcc_dir, monkeypatch, small_threshold):
         """The storm must alert the operator ONCE, not once per tick."""
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_DEBOUNCE", 1)
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_COOLDOWN_MINUTES", 0)
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -341,7 +341,7 @@ class TestBreakerStopsARealStorm:
         assert notes[0][0] == "HSCC: heal breaker tripped"
         assert len(events) == 1
         assert events[0][0] == "heal_breaker.tripped"
-        assert events[0][1]["node"] == "10.0.0.2"
+        assert events[0][1]["node"] == "192.0.2.2"
 
     def test_a_tripped_node_does_not_strand_a_healthy_one(
             self, tmp_hfcc_dir, monkeypatch, small_threshold):
@@ -350,12 +350,12 @@ class TestBreakerStopsARealStorm:
         After A is suspended, B must KEEP being repaired — a breaker that
         stopped the whole fleet would be worse than no breaker."""
         health = self._setup(tmp_hfcc_dir, monkeypatch,
-                             nodes=["10.0.0.2", "10.0.0.3"])
+                             nodes=["192.0.2.2", "192.0.2.3"])
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_DEBOUNCE", 1)
         monkeypatch.setattr(health, "WORKER_AUTOHEAL_COOLDOWN_MINUTES", 0)
         # A enters the loop one action short of tripping.
         for _ in range(small_threshold):
-            heal_breaker.note_heal("10.0.0.2")
+            heal_breaker.note_heal("192.0.2.2")
         heals = []
         # NB: _autoheal_worker_fn(key, label, node, port) — the NODE is a[2].
         # (Asserting on a[0] compares against the (node, port) key tuple and
@@ -367,6 +367,6 @@ class TestBreakerStopsARealStorm:
         # A tripped on the first tick (its 4th action) and was refused on the
         # rest, so its destructive recreate NEVER RAN — even though the strike
         # was counted. The count records the ATTEMPT; the action is withheld.
-        assert [n for n in heals if n == "10.0.0.2"] == []
+        assert [n for n in heals if n == "192.0.2.2"] == []
         # ...while B, still under its own cap, was healed every tick.
-        assert len([n for n in heals if n == "10.0.0.3"]) == 3
+        assert len([n for n in heals if n == "192.0.2.3"]) == 3

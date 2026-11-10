@@ -622,9 +622,9 @@ class TestCheckDaemonStreamsIntentional:
                             lambda *a, **k: {"ok": False})
         monkeypatch.setattr(health, "_sparkrun_workloads",
                             lambda: ([], False, "ok"))
-        monkeypatch.setattr(health.serving, "PRIMARY_NODE", "10.0.0.2")
+        monkeypatch.setattr(health.serving, "PRIMARY_NODE", "192.0.2.2")
         monkeypatch.setattr(health.serving, "VLLM_HEALTH_URL",
-                            "http://10.0.0.2/health")
+                            "http://192.0.2.2/health")
         block_file = str(tmp_hfcc_dir / "watchdog-block.json")
         monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
         ad_file = str(tmp_hfcc_dir / "autodown.json")
@@ -956,7 +956,7 @@ class TestRunAll:
 
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
-            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+            "units": [{"role": "orchestrator", "nodes": ["192.0.2.1"],
                        "recipe": "r", "model": "m", "port": 8000}],
         }))
 
@@ -990,7 +990,7 @@ class TestRunAll:
 
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
-            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+            "units": [{"role": "orchestrator", "nodes": ["192.0.2.1"],
                        "recipe": "r", "model": "m", "port": 8000}],
         }))
         empty_profiles = tmp_path / "profiles"
@@ -1023,7 +1023,7 @@ class TestRunAll:
 
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
-            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+            "units": [{"role": "orchestrator", "nodes": ["192.0.2.1"],
                        "recipe": "r", "model": "m", "port": 8000}],
         }))
         empty_profiles = tmp_path / "profiles"
@@ -1065,7 +1065,7 @@ class TestRunAll:
 
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
-            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+            "units": [{"role": "orchestrator", "nodes": ["192.0.2.1"],
                        "recipe": "r", "model": "m", "port": 8000}],
         }))
 
@@ -1173,7 +1173,7 @@ class TestRunAllFullVerifyIntentionalAutodown:
         # check is vacuously-pass/ok=True.
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
-            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+            "units": [{"role": "orchestrator", "nodes": ["192.0.2.1"],
                        "recipe": "r", "model": "m", "port": 8000}],
         }))
 
@@ -1397,7 +1397,7 @@ class TestCheckChatRoundtrip:
         monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
                             lambda: None)
         serving = self._serving(tmp_path, [{"role": "orchestrator",
-                                            "nodes": ["10.0.0.1"], "port": 8000}])
+                                            "nodes": ["192.0.2.1"], "port": 8000}])
         r = check_chat_roundtrip(serving_path=serving, probe=probe)
         assert r["ok"] is True
         assert "1 serving unit" in r["detail"]
@@ -1411,7 +1411,7 @@ class TestCheckChatRoundtrip:
         monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
                             lambda: None)
         serving = self._serving(tmp_path, [{"role": "orchestrator",
-                                            "nodes": ["10.0.0.1"], "port": 8000}])
+                                            "nodes": ["192.0.2.1"], "port": 8000}])
         r = check_chat_roundtrip(serving_path=serving, probe=probe)
         assert r["ok"] is False
         assert "did not answer" in r["detail"]
@@ -1445,7 +1445,7 @@ class TestCheckChatRoundtrip:
         monkeypatch.setattr("hscc_daemon.verify._generation_is_advancing",
                             lambda node, port, window=20.0: True)
         serving = self._serving(tmp_path, [{"role": "orchestrator",
-                                            "nodes": ["10.0.0.1"],
+                                            "nodes": ["192.0.2.1"],
                                             "port": 8000}])
         r = check_chat_roundtrip(serving_path=serving, probe=probe)
         assert r["ok"] is True
@@ -1464,7 +1464,7 @@ class TestCheckChatRoundtrip:
         monkeypatch.setattr("hscc_daemon.verify._generation_is_advancing",
                             lambda node, port, window=20.0: False)
         serving = self._serving(tmp_path, [{"role": "orchestrator",
-                                            "nodes": ["10.0.0.1"],
+                                            "nodes": ["192.0.2.1"],
                                             "port": 8000}])
         r = check_chat_roundtrip(serving_path=serving, probe=probe)
         assert r["ok"] is False
@@ -2021,9 +2021,9 @@ class TestCheckProviderRouting:
     own host resolution (injected here; the seam itself is pinned too).
     Pure-read: the check never rewrites anything."""
 
-    NODE = "10.0.0.1"
-    NODE2 = "10.0.0.2"
-    NODE_URL = "http://10.0.0.1:8000/v1"
+    NODE = "192.0.2.1"
+    NODE2 = "192.0.2.2"
+    NODE_URL = "http://192.0.2.1:8000/v1"
 
     def _state(self, tmp_path, uniform=True):
         p = tmp_path / "applied_template.json"

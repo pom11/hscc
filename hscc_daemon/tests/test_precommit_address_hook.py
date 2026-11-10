@@ -38,7 +38,7 @@ def _addr(*parts):
 REAL_LAN = _addr("192", ".168.88.244")
 REAL_SUBNET = REAL_LAN + "/24"
 REAL_TAILNET = _addr("100.64", ".55.7")
-LAN_PLACEHOLDER = "10.0.0.244"
+LAN_PLACEHOLDER = "192.0.2.244"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 
 GIT = ["git", "-c", "user.name=guard-test", "-c", "user.email=guard@example.invalid",

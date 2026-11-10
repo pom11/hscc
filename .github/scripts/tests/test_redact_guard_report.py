@@ -47,7 +47,7 @@ def _addr(*parts):
 
 REAL_LAN = _addr("192", ".168.88.244")
 REAL_TAILNET = _addr("100.64", ".55.7")
-LAN_PLACEHOLDER = "10.0.0.244"
+LAN_PLACEHOLDER = "10.0.0.x"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 
 

@@ -36,9 +36,9 @@ import pytest
 
 from hscc_daemon import health, serving
 
-HOST_ORCH = "10.0.0.244"
-HOST_WK1 = "10.0.0.247"
-HOST_WK2 = "10.0.0.248"
+HOST_ORCH = "192.0.2.244"
+HOST_WK1 = "192.0.2.247"
+HOST_WK2 = "192.0.2.248"
 BASE = "local-lab/Qwen-Flash-NVFP4"
 
 
@@ -195,7 +195,7 @@ class TestCheckUnitServingAliases:
         res = health.check_unit_serving_aliases(serving_data=_serving())
         assert res["ok"] is True
         assert len(seen) == 3
-        assert all(u.startswith("http://10.0.0.") and u.endswith("/v1/models")
+        assert all(u.startswith("http://192.0.2.") and u.endswith("/v1/models")
                    for u in seen)
 
 

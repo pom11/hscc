@@ -37,7 +37,7 @@ class _FakeEngine:
                 {"name": "@official/qwen3", "tp": 2, "pp": 1, "container_id": "abc123"},
                 {"name": "@official/llama", "tp": 1, "pp": 1, "container_id": "def456"},
             ],
-            "idle_hosts": ["10.0.0.3", "10.0.0.4"],
+            "idle_hosts": ["192.0.2.3", "192.0.2.4"],
             "total_hosts": 4,
         }
 
@@ -46,8 +46,8 @@ class _FakeEngine:
             "saved_clusters": {"success": True, "output": "hscc (default)\nother"},
             "live_status": {"success": True, "output": "1 container across 4 hosts"},
             "hosts": [
-                {"name": "gw", "ip": "10.0.0.1", "role": "gateway"},
-                {"name": "w1", "ip": "10.0.0.2", "role": "worker"},
+                {"name": "gw", "ip": "192.0.2.1", "role": "gateway"},
+                {"name": "w1", "ip": "192.0.2.2", "role": "worker"},
             ],
         }
 
@@ -61,7 +61,7 @@ class _FakeEngine:
 
     def cmd_info(self):
         return {
-            "cluster_config": {"gateway": {"ip": "10.0.0.1"}, "workers": []},
+            "cluster_config": {"gateway": {"ip": "192.0.2.1"}, "workers": []},
             "saved_clusters": {},
             "default_cluster": {"output": "cluster hscc"},
             "cluster_files": {"hscc.yaml": "---\nname: hscc"},

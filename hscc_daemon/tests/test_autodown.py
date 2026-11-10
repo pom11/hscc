@@ -1451,13 +1451,13 @@ def _write_serving(tmp_path):
         "port": 8000,
         "units": [
             {"id": "orch", "role": "orchestrator",
-             "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+             "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/orch.yaml"},
             {"id": "wk1", "role": "worker", "keepalive": False,
-             "nodes": ["10.0.0.247"], "port": 8000,
+             "nodes": ["192.0.2.247"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
             {"id": "wk-keep", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.248"], "port": 8000,
+             "nodes": ["192.0.2.248"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
         ],
     }
@@ -1974,9 +1974,9 @@ class TestAutoup:
         assert len(runner.calls) == 3      # orch + wk1 + wk-keep
         # Keepalive node IS in a start command now (C4 reversed).
         all_hosts = " ".join(" ".join(c["cmd"]) for c in runner.calls)
-        assert "10.0.0.248" in all_hosts      # keepalive restored
-        assert "10.0.0.247" in all_hosts      # non-keepalive worker
-        assert "10.0.0.244" in all_hosts      # orchestrator
+        assert "192.0.2.248" in all_hosts      # keepalive restored
+        assert "192.0.2.247" in all_hosts      # non-keepalive worker
+        assert "192.0.2.244" in all_hosts      # orchestrator
         # Wake set (ready) is the FULL unit set.
         plan_ids = set(res["ready"])
         assert plan_ids == {"wk1", "orch", "wk-keep"}
@@ -2020,7 +2020,7 @@ class TestAutoup:
             # The alias derived from the unit's ROLE: orchestrator-model on the
             # orchestrator's start, worker-model on every worker start.
             host = cmd[cmd.index("--hosts") + 1]
-            if "10.0.0.244" in host:      # orchestrator head node
+            if "192.0.2.244" in host:      # orchestrator head node
                 assert cmd[i + 1].endswith(" orchestrator-model"), cmd[i + 1]
             else:
                 assert cmd[i + 1].endswith(" worker-model"), cmd[i + 1]
@@ -2043,7 +2043,7 @@ class TestAutoup:
         assert res["result"] == "up"
         first = " ".join(runner.calls[0]["cmd"])
         # Orchestrator host (.244) is in the FIRST start command.
-        assert "10.0.0.244" in first
+        assert "192.0.2.244" in first
         assert res["started"][0]["kind"] == "orchestrator"
         # Worker starts (kind == worker) come after the orchestrator.
         kinds = [res["started"][i]["kind"] for i in range(len(runner.calls))]
@@ -2052,8 +2052,8 @@ class TestAutoup:
         # All worker hosts present across the worker start commands.
         all_worker_hosts = " ".join(
             " ".join(runner.calls[i]["cmd"]) for i in range(1, len(runner.calls)))
-        assert "10.0.0.247" in all_worker_hosts
-        assert "10.0.0.248" in all_worker_hosts
+        assert "192.0.2.247" in all_worker_hosts
+        assert "192.0.2.248" in all_worker_hosts
 
     # -- block cleared ONLY after readiness confirmed ------------------------
     def test_block_latched_through_starts_then_cleared(
@@ -3561,9 +3561,9 @@ class TestWaitReadySilentSpin:
     def _plan(self):
         return [
             {"kind": "orchestrator", "unit_id": "orch",
-             "nodes": ["10.0.0.244"], "port": 8000},
+             "nodes": ["192.0.2.244"], "port": 8000},
             {"kind": "worker", "unit_id": "wk1",
-             "nodes": ["10.0.0.247"], "port": 8000},
+             "nodes": ["192.0.2.247"], "port": 8000},
         ]
 
     def test_raising_probe_logs_once_and_returns_not_ok(
@@ -4261,9 +4261,9 @@ class TestLockAndGates:
             "port": 8000,
             "units": [
                 {"id": "orch", "role": "orchestrator",
-                 "nodes": ["10.0.0.244"], "port": 8000},
+                 "nodes": ["192.0.2.244"], "port": 8000},
                 {"id": "wk-keep", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.244"], "port": 8000},
+                 "nodes": ["192.0.2.244"], "port": 8000},
             ],
         }
         collision = tmp_path / "serving.json"

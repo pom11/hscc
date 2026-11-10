@@ -58,13 +58,13 @@ from hscc_daemon import cli_theme, cluster_render
 STOPPED_OK = "Stopped 4 job(s), 4 container(s) across 4 host(s)."
 ALREADY_DOWN_NONE = "No sparkrun containers running."
 ALREADY_DOWN_INTENT = (
-    "Error: failed to stop containers on 10.0.0.247: No running workload "
-    "matches intent sparkrun_7f2a on hosts ['10.0.0.247']")
+    "Error: failed to stop containers on 192.0.2.247: No running workload "
+    "matches intent sparkrun_7f2a on hosts ['192.0.2.247']")
 # sparkrun/cli/_stop_logs.py:215 — benign ONLY while nothing real rides with it.
 ALREADY_DOWN_SUMMARY = ("No sparkrun containers found on the hosts that could "
                         "be queried.")
-COULD_NOT_QUERY = "Error: could not query 10.0.0.246: connection reset by peer"
-REAL_FAILURE = ("Error: failed to stop containers on 10.0.0.248: "
+COULD_NOT_QUERY = "Error: could not query 192.0.2.246: connection reset by peer"
+REAL_FAILURE = ("Error: failed to stop containers on 192.0.2.248: "
                 "ssh: Permission denied (publickey)")
 UNKNOWN_WORDING = "some future sparkrun wording we do not know"
 

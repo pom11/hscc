@@ -17,8 +17,8 @@ The captured window is `~/.hscc/daemon.log` lines whose timestamp falls in
 | 2 | 07:19:32 | `Engine-wedge recovery: unit '...247-8002' streak=3 — resolved container_id=...` | Wedge recovery armed. |
 | 3 | 07:19:34 | `Worker ...247-8002 down — relaunching (...qwen3.8-flash-next-nvfp4-solo-vllm.yaml) on :8002` | **Path (b)** — check_workers relaunch, no load grace. |
 | 4 | 07:19:35 | `Engine-wedge recovery: stopped unit '...247-8002' (stop_ok=True)` then `relaunching missing units via `hscc cluster up`` | **Path (a)** — wedge recovery, same fault. |
-| 5 | 07:20:32 | `Worker proxy unhealthy on :4000 (probe failed: [Errno 61] Connection refused)` then `relaunching with ['10.0.0.244','10.0.0.246','10.0.0.247','10.0.0.248']` | **Path (c)** — proxy relaunch for all 4 hosts. |
-| 6 | 07:21:45 | `Auto-heal: worker ...247-8002 (10.0.0.247:8002) down 3x consecutively — force-recreate via template apply` + `force-recreating via template apply '4node-flash-next-all' --force-recreate` | **Path (d)** — whole template torn down for one unit. |
+| 5 | 07:20:32 | `Worker proxy unhealthy on :4000 (probe failed: [Errno 61] Connection refused)` then `relaunching with ['10.0.0.x','10.0.0.x','10.0.0.x','10.0.0.x']` | **Path (c)** — proxy relaunch for all 4 hosts. |
+| 6 | 07:21:45 | `Auto-heal: worker ...247-8002 (10.0.0.x:8002) down 3x consecutively — force-recreate via template apply` + `force-recreating via template apply '4node-flash-next-all' --force-recreate` | **Path (d)** — whole template torn down for one unit. |
 | 7 | 07:22:41 | `Gateway check: ok=False (job=True vllm=False mux=True)` | Gateway starts reporting down. |
 | 8 | 07:24:29 | `Worker ...248-8003 down — relaunching` / `Workers check: 1/3 online` | Collateral: healthy unit now "down". |
 | 9 | 07:25:29 | `Worker ...246-8001 down — relaunching` / `Workers check: 0/3 online` | All three workers being recycled. |
@@ -34,7 +34,7 @@ counters on different check cycles, and the counters are in-memory (see F2).
 Line 421 proves the load-grace predicate exists and works — but only on the auto-heal path:
 
 ```
-07:37:58 Auto-heal: worker ...248-8003 (10.0.0.248:8003) down 3x but container <1200s old
+07:37:58 Auto-heal: worker ...248-8003 (10.0.0.x:8003) down 3x but container <1200s old
          and has never served — still loading, NOT auto-healing
 ```
 
@@ -89,7 +89,7 @@ missing container — and shielding there would strand a dead unit unrepaired fo
 
 Tests (4 new, in `TestWorkersStartupGrace`): a young never-served container created by
 another path is NOT relaunched (this one FAILS pre-fix, reproducing the incident line
-`Worker w-10.0.0.2 down — relaunching`, verified by reverting `health.py`); the grace is
+`Worker w-10.0.0.x down — relaunching`, verified by reverting `health.py`); the grace is
 bounded so an old container still gets repaired; unknown age does not block the gentle
 path; the destructive path still fails closed. 13/13 in the class pass.
 
@@ -399,7 +399,7 @@ node from a test run.
 they are the kind that make a suite lie):
 
 1. Asserting `heals == [... a[0] ...]` compares against `_autoheal_worker_fn`'s
-   **key tuple** `(node, port)`, so `a[0] == "10.0.0.2"` is never true and the
+   **key tuple** `(node, port)`, so `a[0] == "10.0.0.x"` is never true and the
    assertion passes vacuously — *worse* than failing, because it looks like
    coverage. The signature is `(key, label, node, port)`; the node is `a[2]`.
 2. The restart test used `monkeypatch.setattr(MODULE, "HEAL_BREAKER_MAX", 3)`

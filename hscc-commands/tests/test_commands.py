@@ -9,11 +9,11 @@ SERVING = {
     "units": [
         {"id": "orch-a3b", "role": "orchestrator",
          "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
-         "recipe": "~/r/a3b.yaml", "nodes": ["10.0.0.1"]},
+         "recipe": "~/r/a3b.yaml", "nodes": ["192.0.2.1"]},
         {"id": "worker-2", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"], "keepalive": True},
+         "recipe": "~/r/27b.yaml", "nodes": ["192.0.2.2"], "keepalive": True},
         {"id": "worker-3", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.3"], "keepalive": True},
+         "recipe": "~/r/27b.yaml", "nodes": ["192.0.2.3"], "keepalive": True},
     ],
 }
 
@@ -30,12 +30,12 @@ def test_orchestrator_and_workers(monkeypatch):
     units = cmdlib.read_units()
     assert cmdlib.orchestrator_unit(units)["id"] == "orch-a3b"
     assert [cmdlib.unit_node(w) for w in cmdlib.worker_units(units)] == \
-        ["10.0.0.2", "10.0.0.3"]
+        ["192.0.2.2", "192.0.2.3"]
 
 
 def test_no_orchestrator():
     assert cmdlib.orchestrator_unit(
-        [{"role": "worker", "nodes": ["10.0.0.2"]}]) is None
+        [{"role": "worker", "nodes": ["192.0.2.2"]}]) is None
 
 
 # ── confirm gating ───────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ def test_orch_restart_previews_without_confirm(monkeypatch):
     called = []
     monkeypatch.setattr(cmdlib, "restart_one", lambda u: called.append(u) or {})
     out = plugin.cmd_orch_restart("")
-    assert "Confirm" in out and "10.0.0.1" in out
+    assert "Confirm" in out and "192.0.2.1" in out
     assert called == []                       # must NOT execute on preview
 
 
@@ -89,7 +89,7 @@ def test_cluster_restart_executes_all_with_confirm(monkeypatch):
                         lambda u: fired.append(cmdlib.unit_node(u)) or
                         {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
     out = plugin.cmd_cluster_restart("confirm")
-    assert fired == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert fired == ["192.0.2.1", "192.0.2.2", "192.0.2.3"]
     assert "3/3 launched" in out
 
 
@@ -99,7 +99,7 @@ def test_cluster_restart_reports_failures(monkeypatch):
 
     def fake(u):
         node = cmdlib.unit_node(u)
-        ok = node != "10.0.0.2"
+        ok = node != "192.0.2.2"
         return {"ok": ok, "unit": u["id"], "node": node,
                 "error": None if ok else "boom"}
     monkeypatch.setattr(cmdlib, "restart_one", fake)
@@ -135,16 +135,16 @@ def test_cluster_restart_reapplies_template_confirm(monkeypatch):
 def test_status_renders_topology_and_vram(monkeypatch):
     monkeypatch.setattr(cmdlib, "discovery_snapshot", lambda probe=True: {
         "ok": True, "source": "live",
-        "orchestrator": {"ip": "10.0.0.1", "name": "gw"},
-        "workers": [{"ip": "10.0.0.2", "vram_free_gb": 90.0, "power_draw_w": 12.0,
+        "orchestrator": {"ip": "192.0.2.1", "name": "gw"},
+        "workers": [{"ip": "192.0.2.2", "vram_free_gb": 90.0, "power_draw_w": 12.0,
                      "idle": True, "vllm_healthy": True}],
-        "nas": {"ip": "10.0.0.9"},
+        "nas": {"ip": "192.0.2.9"},
     })
     monkeypatch.setattr(cmdlib, "proxy_health", lambda: True)
     monkeypatch.setattr(cmdlib, "applied_template", lambda: {"template": "hscc-live"})
     monkeypatch.setattr(cmdlib, "autonomy_flag", lambda: "on")
     out = plugin.cmd_status("")
-    assert "live" in out and "10.0.0.2" in out and "90.0GB free" in out
+    assert "live" in out and "192.0.2.2" in out and "90.0GB free" in out
     assert "hscc-live" in out and "on" in out
 
 
@@ -161,18 +161,18 @@ def test_status_tp_peer_worker_never_false_down(monkeypatch):
     """A tp-peer worker has vllm_healthy False (its model lives on the span's
     primary) — /status must render it as 'tp peer', NEVER ❌/unhealthy."""
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {
-        "10.0.0.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+        "192.0.2.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
                        "model": "m", "tp_peer": False, "primary_of_unit": True},
-        "10.0.0.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+        "192.0.2.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
                        "model": "m", "tp_peer": True, "primary_of_unit": False},
     })
     monkeypatch.setattr(cmdlib, "discovery_snapshot", lambda probe=True: {
         "ok": True, "source": "live",
-        "orchestrator": {"ip": "10.0.0.244", "name": "gw"},
+        "orchestrator": {"ip": "192.0.2.244", "name": "gw"},
         "workers": [
-            {"ip": "10.0.0.247", "vram_free_gb": 20.0, "power_draw_w": 300.0,
+            {"ip": "192.0.2.247", "vram_free_gb": 20.0, "power_draw_w": 300.0,
              "idle": False, "vllm_healthy": True},
-            {"ip": "10.0.0.248", "vram_free_gb": 30.0, "power_draw_w": 310.0,
+            {"ip": "192.0.2.248", "vram_free_gb": 30.0, "power_draw_w": 310.0,
              "idle": False, "vllm_healthy": False},   # peer: False is NORMAL
         ],
     })
@@ -181,10 +181,10 @@ def test_status_tp_peer_worker_never_false_down(monkeypatch):
     monkeypatch.setattr(cmdlib, "autonomy_flag", lambda: "on")
     out = plugin.cmd_status("")
     # the peer renders as tp peer with its span, never ❌ / unhealthy
-    assert "🔗 tp peer (member of family-reasoning-247-8000/10.0.0.247 span) 10.0.0.248" in out
+    assert "🔗 tp peer (member of family-reasoning-247-8000/192.0.2.247 span) 192.0.2.248" in out
     assert "❌" not in out
     # healthy primary still shows ✅ worker
-    assert "✅ worker 10.0.0.247" in out
+    assert "✅ worker 192.0.2.247" in out
     # free-VRAM line kept
     assert "30.0GB free" in out
 
@@ -192,24 +192,24 @@ def test_status_tp_peer_worker_never_false_down(monkeypatch):
 def test_heal_reports_unhealthy_and_gates(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     monkeypatch.setattr(cmdlib, "_curl_model",
-                        lambda node: None if node == "10.0.0.2" else "m")
+                        lambda node: None if node == "192.0.2.2" else "m")
     fired = []
     monkeypatch.setattr(cmdlib, "restart_one", lambda u: fired.append(u) or {"ok": True})
     out = plugin.cmd_heal("")
-    assert "10.0.0.2" in out and "/heal confirm" in out
+    assert "192.0.2.2" in out and "/heal confirm" in out
     assert fired == []                          # gated
 
 
 def test_heal_restarts_on_confirm(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     monkeypatch.setattr(cmdlib, "_curl_model",
-                        lambda node: None if node == "10.0.0.2" else "m")
+                        lambda node: None if node == "192.0.2.2" else "m")
     fired = []
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: fired.append(cmdlib.unit_node(u)) or
                         {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
     out = plugin.cmd_heal("confirm")
-    assert fired == ["10.0.0.2"]
+    assert fired == ["192.0.2.2"]
 
 
 def test_heal_advises_cluster_restart_on_orch_wedge(monkeypatch):
@@ -247,7 +247,7 @@ def test_cluster_status_never_mutates(monkeypatch):
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})  # no live sparkrun
 
     out = plugin.cmd_cluster("")
-    assert "Orchestrator" in out and "10.0.0.244" in out
+    assert "Orchestrator" in out and "192.0.2.244" in out
     # tp peer rendered as tp peer, NEVER as down/❌
     assert "🔗 tp peer" in out and "tp peer" in out
     assert "serving" in out
@@ -257,26 +257,26 @@ def test_cluster_status_never_mutates(monkeypatch):
 def test_cluster_status_shows_metrics(monkeypatch):
     """Metrics attach per-node from cluster_metrics, incl. the VRAM-used line."""
     monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: [
-        {"ip": "10.0.0.1", "name": "gw", "id": "gw", "role": "gateway"},
-        {"ip": "10.0.0.2", "name": "w1", "id": "w1", "role": "worker"},
+        {"ip": "192.0.2.1", "name": "gw", "id": "gw", "role": "gateway"},
+        {"ip": "192.0.2.2", "name": "w1", "id": "w1", "role": "worker"},
     ])
     monkeypatch.setattr(cmdlib, "read_units",
                         lambda: [{"id": "u1", "role": "worker", "model": "m",
-                                  "nodes": ["10.0.0.1"]}])
+                                  "nodes": ["192.0.2.1"]}])
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {
-        "10.0.0.1": {"role": "worker", "unit_id": "u1", "model": "m",
+        "192.0.2.1": {"role": "worker", "unit_id": "u1", "model": "m",
                      "tp_peer": False, "primary_of_unit": True},
-        "10.0.0.2": {"role": "worker", "unit_id": "u1", "model": "m",
+        "192.0.2.2": {"role": "worker", "unit_id": "u1", "model": "m",
                      "tp_peer": True, "primary_of_unit": False},
     })
     monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: [
-        {"ip": "10.0.0.1", "state": "serving", "model": "m", "name": "gw",
+        {"ip": "192.0.2.1", "state": "serving", "model": "m", "name": "gw",
          "id": "gw", "role": "gateway", "detail": ""},
-        {"ip": "10.0.0.2", "state": "tp_peer", "model": None, "name": "w1",
+        {"ip": "192.0.2.2", "state": "tp_peer", "model": None, "name": "w1",
          "id": "w1", "role": "worker", "detail": "tp peer of a multi-node span"},
     ])
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
-        "10.0.0.1": {"host": "10.0.0.1", "error": None, "sample": {
+        "192.0.2.1": {"host": "192.0.2.1", "error": None, "sample": {
             "cpu_usage_pct": "12", "cpu_temp_c": "55",
             "cpu_load_1m": "0.5", "mem_used_pct": "40",
             "mem_available_mb": "90000", "gpu_name": "GB10",
@@ -295,21 +295,21 @@ def test_cluster_metrics_returns_dict_keyed_by_ip(monkeypatch):
     payload = json.dumps({
         "timestamp": 1770000000.0,
         "hosts": [
-            {"host": "10.0.0.1", "error": None,
+            {"host": "192.0.2.1", "error": None,
              "sample": {"cpu_usage_pct": "12", "gpu_util_pct": "30"}},
-            {"host": "10.0.0.2", "error": None,
+            {"host": "192.0.2.2", "error": None,
              "sample": {"cpu_usage_pct": "5", "gpu_util_pct": "0"}},
-            {"host": "10.0.0.3", "error": "collect failed", "sample": None},
+            {"host": "192.0.2.3", "error": "collect failed", "sample": None},
         ],
     })
     monkeypatch.setattr(cmdlib, "_run", lambda *a, **k: (True, payload, ""))
     metrics = cmdlib.cluster_metrics()
     assert isinstance(metrics, dict)
-    assert set(metrics) == {"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+    assert set(metrics) == {"192.0.2.1", "192.0.2.2", "192.0.2.3"}
     # each value is the full host entry, metric fields nested under sample
-    assert metrics["10.0.0.2"]["sample"]["gpu_util_pct"] == "0"
-    assert metrics["10.0.0.3"]["error"] == "collect failed"
-    assert metrics["10.0.0.3"]["sample"] is None
+    assert metrics["192.0.2.2"]["sample"]["gpu_util_pct"] == "0"
+    assert metrics["192.0.2.3"]["error"] == "collect failed"
+    assert metrics["192.0.2.3"]["sample"] is None
 
 
 def test_cluster_metrics_empty_when_hosts_not_a_list(monkeypatch):
@@ -336,30 +336,30 @@ def _four_node_engine():
 
     Returns (hosts_from_cluster_json, scoreboard, engine_nodes)."""
     hosts = [
-        {"ip": "10.0.0.244", "name": "GX10 Gateway", "id": "gx10-gateway", "role": "gateway"},
-        {"ip": "10.0.0.246", "name": "GX10 #1", "id": "gx10-worker-1", "role": "worker"},
-        {"ip": "10.0.0.247", "name": "GX10 #2", "id": "gx10-worker-2", "role": "worker"},
-        {"ip": "10.0.0.248", "name": "GX10 #3", "id": "gx10-worker-3", "role": "worker"},
+        {"ip": "192.0.2.244", "name": "GX10 Gateway", "id": "gx10-gateway", "role": "gateway"},
+        {"ip": "192.0.2.246", "name": "GX10 #1", "id": "gx10-worker-1", "role": "worker"},
+        {"ip": "192.0.2.247", "name": "GX10 #2", "id": "gx10-worker-2", "role": "worker"},
+        {"ip": "192.0.2.248", "name": "GX10 #3", "id": "gx10-worker-3", "role": "worker"},
     ]
     score = {
-        "10.0.0.244": {"role": "orchestrator", "unit_id": "orch", "model": "m",
+        "192.0.2.244": {"role": "orchestrator", "unit_id": "orch", "model": "m",
                        "tp_peer": False, "primary_of_unit": True},
-        "10.0.0.246": {"role": "worker", "unit_id": "orch", "model": "m",
+        "192.0.2.246": {"role": "worker", "unit_id": "orch", "model": "m",
                        "tp_peer": True, "primary_of_unit": False},
-        "10.0.0.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+        "192.0.2.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
                        "model": "m", "tp_peer": False, "primary_of_unit": True},
-        "10.0.0.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+        "192.0.2.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
                        "model": "m", "tp_peer": False, "primary_of_unit": True},
     }
     nodes = [
-        {"ip": "10.0.0.244", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        {"ip": "192.0.2.244", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
          "name": "GX10 Gateway", "id": "gx10-gateway", "role": "gateway", "detail": ""},
-        {"ip": "10.0.0.246", "state": "tp_peer", "model": None,
+        {"ip": "192.0.2.246", "state": "tp_peer", "model": None,
          "name": "GX10 #1", "id": "gx10-worker-1", "role": "worker",
          "detail": "tp peer of a multi-node span"},
-        {"ip": "10.0.0.247", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        {"ip": "192.0.2.247", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
          "name": "GX10 #2", "id": "gx10-worker-2", "role": "worker", "detail": ""},
-        {"ip": "10.0.0.248", "state": "idle", "model": None,
+        {"ip": "192.0.2.248", "state": "idle", "model": None,
          "name": "GX10 #3", "id": "gx10-worker-3", "role": "worker", "detail": "reachable, no model served"},
     ]
     return hosts, score, nodes
@@ -377,15 +377,15 @@ def test_cluster_renders_all_nodes_with_distinct_states(monkeypatch):
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
 
     out = plugin.cmd_cluster("")
-    for ip in ("10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"):
+    for ip in ("192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"):
         assert ip in out, f"missing node {ip}"
     assert "*Nodes (4)*" in out             # header counts NODES, not units
     assert "source: cluster.json" in out    # authoritative source, labeled
     # tp peers distinct & never down
-    assert "🔗 tp peer (member of orch/10.0.0.244 span) @ 10.0.0.246" in out
-    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
+    assert "🔗 tp peer (member of orch/192.0.2.244 span) @ 192.0.2.246" in out
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 192.0.2.247" in out
     # serving vs idle states distinguishable
-    assert "○ idle @ 10.0.0.248  (model not loaded)" in out
+    assert "○ idle @ 192.0.2.248  (model not loaded)" in out
 
 
 def test_cluster_renders_unreachable_distinctly(monkeypatch):
@@ -393,7 +393,7 @@ def test_cluster_renders_unreachable_distinctly(monkeypatch):
     hosts, score, nodes = _four_node_engine()
     # make 248 unreachable instead of idle
     for n in nodes:
-        if n["ip"] == "10.0.0.248":
+        if n["ip"] == "192.0.2.248":
             n["state"], n["model"], n["detail"] = "unreachable", None, "no response on reachability probe"
     monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
@@ -401,7 +401,7 @@ def test_cluster_renders_unreachable_distinctly(monkeypatch):
     monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
     out = plugin.cmd_cluster("")
-    assert "❌ unreachable @ 10.0.0.248" in out
+    assert "❌ unreachable @ 192.0.2.248" in out
 
 
 def test_cluster_falls_back_to_legacy_when_engine_empty(monkeypatch):
@@ -412,12 +412,12 @@ def test_cluster_falls_back_to_legacy_when_engine_empty(monkeypatch):
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {})
     monkeypatch.setattr(cmdlib, "_curl_model",
                         lambda node: "nvidia/Qwen3.6-35B-A3B-NVFP4"
-                        if node == "10.0.0.1" else None)
+                        if node == "192.0.2.1" else None)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
     out = plugin.cmd_cluster("")
     assert "legacy serving.json-primary rendering" in out  # clearly labeled
-    assert "Orchestrator" in out and "10.0.0.1" in out
-    assert "Workers" in out and "10.0.0.2" in out and "10.0.0.3" in out
+    assert "Orchestrator" in out and "192.0.2.1" in out
+    assert "Workers" in out and "192.0.2.2" in out and "192.0.2.3" in out
 
 
 def test_cluster_loaded_but_idle_label(monkeypatch):
@@ -430,7 +430,7 @@ def test_cluster_loaded_but_idle_label(monkeypatch):
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
     monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
-        "10.0.0.247": {"host": "10.0.0.247", "error": None, "sample": {
+        "192.0.2.247": {"host": "192.0.2.247", "error": None, "sample": {
             "gpu_name": "GB10", "gpu_util_pct": "0", "gpu_temp_c": "60",
             "gpu_power_w": "40", "gpu_mem_used_pct": "85",
             "cpu_usage_pct": "1", "cpu_temp_c": "50", "cpu_load_1m": "0.1",
@@ -438,7 +438,7 @@ def test_cluster_loaded_but_idle_label(monkeypatch):
     )
     out = plugin.cmd_cluster("")
     # state line already says serving + the loaded-but-idle note appears
-    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 192.0.2.247" in out
     assert "(model loaded, idle between requests)" in out
     # 0% util is kept as the true number, not tampered
     assert "0% util" in out
@@ -455,19 +455,19 @@ def test_cluster_metrics_none_sample_renders_without_crash(monkeypatch):
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
     monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
-        "10.0.0.244": {"host": "10.0.0.244", "error": None, "sample": None},
-        "10.0.0.247": {"host": "10.0.0.247", "error": None, "sample": None},
+        "192.0.2.244": {"host": "192.0.2.244", "error": None, "sample": None},
+        "192.0.2.247": {"host": "192.0.2.247", "error": None, "sample": None},
     })
     out = plugin.cmd_cluster("")
     # both serving nodes still render their state lines, no traceback
-    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
-    assert "@ 10.0.0.244" in out
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 192.0.2.247" in out
+    assert "@ 192.0.2.244" in out
 
 
 # ── restart_one shells out correctly ─────────────────────────────────────────
 
 def test_restart_one_missing_recipe():
-    res = cmdlib.restart_one({"id": "x", "role": "worker", "nodes": ["10.0.0.9"]})
+    res = cmdlib.restart_one({"id": "x", "role": "worker", "nodes": ["192.0.2.9"]})
     assert res["ok"] is False and "recipe" in res["error"]
 
 
@@ -493,7 +493,7 @@ def test_restart_one_stops_only_target_recipe(monkeypatch):
         return True, "", ""
     monkeypatch.setattr(cmdlib, "_run", fake_run)
     unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
-            "nodes": ["10.0.0.2"], "port": 8001}
+            "nodes": ["192.0.2.2"], "port": 8001}
     cmdlib.restart_one(unit)
     stop_call = calls[0]
     assert "--all" not in stop_call, "must not use --all"
@@ -511,7 +511,7 @@ def test_restart_one_uses_unit_port(monkeypatch):
         return True, "", ""
     monkeypatch.setattr(cmdlib, "_run", fake_run)
     unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
-            "nodes": ["10.0.0.2"], "port": 8001}
+            "nodes": ["192.0.2.2"], "port": 8001}
     cmdlib.restart_one(unit)
     run_call = calls[1]
     port_idx = run_call.index("--port")
@@ -527,7 +527,7 @@ def test_restart_one_falls_back_to_default_port(monkeypatch):
         return True, "", ""
     monkeypatch.setattr(cmdlib, "_run", fake_run)
     unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
-            "nodes": ["10.0.0.2"]}  # no port
+            "nodes": ["192.0.2.2"]}  # no port
     cmdlib.restart_one(unit)
     run_call = calls[1]
     port_idx = run_call.index("--port")
@@ -570,19 +570,19 @@ def test_workers_up_skips_online_workers(monkeypatch):
     out = plugin.cmd_workers_up("")
     assert restarted == []
     assert "already online" in out
-    assert "10.0.0.2" in out and "10.0.0.3" in out
+    assert "192.0.2.2" in out and "192.0.2.3" in out
 
 
 def test_workers_up_launches_down_workers(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     monkeypatch.setattr(cmdlib, "check_unit_health",
-                        lambda node, port=None: node != "10.0.0.2")  # worker-2 down
+                        lambda node, port=None: node != "192.0.2.2")  # worker-2 down
     restarted = []
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: restarted.append(cmdlib.unit_node(u)) or
                         {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
     out = plugin.cmd_workers_up("")
-    assert restarted == ["10.0.0.2"]
+    assert restarted == ["192.0.2.2"]
     assert "already online" in out
     assert "launched" in out
 
@@ -594,9 +594,9 @@ def test_workers_up_never_restarts_orchestrator(monkeypatch):
         "units": [
             {"id": "orch-a3b", "role": "orchestrator",
              "model": "x", "recipe": "~/r/a3b.yaml",
-             "nodes": ["10.0.0.1"], "keepalive": True},
+             "nodes": ["192.0.2.1"], "keepalive": True},
             {"id": "worker-2", "role": "worker", "model": "Qwen/27B",
-             "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"], "keepalive": True},
+             "recipe": "~/r/27b.yaml", "nodes": ["192.0.2.2"], "keepalive": True},
         ],
     }
     monkeypatch.setattr(cmdlib, "read_units", lambda: units_with_orch_keepalive["units"])
@@ -629,7 +629,7 @@ def test_workers_up_no_keepalive_workers(monkeypatch):
         "version": 1, "port": 8000,
         "units": [
             {"id": "w1", "role": "worker", "model": "m",
-             "recipe": "~/r/m.yaml", "nodes": ["10.0.0.2"]},  # no keepalive
+             "recipe": "~/r/m.yaml", "nodes": ["192.0.2.2"]},  # no keepalive
         ],
     }
     monkeypatch.setattr(cmdlib, "read_units", lambda: units["units"])
@@ -643,14 +643,14 @@ def test_workers_up_no_keepalive_workers(monkeypatch):
 
 CLUSTER_LIVE = {
     "name": "hscc",
-    "gateway": {"ip": "10.0.0.244", "name": "GX10 Gateway",
+    "gateway": {"ip": "192.0.2.244", "name": "GX10 Gateway",
                 "sshUser": "spark", "id": "gx10-gateway", "role": "gateway"},
     "workers": [
-        {"ip": "10.0.0.246", "name": "GX10 #1", "sshUser": "spark",
+        {"ip": "192.0.2.246", "name": "GX10 #1", "sshUser": "spark",
          "id": "gx10-worker-1", "role": "worker"},
-        {"ip": "10.0.0.247", "name": "GX10 #2", "sshUser": "spark",
+        {"ip": "192.0.2.247", "name": "GX10 #2", "sshUser": "spark",
          "id": "gx10-worker-2", "role": "worker"},
-        {"ip": "10.0.0.248", "name": "GX10 #3", "sshUser": "spark",
+        {"ip": "192.0.2.248", "name": "GX10 #3", "sshUser": "spark",
          "id": "gx10-worker-3", "role": "worker"},
     ],
 }
@@ -661,11 +661,11 @@ SERVING_LIVE = {
         {"id": "orch", "role": "orchestrator",
          "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
          "recipe": "~/r/v4.yaml",
-         "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000},
+         "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000},
         {"id": "family-reasoning-247-8000", "role": "worker", "keepalive": True,
          "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
          "recipe": "~/r/v4.yaml",
-         "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000, "tp": 2, "pp": 1},
+         "nodes": ["192.0.2.247", "192.0.2.248"], "port": 8000, "tp": 2, "pp": 1},
     ],
 }
 
@@ -678,21 +678,21 @@ def test_read_cluster_json_all_hosts(tmp_path, monkeypatch):
     monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
     hosts = cmdlib.read_cluster_json()
     ips = [h["ip"] for h in hosts]
-    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert ips == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
     assert hosts[0]["name"] == "GX10 Gateway"
     assert hosts[0]["id"] == "gx10-gateway"
 
 
 def test_read_cluster_json_excludes_nas(tmp_path, monkeypatch):
     d = dict(CLUSTER_LIVE)
-    d["nasDevices"] = [{"ip": "10.0.0.249", "name": "nas"}]
+    d["nasDevices"] = [{"ip": "192.0.2.249", "name": "nas"}]
     f = tmp_path / "cluster.json"
     f.write_text(json.dumps(d))
     monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
     hosts = cmdlib.read_cluster_json()
     ips = [h["ip"] for h in hosts]
-    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
-    assert not any(h["ip"] == "10.0.0.249" for h in hosts)
+    assert ips == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
+    assert not any(h["ip"] == "192.0.2.249" for h in hosts)
 
 
 def test_read_cluster_json_empty_on_missing(tmp_path, monkeypatch):
@@ -712,37 +712,37 @@ def test_read_cluster_json_empty_on_corrupt(tmp_path, monkeypatch):
 def test_serving_unit_scoreboard_marks_tp_peers(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
     score = cmdlib.serving_unit_scoreboard()
-    assert sorted(score) == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
-    assert score["10.0.0.246"]["tp_peer"] is True
-    assert score["10.0.0.248"]["tp_peer"] is True
-    assert score["10.0.0.244"]["primary_of_unit"] is True
-    assert score["10.0.0.247"]["primary_of_unit"] is True
-    assert score["10.0.0.246"]["primary_of_unit"] is False
-    assert score["10.0.0.244"]["role"] == "orchestrator"
-    assert score["10.0.0.247"]["role"] == "worker"
+    assert sorted(score) == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
+    assert score["192.0.2.246"]["tp_peer"] is True
+    assert score["192.0.2.248"]["tp_peer"] is True
+    assert score["192.0.2.244"]["primary_of_unit"] is True
+    assert score["192.0.2.247"]["primary_of_unit"] is True
+    assert score["192.0.2.246"]["primary_of_unit"] is False
+    assert score["192.0.2.244"]["role"] == "orchestrator"
+    assert score["192.0.2.247"]["role"] == "worker"
 
 
 def test_scoreboard_primary_dominates_peer(monkeypatch):
     """A node primary in one unit and peer in another stays primary."""
     units = [
         {"id": "u1", "role": "worker", "model": "m",
-         "nodes": ["10.0.0.2", "10.0.0.3"], "tp": 2},       # 10.0.0.3 is peer
+         "nodes": ["192.0.2.2", "192.0.2.3"], "tp": 2},       # 192.0.2.3 is peer
         {"id": "u2", "role": "worker", "model": "other",
-         "nodes": ["10.0.0.3", "10.0.0.4"], "tp": 2},       # 10.0.0.3 primary here
+         "nodes": ["192.0.2.3", "192.0.2.4"], "tp": 2},       # 192.0.2.3 primary here
     ]
     monkeypatch.setattr(cmdlib, "read_units", lambda: units)
     score = cmdlib.serving_unit_scoreboard()
-    assert score["10.0.0.3"]["primary_of_unit"] is True
-    assert score["10.0.0.3"]["tp_peer"] is False
-    assert score["10.0.0.3"]["model"] == "other"            # dominant unit's lineage
+    assert score["192.0.2.3"]["primary_of_unit"] is True
+    assert score["192.0.2.3"]["tp_peer"] is False
+    assert score["192.0.2.3"]["model"] == "other"            # dominant unit's lineage
 
 
 def test_scoreboard_tp1_single_node_not_peer(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units",
                         lambda: [{"id": "w1", "role": "worker", "model": "m",
-                                  "nodes": ["10.0.0.2"], "tp": 1}])
+                                  "nodes": ["192.0.2.2"], "tp": 1}])
     score = cmdlib.serving_unit_scoreboard()
-    s = score["10.0.0.2"]
+    s = score["192.0.2.2"]
     assert s["tp_peer"] is False and s["primary_of_unit"] is True
 
 
@@ -784,27 +784,27 @@ def test_pick_served_model_empty_and_malformed():
 # classify_node ────────────────────────────────────────────────────────────────
 
 def test_classify_serving_when_probe_returns_model():
-    res = cmdlib.classify_node("10.0.0.1", {}, probe_fn=lambda ip: "Qwen/27B")
+    res = cmdlib.classify_node("192.0.2.1", {}, probe_fn=lambda ip: "Qwen/27B")
     assert res["state"] == "serving" and res["model"] == "Qwen/27B"
 
 
 def test_classify_tp_peer_never_down():
     """tp_peer honored even when probe returns None — a tp peer is never down."""
-    score = {"10.0.0.6": {"tp_peer": True, "primary_of_unit": False}}
-    res = cmdlib.classify_node("10.0.0.6", score,
+    score = {"192.0.2.6": {"tp_peer": True, "primary_of_unit": False}}
+    res = cmdlib.classify_node("192.0.2.6", score,
                                probe_fn=lambda ip: None,          # no model at :8000
                                reachability_fn=lambda ip: False)  # unreachable too
     assert res["state"] == "tp_peer"
 
 
 def test_classify_idle_when_reachable_probe_none():
-    res = cmdlib.classify_node("10.0.0.7", {}, probe_fn=lambda ip: None,
+    res = cmdlib.classify_node("192.0.2.7", {}, probe_fn=lambda ip: None,
                                reachability_fn=lambda ip: True)
     assert res["state"] == "idle"
 
 
 def test_classify_unreachable_when_probe_fails():
-    res = cmdlib.classify_node("10.0.0.8", {}, probe_fn=lambda ip: None,
+    res = cmdlib.classify_node("192.0.2.8", {}, probe_fn=lambda ip: None,
                                reachability_fn=lambda ip: False)
     assert res["state"] == "unreachable"
 
@@ -814,24 +814,24 @@ def test_classify_unreachable_when_probe_fails():
 def test_enumerate_cluster_nodes_all_present(monkeypatch):
     """probe serves only primaries → states [serving, tp_peer, serving, tp_peer]."""
     monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: [
-        {"ip": "10.0.0.244", "name": "GX10 Gateway", "id": "gx10-gateway",
+        {"ip": "192.0.2.244", "name": "GX10 Gateway", "id": "gx10-gateway",
          "role": "gateway"},
-        {"ip": "10.0.0.246", "name": "GX10 #1", "id": "gx10-worker-1",
+        {"ip": "192.0.2.246", "name": "GX10 #1", "id": "gx10-worker-1",
          "role": "worker"},
-        {"ip": "10.0.0.247", "name": "GX10 #2", "id": "gx10-worker-2",
+        {"ip": "192.0.2.247", "name": "GX10 #2", "id": "gx10-worker-2",
          "role": "worker"},
-        {"ip": "10.0.0.248", "name": "GX10 #3", "id": "gx10-worker-3",
+        {"ip": "192.0.2.248", "name": "GX10 #3", "id": "gx10-worker-3",
          "role": "worker"},
     ])
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
 
     def probe(ip):
-        return "deepseek-ai/DeepSeek-V4-Flash-0731" if ip in ("10.0.0.244", "10.0.0.247") else None
+        return "deepseek-ai/DeepSeek-V4-Flash-0731" if ip in ("192.0.2.244", "192.0.2.247") else None
 
     nodes = cmdlib.enumerate_cluster_nodes(probe_fn=probe,
                                            reachability_fn=lambda ip: True)
     ips = [n["ip"] for n in nodes]
-    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert ips == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
     assert [n["state"] for n in nodes] == ["serving", "tp_peer", "serving", "tp_peer"]
     assert nodes[0]["model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
     assert nodes[1]["model"] is None
@@ -846,14 +846,14 @@ def test_enumerate_falls_back_to_serving_nodes(monkeypatch):
     nodes = cmdlib.enumerate_cluster_nodes(probe_fn=lambda ip: None,
                                            reachability_fn=lambda ip: True)
     ips = [n["ip"] for n in nodes]
-    assert sorted(ips) == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert sorted(ips) == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
     assert [n["state"] for n in nodes] == ["idle", "tp_peer", "idle", "tp_peer"]
 
 
 def test_enumerate_excludes_nas_from_node_list(tmp_path, monkeypatch):
     """nasDevices in cluster.json must NOT surface as a failed node (no NAS row)."""
     d = dict(CLUSTER_LIVE)
-    d["nasDevices"] = [{"ip": "10.0.0.249", "name": "nas"}]
+    d["nasDevices"] = [{"ip": "192.0.2.249", "name": "nas"}]
     f = tmp_path / "cluster.json"
     f.write_text(json.dumps(d))
     monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
@@ -861,6 +861,6 @@ def test_enumerate_excludes_nas_from_node_list(tmp_path, monkeypatch):
     nodes = cmdlib.enumerate_cluster_nodes(probe_fn=lambda ip: None,
                                            reachability_fn=lambda ip: True)
     ips = [n["ip"] for n in nodes]
-    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
-    assert "10.0.0.249" not in ips           # NAS never rendered as a node
+    assert ips == ["192.0.2.244", "192.0.2.246", "192.0.2.247", "192.0.2.248"]
+    assert "192.0.2.249" not in ips           # NAS never rendered as a node
     assert [n["state"] for n in nodes] == ["idle", "tp_peer", "idle", "tp_peer"]

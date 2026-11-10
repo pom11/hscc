@@ -51,7 +51,7 @@ model:
 model:
   default: nvidia/Qwen3.6-35B-A3B-NVFP4
   provider: custom
-  base_url: http://10.0.0.244:8000/v1
+  base_url: http://10.0.0.x:8000/v1
   api_key: sk-sparkrun
 ```
 

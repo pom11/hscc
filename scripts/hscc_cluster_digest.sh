@@ -16,7 +16,7 @@ echo "Containers: $TOTAL job(s) across hosts"
 # Endpoint health summary
 HEALTHY=0
 DOWN=()
-for HOST in 10.0.0.244 10.0.0.246 10.0.0.247 10.0.0.248; do
+for HOST in 192.0.2.244 192.0.2.246 192.0.2.247 192.0.2.248; do
   if /usr/bin/curl -s -f -m 3 "http://$HOST:8000/v1/models" >/dev/null 2>&1; then
     HEALTHY=$((HEALTHY+1))
   else

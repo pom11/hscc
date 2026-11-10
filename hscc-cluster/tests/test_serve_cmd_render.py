@@ -29,7 +29,7 @@ from cluster_template import (  # noqa: E402
 
 
 def _render(tp=1, gpu_mem=None):
-    return _render_serve_cmd("hscc", "10.0.0.2", 8000, "/r/model.yaml",
+    return _render_serve_cmd("hscc", "192.0.2.2", 8000, "/r/model.yaml",
                              "worker-model", tp, "org/model", gpu_mem)
 
 
@@ -62,8 +62,8 @@ class TestDriftNormalization:
         assert "--tp" in _diff_serve_cmds(legacy, _render(tp=2))
 
     def test_a_real_change_is_still_detected(self):
-        a = _render_serve_cmd("hscc", "10.0.0.2", 8000, "/r/a.yaml", "m", 1)
-        b = _render_serve_cmd("hscc", "10.0.0.2", 9000, "/r/a.yaml", "m", 1)
+        a = _render_serve_cmd("hscc", "192.0.2.2", 8000, "/r/a.yaml", "m", 1)
+        b = _render_serve_cmd("hscc", "192.0.2.2", 9000, "/r/a.yaml", "m", 1)
         assert serve_cmds_equivalent(a, b) is False
         assert "--port" in _diff_serve_cmds(a, b)
 

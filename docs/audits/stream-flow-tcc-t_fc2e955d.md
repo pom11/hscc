@@ -90,5 +90,5 @@ restart loop.
 ## Traceability
 - commit b48548c — fix(daemon): surface macOS Local Network hint on LAN errno 65
 - All probes were throwaway scripts in the worktree (now removed); none committed.
-- No real host/IP committed (tests and this report use 10.0.0.10 / 1.1.1.1 /
+- No real host/IP committed (tests and this report use 10.0.0.x / 1.1.1.1 /
   <GATEWAY_IP> placeholders); test_no_real_addresses_committed.py passes.

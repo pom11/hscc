@@ -42,7 +42,7 @@
         "model": "orch",
         "recipe": "orch.yaml",
         "nodes": [
-          "10.0.0.1"
+          "192.0.2.1"
         ],
         "port": 8000
       },
@@ -53,7 +53,7 @@
         "model": "work",
         "recipe": "work.yaml",
         "nodes": [
-          "10.0.0.2"
+          "192.0.2.2"
         ],
         "port": 8000,
         "tp": 1,
@@ -67,7 +67,7 @@
         "model": "work",
         "recipe": "work.yaml",
         "nodes": [
-          "10.0.0.3"
+          "192.0.2.3"
         ],
         "port": 8000,
         "tp": 1,
@@ -78,7 +78,7 @@
   },
   "hermes_config": {
     "model": {
-      "base_url": "http://10.0.0.1:8000/v1",
+      "base_url": "http://192.0.2.1:8000/v1",
       "provider": "custom",
       "default": "orchestrator-model"
     },
@@ -86,9 +86,9 @@
       {
         "name": "custom",
         "model": {
-          "default": "10.0.0.1:8000"
+          "default": "192.0.2.1:8000"
         },
-        "base_url": "http://10.0.0.1:8000/v1"
+        "base_url": "http://192.0.2.1:8000/v1"
       },
       {
         "name": "family-coding",
@@ -114,7 +114,7 @@
       {
         "consumer": "compaction",
         "target": "orchestrator",
-        "base_url": "http://10.0.0.1:8000/v1",
+        "base_url": "http://192.0.2.1:8000/v1",
         "model": "orchestrator-model",
         "keys": [
           "auxiliary.compression.base_url",
@@ -124,7 +124,7 @@
       {
         "consumer": "auxiliaries",
         "target": "family-reasoning",
-        "base_url": "http://10.0.0.3:8000/v1",
+        "base_url": "http://192.0.2.3:8000/v1",
         "model": "worker-model",
         "keys": [
           "auxiliary.kanban_decomposer.base_url",

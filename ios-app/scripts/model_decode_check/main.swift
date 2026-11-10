@@ -384,7 +384,7 @@ do {
         && (delta.start ?? []).count == 1
         && stopIds.contains("a1")
         && (delta.move ?? []).isEmpty
-        && delta.affected_nodes?.contains("10.0.0.244") == true {
+        && delta.affected_nodes?.contains("192.0.2.244") == true {
         c.passed += 1
         print("OK   template_preview_hscc-live.json  →  serve_delta decodes (start/stop/move + affected nodes)")
     } else {

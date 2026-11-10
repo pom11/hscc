@@ -38,18 +38,22 @@ def _addr(*parts):
     return "".join(parts)
 
 
-REAL_LAN = _addr("192", ".168.88.244")            # the live LAN's NAS host
+REAL_LAN = _addr("192", ".168.88.244")            # the old live LAN's NAS host
+REAL_LAN10 = _addr("10", ".0.0.244")             # the current live LAN's orch host
+REAL_LAN10_NAS = _addr("10", ".0.0.249")         # the current live LAN's NAS
 REAL_TAILNET = _addr("100.64", ".55.7")           # CGNAT, outside the fixture block
-LAN_PLACEHOLDER = "10.0.0.244"
+LAN_PLACEHOLDER = "10.0.0.x"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 
 
 # ── pattern verdicts (shared by pytest gate and hook) ────────────────────────
 
 @pytest.mark.parametrize("text,expect_hit", [
-    (f"mount {REAL_LAN}:/models", REAL_LAN),                       # live LAN
+    (f"mount {REAL_LAN}:/models", REAL_LAN),                       # old live LAN
     (f"subnet {REAL_LAN}/24", REAL_LAN),                            # export list
     (f"ping {_addr('192', '.168.88.1')}", _addr("192", ".168.88.1")),   # LAN gateway
+    (f"mount {REAL_LAN10}:/models", REAL_LAN10),                    # current live LAN
+    (f"node {REAL_LAN10_NAS}", REAL_LAN10_NAS),                     # current LAN NAS
     (f"api https://{REAL_TAILNET}:8787", REAL_TAILNET),             # CGNAT, not fixture
     (f"host {_addr('100', '.65.1.1')}", _addr("100", ".65.1.1")),   # CGNAT above 100.64
     (f"host {_addr('100.127', '.9.9')}", _addr("100.127", ".9.9")),  # top of CGNAT
@@ -57,8 +61,9 @@ TAILNET_PLACEHOLDER = "100.64.0.1"
     (f"use {TAILNET_PLACEHOLDER}", None),                            # tailnet placeholder
     ("fixture 100.64.0.3 and 100.64.0.254", None),                   # sanctioned block
     ("172.16.4.5 and 8.8.8.8", None),                                # out of scope
-    ("10.0.0.244/24 export", None),                                  # placeholder subnet
-    ("192.168.89.244 is a different subnet", None),                  # not the live LAN
+    ("192.0.2.244/24 export", None),                                  # documentation range
+    ("10.0.0.x/24 export", None),                                     # placeholder subnet
+    ("192.168.89.244 is a different subnet", None),                  # not the old live LAN
 ])
 def test_find_in_text_verdicts(text, expect_hit):
     hits = address_guard.find_in_text(text)

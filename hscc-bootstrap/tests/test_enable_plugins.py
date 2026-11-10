@@ -299,7 +299,7 @@ def test_compaction_aux_defaults_to_orchestrator(tmp_path):
     # aux compaction targets the orchestrator (COMPACT_URL/COMPACT_BASE_URL),
     # NOT the worker proxy (WORKER_PROXY_URL) — they are different endpoints.
     assert aux.get("base_url") == enable_plugins.COMPACT_URL
-    assert "10.0.0.244" in aux["base_url"]
+    assert "192.0.2.244" in aux["base_url"]
 
 
 def test_worker_proxy_default_is_lb_4000(tmp_path):
@@ -583,14 +583,14 @@ def test_compaction_threshold_raised(tmp_path, monkeypatch):
 
 
 def test_compaction_aux_wired_when_url_set(tmp_path, monkeypatch):
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:8000/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
     # start from a config WITHOUT aux.compression so the override gets filled
     path = _write(tmp_path / "config.yaml",
                   {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
     res = enable_plugins.enable(path)
     aux = yaml.safe_load(open(path))["auxiliary"]["compression"]
-    assert aux["base_url"] == "http://10.0.0.1:8000/v1"
+    assert aux["base_url"] == "http://192.0.2.1:8000/v1"
     assert aux["model"] == "orch-model"
     assert "aux.base_url" in res["compaction"]
 
@@ -638,12 +638,12 @@ def test_compact_models_url_preserves_v1_no_duplication():
     in /v1 (the default), so appending another /v1/models yielded
     ``.../v1/v1/models`` — the probe always targeted a wrong path and could
     never verify the model (spurious 404 warning even when served correctly)."""
-    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1") == \
-        "http://10.0.0.1:8000/v1/models"
-    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1/") == \
-        "http://10.0.0.1:8000/v1/models"
-    assert enable_plugins._compact_models_url("http://10.0.0.1:8000") == \
-        "http://10.0.0.1:8000/models"
+    assert enable_plugins._compact_models_url("http://192.0.2.1:8000/v1") == \
+        "http://192.0.2.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://192.0.2.1:8000/v1/") == \
+        "http://192.0.2.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://192.0.2.1:8000") == \
+        "http://192.0.2.1:8000/models"
     assert enable_plugins._compact_models_url("") == ""
     assert enable_plugins._compact_models_url("  ") == ""
 
@@ -999,7 +999,7 @@ def test_bitwarden_preserves_explicit_false(tmp_path, monkeypatch):
 
 def test_compaction_timeout_preserved_when_operator_sets_higher(tmp_path, monkeypatch):
     """Fix 3: when operator set aux.timeout=120 (> default 90), it is NOT lowered to 90."""
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:8000/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
     monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
     cfg = {
@@ -1014,7 +1014,7 @@ def test_compaction_timeout_preserved_when_operator_sets_higher(tmp_path, monkey
                        "api_key": "sk-sparkrun", "max_concurrent_children": 9},
         "compression": {"threshold": 0.8},
         "auxiliary": {"compression": {
-            "base_url": "http://10.0.0.1:8000/v1",
+            "base_url": "http://192.0.2.1:8000/v1",
             "model": "orch-model",
             "provider": "custom",
             "api_key": "sk-test",
@@ -1023,7 +1023,7 @@ def test_compaction_timeout_preserved_when_operator_sets_higher(tmp_path, monkey
         "fallback_providers": [{"provider": "custom", "model": "Qwen/Qwen3.6-27B-FP8",
                                 "base_url": "http://localhost:4000/v1", "api_key": "sk-sparkrun"}],
         "prompt_caching": {"cache_ttl": "1hr"},
-        "dashboard": {"public_url": "http://10.0.0.245:3000"},
+        "dashboard": {"public_url": "http://192.0.2.245:3000"},
         "hooks": {},
         "multiplex_profiles": True,
         "gateway": {"multiplex_profiles": True},
@@ -1038,7 +1038,7 @@ def test_compaction_timeout_preserved_when_operator_sets_higher(tmp_path, monkey
 
 def test_compaction_timeout_filled_when_absent(tmp_path, monkeypatch):
     """timeout absent → filled with COMPACT_TIMEOUT."""
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:8000/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
     monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
     cfg = {"auxiliary": {"compression": {}}}
@@ -1051,7 +1051,7 @@ def test_compaction_timeout_filled_when_absent(tmp_path, monkeypatch):
 
 def test_compaction_timeout_filled_when_non_int(tmp_path, monkeypatch):
     """timeout is a string → filled with COMPACT_TIMEOUT."""
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:8000/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
     monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
     cfg = {"auxiliary": {"compression": {"timeout": "fast"}}}
@@ -1182,13 +1182,13 @@ class TestEnsureGoalJudge:
         judge config with fleet defaults is the overwrite we must never do."""
         path = _write(tmp_path / "config.yaml", {**self.BASE, "auxiliary": {
             "goal_judge": {"provider": "custom", "model": "worker-model",
-                           "base_url": "http://10.0.0.9:4000/v1",
+                           "base_url": "http://192.0.2.9:4000/v1",
                            "api_key": "", "timeout": 30}}})
         res = enable_plugins.enable(path)
         assert res["goal_judge"] == []
         gj = yaml.safe_load(open(path))["auxiliary"]["goal_judge"]
         assert gj["model"] == "worker-model"
-        assert gj["base_url"] == "http://10.0.0.9:4000/v1"   # operator endpoint kept
+        assert gj["base_url"] == "http://192.0.2.9:4000/v1"   # operator endpoint kept
         assert gj["timeout"] == 30                            # operator timeout kept
         assert gj["api_key"] == ""                            # even empty: untouched
 

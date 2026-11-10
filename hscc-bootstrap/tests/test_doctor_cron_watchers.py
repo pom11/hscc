@@ -27,12 +27,12 @@ import doctor
 
 CHECK_NAME = "cron watchers (dep_pr/escalate)"
 
-FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["10.0.0.1"]}])
+FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
 
 
 def _fleet_health():
     """Stub every other fleet seam so run_doctor() cannot reach anything real."""
-    return {"_cluster_default_runner": lambda: '{"hosts": ["10.0.0.1"]}',
+    return {"_cluster_default_runner": lambda: '{"hosts": ["192.0.2.1"]}',
             "_status_runner": lambda cl: "",
             "_serving_raw": json.dumps({"units": []}),
             "_venv_python": "/home/u/.venvs/sparkrun/bin/python",

@@ -6,7 +6,7 @@
   was independently re-checked. §0.1 records what the later run could and could not confirm; the
   "located" wording should not be carried into fix cards.
 - Scope: locate the silent layer among client (hermes stream reader) / litellm proxy / sparkrun_balancer in-flight accounting / vLLM engines. Fixes are out of scope; fix proposals per layer only.
-- Redaction: LAN engines `10.0.0.244/.246/.247/.248`, gateway Mac `10.0.0.245` (documented placeholders; real addresses deliberately omitted — this repo is public). No tokens anywhere.
+- Redaction: LAN engines `10.0.0.x`, gateway Mac `10.0.0.x` (documented placeholders; real addresses deliberately omitted — this repo is public). No tokens anywhere.
 
 ## 0. Verdict (READ THIS FIRST)
 
@@ -222,7 +222,7 @@ localhost), which is exactly where the frozen counters of §2.1 were observed.
 
 Why only every *second* RENEW was fatal in the observed window (the kills land on :02/:32 =
 onsets :17/:47): unexplained with available logs — candidate explanations (ARP/forwarding-state
-refresh period of the switch/AP at `10.0.0.1`, macOS re-publishing interface state only on
+refresh period of the switch/AP at `10.0.0.x`, macOS re-publishing interface state only on
 changed ACKs, `nw_path_libinfo_path_check` re-evaluation) are in the next-probe item, §7 item 5.
 Half-cycle fatality does not weaken the correlation; it halves its frequency.
 
@@ -319,7 +319,7 @@ Design guidance from this finding:
 ## 7. Smallest fix proposals per layer (NOT implemented — card scope)
 
 1. **Network/host (root-cause owner; operator network config, outside this repo)**: give the
-   gateway a static lease / long lease (≥24 h) on the LAN router for `10.0.0.245`, or a static IP
+   gateway a static lease / long lease (≥24 h) on the LAN router for `10.0.0.x`, or a static IP
    — removes the 899 s renew clock entirely. Verify per §3B afterwards. This is the smallest true
    fix if the correlation survives the tcpdump probe (§7 item 5).
 2. **litellm proxy (sparkrun fork)**: set `request_timeout: 180` (or `sock_read_timeout`
@@ -332,8 +332,8 @@ Design guidance from this finding:
 4. **hermes client (cluster card)**: on a mid-stream silent death, retry with jitter — today's
    retries succeeded because they landed off-mark; a retry fired immediately at the kill could
    hit the same mark class again. A 30–60 s jitter before retry is one line.
-5. **LEFT — next probe (mechanism completion, ORCH/OPERATOR)**: `sudo tcpdump -i en0 -w … host 10.0.0.244
-   or host 10.0.0.246 or …` for 40 min spanning two marks with one canary stream open each cycle;
+5. **LEFT — next probe (mechanism completion, ORCH/OPERATOR)**: `sudo tcpdump -i en0 -w … host 10.0.0.x
+   or host 10.0.0.x or …` for 40 min spanning two marks with one canary stream open each cycle;
    the capture answers (a) does the death coincide with RENEW to the second, (b) is any direction
    black-holed (ARP? TCP keepalive? RST lost?), (c) why every second mark. If tcpdump shows the
    Mac still receiving engine bytes after the stall, the fault is inside the Mac (socket not

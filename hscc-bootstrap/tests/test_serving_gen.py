@@ -2,25 +2,25 @@ import serving_gen
 
 
 def test_orchestrator_plus_keepalive_workers():
-    cluster = {"hosts": ["10.0.0.1", "10.0.0.2", "10.0.0.3"]}
+    cluster = {"hosts": ["192.0.2.1", "192.0.2.2", "192.0.2.3"]}
     s = serving_gen.build_serving(
-        cluster, orchestrator="10.0.0.1",
+        cluster, orchestrator="192.0.2.1",
         recipe="~/r/qwen.yaml", model="Qwen/X", port=8000, keepalive=True)
     assert s["version"] == 1
     assert s["port"] == 8000
     units = s["units"]
     orch = [u for u in units if u["role"] == "orchestrator"]
     workers = [u for u in units if u["role"] == "worker"]
-    assert len(orch) == 1 and orch[0]["nodes"] == ["10.0.0.1"]
-    assert {tuple(w["nodes"]) for w in workers} == {("10.0.0.2",), ("10.0.0.3",)}
+    assert len(orch) == 1 and orch[0]["nodes"] == ["192.0.2.1"]
+    assert {tuple(w["nodes"]) for w in workers} == {("192.0.2.2",), ("192.0.2.3",)}
     assert all(w.get("keepalive") is True for w in workers)
     assert all(u["model"] == "Qwen/X" and u["recipe"] == "~/r/qwen.yaml" for u in units)
 
 
 def test_single_node_no_workers():
-    cluster = {"hosts": ["10.0.0.1"]}
+    cluster = {"hosts": ["192.0.2.1"]}
     s = serving_gen.build_serving(
-        cluster, orchestrator="10.0.0.1",
+        cluster, orchestrator="192.0.2.1",
         recipe="~/r.yaml", model="M", port=8000, keepalive=True)
     assert len([u for u in s["units"] if u["role"] == "worker"]) == 0
     assert len([u for u in s["units"] if u["role"] == "orchestrator"]) == 1
@@ -41,9 +41,9 @@ def test_same_last_octet_different_subnet_no_id_collision():
     # Three DISTINCT subnets that all share last octet .10 — the point of the
     # regression. (An IP scrub once collapsed two of these into the same address,
     # silently destroying the premise and failing the test.)
-    cluster = {"hosts": ["10.0.0.10", "10.1.0.10", "172.16.0.10"]}
+    cluster = {"hosts": ["192.0.2.10", "10.1.0.10", "172.16.0.10"]}
     s = serving_gen.build_serving(
-        cluster, orchestrator="10.0.0.10",
+        cluster, orchestrator="192.0.2.10",
         recipe="r", model="m", port=8000, keepalive=True)
     ids = [u["id"] for u in s["units"]]
     assert len(ids) == len(set(ids)), f"duplicate unit ids: {ids}"

@@ -1026,7 +1026,7 @@ class ExampleParser:
 # back as a NEW finding (mutation-proven both directions).
 # Address guard: 10.0.0.x is the documented LAN placeholder, never a real host.
 _SEED_CLUSTER_JSON = json.dumps({
-    "gateway": {"host": "10.0.0.1"},
+    "gateway": {"host": "192.0.2.1"},
     "workers": [],
     "nasDevices": [],
 })

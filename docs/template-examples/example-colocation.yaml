@@ -6,7 +6,7 @@
 # By default, two units naming the same node is a HARD ERROR and apply blocks
 # before touching the fleet:
 #
-#     node '10.0.0.3' claimed by both 'fast' and 'embed'
+#     node '10.0.0.x' claimed by both 'fast' and 'embed'
 #       (set allow_colocation: true on both to permit)
 #
 # That default exists because of a real incident: a solo unit was provisioned
@@ -32,13 +32,13 @@ description: "EXAMPLE ONLY — two small models sharing a node via allow_colocat
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/example-orchestrator.yaml"
   tp: 1
-  nodes: [10.0.0.1]
+  nodes: [10.0.0.x]
 
 families:
   - name: fast
-    # Both units name 10.0.0.3, so BOTH must set allow_colocation: true.
+    # Both units name 10.0.0.x, so BOTH must set allow_colocation: true.
     # Remove the flag from either one and apply blocks with the error above.
-    nodes: [10.0.0.3]
+    nodes: [10.0.0.x]
     allow_colocation: true
     models:
       - recipe: "~/.sparkrun-local/recipes/example-small-fast.yaml"
@@ -46,7 +46,7 @@ families:
     proxy: true
 
   - name: embed
-    nodes: [10.0.0.3]
+    nodes: [10.0.0.x]
     allow_colocation: true
     models:
       - recipe: "~/.sparkrun-local/recipes/example-small-embed.yaml"

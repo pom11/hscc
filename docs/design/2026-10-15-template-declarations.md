@@ -406,7 +406,7 @@ the key and the fix, `cluster_template.py:1256+`):
 
 | Rejection | Message shape |
 |---|---|
-| `uniform_pool` + any `endpoints`/`routing` target naming a host or `host:port` | `endpoints.chat -> '10.0.0.1:8000': uniform_pool endpoints must name a family (family-<name>) or 'orchestrator', never an address` |
+| `uniform_pool` + any `endpoints`/`routing` target naming a host or `host:port` | `endpoints.chat -> '10.0.0.x:8000': uniform_pool endpoints must name a family (family-<name>) or 'orchestrator', never an address` |
 | `proxy:` not a mapping / `proxy.families` not a mapping of mappings | `proxy: expected a mapping (generic pass-through dict), got list` |
 | unknown key under `proxy.families.<name>` | `family 'coding' proxy knob: unknown key 'routning' (known: routing, max_parallel_requests, weight, timeout, num_retries)` |
 | `routing_strategy` or any spelling of the balancer as a LiteLLM strategy | `proxy knob 'routing_strategy': the balancer is not a LiteLLM routing strategy — LiteLLM 1.82.6 admits only simple-shuffle / least-busy / usage-based-routing / latency-based-routing, and least-busy is broken there (its in-flight counter is never incremented on the async path); use 'routing: least-in-flight'` |

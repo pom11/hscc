@@ -67,18 +67,18 @@ class TestPlanPlacement:
         # two 30GB models on a 120GB node → co-located, distinct ports
         costs = {"a": rc.RecipeCost("a", per_gpu_total_gb=30, fits=True),
                  "b": rc.RecipeCost("b", per_gpu_total_gb=30, fits=True)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": 120.0}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": 120.0}]
         res = rc.plan_placement([{"recipe": "a"}, {"recipe": "b"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is True
         ports = sorted(p.port for p in res["placements"])
         assert ports == [8000, 8001]                  # distinct, sequential
-        assert all(p.node_ip == "10.0.0.2" for p in res["placements"])
+        assert all(p.node_ip == "192.0.2.2" for p in res["placements"])
 
     def test_overcommit_refused(self):
         costs = {"a": rc.RecipeCost("a", per_gpu_total_gb=80, fits=True),
                  "b": rc.RecipeCost("b", per_gpu_total_gb=80, fits=True)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": 120.0}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": 120.0}]
         res = rc.plan_placement([{"recipe": "a"}, {"recipe": "b"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is False
@@ -87,16 +87,16 @@ class TestPlanPlacement:
     def test_spreads_across_nodes(self):
         costs = {"a": rc.RecipeCost("a", per_gpu_total_gb=80, fits=True),
                  "b": rc.RecipeCost("b", per_gpu_total_gb=80, fits=True)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": 120.0},
-                 {"ip": "10.0.0.3", "vram_free_gb": 120.0}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": 120.0},
+                 {"ip": "192.0.2.3", "vram_free_gb": 120.0}]
         res = rc.plan_placement([{"recipe": "a"}, {"recipe": "b"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is True
-        assert {p.node_ip for p in res["placements"]} == {"10.0.0.2", "10.0.0.3"}
+        assert {p.node_ip for p in res["placements"]} == {"192.0.2.2", "192.0.2.3"}
 
     def test_nofit_recipe_refused(self):
         costs = {"a": rc.RecipeCost("a", per_gpu_total_gb=200, fits=False)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": 120.0}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": 120.0}]
         res = rc.plan_placement([{"recipe": "a"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is False
@@ -106,8 +106,8 @@ class TestPlanPlacement:
         # a tp=2 model can't co-locate; a second model must go elsewhere
         costs = {"big": rc.RecipeCost("big", per_gpu_total_gb=40, fits=True, tensor_parallel=2),
                  "small": rc.RecipeCost("small", per_gpu_total_gb=20, fits=True)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": 120.0},
-                 {"ip": "10.0.0.3", "vram_free_gb": 120.0}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": 120.0},
+                 {"ip": "192.0.2.3", "vram_free_gb": 120.0}]
         res = rc.plan_placement(
             [{"recipe": "big", "tp": 2}, {"recipe": "small"}], nodes,
             _coster=self._coster(costs))
@@ -119,7 +119,7 @@ class TestPlanPlacement:
     def test_unknown_vram_allows_placement(self):
         # vram_free None (unprobed) → don't block; place by order
         costs = {"a": rc.RecipeCost("a", per_gpu_total_gb=60, fits=True)}
-        nodes = [{"ip": "10.0.0.2", "vram_free_gb": None}]
+        nodes = [{"ip": "192.0.2.2", "vram_free_gb": None}]
         res = rc.plan_placement([{"recipe": "a"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is True

@@ -20,8 +20,8 @@ import pytest
 import doctor
 import doctor_node_recovery as dnr
 
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 
 
 # ── fabricated node probes ──────────────────────────────────────────────────
@@ -435,12 +435,12 @@ def test_opt_out_never_renders_as_ok_mark(tmp_path):
 # ── the check as wired into doctor ──────────────────────────────────────────
 
 FAKE_CLUSTER = ('[{"name": "test-cluster", "default": true, '
-                '"hosts": ["10.0.0.1", "10.0.0.2"], "cache_dir": ""}]')
+                '"hosts": ["192.0.2.1", "192.0.2.2"], "cache_dir": ""}]')
 
 
 def _fleet_health():
     """Stub every other fleet seam so run_doctor() cannot reach anything real."""
-    return {"_cluster_default_runner": lambda: '{"hosts": ["10.0.0.1", "10.0.0.2"]}',
+    return {"_cluster_default_runner": lambda: '{"hosts": ["192.0.2.1", "192.0.2.2"]}',
             "_status_runner": lambda cl: "",
             "_serving_raw": json.dumps({"units": []}),
             "_venv_python": "/home/u/.venvs/sparkrun/bin/python",

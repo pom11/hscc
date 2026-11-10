@@ -164,9 +164,9 @@ class TestExecArgvRewrite:
             self, tmp_path, monkeypatch):
         from hscc_daemon import sparkrun_bin
         home, _cli, _venv = _service_env(tmp_path, monkeypatch)
-        argv = sparkrun_bin.exec_argv(["sparkrun", "stop", "r.yaml", "--hosts", "10.0.0.2"])
+        argv = sparkrun_bin.exec_argv(["sparkrun", "stop", "r.yaml", "--hosts", "192.0.2.2"])
         assert argv[0] == str(home / ".local" / "bin" / "sparkrun")
-        assert argv[1:] == ["stop", "r.yaml", "--hosts", "10.0.0.2"]
+        assert argv[1:] == ["stop", "r.yaml", "--hosts", "192.0.2.2"]
 
     def test_healthy_path_resolves_to_the_same_file(self, tmp_path, monkeypatch):
         """When PATH CAN exec sparkrun, the rewrite is purely mechanical: the
@@ -208,7 +208,7 @@ class TestUtilRunCmdRouting:
             return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
 
         monkeypatch.setattr(util.subprocess, "run", fake_run)
-        res = util.run_cmd(["sparkrun", "stop", "r.yaml", "--hosts", "10.0.0.2"])
+        res = util.run_cmd(["sparkrun", "stop", "r.yaml", "--hosts", "192.0.2.2"])
         assert res["ok"] is True
         assert seen["args"][0] == str(home / ".local" / "bin" / "sparkrun")
 
@@ -265,7 +265,7 @@ class TestAutoHealRelaunchUsesAbsolutePath:
             serving, "load_serving",
             lambda path=None: {"version": 2, "units": [
                 {"id": "w1", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.2"], "port": 8000, "recipe": "/r/w.yaml",
+                 "nodes": ["192.0.2.2"], "port": 8000, "recipe": "/r/w.yaml",
                  "model": "W"}]})
         monkeypatch.setattr(health, "_tp_peer_nodes", lambda: set())
         # Fresh-daemon bookkeeping (same as test_health._setup): a relaunch
@@ -314,8 +314,8 @@ class TestDegradedFleetVisibility:
                             lambda *a, **k: {"ok": True, "output": "reachable"})
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": True, "status": 200})
-        monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
-        monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://10.0.0.2:8000/health")
+        monkeypatch.setattr(serving, "PRIMARY_NODE", "192.0.2.2")
+        monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://192.0.2.2:8000/health")
         state_dir = tmp_path / "state"
         state_dir.mkdir(exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
@@ -374,7 +374,7 @@ class TestDegradedFleetVisibility:
         monkeypatch.setattr(health, "_sparkrun_venv_python",
                             lambda: "/fake/sparkrun-venv/bin/python")
         payload = {"groups": {"cid_a": {"meta": {"recipe": "w"},
-                                        "containers": [{"host": "10.0.0.2"}]}},
+                                        "containers": [{"host": "192.0.2.2"}]}},
                    "solo_entries": []}
         calls = []
 
@@ -430,7 +430,7 @@ class TestSweepBudgetAlignment:
     SLOW_SWEEP_SECONDS = 20  # "merely slow node" per the audit's acceptance case
 
     _PAYLOAD = json.dumps({"groups": {"cid_a": {
-        "meta": {"recipe": "w"}, "containers": [{"host": "10.0.0.2"}]}},
+        "meta": {"recipe": "w"}, "containers": [{"host": "192.0.2.2"}]}},
         "solo_entries": []})
     _JOBS_TEXT = "Job: w [cid_a]\n"
 
@@ -441,8 +441,8 @@ class TestSweepBudgetAlignment:
                             lambda *a, **k: {"ok": True, "output": "reachable"})
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": True, "status": 200})
-        monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
-        monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://10.0.0.2:8000/health")
+        monkeypatch.setattr(serving, "PRIMARY_NODE", "192.0.2.2")
+        monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://192.0.2.2:8000/health")
         state_dir = tmp_path / "state"
         state_dir.mkdir(exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
@@ -660,7 +660,7 @@ class TestFleetVisibilityLastKnownGood:
 
     _PAYLOAD = json.dumps({"groups": {"cid_a": {
         "meta": {"recipe": "w"},
-        "containers": [{"host": "10.0.0.2"}, {"host": "10.0.0.3"}]}},
+        "containers": [{"host": "192.0.2.2"}, {"host": "192.0.2.3"}]}},
         "solo_entries": []})
 
     def _setup(self, tmp_path, monkeypatch, logs=None):
@@ -672,9 +672,9 @@ class TestFleetVisibilityLastKnownGood:
                             lambda *a, **k: {"ok": True, "output": "reachable"})
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": True, "status": 200})
-        monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
+        monkeypatch.setattr(serving, "PRIMARY_NODE", "192.0.2.2")
         monkeypatch.setattr(serving, "VLLM_HEALTH_URL",
-                            "http://10.0.0.2:8000/health")
+                            "http://192.0.2.2:8000/health")
         state_dir = tmp_path / "state"
         state_dir.mkdir(exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
@@ -704,7 +704,7 @@ class TestFleetVisibilityLastKnownGood:
         from pathlib import Path
         path = Path(health.FLEET_LAST_SEEN_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"hosts": ["10.0.0.2"], "workloads": [], "workload_count": 0,
+        record = {"hosts": ["192.0.2.2"], "workloads": [], "workload_count": 0,
                   "epoch": time.time() - seconds}
         path.write_text(json.dumps(record))
         return record
@@ -748,7 +748,7 @@ class TestFleetVisibilityLastKnownGood:
         assert health._sparkrun_workloads() == (
             [{"name": "w (cid_a)", "container": "cid_a"}], False, "ok")
         record = self._snapshot(health)
-        assert record["hosts"] == ["10.0.0.2", "10.0.0.3"]
+        assert record["hosts"] == ["192.0.2.2", "192.0.2.3"]
         assert record["workload_count"] == 1
         assert record["workloads"] == [{"name": "w (cid_a)", "container": "cid_a"}]
         # Both stamps: `as_of` is the field the audit specified, `epoch` is what
@@ -1013,7 +1013,7 @@ class TestFleetVisibilityLastKnownGood:
 
         # Every write parses — a torn file would raise here.
         record = self._snapshot(health)
-        assert record["hosts"] == ["10.0.0.2", "10.0.0.3"]
+        assert record["hosts"] == ["192.0.2.2", "192.0.2.3"]
         leftovers = glob.glob(str(health.FLEET_LAST_SEEN_FILE) + "*")
         assert leftovers == [str(health.FLEET_LAST_SEEN_FILE)], leftovers
 

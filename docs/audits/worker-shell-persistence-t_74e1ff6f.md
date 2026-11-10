@@ -145,7 +145,7 @@ safety net:
   is via `terminal`/`execute_code`, which work).
 - During this final pass the worker-shell diagnostics report (moved into
   `docs/audits/`) was found to embed a real operator LAN address; it was
-  redacted to the documented `10.0.0.1` placeholder and the address-scan test
+  redacted to the documented `10.0.0.x` placeholder and the address-scan test
   (`hscc_daemon/tests/test_no_real_addresses_committed.py`) passes. No other
   addresses/tokens appear in any committed file.
 

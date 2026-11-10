@@ -59,13 +59,13 @@ class TestBuildModelsJson:
             name="test",
             cluster_size=1,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
         )
         result = _build_models_json(tpl)
         
         assert result["primary_model"] == "orch"
         assert result["provider"] == "custom"
-        assert result["base_url"] == "http://10.0.0.244:8000/v1"
+        assert result["base_url"] == "http://10.0.0.x:8000/v1"
         assert len(result["models"]) == 1
         assert result["models"][0]["family"] == "orchestrator"
 
@@ -74,7 +74,7 @@ class TestBuildModelsJson:
             name="test",
             cluster_size=2,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
@@ -82,7 +82,7 @@ class TestBuildModelsJson:
                         ModelSpec(recipe="/path/to/m1.yaml", tp=2),
                         ModelSpec(recipe="/path/to/m2.yaml", tp=1),
                     ],
-                    nodes=["10.0.0.246"],
+                    nodes=["10.0.0.x"],
                     proxy=FamilyProxyConfig(port=4001),
                 ),
             ],
@@ -102,7 +102,7 @@ class TestBuildProxyConfig:
         family = WorkerFamily(
             name="coding",
             models=[ModelSpec(recipe="/path/to/m.yaml")],
-            nodes=["10.0.0.246"],
+            nodes=["10.0.0.x"],
             proxy=FamilyProxyConfig(port=4001),
         )
         result = _build_proxy_config(family)
@@ -117,7 +117,7 @@ class TestBuildProxyConfig:
         family = WorkerFamily(
             name="coding",
             models=[ModelSpec(recipe="/path/to/m.yaml")],
-            nodes=["10.0.0.246"],
+            nodes=["10.0.0.x"],
             proxy=FamilyProxyConfig(port=4001, extra_args={"max-model-len": "32768"}),
         )
         result = _build_proxy_config(family)
@@ -133,7 +133,7 @@ class TestUpdateHermesConfig:
             name="test",
             cluster_size=1,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
         )
         result = _update_hermes_config(config, tpl)
         
@@ -147,18 +147,18 @@ class TestUpdateHermesConfig:
             name="test",
             cluster_size=3,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
                     models=[ModelSpec(recipe="/path/to/m.yaml")],
-                    nodes=["10.0.0.246"],
+                    nodes=["10.0.0.x"],
                     proxy=FamilyProxyConfig(port=4001),
                 ),
                 WorkerFamily(
                     name="vision",
                     models=[ModelSpec(recipe="/path/to/m2.yaml")],
-                    nodes=["10.0.0.247"],
+                    nodes=["10.0.0.x"],
                     proxy=FamilyProxyConfig(port=4002),
                 ),
             ],
@@ -181,18 +181,18 @@ class TestUpdateHermesConfig:
             name="test",
             cluster_size=3,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
                     models=[ModelSpec(recipe="/path/to/m.yaml")],
-                    nodes=["10.0.0.246"],
+                    nodes=["10.0.0.x"],
                     proxy=FamilyProxyConfig(port=4001),
                 ),
                 WorkerFamily(
                     name="vision",
                     models=[ModelSpec(recipe="/path/to/m2.yaml")],
-                    nodes=["10.0.0.247"],
+                    nodes=["10.0.0.x"],
                     proxy=FamilyProxyConfig(port=4002),
                 ),
             ],
@@ -210,7 +210,7 @@ class TestUpdateHermesConfig:
         tpl = ClusterTemplate(
             name="test", cluster_size=1,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244", families=[],
+            orchestrator_node="10.0.0.x", families=[],
         )
         # Simulate the corrupted live config: many dup family entries.
         config = {"providers": [{"name": "family-coding", "model": {}}] * 20}

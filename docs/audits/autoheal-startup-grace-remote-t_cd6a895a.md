@@ -10,7 +10,7 @@ the DGX nodes (reached over SSH via sparkrun; live fleet hosts redacted to
 `None` → health.py:1151 `if created_ts is None: return False` (fail-open) →
 grace skipped → auto-heal proceeds → force-recreate loop. The
 ~/.hscc/worker_container_state.json contains only null created_ts entries; the
-`(10.0.0.2,8000)` / `(10.0.0.3,8000)` keys are leftover test placeholders.
+`(10.0.0.x,8000)` / `(10.0.0.x,8000)` keys are leftover test placeholders.
 
 ## Operator directive: use SPARKRUN, never raw docker/ssh
 The operator superseded the card's "reuse SSH path" instruction. HSCC talks to

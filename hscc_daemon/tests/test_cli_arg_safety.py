@@ -121,7 +121,7 @@ class TestClusterUpHelpDoesNotExecute:
         assert "dry-run" in text.lower()
 
     def test_up_typo_flag_does_not_start_the_fleet(self, monkeypatch):
-        text, code, calls = self._run(monkeypatch, ["up", "--host=10.0.0.2"])
+        text, code, calls = self._run(monkeypatch, ["up", "--host=192.0.2.2"])
         assert calls == [], f"cluster up --host=... EXECUTED: {calls}"
         assert code != 0
 

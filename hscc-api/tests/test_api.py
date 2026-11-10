@@ -203,15 +203,15 @@ def test_resolve_config_defaults(hscc_dir):
 def test_config_file_overrides(hscc_dir):
     os.makedirs(hscc_dir, exist_ok=True)
     with open(os.path.join(hscc_dir, "api.json"), "w") as fh:
-        json.dump({"bind": "10.0.0.5", "port": 9999}, fh)
+        json.dump({"bind": "192.0.2.5", "port": 9999}, fh)
     cfg = api_server.resolve_config(hscc_dir=hscc_dir)
-    assert cfg == {"host": "10.0.0.5", "port": 9999}
+    assert cfg == {"host": "192.0.2.5", "port": 9999}
 
 
 def test_override_beats_config(hscc_dir):
     os.makedirs(hscc_dir, exist_ok=True)
     with open(os.path.join(hscc_dir, "api.json"), "w") as fh:
-        json.dump({"bind": "10.0.0.5", "port": 9999}, fh)
+        json.dump({"bind": "192.0.2.5", "port": 9999}, fh)
     cfg = api_server.resolve_config(
         hscc_dir=hscc_dir, bind_override="loopback", port_override=1234
     )

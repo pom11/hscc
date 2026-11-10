@@ -31,7 +31,7 @@ def stub_cluster(monkeypatch):
     """Stub discovery + recipe cost + recipe-exists so CLI preview/apply/validate
     resolve against a fake cluster without live sparkrun or real recipe files."""
     monkeypatch.setattr(cluster_template, "_discover",
-                        lambda probe=False: _T(_N("10.0.0.1"), [_N("10.0.0.2"), _N("10.0.0.3")]))
+                        lambda probe=False: _T(_N("192.0.2.1"), [_N("192.0.2.2"), _N("192.0.2.3")]))
     monkeypatch.setattr(ti._rc, "recipe_cost",
                         lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
     monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)

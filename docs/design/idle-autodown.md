@@ -18,12 +18,12 @@ The **serving layer** is precisely the set of sparkrun vLLM units defined in
 which are the units the watchdog and keep-alive health checks supervise:
 
 - **orchestrator unit** (`role: orchestrator`) — currently spans nodes
-  `10.0.0.244` (head) + `10.0.0.246`, port 8000. This is the model
-  C1 calls "A3B on 10.0.0.244". Stopped by `serving.VLLM_STOP_CMD`
+  `10.0.0.x` (head) + `10.0.0.x`, port 8000. This is the model
+  C1 calls "A3B on 10.0.0.x". Stopped by `serving.VLLM_STOP_CMD`
   (`sparkrun stop --hosts <primary>`, `serving.py:150`), started by
   `serving.VLLM_START_CMD` (`sparkrun run <recipe>...`, `serving.py:151`).
 - **worker unit** (`role: worker`, `keepalive: true`) — currently spans nodes
-  `10.0.0.247` + `10.0.0.248`, port 8000 (see C4 for how autodown
+  `10.0.0.x` + `10.0.0.x`, port 8000 (see C4 for how autodown
   treats keepalive units).
 
 ## Hard constraints (restated from the card, grounded in real code)

@@ -71,11 +71,11 @@ class TestWorkerFamily:
         f = WorkerFamily(
             name="coding",
             models=[ModelSpec(recipe="test.yaml")],
-            nodes=["10.0.0.246"],
+            nodes=["10.0.0.x"],
         )
         assert f.name == "coding"
         assert len(f.models) == 1
-        assert f.nodes == ["10.0.0.246"]
+        assert f.nodes == ["10.0.0.x"]
 
 
 class TestClusterTemplate:
@@ -86,17 +86,17 @@ class TestClusterTemplate:
             name="test",
             cluster_size=4,
             orchestrator=ModelSpec(recipe="orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
                     models=[ModelSpec(recipe="coding.yaml")],
-                    nodes=["10.0.0.246", "10.0.0.247"],
+                    nodes=["10.0.0.x", "10.0.0.x"],
                 ),
                 WorkerFamily(
                     name="vision",
                     models=[ModelSpec(recipe="vision.yaml")],
-                    nodes=["10.0.0.248"],
+                    nodes=["10.0.0.x"],
                 ),
             ],
         )
@@ -110,12 +110,12 @@ class TestClusterTemplate:
                 name="test",
                 cluster_size=5,  # says 5, but only 3 nodes
                 orchestrator=ModelSpec(recipe="orch.yaml"),
-                orchestrator_node="10.0.0.244",
+                orchestrator_node="10.0.0.x",
                 families=[
                     WorkerFamily(
                         name="coding",
                         models=[ModelSpec(recipe="coding.yaml")],
-                        nodes=["10.0.0.246", "10.0.0.247"],
+                        nodes=["10.0.0.x", "10.0.0.x"],
                     ),
                 ],
             )
@@ -125,16 +125,16 @@ class TestClusterTemplate:
             name="test",
             cluster_size=3,
             orchestrator=ModelSpec(recipe="orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="a",
                     models=[ModelSpec(recipe="a.yaml")],
-                    nodes=["10.0.0.246", "10.0.0.247"],
+                    nodes=["10.0.0.x", "10.0.0.x"],
                 ),
             ],
         )
-        assert tpl.all_worker_ips == ["10.0.0.246", "10.0.0.247"]
+        assert tpl.all_worker_ips == ["10.0.0.x", "10.0.0.x"]
 
 
 class TestToServingJson:
@@ -145,12 +145,12 @@ class TestToServingJson:
             name="test",
             cluster_size=2,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
                     models=[ModelSpec(recipe="/path/to/coding.yaml")],
-                    nodes=["10.0.0.246"],
+                    nodes=["10.0.0.x"],
                 ),
             ],
         )
@@ -166,12 +166,12 @@ class TestToServingJson:
             name="test",
             cluster_size=4,
             orchestrator=ModelSpec(recipe="/path/to/orch.yaml"),
-            orchestrator_node="10.0.0.244",
+            orchestrator_node="10.0.0.x",
             families=[
                 WorkerFamily(
                     name="coding",
                     models=[ModelSpec(recipe="/path/to/a.yaml")],
-                    nodes=["10.0.0.246", "10.0.0.247"],
+                    nodes=["10.0.0.x", "10.0.0.x"],
                 ),
                 WorkerFamily(
                     name="vision",
@@ -179,7 +179,7 @@ class TestToServingJson:
                         ModelSpec(recipe="/path/to/v.yaml"),
                         ModelSpec(recipe="/path/to/w.yaml"),
                     ],
-                    nodes=["10.0.0.248"],
+                    nodes=["10.0.0.x"],
                 ),
             ],
         )
@@ -202,12 +202,12 @@ class TestLoadTemplate:
             "name": "test",
             "cluster_size": 2,
             "orchestrator": {"recipe": "orch.yaml", "tp": 1, "pp": 1},
-            "orchestrator_node": "10.0.0.244",
+            "orchestrator_node": "10.0.0.x",
             "families": [
                 {
                     "name": "coding",
                     "models": [{"recipe": "coding.yaml", "tp": 1}],
-                    "nodes": ["10.0.0.246"],
+                    "nodes": ["10.0.0.x"],
                 }
             ],
         }
@@ -239,12 +239,12 @@ class TestListTemplates:
             "cluster_size": 2,
             "description": "A test template",
             "orchestrator": {"recipe": "orch.yaml"},
-            "orchestrator_node": "10.0.0.244",
+            "orchestrator_node": "10.0.0.x",
             "families": [
                 {
                     "name": "coding",
                     "models": [{"recipe": "m.yaml"}],
-                    "nodes": ["10.0.0.246"],
+                    "nodes": ["10.0.0.x"],
                 }
             ],
         }

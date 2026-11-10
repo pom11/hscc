@@ -23,50 +23,50 @@ class TestKeepaliveNodes:
 
     def test_from_env(self, monkeypatch):
         from hscc_daemon import serving
-        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.1,10.0.0.2,10.0.0.3")
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "192.0.2.1,192.0.2.2,192.0.2.3")
         nodes = serving.keepalive_nodes({})
-        assert nodes == {"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+        assert nodes == {"192.0.2.1", "192.0.2.2", "192.0.2.3"}
 
     def test_env_space_separated(self, monkeypatch):
         from hscc_daemon import serving
-        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.1 10.0.0.2")
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "192.0.2.1 192.0.2.2")
         nodes = serving.keepalive_nodes({})
-        assert nodes == {"10.0.0.1", "10.0.0.2"}
+        assert nodes == {"192.0.2.1", "192.0.2.2"}
 
     def test_from_serving_json(self, monkeypatch):
         from hscc_daemon import serving
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         serving_data = {
             "units": [
-                {"role": "worker", "nodes": ["10.0.0.1"], "keepalive": True},
-                {"role": "worker", "nodes": ["10.0.0.2"], "keepalive": False},
+                {"role": "worker", "nodes": ["192.0.2.1"], "keepalive": True},
+                {"role": "worker", "nodes": ["192.0.2.2"], "keepalive": False},
             ]
         }
         nodes = serving.keepalive_nodes(serving_data)
-        assert nodes == {"10.0.0.1"}
+        assert nodes == {"192.0.2.1"}
 
     def test_env_and_serving_union(self, monkeypatch):
         from hscc_daemon import serving
-        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.1")
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "192.0.2.1")
         serving_data = {
             "units": [
-                {"role": "worker", "nodes": ["10.0.0.2"], "keepalive": True},
+                {"role": "worker", "nodes": ["192.0.2.2"], "keepalive": True},
             ]
         }
         nodes = serving.keepalive_nodes(serving_data)
-        assert nodes == {"10.0.0.1", "10.0.0.2"}
+        assert nodes == {"192.0.2.1", "192.0.2.2"}
 
     def test_orchestrator_not_keepalive(self, monkeypatch):
         from hscc_daemon import serving
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         serving_data = {
             "units": [
-                {"role": "orchestrator", "nodes": ["10.0.0.1"], "keepalive": True},
+                {"role": "orchestrator", "nodes": ["192.0.2.1"], "keepalive": True},
             ]
         }
         # orchestrator units are not worker units -> not keepalive
         nodes = serving.keepalive_nodes(serving_data)
-        assert "10.0.0.1" not in nodes
+        assert "192.0.2.1" not in nodes
 
     def test_none_serving(self, monkeypatch):
         from hscc_daemon import serving
@@ -97,17 +97,17 @@ class TestKeepaliveUnits:
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         sd = self._serving([
             {"id": "ka-1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000, "recipe": "r"},
+             "nodes": ["192.0.2.247", "192.0.2.248"], "port": 8000, "recipe": "r"},
         ])
         units = serving.keepalive_units(sd)
         assert len(units) == 2                      # one per node, not one per unit
-        assert {u["node"] for u in units} == {"10.0.0.247", "10.0.0.248"}
+        assert {u["node"] for u in units} == {"192.0.2.247", "192.0.2.248"}
         assert all(u["port"] == 8000 for u in units)
         assert all(u["id"] == "ka-1" for u in units)
         assert all(u["recipe"] == "r" for u in units)
         # Full span + tp carried on every per-node entry (so a consumer can
         # rebuild the whole-span --hosts <span> --tp N command, not a solo).
-        assert all(u["nodes"] == ["10.0.0.247", "10.0.0.248"] for u in units)
+        assert all(u["nodes"] == ["192.0.2.247", "192.0.2.248"] for u in units)
         assert all(u["tp"] is None for u in units)
         # model + role are carried too (for rebuilding the --served-model-name
         # the unit was declared with, so a relaunch reuses the SAME cluster_id
@@ -136,13 +136,13 @@ class TestKeepaliveUnits:
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         sd = self._serving([
             {"id": "ka-1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "r"},
+             "nodes": ["192.0.2.247"], "port": 8000, "recipe": "r"},
             {"id": "ka-1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "r"},
+             "nodes": ["192.0.2.247"], "port": 8000, "recipe": "r"},
         ])
         units = serving.keepalive_units(sd)
         assert len(units) == 1
-        assert units[0]["node"] == "10.0.0.247"
+        assert units[0]["node"] == "192.0.2.247"
 
     def test_co_located_units_distinct_ports(self, monkeypatch):
         """Two units sharing a node on different ports yield two entries."""
@@ -150,32 +150,32 @@ class TestKeepaliveUnits:
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         sd = self._serving([
             {"id": "ka-a", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "ra"},
+             "nodes": ["192.0.2.247"], "port": 8000, "recipe": "ra"},
             {"id": "ka-b", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.247"], "port": 8001, "recipe": "rb"},
+             "nodes": ["192.0.2.247"], "port": 8001, "recipe": "rb"},
         ])
         units = serving.keepalive_units(sd)
         assert {(u["node"], u["port"]) for u in units} == {
-            ("10.0.0.247", 8000), ("10.0.0.247", 8001)}
+            ("192.0.2.247", 8000), ("192.0.2.247", 8001)}
 
     def test_non_keepalive_and_orchestrator_excluded(self, monkeypatch):
         from hscc_daemon import serving
         monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
         sd = self._serving([
             {"id": "wk", "role": "worker", "keepalive": False,
-             "nodes": ["10.0.0.1"], "port": 8000, "recipe": "r"},
+             "nodes": ["192.0.2.1"], "port": 8000, "recipe": "r"},
             {"id": "orch", "role": "orchestrator", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8000, "recipe": "r"},
+             "nodes": ["192.0.2.2"], "port": 8000, "recipe": "r"},
         ])
         assert serving.keepalive_units(sd) == []
 
     def test_env_nodes_emitted(self, monkeypatch):
         from hscc_daemon import serving
-        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.9")
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "192.0.2.9")
         units = serving.keepalive_units(self._serving([]))
         assert len(units) == 1
-        assert units[0]["node"] == "10.0.0.9"
-        assert units[0]["id"] == "10.0.0.9:8000"
+        assert units[0]["node"] == "192.0.2.9"
+        assert units[0]["id"] == "192.0.2.9:8000"
 
     def test_none_serving(self, monkeypatch):
         from hscc_daemon import serving
@@ -191,20 +191,20 @@ class TestOrchestratorEndpoint:
         serving_data = {
             "port": 8000,
             "units": [
-                {"role": "orchestrator", "nodes": ["10.0.0.1"], "recipe": "r", "model": "m"},
+                {"role": "orchestrator", "nodes": ["192.0.2.1"], "recipe": "r", "model": "m"},
             ]
         }
-        assert orchestrator_endpoint(serving_data) == "http://10.0.0.1:8000/v1"
+        assert orchestrator_endpoint(serving_data) == "http://192.0.2.1:8000/v1"
 
     def test_custom_port(self):
         from hscc_daemon.serving import orchestrator_endpoint
         serving_data = {
             "port": 9000,
             "units": [
-                {"role": "orchestrator", "nodes": ["10.0.0.1"], "recipe": "r", "model": "m"},
+                {"role": "orchestrator", "nodes": ["192.0.2.1"], "recipe": "r", "model": "m"},
             ]
         }
-        assert orchestrator_endpoint(serving_data) == "http://10.0.0.1:9000/v1"
+        assert orchestrator_endpoint(serving_data) == "http://192.0.2.1:9000/v1"
 
     def test_unit_port_wins_over_top_level(self):
         """A per-unit port overrides the top-level serving port — a unit can
@@ -213,11 +213,11 @@ class TestOrchestratorEndpoint:
         serving_data = {
             "port": 9000,
             "units": [
-                {"role": "orchestrator", "nodes": ["10.0.0.1"], "recipe": "r",
+                {"role": "orchestrator", "nodes": ["192.0.2.1"], "recipe": "r",
                  "model": "m", "port": 8123},
             ]
         }
-        assert orchestrator_endpoint(serving_data) == "http://10.0.0.1:8123/v1"
+        assert orchestrator_endpoint(serving_data) == "http://192.0.2.1:8123/v1"
 
     def test_no_orchestrator(self):
         from hscc_daemon.serving import orchestrator_endpoint
@@ -233,9 +233,9 @@ class TestResolveClusterConfig:
 
         cluster_file = tmp_hfcc_dir / "cluster.json"
         cluster_file.write_text(json.dumps({
-            "gateway": {"ip": "10.0.0.1"},
-            "workers": [{"ip": "10.0.0.2"}],
-            "nasDevices": [{"ip": "10.0.0.10"}],
+            "gateway": {"ip": "192.0.2.1"},
+            "workers": [{"ip": "192.0.2.2"}],
+            "nasDevices": [{"ip": "192.0.2.10"}],
         }))
 
         serving_file = tmp_hfcc_dir / "serving.json"
@@ -244,8 +244,8 @@ class TestResolveClusterConfig:
         monkeypatch.setattr(serving, "SERVING_JSON", str(serving_file))
 
         serving.resolve_cluster_config()
-        assert serving.PRIMARY_NODE == "10.0.0.1"
-        assert serving.NAS_HOST == "10.0.0.10"
+        assert serving.PRIMARY_NODE == "192.0.2.1"
+        assert serving.NAS_HOST == "192.0.2.10"
 
     def test_cluster_json_missing(self, tmp_hfcc_dir, monkeypatch):
         from hscc_daemon import serving
@@ -306,15 +306,15 @@ class TestRebuildVllmCmds:
         orig_recipe = serving.VLLM_RECIPE
         orig_port = serving.VLLM_PORT
 
-        serving.PRIMARY_NODE = "10.0.0.5"
+        serving.PRIMARY_NODE = "192.0.2.5"
         serving.VLLM_RECIPE = "~/recipe.yaml"
         serving.VLLM_PORT = 8000
 
         serving._rebuild_vllm_cmds()
 
-        assert serving.VLLM_HEALTH_URL == "http://10.0.0.5:8000/health"
+        assert serving.VLLM_HEALTH_URL == "http://192.0.2.5:8000/health"
         assert "sparkrun" in serving.VLLM_STOP_CMD
-        assert "10.0.0.5" in serving.VLLM_STOP_CMD
+        assert "192.0.2.5" in serving.VLLM_STOP_CMD
         assert "sparkrun" in serving.VLLM_START_CMD
 
         # Restore
@@ -329,22 +329,22 @@ class TestEndpointHealthy:
     def test_healthy(self, fake_subprocess):
         from hscc_daemon.serving import _endpoint_healthy
         fake_subprocess.set_result(stdout="200", returncode=0)
-        assert _endpoint_healthy("http://10.0.0.1:8000/v1") is True
+        assert _endpoint_healthy("http://192.0.2.1:8000/v1") is True
 
     def test_unhealthy(self, fake_subprocess):
         from hscc_daemon.serving import _endpoint_healthy
         fake_subprocess.set_result(stdout="000", returncode=0)
-        assert _endpoint_healthy("http://10.0.0.1:8000/v1") is False
+        assert _endpoint_healthy("http://192.0.2.1:8000/v1") is False
 
     def test_curl_failure(self, fake_subprocess):
         from hscc_daemon.serving import _endpoint_healthy
         fake_subprocess.set_result(stdout="", stderr="curl error", returncode=7)
-        assert _endpoint_healthy("http://10.0.0.1:8000/v1") is False
+        assert _endpoint_healthy("http://192.0.2.1:8000/v1") is False
 
     def test_timeout(self, fake_subprocess):
         from hscc_daemon.serving import _endpoint_healthy
         fake_subprocess.set_result(timeout_exc=True)
-        assert _endpoint_healthy("http://10.0.0.1:8000/v1") is False
+        assert _endpoint_healthy("http://192.0.2.1:8000/v1") is False
 
 
 class TestServingWarn:
@@ -380,13 +380,13 @@ class TestFleetPlanPaths:
             "port": 8000,
             "units": [
                 {"id": "orch", "role": "orchestrator",
-                 "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+                 "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000,
                  "recipe": "~/.sparkrun-local/recipes/orch.yaml"},
                 {"id": "wk1", "role": "worker", "keepalive": False,
-                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "nodes": ["192.0.2.247"], "port": 8000,
                  "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
                 {"id": "wk-keep", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.248"], "port": 8000,
+                 "nodes": ["192.0.2.248"], "port": 8000,
                  "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
             ],
         }
@@ -438,11 +438,11 @@ class TestFleetUpServedModelName:
             "port": 8000,
             "units": [
                 {"id": "orch", "role": "orchestrator",
-                 "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+                 "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000,
                  "recipe": "/abs/recipes/orch.yaml",
                  "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "tp": 2},
                 {"id": "wk1", "role": "worker", "keepalive": False,
-                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "nodes": ["192.0.2.247"], "port": 8000,
                  "recipe": "/abs/recipes/wk.yaml",
                  "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
             ],
@@ -478,11 +478,11 @@ class TestFleetUpServedModelName:
             "port": 8000,
             "units": [
                 {"id": "orch", "role": "orchestrator",
-                 "nodes": ["10.0.0.244"], "port": 8000,
+                 "nodes": ["192.0.2.244"], "port": 8000,
                  "recipe": "/abs/recipes/orch.yaml",
                  "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
                 {"id": "wk1", "role": "worker",
-                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "nodes": ["192.0.2.247"], "port": 8000,
                  "recipe": "/abs/recipes/wk.yaml",
                  "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
             ],
@@ -501,7 +501,7 @@ class TestFleetUpServedModelName:
             "port": 8000,
             "units": [
                 {"id": "wk1", "role": "worker",
-                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "nodes": ["192.0.2.247"], "port": 8000,
                  "recipe": "~/recipes/my-model-a3b.yaml"},
             ],
         }
@@ -516,10 +516,10 @@ class TestFleetUpServedModelName:
         rather than refusing it."""
         from hscc_daemon import serving
         assert serving._concrete_model(
-            {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"],
+            {"id": "wk1", "role": "worker", "nodes": ["192.0.2.247"],
              "port": 8000}) is None
         assert serving._served_model_name(
-            {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"]}) is None
+            {"id": "wk1", "role": "worker", "nodes": ["192.0.2.247"]}) is None
 
 
 class TestServeCmdMismatchRefused:
@@ -534,7 +534,7 @@ class TestServeCmdMismatchRefused:
     """
 
     def _unit(self, **over):
-        u = {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"],
+        u = {"id": "wk1", "role": "worker", "nodes": ["192.0.2.247"],
              "port": 8000, "recipe": "/abs/recipes/wk.yaml",
              "model": "deepseek-ai/DeepSeek-V4-Flash-0731"}
         u.update(over)
@@ -542,7 +542,7 @@ class TestServeCmdMismatchRefused:
 
     def _good_serve_cmd(self):
         return ["sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
-                "--hosts", "10.0.0.247", "--port", "8000", "--no-follow",
+                "--hosts", "192.0.2.247", "--port", "8000", "--no-follow",
                 "--ensure", "--served-model-name",
                 "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"]
 
@@ -560,12 +560,12 @@ class TestServeCmdMismatchRefused:
 
     def test_wrong_hosts_is_refused(self, monkeypatch):
         from hscc_daemon import serving
-        # A serve_cmd targeting 10.0.0.1,10.0.0.2 while the unit hosts .247.
+        # A serve_cmd targeting 192.0.2.1,192.0.2.2 while the unit hosts .247.
         sd = {
             "port": 8000,
             "units": [dict(self._unit(), serve_cmd=[
                 "sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
-                "--hosts", "10.0.0.1,10.0.0.2", "--port", "8000", "--no-follow",
+                "--hosts", "192.0.2.1,192.0.2.2", "--port", "8000", "--no-follow",
                 "--ensure", "--served-model-name",
                 "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"])],
         }
@@ -574,9 +574,9 @@ class TestServeCmdMismatchRefused:
         assert len(plan) == 1
         cmd = plan[0]["cmd"]
         # The ISSUED command uses the unit's real host (.247), NOT the serve_cmd's
-        # imagined 10.0.0.1/10.0.0.2 — the bogus serve_cmd was REFUSED.
+        # imagined 192.0.2.1/192.0.2.2 — the bogus serve_cmd was REFUSED.
         assert "--hosts" in cmd
-        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.247"
+        assert cmd[cmd.index("--hosts") + 1] == "192.0.2.247"
         # ...and still carries the correct alias.
         j = cmd.index("--served-model-name")
         assert cmd[j + 1] == "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"
@@ -587,7 +587,7 @@ class TestServeCmdMismatchRefused:
             "port": 8000,
             "units": [dict(self._unit(), serve_cmd=[
                 "sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
-                "--hosts", "10.0.0.247", "--port", "9000", "--no-follow",
+                "--hosts", "192.0.2.247", "--port", "9000", "--no-follow",
                 "--ensure", "--served-model-name",
                 "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"])],
         }
@@ -625,10 +625,10 @@ class TestUniformPoolWakePath:
         s = {
             "version": 3,
             "units": [
-                {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.244"],
+                {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.244"],
                  "port": 8000, "recipe": "/abs/recipes/flash.yaml",
                  "model": "lab/Flash-NVFP4", "tp": 1},
-                {"id": "wk1", "role": "worker", "nodes": ["10.0.0.246"],
+                {"id": "wk1", "role": "worker", "nodes": ["192.0.2.246"],
                  "port": 8001, "recipe": "/abs/recipes/flash.yaml",
                  "model": "lab/Flash-NVFP4", "tp": 1, "keepalive": True},
             ],
@@ -692,7 +692,7 @@ class TestUniformPoolWakePath:
         derived command is reported, so this class of drift can never again be
         silent."""
         from hscc_daemon import serving
-        u = {"id": "wk1", "role": "worker", "nodes": ["10.0.0.246"],
+        u = {"id": "wk1", "role": "worker", "nodes": ["192.0.2.246"],
              "port": 8001, "recipe": "/abs/recipes/flash.yaml",
              "model": "lab/Flash-NVFP4", "tp": 1, "uniform_pool": True}
         derived = serving._unit_run_cmd(u)
@@ -730,11 +730,11 @@ class TestFleetUpMaxNumSeqs:
     token-identical here; what must not diverge is the VALUE.
     """
 
-    ORCH = {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.244"],
+    ORCH = {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.244"],
             "port": 8000, "recipe": "/abs/recipes/orch.yaml",
             "model": "lab/Orch-Flash"}
     WK = {"id": "wk1", "role": "worker", "keepalive": True,
-          "nodes": ["10.0.0.247"], "port": 8000,
+          "nodes": ["192.0.2.247"], "port": 8000,
           "recipe": "/abs/recipes/wk.yaml", "model": "lab/Flash-NVFP4"}
 
     def _serving(self, orch_cap=None, wk_cap=None):
@@ -844,7 +844,7 @@ class TestFleetUpMaxNumSeqs:
         """The env-fallback branch has no serving.json unit behind it, so it
         must not invent a cap key with a bogus value."""
         from hscc_daemon import serving
-        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.9")
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "192.0.2.9")
         units = serving.keepalive_units({"version": 2, "units": []})
         assert len(units) == 1
         assert "-o" not in serving._unit_run_cmd(units[0])
@@ -945,7 +945,7 @@ class TestFleetUpMaxNumSeqs:
         from hscc_daemon import serving
         sd = {"version": 2, "units": [dict(
             self.WK, serve_cmd=["sparkrun", "run", "/abs/recipes/wk.yaml",
-                                "--cluster", "hscc", "--hosts", "10.0.0.247",
+                                "--cluster", "hscc", "--hosts", "192.0.2.247",
                                 "--port", "8000", "--no-follow", "--ensure",
                                 "--served-model-name",
                                 "lab/Flash-NVFP4 worker-model", "--tp", "1",

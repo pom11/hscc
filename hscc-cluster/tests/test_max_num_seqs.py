@@ -46,8 +46,8 @@ class FakeTopo:
 
 
 def _topo(n_workers=2, vram=120.0):
-    return FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                    workers=[FakeNode(f"10.0.0.{2+i}", vram) for i in range(n_workers)])
+    return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                    workers=[FakeNode(f"192.0.2.{2+i}", vram) for i in range(n_workers)])
 
 
 def _coster(per_gpu=30.0, fits=True):
@@ -159,7 +159,7 @@ class TestMaxNumSeqsResolve:
         t = ti.ClusterTemplate.from_dict({
             "name": "t", "version": 3,
             "orchestrator": _model_dict(max_num_seqs=7),
-            "families": [{"name": "coding", "nodes": ["10.0.0.2"],
+            "families": [{"name": "coding", "nodes": ["192.0.2.2"],
                           "models": [_model_dict(max_num_seqs=5)]}]})
         plan = ti.resolve(t, _topo(2), _coster=_coster())
         assert plan.orchestrator.max_num_seqs == 7
@@ -190,14 +190,14 @@ class TestMaxNumSeqsResolve:
         # The 8-positional-arg constructor form (used across test_apply.py)
         # must keep working untouched — new kw is last, defaults None.
         u = ti.ResolvedUnit("worker", "coding", "m.yaml", "M",
-                            ["10.0.0.2"], 8000, 1, 1)
+                            ["192.0.2.2"], 8000, 1, 1)
         assert u.max_num_seqs is None
 
 
 # ── 4. serve-command render ──────────────────────────────────────────────────
 
 def _render(gpu_mem=None, max_num_seqs=None):
-    return ct._render_serve_cmd("hscc", "10.0.0.2", 8000, "/r/model.yaml",
+    return ct._render_serve_cmd("hscc", "192.0.2.2", 8000, "/r/model.yaml",
                                 "worker-model", 1, "org/model",
                                 gpu_mem, max_num_seqs)
 
@@ -290,7 +290,7 @@ class TestProvisionReportsCapDrift:
             calls.append(list(argv))
             if "status" in argv:
                 return MagicMock(returncode=0, stderr="",
-                                 stdout="Job: ~/recipes/deepseek.yaml\n10.0.0.2\n")
+                                 stdout="Job: ~/recipes/deepseek.yaml\n192.0.2.2\n")
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
         # FAKES ONLY: the --ensure-skip gate probes each span node's
@@ -304,16 +304,16 @@ class TestProvisionReportsCapDrift:
         serving_path = tmp_path / "serving.json"
         monkeypatch.setattr(ct, "SERVING_JSON", serving_path)
         rec_cmd = ct._render_serve_cmd(
-            "hscc", "10.0.0.2", 8000, "~/recipes/deepseek.yaml",
+            "hscc", "192.0.2.2", 8000, "~/recipes/deepseek.yaml",
             "worker-model", 1, "deepseek", None, recorded_cap)
         serving_path.write_text(json.dumps({"version": 2, "units": [
             {"id": "orch"},
             {"id": "family-coding-deepseek-2-8000", "serve_cmd": rec_cmd}]}))
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch", ["10.0.0.1"], 8000, 1, 1)
+                               "orch", ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
-                               "deepseek", ["10.0.0.2"], 8000, 1, 1,
+                               "deepseek", ["192.0.2.2"], 8000, 1, 1,
                                max_num_seqs=cap)
         plan = ti.ResolvedPlan(
             template="test", orchestrator=orch,

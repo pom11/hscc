@@ -20,7 +20,7 @@ are **UTC**; `litellm.log`, `autodiscover.log` and `ps.txt` are **local**. All
 LAN/tailnet addresses are replaced with the documented placeholders
 (`10.0.0.x` = a LAN node, `100.64.0.1` = a tailnet host); real values live in
 the operator's evidence dir. Node placeholders used below:
-`10.0.0.1:8000`, `10.0.0.2:8001`, `10.0.0.3:8002`, `10.0.0.4:8003`.
+`10.0.0.x:8000`, `10.0.0.x:8001`, `10.0.0.x:8002`, `10.0.0.x:8003`.
 
 Evidence sources (paths as captured by the operator):
 
@@ -1246,8 +1246,8 @@ and the `sparkrun status` shell-out failed because **(i) SSH to the DGX nodes wa
 unreachable/slow** or **(ii) the Mac itself was starved** (CPU/fork pressure from
 the daemon's own 90 s-killed sparkrun children, or the uvx proxy at ~476 MB RSS).
 Read-only throughout; `sparkrun` untouched (upstream proposals only); no proxy or
-fleet action taken. Addresses follow the §Head convention (`10.0.0.1`–`10.0.0.4` =
-the four sweep targets; the primary is `10.0.0.1`).
+fleet action taken. Addresses follow the §Head convention (`10.0.0.x`–`10.0.0.x` =
+the four sweep targets; the primary is `10.0.0.x`).
 
 ### c0 — the card's premise is false on the code: `Gateway check` is not SSH-dependent
 
@@ -1276,7 +1276,7 @@ health.py:313  gpu_result = ssh_cmd(serving.PRIMARY_NODE, "nvidia-smi --query-gp
 
 and its return value / `DGX check complete: ok=…` line is `serving_ok =
 ssh_reachable and vllm_healthy` (`health.py:371-372`) — i.e. **`ok=True` on a
-degraded tick means that tick's own 8-second SSH to `10.0.0.1` succeeded while
+degraded tick means that tick's own 8-second SSH to `10.0.0.x` succeeded while
 sparkrun's sweep over its 4-host set failed**, in the same process, the same
 second. Parsing all 14 ticks that emitted `structured sparkrun status unavailable`
 (the full log, not just window A):

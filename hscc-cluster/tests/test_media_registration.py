@@ -227,15 +227,15 @@ class TestAdvertisedModelsFromFakeServer:
 class TestEmittedModelListEntry:
     def test_image_unit_entry_carries_image_generation_mode(self):
         # The fixture media unit of the acceptance sentence: a declared
-        # kind=image unit at 10.0.0.11:30002 must register as an
+        # kind=image unit at 192.0.2.11:30002 must register as an
         # image_generation deployment.
-        e = mr.media_model_list_entry("Qwen/Qwen-Image-2.1", "10.0.0.11:30002",
+        e = mr.media_model_list_entry("Qwen/Qwen-Image-2.1", "192.0.2.11:30002",
                                       kind="image")
         assert e == {
             "model_name": "Qwen/Qwen-Image-2.1",
             "litellm_params": {
                 "model": "openai/Qwen/Qwen-Image-2.1",
-                "api_base": "http://10.0.0.11:30002/v1",
+                "api_base": "http://192.0.2.11:30002/v1",
                 "api_key": "not-needed",
             },
             "model_info": {"mode": "image_generation"},
@@ -243,9 +243,9 @@ class TestEmittedModelListEntry:
 
     def test_video_unit_entry_carries_video_generation_mode(self):
         e = mr.media_model_list_entry("Wan-AI/Wan2.2-T2V-A14B",
-                                      "10.0.0.12:30003", kind="video")
+                                      "192.0.2.12:30003", kind="video")
         assert e["model_info"]["mode"] == "video_generation"
-        assert e["litellm_params"]["api_base"] == "http://10.0.0.12:30003/v1"
+        assert e["litellm_params"]["api_base"] == "http://192.0.2.12:30003/v1"
 
     def test_shape_matches_sparkrun_emission_plus_the_one_mode_key(self):
         # sparkrun build_litellm_config (engine.py:165-181) emits exactly
@@ -253,7 +253,7 @@ class TestEmittedModelListEntry:
         # only when max_model_len is known). The proposed patch adds mode to
         # model_info. With a known window BOTH keys must appear — pinning the
         # merged shape so the fork patch and this contract cannot drift.
-        e = mr.media_model_list_entry("ltx-video", "10.0.0.13:30004",
+        e = mr.media_model_list_entry("ltx-video", "192.0.2.13:30004",
                                       kind="video", max_input_tokens=8192)
         assert set(e) == {"model_name", "litellm_params", "model_info"}
         assert set(e["litellm_params"]) == {"model", "api_base", "api_key"}
@@ -263,32 +263,32 @@ class TestEmittedModelListEntry:
     def test_no_window_media_units_get_mode_only(self):
         # M0 §3: diffusion /v1/models reports max_model_len null — the key
         # must be ABSENT (sparkrun's `if ep.max_model_len:` gate), not null.
-        e = mr.media_model_list_entry("ltx-video", "10.0.0.13:30004",
+        e = mr.media_model_list_entry("ltx-video", "192.0.2.13:30004",
                                       kind="video")
         assert e["model_info"] == {"mode": "video_generation"}
 
     def test_explicit_http_url_passes_through(self):
-        e = mr.media_model_list_entry("m", "http://10.0.0.9:30010/v1",
+        e = mr.media_model_list_entry("m", "http://192.0.2.9:30010/v1",
                                       kind="image")
-        assert e["litellm_params"]["api_base"] == "http://10.0.0.9:30010/v1"
+        assert e["litellm_params"]["api_base"] == "http://192.0.2.9:30010/v1"
 
     def test_kind_must_agree_with_advertised_task_types(self):
         # kind: video on a unit advertising T2I is a template bug — the entry
         # would route video traffic to an image engine. Refused, naming both.
         with pytest.raises(mr.MediaRegistrationError) as exc:
-            mr.media_model_list_entry("flux-dev", "10.0.0.11:30002",
+            mr.media_model_list_entry("flux-dev", "192.0.2.11:30002",
                                       kind="video", task_types=["T2I", "I2I"])
         msg = str(exc.value)
         assert "video" in msg and "T2I" in msg
 
     def test_discovery_side_task_types_need_no_kind(self):
-        e = mr.media_model_list_entry("flux-dev", "10.0.0.11:30002",
+        e = mr.media_model_list_entry("flux-dev", "192.0.2.11:30002",
                                       task_types=["T2I"])
         assert e["model_info"]["mode"] == "image_generation"
 
     def test_no_decidable_mode_refuses_instead_of_listing_as_chat(self):
         with pytest.raises(mr.MediaRegistrationError) as exc:
-            mr.media_model_list_entry("mystery", "10.0.0.11:30002",
+            mr.media_model_list_entry("mystery", "192.0.2.11:30002",
                                       task_types=["EMBEDDING"])
         assert "chat" in str(exc.value)
 
@@ -303,7 +303,7 @@ class TestEntriesForUnits:
         # must carry the SAME mode (an alias listed without mode is how a
         # media model gets believed to be chat).
         units = [{"model": "flux-dev", "alias": "image-model",
-                  "kind": "image", "node": "10.0.0.11", "port": 30002}]
+                  "kind": "image", "node": "192.0.2.11", "port": 30002}]
         entries = mr.media_entries_for_units(units)
         assert [e["model_name"] for e in entries] == ["flux-dev",
                                                       "image-model"]
@@ -314,18 +314,18 @@ class TestEntriesForUnits:
     def test_chat_units_are_skipped_byte_identically(self):
         # §7 doctrine: a template with no media units must gain ZERO entries —
         # discovery keeps owning chat registrations exactly as before.
-        units = [{"model": "big", "alias": "worker-model", "node": "10.0.0.5",
+        units = [{"model": "big", "alias": "worker-model", "node": "192.0.2.5",
                   "port": 30001},
-                 {"model": "orch", "node": "10.0.0.1", "port": 30000}]
+                 {"model": "orch", "node": "192.0.2.1", "port": 30000}]
         assert mr.media_entries_for_units(units) == []
 
     def test_mixed_plan_registers_only_media(self):
         units = [
-            {"model": "big", "alias": "worker-model", "node": "10.0.0.5",
+            {"model": "big", "alias": "worker-model", "node": "192.0.2.5",
              "port": 30001},
             {"model": "Wan-AI/Wan2.2-T2V-A14B", "kind": "video",
-             "node": "10.0.0.12", "port": 30003},
-            {"model": "flux-dev", "kind": "image", "node": "10.0.0.11",
+             "node": "192.0.2.12", "port": 30003},
+            {"model": "flux-dev", "kind": "image", "node": "192.0.2.11",
              "port": 30002, "task_types": ["T2I"]},
         ]
         entries = mr.media_entries_for_units(units)
@@ -348,7 +348,7 @@ class TestEntriesForUnits:
 
     def test_duplicate_registration_is_deduped_like_sparkrun(self):
         u = {"model": "flux-dev", "alias": "image-model", "kind": "image",
-            "node": "10.0.0.11", "port": 30002}
+            "node": "192.0.2.11", "port": 30002}
         assert len(mr.media_entries_for_units([u, dict(u)])) == 2
 
     def test_media_unit_without_endpoint_refused(self):
@@ -361,7 +361,7 @@ class TestEntriesForUnits:
         with pytest.raises(mr.MediaRegistrationError) as exc:
             mr.media_entries_for_units([{"model": "confused-unit",
                                          "task_types": ["T2I", "T2V"],
-                                         "node": "10.0.0.14", "port": 30005}])
+                                         "node": "192.0.2.14", "port": 30005}])
         assert "confused-unit" in str(exc.value)
 
 

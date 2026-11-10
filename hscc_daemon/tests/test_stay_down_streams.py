@@ -46,7 +46,7 @@ from hscc_daemon import post_boot as pb
 from hscc_daemon import serving, state as state_mod
 
 REASON = "hscc cluster down"
-PRIMARY = "10.0.0.2"
+PRIMARY = "192.0.2.2"
 
 # The wording D2 asks for, pinned in ONE place so a reword fails loudly here
 # (same convention as tests/test_stay_down_health.py::_expected_line).

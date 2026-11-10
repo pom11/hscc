@@ -4,7 +4,7 @@
 Fleet hosts are deliberately NOT hard-coded (this repo is public). Pass them via env, using the
 documented placeholders as the shape of the argument — LAN engines `10.0.0.x`:
 
-    ENGINE_METRICS="10.0.0.244:8000,10.0.0.246:8003,10.0.0.247:8001,10.0.0.248:8002" \
+    ENGINE_METRICS="10.0.0.x:8000,10.0.0.x:8003,10.0.0.x:8001,10.0.0.x:8002" \
         python3 t_22b546e3_metrics_watch.py 150
 
 The port per engine differs by deployment; `sparkrun status` is the source of truth for both.

@@ -79,10 +79,10 @@ host. Addresses in fixtures/reports are the documented `10.0.0.x` placeholders.
 ## Sample render (from `test_sample_render_green_and_red`, fabricated nodes)
 
     1/2 node(s) fully protected (watchdog armed + panic sysctls in sync); 1 NOT protected
-          [ok] 10.0.0.1 ok: 10.0.0.1: watchdog RuntimeWatchdogUSec=30s, device state=armed, device timeout=30s, wdctl Timeout=30seconds (target 30s); drop-in present
-          [ok] 10.0.0.1 10.0.0.1: 6 panic knob(s) verified live
-          [XX] 10.0.0.2 fail: 10.0.0.2: watchdog error — RuntimeWatchdogUSec='0', expected 30s (target RuntimeWatchdogSec=30s)
-          [XX] 10.0.0.2 10.0.0.2/kernel.panic: live '0', expected '10'
+          [ok] 10.0.0.x ok: 10.0.0.x: watchdog RuntimeWatchdogUSec=30s, device state=armed, device timeout=30s, wdctl Timeout=30seconds (target 30s); drop-in present
+          [ok] 10.0.0.x 10.0.0.x: 6 panic knob(s) verified live
+          [XX] 10.0.0.x fail: 10.0.0.x: watchdog error — RuntimeWatchdogUSec='0', expected 30s (target RuntimeWatchdogSec=30s)
+          [XX] 10.0.0.x 10.0.0.x/kernel.panic: live '0', expected '10'
 
 ## Deferrals
 

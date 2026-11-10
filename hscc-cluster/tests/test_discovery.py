@@ -359,7 +359,7 @@ class TestProbeNodeRealPort:
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
-        node = d.Node(ip="10.0.0.5", role="worker")
+        node = d.Node(ip="192.0.2.5", role="worker")
         d._probe_node(node)
 
         assert node.gpu_model == "GB10"
@@ -378,7 +378,7 @@ class TestProbeNodeRealPort:
         serving_path.write_text(json.dumps({
             "units": [{
                 "id": "unit-1",
-                "nodes": ["10.0.0.5"],
+                "nodes": ["192.0.2.5"],
                 "port": 8001,
             }]
         }))
@@ -393,7 +393,7 @@ class TestProbeNodeRealPort:
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
-        node = d.Node(ip="10.0.0.5", role="worker")
+        node = d.Node(ip="192.0.2.5", role="worker")
         d._probe_node(node)
 
         assert node.vllm_healthy is True
@@ -409,7 +409,7 @@ class TestProbeNodeRealPort:
         serving_path.write_text(json.dumps({
             "units": [{
                 "id": "unit-1",
-                "nodes": ["10.0.0.5"],
+                "nodes": ["192.0.2.5"],
                 "port": 8001,
             }]
         }))
@@ -422,7 +422,7 @@ class TestProbeNodeRealPort:
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
-        node = d.Node(ip="10.0.0.5", role="worker")
+        node = d.Node(ip="192.0.2.5", role="worker")
         d._probe_node(node)
 
         assert node.vllm_healthy is True
@@ -435,7 +435,7 @@ class TestProbeNodeRealPort:
         serving_path.write_text(json.dumps({
             "units": [{
                 "id": "unit-1",
-                "nodes": ["10.0.0.99"],
+                "nodes": ["192.0.2.99"],
                 "port": 8001,
             }]
         }))
@@ -448,7 +448,7 @@ class TestProbeNodeRealPort:
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
-        node = d.Node(ip="10.0.0.5", role="worker")
+        node = d.Node(ip="192.0.2.5", role="worker")
         d._probe_node(node)
 
         assert node.gpu_model == "GB10"
@@ -462,7 +462,7 @@ class TestProbeNodeRealPort:
         serving_path.write_text(json.dumps({
             "units": [{
                 "id": "unit-1",
-                "nodes": ["10.0.0.5"],
+                "nodes": ["192.0.2.5"],
                 "port": 8001,
             }]
         }))
@@ -473,7 +473,7 @@ class TestProbeNodeRealPort:
             return {"ok": False, "stdout": "", "stderr": "connection refused"}
         monkeypatch.setattr(d, "_run", fake_run)
 
-        node = d.Node(ip="10.0.0.5", role="worker")
+        node = d.Node(ip="192.0.2.5", role="worker")
         d._probe_node(node)
 
         assert node.vllm_healthy is False

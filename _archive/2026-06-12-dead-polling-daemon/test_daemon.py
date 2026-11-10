@@ -131,8 +131,8 @@ class TestVLLMHandler:
         assert h.name == "vllm"
 
     def test_custom_url(self):
-        h = VLLMHandler(url="http://10.0.0.1:9000/health")
-        assert h.url == "http://10.0.0.1:9000/health"
+        h = VLLMHandler(url="http://10.0.0.x:9000/health")
+        assert h.url == "http://10.0.0.x:9000/health"
 
     def test_unreachable_port_becomes_unknown(self):
         """Port 19999 should be unknown (connection refused), not crash."""

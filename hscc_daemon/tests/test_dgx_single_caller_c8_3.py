@@ -58,8 +58,8 @@ def wd(tmp_hfcc_dir, monkeypatch):
     monkeypatch.setattr(health, "log", lambda *a, **k: None)
     monkeypatch.setattr(health, "ssh_cmd", lambda *a, **k: {"ok": True, "output": "reachable"})
     monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True, "status": 200})
-    monkeypatch.setattr(serving, "PRIMARY_NODE", "10.0.0.2")
-    monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://10.0.0.2:8000/health")
+    monkeypatch.setattr(serving, "PRIMARY_NODE", "192.0.2.2")
+    monkeypatch.setattr(serving, "VLLM_HEALTH_URL", "http://192.0.2.2:8000/health")
     return {"logs": logs, "argvs": argvs, "state_dir": state_dir, "monkeypatch": monkeypatch}
 
 

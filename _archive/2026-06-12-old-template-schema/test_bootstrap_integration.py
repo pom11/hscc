@@ -56,7 +56,7 @@ class TestBootstrapDefaultTemplate:
             assert result == "basic-1-node"
 
     def test_returns_basic_2_node_with_1_worker(self):
-        mock_data = {"workers": [{"ip": "10.0.0.246"}]}
+        mock_data = {"workers": [{"ip": "10.0.0.x"}]}
         with patch.object(Path, "exists", return_value=True):
             with patch("builtins.open", mock_open(read_data=json.dumps(mock_data))):
                 result = bootstrap_default_template()
@@ -65,8 +65,8 @@ class TestBootstrapDefaultTemplate:
     def test_returns_basic_3_node_with_2_workers(self):
         mock_data = {
             "workers": [
-                {"ip": "10.0.0.246"},
-                {"ip": "10.0.0.247"},
+                {"ip": "10.0.0.x"},
+                {"ip": "10.0.0.x"},
             ]
         }
         with patch.object(Path, "exists", return_value=True):
@@ -77,9 +77,9 @@ class TestBootstrapDefaultTemplate:
     def test_returns_basic_4_node_with_3_workers(self):
         mock_data = {
             "workers": [
-                {"ip": "10.0.0.246"},
-                {"ip": "10.0.0.247"},
-                {"ip": "10.0.0.248"},
+                {"ip": "10.0.0.x"},
+                {"ip": "10.0.0.x"},
+                {"ip": "10.0.0.x"},
             ]
         }
         with patch.object(Path, "exists", return_value=True):
@@ -90,7 +90,7 @@ class TestBootstrapDefaultTemplate:
     def test_returns_basic_4_node_with_many_workers(self):
         mock_data = {
             "workers": [
-                {"ip": f"10.0.0.{i}"} for i in range(246, 252)
+                {"ip": "10.0.0.x"} for i in range(246, 252)
             ]  # 6 workers
         }
         with patch.object(Path, "exists", return_value=True):

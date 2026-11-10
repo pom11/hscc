@@ -152,7 +152,7 @@ def test_hardlockup_is_conditional_constant():
 
 def test_fresh_node_installed_and_verified():
     n = FakeNode()
-    r = m.install_node("10.0.0.1", _ssh=n.ssh)
+    r = m.install_node("192.0.2.1", _ssh=n.ssh)
     assert r["action"] == "installed"
     assert r["error"] is None
     assert n.file == m.build_dropin(True)
@@ -166,7 +166,7 @@ def test_fresh_node_installed_and_verified():
 
 def test_conditional_knob_absent_skips_key_not_node():
     n = FakeNode(has_hardlockup=False)
-    r = m.install_node("10.0.0.2", _ssh=n.ssh)
+    r = m.install_node("192.0.2.2", _ssh=n.ssh)
     assert r["action"] == "installed"
     assert r["skipped_keys"] == [m.HARDLOCKUP_KEY]
     assert n.file is not None
@@ -177,7 +177,7 @@ def test_conditional_knob_absent_skips_key_not_node():
 
 def test_readback_mismatch_fails_node_loudly():
     n = FakeNode(apply_on_write=False)  # file lands, value never sticks
-    r = m.install_node("10.0.0.3", _ssh=n.ssh)
+    r = m.install_node("192.0.2.3", _ssh=n.ssh)
     assert r["action"] == "failed"
     assert "read-back mismatch" in r["error"]
     # names the offending key(s) with expected vs actual
@@ -186,10 +186,10 @@ def test_readback_mismatch_fails_node_loudly():
 
 def test_idempotent_second_run_is_noop():
     n = FakeNode()
-    first = m.install_node("10.0.0.1", _ssh=n.ssh)
+    first = m.install_node("192.0.2.1", _ssh=n.ssh)
     assert first["action"] == "installed"
     before_calls = len(n.calls)
-    second = m.install_node("10.0.0.1", _ssh=n.ssh)
+    second = m.install_node("192.0.2.1", _ssh=n.ssh)
     assert second["action"] == "unchanged"
     # probe only — no writes, no sysctl --system
     assert len(n.calls) == before_calls + 1
@@ -200,7 +200,7 @@ def test_idempotent_second_run_is_noop():
 def test_drift_operator_edited_file_reported_never_clobbered():
     edited = m.build_dropin(True).replace("kernel.panic = 10", "kernel.panic = 0")
     n = FakeNode(file=edited, knobs={"kernel.panic": "0"})
-    r = m.install_node("10.0.0.4", _ssh=n.ssh)
+    r = m.install_node("192.0.2.4", _ssh=n.ssh)
     assert r["action"] == "drift"
     assert r["error"] is None
     assert n.file == edited, "operator file was clobbered"
@@ -213,7 +213,7 @@ def test_our_own_older_canonical_variant_upgrades_not_drift():
     # Kernel later exposed hardlockup_panic: the file we wrote without it is
     # OURS — it upgrades, and is never reported as operator drift.
     n = FakeNode(file=m.build_dropin(False))
-    r = m.install_node("10.0.0.10", _ssh=n.ssh)
+    r = m.install_node("192.0.2.10", _ssh=n.ssh)
     assert r["action"] == "installed"
     assert n.file == m.build_dropin(True)
 
@@ -224,21 +224,21 @@ def test_subset_of_canonical_is_drift_not_upgrade():
     lines = m.build_dropin(True).splitlines(keepends=True)
     subset = "".join(l for l in lines if not l.startswith("kernel.softlockup_panic"))
     n = FakeNode(file=subset)
-    r = m.install_node("10.0.0.11", _ssh=n.ssh)
+    r = m.install_node("192.0.2.11", _ssh=n.ssh)
     assert r["action"] == "drift"
     assert n.file == subset
 
 
 def test_opt_out_skips_without_touching_node():
     n = FakeNode()
-    r = m.install_node("10.0.0.5", _ssh=n.ssh, enabled=False)
+    r = m.install_node("192.0.2.5", _ssh=n.ssh, enabled=False)
     assert r["action"] == "skipped-disabled"
     assert n.calls == []
 
 
 def test_dry_run_reports_diff_writes_nothing():
     n = FakeNode()
-    r = m.install_node("10.0.0.6", _ssh=n.ssh, dry_run=True)
+    r = m.install_node("192.0.2.6", _ssh=n.ssh, dry_run=True)
     assert r["action"] == "dry-run"
     assert n.file is None
     assert write_call_count(n) == 0
@@ -249,14 +249,14 @@ def test_dry_run_reports_diff_writes_nothing():
 
 def test_dry_run_shows_live_drift_on_matching_file():
     n = FakeNode(file=m.build_dropin(True), knobs={"kernel.panic": "0"})
-    r = m.install_node("10.0.0.6", _ssh=n.ssh, dry_run=True)
+    r = m.install_node("192.0.2.6", _ssh=n.ssh, dry_run=True)
     assert r["action"] == "dry-run"
     assert "kernel.panic" in r["diff"]
 
 
 def test_file_correct_live_drifted_reapplies_without_rewrite():
     n = FakeNode(file=m.build_dropin(True), knobs={"kernel.softlockup_panic": "0"})
-    r = m.install_node("10.0.0.7", _ssh=n.ssh)
+    r = m.install_node("192.0.2.7", _ssh=n.ssh)
     assert r["action"] == "live-reapplied"
     assert write_call_count(n) == 0, "file already correct — must not rewrite"
     assert sysctl_call_count(n) >= 1
@@ -265,14 +265,14 @@ def test_file_correct_live_drifted_reapplies_without_rewrite():
 
 def test_sudo_refused_fails_node_clearly_not_hang():
     n = FakeNode(sudo_ok=False)
-    r = m.install_node("10.0.0.8", _ssh=n.ssh)
+    r = m.install_node("192.0.2.8", _ssh=n.ssh)
     assert r["action"] == "failed"
     assert "sudo -n was refused" in r["error"]
 
 
 def test_unreachable_node_fails_not_fabricated_ok():
     n = FakeNode(reachable=False)
-    r = m.install_node("10.0.0.9", _ssh=n.ssh)
+    r = m.install_node("192.0.2.9", _ssh=n.ssh)
     assert r["action"] == "failed"
     assert "probe failed" in r["error"]
 
@@ -352,22 +352,22 @@ def test_read_cluster_config_missing_file_defaults_empty(tmp_path):
 
 def test_fleet_one_bad_node_does_not_suppress_the_others():
     good, bad = FakeNode(), FakeNode(apply_on_write=False)
-    nodes = {"10.0.0.1": good, "10.0.0.2": bad}
+    nodes = {"192.0.2.1": good, "192.0.2.2": bad}
 
     def ssh(host, command, timeout=60):
         return nodes[host].ssh(host, command, timeout)
 
-    out = m.install_fleet(["10.0.0.1", "10.0.0.2"], _ssh=ssh,
+    out = m.install_fleet(["192.0.2.1", "192.0.2.2"], _ssh=ssh,
                           _config_loader=lambda _d: {})
     assert out["ok"] is False
     by_host = {r["host"]: r for r in out["results"]}
-    assert by_host["10.0.0.1"]["action"] == "installed"
-    assert by_host["10.0.0.2"]["action"] == "failed"
+    assert by_host["192.0.2.1"]["action"] == "installed"
+    assert by_host["192.0.2.2"]["action"] == "failed"
 
 
 def test_fleet_optout_touches_no_nodes():
     n = FakeNode()
-    out = m.install_fleet(["10.0.0.1"], _ssh=n.ssh,
+    out = m.install_fleet(["192.0.2.1"], _ssh=n.ssh,
                           _config_loader=lambda _d: {"node_recovery": {"autoreboot": False}})
     assert out["ok"] is True and out["skipped_reason"]
     assert n.calls == []
@@ -379,7 +379,7 @@ def test_main_reports_json_and_rc(monkeypatch, capsys):
     n = FakeNode()
     monkeypatch.setattr(m, "_default_ssh", n.ssh)
     monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
-    rc = m.main(["--hosts", "10.0.0.1"])
+    rc = m.main(["--hosts", "192.0.2.1"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["results"][0]["action"] == "installed"
@@ -389,7 +389,7 @@ def test_main_dry_run_writes_nothing(monkeypatch, capsys):
     n = FakeNode()
     monkeypatch.setattr(m, "_default_ssh", n.ssh)
     monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
-    rc = m.main(["--hosts", "10.0.0.1", "--dry-run"])
+    rc = m.main(["--hosts", "192.0.2.1", "--dry-run"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["results"][0]["action"] == "dry-run"
@@ -407,6 +407,6 @@ def test_main_failing_node_is_rc1(monkeypatch, capsys):
     n = FakeNode(reachable=False)
     monkeypatch.setattr(m, "_default_ssh", n.ssh)
     monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
-    rc = m.main(["--hosts", "10.0.0.1"])
+    rc = m.main(["--hosts", "192.0.2.1"])
     assert rc == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False

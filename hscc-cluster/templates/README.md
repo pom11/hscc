@@ -123,11 +123,11 @@ version: 3
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
   tp: 2
-  nodes: [10.0.0.244, 10.0.0.246]     # optional explicit span
+  nodes: [10.0.0.x, 10.0.0.x]     # optional explicit span
 
 families:
   - name: reasoning
-    nodes: [10.0.0.247, 10.0.0.248]   # optional explicit span
+    nodes: [10.0.0.x, 10.0.0.x]   # optional explicit span
     allow_colocation: false                    # optional, default false
     proxy: true
     models:
@@ -170,9 +170,9 @@ not two — and **blocks before stopping or starting anything** when it fails.
 Every structural violation is a hard block naming the offending unit, e.g.:
 
 ```
-node '10.0.0.250' in family 'reasoning' is not defined in cluster.json
+node '10.0.0.x' in family 'reasoning' is not defined in cluster.json
 family 'reasoning': 2 nodes listed but model tp=3
-node '10.0.0.248' claimed by both 'reasoning' and 'coding'
+node '10.0.0.x' claimed by both 'reasoning' and 'coding'
   (set allow_colocation: true on both to permit)
 routing.delegation -> 'family-coding': no such family in this template
 ```

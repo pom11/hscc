@@ -22,7 +22,7 @@ Two consequences, both observed in production on 2026-08-06/07:
 
 1. **The inference is broken and there is no way around it.** `4node-dual-dsv4`
    fails resolution with `family 'reasoning': no available worker nodes
-   (pool=[], claimed=['10.0.0.247'])` — and produces the identical error
+   (pool=[], claimed=['10.0.0.x'])` — and produces the identical error
    whether the target nodes are running or completely free. `apply
    --force-recreate` is therefore unusable, and activating the v1.6.0 logical
    aliases required bypassing `hscc` entirely and driving `sparkrun` by hand.
@@ -30,7 +30,7 @@ Two consequences, both observed in production on 2026-08-06/07:
    than fixing it.
 2. **Routing is invisible and drifts silently.** `delegation.model` and
    `fallback_providers[0]` currently point at the orchestrator
-   (`10.0.0.244:8000`) rather than the worker proxy, contradicting HSCC's
+   (`10.0.0.x:8000`) rather than the worker proxy, contradicting HSCC's
    own documented intent that "orchestrator subagents run on the WORKER pool,
    not the gateway GPU". Every delegated subagent burns orchestrator GPU. No
    template expresses this, so nothing detects or corrects it.
@@ -70,11 +70,11 @@ version: 3
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
   tp: 2
-  nodes: [10.0.0.244, 10.0.0.246]     # NEW, optional
+  nodes: [10.0.0.x, 10.0.0.x]     # NEW, optional
 
 families:
   - name: reasoning
-    nodes: [10.0.0.247, 10.0.0.248]   # NEW, optional
+    nodes: [10.0.0.x, 10.0.0.x]   # NEW, optional
     allow_colocation: false                    # NEW, optional, default false
     proxy: true
     models:
@@ -195,9 +195,9 @@ Every structural violation is a hard block naming the offending unit and value,
 e.g.:
 
 ```
-node '10.0.0.250' in family 'reasoning' is not defined in cluster.json
+node '10.0.0.x' in family 'reasoning' is not defined in cluster.json
 family 'reasoning': 3 nodes listed but tp=2
-node '10.0.0.248' claimed by both 'orchestrator' and 'reasoning'
+node '10.0.0.x' claimed by both 'orchestrator' and 'reasoning'
   (set allow_colocation: true on both to permit)
 routing.delegation -> 'family-coding': no such family in this template
 ```

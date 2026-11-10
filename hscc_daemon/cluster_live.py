@@ -86,7 +86,7 @@ def parse_vllm_metrics(text: str) -> dict:
 
 
 def hostport(api_base: str) -> str:
-    """'http://10.0.0.2:8001/v1' -> '10.0.0.2:8001'; '' when unparseable."""
+    """'http://192.0.2.2:8001/v1' -> '192.0.2.2:8001'; '' when unparseable."""
     try:
         p = urllib.parse.urlparse(api_base or "")
     except ValueError:

@@ -26,8 +26,8 @@ LIVE_DGX = {
     "ok": True,
     "details": {
         "nodes": [
-            {"name": "/Users/x/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml (10.0.0.1)", "ok": True},
-            {"name": "/Users/x/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml (10.0.0.2)", "ok": True},
+            {"name": "/Users/x/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml (192.0.2.1)", "ok": True},
+            {"name": "/Users/x/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml (192.0.2.2)", "ok": True},
         ],
     },
 }

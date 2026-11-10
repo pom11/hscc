@@ -25,8 +25,8 @@ class FakeTopo:
 
 
 def _topo(n_workers=3, vram=120.0):
-    return FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                    workers=[FakeNode(f"10.0.0.{2+i}", vram) for i in range(n_workers)])
+    return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                    workers=[FakeNode(f"192.0.2.{2+i}", vram) for i in range(n_workers)])
 
 
 def _coster(per_gpu=30.0, fits=True, tp=1):
@@ -53,7 +53,7 @@ class TestSchema:
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.ClusterTemplate.from_dict({
                 "name": "x", "orchestrator": {"recipe": "o.yaml"},
-                "orchestrator_node": "10.0.0.244"})
+                "orchestrator_node": "192.0.2.244"})
         assert "topology-free" in str(e.value)
 
     def test_rejects_legacy_family_nodes_and_port(self):
@@ -61,7 +61,7 @@ class TestSchema:
             ti.ClusterTemplate.from_dict({
                 "name": "x", "orchestrator": {"recipe": "o.yaml"},
                 "families": [{"name": "c", "models": ["m.yaml"],
-                              "nodes": ["10.0.0.246"],
+                              "nodes": ["192.0.2.246"],
                               "proxy": {"port": 4001}}]})
         msg = str(e.value)
         assert "nodes" in msg and "port" in msg
@@ -85,7 +85,7 @@ class TestResolve:
     def test_orchestrator_maps_to_gateway(self):
         t = ti.ClusterTemplate.from_dict({"name": "x", "orchestrator": "o.yaml"})
         plan = ti.resolve(t, _topo(), _coster=_coster())
-        assert plan.orchestrator.node == "10.0.0.1"
+        assert plan.orchestrator.node == "192.0.2.1"
         assert plan.orchestrator.port == 8000
 
     def test_family_all_workers_mapped(self):
@@ -95,7 +95,7 @@ class TestResolve:
         plan = ti.resolve(t, _topo(3), _coster=_coster())
         fam = plan.families[0]
         assert fam.proxy_port == 4000
-        assert {u.node for u in fam.units} == {"10.0.0.2", "10.0.0.3", "10.0.0.4"}
+        assert {u.node for u in fam.units} == {"192.0.2.2", "192.0.2.3", "192.0.2.4"}
         assert all(u.port == 8000 for u in fam.units)   # one model/node → :8000
 
     def test_worker_count_limits(self):
@@ -195,8 +195,8 @@ def test_all_shipped_templates_resolve_and_fit():
         nnode = int(os.path.basename(os.path.dirname(f)).replace("node", ""))
         name = yaml.safe_load(open(f))["name"]
         tpl = ct._load_intent(name)
-        topo = FakeTopo(FakeNode("10.0.0.1"),
-                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+        topo = FakeTopo(FakeNode("192.0.2.1"),
+                        [FakeNode(f"192.0.2.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo)              # real recipe_cost (files on disk)
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
 
@@ -223,13 +223,13 @@ def test_all_shipped_templates_resolve_and_fit_hermetically(monkeypatch):
         nnode = int(os.path.basename(os.path.dirname(f)).replace("node", ""))
         name = yaml.safe_load(open(f))["name"]
         tpl = ct._load_intent(name)
-        topo = FakeTopo(FakeNode("10.0.0.1"),
-                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+        topo = FakeTopo(FakeNode("192.0.2.1"),
+                        [FakeNode(f"192.0.2.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo, _coster=_coster(per_gpu=30.0))
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
         # every unit landed on a node of THIS topology, none invented
         nodes = {u.node for fam in plan.families for u in fam.units}
-        assert nodes <= {f"10.0.0.{1 + i}" for i in range(nnode)}, f"{name}: stray node"
+        assert nodes <= {f"192.0.2.{1 + i}" for i in range(nnode)}, f"{name}: stray node"
 
 
 # ── multi-node tp spanning ───────────────────────────────────────────────────
@@ -244,12 +244,12 @@ class TestMultiNodeTP:
                           "workers": "remaining"}]})
         plan = ti.resolve(t, _topo(n_workers=3), _coster=_coster())
         # orchestrator spans its own node + 1 worker taken from the pool front
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.2"]
         assert plan.orchestrator.tp == 2
         # the borrowed worker must NOT also be handed to the family
         fam_nodes = {n for u in plan.families[0].units for n in u.nodes}
-        assert "10.0.0.2" not in fam_nodes
-        assert fam_nodes == {"10.0.0.3", "10.0.0.4"}
+        assert "192.0.2.2" not in fam_nodes
+        assert fam_nodes == {"192.0.2.3", "192.0.2.4"}
 
     def test_family_tp2_yields_one_spanning_unit_not_two(self):
         t = ti.ClusterTemplate.from_dict({
@@ -260,7 +260,7 @@ class TestMultiNodeTP:
         plan = ti.resolve(t, _topo(n_workers=3), _coster=_coster())
         units = plan.families[0].units
         assert len(units) == 1, "tp=2 over 2 workers is ONE instance, not two"
-        assert units[0].nodes == ["10.0.0.2", "10.0.0.3"]
+        assert units[0].nodes == ["192.0.2.2", "192.0.2.3"]
         assert units[0].tp == 2
 
     def test_orchestrator_tp_exceeding_cluster_raises(self):
@@ -282,9 +282,9 @@ class TestMultiNodeTP:
 
     def test_span_vram_checked_on_every_node(self):
         """A model that fits the first node but not the second must be refused."""
-        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                        workers=[FakeNode("10.0.0.2", 120.0),
-                                 FakeNode("10.0.0.3", 10.0)])
+        topo = FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                        workers=[FakeNode("192.0.2.2", 120.0),
+                                 FakeNode("192.0.2.3", 10.0)])
         t = ti.ClusterTemplate.from_dict({
             "name": "x", "orchestrator": {"recipe": "o.yaml"},
             "families": [{"name": "reasoning",
@@ -292,7 +292,7 @@ class TestMultiNodeTP:
                           "workers": 2}]})
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.resolve(t, topo, _coster=_coster(per_gpu=76.16))
-        assert "10.0.0.3" in str(e.value)
+        assert "192.0.2.3" in str(e.value)
 
     def test_tp1_behavior_unchanged(self):
         """Regression: tp=1 still replicates one unit per node, nodes==[ip]."""
@@ -304,7 +304,7 @@ class TestMultiNodeTP:
         units = plan.families[0].units
         assert len(units) == 3
         assert all(len(u.nodes) == 1 and u.tp == 1 for u in units)
-        assert plan.orchestrator.nodes == ["10.0.0.1"]
+        assert plan.orchestrator.nodes == ["192.0.2.1"]
 
     def test_serving_json_emits_full_span(self):
         t = ti.ClusterTemplate.from_dict({
@@ -312,19 +312,19 @@ class TestMultiNodeTP:
             "families": []})
         plan = ti.resolve(t, _topo(n_workers=2), _coster=_coster())
         js = ti.to_serving_json(plan)
-        assert js["units"][0]["nodes"] == ["10.0.0.1", "10.0.0.2"]
+        assert js["units"][0]["nodes"] == ["192.0.2.1", "192.0.2.2"]
 
     def test_validate_catches_collision_on_non_primary_span_node(self):
         """A conflict on the 2nd node of a span must not slip through."""
         u1 = ti.ResolvedUnit(role="orchestrator", family=None, recipe="o.yaml",
-                             model="o", nodes=["10.0.0.1", "10.0.0.2"],
+                             model="o", nodes=["192.0.2.1", "192.0.2.2"],
                              port=8000, tp=2, pp=1)
         u2 = ti.ResolvedUnit(role="worker", family="f", recipe="o.yaml",
-                             model="m", nodes=["10.0.0.2"], port=8000, tp=1, pp=1)
+                             model="m", nodes=["192.0.2.2"], port=8000, tp=1, pp=1)
         plan = ti.ResolvedPlan(template="x", orchestrator=u1,
                                families=[ti.ResolvedFamily("f", 4000, [u2])])
         errs = ti.validate_resolved(plan)
-        assert any("collision" in e and "10.0.0.2" in e for e in errs)
+        assert any("collision" in e and "192.0.2.2" in e for e in errs)
 
 
 # ── existing-span guard (exclude_nodes) ──────────────────────────────────────
@@ -342,10 +342,10 @@ class TestExistingSpanGuard:
             "families": [{"name": "coding", "models": ["m.yaml"],
                           "workers": "all"}]})
         plan = ti.resolve(t, _topo(3), _coster=_coster(),
-                          exclude_nodes={"10.0.0.4"})   # .4 is a live span peer
+                          exclude_nodes={"192.0.2.4"})   # .4 is a live span peer
         fam_nodes = {u.node for u in plan.families[0].units}
-        assert "10.0.0.4" not in fam_nodes               # never assigned
-        assert fam_nodes == {"10.0.0.2", "10.0.0.3"}      # only truly-free workers
+        assert "192.0.2.4" not in fam_nodes               # never assigned
+        assert fam_nodes == {"192.0.2.2", "192.0.2.3"}      # only truly-free workers
 
     def test_no_exclude_nodes_behavior_unchanged(self):
         """Without exclude_nodes, the pool is untouched (regression guard)."""
@@ -355,7 +355,7 @@ class TestExistingSpanGuard:
                           "workers": "all"}]})
         plan = ti.resolve(t, _topo(3), _coster=_coster())
         assert {u.node for u in plan.families[0].units} == \
-            {"10.0.0.2", "10.0.0.3", "10.0.0.4"}
+            {"192.0.2.2", "192.0.2.3", "192.0.2.4"}
 
     def test_span_member_never_picked_as_tp_peer_of_new_span(self):
         """exclude_nodes also keeps a span member out of the peer slot of a NEW
@@ -365,10 +365,10 @@ class TestExistingSpanGuard:
             "families": [{"name": "coding", "models": ["m.yaml"],
                           "workers": "remaining"}]})
         plan = ti.resolve(t, _topo(3), _coster=_coster(),
-                          exclude_nodes={"10.0.0.2"})
+                          exclude_nodes={"192.0.2.2"})
         # orchestrator spans its own node + a FREE worker (not the excluded peer)
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.3"]
-        assert "10.0.0.2" not in plan.orchestrator.nodes
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.3"]
+        assert "192.0.2.2" not in plan.orchestrator.nodes
 
 
 # ── unit-aware reserved guard (re-apply idempotency) ─────────────────────────
@@ -388,20 +388,20 @@ class TestUnitAwareReserved:
                           "models": [{"recipe": "big.yaml", "tp": 2}],
                           "workers": "remaining"}]})
         # 4-node cluster; serving.json records orch=[.1,.2], reasoning=[.3,.4].
-        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+        topo = FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                        workers=[FakeNode(f"192.0.2.{2+i}") for i in range(3)])
         reserved = {
-            "10.0.0.1": {"kind": "orchestrator", "family": None, "model": "o"},
-            "10.0.0.2": {"kind": "orchestrator", "family": None, "model": "o"},
-            "10.0.0.3": {"kind": "worker", "family": "reasoning", "model": "big"},
-            "10.0.0.4": {"kind": "worker", "family": "reasoning", "model": "big"},
+            "192.0.2.1": {"kind": "orchestrator", "family": None, "model": "o"},
+            "192.0.2.2": {"kind": "orchestrator", "family": None, "model": "o"},
+            "192.0.2.3": {"kind": "worker", "family": "reasoning", "model": "big"},
+            "192.0.2.4": {"kind": "worker", "family": "reasoning", "model": "big"},
         }
         plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
         # orchestrator keeps its own tp peer .2 (same unit), NOT dropped.
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.2"]
         assert len(plan.families[0].units) == 1
         # reasoning re-gets BOTH its tp=2 nodes.
-        assert plan.families[0].units[0].nodes == ["10.0.0.3", "10.0.0.4"]
+        assert plan.families[0].units[0].nodes == ["192.0.2.3", "192.0.2.4"]
         assert plan.families[0].units[0].tp == 2
 
     def test_reserved_node_never_handed_to_different_family(self):
@@ -411,19 +411,19 @@ class TestUnitAwareReserved:
             "name": "x", "orchestrator": "o.yaml",
             "families": [{"name": "coding", "models": ["m.yaml"],
                           "workers": "remaining"}]})
-        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                        workers=[FakeNode("10.0.0.2"), FakeNode("10.0.0.3"),
-                                 FakeNode("10.0.0.4")])
+        topo = FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                        workers=[FakeNode("192.0.2.2"), FakeNode("192.0.2.3"),
+                                 FakeNode("192.0.2.4")])
         # .3 and .4 are currently serving family 'vision' — they must not be
         # reassigned to 'coding'. Only the free .2 is available.
         reserved = {
-            "10.0.0.3": {"kind": "worker", "family": "vision", "model": "v"},
-            "10.0.0.4": {"kind": "worker", "family": "vision", "model": "v"},
+            "192.0.2.3": {"kind": "worker", "family": "vision", "model": "v"},
+            "192.0.2.4": {"kind": "worker", "family": "vision", "model": "v"},
         }
         plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
         fam_nodes = {u.node for u in plan.families[0].units}
-        assert fam_nodes == {"10.0.0.2"}          # reserved stays out of the pool
-        assert "10.0.0.3" not in fam_nodes and "10.0.0.4" not in fam_nodes
+        assert fam_nodes == {"192.0.2.2"}          # reserved stays out of the pool
+        assert "192.0.2.3" not in fam_nodes and "192.0.2.4" not in fam_nodes
 
     def test_reserved_worker_not_borrowed_as_orchestrator_peer(self):
         """A node serving a worker family can't be silently consumed as the
@@ -432,17 +432,17 @@ class TestUnitAwareReserved:
             "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
             "families": [{"name": "vision", "models": ["v.yaml"], "tp": 1,
                           "workers": "remaining"}]})
-        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                        workers=[FakeNode("10.0.0.2"), FakeNode("10.0.0.3"),
-                                 FakeNode("10.0.0.4")])
+        topo = FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                        workers=[FakeNode("192.0.2.2"), FakeNode("192.0.2.3"),
+                                 FakeNode("192.0.2.4")])
         # .3 is currently serving family 'vision'; orchestrator needs 1 peer.
-        reserved = {"10.0.0.3": {"kind": "worker", "family": "vision", "model": "v"}}
+        reserved = {"192.0.2.3": {"kind": "worker", "family": "vision", "model": "v"}}
         plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
         # orchestrator borrows a FREE worker (.2), not the live span member .3
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
-        assert "10.0.0.3" not in plan.orchestrator.nodes
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.2"]
+        assert "192.0.2.3" not in plan.orchestrator.nodes
         # vision family still gets its own node
-        assert {u.node for u in plan.families[0].units} == {"10.0.0.3", "10.0.0.4"}
+        assert {u.node for u in plan.families[0].units} == {"192.0.2.3", "192.0.2.4"}
 
 
 # ── schema v3: nodes / allow_colocation / routing (PARSING ONLY) ──────────────
@@ -460,12 +460,12 @@ V3_FULL = {
     "orchestrator": {
         "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
         "tp": 2,
-        "nodes": ["10.0.0.244", "10.0.0.246"],
+        "nodes": ["192.0.2.244", "192.0.2.246"],
     },
     "families": [
         {
             "name": "reasoning",
-            "nodes": ["10.0.0.247", "10.0.0.248"],
+            "nodes": ["192.0.2.247", "192.0.2.248"],
             "allow_colocation": False,
             "proxy": True,
             "models": [
@@ -488,12 +488,12 @@ class TestSchemaV3:
         t = ti.ClusterTemplate.from_dict(V3_FULL)
         assert t.version == 3
         # orchestrator nodes
-        assert t.orchestrator.nodes == ["10.0.0.244", "10.0.0.246"]
+        assert t.orchestrator.nodes == ["192.0.2.244", "192.0.2.246"]
         assert t.orchestrator.tp == 2
         # family nodes + allow_colocation
         fam = t.families[0]
         assert fam.name == "reasoning"
-        assert fam.nodes == ["10.0.0.247", "10.0.0.248"]
+        assert fam.nodes == ["192.0.2.247", "192.0.2.248"]
         assert fam.allow_colocation is False
         assert fam.proxy is True
         assert fam.models[0].tp == 2
@@ -555,7 +555,7 @@ class TestSchemaV3:
             ti.ClusterTemplate.from_dict({
                 "name": "x", "version": 2, "orchestrator": "o.yaml",
                 "families": [{"name": "c", "models": ["m.yaml"],
-                              "nodes": ["10.0.0.246"]}]})
+                              "nodes": ["192.0.2.246"]}]})
         assert "nodes" in str(e.value)
 
         with pytest.raises(ti.TemplateIntentError) as e:
@@ -574,7 +574,7 @@ class TestSchemaV3:
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.ClusterTemplate.from_dict({
                 "name": "x", "version": 3, "orchestrator": "o.yaml",
-                "orchestrator_node": "10.0.0.244"})
+                "orchestrator_node": "192.0.2.244"})
         assert "orchestrator_node" in str(e.value)
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.ClusterTemplate.from_dict({
@@ -654,8 +654,8 @@ class TestExplicitPlacement:
 
     def _topo4(self):
         # 4-node cluster: gateway .1 + workers .2/.3/.4 (like 4node-dual-dsv4)
-        return FakeTopo(orchestrator=FakeNode("10.0.0.1"),
-                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+        return FakeTopo(orchestrator=FakeNode("192.0.2.1"),
+                        workers=[FakeNode(f"192.0.2.{2+i}") for i in range(3)])
 
     def _running_reasoning(self, nodes):
         # Running-family reserved bookkeeping — mirrors serving.json.
@@ -672,7 +672,7 @@ class TestExplicitPlacement:
     # of coincidentally passing. This is the honesty the task demands: testing
     # a span that happens to equal the inferred one proves nothing.
 
-    EXPLICIT_FAM = ["10.0.0.3", "10.0.0.4"]   # != inferrable [.2,.3]
+    EXPLICIT_FAM = ["192.0.2.3", "192.0.2.4"]   # != inferrable [.2,.3]
 
     def test_explicit_family_nodes_source_family_targets_running(self):
         """Explicit nodes with the targets RUNNING (reserved) → exactly those spans.
@@ -680,7 +680,7 @@ class TestExplicitPlacement:
         cannot sneak past this assertion."""
         t = self._explicit_template(fam_nodes=self.EXPLICIT_FAM)
         plan = ti.resolve(t, self._topo4(), _coster=_coster(),
-                          reserved={"10.0.0.1": {"kind": "orchestrator", "family": None,
+                          reserved={"192.0.2.1": {"kind": "orchestrator", "family": None,
                                                  "model": "o"},
                                     **self._running_reasoning(self.EXPLICIT_FAM)})
         units = plan.families[0].units
@@ -711,8 +711,8 @@ class TestExplicitPlacement:
         unit = plan.families[0].units[0]
         # primary is FIRST in the ordered span; everything after is a tp peer
         assert unit.nodes == self.EXPLICIT_FAM
-        assert unit.nodes[0] == "10.0.0.3"
-        assert unit.nodes[1:] == ["10.0.0.4"]
+        assert unit.nodes[0] == "192.0.2.3"
+        assert unit.nodes[1:] == ["192.0.2.4"]
         # serving.json keeps the same order: scoreboard reads nodes[0] as primary
         js = ti.to_serving_json(plan)
         worker = [u for u in js["units"] if u["role"] == "worker"][0]
@@ -722,17 +722,17 @@ class TestExplicitPlacement:
     def test_explicit_orchestrator_nodes_verbatim(self):
         """Orchestrator explicit nodes bypass the resolver and claim the whole
         span (peers never handed to an inferred family)."""
-        t = self._explicit_template(orch_nodes=["10.0.0.1", "10.0.0.4"],
+        t = self._explicit_template(orch_nodes=["192.0.2.1", "192.0.2.4"],
                                     fam_nodes=None)   # family stays inferred
         plan = ti.resolve(t, self._topo4(), _coster=_coster())
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.4"]
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.4"]
         assert plan.orchestrator.tp == 2
         # the orchestrator's peer .4 must not leak into the inferred family
         fam_nodes = {n for u in plan.families[0].units for n in u.nodes}
-        assert "10.0.0.4" not in fam_nodes
-        assert "10.0.0.1" not in fam_nodes
+        assert "192.0.2.4" not in fam_nodes
+        assert "192.0.2.1" not in fam_nodes
         # family resolves to the two remaining free workers .2 .3
-        assert fam_nodes == {"10.0.0.2", "10.0.0.3"}
+        assert fam_nodes == {"192.0.2.2", "192.0.2.3"}
 
     def test_explicit_nodes_both_units_disjoint_spans(self):
         """The canonical 4node-dual-dsv4 layout: orchestrator [.1,.4] and family
@@ -740,18 +740,18 @@ class TestExplicitPlacement:
         t = ti.ClusterTemplate.from_dict({
             "name": "4node-dual-dsv4", "version": 3,
             "orchestrator": {"recipe": "o.yaml", "tp": 2,
-                             "nodes": ["10.0.0.1", "10.0.0.4"]},
+                             "nodes": ["192.0.2.1", "192.0.2.4"]},
             "families": [{"name": "reasoning",
                           "models": [{"recipe": "big.yaml", "tp": 2}],
-                          "nodes": ["10.0.0.2", "10.0.0.3"]}]})
+                          "nodes": ["192.0.2.2", "192.0.2.3"]}]})
         plan = ti.resolve(t, self._topo4(), _coster=_coster())
-        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.4"]
-        assert plan.families[0].units[0].nodes == ["10.0.0.2", "10.0.0.3"]
+        assert plan.orchestrator.nodes == ["192.0.2.1", "192.0.2.4"]
+        assert plan.families[0].units[0].nodes == ["192.0.2.2", "192.0.2.3"]
 
     def test_explicit_family_node_count_mismatch_tp_raises(self):
         """An explicit span whose length != model tp is an impossible placement —
         resolve() refuses it rather than emitting an incoherent unit."""
-        t = self._explicit_template(fam_nodes=["10.0.0.2", "10.0.0.3"],
+        t = self._explicit_template(fam_nodes=["192.0.2.2", "192.0.2.3"],
                                     fam_tp=3)
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.resolve(t, self._topo4(), _coster=_coster())
@@ -761,7 +761,7 @@ class TestExplicitPlacement:
         t = ti.ClusterTemplate.from_dict({
             "name": "x", "version": 3,
             "orchestrator": {"recipe": "o.yaml", "tp": 2,
-                             "nodes": ["10.0.0.1"]}})   # 1 node but tp=2
+                             "nodes": ["192.0.2.1"]}})   # 1 node but tp=2
         with pytest.raises(ti.TemplateIntentError) as e:
             ti.resolve(t, self._topo4(), _coster=_coster())
         assert "1 nodes listed but tp=2" in str(e.value)
@@ -779,7 +779,7 @@ class TestExplicitPlacement:
         # inferred: one tp=1 unit per worker node, all three workers (.2 .3 .4)
         units = plan.families[0].units
         assert len(units) == 3
-        assert sorted(u.nodes[0] for u in units) == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        assert sorted(u.nodes[0] for u in units) == ["192.0.2.2", "192.0.2.3", "192.0.2.4"]
         assert all([len(u.nodes) == 1 and u.tp == 1] for u in units)
 
     def test_explicit_nodes_mixed_with_inferred_siblings(self):
@@ -790,23 +790,23 @@ class TestExplicitPlacement:
             "families": [
                 {"name": "reasoning",
                  "models": [{"recipe": "big.yaml", "tp": 2}],
-                 "nodes": ["10.0.0.3", "10.0.0.4"]},
+                 "nodes": ["192.0.2.3", "192.0.2.4"]},
                 {"name": "vision", "models": [{"recipe": "v.yaml", "tp": 1}],
                  "workers": "all"},
             ]})
         plan = ti.resolve(t, self._topo4(), _coster=_coster())
         reasoning, vision = plan.families
-        assert reasoning.units[0].nodes == ["10.0.0.3", "10.0.0.4"]
+        assert reasoning.units[0].nodes == ["192.0.2.3", "192.0.2.4"]
         # explicit reasoning claimed .3/.4; vision can only reach the free .2
-        assert {u.node for u in vision.units} == {"10.0.0.2"}
+        assert {u.node for u in vision.units} == {"192.0.2.2"}
 
     def test_explicit_tp1_family_on_single_node(self):
         """A tp=1 model on a one-node explicit span resolves to that exact node,
         primary (index 0) — len(nodes)==tp==1 is valid. Uses a node inference
         would NOT lead with (.3), so a resolver fallback cannot pass it."""
-        t = self._explicit_template(fam_nodes=["10.0.0.3"], fam_tp=1)
+        t = self._explicit_template(fam_nodes=["192.0.2.3"], fam_tp=1)
         plan = ti.resolve(t, self._topo4(), _coster=_coster())
         assert len(plan.families[0].units) == 1     # exactly ONE unit, not 3
         unit = plan.families[0].units[0]
-        assert unit.nodes == ["10.0.0.3"]
+        assert unit.nodes == ["192.0.2.3"]
         assert unit.tp == 1

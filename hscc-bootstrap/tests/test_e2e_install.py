@@ -35,7 +35,7 @@ def test_stage_sequence_produces_working_install(tmp_path):
 
     # Stage 1: doctor (fatal checks should pass with a stub cluster + hermes dir)
     res = doctor.run_doctor(str(home / ".hermes"),
-                            _cluster_runner=lambda: '[{"name":"hscc","hosts":["10.0.0.1","10.0.0.2"]}]')
+                            _cluster_runner=lambda: '[{"name":"hscc","hosts":["192.0.2.1","192.0.2.2"]}]')
     assert "hermes" not in res["fatal_failures"]
     assert "sparkrun cluster" not in res["fatal_failures"]
 
@@ -49,9 +49,9 @@ def test_stage_sequence_produces_working_install(tmp_path):
     assert not (plugins / "hscc-cluster" / "tests").exists()
 
     # Stage: serving.json generation from the detected cluster
-    cluster = {"hosts": ["10.0.0.1", "10.0.0.2", "10.0.0.3"]}
+    cluster = {"hosts": ["192.0.2.1", "192.0.2.2", "192.0.2.3"]}
     serving = serving_gen.build_serving(
-        cluster, orchestrator="10.0.0.1", recipe="~/r/o.yaml", model="M",
+        cluster, orchestrator="192.0.2.1", recipe="~/r/o.yaml", model="M",
         port=8000, keepalive=True)
     hscc = home / ".hscc"; hscc.mkdir()
     (hscc / "serving.json").write_text(json.dumps(serving))
