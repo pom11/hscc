@@ -116,26 +116,19 @@ Compare against the primary interpreter:
 scripts/run_tests.sh            # ~/.hermes/hermes-agent/venv/bin/python
 ```
 
-## Verification of the gates (this branch, rebased on `b87ad6b5`)
+## Verification of the gates (this branch, rebased on `6d541dab`)
 
 One process per dir, under `p313`:
 
 | leg | before (baseline) | after (gated) |
 |---|---|---|
 | `hscc-project` | 4 failed, 1458 passed | 0 failed, 1458 passed, 4 skipped |
-| `hscc_daemon` | 11 failed, 3667 passed, 12 skipped | 1 failed, 3667 passed, 23 skipped |
+| `hscc_daemon` | 11 failed, 3667 passed, 12 skipped | 0 failed, 3672 passed, 23 skipped |
 | `hscc-api` | 6 failed, 970 passed, 19 skipped | 0 failed, 970 passed, 25 skipped |
 
 All 21 baseline failures are now skips whose reason names the missing Hermes
-import. Under the primary interpreter every gated test RUNS: `hscc-project`
-1462 passed; `hscc-api` 994 passed (1 pre-existing corpus skip); `hscc_daemon`
-3689 passed (1 pre-existing wake-claim skip).
-
-The one remaining `hscc_daemon` failure is **not one of the 21 and is not
-interpreter-dependent**: `test_brew_keg_venv_imports_the_board_read_chain[2.15.8]`
-probes the *installed brew keg's* venv, which cannot import `hermes_state` —
-the board-read chain is blind there. It reproduces under the primary
-interpreter, and `hscc_daemon/tests/test_kanban_monitor_deps.py` is unchanged
-from `origin/main`. It is a host-keg finding (fix is the tap resource plus
-`brew reinstall hscc`, operator-owned), and the test exists precisely to
-report that blindness, so it was not skipped here.
+import, and all three legs are green. Under the primary interpreter every
+gated test RUNS: `hscc-project` 1462 passed; `hscc-api` 994 passed (1
+pre-existing corpus skip); `hscc_daemon` 3693 passed (1 pre-existing
+wake-claim skip) plus one transient `test_api_cli_help_inert` port-tripwire
+failure in the full run that passed on an isolated rerun (40 passed).
