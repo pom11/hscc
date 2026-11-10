@@ -83,3 +83,12 @@ wt/
 *_pvb_tmp_home*/
 *.sqlite
 *.sqlite3
+
+# SQLite sidecars — the companions a WAL-mode (or rollback-journal) connection
+# writes next to the db. `*.sqlite` above does NOT match them, so before these
+# three an `add -A` swept -wal/-shm/-journal into a commit while the base file
+# stayed ignored: the same hazard PR #275 fixed, still live (t_4e553569).
+# All five sqlite rules belong together — do not scatter them.
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
