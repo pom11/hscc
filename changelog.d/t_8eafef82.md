@@ -47,7 +47,7 @@ task: t_8eafef82
 - **The restore does not break a later Hermes call, measured rather than
   argued.** A probe drove the real chain against the real `~/.hermes/hermes-agent`
   tree in the daemon's own interpreter. Pre-fix the agent dir was `sys.path[0]`
-  after a resolve; with the fix in place it is absent and the chain still works —
+  after a resolve; at this commit it is absent and the chain still works —
   `list_boards()` returned the operator's 23 boards, `board_db_paths()` resolved
   every per-board DB, a `LIMIT 1` probe read 480 tasks off the live board, and
   `list_boards()` returned 23 again with `hermes_cli` evicted from `sys.modules`.

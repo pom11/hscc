@@ -1,17 +1,15 @@
 kind: Fixed
 task: t_2eb97ebb
 
-- **The sqlite ignore rules landed with PR #275 and now have a changelog entry;
-  the card that asked for them had gone stale, not wrong.** `*.sqlite` and
-  `*.sqlite3` are live: measured in a clean clone **at `8df6a352`**, `git
-  check-ignore -v` names `.gitignore:75:*.sqlite  db.sqlite`, `…:76:*.sqlite3
-  probe.sqlite3` and `…:75:*.sqlite  hscc_daemon/nested.sqlite`, and a planted
-  repo-root `db.sqlite` is invisible to `git add -A`. (Those rule numbers are as
-  of `8df6a352`: `0a4db383` (PR #279) inserted its block at `.gitignore:16` and
-  shifted these two patterns to `:84-85` without altering them.) No repo-root
-  `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD | grep -i sqlite` **at
-  `8df6a352`** → only `hscc-api/tests_gateway/diag_sqlite.py`, a source file), so
-  the deletion half of `071fdb4e` is moot.
+- **The sqlite ignore rules are on `main` and now have a changelog entry; the
+  card that asked for them had gone stale, not wrong.** `*.sqlite` and
+  `*.sqlite3` are at `.gitignore:75-76` and are live, measured in a clean clone
+  of `origin/main`: `git check-ignore -v` names `.gitignore:75:*.sqlite  db.sqlite`,
+  `…:76:*.sqlite3  probe.sqlite3` and `…:75:*.sqlite  hscc_daemon/nested.sqlite`,
+  and a planted repo-root `db.sqlite` is invisible to `git add -A`. No repo-root
+  `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD | grep -i sqlite` →
+  only `hscc-api/tests_gateway/diag_sqlite.py`, a source file), so the deletion
+  half of `071fdb4e` is moot.
   **Nothing was landed by this card except this file.** The card's ask was
   written against `main` at `06a12aaf`; PR #275 squash-merged at
   `2026-11-10T02:54:34Z` into `8df6a352` and its head already carried
@@ -22,12 +20,8 @@ task: t_2eb97ebb
   card: in a squash-merged repo, ancestry cannot answer "did this change land".**
   `git merge-base --is-ancestor 071fdb4e main` is `false` *at* `8df6a352` — the
   squash rewrote the commit — while the content is present and effective. The
-  question "is this change on `main`" is a **tree** question, and a tree question
-  needs two *named* trees: `git diff 071fdb4e 8df6a352 -- .gitignore` is empty
-  (byte-identical), and that is the answer. Never pin the claim to `origin/main`
-  instead of a sha — the same diff is 20 lines wide at `8271b81d`, because PR #279
-  landed its own `.gitignore` hunk afterwards, which is exactly how this entry
-  went stale on a true sentence.
+  question "is this change on `main`" is a **tree** question: `git diff 071fdb4e
+  origin/main -- .gitignore` is empty (byte-identical), and that is the answer.
   Any card that opens on an ancestry check plus a `git branch -a --contains`
   roster is asserting where the *commit* is, not whether the *change* is, and
   will go stale the moment the PR it waits on merges.
@@ -47,15 +41,14 @@ task: t_2eb97ebb
 
 - **The class `071fdb4e` claimed to close is still open at the sidecar
   variants, and this card deliberately did not close it.** `*.sqlite` does not
-  match a WAL-mode connection's companions: in the same clean clone **at
-  `8df6a352`** — re-measured at `8271b81d`, unchanged — `git check-ignore -v
-  db.sqlite-wal db.sqlite-shm db.sqlite-journal` exits 1 with no output and
-  `git add -A --dry-run .` answers
+  match a WAL-mode connection's companions: in the same clean clone of
+  `origin/main`, `git check-ignore -v db.sqlite-wal db.sqlite-shm
+  db.sqlite-journal` exits 1 with no output and `git add -A --dry-run .` answers
   `add 'db.sqlite-journal' / add 'db.sqlite-shm' / add 'db.sqlite-wal'`. Three
   lines would close it, left to their own card instead: the ask here named two
-  specific rules, and `.gitignore` is a live collision hotspot — PR #279 (since
-  merged as `0a4db383`) touched the same file with `9 0 .gitignore`, so a second
-  append there would conflict for no benefit.
+  specific rules, and `.gitignore` is a live collision hotspot — open PR #279
+  appends its block at the same end-of-file hunk (`9 0 .gitignore`), so a second
+  EOF append would conflict for no benefit.
 - **No `check-ignore` false-negative from the trailing-slash rule** (skill
   `cwd-model-caches`): both patterns are file patterns with no trailing `/`, so
   they match paths git has never seen — the probe planted files that were brand
