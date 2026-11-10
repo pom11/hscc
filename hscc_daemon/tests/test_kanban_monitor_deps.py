@@ -61,6 +61,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -191,13 +192,16 @@ from pathlib import Path
 out = {"python": sys.executable, "ran": False, "errors": [], "boards": [],
        "db_path": "missing-api", "detail": ""}
 try:
+    # Repo code first: the keg's hscc_cli import below prepends the frozen
+    # payload's plugins dir to sys.path, so importing hscc_daemon afterwards
+    # would silently test the installed release instead of this checkout.
+    from hscc_daemon import kanban_cli  # noqa: F401  (the monitor verb module)
+    from hscc_daemon import kanban_live
+    from hscc_daemon import autodown
     if os.environ.get("HSCC_PROBE_VIA_WRAPPER") == "1":
         # What /opt/homebrew/bin/hscc does: the shipped wrapper puts the
         # payload root on sys.path (candidate #1 = site-packages/plugins).
         import hscc_cli  # noqa: F401
-    from hscc_daemon import kanban_cli  # noqa: F401  (the monitor verb module)
-    from hscc_daemon import kanban_live
-    from hscc_daemon import autodown
 
     kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
@@ -236,8 +240,38 @@ def _probe_env(tmp: Path, extra=None) -> dict:
     env["HERMES_KANBAN_HOME"] = str(tmp)
     env["HERMES_HOME"] = str(tmp / "home")
     env["HSCC_PROBE_TMP"] = str(tmp)
+    # Probe THIS checkout's hscc_daemon, not the keg payload frozen at its
+    # release: a monitor fix committed here cannot change an installed keg until
+    # the operator runs `brew reinstall`, and a guard that needs that first
+    # would report every in-tree fix as red. The keg still supplies the
+    # interpreter and its dependency set; via_wrapper still imports hscc_cli
+    # from the shipped payload, so the wrapper half stays covered. The
+    # blind-venv control overrides PYTHONPATH with its stub first.
+    env["PYTHONPATH"] = str(REPO)
     env.update(extra or {})
     return env
+
+
+def _seed_board(tmp: Path) -> None:
+    """Create the hermetic legacy ``default`` board the probe reads.
+
+    The probe opens ``file:...?mode=ro`` (the monitor must never create or
+    migrate a board), so the fixture DB has to exist before it starts. Only the
+    tables ``kanban_live._collect_board`` SELECTs are needed.
+    """
+    with sqlite3.connect(tmp / "kanban.db") as c:
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS tasks (
+              id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
+              priority INTEGER, created_at INTEGER, completed_at INTEGER,
+              last_heartbeat_at INTEGER, current_run_id INTEGER);
+            CREATE TABLE IF NOT EXISTS task_runs (
+              id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT,
+              started_at INTEGER, last_heartbeat_at INTEGER);
+            CREATE TABLE IF NOT EXISTS task_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, run_id INTEGER,
+              kind TEXT, payload TEXT, created_at INTEGER);
+        """)
 
 
 def _run_probe(python, tmp: Path, extra=None, via_wrapper=False) -> dict:
@@ -247,6 +281,7 @@ def _run_probe(python, tmp: Path, extra=None, via_wrapper=False) -> dict:
     that cannot even start the probe is a failure, not a skip.
     """
     tmp.mkdir(parents=True, exist_ok=True)
+    _seed_board(tmp)
     script = tmp / "_board_read_probe.py"
     script.write_text(PROBE_SRC)
     env = _probe_env(tmp, extra)
