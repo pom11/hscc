@@ -33,6 +33,7 @@ import sqlite3
 import pytest
 
 from hscc_daemon import orch_waker as ow
+from hscc_daemon.tests.real_hermes import require_real_hermes
 
 NOW = 1_800_000_000
 
@@ -480,7 +481,14 @@ def add_event(db):
 @pytest.fixture
 def deployed(tmp_path, monkeypatch, hermes_kanban_root):
     """The waker exactly as the daemon runs it: default paths, the REAL
-    state.write_state stamp, only clock + repl + roots replaced (no tmux)."""
+    state.write_state stamp, only clock + repl + roots replaced (no tmux).
+
+    Skips (t_02c98915) rather than fails where Hermes is unimportable: the
+    fixture's first assertion is the interlock itself, which is fail-closed by
+    GAP-C-1 and so reads False for a reason that has nothing to do with the
+    dead-pane path under test.
+    """
+    require_real_hermes()
     _, boards = hermes_kanban_root
     home, db = make_tree(tmp_path, boards)
     monkeypatch.setattr(ow, "DEFAULT_HERMES_HOME", str(home))

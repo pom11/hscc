@@ -16,6 +16,7 @@ import sqlite3
 import pytest
 
 from hscc_daemon import orch_waker as ow
+from hscc_daemon.tests.real_hermes import require_real_hermes
 
 NOW = 1_800_000_000
 
@@ -445,24 +446,25 @@ def test_enumerate_includes_legacy_default_and_named_boards(
 
 
 def test_enumeration_reports_unevaluable_when_hermes_is_unreachable(
-        tmp_path, monkeypatch, hermes_kanban_root):
+        tmp_path, monkeypatch):
     """The fail-closed distinction GAP-C-1 introduces.
 
     Enumeration now DEPENDS on Hermes' kanban lib; the old listdir needed
     nothing. So "I cannot see the boards" must not become "there are no boards":
     an unreachable lib reports ``unevaluable`` and :func:`waker_tick` stamps the
     stream ``ok: False`` instead of a healthy-looking ``steady`` (the
-    silent-inert class t_fa9a2faf retired). An EMPTY root — a real board set
-    with nothing on it — is NOT unevaluable.
+    silent-inert class t_fa9a2faf retired).
+
+    t_02c98915 split this test rather than gating it whole: this half needs
+    NOTHING from the interpreter — it points ``HERMES_AGENT_PATH`` at
+    non-existence and injects a raising lib — so it runs and stays red-on-real
+    under any sibling interpreter. The control that needed a loadable Hermes
+    ("an EMPTY root is evaluable, not unevaluable") moved to
+    :func:`test_enumeration_of_an_empty_root_is_evaluable`, which skips honestly.
+    A single test doing both would have had to either fail on a thin interpreter
+    or skip the half that could have run.
     """
     from hscc_daemon import autodown
-
-    # (a) root exists but holds no board => empty, evaluable, healthy.
-    hermes_kanban_root
-    enum = ow.board_enumeration()
-    assert enum == {"boards": {}, "unevaluable": False}
-    assert ow.waker_tick(now=NOW, config_path=str(tmp_path / "cfg.json"),
-                         write=lambda *a: None, read=lambda *a: None)["ok"] is True
 
     # (b) lib genuinely unreachable (HERMES_AGENT_PATH points at nothing —
     # the same lever test_autodown uses) => the seam reports nothing AND says
@@ -490,6 +492,26 @@ def test_enumeration_reports_unevaluable_when_hermes_is_unreachable(
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("enum boom")))
     enum = ow.board_enumeration()
     assert enum == {"boards": {}, "unevaluable": True}
+
+
+def test_enumeration_of_an_empty_root_is_evaluable(
+        tmp_path, hermes_kanban_root):
+    """The control for the test above: an EMPTY root is evaluable, not unevaluable.
+
+    A real board set with nothing on it must read ``{"boards": {},
+    "unevaluable": False}`` and stamp a healthy tick — otherwise every quiet
+    board would look like the blind-scan fault GAP-C-1 exists to catch. It is a
+    control that needs Hermes to load for real (the enumeration IS Hermes'), so
+    on a thin sibling interpreter it skips with the loader's reason rather than
+    failing for a missing ``ruamel`` (t_02c98915; the fail-closed half above
+    stays green-or-red there).
+    """
+    require_real_hermes()
+    hermes_kanban_root  # pins HERMES_KANBAN_HOME at an empty board root
+    enum = ow.board_enumeration()
+    assert enum == {"boards": {}, "unevaluable": False}
+    assert ow.waker_tick(now=NOW, config_path=str(tmp_path / "cfg.json"),
+                         write=lambda *a: None, read=lambda *a: None)["ok"] is True
 
 
 def test_tick_report_marks_unevaluable(tmp_path, monkeypatch):

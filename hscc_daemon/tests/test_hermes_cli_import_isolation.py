@@ -36,6 +36,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 REAL_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+from hscc_daemon.tests.real_hermes import require_real_hermes  # noqa: E402
+
 # The shape test_autodown.TestLoadKanbanDb plants: a kanban_db with no
 # list_boards, i.e. exactly autodown's "single-board shape".
 FAKE_KANBAN_DB = "connect_closing = None"
@@ -143,7 +145,14 @@ def test_a_planted_fake_does_not_reach_the_next_file(tmp_path):
 
     Nested rather than simulated: the card's failure is a cross-file leak inside
     ONE pytest process, and only a real second file exercises it.
+
+    Gated (t_02c98915): file B's assertion IS "the real hermes_cli resolves",
+    which no interpreter lacking Hermes' own runtime deps can satisfy — the
+    nested child runs under ``sys.executable``, i.e. the same thin interpreter
+    that failed the outer assert. The leak this test pins is about the PLANT
+    leaving, not about Hermes being installed.
     """
+    require_real_hermes()
     rc, out = _run_nested(tmp_path)
     # Non-vacuity: file A really did plant a fake through the production
     # resolver and really did hold it (stdout is captured under -q, so file A

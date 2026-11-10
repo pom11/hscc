@@ -19,6 +19,7 @@ import hscc_daemon.autodown as ad
 # Imported, never copied: this class used to carry a private version of the rule
 # that had to keep agreeing with conftest's by hand.
 from hscc_daemon.tests.hermes_cli_plant import evict_planted
+from hscc_daemon.tests.real_hermes import require_real_hermes
 
 # The whole-fleet stop command built by the shared builder, scoped to the
 # configured cluster. Referenced here (not hardcoded) so these assertions stay
@@ -840,7 +841,20 @@ class TestLoadKanbanDb:
         assert n == 1, f"expected exactly one log line, got {n}: {txt!r}"
 
     def test_state_resets_to_ok_on_success(self, tmp_path, monkeypatch):
-        """After a failure, a later success restores ok=True / empty reason."""
+        """After a failure, a later success restores ok=True / empty reason.
+
+        Gated (t_02c98915) because the "success" half needs the resolver's
+        import to work in THIS interpreter. Measured reason it does not on a
+        thin one: the first (deliberately failing) resolve loads
+        ``hermes_cli/__init__.py`` from the real agent tree and leaves a husk in
+        ``sys.modules`` — real ``__path__``, no ``kanban_db`` — so the plant's
+        own ``hermes_cli`` is never consulted and ``from hermes_cli import
+        kanban_db`` re-fails on Hermes' missing ``ruamel`` dependency. The probe
+        is that same capability: where Hermes cannot be imported at all, this
+        test cannot reach its success branch (scratch probe, both interpreters:
+        husk present → fake resolve None).
+        """
+        require_real_hermes()
         agent = self._write_fake_hermes_cli(tmp_path)
         monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(tmp_path / "missing"))
         assert ad._load_kanban_db_or_default() is None

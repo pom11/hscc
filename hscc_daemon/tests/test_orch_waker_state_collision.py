@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from hscc_daemon import orch_waker as ow
+from hscc_daemon.tests.real_hermes import require_real_hermes
 
 T0 = 1_800_000_000
 
@@ -108,7 +109,15 @@ def deployed(tmp_path, monkeypatch, hermes_kanban_root):
     ``HERMES_KANBAN_HOME``, because discovery is now Hermes' (there is no
     ``DEFAULT_BOARDS_DIR`` to monkeypatch any more); profiles still resolve
     through ``DEFAULT_HERMES_HOME`` — that half is the waker's own.
+
+    t_02c98915: it skips rather than fails on an interpreter that cannot import
+    Hermes, because ``tick_at``'s first assert IS the interlock — with the lib
+    unimportable, ``check_orch_waker()`` correctly reports False (fail-closed,
+    the GAP-C-1 behaviour ``test_enumeration_reports_unevaluable_when_hermes_is_unreachable``
+    pins) and the deployed pairing is never reached. A failure there says
+    nothing about this interpreter's 3.13 behaviour.
     """
+    require_real_hermes()
     _, boards = hermes_kanban_root
     home, boards, db = make_tree(tmp_path, boards)
     monkeypatch.setattr(ow, "DEFAULT_HERMES_HOME", str(home))
@@ -236,7 +245,13 @@ def test_stale_counters_are_not_resurrected_by_the_merge(
     """A ``poll_gate``/``disabled`` stamp must not carry the PREVIOUS scan's
     ``nudged``/``decisions`` forward: the merge carries only {last,pending,
     sent}, so the stamp section is rewritten clean every tick.
+
+    Builds the deployed pairing inline rather than through the ``deployed``
+    fixture, so it carries the same t_02c98915 Hermes gate: its first assert is
+    ``check_orch_waker()``, which is fail-closed and reads False on an
+    interpreter that cannot import Hermes at all.
     """
+    require_real_hermes()
     _, boards = hermes_kanban_root
     home, boards, db = make_tree(tmp_path, boards)
     monkeypatch.setattr(ow, "DEFAULT_HERMES_HOME", str(home))
@@ -282,7 +297,13 @@ def test_stamp_stays_alone_when_the_paths_are_different(tmp_path, monkeypatch):
 def test_corrupt_document_does_not_break_the_stamp(tmp_path, monkeypatch):
     """A torn/hand-edited file must not stop the tick from stamping: the
     merge degrades to a bare stamp, and the stream stays non-stale.
+
+    Gated (t_02c98915): "the stream stays non-stale" is ``entry["ok"] is True``,
+    and an unevaluable board scan stamps ``ok: False`` by design, so on an
+    interpreter that cannot import Hermes this assert would read the GAP-C-1
+    fail-closed rule rather than the corrupt-document rule.
     """
+    require_real_hermes()
     monkeypatch.setattr(ow, "stream_interval", lambda *a, **k: 30)
     path = os.path.expanduser(ow.DEFAULT_STATE_PATH)
     os.makedirs(os.path.dirname(path), exist_ok=True)

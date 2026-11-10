@@ -33,6 +33,7 @@ from hscc_daemon import verify
 
 from hscc_daemon.tests.profile_roster_sandbox import (roster_fallback,
                                                       roster_with)
+from hscc_daemon.tests.real_hermes import real_predicate_or_skip
 
 # The real Hermes grammar/predicates, replicated here so the injected branch is
 # pinned even on an interpreter that lacks hermes_constants.
@@ -209,6 +210,20 @@ class TestRosterGate:
         hermes_constants = pytest.importorskip("hermes_constants")
         profile_is_standalone = pytest.importorskip(
             "hermes_cli.profiles").profile_is_standalone
+
+        # t_02c98915: `importorskip` is NOT enough for a predicate. On a thin
+        # interpreter (no ``ruamel``) ``hermes_cli.profiles`` still imports — its
+        # ``hermes_yaml`` import is function-local — and then the CALL raises
+        # inside Hermes. `roster_with` injects that callable into production,
+        # production swallows a raising predicate as "not standalone", and this
+        # drift guard then fails with `['solo', 'worker'] == ['worker']`: a wrong
+        # answer from a half-installed Hermes, not a verdict about this
+        # interpreter. Probe the call on a throwaway tree and skip honestly.
+        probe = tmp_path / "probe-profile"
+        probe.mkdir()
+        (probe / "config.yaml").write_text("gateway:\n  standalone: true\n")
+        real_predicate_or_skip(lambda: profile_is_standalone(probe),
+                               "hermes_cli.profiles.profile_is_standalone")
 
         profiles = tmp_path / "profiles"
         _profile(profiles, "worker")
