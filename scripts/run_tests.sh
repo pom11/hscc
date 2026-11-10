@@ -57,6 +57,27 @@ export HERMES_DISABLE_LAZY_INSTALLS="${HERMES_DISABLE_LAZY_INSTALLS:-1}"
 # operator path still probes, because nothing here exports it outside the suite.
 export HSCC_SKIP_COMPACT_PROBE="${HSCC_SKIP_COMPACT_PROBE:-1}"
 
+# ━━━ one fastembed model cache per host (t_317a0f30) ────────────────────────
+# The memori SDK vendors the Rust `fastembed` crate, whose model cache defaults
+# to the RELATIVE path `.fastembed_cache` — the cwd of whichever process loaded
+# it. Measured on this host before the fix: nine such roots, 88,984 KB each
+# (782 MB), one model (`Qdrant/all-MiniLM-L6-v2-onnx`, sha256-identical blobs),
+# scattered over agent workspaces, `gateclerk` worktrees, `hermes-agent`, and
+# the ROOT OF THIS REPO — that last one is a leg: `run_tests.sh` runs pytest
+# with the repo root as cwd, so every full-suite run could mint another 87 MB
+# here. The provider pins this itself (`memori_byodb/_cache_env.py`, the durable
+# fix — see docs/audits/fastembed-cache-dir-t_317a0f30.md); the runner pins it
+# too because a leg must not have to import the provider to keep 87 MB out of
+# the tree it is testing, and legs reach the SDK directly (e.g. anything calling
+# `memori.embed_texts`). `:-` keeps an operator's own value.
+#
+# Pinned by scripts/tests/test_run_tests_fastembed_cache.py, which extracts this
+# exact block and runs it under bash against a tmp HOME.
+if [ -n "${HOME:-}" ]; then
+  export FASTEMBED_CACHE_DIR="${FASTEMBED_CACHE_DIR:-$HOME/.cache/fastembed}"
+  mkdir -p "$FASTEMBED_CACHE_DIR" 2>/dev/null || true
+fi
+
 # ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
 # Every leg's consumer reads a REDIRECTED file, and pytest's -q band carries no
 # elapsed time anywhere, while its [ NN%] is a test-COUNT percent printed once

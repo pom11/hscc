@@ -13,8 +13,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._config import MemoriConfig
-from ._client import MemoriBYODBClient
+# Order is the contract: this must run before anything in this package can
+# reach the memori SDK, because the vendored fastembed crate defaults its model
+# cache to the RELATIVE path `.fastembed_cache` — i.e. 87 MB per cwd (t_317a0f30,
+# docs/audits/fastembed-cache-dir-t_317a0f30.md). Pinned by
+# tests/test_cache_env.py, which asserts this call site precedes the `._client`
+# import rather than trusting the comment.
+from ._cache_env import ensure_shared_cache_env  # noqa: E402
+
+ensure_shared_cache_env()
+
+from ._config import MemoriConfig  # noqa: E402
+from ._client import MemoriBYODBClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
