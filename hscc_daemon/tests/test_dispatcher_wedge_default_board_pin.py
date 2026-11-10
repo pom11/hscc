@@ -11,6 +11,16 @@ per-profile-cap explanation needs no further evidence, the gate would then
 suppress a gateway restart using running counts taken from a board it never
 read. Decision record: ``docs/audits/wedge-default-board-pin-t_dad0da32.md``.
 
+Division of labour, because two cards reached the same rule mid-flight:
+``t_147201fa`` (PR #271) removed the slug heuristic from the per-profile DB read
+and pinned that in ``test_board_pin.py``. THIS file covers what that left:
+the gate's two sanctioned-CLI argv builders still dropped the slug for
+``default`` (so ``hermes kanban list`` was reading whichever board
+``HERMES_KANBAN_BOARD`` / the pin named while the panel said ``default``), and
+``multi`` was still re-derived per site rather than computed once per gate pass
+and threaded. Both are pinned here by driving the REAL gate end-to-end, which is
+the acceptance case the card asks for.
+
 Assertion style follows ``test_board_pin.py``: the observable is a ``WARN`` line
 naming both boards, the argv a human would type, and which rows the probe
 actually read — never an internal flag. Each conflict case is PAIRED with a
@@ -361,9 +371,15 @@ def test_legacy_single_board_shape_is_unchanged(tmp_path, monkeypatch,
 
 def test_a_broken_enumeration_does_not_switch_the_guard_off(
         armed, warnings, monkeypatch):
-    """If ``list_boards`` raises mid-gate, ``multi`` must still answer from the
-    same rule autodown uses (``hasattr(lib, "list_boards")``), so a lib that
-    enumerates but cannot enumerate RIGHT NOW cannot quietly reopen the leak."""
+    """A lib whose ``list_boards`` RAISES is still a lib that takes ``board=``,
+    so the guard must stay in the loop: deriving ``multi`` from the lib's
+    capability (``hasattr``) rather than by calling it means a transient
+    enumeration failure cannot reopen the leak — and nothing is read just to
+    answer the question.
+
+    Asserted on the observable (the warning, and the slug on the argv), not on
+    the helper's name, so this stays a behaviour test rather than a rename test.
+    """
     lib, pin = armed
 
     def boom():
@@ -378,4 +394,8 @@ def test_a_broken_enumeration_does_not_switch_the_guard_off(
     text = _warn_text(warnings)
     assert pin in text and ASKED in text, (
         f"the guard must still be in the loop: {text or '(silent)'}")
-    assert dw._gate_multi(lib) is True
+    assert any("--board" in c and c[c.index("--board") + 1] == ASKED
+               for c in cli.calls), (
+        f"argv must still name the board even when enumeration is broken: "
+        f"{cli.calls}")
+    assert lib.connects and lib.connects[-1][0] == ASKED, lib.connects

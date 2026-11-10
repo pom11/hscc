@@ -125,7 +125,43 @@ Paired non-vacuity, in the same armed environment: the *unguarded*
 board's rows and says nothing. Without that assertion the suite would pass just
 as happily in an env where nothing was ever pinned.
 
-## 5. Not touched
+## 5. Landing order: `t_147201fa` (#271) took the DB half while this was in flight
+
+This card was written against `1b5e9eb0`. Before it could merge, `main` took
+#270, #272 and **#271 — "wedge stops guessing `multi` from the slug"**, which
+removed the `bool(board) and board != "default"` heuristic from
+`_capped_assignees` using `hasattr(kanban_db, "list_boards")`: the same rule this
+card derived, reached independently, and documented there with an extra fact this
+audit had not stated (`board=None` resolves through `HERMES_KANBAN_BOARD` while
+`board="default"` resolves to the legacy flat DB, so the old heuristic did not even
+read the same file the sibling probes read for the same board).
+
+So the shipped split, stated plainly so no reader has to diff two PRs:
+
+| leak | fixed by |
+|---|---|
+| `_capped_assignees` asked the guard with `multi=False` for `default` | **#271 (t_147201fa)** |
+| `list_argv` omitted `--board default` | this card |
+| `show_argv` omitted `--board default` | this card |
+| `multi` re-derived per site instead of once per gate pass | this card (`_gate_multi` + threading) |
+| acceptance case in the **wedge** suite, driving the real gate end-to-end | this card (#271's three tests call `_capped_assignees` directly) |
+
+`_gate_multi` adopts #271's `hasattr` rule rather than calling
+`_enum_board_names`, so the module keeps ONE derivation of `multi` and a lib that
+raises mid-enumeration keeps its `board=`-capable answer instead of losing the
+guard (and no board metadata is read to answer the question).
+
+Measured control probes for `hscc_daemon/tests/test_dispatcher_wedge_default_board_pin.py`,
+run against the code this card did *not* write:
+
+* at `97359b71` (before any of it, i.e. `1b5e9eb0` + the docs commit): **4 failed /
+  4 passed** — no warning fires for `default`, the argv drops the slug, and the
+  no-pin case loses its `board=`.
+* at `a2e23c9d` (`origin/main`, i.e. after #271): **2 failed / 6 passed** — and both
+  failures are the argv leak. The DB-read half is green there because #271 fixed it,
+  which is the honest statement of what this card still contributes.
+
+## 6. Not touched
 
 hermes precedence, `~/.hermes/**`, `board_pin.py` (it was already right —
 it was handed a lying `multi`), and the two probe sites at
