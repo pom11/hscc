@@ -313,3 +313,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### memori SDK shadowing (live)
 
 - `docs/audits/memori-sdk-shadowing-t_2ab0eda1.md` — why the cloud provider dir named `memori/` shadowed the installed `memori` SDK for any repo-root/plugins `sys.path` process, the measured options (private-name load ruled out, rename chosen), the rename to `memori_cloud/`, the installer's `RETIRED_PAYLOAD` migration for stale deployed dirs, and the regression check. **live** (t_2ab0eda1)
+
+### test environment: the thin sibling interpreter (record)
+
+- `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — why 21 hermes-integration tests hard-failed under the sanctioned `p313` sibling interpreter (it is a thin pytest env with no `ruamel`/`hermes_state`), the 21-test roster, the measured rejection of dep-stuffing the sibling env, and the capability-probe skip posture now written into `scripts/run_tests.sh`. **record** (t_02c98915)
