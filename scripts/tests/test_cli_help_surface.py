@@ -114,10 +114,32 @@ _SIBLING_CANDIDATES = (
 # a test can assert a drop is EXPLAINED rather than invisible.
 SIBLING_DROPPED: dict = {}
 
+#: Environment variables through which the CALLER can inject another
+#: interpreter's packages into a probe child. None of them describes the
+#: candidate's OWN dependencies, so the gate strips them: what a sibling can
+#: import must not depend on who started the leg. MEASURED (t_d5698315): a
+#: dep-less COPY venv does not import ``rich`` from a plain shell, but DOES as
+#: soon as ``PYTHONPATH`` names a site-packages holding it — the scripts leg ran
+#: under such an environment and the premise pin below failed in two clean
+#: worktrees. ``__PYVENV_LAUNCHER__`` is macOS's venv launcher hand-off and is
+#: dropped for the same reason: a child started inside a venv can otherwise
+#: resolve back to it.
+_PROBE_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE",
+                   "PYTHONSTARTUP", "__PYVENV_LAUNCHER__")
+
+
+def _probe_env() -> dict:
+    """The environment a child interpreter probe gets: caller path pins gone."""
+    return {k: v for k, v in os.environ.items() if k not in _PROBE_ENV_DROP}
+
+
 # Loads the audit module exactly the way the (A)-only pass does — same file,
 # same module-level imports — so a candidate that passes this probe has proved
 # the ONE precondition the pass needs (t_36d9d8fb). ``-B`` keeps it from
-# dropping a sibling-version .pyc into the checkout.
+# dropping a sibling-version .pyc into the checkout. ``-I`` makes the probe
+# answer for the CANDIDATE alone: it ignores every ``PYTHON*`` env var and the
+# user site, so an inherited path cannot make a dep-less interpreter look
+# runnable (see ``_PROBE_ENV_DROP``).
 _SIBLING_PROBE = (
     "import importlib.util, sys\n"
     "spec = importlib.util.spec_from_file_location('sibling_probe', sys.argv[1])\n"
@@ -148,9 +170,10 @@ def _sibling_is_runnable(py: str):
     that is genuinely able to answer.
     """
     try:
-        proc = subprocess.run([py, "-B", "-c", _SIBLING_PROBE,
+        proc = subprocess.run([py, "-I", "-B", "-c", _SIBLING_PROBE,
                                str(REPO / "scripts" / "hscc_cli_help_audit.py")],
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=120,
+                              env=_probe_env())
     except Exception as e:                                    # noqa: BLE001
         return False, f"{type(e).__name__}: {e}"
     if proc.returncode != 0:
@@ -346,7 +369,7 @@ def _sibling_a_table(py: str, surfaces: list, timeout: int | None = None) -> tup
     proc = subprocess.run(
         [py, str(REPO / "scripts" / "hscc_cli_help_audit.py"),
          "--repo", str(REPO), "--a-table", ",".join(surfaces) or "*"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_probe_env(),
         timeout=timeout if timeout is not None else A_TABLE_TIMEOUT_SECS)
     if proc.returncode != 0:
         # A non-zero exit means the sibling could not complete the pass at all
@@ -433,7 +456,7 @@ def _a_table_timeout(py: str, n_probes_hint: int = A_TABLE_MIN_PROBES) -> int:
         (home / ".hscc" / "cluster.json").write_text(
             '{"gateway": {"host": "192.0.2.1"}, "workers": [],'
             ' "nasDevices": []}')
-        env = {**os.environ,
+        env = {**_probe_env(),
                "HOME": str(home),
                "PYTHONPATH": os.pathsep.join(
                    [str(REPO), str(REPO / "hscc-project")]),
@@ -607,12 +630,27 @@ def test_sibling_gate_uses_the_interpreter_that_can_import_the_audit(
     Builds a real venv from the leg's own interpreter (no third-party deps, so
     `import rich` inside the audit genuinely fails) and asserts the candidate
     is dropped AND the drop is explained — the two properties the old code
-    lacked: it treated the interpreter as runnable and failed the leg."""
+    lacked: it treated the interpreter as runnable and failed the leg.
+
+    The caller's environment is made HOSTILE on purpose (t_d5698315): the leg
+    that found this ran with a `PYTHONPATH` naming another interpreter's
+    site-packages, and that was enough to hand `rich` to the dependency-less
+    venv, invalidating the premise. The control below proves the hostile path
+    really reaches an unfiltered child; the probes must not."""
     import venv
 
     sandbox = Path(tempfile.mkdtemp(prefix="sibling-nodeps-"))
     target = sandbox / "venv"
     try:
+        # The exact leak shape, fabricated so the pin does not depend on this
+        # host's real site-packages: any `import rich` that inherits this
+        # PYTHONPATH succeeds. Measured on main at two clean worktrees, the
+        # premise assertion below failed for this reason.
+        hostile = sandbox / "hostile-site-packages"
+        hostile.mkdir()
+        (hostile / "rich.py").write_text("VERSION = 'injected-by-caller'\n")
+        monkeypatch.setenv("PYTHONPATH", str(hostile))
+
         # A COPY venv, not a symlink one: under `symlinks=True` the venv's
         # bin/python resolves back to the leg's own interpreter and the
         # selector would dedupe it away as "this interpreter" before the probe
@@ -621,14 +659,25 @@ def test_sibling_gate_uses_the_interpreter_that_can_import_the_audit(
         venv.EnvBuilder(with_pip=False, symlinks=False).create(str(target))
         py = str(target / "bin" / "python")
         assert os.path.isfile(py), "venv build produced no interpreter"
+        # Control: the hostile path IS reachable for a child that inherits the
+        # caller's environment. If this ever fails the pin is vacuous, not green.
+        leaked = subprocess.run([py, "-c", "import rich"],
+                                capture_output=True, text=True, timeout=60)
+        assert leaked.returncode == 0, (
+            "pin premise broken: the hostile PYTHONPATH did not reach the "
+            f"venv, so this test cannot prove the scrub: {leaked.stderr}")
         # Sanity: this interpreter really is alive and really lacks a dep the
         # audit needs, so a PASS here means the probe rejected it, not that the
-        # venv was broken.
-        alive = subprocess.run([py, "-c", "import sys;print(sys.version_info[:2])"],
-                              capture_output=True, text=True, timeout=60)
+        # venv was broken. `-I` + `_probe_env()` are the fix under test: the
+        # candidate answers for itself, never through the caller's path.
+        alive = subprocess.run([py, "-I", "-c",
+                                "import sys;print(sys.version_info[:2])"],
+                               capture_output=True, text=True, timeout=60,
+                               env=_probe_env())
         assert alive.returncode == 0, alive.stderr
-        missing = subprocess.run([py, "-c", "import rich"],
-                                 capture_output=True, text=True, timeout=60)
+        missing = subprocess.run([py, "-I", "-c", "import rich"],
+                                 capture_output=True, text=True, timeout=60,
+                                 env=_probe_env())
         assert missing.returncode != 0 and "rich" in missing.stderr, (
             "pin premise broken: the venv has rich, so it proves nothing")
 
@@ -675,7 +724,8 @@ def test_sibling_gate_still_runs_a_real_sibling():
         if not path:
             continue
         probe = subprocess.run([path, "-c", "import rich, yaml"],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, timeout=60,
+                               env=_probe_env())
         if probe.returncode == 0:
             have_capable = True
             break
