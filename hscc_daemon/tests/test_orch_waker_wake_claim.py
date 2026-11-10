@@ -1217,10 +1217,12 @@ def test_upstream_claim_helpers_read_through_the_real_connector(tmp_path, caplog
 def test_upstream_claim_helpers_write_through_the_real_connector(tmp_path):
     """The same connection must also be able to CLAIM — not just read.
 
-    The mirror half: with no claim row the helpers take it for us and confirm
-    settles it. Without this the assertions above could be satisfied by a
-    connection that always fails (fail-open answers "claimed: nothing, owed:
-    everything" too), which is precisely the shape CR-1 hid behind.
+    The mirror half: with no claim row the helpers take it for us, confirm
+    settles it, and the row it wrote is then read back BY NAME. Without this the
+    assertions above could be satisfied by a connection that always fails
+    (fail-open answers "claimed: nothing, owed: everything" too), which is
+    precisely the shape CR-1 hid behind. It doubles as the pin for the write
+    flag: flip ``mode=rw`` to ``mode=ro`` and the claim/confirm writes die here.
     """
     db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
     adapter = real_connector_adapter()
@@ -1231,10 +1233,16 @@ def test_upstream_claim_helpers_write_through_the_real_connector(tmp_path):
     rows = FakeClaims(db).rows()
     assert [(r["emitter"], r["confirmed_at"]) for r in rows] == \
         [(ow.WAKE_CLAIM_EMITTER, None)], "our lease is the row the board now holds"
+    # The row we just wrote must be READABLE by the read that decides the next
+    # wake — name-indexed, so this is a row_factory pin too, on the write path.
+    assert adapter.suppressions(db, ORCH, idents) == {(TASK, 7)}, \
+        "our own live lease has to be visible as a hold"
 
     adapter.confirm(db, ORCH, idents)
     assert FakeClaims(db).rows()[0]["confirmed_at"] == DELIVER, \
         "the claim write goes through the same opener the read used"
+    assert adapter.suppressions(db, ORCH, idents) == {(TASK, 7)}, \
+        "a claim we settled must suppress the re-wake, which needs the read"
 
 
 def test_a_gateway_claim_silences_the_wake_through_the_real_connector(tmp_path,
