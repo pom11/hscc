@@ -15,8 +15,9 @@ task: t_ae3e5f9b
   its own: `*.sqlite` / `*.sqlite3` did reach `main` — `071fdb4e` landed with
   PR #275's squash `8df6a352` — and `changelog.d/t_2eb97ebb.md` (PR #281) is the
   fragment that records them, so nothing here re-states or re-measures them. The
-  half of that class genuinely open is the WAL sidecars `*.sqlite` does not match
-  (`db.sqlite-wal` / `-shm` / `-journal`), carded separately as t_4e553569.
+  pattern `*.sqlite` does not match WAL sidecars (`db.sqlite-wal` / `-shm` /
+  `-journal`) — those are t_4e553569's subject, not this entry's, and whether they
+  are ignored now is its record to make, not this fragment's.
   **What writes it, so the rule is justified rather than swallowed:** no `.py` in
   this repo mentions fastembed (`grep -rn "fastembed" --include=*.py .` → 0 hits),
   because it is a *transitive* write. `memori_byodb/_client.py:90` does
