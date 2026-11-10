@@ -178,7 +178,7 @@ Work flows through native Hermes kanban: the orchestrator decomposes an idea int
 | [sparkrun-hermes](sparkrun-hermes/README.md) | guarded sparkrun passthrough Hermes plugin |
 | [hscc-bootstrap](hscc-bootstrap/README.md) | preflight-gated, topology-detecting installer |
 | [hscc-skills](hscc-skills/README.md) | bundled skill installer (sources in [install/](install/README.md)) |
-| [memori / memori_byodb](memori_byodb/README.md) | memory-provider plugins (HSCC runs the BYODB variant) |
+| [memori_cloud / memori_byodb](memori_byodb/README.md) | memory-provider plugins (HSCC runs the BYODB variant) |
 
 Also: [changelog.d/](changelog.d/README.md) — per-card changelog fragments (never edit `CHANGELOG.md` directly); [patches/](patches/MANIFEST.md) — curated upstream patches; [docs/](docs/README.md) — full index of the docs tree; [scripts/](scripts/README.md) — operator watchdogs + repo tooling (address guard, changelog fragments).
 
@@ -188,7 +188,7 @@ Also: [changelog.d/](changelog.d/README.md) — per-card changelog fragments (ne
 ~/dev/hscc/                 # the work repo — what you clone + edit
 ├── hscc-cluster/ hscc-roles/ hscc_daemon/ hscc-commands/   # plugins → README each
 ├── hscc-cli/ hscc-project/ hscc-api/ hscc-bootstrap/ hscc-skills/
-├── sparkrun-hermes/ memori/ memori_byodb/                  # plugins → README each
+├── sparkrun-hermes/ memori_cloud/ memori_byodb/            # plugins → README each
 ├── ios-app/                # iOS companion app → README
 ├── changelog.d/            # per-card changelog fragments → README
 ├── install/  patches/  docs/  scripts/                     # → README / MANIFEST

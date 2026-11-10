@@ -250,7 +250,7 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
             "skipped": True,
             "reason": "repo_root == plugins_dir (in-place layout); nothing to copy",
             "installed": [], "backed_up": [], "missing": [], "drifted": [],
-            "drift_detected": False,
+            "retired": [], "drift_detected": False,
         }
 
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -318,6 +318,30 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
         for extra in PAYLOAD_EXTRA_DESTS.get(name, ()):
             _copy_into(src, plugins_dir / extra, extra)
 
+    # Retire deployed dirs whose payload entry was RENAMED (t_2ab0eda1).
+    # Only when the replacement is actually landing in this pass — a payload
+    # that does not contain the new name must not delete anything. A retired
+    # dir is MOVED to plugins-backups (never rmtree'd): the stale
+    # ~/.hermes/plugins/memori/ would otherwise survive a rename and keep
+    # shadowing the installed memori SDK for every process with the plugins
+    # dir on sys.path.
+    retired = []
+    for old, new in RETIRED_PAYLOAD.items():
+        if new not in payload or new not in installed:
+            continue
+        dst = plugins_dir / old
+        if not (dst.exists() or dst.is_symlink()):
+            continue
+        bak_dir = _backups_dir(plugins_dir)
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        bak = bak_dir / f"{old}.retired.bak-{stamp}"
+        n = 1
+        while bak.exists():
+            bak = bak_dir / f"{old}.retired.{n}.bak-{stamp}"
+            n += 1
+        shutil.move(str(dst), str(bak))
+        retired.append(bak.name)
+
     return {
         "skipped": False,
         "installed": installed,
@@ -327,6 +351,7 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None,
         # therefore preserved (or destroyed) by this install. Empty list =
         # nothing was silently overwritten.
         "drifted": drifted,
+        "retired": retired,
         "drift_detected": bool(drifted),
         "plugins_dir": str(plugins_dir),
     }
@@ -594,7 +619,11 @@ DEFAULT_PAYLOAD = [
     # at runtime, so it must deploy alongside them or the installed `hscc api`
     # verb fails with 'package not found' — the same gap that bit hscc-project.
     "hscc-api",
-    "memori", "memori_byodb",
+    # NOT "memori": a top-level package with the SDK's import name shadows the
+    # installed memori SDK for any process that puts this repo root or the
+    # plugins dir on sys.path (t_2ab0eda1). RETIRED_PAYLOAD below moves the
+    # stale deployed dir aside.
+    "memori_cloud", "memori_byodb",
     "install", "docs", "assets", "configs",
     # Hermes provider plugins the fleet ships (media enablement, t_ec488ce3).
     # Staged under install/ alongside the bundled skills; PAYLOAD_EXTRA_DESTS
@@ -605,6 +634,20 @@ DEFAULT_PAYLOAD = [
     "install/hscc-plugins/video_gen/openai_compat",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "VERSION",
 ]
+
+#: Deployed dirs whose payload entry was RENAMED: old deployed name -> the new
+#: payload entry that replaces it. install_payload only ever touches the
+#: destination of an entry it is installing, so without this map a renamed
+#: plugin survives side-by-side with its replacement. ``memori`` is the case
+#: that matters: its generic package name shadows the installed memori SDK for
+#: every process with the plugins dir on sys.path (t_2ab0eda1), so leaving it
+#: deployed would keep the original bug alive on every host that ever ran the
+#: old payload. Retirement moves (never deletes) the stale dir to
+#: ``plugins-backups/<old>.retired.bak-<stamp>`` and only runs when the
+#: replacement is installed in the same pass.
+RETIRED_PAYLOAD = {
+    "memori": "memori_cloud",
+}
 
 
 if __name__ == "__main__":

@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Installed Memori Hermes provider to {target}")
             print("Next steps:")
-            print("  hermes config set memory.provider memori")
+            print(f"  hermes config set memory.provider {PLUGIN_NAME}")
             print("  hermes memory setup")
             print("  hermes memory status")
             return 0

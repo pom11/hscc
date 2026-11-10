@@ -41,5 +41,7 @@ Hermes env (e.g. the gateway launchd plist) selects the provider:
 
 ## Sibling
 
-`memori/` is the Memori **Cloud** variant (API key + hosted service); this
-package is the fully-local alternative.
+`memori_cloud/` is the Memori **Cloud** variant (API key + hosted service);
+this package is the fully-local alternative. The cloud dir is deliberately not
+named `memori`: that package name would shadow the installed `memori` SDK for
+any process with the repo root or plugins dir on `sys.path` (t_2ab0eda1).
