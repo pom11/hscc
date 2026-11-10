@@ -15,16 +15,19 @@ task: t_dad0da32
   *including `default`*, and `kanban_db_path(board="default")` is
   `<root>/kanban.db` with the pin scrubbed vs `<root>/kanban/boards/<slug>/kanban.db`
   with it visible — a different board's file.
-  Split across two cards that reached the same rule mid-flight: **t_147201fa
+  Split across three cards that reached the same hazard mid-flight: **t_147201fa
   (PR #271) removed the heuristic from the per-profile DB read**
-  (`multi = hasattr(kanban_db, "list_boards")`). This card covers what that left —
+  (`multi = hasattr(kanban_db, "list_boards")`) and **t_8616f2a5 (PR #274) stopped
+  the CLI child inheriting the pin at all**. This card covers what both left —
   the two argv builders still omitted `--board default`, so `hermes kanban list`
   read whichever board `HERMES_KANBAN_BOARD` / the pin named while the answer was
-  presented as `default`, and `multi` was still re-derived per site instead of once
-  per pass. Now `_gate_multi` holds that one rule and the answer is computed once
-  per gate pass and threaded into `_board_ready_facts`, `_capped_assignees` and
-  `_card_hold_from_cli`; both argv sites share one builder, `_gate_board_argv`, so
-  the CLI argv and the DB open can no longer disagree about which board was named.
+  presented as `default` (a scrubbed child does not fix that: with the pin gone, an
+  unnamed board still follows `HERMES_KANBAN_BOARD`), and `multi` was still re-derived
+  per site instead of once per pass. Now `_gate_multi` holds that one rule and the
+  answer is computed once per gate pass and threaded into `_board_ready_facts`,
+  `_capped_assignees` and `_card_hold_from_cli`; both argv sites share one builder,
+  `_gate_board_argv`, so the CLI argv and the DB open can no longer disagree about
+  which board was named.
   `--board <slug>` is stated for every slug when the lib enumerates boards — the
   sanctioned CLI accepts `--board default` (measured: exit 0, valid JSON), so this
   is not a new contract. The legacy no-`list_boards` shape is byte-for-byte
@@ -38,5 +41,5 @@ task: t_dad0da32
   human would type, which rows the probe read), each conflict case paired with a
   non-vacuity assertion that the same armed environment reads the WRONG board
   unguarded. Control probes: against `1b5e9eb0`-era code 4 of 8 fail; against
-  `origin/main` after #271, 2 fail and both are the argv leak. Decision record:
-  `docs/audits/wedge-default-board-pin-t_dad0da32.md`.
+  `origin/main` after #271, and again after #274, 2 fail and both are the argv leak.
+  Decision record: `docs/audits/wedge-default-board-pin-t_dad0da32.md`.

@@ -125,41 +125,53 @@ Paired non-vacuity, in the same armed environment: the *unguarded*
 board's rows and says nothing. Without that assertion the suite would pass just
 as happily in an env where nothing was ever pinned.
 
-## 5. Landing order: `t_147201fa` (#271) took the DB half while this was in flight
+## 5. Landing order: two sibling cards took the other halves mid-flight
 
-This card was written against `1b5e9eb0`. Before it could merge, `main` took
-#270, #272 and **#271 — "wedge stops guessing `multi` from the slug"**, which
-removed the `bool(board) and board != "default"` heuristic from
-`_capped_assignees` using `hasattr(kanban_db, "list_boards")`: the same rule this
-card derived, reached independently, and documented there with an extra fact this
-audit had not stated (`board=None` resolves through `HERMES_KANBAN_BOARD` while
-`board="default"` resolves to the legacy flat DB, so the old heuristic did not even
-read the same file the sibling probes read for the same board).
+This card was written against `1b5e9eb0`. Before it could merge, `main` took #270,
+#272, **#271 (t_147201fa) — "wedge stops guessing `multi` from the slug"** and
+**#274 (t_8616f2a5) — "the board-state gate hands its CLI probes a child
+environment a worker pin cannot steer"**. Both are the same hazard seen from a
+different seam, and #274's own commit message records the split: *"argv builders are
+untouched (t_dad0da32 owns `--board default`)"*.
 
-So the shipped split, stated plainly so no reader has to diff two PRs:
+`multi` is the lib's capability, not a property of the slug —
+`autodown._enum_board_names`, `autodown.py:310`, `hasattr(kanban_db, "list_boards")`
+— a rule #271 reached independently while this card derived it. `_gate_multi` now
+holds #271's rule in ONE place and threads it, and #274's `_gate_child_env`
+scrubbing sits beside it rather than under it.
+
+The shipped split, stated plainly so no reader has to diff three PRs:
 
 | leak | fixed by |
 |---|---|
 | `_capped_assignees` asked the guard with `multi=False` for `default` | **#271 (t_147201fa)** |
-| `list_argv` omitted `--board default` | this card |
-| `show_argv` omitted `--board default` | this card |
-| `multi` re-derived per site instead of once per gate pass | this card (`_gate_multi` + threading) |
-| acceptance case in the **wedge** suite, driving the real gate end-to-end | this card (#271's three tests call `_capped_assignees` directly) |
+| the CLI child inherited `HERMES_KANBAN_DB`, so `hermes kanban` printed the pinned board | **#274 (t_8616f2a5)** |
+| `list_argv` omitted `--board default` | **this card** |
+| `show_argv` omitted `--board default` | **this card** |
+| `multi` re-derived per site instead of once per gate pass | **this card** (`_gate_multi` + threading) |
+| acceptance case in the **wedge** suite driving the real gate end-to-end | **this card** (#271's three tests call `_capped_assignees` directly; #274's ten tests drive the child env) |
 
-`_gate_multi` adopts #271's `hasattr` rule rather than calling
-`_enum_board_names`, so the module keeps ONE derivation of `multi` and a lib that
-raises mid-enumeration keeps its `board=`-capable answer instead of losing the
-guard (and no board metadata is read to answer the question).
+The two CLI halves are **not** redundant, which is why both are asserted together in
+the acceptance case: #274 removes the pin from the child, and with the pin gone an
+*unnamed* board still resolves through `HERMES_KANBAN_BOARD` — so a scrubbed child
+with no `--board default` still answers for the wrong board.
+
+`_gate_multi` uses #271's `hasattr` rule rather than calling `_enum_board_names`, so
+the module keeps ONE derivation of `multi` and a lib that raises mid-enumeration keeps
+its `board=`-capable answer instead of losing the guard (and no board metadata is read
+to answer the question).
 
 Measured control probes for `hscc_daemon/tests/test_dispatcher_wedge_default_board_pin.py`,
-run against the code this card did *not* write:
+run against code this card did *not* write:
 
 * at `97359b71` (before any of it, i.e. `1b5e9eb0` + the docs commit): **4 failed /
   4 passed** — no warning fires for `default`, the argv drops the slug, and the
   no-pin case loses its `board=`.
-* at `a2e23c9d` (`origin/main`, i.e. after #271): **2 failed / 6 passed** — and both
-  failures are the argv leak. The DB-read half is green there because #271 fixed it,
-  which is the honest statement of what this card still contributes.
+* at `a2e23c9d` (after #271, before #274): **2 failed / 6 passed**.
+* at `e5d4a2c4` (`origin/main`, after #271 **and** #274): **2 failed / 6 passed**, and
+  both failures are the argv omission — the half only this card fixes. The DB-read half
+  and the child-environment half are green there because #271 and #274 fixed them, which
+  is the honest statement of what this card still contributes.
 
 ## 6. Not touched
 
