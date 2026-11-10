@@ -3,10 +3,15 @@ task: t_2eb97ebb
 
 - **The sqlite ignore rules are on `main` and now have a changelog entry; the
   card that asked for them had gone stale, not wrong.** `*.sqlite` and
-  `*.sqlite3` are at `.gitignore:75-76` and are live, measured in a clean clone
-  of `origin/main`: `git check-ignore -v` names `.gitignore:75:*.sqlite  db.sqlite`,
-  `…:76:*.sqlite3  probe.sqlite3` and `…:75:*.sqlite  hscc_daemon/nested.sqlite`,
-  and a planted repo-root `db.sqlite` is invisible to `git add -A`. No repo-root
+  `*.sqlite3` are in `.gitignore` and live, measured in a clean checkout of
+  `main` at `789130dc`: `git check-ignore -v` names the **rules**, not
+  positions — `…:*.sqlite  db.sqlite`, `…:*.sqlite3  probe.sqlite3` and
+  `…:*.sqlite  hscc_daemon/nested.sqlite` — and a planted repo-root `db.sqlite`
+  is invisible to `git add -A`. No line number is quoted, on purpose:
+  `grep -n sqlite .gitignore` answered 75-76 at `8df6a352` and 84-85 at
+  `789130dc` only because an unrelated block landed above them, so a pinned
+  number goes false while the rule `check-ignore` names has not moved.
+  No repo-root
   `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD | grep -i sqlite` →
   only `hscc-api/tests_gateway/diag_sqlite.py`, a source file), so the deletion
   half of `071fdb4e` is moot.
@@ -19,12 +24,22 @@ task: t_2eb97ebb
 - **Probe lesson, recorded because the wrong probe is what produced the stale
   card: in a squash-merged repo, ancestry cannot answer "did this change land".**
   `git merge-base --is-ancestor 071fdb4e main` is `false` *at* `8df6a352` — the
-  squash rewrote the commit — while the content is present and effective. The
-  question "is this change on `main`" is a **tree** question: `git diff 071fdb4e
-  origin/main -- .gitignore` is empty (byte-identical), and that is the answer.
-  Any card that opens on an ancestry check plus a `git branch -a --contains`
-  roster is asserting where the *commit* is, not whether the *change* is, and
-  will go stale the moment the PR it waits on merges.
+  squash rewrote the commit — while the content is present and effective, and it
+  is `false` at `789130dc` too. The question "is this change on `main`" is a
+  **tree** question, and the tree answer is scoped to the rules and pinned to a
+  sha: `git diff --stat 071fdb4e 8df6a352 -- .gitignore` is **empty** (the file
+  was byte-identical there, and that is what answered the question). It is *not*
+  empty at `0a4db383` or later — `git diff --stat 071fdb4e 0a4db383 -- .gitignore`
+  is `.gitignore | 9 +++++++++` — because #279 appended its unrelated
+  `.fastembed_cache/` block to the same file, and every added line in that diff
+  is that block: `git diff 071fdb4e origin/main -- .gitignore | grep -ci sqlite`
+  is `0`, so the two sqlite rules are still unchanged between the two trees.
+  The durable form of the claim is therefore "the tree matched at `8df6a352`, and
+  the only divergence since is later, unrelated content" — not "the file is
+  byte-identical to `main`", which a stranger's append can falsify without moving
+  the change one inch. Any card that opens on an ancestry check plus a
+  `git branch -a --contains` roster is asserting where the *commit* is, not
+  whether the *change* is, and will go stale the moment the PR it waits on merges.
 - **The changelog half was the only real gap.** `071fdb4e`'s own stat is
   `.gitignore | 2 ++` + `db.sqlite | 0` — no fragment — and PR #275's squash
   fragment `changelog.d/t_2cd692f0.md` describes the orch-waker tests, never the
