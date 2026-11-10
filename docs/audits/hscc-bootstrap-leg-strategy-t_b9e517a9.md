@@ -60,14 +60,42 @@ Every duration in the trio is spread (4.61–30.04 s), not clustered on an exact
 5.0 / 10.0 / 15.0 boundary. The 30 s case runs the installer twice; the 14 s
 cases run it once. There is no hidden timeout to recover here.
 
-One number does **not** reproduce the earlier baseline: the ruling cites the
-post-t_ecb84764 leg at **236.90 s**, while this run is **292.03 s (+55.13 s)**.
-The whole delta sits in `test_restart_daemon.py` — **67.67 s here vs 11.66 s**
-recorded in `changelog.d/archive/2.15.6/t_ecb84764.md`. Its 37 cases are spread
-0.01–4.47 s (each spawns bash plus a Python stub, with `POLL_INTERVAL=0.05`),
-so it is not a quantised timeout either, but it is worth a separate look if the
-number persists. It does not change this card's decision: that file is not one
-of the three installer-subprocess files.
+The direct run is 55 s above the ruling's 236.90 s, and the delta sits in
+`test_restart_daemon.py` — **67.67 s here vs 11.66 s** recorded in
+`changelog.d/archive/2.15.6/t_ecb84764.md`. The canonical-runner gate then ran
+the same leg at **240.36 s** (below), within 3.5 s of the ruling's number, so
+the 67.67 s was run-to-run variance in that file rather than a persistent
+regression. Its 37 cases are spread 0.01–4.47 s (each spawns bash plus a Python
+stub, with `POLL_INTERVAL=0.05`), so it is not a quantised timeout either. It
+does not change this card's decision: that file is not one of the three
+installer-subprocess files.
+
+## Full-suite gate (same host, same day)
+
+`scripts/run_tests.sh` run once, foreground, after the decision commit:
+**ALL GREEN, 12/12 legs**, 9398 passed / 7 skipped / 1 xfailed / 0 failed,
+21 m 33 s wall (12:43:55–13:05:28 +0200, load 2.07 before / 1.90 after).
+
+| leg | duration |
+|---|---:|
+| `scripts` | **582.53 s** |
+| `hscc-api` | 245.62 s |
+| `hscc-bootstrap` | **240.36 s** |
+| `hscc_daemon` | 97.73 s |
+| `hscc-cluster` | 60.90 s |
+| `comfyui-sparkrun` | 35.05 s |
+| `.github/scripts` | 14.13 s |
+| `hscc-project` | 8.77 s |
+| `hscc-roles` | 2.62 s |
+| `hscc-commands` | 1.65 s |
+| `memori_byodb` | 0.47 s |
+| `sparkrun-hermes` | 0.01 s |
+
+This is the ruling's trigger (a): `hscc-bootstrap` is no longer the long pole —
+`scripts` is, at 582.53 s. Per the ruling, that makes the open question *leg
+budgeting for `scripts`*, not a reason to share or split these 20 installer
+cases. The decision on this card stays **leave as-is**; a separate leg-budget
+card for `scripts` is the follow-up, not a change here.
 
 ## Options, measured against the ruling
 
@@ -132,5 +160,5 @@ Otherwise re-measure after the ruling's `SCHEDULED_UNTIL=2026-12-07`.
   `HERMES_DISABLE_LAZY_INSTALLS=1` / `HSCC_SKIP_COMPACT_PROBE=1` exports in
   `scripts/run_tests.sh` are untouched.
 - No process was stopped; no `pkill` was used.
-- Full-suite gate: `scripts/run_tests.sh` run once, foreground; result in the
-  PR description.
+- Full-suite gate: `scripts/run_tests.sh` run once, foreground — ALL GREEN,
+  12/12 legs (above).
