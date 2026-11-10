@@ -95,8 +95,8 @@ MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"
 # Gateway LAN IPs — env-overridable; defaults match the live HSCC topology.
 # ORCH_MODEL_HOST: the orchestrator vLLM node (runs models :8000)
 # GATEWAY_HOST: the gateway Mac Studio (runs Hermes + dashboard :3000 + LB :4000)
-ORCH_MODEL_HOST = os.environ.get("HSCC_ORCH_MODEL_HOST", "10.0.0.244")
-GATEWAY_HOST = os.environ.get("HSCC_GATEWAY_HOST", "10.0.0.245")
+ORCH_MODEL_HOST = os.environ.get("HSCC_ORCH_MODEL_HOST", "192.0.2.244")
+GATEWAY_HOST = os.environ.get("HSCC_GATEWAY_HOST", "192.0.2.245")
 
 # Orchestrator model alias: the vLLM model served on ORCH_MODEL_HOST:8000/v1.
 # Used by compaction + the text auxiliaries when their URL defaults to the

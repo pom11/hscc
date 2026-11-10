@@ -18,7 +18,7 @@
       "action": "update",
       "summary": "Update provider/model settings",
       "details": [
-        "  orchestrator: 10.0.0.244:8000 (model: orchestrator-model)"
+        "  orchestrator: 192.0.2.244:8000 (model: orchestrator-model)"
       ]
     },
     {
@@ -33,7 +33,7 @@
         "id": "orch",
         "role": "orchestrator",
         "model": "orchestrator-model",
-        "nodes": ["10.0.0.244"],
+        "nodes": ["192.0.2.244"],
         "port": 8000,
         "tp": null,
         "pp": null,
@@ -45,7 +45,7 @@
         "id": "a1",
         "role": "worker",
         "model": "worker-model",
-        "nodes": ["10.0.0.245"],
+        "nodes": ["192.0.2.245"],
         "port": 9000,
         "tp": 1,
         "pp": 1,
@@ -55,7 +55,7 @@
         "id": "orch-old",
         "role": "orchestrator",
         "model": "orchestrator-model",
-        "nodes": ["10.0.0.244"],
+        "nodes": ["192.0.2.244"],
         "port": 8000,
         "tp": null,
         "pp": null,
@@ -64,7 +64,7 @@
     ],
     "move": [],
     "unchanged": [],
-    "affected_nodes": ["10.0.0.244", "10.0.0.245"]
+    "affected_nodes": ["192.0.2.244", "192.0.2.245"]
   },
   "speak": "Preview: 4 changes."
 }

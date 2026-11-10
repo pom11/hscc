@@ -95,7 +95,7 @@ def _job_host_ip(stripped):
     """Return the node IP of a Job-block host line, or None.
 
     Host lines under a ``Job:`` block carry a label column then the address:
-    ``node_0     10.0.0.1     Up 12 hours    <image>`` (or ``solo`` for a
+    ``node_0     192.0.2.1     Up 12 hours    <image>`` (or ``solo`` for a
     single-container job). The idle-section lines (``  192.0.2.11``) have no
     label column, so requiring a dot-free first token and a dotted second
     token separates the two classes. (t_db6a32da)

@@ -8421,7 +8421,7 @@ three. Full nav-graph gate green incl. the negative self-check.
 
 ### Added
 - **`/v1/cluster/status` workloads now carry a `nodes` list.** Each entry of
-  `workloads` gains one optional key, `"nodes": ["10.0.0.1", "10.0.0.2"]`,
+  `workloads` gains one optional key, `"nodes": ["10.0.0.x", "10.0.0.x"]`,
   the host lines of that job's block in `sparkrun status` — the unit→node
   edge the iOS "Nodes & serving" screen needs. `cmd_cluster_status()`
   (`hscc-cluster/hscc.py`) already walked those lines and threw them away; it
@@ -9219,7 +9219,7 @@ order: 1
   clients need remounting.
 - **`hscc_nas_watchdog.sh` could never have fired correctly.** It was installed
   to `~/.hermes/scripts/` but never scheduled, and it still carried
-  `NAS_HOST="10.0.0.249"` — a placeholder left behind by the public-repo address
+  `NAS_HOST="10.0.0.x"` — a placeholder left behind by the public-repo address
   scrub — so its reachability probe targeted a host that does not exist. It also
   used `ping -W 2`, which is **milliseconds** on macOS (seconds only on Linux),
   making that probe a ~2ms timeout that would fail against a healthy NAS. The
@@ -10480,8 +10480,8 @@ genuinely-marginal findings were deliberately deferred (see below).
 
   ```
   delegation  -> family-reasoning | http://localhost:4000/v1      | deepseek-ai/DeepSeek-V4-Flash-0731
-  compaction  -> orchestrator     | http://10.0.0.244:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
-  auxiliaries -> orchestrator     | http://10.0.0.244:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
+  compaction  -> orchestrator     | http://10.0.0.x:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
+  auxiliaries -> orchestrator     | http://10.0.0.x:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
   ```
 
   Consumers the template does **not** declare are listed under
@@ -10640,7 +10640,7 @@ templates captured before the change.
 - **Self-heal double-provisioned tensor-parallel peers.** `hscc_daemon/health.py`
   had no tp-peer awareness, so a non-primary span member — which serves through
   the span's primary and exposes no endpoint of its own — was counted as a DOWN
-  worker (`Workers check: 2/3 online, down ['10.0.0.248']`) and relaunched as
+  worker (`Workers check: 2/3 online, down ['10.0.0.x']`) and relaunched as
   a *solo* unit. That put two containers on one GPU, re-staged weights on every
   cycle, and respawned within minutes of being stopped. Peers are now classified
   via `cmdlib.serving_unit_scoreboard()` (the same source `/cluster` uses) and are
@@ -10993,7 +10993,7 @@ All fixed:
 - **Kanban auto-unblock** only promotes a blocked task when *every* referenced
   dependency is `done` (exact `t_…` id match, not a substring).
 - **Discovery / node matching**: probes the node's actual served ports (not just
-  8000); node-IP matching is exact (`10.0.0.1` no longer matches `10.0.0.10`).
+  8000); node-IP matching is exact (`10.0.0.x` no longer matches `10.0.0.x`).
 - **Role regen resilience**: one bad spec no longer aborts the whole batch;
   `model_tier: null` defaults to `fast`; a non-UTF-8 profile is overwritten
   rather than crashing.

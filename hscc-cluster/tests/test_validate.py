@@ -22,8 +22,8 @@ import template_intent as ti
 
 # Cluster.json compute nodes used across these tests (gateway .1 + workers.
 # The exact same addresses the placement tests use for the 4-node layout).
-COMPUTE = ["10.0.0.244", "10.0.0.245", "10.0.0.246",
-           "10.0.0.247", "10.0.0.248"]
+COMPUTE = ["192.0.2.244", "192.0.2.245", "192.0.2.246",
+           "192.0.2.247", "192.0.2.248"]
 
 
 def _raw_tpl(d: dict):
@@ -47,7 +47,7 @@ class TestStructuralErrors:
         d = {"name": "x", "version": 3, "orchestrator": "o.yaml",
              "families": [{"name": "reasoning",
                            "models": [{"recipe": "big.yaml", "tp": 2}],
-                           "nodes": ["10.0.0.247", "10.0.0.248"]}]}
+                           "nodes": ["192.0.2.247", "192.0.2.248"]}]}
         d.update(extra)
         return d
 
@@ -59,9 +59,9 @@ class TestStructuralErrors:
     def test_unknown_node_fires(self):
         # node .250 is not in cluster.json
         d = self._base()
-        d["families"][0]["nodes"] = ["10.0.0.250", "10.0.0.248"]
+        d["families"][0]["nodes"] = ["192.0.2.250", "192.0.2.248"]
         errs, _ = self._check(d, COMPUTE)
-        assert any("node '10.0.0.250' in family 'reasoning' is not defined "
+        assert any("node '192.0.2.250' in family 'reasoning' is not defined "
                    "in cluster.json" in e for e in errs)
 
     def test_tp_mismatch_fires(self):
@@ -75,7 +75,7 @@ class TestStructuralErrors:
     def test_orchestrator_tp_mismatch_fires(self):
         d = self._base()
         d["orchestrator"] = {"recipe": "o.yaml", "tp": 2,
-                             "nodes": ["10.0.0.244"]}
+                             "nodes": ["192.0.2.244"]}
         errs, _ = self._check(d, COMPUTE)
         assert any("orchestrator: 1 nodes listed but tp=2" in e for e in errs)
 
@@ -86,10 +86,10 @@ class TestStructuralErrors:
         d = self._base()
         d["families"].append({
             "name": "coding", "models": [{"recipe": "c.yaml", "tp": 1}],
-            "nodes": ["10.0.0.248"]})
+            "nodes": ["192.0.2.248"]})
         errs, _ = self._check(d, COMPUTE)
         assert any(
-            "node '10.0.0.248' claimed by both 'reasoning' and 'coding'"
+            "node '192.0.2.248' claimed by both 'reasoning' and 'coding'"
             in e for e in errs)
         assert any("set allow_colocation: true on both to permit" in e
                    for e in errs)
@@ -145,10 +145,10 @@ class TestColocationPermitted:
              "families": [
                  {"name": "reasoning",
                   "models": [{"recipe": "big.yaml", "tp": 1}],
-                  "nodes": ["10.0.0.248"], "allow_colocation": True},
+                  "nodes": ["192.0.2.248"], "allow_colocation": True},
                  {"name": "vision",
                   "models": [{"recipe": "v.yaml", "tp": 1}],
-                  "nodes": ["10.0.0.248"], "allow_colocation": True},
+                  "nodes": ["192.0.2.248"], "allow_colocation": True},
              ]}
         return d
 
@@ -202,12 +202,12 @@ EXPLICIT_4NODE = {
     "name": "4node-dual-dsv4", "version": 3,
     "orchestrator": {"recipe": "~/.sparkrun-local/recipes/local-fixed/"
                                "deepseek-v4-fp8-scitrera-hscc.yaml",
-                     "tp": 2, "nodes": ["10.0.0.244", "10.0.0.246"]},
+                     "tp": 2, "nodes": ["192.0.2.244", "192.0.2.246"]},
     "families": [{"name": "reasoning",
                   "models": [{"recipe": "~/.sparkrun-local/recipes/local-fixed/"
                                         "deepseek-v4-fp8-scitrera-hscc.yaml",
                               "tp": 2}],
-                  "nodes": ["10.0.0.247", "10.0.0.248"]}],
+                  "nodes": ["192.0.2.247", "192.0.2.248"]}],
 }
 
 
@@ -249,7 +249,7 @@ class TestFourNodeDual:
         def broken_resolve(*a, **k):
             raise ti.TemplateIntentError(
                 "family 'reasoning': no available worker nodes "
-                "(pool=[], claimed=['10.0.0.247'])")
+                "(pool=[], claimed=['192.0.2.247'])")
         monkeypatch.setattr(ct, "_resolve", broken_resolve)
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
 
@@ -316,20 +316,20 @@ class TestValidateTemplateE2E:
         Path.is_file stub so nothing depends on disk state either."""
         self._setup(tmp_path, monkeypatch, "t", (
             "name: t\nversion: 3\norchestrator:\n  recipe: o.yaml\n  tp: 2\n"
-            "  nodes: [10.0.0.244, 10.0.0.246]\n"
+            "  nodes: [192.0.2.244, 192.0.2.246]\n"
             "families:\n  - name: reasoning\n    models:\n      - recipe: big.yaml\n"
-            "        tp: 2\n    nodes: [10.0.0.247, 10.0.0.248]\n"))
+            "        tp: 2\n    nodes: [192.0.2.247, 192.0.2.248]\n"))
         # No cluster.json written → structural sees no compute nodes; explicit
         # spans reference nodes not in that empty set → would fail. Instead
         # provide a cluster.json so the "exists in cluster.json" check passes,
         # and stub recipes to exist. The point being tested: no RESOLVER/no
         # discovery is touched and the run succeeds offline.
         cj = {"name": "hscc",
-              "gateway": {"ip": "10.0.0.244"},
+              "gateway": {"ip": "192.0.2.244"},
               "workers": [
-                  {"ip": "10.0.0.246"}, {"ip": "10.0.0.247"},
-                  {"ip": "10.0.0.248"}],
-              "nasDevices": [{"ip": "10.0.0.99"}]}
+                  {"ip": "192.0.2.246"}, {"ip": "192.0.2.247"},
+                  {"ip": "192.0.2.248"}],
+              "nasDevices": [{"ip": "192.0.2.99"}]}
         monkeypatch.setattr(ct, "CLUSTER_JSON",
                             _write_cluster(tmp_path, cj))
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
@@ -346,15 +346,15 @@ class TestValidateTemplateE2E:
         exit-failure is surfaced as top-level ok=False."""
         self._setup(tmp_path, monkeypatch, "t", (
             "name: t\nversion: 3\norchestrator:\n  recipe: o.yaml\n  tp: 2\n"
-            "  nodes: [10.0.0.244, 10.0.0.246]\n"
+            "  nodes: [192.0.2.244, 192.0.2.246]\n"
             "families:\n  - name: reasoning\n    models:\n      - recipe: big.yaml\n"
-            "        tp: 2\n    nodes: [10.0.0.247, 10.0.0.248]\n"))
+            "        tp: 2\n    nodes: [192.0.2.247, 192.0.2.248]\n"))
         monkeypatch.setattr(ct, "CLUSTER_JSON",
                             _write_cluster(tmp_path, {
-                                "gateway": {"ip": "10.0.0.244"},
-                                "workers": [{"ip": "10.0.0.246"},
-                                            {"ip": "10.0.0.247"},
-                                            {"ip": "10.0.0.248"}]}))
+                                "gateway": {"ip": "192.0.2.244"},
+                                "workers": [{"ip": "192.0.2.246"},
+                                            {"ip": "192.0.2.247"},
+                                            {"ip": "192.0.2.248"}]}))
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
 
         def broken_resolve(*a, **k):
@@ -374,16 +374,16 @@ class TestValidateTemplateE2E:
         self._setup(tmp_path, monkeypatch, "t", (
             "name: t\nversion: 3\norchestrator:\n  recipe: o.yaml\n"
             "families:\n  - name: f\n    models:\n      - recipe: big.yaml\n"
-            "    nodes: [10.0.0.99]\n"))
+            "    nodes: [192.0.2.99]\n"))
         monkeypatch.setattr(ct, "CLUSTER_JSON",
                             _write_cluster(tmp_path, {
-                                "gateway": {"ip": "10.0.0.244"},
-                                "workers": [{"ip": "10.0.0.247"}],
-                                "nasDevices": [{"ip": "10.0.0.99"}]}))
+                                "gateway": {"ip": "192.0.2.244"},
+                                "workers": [{"ip": "192.0.2.247"}],
+                                "nasDevices": [{"ip": "192.0.2.99"}]}))
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
         res = ct.validate_template("t", structural_only=True)
         assert res["structural"]["ok"] is False
-        assert any("node '10.0.0.99' in family 'f' is not defined in cluster.json"
+        assert any("node '192.0.2.99' in family 'f' is not defined in cluster.json"
                    in e for e in res["structural"]["errors"])
 
 

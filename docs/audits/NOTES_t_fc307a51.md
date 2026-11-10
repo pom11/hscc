@@ -69,7 +69,7 @@ append a FIXED note; do not rewrite the historical row.
 - [x] canonical suite ALL GREEN on the frozen tip ac25c0fc: py3.11 leg
   (FROZEN_TIP==TIP_AFTER verified) and py3.13 leg, both exit 0
 - [x] address_guard --tracked exit 0; own-diff IP grep: only the documented
-  10.0.0.1 sandbox placeholder in the new test fixture; attribution grep 0
+  10.0.0.x sandbox placeholder in the new test fixture; attribution grep 0
   hits
 - [x] real-CLI smoke (sandbox HOME + canaries, COLUMNS 80/120): 17 surfaces
   x both widths = 34 runs, all ok — rc as designed, zero trips, zero new

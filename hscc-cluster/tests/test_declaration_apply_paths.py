@@ -28,8 +28,8 @@ import recipe_cost as rc                   # noqa: E402
 
 from _capture_apply_golden import FakeNode, FakeTopo  # noqa: E402
 
-ORCH = "10.0.0.1"
-W = ["10.0.0.2", "10.0.0.3"]
+ORCH = "192.0.2.1"
+W = ["192.0.2.2", "192.0.2.3"]
 
 
 def _cost(recipe):

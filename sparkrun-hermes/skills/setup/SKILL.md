@@ -95,9 +95,9 @@ sparkrun cluster default
 
 # Modify
 sparkrun cluster update <name> --hosts <new_hosts> [--user <user>] [-d "desc"]
-sparkrun cluster update <name> --add-host 10.0.0.5
-sparkrun cluster update <name> --add-host 10.0.0.5,10.0.0.6
-sparkrun cluster update <name> --remove-host 10.0.0.2
+sparkrun cluster update <name> --add-host 10.0.0.x
+sparkrun cluster update <name> --add-host 10.0.0.x,10.0.0.x
+sparkrun cluster update <name> --remove-host 10.0.0.x
 sparkrun cluster update <name> --transfer-mode push --transfer-interface cx7
 sparkrun cluster delete <name>
 sparkrun cluster unset-default

@@ -71,7 +71,7 @@ def profile_home(tmp_path, monkeypatch):
         "model:\n"
         "  default: hscc-model\n"
         "  provider: custom\n"
-        "  base_url: http://10.0.0.244:8000/v1\n"
+        "  base_url: http://192.0.2.244:8000/v1\n"
         "  api_key: sk-sparkrun\n"
         "compression:\n"
         "  threshold: 0.8\n"
@@ -190,7 +190,7 @@ def test_put_model_merges_preserves_rest(running, token, profile_home):
     assert body["compression"]["threshold"] == 0.8
     # protected keys not clobbered
     cfg = (profile_home["pdir"] / "config.yaml").read_text()
-    assert "base_url: http://10.0.0.244:8000/v1" in cfg
+    assert "base_url: http://192.0.2.244:8000/v1" in cfg
     assert "api_key: sk-sparkrun" in cfg
 
 
@@ -269,7 +269,7 @@ def leaked_profile_home(tmp_path, monkeypatch):
     pdir.mkdir(parents=True)
     (pdir / "config.yaml").write_text(
         "model:\n  default: hscc-model\n  provider: custom\n"
-        "  base_url: http://10.0.0.244:8000/v1\n")
+        "  base_url: http://192.0.2.244:8000/v1\n")
     (pdir / "profile.yaml").write_text("description: Routes HSCC work.\n")
 
     # GLOBAL skills live at the ROOT; the leaked profile has its own smaller set.
@@ -340,7 +340,7 @@ def test_editor_writes_land_in_the_root_profile(leaked_running, leaked_token,
     assert body["model"] == "new-model"
     cfg = (leaked_profile_home["pdir"] / "config.yaml").read_text()
     assert "new-model" in cfg
-    assert "base_url: http://10.0.0.244:8000/v1" in cfg   # merge, not clobber
+    assert "base_url: http://192.0.2.244:8000/v1" in cfg   # merge, not clobber
     # Nothing was written into the double-nest.
     assert list(leaked_profile_home["phantom"].iterdir()) == []
     assert not (leaked_profile_home["leaked"] / "profiles" / "hscc-orch" /

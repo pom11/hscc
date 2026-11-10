@@ -28,9 +28,9 @@ vllm:num_preemptions_total{{engine="0",model_name="{MODEL}"}} 2.0
 """
 
 MODEL_INFO = {"data": [
-    {"model_name": MODEL, "litellm_params": {"api_base": "http://10.0.0.1:8000/v1"}},
-    {"model_name": "worker-model", "litellm_params": {"api_base": "http://10.0.0.1:8000/v1"}},
-    {"model_name": "worker-model", "litellm_params": {"api_base": "http://10.0.0.2:8001/v1"}},
+    {"model_name": MODEL, "litellm_params": {"api_base": "http://192.0.2.1:8000/v1"}},
+    {"model_name": "worker-model", "litellm_params": {"api_base": "http://192.0.2.1:8000/v1"}},
+    {"model_name": "worker-model", "litellm_params": {"api_base": "http://192.0.2.2:8001/v1"}},
 ]}
 
 
@@ -65,13 +65,13 @@ def test_parse_vllm_metrics_ignores_garbage():
 
 def test_parse_model_info_groups_aliases_by_backend():
     assert cl.parse_model_info(MODEL_INFO) == {
-        "10.0.0.1:8000": [MODEL, "worker-model"],
-        "10.0.0.2:8001": ["worker-model"],
+        "192.0.2.1:8000": [MODEL, "worker-model"],
+        "192.0.2.2:8001": ["worker-model"],
     }
 
 
 def test_hostport():
-    assert cl.hostport("http://10.0.0.3:8002/v1") == "10.0.0.3:8002"
+    assert cl.hostport("http://192.0.2.3:8002/v1") == "192.0.2.3:8002"
     assert cl.hostport("https://example.test/v1") == "example.test:443"
     assert cl.hostport("") == ""
 
@@ -88,7 +88,7 @@ def test_rates_need_two_samples_and_survive_restart():
 
 class FakeNet:
     def __init__(self):
-        self.metrics = {"10.0.0.1:8000": METRICS, "10.0.0.2:8001": METRICS}
+        self.metrics = {"192.0.2.1:8000": METRICS, "192.0.2.2:8001": METRICS}
         self.proxy_ok = True
         self.calls = []
 
@@ -114,11 +114,11 @@ def test_poller_rows_per_backend_and_rates_on_second_tick():
     p = _poller(net, clock)
     rows = p.poll()
     assert [(r["node"], r["port"], r["running"], r["waiting"]) for r in rows] == [
-        ("10.0.0.1", "8000", 3, 1), ("10.0.0.2", "8001", 3, 1)]
+        ("192.0.2.1", "8000", 3, 1), ("192.0.2.2", "8001", 3, 1)]
     assert rows[0]["routes"] == [MODEL, "worker-model"]
     assert rows[0]["gen_tps"] is None  # first sample has no rate yet
 
-    net.metrics["10.0.0.1:8000"] = METRICS.replace("1000.0", "1020.0")
+    net.metrics["192.0.2.1:8000"] = METRICS.replace("1000.0", "1020.0")
     clock[0] = 102.0
     rows = p.poll()
     assert rows[0]["gen_tps"] == 10.0
@@ -128,10 +128,10 @@ def test_poller_rows_per_backend_and_rates_on_second_tick():
 
 def test_poller_marks_a_dead_backend_instead_of_dropping_it():
     net, clock = FakeNet(), [0.0]
-    net.metrics.pop("10.0.0.2:8001")
+    net.metrics.pop("192.0.2.2:8001")
     rows = _poller(net, clock).poll()
     dead = [r for r in rows if r.get("error")]
-    assert len(dead) == 1 and dead[0]["node"] == "10.0.0.2"
+    assert len(dead) == 1 and dead[0]["node"] == "192.0.2.2"
 
 
 def test_poller_keeps_last_routes_when_proxy_blips_and_caches_them():
@@ -152,12 +152,12 @@ def test_poller_keeps_last_routes_when_proxy_blips_and_caches_them():
 # ── rendering ──────────────────────────────────────────────────────────────
 
 FRAME = {"hosts": [
-    {"host": "10.0.0.1", "error": None, "sample": {
+    {"host": "192.0.2.1", "error": None, "sample": {
         "sparkrun_jobs": "1", "cpu_usage_pct": "6.2", "mem_used_pct": "85.1",
         "swap_total_mb": "16383", "swap_used_mb": "0", "gpu_util_pct": "94",
         "cpu_temp_c": "87.2", "gpu_temp_c": "71", "gpu_power_w": "37.88"},
      "workloads": [{"containers": [{"name": "should-not-render"}]}]},
-    {"host": "10.0.0.2", "error": "ssh: connection refused", "sample": None},
+    {"host": "192.0.2.2", "error": "ssh: connection refused", "sample": None},
 ]}
 
 
@@ -173,11 +173,11 @@ def test_host_table_matches_sparkrun_columns_without_containers():
 
 def test_serving_table_shows_load_per_node_and_model_totals():
     rows = [
-        {"node": "10.0.0.1", "port": "8000", "model": MODEL, "routes": [MODEL, "worker-model"],
+        {"node": "192.0.2.1", "port": "8000", "model": MODEL, "routes": [MODEL, "worker-model"],
          "running": 3, "waiting": 1, "kv": 0.5, "gen_tps": 10.0, "prompt_tps": 200.0},
-        {"node": "10.0.0.2", "port": "8001", "model": MODEL, "routes": ["worker-model"],
+        {"node": "192.0.2.2", "port": "8001", "model": MODEL, "routes": ["worker-model"],
          "running": 2, "waiting": 0, "kv": 0.25, "gen_tps": 5.0, "prompt_tps": None},
-        {"node": "10.0.0.3", "port": "8002", "model": "-", "routes": ["worker-model"],
+        {"node": "192.0.2.3", "port": "8002", "model": "-", "routes": ["worker-model"],
          "error": "timed out"},
     ]
     out = _render(cl.serving_table(rows))
@@ -190,7 +190,7 @@ def test_serving_table_shows_load_per_node_and_model_totals():
 
 
 def test_serving_table_narrow_drops_routes_and_prompt_rate():
-    rows = [{"node": "10.0.0.1", "port": "8000", "model": MODEL, "routes": ["worker-model"],
+    rows = [{"node": "192.0.2.1", "port": "8000", "model": MODEL, "routes": ["worker-model"],
              "running": 1, "waiting": 0, "kv": 0.1, "gen_tps": None, "prompt_tps": None}]
     out = _render(cl.serving_table(rows, width=80))
     assert "Routes" not in out and "Prompt" not in out and "Gen t/s" in out
@@ -252,7 +252,7 @@ def _urlopen_raises(exc):
     return _fake
 
 
-def _errno65(host="10.0.0.1"):
+def _errno65(host="192.0.2.1"):
     return urllib.error.URLError(OSError(65, "No route to host", host))
 
 
@@ -271,9 +271,9 @@ def test_errno65_on_private_host_falls_back_to_curl_and_returns_body(curl_seam, 
     """The reported failure: errno 65 on a LAN backend now yields the body."""
     stub = curl_seam(out=METRICS.encode())
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-    assert cl._http_get("http://10.0.0.1:8000/metrics", 3) == METRICS.encode()
+    assert cl._http_get("http://192.0.2.1:8000/metrics", 3) == METRICS.encode()
     assert stub.argvs == [["/usr/bin/curl", "-sS", "--fail", "-L", "--max-time", "3",
-                           "http://10.0.0.1:8000/metrics"]]
+                           "http://192.0.2.1:8000/metrics"]]
     assert stub.timeouts == [3]
 
 
@@ -281,10 +281,10 @@ def test_fallback_argv_is_a_list_never_a_shell(curl_seam, monkeypatch):
     """argv-list only: no shell=True, no string command, URL last, curl first."""
     stub = curl_seam()
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-    cl._http_get("http://10.0.0.1:8000/metrics", 3)
+    cl._http_get("http://192.0.2.1:8000/metrics", 3)
     argv = stub.argvs[0]
     assert isinstance(argv, list) and argv[0] == "/usr/bin/curl"
-    assert argv[-1] == "http://10.0.0.1:8000/metrics"
+    assert argv[-1] == "http://192.0.2.1:8000/metrics"
     for flag in ("--fail", "-L", "-sS", "--max-time"):
         assert flag in argv
 
@@ -309,10 +309,10 @@ def test_errno65_off_a_private_host_propagates_unchanged(curl_seam, monkeypatch,
 def test_errno113_on_private_host_does_not_fall_back(curl_seam, monkeypatch):
     """Linux EHOSTUNREACH is 113 = genuinely no route; it must stay an error."""
     stub = curl_seam()
-    exc = urllib.error.URLError(OSError(113, "No route to host", "10.0.0.1"))
+    exc = urllib.error.URLError(OSError(113, "No route to host", "192.0.2.1"))
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
     with pytest.raises(urllib.error.URLError) as ei:
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     assert ei.value.reason.errno == 113
     assert stub.argvs == []
 
@@ -320,11 +320,11 @@ def test_errno113_on_private_host_does_not_fall_back(curl_seam, monkeypatch):
 def test_httperror_from_urlopen_is_untouched(curl_seam, monkeypatch):
     """A status is a probe answer, not a denial — no fallback on any python."""
     stub = curl_seam()
-    exc = urllib.error.HTTPError("http://10.0.0.1:8000/metrics", 503,
+    exc = urllib.error.HTTPError("http://192.0.2.1:8000/metrics", 503,
                                  "down", None, None)
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
     with pytest.raises(urllib.error.HTTPError) as ei:
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     assert ei.value.code == 503
     assert stub.argvs == []
 
@@ -334,7 +334,7 @@ def test_timeout_from_urlopen_is_untouched(curl_seam, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen",
                         _urlopen_raises(TimeoutError("timed out")))
     with pytest.raises(TimeoutError):
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     assert stub.argvs == []
 
 
@@ -343,7 +343,7 @@ def test_curl_exit_22_raises_the_httperror_family(curl_seam, monkeypatch):
     curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 404\n")
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
     with pytest.raises(urllib.error.HTTPError) as ei:
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     assert ei.value.code == 404
     assert isinstance(ei.value, urllib.error.URLError)
 
@@ -354,7 +354,7 @@ def test_curl_failure_of_another_kind_keeps_the_original_error(curl_seam, monkey
     exc = _errno65()
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
     with pytest.raises(urllib.error.URLError) as ei:
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     assert ei.value.reason.errno == 65
 
 
@@ -366,7 +366,7 @@ def test_curl_missing_surfaces_original_error_with_hint(curl_seam, monkeypatch):
     cl._lan_curl_reset_notice()
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
     with pytest.raises(urllib.error.URLError) as ei:
-        cl._http_get("http://10.0.0.1:8000/metrics", 3)
+        cl._http_get("http://192.0.2.1:8000/metrics", 3)
     msg = str(ei.value)
     assert "No route to host" in msg            # original message kept, not replaced
     assert "curl fallback unavailable" in msg   # one-line hint appended
@@ -383,7 +383,7 @@ def test_notice_appears_exactly_once_across_many_fallbacks(curl_seam, monkeypatc
     assert capsys.readouterr().err.count(cl.LAN_CURL_FALLBACK_NOTICE) == 1
 
 
-@pytest.mark.parametrize("host", ["10.0.0.1", "192.0.2.1", "172.20.3.4",
+@pytest.mark.parametrize("host", ["192.0.2.1", "192.0.2.1", "172.20.3.4",
                                  "100.64.0.3", "100.64.0.254",
                                  "169.254.9.9", "node-1.local", "gateway.local",
                                  "fd00::1234", "fe80::1"])
@@ -446,10 +446,10 @@ def test_poller_renders_backends_up_under_errno65(curl_seam, monkeypatch):
         p.close()
     assert not [r for r in rows if r.get("error")], rows
     assert {(r["node"], r["port"], r["running"]) for r in rows} == {
-        ("10.0.0.1", "8000", 3), ("10.0.0.2", "8001", 3)}
+        ("192.0.2.1", "8000", 3), ("192.0.2.2", "8001", 3)}
     # the fallback ran for the two LAN backends only — never for the loopback proxy
-    assert sorted(curl_urls) == ["http://10.0.0.1:8000/metrics",
-                                 "http://10.0.0.2:8001/metrics"]
+    assert sorted(curl_urls) == ["http://192.0.2.1:8000/metrics",
+                                 "http://192.0.2.2:8001/metrics"]
 
 
 def test_poller_rows_carry_cumulative_token_counters():
@@ -460,10 +460,10 @@ def test_poller_rows_carry_cumulative_token_counters():
 
 def test_serving_table_shows_token_totals_per_node_and_summed_even_narrow():
     rows = [
-        {"node": "10.0.0.1", "port": "8000", "model": MODEL, "routes": ["worker-model"],
+        {"node": "192.0.2.1", "port": "8000", "model": MODEL, "routes": ["worker-model"],
          "running": 1, "waiting": 0, "kv": 0.1, "gen_tps": None, "prompt_tps": None,
          "prompt_total": 110_862_221.0, "gen_total": 1_446_156.0},
-        {"node": "10.0.0.2", "port": "8001", "model": MODEL, "routes": ["worker-model"],
+        {"node": "192.0.2.2", "port": "8001", "model": MODEL, "routes": ["worker-model"],
          "running": 1, "waiting": 0, "kv": 0.1, "gen_tps": None, "prompt_tps": None,
          "prompt_total": 900_000_000.0, "gen_total": 999.0},
     ]

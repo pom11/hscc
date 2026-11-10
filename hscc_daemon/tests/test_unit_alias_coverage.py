@@ -36,9 +36,9 @@ import pytest
 
 from hscc_daemon import health, serving
 
-HOST_ORCH = "10.0.0.244"
-HOST_WK1 = "10.0.0.247"
-HOST_WK2 = "10.0.0.248"
+HOST_ORCH = "192.0.2.244"
+HOST_WK1 = "192.0.2.247"
+HOST_WK2 = "192.0.2.248"
 BASE = "local-lab/Qwen-Flash-NVFP4"
 
 

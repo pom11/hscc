@@ -177,12 +177,12 @@ class TestGetRunningContainers:
     def test_no_idle_section(self, fake_ssh):
         output = (
             "Job: @official/test-model  (tp=1, pp=1)  [deadbeef]  (1 container(s))\n"
-            "  solo       10.0.0.1  Up 10 minutes  sparkrun-vllm\n"
+            "  solo       10.0.0.x  Up 10 minutes  sparkrun-vllm\n"
         )
         fake_ssh.set_result(stdout=output, returncode=0)
         containers = hscc.get_running_containers()
         assert len(containers) == 1
-        assert containers[0]["host"] == "10.0.0.1"
+        assert containers[0]["host"] == "10.0.0.x"
 
     def test_run_cmd_failure(self, fake_ssh):
         fake_ssh.set_result(stderr="sparkrun not found", returncode=1)
@@ -223,10 +223,10 @@ class TestGetIdleHosts:
         assert idle == []
 
     def test_single_idle_host(self, fake_ssh):
-        output = "Idle hosts\n  10.0.0.99\n"
+        output = "Idle hosts\n  10.0.0.x\n"
         fake_ssh.set_result(stdout=output, returncode=0)
         idle = hscc.get_idle_hosts()
-        assert idle == ["10.0.0.99"]
+        assert idle == ["10.0.0.x"]
 
 
 # ── check_health() — vLLM health check ────────────────────────────────────
@@ -308,7 +308,7 @@ class TestCmdStop:
 
     _STATUS_WITH_HERMES_HOST = (
         "Job: @official/test  (tp=1, pp=1)  [hermes-cont-id]  (1 container(s))\n"
-        "  solo       10.0.0.1  Up 10 minutes  sparkrun\n"
+        "  solo       10.0.0.x  Up 10 minutes  sparkrun\n"
     )
 
     def test_stop_success(self, fake_ssh, capsys):
@@ -394,7 +394,7 @@ class TestCmdUnassign:
 
     def test_unassign_existing(self, provision_state_file, sample_agents_json, fake_ssh, capsys):
         hscc.save_provision_state({
-            "mappings": {"agent-001": {"recipe": "test", "container_id": "c1", "host": "10.0.0.1", "wired_at": "2025-01-01T00:00:00Z"}},
+            "mappings": {"agent-001": {"recipe": "test", "container_id": "c1", "host": "10.0.0.x", "wired_at": "2025-01-01T00:00:00Z"}},
             "history": [],
         })
         fake_ssh.set_result(stdout="ok", returncode=0)  # log_event
@@ -487,7 +487,7 @@ class TestCmdCleanup:
 
         running_status = (
             "Job: @official/hermes-container  (tp=1, pp=1)  [hermes-cid]  (1 container(s))\n"
-            "  solo       10.0.0.1  Up 5 minutes  sparkrun\n"
+            "  solo       10.0.0.x  Up 5 minutes  sparkrun\n"
         )
         fake_ssh.set_result(stdout=running_status, returncode=0)  # get_running_containers (1st)
         fake_ssh.set_result(stdout=running_status, returncode=0)  # get_running_containers (2nd)

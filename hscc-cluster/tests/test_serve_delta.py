@@ -37,12 +37,12 @@ class TestServeDelta:
 
     def test_no_change_reports_all_unchanged_and_empty_delta(self):
         cur = {"units": [
-            _unit("orch", "orchestrator", "deepseek-v3", ["10.0.0.1"], 8000),
-            _unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001),
+            _unit("orch", "orchestrator", "deepseek-v3", ["192.0.2.1"], 8000),
+            _unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001),
         ]}
         new = {"units": [
-            _unit("orch", "orchestrator", "deepseek-v3", ["10.0.0.1"], 8000),
-            _unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001),
+            _unit("orch", "orchestrator", "deepseek-v3", ["192.0.2.1"], 8000),
+            _unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001),
         ]}
         d = _diff_serving_delta(cur, new)
         assert d["start"] == [] and d["stop"] == [] and d["move"] == []
@@ -51,57 +51,57 @@ class TestServeDelta:
         assert d["affected_nodes"] == []
 
     def test_grow_is_a_start(self):
-        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001)]}
+        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001)]}
         new = {"units": [
-            _unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001),
-            _unit("a2", "worker", "llama-3.1", ["10.0.0.3"], 8002),
+            _unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001),
+            _unit("a2", "worker", "llama-3.1", ["192.0.2.3"], 8002),
         ]}
         d = _diff_serving_delta(cur, new)
         assert len(d["start"]) == 1
         assert d["start"][0]["id"] == "a2"
         assert d["stop"] == [] and d["move"] == []
-        assert d["affected_nodes"] == ["10.0.0.3"]
+        assert d["affected_nodes"] == ["192.0.2.3"]
 
     def test_shrink_is_a_stop(self):
         cur = {"units": [
-            _unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001),
-            _unit("a2", "worker", "llama-3.1", ["10.0.0.3"], 8002),
+            _unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001),
+            _unit("a2", "worker", "llama-3.1", ["192.0.2.3"], 8002),
         ]}
-        new = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001)]}
+        new = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001)]}
         d = _diff_serving_delta(cur, new)
         assert len(d["stop"]) == 1
         assert d["stop"][0]["id"] == "a2"
         assert d["start"] == [] and d["move"] == []
-        assert d["affected_nodes"] == ["10.0.0.3"]
+        assert d["affected_nodes"] == ["192.0.2.3"]
 
     def test_relocate_is_a_move_not_stop_plus_start(self):
-        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001)]}
-        new = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.4"], 8001)]}
+        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001)]}
+        new = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.4"], 8001)]}
         d = _diff_serving_delta(cur, new)
         assert len(d["move"]) == 1
         m = d["move"][0]
-        assert m["from_nodes"] == ["10.0.0.2"] and m["to_nodes"] == ["10.0.0.4"]
+        assert m["from_nodes"] == ["192.0.2.2"] and m["to_nodes"] == ["192.0.2.4"]
         assert d["start"] == [] and d["stop"] == []
-        assert d["affected_nodes"] == ["10.0.0.2", "10.0.0.4"]
+        assert d["affected_nodes"] == ["192.0.2.2", "192.0.2.4"]
 
     def test_rescale_is_a_move(self):
-        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001, tp=1)]}
-        new = {"units": [_unit("a1", "worker", "llama-3.1", ["10.0.0.2"], 8001, tp=2)]}
+        cur = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001, tp=1)]}
+        new = {"units": [_unit("a1", "worker", "llama-3.1", ["192.0.2.2"], 8001, tp=2)]}
         d = _diff_serving_delta(cur, new)
         assert len(d["move"]) == 1
         assert d["move"][0]["from_tp"] == 1 and d["move"][0]["to_tp"] == 2
 
     def test_absent_current_every_thing_is_a_start(self):
         d = _diff_serving_delta(None, {"units": [_unit("a1", "worker", "llama-3.1",
-                                                       ["10.0.0.2"], 8001)]})
+                                                       ["192.0.2.2"], 8001)]})
         assert len(d["start"]) == 1
         assert d["stop"] == [] and d["move"] == []
-        assert d["affected_nodes"] == ["10.0.0.2"]
+        assert d["affected_nodes"] == ["192.0.2.2"]
 
     def test_malformed_units_are_ignored_not_crash(self):
         d = _diff_serving_delta({"units": ["garbage", None, 5]},
                                 {"units": [_unit("a1", "worker", "llama-3.1",
-                                                ["10.0.0.2"], 8001)]})
+                                                ["192.0.2.2"], 8001)]})
         assert len(d["start"]) == 1
         assert d["stop"] == [] and d["move"] == []
 
@@ -121,7 +121,7 @@ class _FakeTopo:
 
 
 def _integration_topology(n=3):
-    return _FakeTopo(_FakeNode("10.0.0.1"),
+    return _FakeTopo(_FakeNode("192.0.2.1"),
                      [_FakeNode(f"10.0.0.{2 + i}") for i in range(n)])
 
 

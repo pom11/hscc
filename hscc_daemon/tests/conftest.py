@@ -793,8 +793,8 @@ def workers_json(tmp_hfcc_dir):
     """Create a workers.json with known content. Returns (path, data_dict)."""
     data = {
         "workers": [
-            {"node": "10.0.0.246", "status": "online"},
-            {"node": "10.0.0.247", "status": "offline"},
+            {"node": "192.0.2.246", "status": "online"},
+            {"node": "192.0.2.247", "status": "offline"},
         ]
     }
     path = tmp_hfcc_dir / "workers.json"

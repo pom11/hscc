@@ -23,18 +23,18 @@ SERVING = {
     "version": 1, "port": 8000,
     "units": [
         {"id": "orch-a3b", "role": "orchestrator", "model": "orch",
-         "recipe": "~/r/a3b.yaml", "nodes": ["10.0.0.1"]},
+         "recipe": "~/r/a3b.yaml", "nodes": ["192.0.2.1"]},
         {"id": "worker-2", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"], "keepalive": True},
+         "recipe": "~/r/27b.yaml", "nodes": ["192.0.2.2"], "keepalive": True},
         {"id": "worker-3", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.3"], "keepalive": True},
+         "recipe": "~/r/27b.yaml", "nodes": ["192.0.2.3"], "keepalive": True},
     ],
 }
 
 # Verbatim shapes the installed sparkrun stop path emits for "nothing to stop"
 # (sparkrun/cli/_stop_logs.py:123-125 stderr+exit 1, :217 stdout+exit 0).
 NOTHING_RUNNING_STDERR = ("Error: No running workload matches intent "
-                          "all on hosts 10.0.0.2")
+                          "all on hosts 192.0.2.2")
 NOTHING_RUNNING_STDOUT = "No sparkrun containers running."
 # The discovery-failure shape must NOT read as "nothing running" (:215 prints
 # it next to `Error: could not query <host>`, and that host may still be up).
@@ -109,14 +109,14 @@ def test_record_is_stamped_even_when_a_node_stop_failed(monkeypatch):
     a fleet down, even if one node refused to stop.
     """
     def per_node(node):
-        if node == "10.0.0.2":
-            return False, "", "Error: failed to stop containers on 10.0.0.2: docker: error"
+        if node == "192.0.2.2":
+            return False, "", "Error: failed to stop containers on 192.0.2.2: docker: error"
         return True, "Stopped", ""
 
     _fakes(monkeypatch, per_node)
     out = plugin.cmd_cluster_down("confirm")
 
-    assert "❌ 10.0.0.2: stopped — Error: failed to stop containers" in out
+    assert "❌ 192.0.2.2: stopped — Error: failed to stop containers" in out
     assert "fleet marked deliberately down" in out
 
 
@@ -129,13 +129,13 @@ def test_all_nodes_nothing_running_reports_no_failure_anywhere(monkeypatch):
     intent …`, which is both a lie about a failure and a lie about a stop.
     """
     def per_node(node):
-        return False, "", NOTHING_RUNNING_STDERR.replace("10.0.0.2", node)
+        return False, "", NOTHING_RUNNING_STDERR.replace("192.0.2.2", node)
 
     _fakes(monkeypatch, per_node)
     out = plugin.cmd_cluster_down("confirm")
 
     assert "❌" not in out
-    for node in ("10.0.0.1", "10.0.0.2", "10.0.0.3"):
+    for node in ("192.0.2.1", "192.0.2.2", "192.0.2.3"):
         assert f"○ {node}: nothing running" in out
     assert "fleet marked deliberately down" in out
 
@@ -150,22 +150,22 @@ def test_exit_zero_no_containers_shape_is_also_not_a_stop(monkeypatch):
     out = plugin.cmd_cluster_down("confirm")
 
     assert "❌" not in out and "✅" not in out
-    assert "○ 10.0.0.1: nothing running" in out
+    assert "○ 192.0.2.1: nothing running" in out
 
 
 def test_a_real_error_keeps_the_cross_and_the_error_tail(monkeypatch):
     """Already-down detection must never swallow a genuine failure."""
     def per_node(node):
-        if node == "10.0.0.3":
+        if node == "192.0.2.3":
             return False, "", query_failed(node)
         return True, "Stopped", ""
 
     _fakes(monkeypatch, per_node)
     out = plugin.cmd_cluster_down("confirm")
 
-    assert "❌ 10.0.0.3: stopped — Error: could not query 10.0.0.3: ssh" in out
-    assert "○ 10.0.0.3" not in out            # unqueried != nothing running
-    assert "✅ 10.0.0.1: stopped" in out
+    assert "❌ 192.0.2.3: stopped — Error: could not query 192.0.2.3: ssh" in out
+    assert "○ 192.0.2.3" not in out            # unqueried != nothing running
+    assert "✅ 192.0.2.1: stopped" in out
 
 
 # ── the unconfirmed preview still touches nothing ────────────────────────────
@@ -177,7 +177,7 @@ def test_unconfirmed_invocation_issues_no_stop_and_writes_no_marker(monkeypatch)
     assert runs == []                          # cmdlib._run never called
     assert pb.calls == []                      # marker untouched
     assert "fleet marked deliberately down" not in out
-    assert "Confirm" in out and "10.0.0.1" in out
+    assert "Confirm" in out and "192.0.2.1" in out
 
 
 # ── fail-soft: the marker must never break the verb ──────────────────────────
@@ -211,4 +211,4 @@ def test_a_raising_clear_expected_up_warns_instead_of_breaking(monkeypatch):
 
     assert "⚠️" in out and "Read-only file system" in out
     assert "fleet marked deliberately down" not in out
-    assert "✅ 10.0.0.1: stopped" in out
+    assert "✅ 192.0.2.1: stopped" in out

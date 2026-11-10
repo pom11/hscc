@@ -311,7 +311,7 @@ class TestRefreshLiveWorkers:
                 return str(workers_file)
             return p
         monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
-        monkeypatch.setenv("HSCC_NODES", "10.0.0.1,10.0.0.2")
+        monkeypatch.setenv("HSCC_NODES", "192.0.2.1,192.0.2.2")
 
         fake_subprocess.set_result(stdout='{"ok":true}', returncode=0)  # node 1
         fake_subprocess.set_result(stdout="", returncode=1)  # node 2

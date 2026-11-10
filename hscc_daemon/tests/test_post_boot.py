@@ -31,8 +31,8 @@ import pytest
 
 from hscc_daemon import post_boot as pb
 
-HOST_A = "10.0.0.244"
-HOST_B = "10.0.0.247"
+HOST_A = "192.0.2.244"
+HOST_B = "192.0.2.247"
 BOOT_OLD_A = "aaaaaaaa-0000-0000-0000-000000000000"
 BOOT_NEW_A = "bbbbbbbb-1111-1111-1111-111111111111"
 BOOT_OLD_B = "cccccccc-2222-2222-2222-222222222222"

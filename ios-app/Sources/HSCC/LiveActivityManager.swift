@@ -216,7 +216,7 @@ final class LiveActivityManager {
 
     /// Which of the four nodes are currently serving, from /v1/cluster/status.
     /// The cluster engine reports `idle_hosts` as text lines containing the
-    /// node's private IP (e.g. "node_0  10.0.0.244 ... Up 3 hours"). We
+    /// node's private IP (e.g. "node_0  192.0.2.244 ... Up 3 hours"). We
     /// map those back to the canonical short labels so the topology can honestly
     /// show each pair coming online as its node reports up.
     private func upNodes(client: HSCCClient) async throws -> [String] {

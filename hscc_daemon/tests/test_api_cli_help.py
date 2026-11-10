@@ -217,9 +217,9 @@ class TestVerbHelpRealCLI:
         home = tmp_path / "home"
         (home / ".hscc").mkdir(parents=True)
         # Seed cluster.json so module import never shells out (address guard:
-        # 10.0.0.1 is the documented LAN placeholder, never a real host).
+        # 192.0.2.1 is the documented LAN placeholder, never a real host).
         (home / ".hscc" / "cluster.json").write_text(json.dumps(
-            {"gateway": {"host": "10.0.0.1"}, "workers": [],
+            {"gateway": {"host": "192.0.2.1"}, "workers": [],
              "nasDevices": []}))
         # PID 99999999 > macOS max_pid: get_pid() treats it as dead on every
         # host, so even a regressed tree that dispatches `stop --help` can

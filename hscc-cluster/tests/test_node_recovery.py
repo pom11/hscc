@@ -29,8 +29,8 @@ import pytest
 
 import node_recovery as nr
 
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 
 
 # ── fabricated transport ────────────────────────────────────────────────────

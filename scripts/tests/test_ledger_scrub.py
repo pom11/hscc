@@ -66,7 +66,7 @@ REAL_LAN_GW = _addr("192", ".168.88.1")
 REAL_TAILNET = _addr("100", ".64.55.7")           # CGNAT, outside the fixture block
 REAL_TAILNET_HI = _addr("100", ".127.9.9")        # top of CGNAT
 FIXTURE_TAILNET = "100.64.0.3"                    # sanctioned block — must survive
-LAN_PLACEHOLDER_LONG = "10.0.0.244"               # placeholder-style text, must survive
+LAN_PLACEHOLDER_LONG = "192.0.2.244"               # placeholder-style text, must survive
 
 GIT = ["git", "-c", "user.name=scrub-test", "-c", "user.email=scrub@example.invalid",
        "-c", "commit.gpgsign=false"]
@@ -143,7 +143,7 @@ def test_scrubbed_text_has_no_offender_left():
 ])
 def test_clean_text_is_byte_identical(text):
     """Nothing that is NOT an offender may move — not the placeholders, not the
-    fixture block, not `10.0.0.244`-style placeholder text."""
+    fixture block, not `192.0.2.244`-style placeholder text."""
     out, n = scrub.scrub_text(text)
     assert out == text and n == 0
 

@@ -320,9 +320,9 @@ class TestHShortFlagRealCLI:
         monkeypatch.chdir(tmp_path)
         home = tmp_path / "home"
         (home / ".hscc").mkdir(parents=True)
-        # 10.0.0.1 is the documented LAN placeholder, never a real host.
+        # 192.0.2.1 is the documented LAN placeholder, never a real host.
         (home / ".hscc" / "cluster.json").write_text(_json.dumps(
-            {"gateway": {"host": "10.0.0.1"}, "workers": [],
+            {"gateway": {"host": "192.0.2.1"}, "workers": [],
              "nasDevices": []}))
         canary = tmp_path / "canary-bin"
         canary.mkdir()

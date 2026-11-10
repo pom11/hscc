@@ -66,7 +66,7 @@ class TestNoAnsiHscc:
         out = _no_ansi(lambda: hscc._emit_result("cluster-status", {
             "workloads": [{"name": "@official/qwen3", "tp": 2, "pp": 1,
                            "container_id": "abc123"}],
-            "idle_hosts": ["10.0.0.3"],
+            "idle_hosts": ["192.0.2.3"],
             "total_hosts": 4,
         }))
         assert "@official/qwen3" in out
@@ -99,7 +99,7 @@ class TestNoAnsiHscc:
         # literal Rich markup in engine-derived content renders literally (no
         # MissingStyle, no style injection)
         out = _no_ansi(lambda: hscc._emit_result("hosts", {
-            "hosts": [{"name": "[PRUNE]keep", "ip": "10.0.0.1", "role": "gateway"}],
+            "hosts": [{"name": "[PRUNE]keep", "ip": "192.0.2.1", "role": "gateway"}],
         }))
         assert "[PRUNE]keep" in out
 

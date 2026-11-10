@@ -398,12 +398,12 @@ class TestCheckWorkers:
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         # serving.json with one orchestrator + the given keep-alive workers
-        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
                   "recipe": "~/r/orch.yaml", "model": "M"}]
         for n in nodes:
             units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
                           "nodes": [n], "recipe": recipe, "model": "W"})
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 1, "units": units})
         # Clear in-memory state and point persistence file at tmp dir so
@@ -424,7 +424,7 @@ class TestCheckWorkers:
         assert health.check_workers() is True   # nothing to watch -> ok
 
     def test_all_workers_online(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
         calls = []
         monkeypatch.setattr(health, "run_cmd", lambda *a, **k: calls.append(a) or {"ok": True})
@@ -439,7 +439,7 @@ class TestCheckWorkers:
         import time as _time
         from hscc_daemon import lifecycle as _lc
         from hscc_daemon import autodown as _ad
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         # Worker is DOWN (would normally be relaunched).
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         ran = []
@@ -480,7 +480,7 @@ class TestCheckWorkers:
         state (no block, waking, up) ⇒ False so supervision proceeds."""
         from hscc_daemon import lifecycle as _lc
         from hscc_daemon import autodown as _ad
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         block_file = str(tmp_hfcc_dir / "watchdog-block.json")
         monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
         ad_file = str(tmp_hfcc_dir / "autodown.json")
@@ -508,7 +508,7 @@ class TestCheckWorkers:
 
     def test_crashed_worker_relaunched(self, tmp_hfcc_dir, monkeypatch):
         import time as _time
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
@@ -539,7 +539,7 @@ class TestCheckWorkers:
         assert _os.path.basename(popen_args[0]) == "sparkrun"
         assert _os.path.isabs(popen_args[0])
         assert popen_args[1] == "run"
-        assert "10.0.0.2" in popen_args
+        assert "192.0.2.2" in popen_args
         assert any("27b" in str(x) for x in popen_args)
         # Popen kwargs: detached + log file
         kwargs = popen_calls[0][1]
@@ -561,10 +561,10 @@ class TestCheckWorkers:
         monkeypatch.setattr(
             serving_mod, "load_serving",
             lambda: {"version": 2, "units": [
-                {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+                {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
                  "recipe": "~/r/orch.yaml", "model": "M"},
                 {"id": "w-tp", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000,
+                 "nodes": ["192.0.2.247", "192.0.2.248"], "port": 8000,
                  "recipe": "~/r/27b.yaml", "model": "W", "tp": 2},
             ]})
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
@@ -590,7 +590,7 @@ class TestCheckWorkers:
             relaunch = args[0]
             # Same full-span hosts + --tp as the declared worker…
             assert "--hosts" in relaunch
-            assert relaunch[relaunch.index("--hosts") + 1] == "10.0.0.247,10.0.0.248"
+            assert relaunch[relaunch.index("--hosts") + 1] == "192.0.2.247,192.0.2.248"
             assert "--tp" in relaunch
             assert relaunch[relaunch.index("--tp") + 1] == "2"
             # …AND the --served-model-name that fleet_up_plan carries (the
@@ -614,12 +614,12 @@ class TestCheckWorkers:
 
     def test_grace_window_skips_relaunch(self, tmp_hfcc_dir, monkeypatch):
         import time as _time
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         # pretend we just relaunched it -> within grace, must NOT relaunch again.
         # Grace is keyed per UNIT (node, port); units w/o explicit port → :8000.
         # Uses wall-clock time.time() (not monotonic).
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time()
+        health._worker_relaunch_at[("192.0.2.2", 8000)] = _time.time()
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
@@ -642,14 +642,14 @@ class TestCheckWorkers:
         state_dir = tmp_hfcc_dir / "state"; state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         units = [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
              "recipe": "~/r/orch.yaml", "model": "M"},
-            {"id": "a", "role": "worker", "keepalive": True, "nodes": ["10.0.0.2"],
+            {"id": "a", "role": "worker", "keepalive": True, "nodes": ["192.0.2.2"],
              "port": 8000, "recipe": "~/r/a.yaml", "model": "A"},
-            {"id": "b", "role": "worker", "keepalive": True, "nodes": ["10.0.0.2"],
+            {"id": "b", "role": "worker", "keepalive": True, "nodes": ["192.0.2.2"],
              "port": 8001, "recipe": "~/r/b.yaml", "model": "B"},
         ]
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving", lambda: {"version": 2, "units": units})
         health._worker_relaunch_at.clear()
         monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
@@ -679,7 +679,7 @@ class TestCheckWorkers:
 
     def test_detached_relaunch_log_file(self, tmp_hfcc_dir, monkeypatch):
         """Asserts log-file wiring: file opened in append mode at expected path."""
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": True})
@@ -714,12 +714,12 @@ class TestCheckWorkers:
         # open() called with append mode at correct path
         assert len(opened_files) >= 1
         log_path, log_mode = opened_files[0]
-        assert "relaunch-10.0.0.2-8000.log" in log_path
+        assert "relaunch-192.0.2.2-8000.log" in log_path
         assert log_mode == "a"
 
     def test_popen_exception_logged(self, tmp_hfcc_dir, monkeypatch):
         """On Popen exception, log ERROR with exception text."""
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": True})
@@ -734,7 +734,7 @@ class TestCheckWorkers:
         error_logs = [m for m, l in log_calls if l == "ERROR"]
         assert len(error_logs) == 1
         assert "spawn denied" in error_logs[0]
-        assert "w-10.0.0.2" in error_logs[0]
+        assert "w-192.0.2.2" in error_logs[0]
 
     def test_popen_failure_counts_worker_down(self, tmp_hfcc_dir, monkeypatch):
         """A relaunch whose Popen raises is a FAILED launch: the worker goes to
@@ -742,7 +742,7 @@ class TestCheckWorkers:
         must not look healthy. The grace timestamp is still recorded so the
         next cycle does not thrash."""
         import time as _time
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": True})
@@ -756,8 +756,8 @@ class TestCheckWorkers:
         # Popen raised — worker goes to down, ok = not down = False
         assert ok is False
         # Grace timestamp still recorded (no thrash on the next cycle)
-        assert ("10.0.0.2", 8000) in health._worker_relaunch_at
-        ts = health._worker_relaunch_at[("10.0.0.2", 8000)]
+        assert ("192.0.2.2", 8000) in health._worker_relaunch_at
+        ts = health._worker_relaunch_at[("192.0.2.2", 8000)]
         assert isinstance(ts, float)
 
     def test_grace_period_uses_lifecycle_default_20min(self, tmp_hfcc_dir, monkeypatch):
@@ -768,13 +768,13 @@ class TestCheckWorkers:
         # Confirm default is 20
         monkeypatch.setattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20)
 
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": True})
 
         # Set relaunch time to 19 minutes ago (within 20-min grace)
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time() - 19 * 60
+        health._worker_relaunch_at[("192.0.2.2", 8000)] = _time.time() - 19 * 60
         popen_calls = []
         def fake_popen(*args, **kwargs):
             popen_calls.append((args, kwargs))
@@ -785,7 +785,7 @@ class TestCheckWorkers:
         assert popen_calls == []  # within 20-min grace, no relaunch
 
         # Set relaunch time to 21 minutes ago (past grace) — relaunch fires
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time() - 21 * 60
+        health._worker_relaunch_at[("192.0.2.2", 8000)] = _time.time() - 21 * 60
         popen_calls.clear()
         health.check_workers()
         assert len(popen_calls) == 1  # past grace, relaunch fires
@@ -802,7 +802,7 @@ class TestCheckWorkers:
         # Persist a timestamp from 10 minutes ago
         import time as _time
         old_ts = _time.time() - 10 * 60
-        relaunch_file.write_text(json.dumps({"(10.0.0.2,8000)": old_ts}))
+        relaunch_file.write_text(json.dumps({"(192.0.2.2,8000)": old_ts}))
         monkeypatch.setattr(health, "_WORKER_RELATCH_FILE", str(relaunch_file))
 
         # Clear in-memory dict to simulate fresh process
@@ -811,8 +811,8 @@ class TestCheckWorkers:
         # Load persisted timestamps
         health._load_worker_relaunch_timestamps()
 
-        assert ("10.0.0.2", 8000) in health._worker_relaunch_at
-        ts = health._worker_relaunch_at[("10.0.0.2", 8000)]
+        assert ("192.0.2.2", 8000) in health._worker_relaunch_at
+        ts = health._worker_relaunch_at[("192.0.2.2", 8000)]
         assert abs(ts - old_ts) < 1  # loaded correctly
 
     def test_persisted_grace_window_corrupt_file(self, tmp_hfcc_dir, monkeypatch):
@@ -846,18 +846,18 @@ class TestCheckWorkers:
 
         import time as _time
         ts = _time.time()
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = ts
+        health._worker_relaunch_at[("192.0.2.2", 8000)] = ts
         health._save_worker_relaunch_timestamps()
 
         assert relaunch_file.exists()
         data = json.loads(relaunch_file.read_text())
-        assert "(10.0.0.2,8000)" in data
-        assert abs(data["(10.0.0.2,8000)"] - ts) < 1
+        assert "(192.0.2.2,8000)" in data
+        assert abs(data["(192.0.2.2,8000)"] - ts) < 1
 
     def test_sparkrun_stop_failure_logged(self, tmp_hfcc_dir, monkeypatch):
         """When sparkrun stop fails, a WARN is logged but relaunch still proceeds."""
         import time as _time
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
 
         log_calls = []
@@ -881,7 +881,7 @@ class TestCheckWorkers:
 
     def _setup_span(self, tmp_hfcc_dir, monkeypatch):
         """Setup a keep-alive worker unit spanning TWO nodes (tp=2):
-        10.0.0.2 = primary (binds the endpoint), 10.0.0.3 = tp peer (no endpoint
+        192.0.2.2 = primary (binds the endpoint), 192.0.2.3 = tp peer (no endpoint
         of its own). Returns (health, serving, state_dir)."""
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
@@ -890,13 +890,13 @@ class TestCheckWorkers:
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         units = [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
              "recipe": "~/r/orch.yaml", "model": "M"},
             {"id": "w-span", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2", "10.0.0.3"], "tp": 2,
+             "nodes": ["192.0.2.2", "192.0.2.3"], "tp": 2,
              "recipe": "~/r/span.yaml", "model": "S"},
         ]
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 2, "units": units})
         health._worker_relaunch_at.clear()
@@ -916,8 +916,8 @@ class TestCheckWorkers:
         online, never down, and never relaunched as a solo unit. The span's
         PRIMARY answers its own :8000; the peer's :8000 does not."""
         health, _, state_dir = self._setup_span(tmp_hfcc_dir, monkeypatch)
-        # Scoreboard marks 10.0.0.3 the tp peer of the 10.0.0.2 span
-        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"10.0.0.3"})
+        # Scoreboard marks 192.0.2.3 the tp peer of the 192.0.2.2 span
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"192.0.2.3"})
         # Primary .2 answers; peer .3 has no endpoint (http_check to .3 -> False)
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": ".2:8000" in url})
@@ -945,11 +945,11 @@ class TestCheckWorkers:
         The card t_4c9dd6d4 regression: the gentle relaunch in check_workers used
         to drop to a single-host, no-`--tp` `sparkrun run --hosts <head>` — the
         `_SOLO` that wedged the unit. Now the down primary .2 is relaunched as the
-        full span (--hosts 10.0.0.2,10.0.0.3 --tp 2), and the peer .3 is never
+        full span (--hosts 192.0.2.2,192.0.2.3 --tp 2), and the peer .3 is never
         solo-provisioned as a separate single-host run.
         """
         health, _, state_dir = self._setup_span(tmp_hfcc_dir, monkeypatch)
-        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"10.0.0.3"})
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"192.0.2.3"})
         # Both endpoints down — spans pair must be re-provisioned together
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         ran = []
@@ -973,7 +973,7 @@ class TestCheckWorkers:
         assert cmd[1] == "run"
         # the full span is in --hosts (comma-joined head,peer)
         i = cmd.index("--hosts")
-        assert cmd[i + 1] == "10.0.0.2,10.0.0.3"
+        assert cmd[i + 1] == "192.0.2.2,192.0.2.3"
         # --tp 2 carried so the pair re-binds host-network as a TP group, not a solo
         j = cmd.index("--tp")
         assert cmd[j + 1] == "2"
@@ -985,12 +985,12 @@ class TestCheckWorkers:
         # no two workloads are ever left bound to the same host:port.
         stop_cmds = [a for a in ran
                      if os.path.basename(a[0]) == "sparkrun" and a[1:2] == ["stop"]]
-        assert any(a[a.index("--hosts") + 1] == "10.0.0.2,10.0.0.3" for a in stop_cmds)
+        assert any(a[a.index("--hosts") + 1] == "192.0.2.2,192.0.2.3" for a in stop_cmds)
 
     def test_genuinely_down_primary_still_relaunched(self, tmp_hfcc_dir, monkeypatch):
         """Regression: real self-heal must be preserved — a genuinely down
         PRIMARY (single-node unit, not a span peer) is still relaunched."""
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         monkeypatch.setattr(health, "_tp_peer_nodes", lambda: set())  # no peers
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         monkeypatch.setattr(health, "run_cmd",
@@ -1005,7 +1005,7 @@ class TestCheckWorkers:
         # solo single-node primary IS relaunched (self-heal intact)
         assert len(popen_calls) == 1
         popen_args = popen_calls[0][0][0]
-        assert "10.0.0.2" in popen_args
+        assert "192.0.2.2" in popen_args
 
 
 class TestCheckWorkersAutoHeal:
@@ -1025,12 +1025,12 @@ class TestCheckWorkersAutoHeal:
         state_dir = tmp_hfcc_dir / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
                   "recipe": "~/r/orch.yaml", "model": "M"}]
         for n in nodes:
             units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
                           "nodes": [n], "recipe": recipe, "model": "W"})
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 1, "units": units})
         # Reset module-level auto-heal + relaunch state so a test starts clean.
@@ -1061,7 +1061,7 @@ class TestCheckWorkersAutoHeal:
         monkeypatch.setattr(health.subprocess, "Popen", lambda *a, **k: None)
 
     def test_single_down_check_does_not_trigger(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         heals = []
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -1070,7 +1070,7 @@ class TestCheckWorkersAutoHeal:
         assert heals == []             # no auto-heal on a single blip
 
     def test_n_consecutive_down_checks_triggers(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         heals = []
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -1083,10 +1083,10 @@ class TestCheckWorkersAutoHeal:
         health.check_workers()
         assert len(heals) == 1
         key, label, node, port = heals[0]
-        assert key == ("10.0.0.2", 8000)   # unit identity (node, port)
-        assert node == "10.0.0.2"
+        assert key == ("192.0.2.2", 8000)   # unit identity (node, port)
+        assert node == "192.0.2.2"
         assert port == 8000
-        assert "w-10.0.0.2" in label
+        assert "w-192.0.2.2" in label
 
     def test_keepalive_healing_proceeds_while_intentional(self, tmp_hfcc_dir, monkeypatch):
         """§5 C2: keepalive/other-unit healing must continue while an
@@ -1097,7 +1097,7 @@ class TestCheckWorkersAutoHeal:
         keepalive supervision) with an intentional watchdog block present."""
         from hscc_daemon import health, serving, lifecycle
         # Set up a keepalive worker unit (never a teardown target).
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         # An intentional autodown block is latched (orchestrator deliberately
         # down by autodown) — the exact state during an idle teardown.
@@ -1112,10 +1112,10 @@ class TestCheckWorkersAutoHeal:
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert len(heals) == 1
-        assert heals[0][2] == "10.0.0.2"    # keepalive unit healed despite intentional
+        assert heals[0][2] == "192.0.2.2"    # keepalive unit healed despite intentional
 
     def test_flapping_resets_consecutive_count(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         heals = []
         monkeypatch.setattr(health, "_autoheal_worker_fn",
                             lambda *a: heals.append(a) or {"status": "ok"})
@@ -1135,7 +1135,7 @@ class TestCheckWorkersAutoHeal:
         assert heals == []
 
     def test_cooldown_blocks_second_heal(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         heals = []
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -1150,7 +1150,7 @@ class TestCheckWorkersAutoHeal:
         assert len(heals) == 1          # cooldown prevented a second auto-heal
 
     def test_action_logged_distinctly(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         log_calls = []
         monkeypatch.setattr(health, "log",
@@ -1165,7 +1165,7 @@ class TestCheckWorkersAutoHeal:
         assert any("recreating this unit only" in m for m in log_calls)
 
     def test_config_values_are_read_not_hardcoded(self, tmp_hfcc_dir, monkeypatch):
-        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"])
         self._down(health, monkeypatch)
         heals = []
         monkeypatch.setattr(health, "_autoheal_worker_fn",
@@ -1207,7 +1207,7 @@ class TestCheckWorkersAutoHeal:
         monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
         return stops, launches
 
-    def _one_unit_serving(self, monkeypatch, node="10.0.0.2", port=8000,
+    def _one_unit_serving(self, monkeypatch, node="192.0.2.2", port=8000,
                           recipe="~/r/a.yaml", model="A"):
         from hscc_daemon import serving
         monkeypatch.setattr(
@@ -1228,22 +1228,22 @@ class TestCheckWorkersAutoHeal:
         # serving.json: the unit under heal + a healthy sibling on another node.
         monkeypatch.setattr(serving, "load_serving", lambda: {"version": 1, "units": [
             {"id": "w-a", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "recipe": "~/r/a.yaml", "model": "A",
+             "nodes": ["192.0.2.2"], "recipe": "~/r/a.yaml", "model": "A",
              "tp": 1, "port": 8000},
             {"id": "w-b", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.3"], "recipe": "~/r/b.yaml", "model": "B",
+             "nodes": ["192.0.2.3"], "recipe": "~/r/b.yaml", "model": "B",
              "tp": 1, "port": 8001},
         ]})
 
         res = health._default_autoheal_worker(
-            ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
+            ("192.0.2.2", 8000), "w-1", "192.0.2.2", 8000)
 
         # exactly one stop, scoped to THIS unit's recipe + span — never --all
         assert len(stops) == 1
         assert stops[0][0] == "stop"
         assert stops[0][1].endswith("r/a.yaml")
-        assert "--hosts" in stops[0] and "10.0.0.2" in stops[0]
-        assert "10.0.0.3" not in stops[0]                 # sibling host untouched
+        assert "--hosts" in stops[0] and "192.0.2.2" in stops[0]
+        assert "192.0.2.3" not in stops[0]                 # sibling host untouched
         assert "--all" not in stops[0]
         # exactly one launch, for THIS unit only
         assert len(launches) == 1
@@ -1263,17 +1263,17 @@ class TestCheckWorkersAutoHeal:
         stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
         monkeypatch.setattr(serving, "load_serving", lambda: {"version": 1, "units": [
             {"id": "w-tp", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2", "10.0.0.3"], "recipe": "~/r/tp.yaml",
+             "nodes": ["192.0.2.2", "192.0.2.3"], "recipe": "~/r/tp.yaml",
              "model": "TP", "tp": 2, "port": 8000},
         ]})
 
         res = health._default_autoheal_worker(
-            ("10.0.0.2", 8000), "w-tp", "10.0.0.2", 8000)
+            ("192.0.2.2", 8000), "w-tp", "192.0.2.2", 8000)
 
         assert len(stops) == 1 and len(launches) == 1
-        assert stops[0][stops[0].index("--hosts") + 1] == "10.0.0.2,10.0.0.3"
+        assert stops[0][stops[0].index("--hosts") + 1] == "192.0.2.2,192.0.2.3"
         launched = " ".join(launches[0])
-        assert "--hosts 10.0.0.2,10.0.0.3" in launched
+        assert "--hosts 192.0.2.2,192.0.2.3" in launched
         assert "--tp 2" in launched
         assert res.get("ok") is True
 
@@ -1298,7 +1298,7 @@ class TestCheckWorkersAutoHeal:
         self._one_unit_serving(monkeypatch)
 
         res = health._default_autoheal_worker(
-            ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
+            ("192.0.2.2", 8000), "w-1", "192.0.2.2", 8000)
         assert res.get("ok") is True                  # healed without applying
         assert len(stops) == 1 and len(launches) == 1
 
@@ -1309,11 +1309,11 @@ class TestCheckWorkersAutoHeal:
         grace shield the new container from the gentle relaunch."""
         from hscc_daemon import health
         stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
-        key = ("10.0.0.2", 8000)
+        key = ("192.0.2.2", 8000)
         health._worker_relaunch_at.pop(key, None)
         self._one_unit_serving(monkeypatch)
 
-        health._default_autoheal_worker(key, "w-1", "10.0.0.2", 8000)
+        health._default_autoheal_worker(key, "w-1", "192.0.2.2", 8000)
         assert key in health._worker_relaunch_at
 
     def test_default_heal_reports_without_recreating_when_unit_unknown(
@@ -1327,7 +1327,7 @@ class TestCheckWorkersAutoHeal:
                             lambda: {"version": 1, "units": []})
 
         res = health._default_autoheal_worker(
-            ("10.0.0.9", 8000), "w-x", "10.0.0.9", 8000)
+            ("192.0.2.9", 8000), "w-x", "192.0.2.9", 8000)
         assert stops == [] and launches == []
         assert res.get("ok") is False
         assert "no serving.json unit" in res.get("error", "")
@@ -1344,18 +1344,18 @@ class TestWorkersStartupGrace:
     touched — the container-age probe is injected (like _autoheal_worker_fn).
     """
 
-    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"]):
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"]):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         state_dir = tmp_hfcc_dir / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"],
                   "recipe": "~/r/orch.yaml", "model": "M"}]
         for n in nodes:
             units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
                           "nodes": [n], "recipe": "~/r/27b.yaml", "model": "W"})
-        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 1, "units": units})
         health._worker_relaunch_at.clear()
@@ -1399,7 +1399,7 @@ class TestWorkersStartupGrace:
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: _t.time())
         created_ts = _t.time()
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": created_ts, "has_served": False}
         health._save_worker_container_state()  # durable on disk
         monkeypatch.setattr(health, "_worker_container_created_ts",
@@ -1419,14 +1419,14 @@ class TestWorkersStartupGrace:
         # Container created LONG ago (older than the grace) and never served —
         # that is a genuine wedge, not a load. Auto-heal must fire.
         old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": old, "has_served": False}
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: old)
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert len(heals) == 1
-        assert heals[0][2] == "10.0.0.2"
+        assert heals[0][2] == "192.0.2.2"
 
     def test_served_then_stopped_still_heals(self, tmp_hfcc_dir, monkeypatch):
         """A unit that HAS served and then stopped is a genuine failure — it
@@ -1436,14 +1436,14 @@ class TestWorkersStartupGrace:
         heals = self._heals_recorder(health, monkeypatch)
         # The unit served before (persisted has_served=True) and its container
         # is young — but it IS a real crash, so it must still be healed.
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": _t.time(), "has_served": True}
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: _t.time())
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert len(heals) == 1
-        assert heals[0][2] == "10.0.0.2"
+        assert heals[0][2] == "192.0.2.2"
 
     def test_recreated_container_gets_fresh_grace(self, tmp_hfcc_dir, monkeypatch):
         """A container that was recreated (new created_ts) resets the serve
@@ -1453,7 +1453,7 @@ class TestWorkersStartupGrace:
         heals = self._heals_recorder(health, monkeypatch)
         old_ts = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 600
         # The OLD container served before (recorded with the old ts).
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": old_ts, "has_served": True}
         # It was recreated just now — a brand-new container, younger than grace.
         monkeypatch.setattr(health, "_worker_container_created_ts",
@@ -1477,7 +1477,7 @@ class TestWorkersStartupGrace:
             health.check_workers()
         assert heals == []           # unknown age → assumed loading → no heal
         # The fresh-assumption was persisted (durable) for the down unit.
-        rec = health._worker_container_state.get(("10.0.0.2", 8000))
+        rec = health._worker_container_state.get(("192.0.2.2", 8000))
         assert rec is not None and rec["created_ts"] is not None
         assert rec["has_served"] is False
 
@@ -1494,7 +1494,7 @@ class TestWorkersStartupGrace:
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert heals == []
-        created_ts = health._worker_container_state[("10.0.0.2", 8000)]["created_ts"]
+        created_ts = health._worker_container_state[("192.0.2.2", 8000)]["created_ts"]
         # Simulate a daemon restart: in-memory debounce + container state wiped,
         # ONLY the on-disk durable record survives. Probe still unknown.
         health._worker_down_streak.clear()
@@ -1505,7 +1505,7 @@ class TestWorkersStartupGrace:
         # Bounded: once the youthful window elapses, a genuinely dead unit heals.
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         expired = created_ts - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": expired, "has_served": False}
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: expired)
@@ -1513,7 +1513,7 @@ class TestWorkersStartupGrace:
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert len(heals) == 1       # grace elapsed → genuine failure → heal
-        assert heals[0][2] == "10.0.0.2"
+        assert heals[0][2] == "192.0.2.2"
 
     # ── F1 (HEAL_CASCADE 2026-10-14): the GENTLE relaunch path shares the grace ──
     #
@@ -1548,7 +1548,7 @@ class TestWorkersStartupGrace:
         young = _t.time() - 60
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: young)
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": young, "has_served": False}
         for _ in range(3):                      # several 60s checks
             health.check_workers()
@@ -1557,7 +1557,7 @@ class TestWorkersStartupGrace:
         # The unit is honestly reported down (not silently "online").
         from hscc_daemon import state as state_mod
         state = state_mod.read_state("workers") or {}
-        assert "w-10.0.0.2" in state.get("down", [])
+        assert "w-192.0.2.2" in state.get("down", [])
 
     def test_relaunch_still_fires_once_grace_expires(self, tmp_hfcc_dir, monkeypatch):
         """The grace is bounded: an OLD never-served container is a genuine
@@ -1569,7 +1569,7 @@ class TestWorkersStartupGrace:
         old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: old)
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": old, "has_served": False}
         health.check_workers()
         assert len(relaunches) == 1
@@ -1612,7 +1612,7 @@ class TestWorkersStartupGrace:
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: None)     # dead, no container
         assert heal_lease.acquire(
-            "engine-wedge-recovery", "10.0.0.2:8000")[0] is True
+            "engine-wedge-recovery", "192.0.2.2:8000")[0] is True
 
         health.check_workers()
         assert relaunches == []
@@ -1630,7 +1630,7 @@ class TestWorkersStartupGrace:
         old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: old)
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": old, "has_served": False}
         assert heal_lease.acquire("proxy-relaunch", "proxy :4000")[0] is True
 
@@ -1658,7 +1658,7 @@ class TestWorkersStartupGrace:
         old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
         monkeypatch.setattr(health, "_worker_container_created_ts",
                             lambda node, port: old)
-        health._worker_container_state[("10.0.0.2", 8000)] = {
+        health._worker_container_state[("192.0.2.2", 8000)] = {
             "created_ts": old, "has_served": False}
 
         def boom(*a, **k):
@@ -1683,15 +1683,15 @@ class TestWorkersStartupGrace:
                 "cid_a": {
                     "meta": {"port": 8000, "started_at": now - 100},
                     "containers": [
-                        {"host": "10.0.0.2", "role": "node_0", "status": "Up",
+                        {"host": "192.0.2.2", "role": "node_0", "status": "Up",
                          "image": "img"},
-                        {"host": "10.0.0.3", "role": "node_1", "status": "Up",
+                        {"host": "192.0.2.3", "role": "node_1", "status": "Up",
                          "image": "img"},
                     ],
                 },
             },
             "solo_entries": [
-                {"cluster_id": "cid_b", "host": "10.0.0.4",
+                {"cluster_id": "cid_b", "host": "192.0.2.4",
                  "meta": {"port": 8001, "started_at": now - 50},
                  "status": "Up", "image": "img"},
             ],
@@ -1704,10 +1704,10 @@ class TestWorkersStartupGrace:
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: {"ok": True, "output": json.dumps(fake)})
         m = health._sparkrun_created_map()
-        assert m[("10.0.0.2", 8000)] == now - 100   # group span member
-        assert m[("10.0.0.3", 8000)] == now - 100   # shared launch epoch
-        assert m[("10.0.0.4", 8001)] == now - 50    # solo entry
-        assert ("10.0.0.2", 8001) not in m          # wrong port doesn't match
+        assert m[("192.0.2.2", 8000)] == now - 100   # group span member
+        assert m[("192.0.2.3", 8000)] == now - 100   # shared launch epoch
+        assert m[("192.0.2.4", 8001)] == now - 50    # solo entry
+        assert ("192.0.2.2", 8001) not in m          # wrong port doesn't match
 
     def test_default_created_ts_resolves_remote_via_sparkrun(self, monkeypatch):
         """The REAL _default_worker_container_created_ts resolves the remote
@@ -1720,13 +1720,13 @@ class TestWorkersStartupGrace:
         monkeypatch.setattr(health, "_WORKER_CREATED_CACHE_AT", 0.0)
         monkeypatch.setattr(
             health, "_WORKER_CREATED_CACHE",
-            {("10.0.0.7", 8000): now - 30, ("10.0.0.8", 8000): now - 5})
+            {("192.0.2.7", 8000): now - 30, ("192.0.2.8", 8000): now - 5})
         monkeypatch.setattr(health, "_sparkrun_created_map",
                             lambda: health._WORKER_CREATED_CACHE)
-        ts = health._default_worker_container_created_ts("10.0.0.7", 8000)
+        ts = health._default_worker_container_created_ts("192.0.2.7", 8000)
         assert ts == now - 30
         # A node the map doesn't know → unknown → None (caller fails closed).
-        assert health._default_worker_container_created_ts("10.0.0.9", 8000) is None
+        assert health._default_worker_container_created_ts("192.0.2.9", 8000) is None
 
 
 class TestCheckProxy:
@@ -1795,9 +1795,9 @@ class TestCheckProxy:
         body = {
             "data": [
                 {"model_name": "worker-model",
-                 "litellm_params": {"api_base": "http://10.0.0.2:8001/v1"}},
+                 "litellm_params": {"api_base": "http://192.0.2.2:8001/v1"}},
                 {"model_name": "orchestrator-model",
-                 "litellm_params": {"api_base": "http://10.0.0.2:8001"}},
+                 "litellm_params": {"api_base": "http://192.0.2.2:8001"}},
                 {"model_name": "no-params"},
             ]}
         import io
@@ -1815,49 +1815,49 @@ class TestCheckProxy:
         finally:
             health.urllib.request.urlopen = orig
         assert res["ok"] is True
-        assert res["backends"] == {"10.0.0.2:8001"}
+        assert res["backends"] == {"192.0.2.2:8001"}
 
     def test_backend_probe_failure_is_not_drift(self):
         """"Could not ask the proxy" must NOT be read as drift — failing closed
         here would restart a working LB on any endpoint change."""
         from hscc_daemon import health
-        assert health._proxy_backend_drift(set(), {"10.0.0.2:8001"},
-                                           {"10.0.0.2:8001"})[0] is True
+        assert health._proxy_backend_drift(set(), {"192.0.2.2:8001"},
+                                           {"192.0.2.2:8001"})[0] is True
 
     def test_drift_missing_backend_is_unhealthy(self):
         """THE INCIDENT SHAPE: the catalogue serves every alias, but all of it
         routes through ONE backend while three units are healthy."""
         from hscc_daemon import health
         ok, reason = health._proxy_backend_drift(
-            {"10.0.0.2:8001"},                              # live router
-            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"},  # healthy
-            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"})
+            {"192.0.2.2:8001"},                              # live router
+            {"192.0.2.2:8001", "192.0.2.3:8002", "192.0.2.4:8003"},  # healthy
+            {"192.0.2.2:8001", "192.0.2.3:8002", "192.0.2.4:8003"})
         assert ok is False
-        assert "10.0.0.3:8002" in reason and "10.0.0.4:8003" in reason
+        assert "192.0.2.3:8002" in reason and "192.0.2.4:8003" in reason
 
     def test_drift_dead_backend_is_unhealthy(self):
         """A router pointing at a unit that is NOT healthy is sending load to a
         dead worker — unhealthy even when every healthy unit is covered."""
         from hscc_daemon import health
         ok, reason = health._proxy_backend_drift(
-            {"10.0.0.2:8001", "10.0.0.9:8099"},
-            {"10.0.0.2:8001"},
-            {"10.0.0.2:8001", "10.0.0.9:8099"})
-        assert ok is False and "10.0.0.9:8099" in reason
+            {"192.0.2.2:8001", "192.0.2.9:8099"},
+            {"192.0.2.2:8001"},
+            {"192.0.2.2:8001", "192.0.2.9:8099"})
+        assert ok is False and "192.0.2.9:8099" in reason
 
     def test_drift_ignores_backends_hscc_does_not_supervise(self):
         """The proxy may legitimately serve endpoints outside serving.json. They
         must never make us relaunch the LB forever."""
         from hscc_daemon import health
         ok, _ = health._proxy_backend_drift(
-            {"10.0.0.2:8001", "10.9.9.9:9000"},
-            {"10.0.0.2:8001"},
-            {"10.0.0.2:8001"})
+            {"192.0.2.2:8001", "10.9.9.9:9000"},
+            {"192.0.2.2:8001"},
+            {"192.0.2.2:8001"})
         assert ok is True
 
     def test_drift_matches_is_healthy(self):
         from hscc_daemon import health
-        hp = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        hp = {"192.0.2.2:8001", "192.0.2.3:8002"}
         ok, _ = health._proxy_backend_drift(hp, hp, hp)
         assert ok is True
 
@@ -1867,17 +1867,17 @@ class TestCheckProxy:
         UNHEALTHY and take the repair path, not the plain `proxy start` that
         refuses a running proxy."""
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": True, "models": ["worker-model"], "error": ""},
             serving_data={"version": 2, "units": [
                 {"id": "w1", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.2"], "port": 8001, "recipe": "r"},
+                 "nodes": ["192.0.2.2"], "port": 8001, "recipe": "r"},
                 {"id": "w2", "role": "worker", "keepalive": True,
-                 "nodes": ["10.0.0.3"], "port": 8002, "recipe": "r"},
+                 "nodes": ["192.0.2.3"], "port": 8002, "recipe": "r"},
             ]},
-            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
-            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"},
-            fleet_hp={"10.0.0.2:8001", "10.0.0.3:8002"})
+            backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
+            healthy_units={"192.0.2.2:8001", "192.0.2.3:8002"},
+            fleet_hp={"192.0.2.2:8001", "192.0.2.3:8002"})
         calls = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda a, **k: calls.append(list(a)) or {"ok": True})
@@ -1894,10 +1894,10 @@ class TestCheckProxy:
         """The repair must never fall back to plain `proxy start`: sparkrun
         REFUSES a running proxy (rc 1), which is how the incident persisted."""
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": True, "models": ["worker-model"], "error": ""},
-            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
-            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"})
+            backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
+            healthy_units={"192.0.2.2:8001", "192.0.2.3:8002"})
         started = []
         monkeypatch.setattr(health, "_proxy_repair_orphan",
                             lambda hosts: {"ok": True, "verified": True})
@@ -1919,22 +1919,22 @@ class TestCheckProxy:
         re-adds it — sparkrun's auto-discover rewrites the config file but skips
         the restart because is_running() only checks its own state-file PID.
         One check_proxy sweep must detect that and repair."""
-        healthy_units = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        healthy_units = {"192.0.2.2:8001", "192.0.2.3:8002"}
         # Sweep 1: node .3 is down for reboot -> proxy legitimately has 1 backend.
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": True, "models": ["worker-model"], "error": ""},
-            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
-            healthy_units={"10.0.0.2:8001"})
+            backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
+            healthy_units={"192.0.2.2:8001"})
         monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
         monkeypatch.setattr(health, "_proxy_repair_orphan", lambda hosts: {"ok": True})
         assert health.check_proxy() is True          # no demand on a rebooting node
 
         # Sweep 2: .3 is back and healthy, but the live router still has only .2.
         health2 = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": True, "models": ["worker-model"], "error": ""},
-            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
             healthy_units=healthy_units)
         repaired = []
         monkeypatch.setattr(health2, "_proxy_repair_orphan",
@@ -1992,7 +1992,7 @@ class TestCheckProxy:
         monkeypatch.setattr(health, "_proxy_listener", lambda: (333, "litellm"))
         monkeypatch.setattr(health, "_reap_orphan_proxy_listener", lambda t: True)
         monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
-        res = health._proxy_repair_orphan(["10.0.0.2"])
+        res = health._proxy_repair_orphan(["192.0.2.2"])
         assert res["verified"] is False and res["ok"] is False
 
     def test_repair_orders_stop_then_reap_then_start(
@@ -2016,7 +2016,7 @@ class TestCheckProxy:
             lambda t: seq.append("reap") or True)
         monkeypatch.setattr(health, "_proxy_listener",
                             lambda: seq.append("listen") or (222, "litellm"))
-        res = health._proxy_repair_orphan(["10.0.0.2", "10.0.0.3"])
+        res = health._proxy_repair_orphan(["192.0.2.2", "192.0.2.3"])
         assert res["ok"] is True and res["verified"] is True
 
         kinds = []
@@ -2033,11 +2033,11 @@ class TestCheckProxy:
         start = [c for c in seq if isinstance(c, list) and "start" in c][0]
         assert "--restart" not in start, \
             "--restart must not be used: it only SIGTERMs sparkrun's own tracked PID"
-        assert "10.0.0.2,10.0.0.3" in start
+        assert "192.0.2.2,192.0.2.3" in start
 
     def test_proxy_healthy(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
             probe={"ok": True, "models": ["worker-model"], "error": ""})
         ran = []
         monkeypatch.setattr(health, "run_cmd", lambda *a, **k: ran.append(a) or {"ok": True})
@@ -2053,10 +2053,10 @@ class TestCheckProxy:
         proxy (engine.py is_running -> rc 1), so attempts come back failed."""
         serving_data = {"version": 2, "units": [
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"], probe={
                 "ok": True, "models": ["some-model"], "error": ""},
             serving_data=serving_data)
         ran = []
@@ -2118,7 +2118,7 @@ class TestCheckProxy:
         from SIGTERMing the LB underneath it — the incident's path (c)."""
         from hscc_daemon import heal_lease
         health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
-        assert heal_lease.acquire("auto-heal", "10.0.0.2:8001")[0] is True
+        assert heal_lease.acquire("auto-heal", "192.0.2.2:8001")[0] is True
 
         assert health.check_proxy() is False
         assert ran == []                         # sparkrun NEVER invoked
@@ -2149,7 +2149,7 @@ class TestCheckProxy:
         state = json.loads(state_path.read_text())
         state["last_relaunch"] = stale
         state_path.write_text(json.dumps(state))
-        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+        assert heal_lease.acquire("worker-relaunch", "192.0.2.2:8001")[0] is True
 
         health.check_proxy()
         assert len(ran) == 1                     # no NEW sparkrun call (still 1)
@@ -2240,7 +2240,7 @@ class TestCheckProxy:
 
     def test_proxy_down_relaunched(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": False, "models": [], "error": "connection refused"})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
@@ -2251,13 +2251,13 @@ class TestCheckProxy:
         # basename + subcommands, not the literal bare name.
         assert os.path.basename(cmd[0]) == "sparkrun"
         assert cmd[1:3] == ["proxy", "start"]
-        assert "10.0.0.2,10.0.0.3" in cmd
+        assert "192.0.2.2,192.0.2.3" in cmd
 
     def test_relaunch_pins_uv_python_312(self, tmp_hfcc_dir, monkeypatch):
         """LiteLLM/uvloop cannot run on Python 3.14, so the daemon's relaunch
         must not inherit uv's machine-global interpreter default (t_425990ae)."""
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
             probe={"ok": False, "models": [], "error": "connection refused"})
         monkeypatch.delenv("UV_PYTHON", raising=False)
         seen = {}
@@ -2270,7 +2270,7 @@ class TestCheckProxy:
     def test_relaunch_respects_operator_uv_python(self, tmp_hfcc_dir, monkeypatch):
         """An explicit operator UV_PYTHON is authoritative — never overridden."""
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
             probe={"ok": False, "models": [], "error": "connection refused"})
         monkeypatch.setenv("UV_PYTHON", "3.13")
         seen = {}
@@ -2285,7 +2285,7 @@ class TestCheckProxy:
     def test_empty_catalogue_is_unhealthy_and_relaunches(self, tmp_hfcc_dir, monkeypatch):
         """THE outage shape: proxy answers 200 with data: [] — must relaunch."""
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
             probe={"ok": True, "models": [], "error": ""})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
@@ -2297,7 +2297,7 @@ class TestCheckProxy:
 
     def _relaunch_args(self, tmp_hfcc_dir, monkeypatch, probe, serving_data=None):
         kw = {} if serving_data is None else {"serving_data": serving_data}
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
                              probe=probe, **kw)
         ran = []
         monkeypatch.setattr(health, "run_cmd",
@@ -2321,7 +2321,7 @@ class TestCheckProxy:
         traffic, so the relaunch stays a plain start."""
         serving_data = {"version": 2, "units": [
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         args = self._relaunch_args(
             tmp_hfcc_dir, monkeypatch,
@@ -2342,12 +2342,12 @@ class TestCheckProxy:
         be HEALTHY and must NOT relaunch. Requiring orchestrator-model here
         made every check tick relaunch a proxy that could never satisfy it."""
         serving_data = {"version": 2, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"], probe={
                 "ok": True, "models": ["some-model", "worker-model"], "error": ""},
             serving_data=serving_data)
         ran = []
@@ -2364,12 +2364,12 @@ class TestCheckProxy:
         relaunch. The bug was never 'orchestrator alias missing'; it is any
         REACHABLE unit's alias missing."""
         serving_data = {"version": 2, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"], probe={
                 "ok": True, "models": ["some-model"], "error": ""},
             serving_data=serving_data)
         ran = []
@@ -2383,12 +2383,12 @@ class TestCheckProxy:
 
     def test_uniform_pool_requires_both_aliases(self, tmp_hfcc_dir, monkeypatch):
         serving_data = {"version": 2, "uniform_pool": True, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"], probe={
                 "ok": True, "models": ["m", "orchestrator-model"], "error": ""},
             serving_data=serving_data)
         ran = []
@@ -2399,10 +2399,10 @@ class TestCheckProxy:
 
     def test_both_aliases_served_is_healthy(self, tmp_hfcc_dir, monkeypatch):
         serving_data = {"version": 2, "uniform_pool": True, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"], probe={
                 "ok": True, "models": ["m", "worker-model", "orchestrator-model"],
                 "error": ""},
             serving_data=serving_data)
@@ -2418,14 +2418,14 @@ class TestCheckProxy:
         uniform pool the relaunch must union it back, or the LB can never
         re-add the orchestrator endpoint (the 2026-10-11 outage)."""
         serving_data = {"version": 2, "uniform_pool": True, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
             {"id": "w2", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.3"], "port": 8002},
+             "nodes": ["192.0.2.3"], "port": 8002},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": False, "models": [], "error": "down"},
             serving_data=serving_data)
         ran = []
@@ -2433,21 +2433,21 @@ class TestCheckProxy:
                             lambda args, **k: ran.append(args) or {"ok": True})
         health.check_proxy()
         cmd = ran[0]
-        assert "10.0.0.1,10.0.0.2,10.0.0.3" in cmd   # orchestrator node included
+        assert "192.0.2.1,192.0.2.2,192.0.2.3" in cmd   # orchestrator node included
 
     def test_uniform_relaunch_includes_nonkeepalive_workers(self, tmp_hfcc_dir, monkeypatch):
         """ALL serving nodes means ALL: a uniform pool may legitimately carry
         keepalive:false workers; they serve either role and the LB must know
         about them (KEEPALIVE_NODES alone would drop them)."""
         serving_data = {"version": 2, "uniform_pool": True, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
             {"id": "w2", "role": "worker", "keepalive": False,
-             "nodes": ["10.0.0.4"], "port": 8003},
+             "nodes": ["192.0.2.4"], "port": 8003},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],   # keepalive set is w1 only
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],   # keepalive set is w1 only
             probe={"ok": False, "models": [], "error": "down"},
             serving_data=serving_data)
         ran = []
@@ -2455,17 +2455,17 @@ class TestCheckProxy:
                             lambda args, **k: ran.append(args) or {"ok": True})
         health.check_proxy()
         cmd = ran[0]
-        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.1,10.0.0.2,10.0.0.4"
+        assert cmd[cmd.index("--hosts") + 1] == "192.0.2.1,192.0.2.2,192.0.2.4"
 
     def test_relaunch_non_uniform_excludes_orchestrator(self, tmp_hfcc_dir, monkeypatch):
         """Non-uniform behaviour UNCHANGED: worker nodes only (historical)."""
         serving_data = {"version": 2, "units": [
-            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.2"], "port": 8001},
+             "nodes": ["192.0.2.2"], "port": 8001},
         ]}
         health = self._setup(
-            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
             probe={"ok": False, "models": [], "error": "down"},
             serving_data=serving_data)
         ran = []
@@ -2473,7 +2473,7 @@ class TestCheckProxy:
                             lambda args, **k: ran.append(args) or {"ok": True})
         health.check_proxy()
         cmd = ran[0]
-        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.2"   # no orchestrator union
+        assert cmd[cmd.index("--hosts") + 1] == "192.0.2.2"   # no orchestrator union
 
     # ── pure-function units (the health VERDICT itself) ─────────────────────
 
@@ -2483,17 +2483,17 @@ class TestCheckProxy:
         fleet); non-uniform = KEEPALIVE_NODES exactly."""
         from hscc_daemon import health, serving
         original = serving.KEEPALIVE_NODES
-        serving.KEEPALIVE_NODES = {"10.0.0.2", "10.0.0.9"}
+        serving.KEEPALIVE_NODES = {"192.0.2.2", "192.0.2.9"}
         try:
             assert health._proxy_relaunch_hosts(
                 {"uniform_pool": True, "units": [
-                    {"role": "orchestrator", "nodes": ["10.0.0.1"]},
-                    {"role": "worker", "nodes": ["10.0.0.2"]}]}) == \
-                ["10.0.0.1", "10.0.0.2", "10.0.0.9"]
+                    {"role": "orchestrator", "nodes": ["192.0.2.1"]},
+                    {"role": "worker", "nodes": ["192.0.2.2"]}]}) == \
+                ["192.0.2.1", "192.0.2.2", "192.0.2.9"]
             # non-uniform: env/keepalive set only, unit nodes NOT unioned
             assert health._proxy_relaunch_hosts(
-                {"units": [{"role": "orchestrator", "nodes": ["10.0.0.1"]}]}) == \
-                ["10.0.0.2", "10.0.0.9"]
+                {"units": [{"role": "orchestrator", "nodes": ["192.0.2.1"]}]}) == \
+                ["192.0.2.2", "192.0.2.9"]
         finally:
             serving.KEEPALIVE_NODES = set()
 
@@ -2523,19 +2523,19 @@ class TestCheckProxy:
         # the proxy reaches -> worker-model expected; orchestrator-only unit
         # on a host it cannot reach -> orchestrator-model NOT expected.
         assert health._proxy_expected_aliases(
-            {"units": [{"role": "worker", "nodes": ["10.0.0.2"]},
-                       {"role": "orchestrator", "nodes": ["10.0.0.1"]}]},
-            relaunch_hosts=["10.0.0.2"]) == {"worker-model"}
+            {"units": [{"role": "worker", "nodes": ["192.0.2.2"]},
+                       {"role": "orchestrator", "nodes": ["192.0.2.1"]}]},
+            relaunch_hosts=["192.0.2.2"]) == {"worker-model"}
         # when the orchestrator node IS in the host set (e.g. tp-peer union or
         # env override), its alias IS expected again
         assert health._proxy_expected_aliases(
-            {"units": [{"role": "worker", "nodes": ["10.0.0.2"]},
-                       {"role": "orchestrator", "nodes": ["10.0.0.1"]}]},
-            relaunch_hosts=["10.0.0.1", "10.0.0.2"]) == \
+            {"units": [{"role": "worker", "nodes": ["192.0.2.2"]},
+                       {"role": "orchestrator", "nodes": ["192.0.2.1"]}]},
+            relaunch_hosts=["192.0.2.1", "192.0.2.2"]) == \
             {"worker-model", "orchestrator-model"}
         # a unit with no node info is expected wherever the proxy points
         assert health._proxy_expected_aliases(
-            {"units": [{"role": "worker"}]}, relaunch_hosts=["10.0.0.2"]) == \
+            {"units": [{"role": "worker"}]}, relaunch_hosts=["192.0.2.2"]) == \
             {"worker-model"}
         # uniform pool demands BOTH regardless of configured roles
         assert health._proxy_expected_aliases(
@@ -2592,7 +2592,7 @@ class TestProxyRelaunchStall:
 
     _SERVING = {"version": 2, "units": [
         {"id": "w1", "role": "worker", "keepalive": True,
-         "nodes": ["10.0.0.2"], "port": 8001},
+         "nodes": ["192.0.2.2"], "port": 8001},
     ]}
     REFUSAL = ("Discovering inference endpoints...\n"
                "Error: Proxy is already running (PID 12477) on port 4000. "
@@ -2609,7 +2609,7 @@ class TestProxyRelaunchStall:
         state_dir = tmp_hfcc_dir / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-        monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"10.0.0.2"})
+        monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"192.0.2.2"})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: self._SERVING)
         monkeypatch.setattr(health, "_proxy_models_probe",
                             lambda url, timeout=5: {"ok": False, "models": [],
@@ -2753,7 +2753,7 @@ class TestProxyRelaunchStall:
         # Attempts 1..MAX-1 were plain starts; attempt MAX escalated.
         starts = [c for c in calls if c[1:3] == ["proxy", "start"] and "--restart" not in c]
         assert len(starts) == health.PROXY_RELAUNCH_MAX_CONSECUTIVE - 1
-        assert len(repairs) == 1 and repairs[0] == ["10.0.0.2"]
+        assert len(repairs) == 1 and repairs[0] == ["192.0.2.2"]
         # The hollow tracked PID was retired first (vetted cmdline stubbed).
         assert kills and kills[0][0] == 12477
         assert self._state(tmp_hfcc_dir)["relaunched"] is True
@@ -2875,7 +2875,7 @@ class TestProxyRelaunchStall:
             - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
         ).isoformat()
         p.write_text(json.dumps(st))
-        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+        assert heal_lease.acquire("worker-relaunch", "192.0.2.2:8001")[0] is True
         assert health.check_proxy() is False
         assert self._state(tmp_hfcc_dir)["relaunch_streak"] == 1
         assert notes == []
@@ -2912,7 +2912,7 @@ class TestProxyRelaunchStall:
             return 999, "litellm --config c.yaml"
         monkeypatch.setattr(health, "_proxy_listener", flaky_listener)
         monkeypatch.setattr(health.time, "sleep", lambda s: None)
-        res = health._proxy_repair_orphan(["10.0.0.2"])
+        res = health._proxy_repair_orphan(["192.0.2.2"])
         assert res["verified"] is True and res["ok"] is True
 
     def test_kill_hollow_refuses_foreign_and_dead_pids(self, tmp_hfcc_dir, monkeypatch):

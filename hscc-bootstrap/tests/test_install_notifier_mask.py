@@ -35,8 +35,8 @@ import pytest
 
 import install_notifier_mask as nm
 
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 SVC = nm.NOTIFIER_SERVICE
 TIMER = nm.NOTIFIER_TIMER
 

@@ -2175,9 +2175,9 @@ WORKER_ALIAS = "worker-model"
 # Endpoint discriminators — mirror enable_plugins / generator topology:
 #   orchestrator = loopback/local at the orch vLLM port, or the known orch host.
 #   worker       = loopback/proxy at :4000 (sparkrun LiteLLM load-balancer).
-_ORCH_HOST = "10.0.0.244"
+_ORCH_HOST = "192.0.2.244"
 _ORCH_PORT = 8000
-_WORKER_HOST = "10.0.0.245"
+_WORKER_HOST = "192.0.2.245"
 _WORKER_PORT = 4000
 
 

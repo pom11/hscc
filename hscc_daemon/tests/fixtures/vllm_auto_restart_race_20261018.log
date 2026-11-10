@@ -27,7 +27,7 @@
 #   * 01:39:09             the launch "succeeded": a SECOND job from the bare
 #                          recipe (no served_model_name; recipe_fingerprint
 #                          9c2c08c6ba56 vs the correct 256790855d81) landed on
-#                          10.0.0.244 while :8000 was still held by the correct
+#                          192.0.2.244 while :8000 was still held by the correct
 #                          job, so vllm inside it never started (container ran
 #                          `sleep infinity` only) — a HOLLOW launch, and the
 #                          counter/notification recorded it as success. Both
@@ -46,7 +46,7 @@
 [2026-10-18T01:38:33.101616+00:00] [ INFO] Engine-wedge recovery: stopped unit 'orch' (container 'sparkrun_03fae933e3df92bf_de6e280b97b0', attempt 1, stop_ok=True)
 [2026-10-18T01:38:33.102153+00:00] [ INFO] Engine-wedge recovery: relaunching missing units via `hscc cluster up`
 [2026-10-18T01:38:34.010511+00:00] [ INFO] Running proxy check
-[2026-10-18T01:38:34.132508+00:00] [ INFO] Worker proxy unhealthy on :4000 (live router points at unhealthy backend(s) ['10.0.0.244:8000'] — load is being sent to a dead worker)
+[2026-10-18T01:38:34.132508+00:00] [ INFO] Worker proxy unhealthy on :4000 (live router points at unhealthy backend(s) ['192.0.2.244:8000'] — load is being sent to a dead worker)
 [2026-10-18T01:38:34.133669+00:00] [ WARN] proxy relaunch deferred — deferred — heal in progress: engine-wedge-recovery (orch)
 [2026-10-18T01:38:36.887459+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: orch
 [2026-10-18T01:38:36.889917+00:00] [ INFO] Engine-wedge check: 2/3 streaming ok, WEDGED: orch

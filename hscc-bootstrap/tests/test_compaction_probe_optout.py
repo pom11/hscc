@@ -48,7 +48,7 @@ def test_optout_makes_no_network_call(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _never)
     monkeypatch.setenv("HSCC_SKIP_COMPACT_PROBE", "1")
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:9/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:9/v1")
 
     assert enable_plugins._probe_compaction_endpoint() is True
     assert calls == []
@@ -73,13 +73,13 @@ def test_probe_still_runs_when_not_opted_out(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake)
     monkeypatch.delenv("HSCC_SKIP_COMPACT_PROBE", raising=False)
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:9/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:9/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orchestrator-model")
 
     assert enable_plugins._probe_compaction_endpoint() is True
     # one call, at the /v1/models form, and it still carries the 5 s budget the
     # opt-out exists to avoid — the timeout is the thing that cost the leg.
-    assert seen == [("http://10.0.0.1:9/v1/models", 5)]
+    assert seen == [("http://192.0.2.1:9/v1/models", 5)]
 
 
 def test_enable_skips_the_probe_when_opted_out(monkeypatch, tmp_path):
@@ -95,7 +95,7 @@ def test_enable_skips_the_probe_when_opted_out(monkeypatch, tmp_path):
 
     monkeypatch.setattr(urllib.request, "urlopen", _never)
     monkeypatch.setenv("HSCC_SKIP_COMPACT_PROBE", "1")
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:9/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:9/v1")
     monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(tmp_path / "hooks"))
 
     cfg = tmp_path / "config.yaml"

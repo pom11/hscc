@@ -40,8 +40,8 @@ import pytest
 from hscc_daemon import health, post_boot as pb, serving
 from hscc_daemon import state as state_mod
 
-ORCH = "10.0.0.1"
-WORKER = "10.0.0.247"
+ORCH = "192.0.2.1"
+WORKER = "192.0.2.247"
 RECIPE = "~/r/27b.yaml"
 REASON = "hscc cluster down"
 

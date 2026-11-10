@@ -17,7 +17,7 @@ changes JSON shape (same keys, same value types, same nesting), because shape
 is the entire point of the check.
 
 Mapping applied (value → replacement):
-- private node IPs  →  `10.0.0.1` / `10.0.0.2` / … (one distinct fake IP per real node)
+- private node IPs  →  `10.0.0.x` / `10.0.0.x` / … (one distinct fake IP per real node)
 - private tailnet IP → `100.64.0.1`
 - operator home dir  →  `/home/devuser`
 - ssh username       →  `node`

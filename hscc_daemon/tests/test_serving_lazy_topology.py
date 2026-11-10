@@ -90,7 +90,7 @@ def _shells(counter: Path):
 
 
 FAKE_CLUSTER = json.dumps(
-    [{"name": "hscc", "default": True, "hosts": ["10.0.0.7:22"]}])
+    [{"name": "hscc", "default": True, "hosts": ["192.0.2.7:22"]}])
 
 
 class TestImportExecutesNothing:
@@ -149,7 +149,7 @@ class TestImportExecutesNothing:
         shells = _shells(counter)
         assert len(shells) == 1, f"expected exactly 1 shell, got {shells}"
         assert "cluster list --json" in shells[0]
-        assert "10.0.0.7" in r.stdout  # resolved from the fake default cluster
+        assert "192.0.2.7" in r.stdout  # resolved from the fake default cluster
 
 
 class TestFirstUseShellsOnceAndCaches:
@@ -163,7 +163,7 @@ class TestFirstUseShellsOnceAndCaches:
         r = _run(env, "-c",
                  "import hscc_daemon.serving as s; print(s.PRIMARY_NODE)")
         assert r.returncode == 0, r.stderr
-        assert r.stdout.strip().endswith("10.0.0.7"), r.stdout
+        assert r.stdout.strip().endswith("192.0.2.7"), r.stdout
         shells = _shells(counter)
         assert len(shells) == 1, f"first use must shell exactly once: {shells}"
         assert "cluster list --json" in shells[0]
@@ -184,8 +184,8 @@ class TestFirstUseShellsOnceAndCaches:
         assert len(_shells(counter)) == 1, (
             "topology re-resolved on later reads — cache broken")
         out = r.stdout.split()
-        assert out[0].endswith("10.0.0.7")             # PRIMARY_NODE resolved
-        assert out[1] == "http://10.0.0.7:8000/health"  # cmds rebuilt from it
+        assert out[0].endswith("192.0.2.7")             # PRIMARY_NODE resolved
+        assert out[1] == "http://192.0.2.7:8000/health"  # cmds rebuilt from it
         assert out[2] == "True"
 
     def test_cluster_json_present_shells_zero(self, tmp_path):
@@ -198,15 +198,15 @@ class TestFirstUseShellsOnceAndCaches:
         hscc_dir = tmp_path / "empty-home" / ".hscc"
         hscc_dir.mkdir(parents=True, exist_ok=True)
         (hscc_dir / "cluster.json").write_text(json.dumps({
-            "gateway": {"ip": "10.0.0.1"},
-            "workers": [{"ip": "10.0.0.2"}],
-            "nasDevices": [{"ip": "10.0.0.10"}],
+            "gateway": {"ip": "192.0.2.1"},
+            "workers": [{"ip": "192.0.2.2"}],
+            "nasDevices": [{"ip": "192.0.2.10"}],
         }))
         r = _run(env, "-c",
                  "import hscc_daemon.serving as s; "
                  "print(s.PRIMARY_NODE, s.NAS_HOST)")
         assert r.returncode == 0, r.stderr
-        assert r.stdout.split() == ["10.0.0.1", "10.0.0.10"]
+        assert r.stdout.split() == ["192.0.2.1", "192.0.2.10"]
         assert _shells(counter) == []
 
 
@@ -245,25 +245,25 @@ class TestLazyMechanismInProcess:
         from hscc_daemon import serving
         serving._materialize_topology_defaults()
         cluster = tmp_path / "cluster.json"
-        cluster.write_text(json.dumps({"gateway": {"ip": "10.0.0.4"},
+        cluster.write_text(json.dumps({"gateway": {"ip": "192.0.2.4"},
                                        "workers": [], "nasDevices": []}))
         monkeypatch.setattr(serving, "CLUSTER_JSON", str(cluster))
         monkeypatch.setattr(serving, "SERVING_JSON", str(tmp_path / "none.json"))
         serving.resolve_cluster_config()
-        assert serving.PRIMARY_NODE == "10.0.0.4"
+        assert serving.PRIMARY_NODE == "192.0.2.4"
 
     def test_reset_hands_names_back_to_lazy_path(self, tmp_path, monkeypatch):
         from hscc_daemon import serving
         serving._materialize_topology_defaults()
         cluster = tmp_path / "cluster.json"
-        cluster.write_text(json.dumps({"gateway": {"ip": "10.0.0.8"},
+        cluster.write_text(json.dumps({"gateway": {"ip": "192.0.2.8"},
                                        "workers": [], "nasDevices": []}))
         monkeypatch.setattr(serving, "CLUSTER_JSON", str(cluster))
         monkeypatch.setattr(serving, "SERVING_JSON", str(tmp_path / "none.json"))
         serving.reset_resolution_cache()
         # Unresolved again: the first READ must pick up the NEW cluster.json
         # (an eager-at-import design could not; a broken cache could not).
-        assert serving.PRIMARY_NODE == "10.0.0.8"
+        assert serving.PRIMARY_NODE == "192.0.2.8"
 
     def test_reads_inside_the_resolver_do_not_recurse(self, tmp_path,
                                                       monkeypatch):
@@ -275,7 +275,7 @@ class TestLazyMechanismInProcess:
         serving._materialize_topology_defaults()
         serving.reset_resolution_cache()
         cluster = tmp_path / "cluster.json"
-        cluster.write_text(json.dumps({"gateway": {"ip": "10.0.0.9"},
+        cluster.write_text(json.dumps({"gateway": {"ip": "192.0.2.9"},
                                        "workers": [], "nasDevices": []}))
         monkeypatch.setattr(serving, "CLUSTER_JSON", str(cluster))
         monkeypatch.setattr(serving, "SERVING_JSON", str(tmp_path / "none.json"))
@@ -291,7 +291,7 @@ class TestLazyMechanismInProcess:
 
         monkeypatch.setattr(serving, "_resolve_cluster_config_body",
                             instrumented)
-        assert serving.PRIMARY_NODE == "10.0.0.9"
+        assert serving.PRIMARY_NODE == "192.0.2.9"
         assert calls["n"] == 1, (
             f"resolver re-entered {calls['n']}x — recursion guard broken")
-        assert serving.VLLM_STOP_CMD[-1] == "10.0.0.9"  # commands rebuilt
+        assert serving.VLLM_STOP_CMD[-1] == "192.0.2.9"  # commands rebuilt

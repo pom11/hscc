@@ -34,7 +34,7 @@ class FakeTopo:
 
 
 def _topo(n=3):
-    return FakeTopo(FakeNode("10.0.0.1"),
+    return FakeTopo(FakeNode("192.0.2.1"),
                     [FakeNode(f"10.0.0.{2+i}") for i in range(n)])
 
 
@@ -144,8 +144,8 @@ class TestApplyReapplySamePlan:
         """serving.json recorded state — orch=[.245,.246], reasoning=[.247,.248].
         Present regardless of whether the spans are live (recording) or stopped.
         """
-        g = "10.0.0.245"; w1 = "10.0.0.246"
-        w2 = "10.0.0.247"; w3 = "10.0.0.248"
+        g = "192.0.2.245"; w1 = "192.0.2.246"
+        w2 = "192.0.2.247"; w3 = "192.0.2.248"
         return {
             g: {"kind": "orchestrator", "family": None, "model": "dsv4"},
             w1: {"kind": "orchestrator", "family": None, "model": "dsv4"},
@@ -154,9 +154,9 @@ class TestApplyReapplySamePlan:
         }
 
     def _four_node_topo(self):
-        return FakeTopo(FakeNode("10.0.0.245"),
-                        [FakeNode("10.0.0.246"), FakeNode("10.0.0.247"),
-                         FakeNode("10.0.0.248")])
+        return FakeTopo(FakeNode("192.0.2.245"),
+                        [FakeNode("192.0.2.246"), FakeNode("192.0.2.247"),
+                         FakeNode("192.0.2.248")])
 
     def test_resolves_when_target_spans_running(self, monkeypatch):
         monkeypatch.setattr(cluster_template, "_discover",
@@ -169,12 +169,12 @@ class TestApplyReapplySamePlan:
                                                     fits=True))
         monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
         plan = cluster_template._resolve(self.TEMPLATE)
-        assert plan.orchestrator.nodes == ["10.0.0.245", "10.0.0.246"]
+        assert plan.orchestrator.nodes == ["192.0.2.245", "192.0.2.246"]
         assert plan.orchestrator.tp == 2
         assert len(plan.families) == 1
         units = plan.families[0].units
         assert len(units) == 1                       # one tp=2 unit, not two
-        assert units[0].nodes == ["10.0.0.247", "10.0.0.248"]
+        assert units[0].nodes == ["192.0.2.247", "192.0.2.248"]
         assert units[0].tp == 2
         assert cluster_template.validate_resolved_plan(plan) == []
 
@@ -191,7 +191,7 @@ class TestApplyReapplySamePlan:
                                                     fits=True))
         monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
         plan = cluster_template._resolve(self.TEMPLATE)
-        assert plan.families[0].units[0].nodes == ["10.0.0.247", "10.0.0.248"]
+        assert plan.families[0].units[0].nodes == ["192.0.2.247", "192.0.2.248"]
         assert cluster_template.validate_resolved_plan(plan) == []
 
     def test_preview_reports_two_nodes_for_tp2_family(self, monkeypatch):
@@ -212,7 +212,7 @@ class TestApplyReapplySamePlan:
         proxy = next(c for c in prom if c["file"] == "proxies/")
         # per-family proxy node list includes every span node, not just the primary
         reason_detail = proxy["details"][0]
-        assert "10.0.0.247" in reason_detail and "10.0.0.248" in reason_detail
+        assert "192.0.2.247" in reason_detail and "192.0.2.248" in reason_detail
         cfg = next(c for c in prom if c["file"] == "config.yaml")
         # config detail was the "1 units, 1 nodes" site — now reports the full span
         fam_line = next(l for l in cfg["details"] if "family-reasoning" in l)
@@ -260,7 +260,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["192.0.2.2"], 8000, 1, 1)])
             res = install_proxy(fam)
 
         assert calls[0][0] == "sparkrun"
@@ -286,7 +286,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["192.0.2.2"], 8000, 1, 1)])
             res = install_proxy(fam)
 
         assert res["loaded"] is False
@@ -304,7 +304,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["192.0.2.2"], 8000, 1, 1)])
             install_proxy(fam)
 
         # No proxy.plist should be generated
@@ -331,7 +331,7 @@ class TestRemoveProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["192.0.2.2"], 8000, 1, 1)])
             res = remove_proxy(fam)
 
         assert calls[0][0] == "sparkrun"
@@ -355,7 +355,7 @@ class TestBackwardCompatAliases:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["192.0.2.2"], 8000, 1, 1)])
             res = install_proxy_plist(fam)
 
         assert res["loaded"] is True
@@ -456,7 +456,7 @@ class TestApplyIntegration:
         ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=2)
         (hscc / "serving.json").write_text(json.dumps(
             {"version": 1, "units": [{"id": "prior", "role": "orchestrator",
-                                      "nodes": ["10.0.0.1"]}]}))
+                                      "nodes": ["192.0.2.1"]}]}))
 
         def boom(plan, **k):
             raise RuntimeError("provision exploded")
@@ -563,20 +563,20 @@ class TestValidateAndStatusHelpers:
 
 INVALID_YAML = (
     "name: bad\nversion: 3\n"
-    "orchestrator:\n  recipe: o.yaml\n  tp: 1\n  nodes: [10.0.0.244]\n"
+    "orchestrator:\n  recipe: o.yaml\n  tp: 1\n  nodes: [192.0.2.244]\n"
     "families:\n  - name: f\n    models:\n      - recipe: m.yaml\n"
-    "        tp: 1\n    nodes: [10.0.0.250]\n"  # .250 not in cluster.json
+    "        tp: 1\n    nodes: [192.0.2.250]\n"  # .250 not in cluster.json
 )
 VALID_YAML = (
     "name: good\nversion: 3\n"
     "orchestrator:\n  recipe: o.yaml\n  tp: 2\n"
-    "  nodes: [10.0.0.244, 10.0.0.246]\n"
+    "  nodes: [192.0.2.244, 192.0.2.246]\n"
     "families:\n  - name: f\n    models:\n      - recipe: m.yaml\n"
-    "        tp: 1\n    nodes: [10.0.0.247]\n"
+    "        tp: 1\n    nodes: [192.0.2.247]\n"
 )
 CLUSTER_OBJ = {
-    "gateway": {"ip": "10.0.0.244"},
-    "workers": [{"ip": "10.0.0.246"}, {"ip": "10.0.0.247"}],
+    "gateway": {"ip": "192.0.2.244"},
+    "workers": [{"ip": "192.0.2.246"}, {"ip": "192.0.2.247"}],
 }
 
 
@@ -772,7 +772,7 @@ class TestApplyWarnSetsSuccessFalse:
         # Override provision to return status='warn'
         monkeypatch.setattr(ct, "_provision_models",
                             lambda plan, **k: {"status": "warn",
-                                               "failed": [{"node": "10.0.0.2",
+                                               "failed": [{"node": "192.0.2.2",
                                                            "recipe": "m.yaml",
                                                            "error": "oom"}],
                                                "note": "1 model(s) failed"})
@@ -783,7 +783,7 @@ class TestApplyWarnSetsSuccessFalse:
         ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
         monkeypatch.setattr(ct, "_provision_models",
                             lambda plan, **k: {"status": "ok",
-                                               "provisioned": ["10.0.0.2"],
+                                               "provisioned": ["192.0.2.2"],
                                                "note": "1 ensured"})
         res = ct.apply_template("single-family", confirm=True)
         assert res["success"] is True
@@ -838,9 +838,9 @@ class TestStopFailuresRecorded:
         def fake_sparkrun_run(args, **kw):
             if "status" in args:
                 return MagicMock(returncode=0, stderr="",
-                                 stdout="10.0.0.3")
+                                 stdout="192.0.2.3")
             if "stop" in args:
-                if "10.0.0.3" in args:
+                if "192.0.2.3" in args:
                     raise RuntimeError("connection refused")
                 return MagicMock(returncode=0, stderr="", stdout="")
             return MagicMock(returncode=0, stderr="", stdout="")
@@ -865,7 +865,7 @@ class TestStopFailuresRecorded:
 
         assert "stop_failures" in result
         assert len(result["stop_failures"]) >= 1
-        assert "10.0.0.3" in result["stop_failures"][0]
+        assert "192.0.2.3" in result["stop_failures"][0]
 
     def test_stop_succeeds_no_stop_failures_key(self, tmp_path, monkeypatch):
         import cluster_template as ct
@@ -964,7 +964,7 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1, ["10.0.0.2"], 1)
+        plan = self._build_plan(monkeypatch, tmp_path, ["192.0.2.1"], 1, ["192.0.2.2"], 1)
         result = cluster_template._provision_models(plan, do_launch=True)
 
         # 2 calls: 1 orchestrator + 1 worker (status not counted if no IP in output)
@@ -974,7 +974,7 @@ class TestProvisionMultiNodeSpan:
         worker_call = [c for c in sparkrun_runs if "8000" in str(c)][0]
         assert "--hosts" in worker_call
         hosts_idx = worker_call.index("--hosts")
-        assert worker_call[hosts_idx + 1] == "10.0.0.2"
+        assert worker_call[hosts_idx + 1] == "192.0.2.2"
         assert worker_call[worker_call.index("--tp") + 1] == "1"
 
     def test_tp2_unit_one_call_comma_hosts_and_tp(self, monkeypatch, tmp_path):
@@ -989,8 +989,8 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
-                                ["10.0.0.2", "10.0.0.3"], 2)
+        plan = self._build_plan(monkeypatch, tmp_path, ["192.0.2.1"], 1,
+                                ["192.0.2.2", "192.0.2.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=True)
 
         sparkrun_runs = [c for c in calls if c[0] == "sparkrun" and c[1] == "run"]
@@ -998,7 +998,7 @@ class TestProvisionMultiNodeSpan:
         # Worker call: comma-joined hosts + --tp 2
         worker_call = [c for c in sparkrun_runs if "8000" in str(c)][0]
         hosts_idx = worker_call.index("--hosts")
-        assert worker_call[hosts_idx + 1] == "10.0.0.2,10.0.0.3"
+        assert worker_call[hosts_idx + 1] == "192.0.2.2,192.0.2.3"
         tp_idx = worker_call.index("--tp")
         assert worker_call[tp_idx + 1] == "2"
 
@@ -1012,30 +1012,30 @@ class TestProvisionMultiNodeSpan:
             calls.append(argv)
             if "status" in argv:
                 return MagicMock(returncode=0, stderr="",
-                                 stdout="10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.4")
+                                 stdout="192.0.2.1 192.0.2.2 192.0.2.3 192.0.2.4")
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        # tp=2 worker spans 10.0.0.2 and 10.0.0.3
-        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
-                                ["10.0.0.2", "10.0.0.3"], 2)
+        # tp=2 worker spans 192.0.2.2 and 192.0.2.3
+        plan = self._build_plan(monkeypatch, tmp_path, ["192.0.2.1"], 1,
+                                ["192.0.2.2", "192.0.2.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=True)
 
         stop_calls = [c for c in calls if "stop" in c]
-        # 10.0.0.2 and 10.0.0.3 are in-use (part of span) — should not be stopped
+        # 192.0.2.2 and 192.0.2.3 are in-use (part of span) — should not be stopped
         for sc in stop_calls:
-            assert "10.0.0.2" not in sc
-            assert "10.0.0.3" not in sc
+            assert "192.0.2.2" not in sc
+            assert "192.0.2.3" not in sc
 
     def test_dry_run_reports_span(self, monkeypatch, tmp_path):
         """Dry-run provisioned list uses comma-joined node span."""
-        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
-                                ["10.0.0.2", "10.0.0.3"], 2)
+        plan = self._build_plan(monkeypatch, tmp_path, ["192.0.2.1"], 1,
+                                ["192.0.2.2", "192.0.2.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=False)
 
         prov = result["provisioned"]
-        assert "10.0.0.2,10.0.0.3:8000:m.yaml" in prov
-        assert "10.0.0.1:9000:o.yaml" in prov
+        assert "192.0.2.2,192.0.2.3:8000:m.yaml" in prov
+        assert "192.0.2.1:9000:o.yaml" in prov
 
     def test_orchestrator_tp2_span(self, monkeypatch, tmp_path):
         """Orchestrator with tp=2 also gets comma-joined hosts and --tp."""
@@ -1048,14 +1048,14 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1", "10.0.0.2"], 2,
-                                ["10.0.0.3"], 1)
+        plan = self._build_plan(monkeypatch, tmp_path, ["192.0.2.1", "192.0.2.2"], 2,
+                                ["192.0.2.3"], 1)
         result = cluster_template._provision_models(plan, do_launch=True)
 
         sparkrun_runs = [c for c in calls if c[0] == "sparkrun" and c[1] == "run"]
         orch_call = [c for c in sparkrun_runs if "9000" in str(c)][0]
         hosts_idx = orch_call.index("--hosts")
-        assert orch_call[hosts_idx + 1] == "10.0.0.1,10.0.0.2"
+        assert orch_call[hosts_idx + 1] == "192.0.2.1,192.0.2.2"
         tp_idx = orch_call.index("--tp")
         assert orch_call[tp_idx + 1] == "2"
 
@@ -1068,7 +1068,7 @@ class TestUpdateHermesConfigModelBlock:
     alias gap close, model.default is PROBE-RESOLVED: the candidate is the
     orchestrator's alias and the probe decides what is actually written."""
 
-    def _make_plan(self, model_id, node="10.0.0.1", port=8000):
+    def _make_plan(self, model_id, node="192.0.2.1", port=8000):
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                model_id, [node], port, 1, 1)
         return ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
@@ -1088,7 +1088,7 @@ class TestUpdateHermesConfigModelBlock:
         result = cluster_template._update_hermes_config(
             config, plan, _http_get=self._serving("deepseek-ai/DeepSeek-V4-Flash-0731"))
         assert result["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
-        assert result["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert result["model"]["base_url"] == "http://192.0.2.1:8000/v1"
 
     def test_model_default_writes_alias_when_orchestrator_advertises_it(self):
         """THE new behaviour: when the orchestrator endpoint advertises the
@@ -1126,11 +1126,11 @@ class TestUpdateHermesConfigModelBlock:
         assert "default" not in result["model"]
 
     def test_model_base_url_set_correctly(self):
-        plan = self._make_plan("test-model", "10.0.0.5", 9000)
+        plan = self._make_plan("test-model", "192.0.2.5", 9000)
         config = {}
         result = cluster_template._update_hermes_config(
             config, plan, _http_get=self._serving("test-model"))
-        assert result["model"]["base_url"] == "http://10.0.0.5:9000/v1"
+        assert result["model"]["base_url"] == "http://192.0.2.5:9000/v1"
 
     def test_model_provider_preserved_when_existing(self):
         plan = self._make_plan("test-model")
@@ -1148,9 +1148,9 @@ class TestUpdateHermesConfigModelBlock:
 
     def test_providers_still_rebuilt(self):
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "test-model", ["10.0.0.1"], 8000, 1, 1)
+                               "test-model", ["192.0.2.1"], 8000, 1, 1)
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-            ti.ResolvedUnit("worker", "coding", "m.yaml", "W", ["10.0.0.2"], 8001, 1, 1)])
+            ti.ResolvedUnit("worker", "coding", "m.yaml", "W", ["192.0.2.2"], 8001, 1, 1)])
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
         config = {"providers": [{"name": "stale-provider", "base_url": "http://x"}]}
         result = cluster_template._update_hermes_config(
@@ -1165,13 +1165,13 @@ class TestUpdateHermesConfigModelBlock:
     def test_idempotent_on_second_call(self):
         plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
         config = {"model": {"default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                            "base_url": "http://10.0.0.1:8000/v1",
+                            "base_url": "http://192.0.2.1:8000/v1",
                             "provider": "custom"}}
         serving = self._serving("deepseek-ai/DeepSeek-V4-Flash-0731")
         result1 = cluster_template._update_hermes_config(config, plan, _http_get=serving)
         result2 = cluster_template._update_hermes_config(result1, plan, _http_get=serving)
         assert result2["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
-        assert result2["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert result2["model"]["base_url"] == "http://192.0.2.1:8000/v1"
         assert result2["model"]["provider"] == "custom"
 
     def test_other_model_keys_not_clobbered(self):
@@ -1197,11 +1197,11 @@ class TestUpdateWorkerModelIds:
     def _plan(self, model=None, proxy_port=4000, worker=True):
         import template_intent as ti
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch-model", ["10.0.0.1"], 8000, 1, 1)
+                               "orch-model", ["192.0.2.1"], 8000, 1, 1)
         families = []
         if worker:
             unit = ti.ResolvedUnit("worker", "coding", "m.yaml",
-                                   model or self.WORKER, ["10.0.0.2"], 8001, 1, 1)
+                                   model or self.WORKER, ["192.0.2.2"], 8001, 1, 1)
             families.append(ti.ResolvedFamily(name="coding", proxy_port=proxy_port,
                                               units=[unit]))
         return ti.ResolvedPlan(template="test", orchestrator=orch, families=families)
@@ -1268,9 +1268,9 @@ class TestUpdateWorkerModelIds:
         self._write_config(
             conf,
             delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"},
+                        "base_url": "http://192.0.2.244:8000/v1"},
             fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"}])
+                        "base_url": "http://192.0.2.244:8000/v1"}])
         self._apply(self._plan(), conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
@@ -1301,13 +1301,13 @@ class TestUpdateWorkerModelIds:
         self._write_config(
             conf,
             delegation={"model": "orch-model",
-                        "base_url": "http://10.0.0.1:8000/v1"})
+                        "base_url": "http://192.0.2.1:8000/v1"})
         plan = self._plan(worker=False)
         cluster_template._update_worker_model_ids(
             plan, profiles_dir=tmp_path / "profiles", config_yaml=conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
-        assert data["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert data["delegation"]["base_url"] == "http://192.0.2.1:8000/v1"
         assert data["delegation"]["model"] == "orch-model"
 
     def test_config_no_fallback_providers_still_sets_delegation(self, tmp_path):
@@ -1320,7 +1320,7 @@ class TestUpdateWorkerModelIds:
     def test_config_orchestrator_model_default_untouched(self, tmp_path):
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"},
-                           model={"default": "orch-model", "base_url": "http://10.0.0.1:8000/v1"})
+                           model={"default": "orch-model", "base_url": "http://192.0.2.1:8000/v1"})
         self._apply(self._plan(), conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
@@ -1340,9 +1340,9 @@ class TestUpdateWorkerModelIds:
         self._write_config(
             conf,
             delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"},
+                        "base_url": "http://192.0.2.244:8000/v1"},
             fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"}])
+                        "base_url": "http://192.0.2.244:8000/v1"}])
         profiles = tmp_path / "profiles"
         self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
         # plan declares the ALIAS as the worker unit model
@@ -1372,9 +1372,9 @@ class TestUpdateWorkerModelIds:
         self._write_config(
             conf,
             delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"},
+                        "base_url": "http://192.0.2.244:8000/v1"},
             fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                        "base_url": "http://10.0.0.244:8000/v1"}])
+                        "base_url": "http://192.0.2.244:8000/v1"}])
         profiles = tmp_path / "profiles"
         self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
         result = self._apply(self._plan(), conf, profiles=profiles,
@@ -1400,9 +1400,9 @@ class TestUpdateWorkerModelIds:
         self._write_config(
             conf,
             delegation={"model": "stale",
-                        "base_url": "http://10.0.0.244:8000/v1"},
+                        "base_url": "http://192.0.2.244:8000/v1"},
             fallbacks=[{"model": "stale",
-                        "base_url": "http://10.0.0.244:8000/v1"}])
+                        "base_url": "http://192.0.2.244:8000/v1"}])
         profiles = tmp_path / "profiles"
         self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
         result = cluster_template._update_worker_model_ids(
@@ -1410,7 +1410,7 @@ class TestUpdateWorkerModelIds:
         import yaml
         data = yaml.safe_load(conf.read_text())
         assert data["delegation"]["model"] == "stale"          # untouched
-        assert data["delegation"]["base_url"] == "http://10.0.0.244:8000/v1"
+        assert data["delegation"]["base_url"] == "http://192.0.2.244:8000/v1"
         assert data["fallback_providers"][0]["model"] == "stale"
         assert yaml.safe_load((profiles / "coder" / "config.yaml").read_text())[
             "model"]["default"] == "stale"
@@ -1425,7 +1425,7 @@ class TestUpdateWorkerModelIds:
         self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
         self._write_profile(profiles, "reviewer", "http://localhost:4000/v1", "stale")
         # orchestrator-facing profile (:8000) must be left alone
-        self._write_profile(profiles, "orch-role", "http://10.0.0.1:8000/v1", "orch-model")
+        self._write_profile(profiles, "orch-role", "http://192.0.2.1:8000/v1", "orch-model")
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"})
         result = self._apply(self._plan(), conf, profiles=profiles)
@@ -1485,13 +1485,13 @@ class TestApplyRouting:
     ORCH_ALIAS = "orchestrator-model"
 
     def _plan(self, *, fam_proxy=None, family="reasoning"):
-        """Plan: orchestrator on 10.0.0.1:8000; one worker family 'reasoning'
-        with a unit on 10.0.0.2:8001 and (optionally) a proxy on ``fam_proxy``
+        """Plan: orchestrator on 192.0.2.1:8000; one worker family 'reasoning'
+        with a unit on 192.0.2.2:8001 and (optionally) a proxy on ``fam_proxy``
         (None = no proxy)."""
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               self.ORCH_ALIAS, ["10.0.0.1"], 8000, 1, 1)
+                               self.ORCH_ALIAS, ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", family, "w.yaml", self.ALIAS,
-                               ["10.0.0.2"], 8001, 1, 1)
+                               ["192.0.2.2"], 8001, 1, 1)
         fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
         return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
 
@@ -1540,14 +1540,14 @@ class TestApplyRouting:
         assert result["changed"] is True
 
     def test_delegation_routes_to_orchestrator(self, tmp_path):
-        """delegation: orchestrator → base_url 10.0.0.1:8000, model = orch alias."""
+        """delegation: orchestrator → base_url 192.0.2.1:8000, model = orch alias."""
         conf = tmp_path / "config.yaml"
         self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
         tpl = self._tpl(routing={"delegation": "orchestrator"})
         result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
         import yaml
         d = yaml.safe_load(conf.read_text())
-        assert d["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert d["delegation"]["base_url"] == "http://192.0.2.1:8000/v1"
         assert d["delegation"]["model"] == self.ORCH_ALIAS
 
     def test_compaction_routes_to_orchestrator(self, tmp_path):
@@ -1558,7 +1558,7 @@ class TestApplyRouting:
         result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
         import yaml
         aux = yaml.safe_load(conf.read_text())["auxiliary"]["compression"]
-        assert aux["base_url"] == "http://10.0.0.1:8000/v1"
+        assert aux["base_url"] == "http://192.0.2.1:8000/v1"
         assert aux["model"] == self.ORCH_ALIAS
         assert "auxiliary.compression.model" in result["keys_written"]
 
@@ -1574,7 +1574,7 @@ class TestApplyRouting:
         tasks = cluster_template.ROUTING_AUX_TEXT_TASKS
         assert len(tasks) == 8
         for t in tasks:
-            assert aux[t]["base_url"] == "http://10.0.0.1:8000/v1"
+            assert aux[t]["base_url"] == "http://192.0.2.1:8000/v1"
             assert aux[t]["model"] == self.ORCH_ALIAS
         # vision / web_extract must NOT have been written by the auxiliaries consumer
         assert "vision" not in aux
@@ -1590,7 +1590,7 @@ class TestApplyRouting:
         result = self._apply(tpl, plan, conf, served=(self.ALIAS,))
         import yaml
         d = yaml.safe_load(conf.read_text())
-        assert d["delegation"]["base_url"] == "http://10.0.0.2:8001/v1"
+        assert d["delegation"]["base_url"] == "http://192.0.2.2:8001/v1"
         assert d["delegation"]["model"] == self.ALIAS
 
     # ── hard requirement: OMISSION means NOT-WRITTEN ─────────────────────
@@ -1613,7 +1613,7 @@ class TestApplyRouting:
         assert result["keys_written"] == [
             "auxiliary.compression.base_url", "auxiliary.compression.model"]
         # compaction WAS written (positive control: routing still works)
-        assert d["auxiliary"]["compression"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert d["auxiliary"]["compression"]["base_url"] == "http://192.0.2.1:8000/v1"
 
     def test_absent_routing_block_writes_nothing(self, tmp_path):
         """Whole routing block absent (tpl.routing is None) → zero writes; the
@@ -1636,7 +1636,7 @@ class TestApplyRouting:
         not 'write' it, we merely left it)."""
         conf = tmp_path / "config.yaml"
         self._write(conf, delegation={"model": self.ORCH_ALIAS,
-                                      "base_url": "http://10.0.0.1:8000/v1"})
+                                      "base_url": "http://192.0.2.1:8000/v1"})
         before = conf.read_text()
         tpl = self._tpl(routing={"compaction": "orchestrator"})
         result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
@@ -1647,7 +1647,7 @@ class TestApplyRouting:
         assert "delegation.base_url" not in result["keys_written"]
         # and its (matching) bytes are untouched — it was left, not rewritten
         assert d["delegation"] == {"model": self.ORCH_ALIAS,
-                                   "base_url": "http://10.0.0.1:8000/v1"}
+                                   "base_url": "http://192.0.2.1:8000/v1"}
 
     # ── probe-before-write (RISK: alias not advertised at target) ────────
 
@@ -1681,9 +1681,9 @@ class TestApplyRouting:
         ``u.model``, routing must derive the ALIAS candidate from role identity,
         not from the recipe's id — otherwise the alias can never win."""
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               self.CONCRETE, ["10.0.0.1"], 8000, 1, 1)
+                               self.CONCRETE, ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", family, "w.yaml", self.CONCRETE,
-                               ["10.0.0.2"], 8001, 1, 1)
+                               ["192.0.2.2"], 8001, 1, 1)
         fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
         return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
 
@@ -1714,7 +1714,7 @@ class TestApplyRouting:
         import yaml
         d = yaml.safe_load(conf.read_text())
         assert d["delegation"]["model"] == self.ORCH_ALIAS
-        assert d["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert d["delegation"]["base_url"] == "http://192.0.2.1:8000/v1"
 
     def test_ambiguous_served_refuses_consumer(self, tmp_path):
         """Ambiguous probe (≥2 ids served, neither the alias) → refuse to write
@@ -1750,9 +1750,9 @@ class TestApplyRouting:
         'orchestrator' still gets worker-model, and no worker is ever aliased
         orchestrator-model."""
         unit = ti.ResolvedUnit("orchestrator", "reasoning", "w.yaml", self.CONCRETE,
-                               ["10.0.0.2"], 8001, 1, 1)
+                               ["192.0.2.2"], 8001, 1, 1)
         orch = ti.ResolvedUnit("orchestrator", None, "orch.yaml", self.CONCRETE,
-                               ["10.0.0.1"], 8000, 1, 1)
+                               ["192.0.2.1"], 8000, 1, 1)
         plan = ti.ResolvedPlan(template="t", orchestrator=orch,
                                families=[ti.ResolvedFamily("reasoning", 4000, [unit])])
         assert cluster_template._unit_alias(orch, plan) == self.ORCH_ALIAS
@@ -1793,9 +1793,9 @@ class TestApplyRouting:
         # START: concrete ids everywhere (the state that used to get re-emitted)
         self._write(conf,
                     model={"default": self.CONCRETE,
-                           "base_url": "http://10.0.0.1:8000/v1", "provider": "custom"},
+                           "base_url": "http://192.0.2.1:8000/v1", "provider": "custom"},
                     delegation={"model": self.CONCRETE,
-                                "base_url": "http://10.0.0.244:8000/v1"},
+                                "base_url": "http://192.0.2.244:8000/v1"},
                     fallback_providers=[{"model": self.CONCRETE, "name": "fb"}])
         pfile.parent.mkdir(parents=True, exist_ok=True)
         import yaml
@@ -1934,12 +1934,12 @@ class TestPreviewRouting:
     ORCH_ALIAS = "orchestrator-model"
 
     def _plan(self, *, fam_proxy=4000, family="reasoning"):
-        """Plan: orchestrator on 10.0.0.1:8000; one worker family 'reasoning'
-        with a unit on 10.0.0.2:8001 and a proxy on ``fam_proxy``."""
+        """Plan: orchestrator on 192.0.2.1:8000; one worker family 'reasoning'
+        with a unit on 192.0.2.2:8001 and a proxy on ``fam_proxy``."""
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               self.ORCH_ALIAS, ["10.0.0.1"], 8000, 1, 1)
+                               self.ORCH_ALIAS, ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", family, "w.yaml", self.ALIAS,
-                               ["10.0.0.2"], 8001, 1, 1)
+                               ["192.0.2.2"], 8001, 1, 1)
         fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
         return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
 
@@ -1989,12 +1989,12 @@ class TestPreviewRouting:
         assert by_consumer["delegation"]["model"] == self.ALIAS
         assert by_consumer["delegation"]["keys"] == [
             "delegation.base_url", "delegation.model"]
-        assert by_consumer["compaction"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert by_consumer["compaction"]["base_url"] == "http://192.0.2.1:8000/v1"
         assert by_consumer["compaction"]["model"] == self.ORCH_ALIAS
         assert by_consumer["compaction"]["keys"] == [
             "auxiliary.compression.base_url", "auxiliary.compression.model"]
         tasks = cluster_template.ROUTING_AUX_TEXT_TASKS
-        assert by_consumer["auxiliaries"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert by_consumer["auxiliaries"]["base_url"] == "http://192.0.2.1:8000/v1"
         assert by_consumer["auxiliaries"]["model"] == self.ORCH_ALIAS
         assert len(by_consumer["auxiliaries"]["keys"]) == 2 * len(tasks)
         for t in tasks:
@@ -2081,8 +2081,8 @@ class TestProvisionReusedNode:
     container must be stopped BEFORE the launch. A node already correctly
     serving the wanted model must be left running (--ensure idempotency)."""
 
-    def _invoke(self, monkeypatch, tmp_path, status_out, *, orch_nodes=("10.0.0.1",),
-                unit_nodes=("10.0.0.2",)):
+    def _invoke(self, monkeypatch, tmp_path, status_out, *, orch_nodes=("192.0.2.1",),
+                unit_nodes=("192.0.2.2",)):
         """Run _provision_models with a plan of one orchestrator + one worker,
         recording every subprocess call. status_out is the `sparkrun status`
         stdout the mock returns."""
@@ -2122,11 +2122,11 @@ class TestProvisionReusedNode:
         # A container serving qwen27b is running on the worker node the plan
         # wants deepseek on → the stale qwen container must be stopped first.
         status = ("Job: qwen27b\n"
-                  "10.0.0.2\n")
-        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
+                  "192.0.2.2\n")
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("192.0.2.2",))
         stops = self._stops(calls)
         assert len(stops) == 1
-        assert "10.0.0.2" in stops[0]
+        assert "192.0.2.2" in stops[0]
         deepseek_run = self._run_for(calls, "deepseek.yaml")
         assert len(deepseek_run) == 1
         assert calls.index(stops[0]) < calls.index(deepseek_run[0])
@@ -2136,8 +2136,8 @@ class TestProvisionReusedNode:
         # → no stop, no relaunch (the --ensure run is the only run, and there is
         # no stop for the node).
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
-        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
+                  "192.0.2.2\n")
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("192.0.2.2",))
         stops = self._stops(calls)
         assert stops == []  # idempotent — nothing stopped
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
@@ -2145,7 +2145,7 @@ class TestProvisionReusedNode:
     def test_fresh_node_no_spurious_stop(self, monkeypatch, tmp_path):
         # Nothing running on the worker node → it is just launched, no stop.
         status = "Idle hosts (...): 0\n"
-        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("192.0.2.2",))
         stops = self._stops(calls)
         assert stops == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
@@ -2154,14 +2154,14 @@ class TestProvisionReusedNode:
         # A node running a container but NOT part of the plan is still stopped
         # by the existing not-in-plan logic.
         status = ("Job: qwen27b\n"
-                  "10.0.0.1 10.0.0.2 10.0.0.3\n")
+                  "192.0.2.1 192.0.2.2 192.0.2.3\n")
         calls = self._invoke(monkeypatch, tmp_path, status,
-                             orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",))
-        # 10.0.0.3 is not in the plan → gets stopped via `_running_nodes_via_sparkrun`
+                             orch_nodes=("192.0.2.1",), unit_nodes=("192.0.2.2",))
+        # 192.0.2.3 is not in the plan → gets stopped via `_running_nodes_via_sparkrun`
         stop_nodes = {n for stop in self._stops(calls) for n in stop if n.count(".") == 3}
-        assert "10.0.0.3" in stop_nodes
-        # 10.0.0.2 serves the wanted model → left running
-        assert "10.0.0.2" not in stop_nodes
+        assert "192.0.2.3" in stop_nodes
+        # 192.0.2.2 serves the wanted model → left running
+        assert "192.0.2.2" not in stop_nodes
 
 
 class TestProvisionTimeout:
@@ -2186,7 +2186,7 @@ class TestProvisionTimeout:
         monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "test-model", ["10.0.0.1"], 8000, 1, 1)
+                               "test-model", ["192.0.2.1"], 8000, 1, 1)
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
         cluster_template._provision_models(plan, do_launch=True)
 
@@ -2252,9 +2252,9 @@ class TestServedModelNameAliases:
         # SERVING_JSON (t_501fb7f1 leak locus).
         monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
         orch = ti.ResolvedUnit("orchestrator", None, orch_recipe,
-                               orch_model, ["10.0.0.1"], 8000, 1, 1)
+                               orch_model, ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", worker_recipe,
-                               worker_model, ["10.0.0.2"], 8000, 1, 1)
+                               worker_model, ["192.0.2.2"], 8000, 1, 1)
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
         cluster_template._provision_models(plan, do_launch=True)
@@ -2385,10 +2385,10 @@ class TestServedModelNameAliases:
 
         # A worker unit with a misleading role "orchestrator".
         unit = ti.ResolvedUnit("orchestrator", "coding", "~/recipes/deepseek.yaml",
-                               "deepseek", ["10.0.0.2"], 8001, 1, 1)
+                               "deepseek", ["192.0.2.2"], 8001, 1, 1)
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch", ["10.0.0.1"], 8000, 1, 1)
+                               "orch", ["192.0.2.1"], 8000, 1, 1)
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
         cluster_template._provision_models(plan, do_launch=True)
 
@@ -2412,7 +2412,7 @@ class TestServedModelNameAliases:
         monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch", ["10.0.0.1", "10.0.0.2"], 9000, 2, 1)
+                               "orch", ["192.0.2.1", "192.0.2.2"], 9000, 2, 1)
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
         cluster_template._provision_models(plan, do_launch=True)
         orch_run = self._runs(calls, "orch.yaml")[0]
@@ -2433,11 +2433,11 @@ class TestServedModelNameAliases:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch", ["10.0.0.1"], 8000, 1, 1)
+                               "orch", ["192.0.2.1"], 8000, 1, 1)
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
         result = cluster_template._provision_models(plan, do_launch=False)
         assert calls == []
-        assert result["provisioned"] == ["10.0.0.1:8000:~/recipes/orch.yaml"]
+        assert result["provisioned"] == ["192.0.2.1:8000:~/recipes/orch.yaml"]
         assert result["note"].startswith("dry-run")
 
 
@@ -2465,7 +2465,7 @@ class TestProvisionRecreateOnChange:
     """
 
     def _invoke(self, monkeypatch, tmp_path, status_out, *, recreate=False,
-                orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",),
+                orch_nodes=("192.0.2.1",), unit_nodes=("192.0.2.2",),
                 worker_serve_cmd="__UNSET__", orch_serve_cmd="__UNSET__"):
         """Run _provision_models with a plan of one orchestrator + one worker,
         recording every subprocess call. status_out is the `sparkrun status`
@@ -2529,14 +2529,14 @@ class TestProvisionRecreateOnChange:
     def _expected_worker_cmd():
         """The rendered serve command for the worker unit in _invoke's plan."""
         return cluster_template._render_serve_cmd(
-            "hscc", "10.0.0.2", 8000, "~/recipes/deepseek.yaml",
+            "hscc", "192.0.2.2", 8000, "~/recipes/deepseek.yaml",
             "worker-model", 1, "deepseek")
 
     @staticmethod
     def _expected_orch_cmd():
         """The rendered serve command for the orchestrator in _invoke's plan."""
         return cluster_template._render_serve_cmd(
-            "hscc", "10.0.0.1", 8000, "~/recipes/orch.yaml",
+            "hscc", "192.0.2.1", 8000, "~/recipes/orch.yaml",
             "orchestrator-model", 1, "orch")
 
     # ── recreate=True: a changed unit's command reaches vLLM ────────────────
@@ -2547,19 +2547,19 @@ class TestProvisionRecreateOnChange:
         re-run, so a changed serve command actually reaches vLLM, and it is
         reported loudly in ``recreated``."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         # the running unit is stopped (force-recreate) then re-run
         stops = self._stops(calls)
         assert len(stops) >= 1
-        assert "10.0.0.2" in stops[0]
+        assert "192.0.2.2" in stops[0]
         run = self._run_for(calls, "deepseek.yaml")
         assert len(run) == 1
         # stop happens BEFORE the relaunch
         assert calls.index(stops[0]) < calls.index(run[0])
         # reported loudly
-        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+        assert result["recreated"] == ["192.0.2.2:8000:deepseek.yaml"]
         assert "recreated" in result["note"]
         assert result["status"] == "ok"  # it actually applied, so no drift warning
         assert result["warnings"] == []
@@ -2568,9 +2568,9 @@ class TestProvisionRecreateOnChange:
         """The recreated deepseek unit carries the CURRENT rendered serve command
         (concrete + alias) — proving the alias reaches vLLM after the recreate."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         run = self._run_for(calls, "deepseek.yaml")[0]
         idx = run.index("--served-model-name")
         assert run[idx + 1] == "deepseek worker-model"
@@ -2582,7 +2582,7 @@ class TestProvisionRecreateOnChange:
         unit is simply left to --ensure's normal handling (no stop)."""
         status = ("Idle hosts (...): 0\n")
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         assert self._stops(calls) == []      # nothing running → nothing stopped
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert result["status"] == "ok"
@@ -2594,7 +2594,7 @@ class TestProvisionRecreateOnChange:
         spurious stop, no recreate entry (nothing pre-existed to recreate)."""
         status = ("Idle hosts (...): 0\n")
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         # idle → nothing already running → fresh --ensure launch, no stop
         assert self._stops(calls) == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
@@ -2608,11 +2608,11 @@ class TestProvisionRecreateOnChange:
         apply must NOT emit any drift warning. Silence here is what makes the
         warning meaningful."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         # The worker's previous provision recorded the SAME command we render now.
         calls, result = self._invoke(
             monkeypatch, tmp_path, status, recreate=False,
-            unit_nodes=("10.0.0.2",),
+            unit_nodes=("192.0.2.2",),
             worker_serve_cmd=self._expected_worker_cmd())
         # no stop (already running), single --ensure no-op run
         assert self._stops(calls) == []
@@ -2627,16 +2627,16 @@ class TestProvisionRecreateOnChange:
         one is REAL drift: it is named, WHAT changed is reported, and it is
         skipped-with-warning (status flips to warn) unless --force-recreate."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         # Recorded with the OLD alias-less command — the current render adds the
         # worker-model alias, so the two genuinely differ.
         old_cmd = ["sparkrun", "run", "~/recipes/deepseek.yaml",
-                   "--cluster", "hscc", "--hosts", "10.0.0.2",
+                   "--cluster", "hscc", "--hosts", "192.0.2.2",
                    "--port", "8000", "--no-follow", "--ensure",
                    "--served-model-name", "deepseek"]
         calls, result = self._invoke(
             monkeypatch, tmp_path, status, recreate=False,
-            unit_nodes=("10.0.0.2",), worker_serve_cmd=old_cmd)
+            unit_nodes=("192.0.2.2",), worker_serve_cmd=old_cmd)
         # same recipe already running → no stop, single --ensure run
         assert self._stops(calls) == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
@@ -2645,7 +2645,7 @@ class TestProvisionRecreateOnChange:
         assert "skipped with command drift" in result["note"]
         assert len(result["warnings"]) == 1
         w0 = result["warnings"][0]
-        assert "10.0.0.2:8000:deepseek.yaml" in w0
+        assert "192.0.2.2:8000:deepseek.yaml" in w0
         assert "--force-recreate" in w0
         # WHAT changed is named: the alias flag differs (old alias-less → alias)
         assert "--served-model-name" in w0
@@ -2662,11 +2662,11 @@ class TestProvisionRecreateOnChange:
         back to the conservative 'drift not checked' wording — never a false
         'command drift' claim."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         # seed the worker unit present but WITHOUT a serve_cmd (pre-upgrade).
         calls, result = self._invoke(
             monkeypatch, tmp_path, status, recreate=False,
-            unit_nodes=("10.0.0.2",), worker_serve_cmd=None)
+            unit_nodes=("192.0.2.2",), worker_serve_cmd=None)
         assert self._stops(calls) == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert result["status"] == "warn"
@@ -2681,18 +2681,18 @@ class TestProvisionRecreateOnChange:
         current command, reports it in ``recreated`` (OK not warn), AND refreshes
         its recorded serve_cmd so a later apply sees no drift."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
-                  "10.0.0.2\n")
+                  "192.0.2.2\n")
         old_cmd = ["sparkrun", "run", "~/recipes/deepseek.yaml",
-                   "--cluster", "hscc", "--hosts", "10.0.0.2",
+                   "--cluster", "hscc", "--hosts", "192.0.2.2",
                    "--port", "8000", "--no-follow", "--ensure",
                    "--served-model-name", "deepseek"]
         calls, result = self._invoke(
             monkeypatch, tmp_path, status, recreate=True,
-            unit_nodes=("10.0.0.2",), worker_serve_cmd=old_cmd)
+            unit_nodes=("192.0.2.2",), worker_serve_cmd=old_cmd)
         assert len(self._stops(calls)) >= 1          # stopped first
         assert result["status"] == "ok"              # actually applied, no drift
         assert result["warnings"] == []
-        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+        assert result["recreated"] == ["192.0.2.2:8000:deepseek.yaml"]
         # record refreshed to the current command
         import json
         persisted = json.loads((tmp_path / "serving.json").read_text())
@@ -2831,7 +2831,7 @@ class TestTpExceedsSpanRefused:
         monkeypatch.setattr(cluster_template, "SERVING_JSON",
                             tmp_path / "serving.json")
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
-                               "orch", ["10.0.0.1"], 8000, 1, 1)
+                               "orch", ["192.0.2.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
                                "deepseek", list(unit_nodes), 8000, tp, 1)
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
@@ -2843,7 +2843,7 @@ class TestTpExceedsSpanRefused:
 
     def test_tp2_on_one_host_is_refused_and_not_launched(self, monkeypatch, tmp_path):
         runs, result = self._run(monkeypatch, tmp_path,
-                                 unit_nodes=("10.0.0.2",), tp=2)
+                                 unit_nodes=("192.0.2.2",), tp=2)
         # the doomed unit must NOT be launched
         assert runs == []
         failures = [f for f in result["failed"]
@@ -2858,7 +2858,7 @@ class TestTpExceedsSpanRefused:
         """The guard must not over-reach: tp == host count is the normal
         multi-node case and must still be provisioned."""
         runs, result = self._run(monkeypatch, tmp_path,
-                                 unit_nodes=("10.0.0.2", "10.0.0.3"), tp=2)
+                                 unit_nodes=("192.0.2.2", "192.0.2.3"), tp=2)
         assert len(runs) == 1
         assert "--tp" in runs[0] and "2" in runs[0]
         assert [f for f in result["failed"]
@@ -2866,7 +2866,7 @@ class TestTpExceedsSpanRefused:
 
     def test_tp1_single_host_unaffected(self, monkeypatch, tmp_path):
         runs, result = self._run(monkeypatch, tmp_path,
-                                 unit_nodes=("10.0.0.2",), tp=1)
+                                 unit_nodes=("192.0.2.2",), tp=1)
         assert len(runs) == 1
         assert [f for f in result["failed"]
                 if "deepseek.yaml" in str(f.get("recipe"))] == []
@@ -3133,7 +3133,7 @@ class TestOrchestratorProfilePooling:
 
     def test_pinned_orch_profile_is_repointed(self):
         cfg = {"model": {"default": "orchestrator-model",
-                         "base_url": "http://10.0.0.1:8000/v1"}}
+                         "base_url": "http://192.0.2.1:8000/v1"}}
         out = cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
         assert out["model"]["base_url"] == self.POOL
         assert out["model"]["default"] == "orchestrator-model"
@@ -3192,7 +3192,7 @@ class TestWorkerRewriteRespectsOrchestratorIntent:
     def test_the_two_passes_together_are_stable(self):
         """worker pass then orch pass, twice: must converge, not flip-flop."""
         cfg = {"model": {"default": "orchestrator-model",
-                         "base_url": "http://10.0.0.1:8000/v1"}}
+                         "base_url": "http://192.0.2.1:8000/v1"}}
         for _ in range(2):
             cluster_template._set_worker_model_in_profile(
                 cfg, "worker-model", self.POOL_PORT)
@@ -3206,11 +3206,11 @@ class TestWorkerRewriteRespectsOrchestratorIntent:
 # Placeholder nodes follow the documented 10.0.0.x LAN convention (address
 # guard); the live operator hosts never appear in fixtures.
 
-_UNIF_NODE_A = "10.0.0.1"
-_UNIF_NODE_B = "10.0.0.2"
-_UNIF_NODE_C = "10.0.0.3"
-_UNIF_NODE_V1 = "http://10.0.0.1:8000/v1"
-_UNIF_NODE_DEFAULT = "10.0.0.1:8000"
+_UNIF_NODE_A = "192.0.2.1"
+_UNIF_NODE_B = "192.0.2.2"
+_UNIF_NODE_C = "192.0.2.3"
+_UNIF_NODE_V1 = "http://192.0.2.1:8000/v1"
+_UNIF_NODE_DEFAULT = "192.0.2.1:8000"
 
 
 class TestUniformPoolProviderEndpoints:
@@ -3526,7 +3526,7 @@ class TestProvisionAlreadyServingSkip:
     _expected_worker_cmd = staticmethod(TestProvisionRecreateOnChange._expected_worker_cmd)
 
     @staticmethod
-    def _serving(monkeypatch, up=("10.0.0.2",)):
+    def _serving(monkeypatch, up=("192.0.2.2",)):
         seen = []
 
         def probe(url, timeout=2):
@@ -3538,45 +3538,45 @@ class TestProvisionAlreadyServingSkip:
 
     def test_serving_same_recipe_unit_is_not_launched(self, monkeypatch, tmp_path):
         seen = self._serving(monkeypatch)
-        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        status = "Job: ~/recipes/deepseek.yaml\n192.0.2.2\n"
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
-                                     unit_nodes=("10.0.0.2",),
+                                     unit_nodes=("192.0.2.2",),
                                      worker_serve_cmd=self._expected_worker_cmd())
         assert self._run_for(calls, "deepseek.yaml") == []
-        assert "http://10.0.0.2:8000/v1/models" in seen
-        assert result["skipped_serving"] == ["10.0.0.2:8000:deepseek.yaml"]
-        assert "10.0.0.2:8000:deepseek.yaml" in result["provisioned"]
+        assert "http://192.0.2.2:8000/v1/models" in seen
+        assert result["skipped_serving"] == ["192.0.2.2:8000:deepseek.yaml"]
+        assert "192.0.2.2:8000:deepseek.yaml" in result["provisioned"]
         assert result["status"] == "ok" and result["warnings"] == []
 
     def test_hollow_or_unreachable_unit_still_launches(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cluster_template, "_unit_models_probe",
                             lambda url, timeout=2: {"ok": True, "models": [], "error": None})
-        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        status = "Job: ~/recipes/deepseek.yaml\n192.0.2.2\n"
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert "skipped_serving" not in result
 
     def test_recreate_ignores_the_skip(self, monkeypatch, tmp_path):
         self._serving(monkeypatch)
-        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        status = "Job: ~/recipes/deepseek.yaml\n192.0.2.2\n"
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
-                                     unit_nodes=("10.0.0.2",))
+                                     unit_nodes=("192.0.2.2",))
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
-        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+        assert result["recreated"] == ["192.0.2.2:8000:deepseek.yaml"]
 
     def test_tp_span_needs_every_node_serving(self, monkeypatch, tmp_path):
-        self._serving(monkeypatch, up=("10.0.0.2",))         # peer 10.0.0.3 silent
-        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n10.0.0.3\n"
+        self._serving(monkeypatch, up=("192.0.2.2",))         # peer 192.0.2.3 silent
+        status = "Job: ~/recipes/deepseek.yaml\n192.0.2.2\n192.0.2.3\n"
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
-                                     unit_nodes=("10.0.0.2", "10.0.0.3"))
+                                     unit_nodes=("192.0.2.2", "192.0.2.3"))
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
 
     def test_drifted_serving_unit_still_reports_drift(self, monkeypatch, tmp_path):
         self._serving(monkeypatch)
-        status = "Job: ~/recipes/deepseek.yaml\n10.0.0.2\n"
+        status = "Job: ~/recipes/deepseek.yaml\n192.0.2.2\n"
         calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
-                                     unit_nodes=("10.0.0.2",),
+                                     unit_nodes=("192.0.2.2",),
                                      worker_serve_cmd=["sparkrun", "run", "old-flags"])
         assert self._run_for(calls, "deepseek.yaml") == []
         assert result["status"] == "warn"
@@ -3607,7 +3607,7 @@ def test_unit_probe_falls_back_to_plain_http_without_the_daemon(monkeypatch):
                         lambda url, timeout=2: _Resp(b'{"data":[{"id":"m"},{"id":"worker-model"}]}'))
     # the autouse conftest stub replaced the seam; call the real implementation
     real = cluster_template.__dict__["_plain_models_probe"]
-    assert real("http://10.0.0.2:8000/v1/models") == {"ok": True, "models": ["m", "worker-model"], "error": None}
+    assert real("http://192.0.2.2:8000/v1/models") == {"ok": True, "models": ["m", "worker-model"], "error": None}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda url, timeout=2: (_ for _ in ()).throw(OSError("refused")))
-    assert real("http://10.0.0.2:8000/v1/models")["ok"] is False
+    assert real("http://192.0.2.2:8000/v1/models")["ok"] is False

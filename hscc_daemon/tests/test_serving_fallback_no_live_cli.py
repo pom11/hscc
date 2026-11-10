@@ -60,14 +60,14 @@ class TestFallbackGoesThroughTheResolutionSeam:
     def test_missing_cluster_json_runs_the_resolved_cli_not_a_bare_name(
             self, tmp_path, monkeypatch):
         cli, log = _fake_cli(tmp_path, json.dumps(
-            [{"name": "hscc", "hosts": ["10.0.0.7"], "default": True}]))
+            [{"name": "hscc", "hosts": ["192.0.2.7"], "default": True}]))
         monkeypatch.setenv("HSCC_SPARKRUN_BIN", str(cli))
         from hscc_daemon import sparkrun_bin
         sparkrun_bin.reset_cache()
         try:
             serving = _clean_serving(tmp_path, monkeypatch)
             serving.resolve_cluster_config()
-            assert serving.PRIMARY_NODE == "10.0.0.7", (
+            assert serving.PRIMARY_NODE == "192.0.2.7", (
                 "fallback did not resolve from the fake cluster list")
             calls = log.read_text().splitlines() if log.exists() else []
             assert calls, "fallback never invoked sparkrun"
@@ -87,7 +87,7 @@ class TestFallbackGoesThroughTheResolutionSeam:
         rewrite cannot silently regress.
         """
         cli, log = _fake_cli(tmp_path, json.dumps(
-            [{"name": "hscc", "hosts": ["10.0.0.9"], "default": True}]))
+            [{"name": "hscc", "hosts": ["192.0.2.9"], "default": True}]))
         monkeypatch.setenv("HSCC_SPARKRUN_BIN", str(cli))
         from hscc_daemon import sparkrun_bin, serving
         sparkrun_bin.reset_cache()

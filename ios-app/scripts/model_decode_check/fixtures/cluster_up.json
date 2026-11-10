@@ -5,7 +5,7 @@
   "plan": [
     {
       "kind": "orchestrator",
-      "nodes": ["10.0.0.1"],
+      "nodes": ["192.0.2.1"],
       "port": 8788,
       "cmd": ["sparkrun", "run", "hscc-orch"],
       "keepalive": true

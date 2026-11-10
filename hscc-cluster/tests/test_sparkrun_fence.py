@@ -53,7 +53,7 @@ class TestDetectionIsExact:
     def test_live_cli_argv_including_stop_all_is_violation(self, expect_block):
         if not sf.live_sparkrun():
             pytest.skip("no sparkrun on PATH")
-        assert sf.check(["sparkrun", "stop", "--all", "--hosts", "10.0.0.2"])
+        assert sf.check(["sparkrun", "stop", "--all", "--hosts", "192.0.2.2"])
 
     def test_shell_string_form_is_violation(self, expect_block):
         if not sf.live_sparkrun():
@@ -161,7 +161,7 @@ class TestExecLayerRaisesInsteadOfRunning:
         if not sf.live_sparkrun():
             pytest.skip("no sparkrun on PATH")
         with pytest.raises(sf.SparkrunFenceViolation):
-            subprocess.Popen(["sparkrun", "stop", "--all", "--hosts", "10.0.0.2"])
+            subprocess.Popen(["sparkrun", "stop", "--all", "--hosts", "192.0.2.2"])
 
     def test_fenced_run_of_fake_sparkrun_execs_normally(self, tmp_path):
         fake = tmp_path / "sparkrun"

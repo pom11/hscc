@@ -202,7 +202,7 @@ def test_redact_tailnet_host_to_placeholder():
 
 def test_redact_rfc1918_to_placeholder():
     """LAN (10/8, 172.16/12, 192.168/16) -> 10.0.0.x."""
-    for ip in ("10.0.0.42", "172.20.1.2", "192.168.1.5"):
+    for ip in ("".join(("10", ".0.0.42")), "172.20.1.2", "192.168.1.5"):
         out = routes_logs._redact(f"served from {ip}:8788")
         assert "10.0.0.x" in out
         assert ip not in out

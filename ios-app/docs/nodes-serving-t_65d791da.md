@@ -49,8 +49,8 @@ passed through by `hscc-api/routes_cluster.py` `handle_cluster_hosts`):
 
 ```
 Job: <recipe.yaml>  (tp=2, pp=1)  [<container_id>]  (2 container(s))
-  node_0     10.0.0.1     Up 12 hours    <image>
-  node_1     10.0.0.2     Up 12 hours    <image>
+  node_0     10.0.0.x     Up 12 hours    <image>
+  node_1     10.0.0.x     Up 12 hours    <image>
 ```
 
 `Sources/HSCC/ServingPlacement.swift` parses it. Three rules worth knowing

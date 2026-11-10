@@ -45,11 +45,11 @@ def _reset_engine_wedge_state():
 
 UNIT_ORCH = {
     "id": "orch", "role": "orchestrator", "model": "m1",
-    "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000, "tp": 2,
+    "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000, "tp": 2,
 }
 UNIT_WORKER = {
     "id": "worker-247", "role": "worker", "keepalive": True, "model": "m2",
-    "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000, "tp": 2,
+    "nodes": ["192.0.2.247", "192.0.2.248"], "port": 8000, "tp": 2,
 }
 
 
@@ -450,11 +450,11 @@ class TestEngineWedgeLoadAware:
         monkeypatch.setattr(throughput, "fetch_node_metrics", fake_fetch)
 
         # busy (running+waiting > 0)
-        assert health._unit_busy("10.0.0.1", "8000") is True
+        assert health._unit_busy("192.0.2.1", "8000") is True
         # idle (both zero)
-        assert health._unit_busy("10.0.0.1", "9000") is False
+        assert health._unit_busy("192.0.2.1", "9000") is False
         # unreachable / no signal
-        assert health._unit_busy("10.0.0.1", "7000") is None
+        assert health._unit_busy("192.0.2.1", "7000") is None
 
     def test_busy_verdict_resets_wedge_streak_then_idle_declares(self, monkeypatch):
         """A unit that was busy (consecutive-failures reset) but then goes

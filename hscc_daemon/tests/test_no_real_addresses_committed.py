@@ -50,29 +50,34 @@ def test_no_real_operator_address_in_tracked_files():
 # The card's core requirement: test and hook share ONE detector. These assert it
 # structurally, so a future edit cannot quietly fork the pattern again.
 
-# Literal fragment of the live-LAN branch of the regex, assembled so this file
-# (which must not itself look like a second implementation) stays clean.
-_LAN_BRANCH_LITERAL = "192" + r"\.168" + r"\.88" + r"\.\d"
+# Literal fragments of BOTH live-LAN branches of the regex, assembled so this
+# file (which must not itself look like a second implementation) stays clean.
+_LAN_BRANCH_LITERALS = (
+    "192" + r"\.168" + r"\.88" + r"\.\d",   # the old LAN
+    "10" + r"\.0\.0\." + r"\d",              # the current LAN (missed before this card)
+)
 
 
 def test_forbidden_pattern_is_defined_in_exactly_one_tracked_file():
     """No competing implementation of the detector may exist in the repo.
 
     Scans tracked files PLUS the detector itself, so the assertion is meaningful
-    both before and after this card's files land.
+    both before and after this card's files land. Both live-LAN branches are
+    checked: the current one had been missed by the guard until this card.
     """
     detector = "scripts/address_guard.py"
     candidates = set(address_guard.tracked_paths(REPO)) | {detector}
-    holders = sorted(
-        rel
-        for rel in candidates
-        if rel.endswith((".py", ".sh", ".ts", ".js", ".swift"))
-        and _LAN_BRANCH_LITERAL in (REPO / rel).read_text(errors="ignore")
-    )
-    assert holders == [detector], (
-        "the forbidden-address regex must live in exactly one place, found in: "
-        + ", ".join(holders)
-    )
+    for literal in _LAN_BRANCH_LITERALS:
+        holders = sorted(
+            rel
+            for rel in candidates
+            if rel.endswith((".py", ".sh", ".ts", ".js", ".swift"))
+            and literal in (REPO / rel).read_text(errors="ignore")
+        )
+        assert holders == [detector], (
+            "the forbidden-address regex must live in exactly one place, found in: "
+            + ", ".join(holders)
+        )
 
 
 def test_hook_delegates_detection_instead_of_reimplementing_it():
@@ -82,7 +87,7 @@ def test_hook_delegates_detection_instead_of_reimplementing_it():
     text = hook.read_text()
     assert "address_guard.py" in text, "hook must call the shared detector"
     assert "--staged" in text, "hook must scan the STAGED tree, not the working tree"
-    for digits in ("192", "100.64", "100.6"):
+    for digits in ("192", "10.0.0", "100.64", "100.6"):
         assert digits not in text, (
             f"hook carries its own address pattern ({digits}) — use the shared detector"
         )

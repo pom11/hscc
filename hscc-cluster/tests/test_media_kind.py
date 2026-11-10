@@ -49,7 +49,7 @@ class FakeTopo:
 
 
 def _topo(n_workers=2, vram=120.0):
-    return FakeTopo(FakeNode("10.0.0.1"),
+    return FakeTopo(FakeNode("192.0.2.1"),
                     [FakeNode(f"10.0.0.{2+i}", vram) for i in range(n_workers)])
 
 
@@ -170,14 +170,14 @@ class TestKindRoundTrip:
                    {"recipe": "img.yaml", "kind": "image"}]}]}
         tpl = ti.ClusterTemplate.from_dict(raw)
         errs, _warns = ct._structural_validate(
-            raw, tpl, cluster_ips=["10.0.0.1"], recipe_exists=lambda r: True)
+            raw, tpl, cluster_ips=["192.0.2.1"], recipe_exists=lambda r: True)
         assert errs == []
         # A near-miss spelling stays a hard structural error.
         raw2 = json.loads(json.dumps(raw))
         raw2["families"][0]["models"][0]["knd"] = "image"
         tpl2 = ti.ClusterTemplate.from_dict(raw2)
         errs2, _ = ct._structural_validate(
-            raw2, tpl2, cluster_ips=["10.0.0.1"], recipe_exists=lambda r: True)
+            raw2, tpl2, cluster_ips=["192.0.2.1"], recipe_exists=lambda r: True)
         assert any("unknown key 'knd'" in e for e in errs2)
 
 
@@ -207,7 +207,7 @@ class TestKindResolve:
     def test_explicit_nodes_branch_carries_it(self):
         t = ti.ClusterTemplate.from_dict({
             "name": "x", "version": 3, "orchestrator": "o.yaml",
-            "families": [{"name": "media", "nodes": ["10.0.0.2"],
+            "families": [{"name": "media", "nodes": ["192.0.2.2"],
                           "models": [_model_dict(kind="video")]}]})
         plan = ti.resolve(t, _topo(2), _coster=_coster(per_gpu=30))
         assert plan.families[0].units[0].kind == "video"
@@ -229,7 +229,7 @@ class TestKindResolve:
     def test_resolved_unit_defaults_to_chat(self):
         # Hand-built units (heal paths, tests) that predate media keep working.
         u = ti.ResolvedUnit("worker", "coding", "m.yaml", "M",
-                            ["10.0.0.2"], 8000, 1, 1)
+                            ["192.0.2.2"], 8000, 1, 1)
         assert u.kind == "chat"
 
 
@@ -240,9 +240,9 @@ class TestKindNeverEntersRender:
         # The §4 drift guarantee, stated the strongest way: two units with the
         # same recipe and different kind render BYTE-EQUAL argv — not merely
         # equivalent under normalization. `kind` is invisible to sparkrun.
-        base = ct._render_serve_cmd("hscc", "10.0.0.2", 8000, "/r/media.yaml",
+        base = ct._render_serve_cmd("hscc", "192.0.2.2", 8000, "/r/media.yaml",
                                     "worker-model", 1, "media", 0.25)
-        assert base == ct._render_serve_cmd("hscc", "10.0.0.2", 8000,
+        assert base == ct._render_serve_cmd("hscc", "192.0.2.2", 8000,
                                             "/r/media.yaml", "worker-model",
                                             1, "media", 0.25)
         assert "kind" not in " ".join(base)
@@ -252,16 +252,16 @@ class TestKindNeverEntersRender:
         # A recorded image-unit command vs the command an apply renders after
         # the operator flips kind to video: equal => no drift warning, no
         # recreate. The recipe change remains real drift (control below).
-        recorded = ct._render_serve_cmd("hscc", "10.0.0.2", 8000,
+        recorded = ct._render_serve_cmd("hscc", "192.0.2.2", 8000,
                                         "/r/media.yaml", "worker-model",
                                         1, "media", 0.25)
-        flipped = ct._render_serve_cmd("hscc", "10.0.0.2", 8000,
+        flipped = ct._render_serve_cmd("hscc", "192.0.2.2", 8000,
                                        "/r/media.yaml", "worker-model",
                                        1, "media", 0.25)  # kind: video renders the same
         assert ct.serve_cmds_equivalent(recorded, flipped)
         assert ct._diff_serve_cmds(recorded, flipped) == ""
         # Control: a RECIPE change IS real drift and must still report.
-        new_recipe = ct._render_serve_cmd("hscc", "10.0.0.2", 8000,
+        new_recipe = ct._render_serve_cmd("hscc", "192.0.2.2", 8000,
                                           "/r/other.yaml", "worker-model",
                                           1, "media", 0.25)
         assert not ct.serve_cmds_equivalent(recorded, new_recipe)
@@ -353,7 +353,7 @@ class TestShippedMediaTemplate:
         assert set(by_kind) == {"chat", "image", "video"}
         assert by_kind["image"].node != by_kind["video"].node
         # placement itself: every node belongs to the fake topology
-        assert {u.node for u in units} <= {"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+        assert {u.node for u in units} <= {"192.0.2.1", "192.0.2.2", "192.0.2.3"}
 
     def test_serving_json_marks_exactly_the_media_units(self):
         tpl = self._load()

@@ -1,6 +1,6 @@
 {
  "by_node": {
-  "http://10.0.0.3:8000/metrics": {
+  "http://192.0.2.3:8000/metrics": {
    "prompt_tokens": 6,
    "generation_tokens": 5,
    "running": 0,

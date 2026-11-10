@@ -167,7 +167,7 @@ class TestFixtureFidelity:
         # file never itself carries the live-network prefix.
         live_prefix = "192" + ".168.88."
         assert live_prefix not in text
-        assert "10.0.0.244:8000" in text  # redaction applied, host kept shape
+        assert "192.0.2.244:8000" in text  # redaction applied, host kept shape
 
 
 # ── Rule 1 — in-process replay of the 01:38 race ────────────────────────────
@@ -305,10 +305,10 @@ class TestStopTarget:
     def test_serving_vllm_stop_cmd_refuses_targetless(self, tmp_path):
         """Unit-level rule 3: no recipe ⇒ None (unbuildable), never a silent
         no-op form."""
-        assert serving.vllm_stop_cmd(node="10.0.0.1", recipe="") is None
-        assert serving.vllm_stop_cmd(node="10.0.0.1", recipe=None) is None
-        cmd = serving.vllm_stop_cmd(node="10.0.0.1", recipe="/r/model.yaml")
-        assert cmd == ["sparkrun", "stop", "/r/model.yaml", "--hosts", "10.0.0.1"]
+        assert serving.vllm_stop_cmd(node="192.0.2.1", recipe="") is None
+        assert serving.vllm_stop_cmd(node="192.0.2.1", recipe=None) is None
+        cmd = serving.vllm_stop_cmd(node="192.0.2.1", recipe="/r/model.yaml")
+        assert cmd == ["sparkrun", "stop", "/r/model.yaml", "--hosts", "192.0.2.1"]
 
 
 # ── Rule 2 — never launch a cluster-up-owned unit ───────────────────────────
@@ -352,7 +352,7 @@ class TestRegisteredUnitRefusal:
         serving._materialize_topology_defaults()
         path = tmp_hfcc_dir / "serving.json"
         path.write_text(json.dumps({"port": 8000, "units": [{
-            "id": "other", "role": "worker", "nodes": ["10.0.0.99"],
+            "id": "other", "role": "worker", "nodes": ["192.0.2.99"],
             "recipe": "/tmp/models/x.yaml", "port": 8001}]}))
         monkeypatch.setattr(serving, "SERVING_JSON", str(path))
         serving.VLLM_RECIPE = "/tmp/models/orch-recipe.yaml"

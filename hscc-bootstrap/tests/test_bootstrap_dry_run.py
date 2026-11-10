@@ -39,7 +39,7 @@ TREE_DIRS = ("hscc-bootstrap", "hscc_daemon", "hscc-cli", "hscc-cluster",
              "hscc-roles", "hscc-skills")
 
 FAKE_CLUSTER = json.dumps([
-    {"name": "fabricated", "hosts": ["10.0.0.1"], "user": "op",
+    {"name": "fabricated", "hosts": ["192.0.2.1"], "user": "op",
      "cache_dir": "", "default": True}])
 
 

@@ -43,8 +43,8 @@ import pytest
 import migrate_systemd_unit_name as m
 
 REPO = str(Path(m.__file__).resolve().parents[1])
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 NEW = m.UNIT_NAME
 OLD = m.LEGACY_UNIT_NAME
 
@@ -208,7 +208,7 @@ def test_probe_rc0_without_unit_lines_is_a_fault():
 
 
 @pytest.mark.parametrize("res", [
-    {"ok": False, "error": "ssh: connect to host 10.0.0.1 port 22: Connection refused"},
+    {"ok": False, "error": "ssh: connect to host 192.0.2.1 port 22: Connection refused"},
     {"ok": True, "stdout": "", "code": 255},
     "a transport that ignores its own contract",
 ])

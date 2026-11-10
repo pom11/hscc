@@ -15,8 +15,8 @@ import Foundation
 // `live_status` as-is). Its shape:
 //
 //   Job: <recipe.yaml>  (tp=2, pp=1)  [<container_id>]  (2 container(s))
-//     node_0     10.0.0.1     Up 12 hours    <image>
-//     node_1     10.0.0.2     Up 12 hours    <image>
+//     node_0     192.0.2.1     Up 12 hours    <image>
+//     node_1     192.0.2.2     Up 12 hours    <image>
 //     logs: sparkrun logs <container_id>
 //     stop: sparkrun stop <container_id>
 //
@@ -48,7 +48,7 @@ import Foundation
 
 /// One node with the serving units that run on it.
 struct ServingNodeGroup: Identifiable {
-    /// The node's IP as the cluster reported it (`10.0.0.1`).
+    /// The node's IP as the cluster reported it (`192.0.2.1`).
     let ip: String
     /// The host's role from `/v1/cluster/hosts` (`gateway` / `worker`), nil when
     /// the live report named a node the host list does not carry.
@@ -203,7 +203,7 @@ enum ServingPlacement {
         }
     }
 
-    /// The short tail the topology strip uses (`.244` for `10.0.0.244`), so the
+    /// The short tail the topology strip uses (`.244` for `192.0.2.244`), so the
     /// section headers and the strip's dots name a node the same way.
     static func nodeTail(_ ip: String) -> String {
         guard ip.contains(".") else { return ip }
@@ -225,7 +225,7 @@ enum ServingPlacement {
     }
 
     /// The first IPv4-looking token on a line — the node's address. Node lines
-    /// look like `node_0  10.0.0.1  Up 12 hours  <image>` and `solo  10.0.0.3 …`;
+    /// look like `node_0  192.0.2.1  Up 12 hours  <image>` and `solo  192.0.2.3 …`;
     /// `logs:`/`stop:` lines carry a container id (no dotted quad) and are
     /// therefore skipped by construction.
     private static func ipv4Token(in line: String) -> String? {
@@ -248,7 +248,7 @@ enum ServingPlacement {
         return true
     }
 
-    /// Numeric IP order, so `10.0.0.2` sorts before `10.0.0.10`.
+    /// Numeric IP order, so `192.0.2.2` sorts before `192.0.2.10`.
     private static func lessThanIP(_ lhs: String, _ rhs: String) -> Bool {
         let l = lhs.split(separator: ".").compactMap { Int($0) }
         let r = rhs.split(separator: ".").compactMap { Int($0) }

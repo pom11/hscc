@@ -72,21 +72,21 @@ do {
     // The capture holds 3 jobs: two TP pairs across .1+.2 and .3+.4, one solo
     // container on .3. So .1 and .2 host one unit each, .3 hosts two, .4 one.
     let groups = Dictionary(uniqueKeysWithValues: placement.groups.map { ($0.ip, $0.units.count) })
-    expect(groups["10.0.0.1"] == 1, "live capture: 10.0.0.1 hosts exactly 1 unit")
-    expect(groups["10.0.0.2"] == 1, "live capture: 10.0.0.2 hosts exactly 1 unit")
-    expect(groups["10.0.0.3"] == 2, "live capture: 10.0.0.3 hosts BOTH the TP pair and the solo unit")
-    expect(groups["10.0.0.4"] == 1, "live capture: 10.0.0.4 hosts exactly 1 unit")
-    expect(groups["10.0.0.5"] == nil, "live capture: the NAS is never a serving node")
+    expect(groups["192.0.2.1"] == 1, "live capture: 192.0.2.1 hosts exactly 1 unit")
+    expect(groups["192.0.2.2"] == 1, "live capture: 192.0.2.2 hosts exactly 1 unit")
+    expect(groups["192.0.2.3"] == 2, "live capture: 192.0.2.3 hosts BOTH the TP pair and the solo unit")
+    expect(groups["192.0.2.4"] == 1, "live capture: 192.0.2.4 hosts exactly 1 unit")
+    expect(groups["192.0.2.5"] == nil, "live capture: the NAS is never a serving node")
     expect(placement.idleNodes.isEmpty,
            "live capture: no registered node is reported idle while it hosts a unit")
     // TP truth: the pair's unit must appear under BOTH of its nodes — a naive
     // "first node only" grouping would hide half the fleet.
     let pairID = "9a0467d69586ef5f_4e690f2e56f8"
-    let onOne = placement.groups.first { $0.ip == "10.0.0.1" }?.units.contains { $0.container_id == pairID } ?? false
-    let onTwo = placement.groups.first { $0.ip == "10.0.0.2" }?.units.contains { $0.container_id == pairID } ?? false
+    let onOne = placement.groups.first { $0.ip == "192.0.2.1" }?.units.contains { $0.container_id == pairID } ?? false
+    let onTwo = placement.groups.first { $0.ip == "192.0.2.2" }?.units.contains { $0.container_id == pairID } ?? false
     expect(onOne && onTwo, "live capture: a TP pair's unit is listed under BOTH nodes")
     // Role comes from the host rows, not from the text blob.
-    expect(placement.groups.first { $0.ip == "10.0.0.1" }?.role == "gateway",
+    expect(placement.groups.first { $0.ip == "192.0.2.1" }?.role == "gateway",
            "live capture: the node's role label comes from the host rows")
 } catch {
     failures += 1
@@ -99,7 +99,7 @@ do {
 // ---------------------------------------------------------------------------
 let one = [workload("qwen3-30b", "abc123")]
 for (label, blob) in [("nil output", nil), ("empty output", ""), ("whitespace output", "   \n  ")] {
-    let r = ServingPlacement.place(workloads: one, hosts: [host("10.0.0.1", "worker")],
+    let r = ServingPlacement.place(workloads: one, hosts: [host("192.0.2.1", "worker")],
                                    liveStatusOutput: blob)
     expect(!r.didPlaceAnything, "\(label): reported as 'nothing placed', not as 'empty fleet'")
     expect(r.unattributed.count == 1, "\(label): the unit falls to 'not reported', never a guessed node")
@@ -125,16 +125,16 @@ let hostile: [Hostile] = [
             blob: "Job: /x/r.yaml  (tp=1, pp=1)  [cid3]  (1 container(s))\n  solo       10.0.0   Up 1 hour\nTotal: 1 container(s) across 1 host(s)"),
     // A Job line without a bracketed id must not steal the previous job's nodes.
     Hostile(label: "job line without a container id starts no block",
-            blob: "Job: /x/r.yaml  (tp=1, pp=1)  [cidA]  (1 container(s))\n  node_0     10.0.0.9   Up 1 hour\nJob: /x/other.yaml  (tp=1, pp=1)  (1 container(s))\n  node_0     10.0.0.8   Up 1 hour\nTotal: 2 container(s) across 2 host(s)"),
+            blob: "Job: /x/r.yaml  (tp=1, pp=1)  [cidA]  (1 container(s))\n  node_0     192.0.2.9   Up 1 hour\nJob: /x/other.yaml  (tp=1, pp=1)  (1 container(s))\n  node_0     192.0.2.8   Up 1 hour\nTotal: 2 container(s) across 2 host(s)"),
     // Empty bracket token.
     Hostile(label: "empty [] is not a container id",
-            blob: "Job: /x/r.yaml  []  (1 container(s))\n  solo       10.0.0.7   Up 1 hour\nTotal: 1 container(s) across 1 host(s)"),
+            blob: "Job: /x/r.yaml  []  (1 container(s))\n  solo       192.0.2.7   Up 1 hour\nTotal: 1 container(s) across 1 host(s)"),
     // Garbage / non-status text.
     Hostile(label: "unrelated text places nothing",
             blob: "sparkrun: command not found\nError: connection refused"),
     // The `logs:`/`stop:` trailer lines name the container, not a node.
     Hostile(label: "logs:/stop: trailer lines add no node",
-            blob: "Job: /x/r.yaml  (tp=1, pp=1)  [cidB]  (1 container(s))\n  solo       10.0.0.6   Up 1 hour\n  logs: sparkrun logs 10.0.0.6\n  stop: sparkrun stop 10.0.0.6\nTotal: 1 container(s) across 1 host(s)"),
+            blob: "Job: /x/r.yaml  (tp=1, pp=1)  [cidB]  (1 container(s))\n  solo       192.0.2.6   Up 1 hour\n  logs: sparkrun logs 192.0.2.6\n  stop: sparkrun stop 192.0.2.6\nTotal: 1 container(s) across 1 host(s)"),
 ]
 
 for h in hostile {
@@ -148,16 +148,16 @@ for h in hostile {
     case "10.0.0 is not a node":
         expect(map["cid3"]?.isEmpty != false, "\(h.label)")
     case "job line without a container id starts no block":
-        expect(map["cidA"] == ["10.0.0.9"],
+        expect(map["cidA"] == ["192.0.2.9"],
                "\(h.label) — cidA keeps only its own node, got \(String(describing: map["cidA"]))")
-        expect(!map.values.contains(where: { $0.contains("10.0.0.8") }),
+        expect(!map.values.contains(where: { $0.contains("192.0.2.8") }),
                "\(h.label) — the orphan node_0 line is attributed to nobody")
     case "empty [] is not a container id":
         expect(map.isEmpty, "\(h.label)")
     case "unrelated text places nothing":
         expect(map.isEmpty, "\(h.label)")
     case "logs:/stop: trailer lines add no node":
-        expect(map["cidB"] == ["10.0.0.6"],
+        expect(map["cidB"] == ["192.0.2.6"],
                "\(h.label) — got \(String(describing: map["cidB"]))")
     default:
         failures += 1
@@ -169,20 +169,20 @@ for h in hostile {
 // 4. IDLE + ROLE + NAS handling through the public entry point.
 // ---------------------------------------------------------------------------
 do {
-    let hosts = [host("10.0.0.1", "gateway"), host("10.0.0.2", "worker"), host("10.0.0.9", "nas")]
+    let hosts = [host("192.0.2.1", "gateway"), host("192.0.2.2", "worker"), host("192.0.2.9", "nas")]
     let blob = """
     Job: /x/r.yaml  (tp=1, pp=1)  [c1]  (1 container(s))
-      solo       10.0.0.1   Up 1 hour
+      solo       192.0.2.1   Up 1 hour
     Total: 1 container(s) across 2 host(s)
     """
     let r = ServingPlacement.place(workloads: [workload("model-a", "c1"), workload("model-b", "cX")],
                                    hosts: hosts, liveStatusOutput: blob)
-    expect(r.groups.count == 1 && r.groups.first?.ip == "10.0.0.1",
+    expect(r.groups.count == 1 && r.groups.first?.ip == "192.0.2.1",
            "one placed unit yields exactly one node group")
     expect(r.groups.first?.units.count == 1, "the placed unit is under its node")
-    expect(r.idleNodes.map(\.ip) == ["10.0.0.2"],
+    expect(r.idleNodes.map(\.ip) == ["192.0.2.2"],
            "the registered worker with nothing on it shows as idle (got \(r.idleNodes.map(\.ip)))")
-    expect(!r.idleNodes.contains(where: { $0.ip == "10.0.0.9" }),
+    expect(!r.idleNodes.contains(where: { $0.ip == "192.0.2.9" }),
            "the NAS is never listed, not even as idle")
     expect(r.unattributed.map(\.name) == ["model-b"],
            "the container the report never mentioned is 'not reported', not dropped")
@@ -199,7 +199,7 @@ do {
 // No units at all: the fleet really is empty; the view must be able to say so.
 do {
     let r = ServingPlacement.place(workloads: [],
-                                   hosts: [host("10.0.0.1", "worker")],
+                                   hosts: [host("192.0.2.1", "worker")],
                                    liveStatusOutput: "Total: 0 container(s) across 1 host(s)")
     expect(r.groups.isEmpty && r.idleNodes.count == 1 && r.unattributed.isEmpty,
            "empty fleet => no groups, the node listed idle, nothing unattributed")
@@ -211,17 +211,17 @@ do {
 do {
     let blob = """
     Job: a  [j10]  (1 container(s))
-      solo       10.0.0.10   Up 1 hour
+      solo       192.0.2.10   Up 1 hour
     Job: b  [j2]  (1 container(s))
-      solo       10.0.0.2    Up 1 hour
+      solo       192.0.2.2    Up 1 hour
     Total: 2 container(s) across 2 host(s)
     """
     let r = ServingPlacement.place(workloads: [workload("a", "j10"), workload("b", "j2")],
                                    hosts: [], liveStatusOutput: blob)
-    expect(r.groups.map(\.ip) == ["10.0.0.2", "10.0.0.10"],
+    expect(r.groups.map(\.ip) == ["192.0.2.2", "192.0.2.10"],
            "node sections sort numerically, not lexically (got \(r.groups.map(\.ip)))")
 }
-expect(ServingPlacement.nodeTail("10.0.0.244") == ".244", "nodeTail matches the topology strip's `.244` form")
+expect(ServingPlacement.nodeTail("192.0.2.244") == ".244", "nodeTail matches the topology strip's `.244` form")
 expect(ServingPlacement.nodeTail("not-an-ip") == "not-an-ip", "nodeTail passes a non-IP through unchanged")
 
 // ---------------------------------------------------------------------------

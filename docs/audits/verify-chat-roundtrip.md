@@ -30,7 +30,7 @@ orchestrator unit's `vllm:generation_tokens_total` moved during every run
 outage where every profile pointed at a dead host.
 
 ### How the metric is read (read-only)
-The orchestrator unit (`role=="orch"`, serving.json nodes[0]=10.0.0.244,
+The orchestrator unit (`role=="orch"`, serving.json nodes[0]=10.0.0.x,
 port 8000) exposes vLLM Prometheus metrics at `http://<node>:<port>/metrics`.
 We parse the `vllm:generation_tokens_total` counter (the standard vLLM counter
 surface the codebase already uses in `throughput.py`). Note: the orch unit is

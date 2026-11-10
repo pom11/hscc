@@ -68,7 +68,7 @@ Shared surface handed to the doctor card (t_94598b3a): `probe_node()`,
 ## Measured node reality (read-only, live fleet — hosts placeholdered)
 
 Probed through the module's own read-only path before writing anything. Every
-node in the live sparkrun cluster (`10.0.0.1`, `10.0.0.2`, `10.0.0.3`):
+node in the live sparkrun cluster (`10.0.0.x`, `10.0.0.x`, `10.0.0.x`):
 
 ```
 HSCC_WATCHDOG_CLASS: present          HSCC_WATCHDOG_DEVICES: watchdog0
@@ -108,7 +108,7 @@ output with hosts rewritten to the `10.0.0.x` convention:
 ```
 node-recovery watchdog — DRY RUN (writes nothing)
   target: /etc/systemd/system.conf.d/90-hscc-watchdog.conf RuntimeWatchdogSec=30s RebootWatchdogSec=2min
-  [ok] 10.0.0.1 applied: would create /etc/systemd/system.conf.d/90-hscc-watchdog.conf with:
+  [ok] 10.0.0.x applied: would create /etc/systemd/system.conf.d/90-hscc-watchdog.conf with:
   │ # Managed by HSCC (node-recovery watchdog; hscc bootstrap).
   │ # PID1 (systemd) opens and pets /dev/watchdog0 and closes it on clean
   │ # shutdown, so a hard hang resets the SoC instead of wedging until someone
@@ -120,7 +120,7 @@ node-recovery watchdog — DRY RUN (writes nothing)
   │ RebootWatchdogSec=2min
   │ then: sudo -n systemctl daemon-reexec
   │ current RuntimeWatchdogUSec=0; watchdog devices=[watchdog0]
-  ... identical for 10.0.0.2 and 10.0.0.3 ...
+  ... identical for 10.0.0.x and 10.0.0.x ...
   protected: 3/3; opted out: 0
 ```
 

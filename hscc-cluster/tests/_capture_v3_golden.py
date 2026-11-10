@@ -23,8 +23,8 @@ import recipe_cost as rc
 from dataclasses import dataclass
 
 # t_ac795424 doctrine: documented placeholder addresses only.
-ORCH = "10.0.0.1"
-W = ["10.0.0.2", "10.0.0.3"]
+ORCH = "192.0.2.1"
+W = ["192.0.2.2", "192.0.2.3"]
 
 
 @dataclass

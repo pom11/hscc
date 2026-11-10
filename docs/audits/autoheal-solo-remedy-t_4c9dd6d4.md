@@ -58,11 +58,11 @@ That is the observed `sparkrun_1e5b762a694eaee6_086606fbaf71_SOLO` on `.247`
 Built at health.py:1536-1538 (inside the `if streak >= DEBOUNCE` else-gentle
 branch, reached on the first/second down checks before the debounce reaches 3):
 
-    sparkrun run <recipe> --cluster hscc --hosts 10.0.0.247 --port 8000 --no-follow --ensure
+    sparkrun run <recipe> --cluster hscc --hosts 10.0.0.x --port 8000 --no-follow --ensure
 
 Contrast the correct TP command (health.py's own `fleet_up_plan`, serving.py:383-398):
 
-    sparkrun run <recipe> --cluster hscc --hosts 10.0.0.247,10.0.0.248 --port 8000 --no-follow --ensure --tp 2
+    sparkrun run <recipe> --cluster hscc --hosts 10.0.0.x,10.0.0.x --port 8000 --no-follow --ensure --tp 2
 
 The gentle relaunch drops the second host and the `--tp` flag. That is the bug.
 

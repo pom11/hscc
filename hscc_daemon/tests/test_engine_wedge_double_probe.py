@@ -57,7 +57,7 @@ def _reset_engine_wedge_state():
 
 UNIT = {
     "id": "unit-247", "role": "worker", "keepalive": True, "model": "m2",
-    "nodes": ["10.0.0.247"], "port": 8001, "tp": 1,
+    "nodes": ["192.0.2.247"], "port": 8001, "tp": 1,
 }
 
 
@@ -346,7 +346,7 @@ class TestProbeSharedPerTick:
         mine = health._engine_wedge_units["unit-247"]["last_probe_ts"]
         # A sibling record from BEFORE our probe: not newer than our own
         # last probe => we keep our fresh data and probe for our next tick.
-        _write_share("10.0.0.247", 8001, mine - 5, _ok_result(None, None))
+        _write_share("192.0.2.247", 8001, mine - 5, _ok_result(None, None))
         assert health.check_engine_wedge() is True
         assert len(probe.calls) == 2
 
@@ -360,7 +360,7 @@ class TestProbeSharedPerTick:
         probe = _counting_probe(_ok_result)
         monkeypatch.setattr(health, "_probe_unit_generation", probe)
 
-        _write_share("10.0.0.247", 8001, time.time() - 60,
+        _write_share("192.0.2.247", 8001, time.time() - 60,
                      _ok_result(None, None))
         assert health.check_engine_wedge() is True
         assert len(probe.calls) == 1
@@ -378,7 +378,7 @@ class TestProbeSharedPerTick:
         probe = _counting_probe(_ok_result)
         monkeypatch.setattr(health, "_probe_unit_generation", probe)
 
-        path = _share_path("10.0.0.247", 8001)
+        path = _share_path("192.0.2.247", 8001)
         claim = path + ".claim"
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(claim, "w") as f:
@@ -386,7 +386,7 @@ class TestProbeSharedPerTick:
 
         def sibling_finishes():
             time.sleep(0.3)
-            _write_share("10.0.0.247", 8001, time.time(), _ok_result(None, None))
+            _write_share("192.0.2.247", 8001, time.time(), _ok_result(None, None))
             try:
                 os.unlink(claim)
             except OSError:
@@ -413,7 +413,7 @@ class TestProbeSharedPerTick:
         probe = _counting_probe(_ok_result)
         monkeypatch.setattr(health, "_probe_unit_generation", probe)
 
-        path = _share_path("10.0.0.247", 8001)
+        path = _share_path("192.0.2.247", 8001)
         claim = path + ".claim"
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(claim, "w") as f:
@@ -453,7 +453,7 @@ class TestProbeSharedPerTick:
         monkeypatch.setattr(health, "_probe_unit_generation", probe)
 
         # A daemon-published fresh result exists — the CLI must ignore it...
-        _write_share("10.0.0.247", 8001, time.time(),
+        _write_share("192.0.2.247", 8001, time.time(),
                      {"ok": False, "status": 200, "error": "wedged"})
         with _state.persist_disabled():
             assert health.check_engine_wedge() is True
@@ -462,7 +462,7 @@ class TestProbeSharedPerTick:
         # The CLI published NO share of its own (its ok result did not
         # replace the daemon's wedged one).
         entry = health._engine_wedge_share_read(
-            _share_path("10.0.0.247", 8001))
+            _share_path("192.0.2.247", 8001))
         assert entry["result"]["error"] == "wedged"
 
 

@@ -1537,7 +1537,7 @@ def _proxy_backend_probe(url=None, timeout=5):
 
 
 def _hostport_from_api_base(api_base):
-    """'http://10.0.0.2:8001/v1' -> '10.0.0.2:8001'; '' when unparseable.
+    """'http://192.0.2.2:8001/v1' -> '192.0.2.2:8001'; '' when unparseable.
 
     Hostnames and ports are kept verbatim so the comparison never has to
     resolve anything (a proxy may legitimately use a name or a loopback).

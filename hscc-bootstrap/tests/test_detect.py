@@ -4,12 +4,12 @@ import detect
 
 def test_parse_default_cluster():
     raw = json.dumps([
-        {"name": "hscc", "hosts": ["10.0.0.1", "10.0.0.2"], "user": "spark",
+        {"name": "hscc", "hosts": ["192.0.2.1", "192.0.2.2"], "user": "spark",
          "cache_dir": "/mnt/nas", "default": True},
     ])
     c = detect.parse_clusters(raw)
     assert c["name"] == "hscc"
-    assert c["hosts"] == ["10.0.0.1", "10.0.0.2"]
+    assert c["hosts"] == ["192.0.2.1", "192.0.2.2"]
     assert c["user"] == "spark"
     assert c["nas"] == "/mnt/nas"
 

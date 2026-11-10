@@ -166,7 +166,7 @@ def _replace_header(text, header):
 
     If HEAD sentinels exist, replace between them. Otherwise treat the first
     paragraph (up to the first blank line) as the legacy hardcoded preamble and
-    replace it — this strips the old `...10.0.0.244...` line (M4). User
+    replace it — this strips the old `...192.0.2.244...` line (M4). User
     content below the first blank line is preserved."""
     if HEAD_BEGIN in text and HEAD_END in text:
         post = text.split(HEAD_END, 1)[1]

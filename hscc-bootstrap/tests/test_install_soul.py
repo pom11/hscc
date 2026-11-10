@@ -29,11 +29,11 @@ def test_legacy_hardcoded_ip_header_is_stripped(tmp_path):
     replaced by the topology-free HSCC identity, preserving user sections."""
     p = tmp_path / "SOUL.md"
     p.write_text(
-        "You are Hermes, orchestrator (gateway 10.0.0.244; workers "
+        "You are Hermes, orchestrator (gateway 192.0.2.244; workers "
         ".246/.247/.248; NAS .249).\n\n## Brevity\nbe terse.\n")
     IS.install_soul(str(p))
     text = p.read_text()
-    assert "10.0.0.244" not in text          # legacy IP line gone
+    assert "192.0.2.244" not in text          # legacy IP line gone
     assert "## Brevity" in text and "be terse." in text  # user section kept
     assert "HSCC" in text and IS.HEAD_BEGIN in text
 
@@ -146,7 +146,7 @@ def test_personality_legacy_ip_header_stripped(tmp_path):
     topology-free HSCC header, preserving the rest of the user's prose."""
     import re
     path = _cfg(tmp_path / "config.yaml", {"personalities": {"ops":
-                "You are Hermes (gateway 10.0.0.244, workers .246/.247/.248).\n\n"
+                "You are Hermes (gateway 192.0.2.244, workers .246/.247/.248).\n\n"
                 "## My rules\nbe terse.\n"}})
     IS.install_personality(path)
     ops = yaml.safe_load(open(path))["personalities"]["ops"]

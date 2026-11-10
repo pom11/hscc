@@ -43,7 +43,7 @@ _HOME_ENV = ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HSCC_PROFILES_DIR",
 
 # A minimal, cluster-configured sparkrun response so no test has to shell out to
 # the real `sparkrun cluster list` (which reads the operator's cluster config).
-_FAKE_CLUSTER = '[{"name": "test-cluster", "default": true, "hosts": ["10.0.0.1"], "cache_dir": "/mnt/nas/cache"}]'
+_FAKE_CLUSTER = '[{"name": "test-cluster", "default": true, "hosts": ["192.0.2.1"], "cache_dir": "/mnt/nas/cache"}]'
 
 
 def _pin_home(monkeypatch, home, hermes_home=None):
@@ -672,7 +672,7 @@ class TestCheckModelsServed:
         cfg = {
             "auxiliary": {
                 "compression": {
-                    "base_url": "http://10.0.0.244:8000/v1",
+                    "base_url": "http://192.0.2.244:8000/v1",
                     "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
                 },
             },
@@ -688,7 +688,7 @@ class TestCheckModelsServed:
         # detail names the offending config key + endpoint + served ids
         assert "auxiliary.compression.model" in check.detail
         assert "nvidia/Qwen3.6-35B-A3B-NVFP4" in check.detail
-        assert "http://10.0.0.244:8000/v1/models" in check.detail
+        assert "http://192.0.2.244:8000/v1/models" in check.detail
         assert "deepseek-ai/DeepSeek-V4-Flash-0731" in check.detail
         assert "fix" in check.fix.lower() or check.fix
 
@@ -910,7 +910,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             }
         }
         changed = doctor._convert_orchestrator_ids_to_alias(
@@ -935,7 +935,7 @@ class TestConvertOrchestratorIdsToAlias:
             "auxiliary": {
                 "compression": {
                     "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                    "base_url": "http://10.0.0.244:8000/v1",
+                    "base_url": "http://192.0.2.244:8000/v1",
                 }
             }
         }
@@ -999,7 +999,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "orchestrator-model",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
             "delegation": {
                 "model": "worker-model",
@@ -1036,7 +1036,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             }
         }
         refused = []
@@ -1055,7 +1055,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             }
         }
         refused = []
@@ -1089,7 +1089,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             }
         }
         refused = []
@@ -1122,7 +1122,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
             "delegation": {
                 "model": "Qwen/Qwen3.6-27B-FP8",
@@ -1149,7 +1149,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
             "delegation": {
                 "model": "Qwen/Qwen3.6-27B-FP8",
@@ -1178,7 +1178,7 @@ class TestConvertOrchestratorIdsToAlias:
         cfg = {
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
             "delegation": {
                 "model": "Qwen/Qwen3.6-27B-FP8",
@@ -1240,7 +1240,7 @@ class TestAliasMigrationInFix:
             "plugins": {"enabled": []},
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
         }
         with open(config_path, "w") as fh:
@@ -1270,7 +1270,7 @@ class TestAliasMigrationInFix:
             "plugins": {"enabled": []},
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
         }
         with open(config_path, "w") as fh:
@@ -1301,7 +1301,7 @@ class TestAliasMigrationInFix:
             "plugins": {"enabled": []},
             "model": {
                 "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                "base_url": "http://10.0.0.244:8000/v1",
+                "base_url": "http://192.0.2.244:8000/v1",
             },
         }
         with open(config_path, "w") as fh:
@@ -1387,7 +1387,7 @@ class TestDoctorFixNoopWhenFresh:
                             "threshold_tokens": enable_plugins._compaction_cap()[0]},
             "auxiliary": {
                 "compression": {
-                    "base_url": "http://10.0.0.244:8000/v1",
+                    "base_url": "http://192.0.2.244:8000/v1",
                     "model": "orchestrator-model",
                     "provider": "custom",
                     "api_key": "sk-sparkrun",
@@ -1409,7 +1409,7 @@ class TestDoctorFixNoopWhenFresh:
                 "api_key": "sk-sparkrun",
             }],
             "prompt_caching": {"cache_ttl": "1hr"},
-            "dashboard": {"public_url": "http://10.0.0.245:3000"},
+            "dashboard": {"public_url": "http://192.0.2.245:3000"},
             "hooks": {
                 "pre_tool_call": [{
                     "matcher": "hscc-cluster",
@@ -1615,9 +1615,9 @@ class TestDoctorNoAnsi:
 import json as _json_fleet
 
 _SERVING_TWO = _json_fleet.dumps({"version": 2, "units": [
-    {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+    {"id": "orch", "role": "orchestrator", "nodes": ["192.0.2.1"], "port": 8000},
     {"id": "w1", "role": "worker", "keepalive": True,
-     "nodes": ["10.0.0.2"], "port": 8001},
+     "nodes": ["192.0.2.2"], "port": 8001},
 ]})
 
 
@@ -1641,7 +1641,7 @@ class TestSparkrunLanReachability:
             _venv_python="/home/u/.venvs/sparkrun/bin/python", _probe=probe,
             _serving_raw=_SERVING_TWO)
         assert c.ok is True and c.fatal is False
-        assert {n for _i, n in seen} == {"10.0.0.1", "10.0.0.2"}  # orch node probed too
+        assert {n for _i, n in seen} == {"192.0.2.1", "192.0.2.2"}  # orch node probed too
 
     def test_homebrew_interpreter_warns_even_when_reachable(self):
         c = doctor._sparkrun_lan_reachability(
@@ -1663,28 +1663,28 @@ class TestSparkrunLanReachability:
             _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
         assert "Local Network" not in c.detail   # errno 61 is NOT the TCC story
-        assert "10.0.0.1: errno=61" in c.detail
+        assert "192.0.2.1: errno=61" in c.detail
 
 
 class TestClusterVsServing:
     def test_missing_orchestrator_node_is_reported(self):
-        raw = _json_fleet.dumps({"name": "hscc", "hosts": ["10.0.0.2"]})  # no 10.0.0.1
+        raw = _json_fleet.dumps({"name": "hscc", "hosts": ["192.0.2.2"]})  # no 192.0.2.1
         c = doctor._sparkrun_default_cluster_matches_serving(
             _runner=lambda: raw, _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
-        assert "10.0.0.1" in c.detail and "MISSING" in c.detail
+        assert "192.0.2.1" in c.detail and "MISSING" in c.detail
 
     def test_exact_match_ok(self):
-        raw = _json_fleet.dumps({"hosts": ["10.0.0.1", "10.0.0.2"]})
+        raw = _json_fleet.dumps({"hosts": ["192.0.2.1", "192.0.2.2"]})
         c = doctor._sparkrun_default_cluster_matches_serving(
             _runner=lambda: raw, _serving_raw=_SERVING_TWO)
         assert c.ok is True
 
     def test_extra_host_reported(self):
-        raw = _json_fleet.dumps({"hosts": ["10.0.0.1", "10.0.0.2", "10.0.0.9"]})
+        raw = _json_fleet.dumps({"hosts": ["192.0.2.1", "192.0.2.2", "192.0.2.9"]})
         c = doctor._sparkrun_default_cluster_matches_serving(
             _runner=lambda: raw, _serving_raw=_SERVING_TWO)
-        assert c.ok is False and "10.0.0.9" in c.detail
+        assert c.ok is False and "192.0.2.9" in c.detail
 
     def test_no_default_skips(self):
         c = doctor._sparkrun_default_cluster_matches_serving(
@@ -1702,25 +1702,25 @@ class TestServingConsistency:
         return {"host": host, "cluster_id": "sparkrun_x_y", "meta": {"port": port}}
 
     def test_clean_matches_ok(self):
-        raw = self._status([self._solo("10.0.0.1", 8000), self._solo("10.0.0.2", 8001)])
+        raw = self._status([self._solo("192.0.2.1", 8000), self._solo("192.0.2.2", 8001)])
         c = doctor._serving_consistency(_status_runner=lambda cl: raw,
                                         _serving_raw=_SERVING_TWO, cluster="hscc")
         assert c.ok is True
 
     def test_duplicate_on_mapped_port_flagged(self):
-        raw = self._status([self._solo("10.0.0.1", 8000),
-                            self._solo("10.0.0.1", 8000),      # the duplicate
-                            self._solo("10.0.0.2", 8001)])
+        raw = self._status([self._solo("192.0.2.1", 8000),
+                            self._solo("192.0.2.1", 8000),      # the duplicate
+                            self._solo("192.0.2.2", 8001)])
         c = doctor._serving_consistency(_status_runner=lambda cl: raw,
                                         _serving_raw=_SERVING_TWO, cluster="hscc")
         assert c.ok is False and c.fatal is False
-        assert "10.0.0.1:8000" in c.detail and "duplicate" in c.detail
+        assert "192.0.2.1:8000" in c.detail and "duplicate" in c.detail
 
     def test_stale_record_flagged(self):
-        raw = self._status([self._solo("10.0.0.1", 8000)])     # worker vanished
+        raw = self._status([self._solo("192.0.2.1", 8000)])     # worker vanished
         c = doctor._serving_consistency(_status_runner=lambda cl: raw,
                                         _serving_raw=_SERVING_TWO, cluster="hscc")
-        assert c.ok is False and "10.0.0.2:8001" in c.detail
+        assert c.ok is False and "192.0.2.2:8001" in c.detail
         assert "stale" in c.detail
 
     def test_no_status_skips(self):
@@ -1732,9 +1732,9 @@ class TestServingConsistency:
         """Only each unit's PRIMARY (nodes[0]) exposes an endpoint; a tp peer
         running no container of its own is NOT a stale record."""
         serving = _json_fleet.dumps({"units": [
-            {"id": "big", "role": "worker", "nodes": ["10.0.0.2", "10.0.0.3"],
+            {"id": "big", "role": "worker", "nodes": ["192.0.2.2", "192.0.2.3"],
              "port": 8001, "tp": 2}]})
-        raw = self._status([self._solo("10.0.0.2", 8001)])
+        raw = self._status([self._solo("192.0.2.2", 8001)])
         c = doctor._serving_consistency(_status_runner=lambda cl: raw,
                                         _serving_raw=serving, cluster="hscc")
         assert c.ok is True
@@ -1773,10 +1773,10 @@ class TestFleetChecksSkipInSuite:
             _venv_python="/home/u/.venvs/sparkrun/bin/python",
             _lan_probe=lambda i, n: None,
             _cluster_default_runner=lambda: _json_fleet.dumps(
-                {"hosts": ["10.0.0.1", "10.0.0.2"]}),
+                {"hosts": ["192.0.2.1", "192.0.2.2"]}),
             _status_runner=lambda cl: TestServingConsistency._status(
-                [TestServingConsistency._solo("10.0.0.1", 8000),
-                 TestServingConsistency._solo("10.0.0.2", 8001)]),
+                [TestServingConsistency._solo("192.0.2.1", 8000),
+                 TestServingConsistency._solo("192.0.2.2", 8001)]),
             _serving_raw=_SERVING_TWO)
         names = {c["name"]: c for c in res["checks"]}
         assert names["sparkrun lan reachability"]["ok"] is True
@@ -1815,7 +1815,7 @@ class _CurlStub:
         return self.rc, self.out, self.err
 
 
-def _errno65(host="10.0.0.1"):
+def _errno65(host="192.0.2.1"):
     return urllib.error.URLError(OSError(65, "No route to host", host))
 
 
@@ -1841,11 +1841,11 @@ class TestLanCurlFallback:
                                                                 monkeypatch):
         stub = curl_seam(out=b'{"data": [{"id": "worker-model"}]}')
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        got = doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+        got = doctor._http_get_default("http://192.0.2.1:4000/v1/models")
         assert got == '{"data": [{"id": "worker-model"}]}'
         assert stub.argvs == [["/usr/bin/curl", "-sS", "--fail", "-L",
                                "--max-time", "10",
-                               "http://10.0.0.1:4000/v1/models"]]
+                               "http://192.0.2.1:4000/v1/models"]]
 
     @pytest.mark.parametrize("url", [
         "https://api.example.com/v1/models",   # public: not the TCC story
@@ -1864,20 +1864,20 @@ class TestLanCurlFallback:
     def test_errno113_does_not_fall_back(self, curl_seam, monkeypatch):
         """113 is Linux EHOSTUNREACH = genuinely no route; it stays an error."""
         stub = curl_seam()
-        exc = urllib.error.URLError(OSError(113, "No route to host", "10.0.0.1"))
+        exc = urllib.error.URLError(OSError(113, "No route to host", "192.0.2.1"))
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
         with pytest.raises(urllib.error.URLError) as ei:
-            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+            doctor._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.reason.errno == 113
         assert stub.argvs == []
 
     def test_httperror_from_urlopen_is_untouched(self, curl_seam, monkeypatch):
         stub = curl_seam()
-        exc = urllib.error.HTTPError("http://10.0.0.1:4000/v1/models", 401,
+        exc = urllib.error.HTTPError("http://192.0.2.1:4000/v1/models", 401,
                                      "unauthorized", None, None)
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(exc))
         with pytest.raises(urllib.error.HTTPError) as ei:
-            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+            doctor._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.code == 401
         assert stub.argvs == []
 
@@ -1886,7 +1886,7 @@ class TestLanCurlFallback:
         curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         with pytest.raises(urllib.error.HTTPError) as ei:
-            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+            doctor._http_get_default("http://192.0.2.1:4000/v1/models")
         assert ei.value.code == 401
 
     def test_probe_contract_still_reports_error_not_unreachable(self, curl_seam,
@@ -1895,7 +1895,7 @@ class TestLanCurlFallback:
         'unreachable', when only curl can reach the endpoint."""
         curl_seam(rc=22, err=b"curl: (22) The requested URL returned error: 401\n")
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        status, detail = doctor._probe_served_models("http://10.0.0.1:4000/v1")
+        status, detail = doctor._probe_served_models("http://192.0.2.1:4000/v1")
         assert status == "error"
         assert "401" in detail[0]
 
@@ -1903,7 +1903,7 @@ class TestLanCurlFallback:
         """End-to-end happy path: the alias gate works again under errno 65."""
         curl_seam(out=json.dumps({"data": [{"id": "worker-model"}]}).encode())
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        assert doctor._probe_served_models("http://10.0.0.1:4000/v1") == \
+        assert doctor._probe_served_models("http://192.0.2.1:4000/v1") == \
             ("ok", ["worker-model"])
 
     def test_api_key_never_reaches_argv_and_travels_in_a_0600_file(self, curl_seam,
@@ -1928,11 +1928,11 @@ class TestLanCurlFallback:
 
         monkeypatch.setattr(doctor, "_lan_curl_run", spy)
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
-        doctor._http_get_default("http://10.0.0.1:4000/v1/models", api_key=key)
+        doctor._http_get_default("http://192.0.2.1:4000/v1/models", api_key=key)
         assert captured["body"] == f"Authorization: Bearer {key}\n"
         assert captured["mode"] == "0o600"
         assert not os.path.exists(captured["path"])   # unlinked after the request
-        assert stub.argvs[0][-1] == "http://10.0.0.1:4000/v1/models"
+        assert stub.argvs[0][-1] == "http://192.0.2.1:4000/v1/models"
 
     def test_notice_printed_exactly_once_across_fallbacks(self, curl_seam,
                                                           monkeypatch, capsys):
@@ -1950,7 +1950,7 @@ class TestLanCurlFallback:
         doctor._lan_curl_reset_notice()
         monkeypatch.setattr(urllib.request, "urlopen", _urlopen_raises(_errno65()))
         with pytest.raises(urllib.error.URLError) as ei:
-            doctor._http_get_default("http://10.0.0.1:4000/v1/models")
+            doctor._http_get_default("http://192.0.2.1:4000/v1/models")
         msg = str(ei.value)
         assert "No route to host" in msg               # original kept, not replaced
         assert "curl fallback unavailable" in msg      # + the one-line hint

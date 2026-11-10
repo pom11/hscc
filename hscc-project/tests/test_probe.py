@@ -93,8 +93,8 @@ class _RecordingURL:
 def test_models_url_derived_from_chat_completions_url():
     """The /models URL is derived by replacing the trailing /chat/completions."""
     assert probe.derive_models_url(
-        "http://10.0.0.244:8000/v1/chat/completions"
-    ) == "http://10.0.0.244:8000/v1/models"
+        "http://192.0.2.244:8000/v1/chat/completions"
+    ) == "http://192.0.2.244:8000/v1/models"
 
 
 def test_models_url_derivation_handles_trailing_slash():

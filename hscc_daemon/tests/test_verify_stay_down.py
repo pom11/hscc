@@ -523,7 +523,7 @@ def _dead_proxy(calls=None):
     return _fake
 
 
-def _serving_file(tmp_path, units=({"nodes": ["10.0.0.1"], "port": 8000},)):
+def _serving_file(tmp_path, units=({"nodes": ["192.0.2.1"], "port": 8000},)):
     p = tmp_path / "serving.json"
     p.write_text(json.dumps({"units": list(units)}))
     return str(p)

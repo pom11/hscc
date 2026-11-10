@@ -41,40 +41,40 @@ def test_running_by_node_excludes_idle_section(monkeypatch):
 
 
 def test_running_by_node_no_substring_ip_match(monkeypatch):
-    """Regression: '10.0.0.1' must NOT match a line containing '10.0.0.10'."""
+    """Regression: '192.0.2.1' must NOT match a line containing '192.0.2.10'."""
     sample = """Job: @local-official/qwen3.6-27b-fp8-vllm  (tp=1, pp=1)  [abc123]  (1 container(s))
-  solo       10.0.0.10                          Up About an hour          sparkrun-eugr-vllm
+  solo       192.0.2.10                          Up About an hour          sparkrun-eugr-vllm
   logs: sparkrun logs abc123
 
 Total: 1 container(s) across 2 host(s)
 """
-    monkeypatch.setattr(ops.cl, "NODES", ["10.0.0.1"])
-    monkeypatch.setattr(ops.cl, "HEAD", "10.0.0.1")
+    monkeypatch.setattr(ops.cl, "NODES", ["192.0.2.1"])
+    monkeypatch.setattr(ops.cl, "HEAD", "192.0.2.1")
     monkeypatch.setattr(ops.cl, "run_cmd",
                         lambda a, timeout=30: {"ok": True, "stdout": sample,
                                                "stderr": "", "code": 0})
     m = ops._running_by_node()
-    # 10.0.0.1 should NOT match the line for 10.0.0.10
-    assert "10.0.0.1" not in m
+    # 192.0.2.1 should NOT match the line for 192.0.2.10
+    assert "192.0.2.1" not in m
     assert len(m) == 0
 
 
 def test_running_by_node_exact_match_longer_ip(monkeypatch):
-    """'10.0.0.10' must match a line containing '10.0.0.10' exactly."""
+    """'192.0.2.10' must match a line containing '192.0.2.10' exactly."""
     sample = """Job: @local-official/qwen3.6-27b-fp8-vllm  (tp=1, pp=1)  [abc123]  (1 container(s))
-  solo       10.0.0.100                         Up About an hour          sparkrun-eugr-vllm
+  solo       192.0.2.100                         Up About an hour          sparkrun-eugr-vllm
   logs: sparkrun logs abc123
 
 Total: 1 container(s) across 2 host(s)
 """
-    monkeypatch.setattr(ops.cl, "NODES", ["10.0.0.10"])
-    monkeypatch.setattr(ops.cl, "HEAD", "10.0.0.10")
+    monkeypatch.setattr(ops.cl, "NODES", ["192.0.2.10"])
+    monkeypatch.setattr(ops.cl, "HEAD", "192.0.2.10")
     monkeypatch.setattr(ops.cl, "run_cmd",
                         lambda a, timeout=30: {"ok": True, "stdout": sample,
                                                "stderr": "", "code": 0})
     m = ops._running_by_node()
-    # 10.0.0.10 should NOT match 10.0.0.100 either
-    assert "10.0.0.10" not in m
+    # 192.0.2.10 should NOT match 192.0.2.100 either
+    assert "192.0.2.10" not in m
 
 def test_cluster_status_idle_and_units(monkeypatch, tmp_path):
     monkeypatch.setattr(ops.cl, "run_cmd",
@@ -163,15 +163,15 @@ def test_stop_head_with_force_executes(monkeypatch):
 
 _LIVE_TOPOLOGY_UNITS = [
     # orch: head (.244) primary, .246 is the tp peer
-    {"id": "orch", "nodes": ["10.0.0.244", "10.0.0.246"]},
+    {"id": "orch", "nodes": ["192.0.2.244", "192.0.2.246"]},
     # reasoning family: .247 primary, .248 is the tp peer (tp=2 span)
     {"id": "family-reasoning-DeepSeek-V4-Flash-0731-247-8000",
-     "nodes": ["10.0.0.247", "10.0.0.248"], "tp": 2, "pp": 1},
+     "nodes": ["192.0.2.247", "192.0.2.248"], "tp": 2, "pp": 1},
 ]
 
 def test_tp_peer_nodes_live_topology():
     # The live-topology-shaped serving.json must yield exactly {.246, .248}.
-    assert ops._tp_peer_nodes(_LIVE_TOPOLOGY_UNITS) == {"10.0.0.246", "10.0.0.248"}
+    assert ops._tp_peer_nodes(_LIVE_TOPOLOGY_UNITS) == {"192.0.2.246", "192.0.2.248"}
 
 def test_tp_peer_nodes_empty_when_no_span():
     assert ops._tp_peer_nodes([{"id": "a", "nodes": ["1.2.3.4"]},

@@ -246,7 +246,7 @@ def _row(**verdict):
 
 
 def _fleet_health():
-    return {"_cluster_default_runner": lambda: '{"hosts": ["10.0.0.1"]}',
+    return {"_cluster_default_runner": lambda: '{"hosts": ["192.0.2.1"]}',
             "_status_runner": lambda cl: "",
             "_serving_raw": json.dumps({"units": []}),
             "_venv_python": "/home/u/.venvs/sparkrun/bin/python",
@@ -266,7 +266,7 @@ def _doctor(tmp_path, monkeypatch, **kw):
     home = _home(tmp_path, monkeypatch)
     return doctor.run_doctor(
         str(home), _cluster_runner=lambda: json.dumps(
-            [{"name": "hscc", "hosts": ["10.0.0.1"]}]),
+            [{"name": "hscc", "hosts": ["192.0.2.1"]}]),
         fleet_checks=True,
         _ssh_factory=lambda h: (lambda c, t: {"ok": False, "stdout": "",
                                               "code": 127, "stderr": "stub"}),

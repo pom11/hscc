@@ -133,8 +133,8 @@ class TestGoldenIsStillPinned:
         # DIRECT-NODE custom provider — the two things a v4 overreach would most
         # plausibly have rewritten.
         assert "routing" in [s["step"] for s in golden["steps"]]
-        assert "http://10.0.0.1:8000/v1" in golden["config_yaml"]
-        assert "10.0.0.3:8000" in golden["config_yaml"]
+        assert "http://192.0.2.1:8000/v1" in golden["config_yaml"]
+        assert "192.0.2.3:8000" in golden["config_yaml"]
         # The config step must have actually written something, or the golden is
         # a record of an apply that did nothing.
         cfg = [s for s in golden["step_detail"] if s["step"] == "config.yaml"]

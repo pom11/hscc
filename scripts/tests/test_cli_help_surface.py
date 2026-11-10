@@ -431,7 +431,7 @@ def _a_table_timeout(py: str, n_probes_hint: int = A_TABLE_MIN_PROBES) -> int:
         # Address guard: 10.0.0.x is the documented LAN placeholder, never a
         # real host (same convention as the audit's own seed).
         (home / ".hscc" / "cluster.json").write_text(
-            '{"gateway": {"host": "10.0.0.1"}, "workers": [],'
+            '{"gateway": {"host": "192.0.2.1"}, "workers": [],'
             ' "nasDevices": []}')
         env = {**os.environ,
                "HOME": str(home),

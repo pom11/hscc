@@ -54,10 +54,10 @@ _PREVIOUS_KEYS = {"success", "returncode", "command", "output", "error"}
 
 STOPPED_OK = "Stopped 4 job(s), 4 container(s) across 4 host(s)."
 ALREADY_DOWN_NONE = "No sparkrun containers running."
-ALREADY_DOWN_INTENT = ("Error: failed to stop containers on 10.0.0.247: "
+ALREADY_DOWN_INTENT = ("Error: failed to stop containers on 192.0.2.247: "
                        "No running workload matches intent "
-                       "sparkrun_7f2a on hosts ['10.0.0.247']")
-REAL_FAILURE = ("Error: failed to stop containers on 10.0.0.248: "
+                       "sparkrun_7f2a on hosts ['192.0.2.247']")
+REAL_FAILURE = ("Error: failed to stop containers on 192.0.2.248: "
                 "ssh: Permission denied (publickey)")
 
 
@@ -143,7 +143,7 @@ class TestDownOutputRendering:
         mod, res, _ = self._down(
             monkeypatch, 1,
             "No sparkrun containers found on the hosts that could be queried.",
-            "Error: could not query 10.0.0.246: ssh: Permission denied")
+            "Error: could not query 192.0.2.246: ssh: Permission denied")
         assert "benign_no_workloads" not in res
         assert "ERROR" in "\n".join(mod._human_lines("down", res))
 
@@ -156,7 +156,7 @@ class TestDownOutputRendering:
         mod, res, _ = self._down(
             monkeypatch, 1,
             "No sparkrun containers found on the hosts that could be queried.",
-            "Error: could not query 10.0.0.246: connection reset by peer")
+            "Error: could not query 192.0.2.246: connection reset by peer")
         assert "benign_no_workloads" not in res
         assert "ERROR" in "\n".join(mod._human_lines("down", res))
 

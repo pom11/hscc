@@ -133,7 +133,7 @@
     "is_dir": true,
     "in_mount_table": true,
     "mount_fstype": "nfs",
-    "mount_source": "10.0.0.5:/models",
+    "mount_source": "192.0.2.5:/models",
     "mount_is_distinct_device": true,
     "disk_total": "8664G",
     "disk_used": "1440G",

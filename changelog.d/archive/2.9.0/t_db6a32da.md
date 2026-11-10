@@ -2,7 +2,7 @@ kind: Added
 task: t_db6a32da
 
 - **`/v1/cluster/status` workloads now carry a `nodes` list.** Each entry of
-  `workloads` gains one optional key, `"nodes": ["10.0.0.1", "10.0.0.2"]`,
+  `workloads` gains one optional key, `"nodes": ["10.0.0.x", "10.0.0.x"]`,
   the host lines of that job's block in `sparkrun status` — the unit→node
   edge the iOS "Nodes & serving" screen needs. `cmd_cluster_status()`
   (`hscc-cluster/hscc.py`) already walked those lines and threw them away; it

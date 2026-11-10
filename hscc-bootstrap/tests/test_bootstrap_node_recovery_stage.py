@@ -35,7 +35,7 @@ needs_runtime = pytest.mark.skipif(
 TREE_DIRS = ("hscc-bootstrap", "hscc_daemon", "hscc-cli", "hscc-cluster",
              "hscc-roles", "hscc-skills")
 
-FAKE_CLUSTER = ('[{"name": "fabricated", "hosts": ["10.0.0.1", "10.0.0.2"],'
+FAKE_CLUSTER = ('[{"name": "fabricated", "hosts": ["192.0.2.1", "192.0.2.2"],'
                 ' "user": "op", "cache_dir": "", "default": true}]')
 
 SRC = BOOTSTRAP.read_text()
@@ -170,7 +170,7 @@ def test_dry_run_plans_the_watchdog_and_names_every_node(tmp_path):
     plan = [ln for ln in out.splitlines()
             if "→ plan:" in ln and "node hardware watchdog" in ln]
     assert plan, f"no watchdog plan line:\n{out[-3000:]}"
-    assert "10.0.0.1,10.0.0.2" in plan[0], plan[0]
+    assert "192.0.2.1,192.0.2.2" in plan[0], plan[0]
     assert "NOTHING" in plan[0] and "daemon-reexec" in plan[0]
 
 

@@ -21,8 +21,8 @@ import pytest
 
 import install_gpu_clock_cap as gc
 
-NODE = "10.0.0.1"
-OTHER = "10.0.0.2"
+NODE = "192.0.2.1"
+OTHER = "192.0.2.2"
 
 
 def _state_out(present=True, cap=2200, enabled="enabled", active="active", clk=2184,
@@ -162,8 +162,8 @@ def test_doctor_default_transport_refused_in_pytest(tmp_path):
 
 
 def test_parse_hosts_splits_bootstrap_csv():
-    assert gc.parse_hosts(["--hosts", "10.0.0.1,10.0.0.2", "--bootstrap-lines"]) == [NODE, OTHER]
-    assert gc.parse_hosts(["--hosts", "10.0.0.1", "10.0.0.2"]) == [NODE, OTHER]
+    assert gc.parse_hosts(["--hosts", "192.0.2.1,192.0.2.2", "--bootstrap-lines"]) == [NODE, OTHER]
+    assert gc.parse_hosts(["--hosts", "192.0.2.1", "192.0.2.2"]) == [NODE, OTHER]
 
 
 def test_notifier_mask_cli_splits_bootstrap_csv(monkeypatch):
@@ -177,7 +177,7 @@ def test_notifier_mask_cli_splits_bootstrap_csv(monkeypatch):
                 "target": {"units": [], "mask_dir": "", "snap_untouched": ""},
                 "nodes": [], "masked": [], "opted_out": [], "needing_attention": []}
     monkeypatch.setattr(nm, "mask_fleet", fake_fleet)
-    nm.main(["--hosts", "10.0.0.1,10.0.0.2", "--dry-run", "--json"])
+    nm.main(["--hosts", "192.0.2.1,192.0.2.2", "--dry-run", "--json"])
     assert seen["nodes"] == [NODE, OTHER]
 
 

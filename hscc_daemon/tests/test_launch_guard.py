@@ -21,9 +21,9 @@ import pytest
 from hscc_daemon import health
 from hscc_daemon import launch_guard as lg
 
-H1 = "10.0.0.11"
-H2 = "10.0.0.12"
-H3 = "10.0.0.13"
+H1 = "192.0.2.11"
+H2 = "192.0.2.12"
+H3 = "192.0.2.13"
 VLLM_R = "~/recipes/qwen-solo-vllm.yaml"
 OTHER_R = "~/recipes/embed-vllm.yaml"
 
@@ -347,13 +347,13 @@ class TestAutoupIsGuarded:
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
         data = {"port": 8000, "units": [
             {"id": "orch", "role": "orchestrator",
-             "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+             "nodes": ["192.0.2.244", "192.0.2.246"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/orch.yaml"},
             {"id": "wk1", "role": "worker", "keepalive": False,
-             "nodes": ["10.0.0.247"], "port": 8000,
+             "nodes": ["192.0.2.247"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
             {"id": "wk-keep", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.248"], "port": 8000,
+             "nodes": ["192.0.2.248"], "port": 8000,
              "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
         ]}
         serving_path = tmp_path / "serving.json"
@@ -390,14 +390,14 @@ class TestAutoupIsGuarded:
         started, which is honest §8 partial-start semantics; what must NEVER
         happen is the refused unit's own start being issued, or the wake
         claiming success."""
-        poison = status(solo("10.0.0.247", 9100, recipe=OTHER_R))
+        poison = status(solo("192.0.2.247", 9100, recipe=OTHER_R))
         res, runner = self._autoup_harness(tmp_path, monkeypatch,
                                            autodown_file, poison)
         assert res["result"] == "start-failed", res
         assert res.get("failed_at") == "wk1", res
         # The refused unit's host appears in NO issued start.
         for call in runner:
-            assert "10.0.0.247" not in " ".join(call["cmd"]), call["cmd"]
+            assert "192.0.2.247" not in " ".join(call["cmd"]), call["cmd"]
         # orch + wk-keep legitimately started (they are ordered before wk1).
         assert len(runner) == 2
 
