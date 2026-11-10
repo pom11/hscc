@@ -118,4 +118,39 @@ paired with a non-vacuity assertion, all assertions on observables (the
 environment the child was handed, the argv, what the report says, whether anything
 was spawned at all).
 
-(suite measurements and mutation probes appended below)
+## 6. Evidence
+
+- **12 tests** in `hscc_daemon/tests/test_board_pin_pause.py`. Every conflict case
+  is paired with a non-vacuity assertion, and every assertion is on an observable:
+  the environment the child was actually handed, the argv, what the report and the
+  status stream say, whether anything spawned **at all**. The non-vacuity pair that
+  matters: the pre-guard `list` answers for the *pinned* board, and the pre-guard
+  `block` argv **mutates** that board's same-id card while the asked board is
+  untouched — the CLI fake answers and mutates the board the environment it was
+  handed resolves to, so the harm is observable rather than merely flagged.
+- **Targeted trio**: 45 passed — the 12 new plus the 33 existing
+  (`test_kanban_pause.py` 20, `test_kanban_pause_enforce_stream.py` 13), the
+  injected-`run` fakes unchanged as the card required.
+- **Suite pair, back-to-back at `f5af6980`** (this card's code commit — the only
+  later commits are this record and the changelog fragment, no code and no tests),
+  with `run_tests.sh`'s identity vars unset (`HERMES_DELEGATED_CHILD_CONTEXT`,
+  `HERMES_KANBAN_DB`, `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_WORKSPACES_ROOT`,
+  `HERMES_KANBAN_ATTACHMENTS_ROOT`):
+  **hscc_daemon 3630 passed / 0 failed** (114s),
+  **hscc-api 994 passed + 1 skipped** (253s).
+  Branch-point pair on `fe530887`: 3618 / 994+1 — the delta is exactly the +12 here,
+  so nothing was renamed or dropped. `changelog_fragments.py check` OK
+  ([Unreleased] pointer, 3 fragment entries consistent); `readme_lint.py` 0 findings,
+  docs-index 204/204.
+- **Mutation probes: 13/13 decision points caught**, each probe reset to the
+  pristine copy first, an unmutated CONTROL run green before any verdict, and
+  provenance asserted inside every run (a plugin's FILE sentinel — `-q` suppresses
+  report headers, so a check that only prints is not a gate). The points:
+  never-scrub the read · scrub-but-empty-world (the read must inherit the rest of
+  the environment) · the real runner dropping `env=` (the only route by which a
+  scrub survives `subprocess.run`) · `list_cards` ignoring `blocked` · `pause`
+  ignoring the write refusal · `pause` continuing after refusing · `resume`
+  ignoring the write refusal · `enforce` ignoring the write refusal · `enforce`
+  hiding the refusals · `enforce_tick` staying `ok=True` on refusals · `_hold`
+  no longer refusing a direct write · the read capability always answering
+  "cannot" (which would fail the read closed) · detection switched off entirely.
