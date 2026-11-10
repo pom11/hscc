@@ -11,6 +11,596 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.7] - 2026-11-10
+
+### Fixed
+- **The kill switch no longer reports ONE pinned board as the fleet, and it can
+  no longer stop a worker on a board the caller does not own.** Two residuals
+  t_b014c2b8 deliberately left fenced, both decided in
+  `hscc_daemon/kill_switch.py`'s module docstring. A dispatched worker shell
+  carries `HERMES_KANBAN_DB`, and hermes resolves that pin ahead of an explicit
+  `board=` under a worker/delegation fence, so the running-card listing
+  (`GET /v1/kanban/running`, also wrapped by `routes_activity`) opened the SAME
+  pinned DB once per slug and rendered a well-formed panel describing one board
+  as the fleet. Worse, the find-by-id behind the verb read only the pinned
+  board: task ids repeat across boards, so `kill <id>` from a worker shell could
+  resolve the id to a card that lives on a DIFFERENT board and SIGTERM/SIGKILL
+  the worker found there. Now one `_scan_running_tasks` sits behind both
+  surfaces — the read is guarded (`board_pin.open_board(mode="read")`: warn once
+  per (pin, board) naming both values, then read the real fleet, the same shape
+  `kanban_live.collect` uses) and the verb refuses (`BoardPinConflict` naming the
+  pin, the board asked for and both resolved paths, raised BEFORE any pid is read
+  or any signal sent) for every board the pin outranks. A worker shell may still
+  stop a worker on the board the pin points at and nowhere else, so the fence
+  keeps its mutation half. The listing/verb agreement is structural rather than
+  promised: both walk the same rows with the same per-board verdict, and each row
+  carries `killable` + `pin_conflict` (listing-level `pin_conflicts`) so a row the
+  panel shows as un-killable is exactly a row the verb refuses, in the same
+  sentence. `BoardPinConflict` is re-raised out of the two `except Exception`
+  handlers instead of being reported as "board unreadable", matching
+  `autodown.archive_stale_task` and `kanban_blocked.recover_blocked_task`.
+- **`dispatcher_wedge._capped_assignees` stops guessing `multi` from the board
+  slug.** `multi = bool(board) and board != "default"` was a slug-shaped guess
+  about a lib capability: `autodown.py:310` derives that flag as
+  `hasattr(kanban_db, "list_boards")`, which is also the value the gate's two
+  sibling probes are handed. The heuristic sent a `default` read down the
+  no-`board=` path — the one path the guard left unguarded, so a worker pin still
+  steered exactly one of the gate's three reads of a board — and it made the gate
+  compare two different files for one board, because `kanban_db_path()` with no
+  intent follows `HERMES_KANBAN_BOARD` while
+  `kanban_db_path(board="default")` is the legacy flat `<root>/kanban.db`. The
+  legacy no-`list_boards` shape still gets the no-`board=` call verbatim.
+  14 new tests (9 kill-switch, 3 wedge-probe, 2 API) in
+  `hscc_daemon/tests/test_kill_switch.py` (11 -> 20),
+  `hscc_daemon/tests/test_board_pin.py` (17 -> 20) and
+  `hscc-api/tests/test_routes_kill_switch.py` (10 -> 12), each conflict case
+  paired with a non-vacuity assertion that the same armed env reads — or kills —
+  the WRONG card without the guard, plus the companion cases proving the un-armed
+  and legacy shapes behave exactly as before; every decision point mutation-probed
+  against the mutated file (both controls green).
+- **Board enumeration no longer silently shrinks to one board when the test
+  process is shared.** `test_orch_waker.py::test_enumerate_includes_legacy_default_and_named_boards`
+  failed `KeyError: 'beta'` in the canonical leg and passed alone. Root cause,
+  measured (`docs/audits/orch-waker-import-leak_t_2be3b04e.md`):
+  `autodown._load_kanban_db_or_default` does `sys.path.insert(0, <agent dir>)`
+  and never removes it — despite its docstring promising "only for the duration
+  of this one import" — so the FAKE `hermes_cli` tree that
+  `test_autodown.py::TestLoadKanbanDb` plants under `tmp_path` stays at
+  `sys.path[0]` for the rest of the process. pytest keeps a test's `tmp_path`
+  alive until the next session, so the next test that touched the seam (the
+  first `test_autodown_cli.py::TestStatus`) re-imported that fake, and — being
+  a lib without `list_boards`, i.e. autodown's documented single-board shape —
+  it was then the resident kanban lib for every later file, including the
+  waker. `test_autodown`'s own evictor was written for this exact hazard but
+  only removes `sys.modules` entries, never the `sys.path` entry that lets the
+  fake walk back in.
+  `hscc_daemon/tests/conftest.py` now pins the `hermes_cli` import cache per
+  test, like the autouse fixtures here already pin the kanban root, the serving
+  topology and sparkrun resolution: drop temp-rooted `sys.path` entries, and
+  purge + restore the `hermes_cli*` subtree when a test poisons it. The purge is
+  whole-subtree rather than planted-only because `hermes_cli/kanban_db_*.py`
+  bind `import kanban_db as _kb` at import time, so a real module imported while
+  a fake is resident keeps the fake — evicting the fake alone does not repair
+  it. No production code changed and no assertion was relaxed; a test that only
+  ever touches the real library pays nothing (re-import measured at ~5 ms).
+  New `hscc_daemon/tests/test_hermes_cli_import_isolation.py` pins it with a
+  nested real pytest run — one generated file plants through the production
+  resolver, the next file in that process must still see hermes' real
+  `list_boards` — plus unit tests for the poison detector, including the
+  `real module holding _kb -> planted fake` shape a plain evict cannot catch.
+- **`hscc verify` still called the serving layer faulty for a deliberate
+  `cluster down` — in the two rows the reader half (t_97f2b38c, PR #261) did not
+  cover.** `check_proxy` and the opt-in `check_chat_roundtrip` excuse only what
+  the AUTO DOWN window grants (`_intentional_window_verdict()`, verify.py:829 /
+  :1569), which a manual `cluster down` never opens. So after the operator typed
+  the verb, the table still read
+  `✗ proxy … no models in data list` and (with `--chat`)
+  `✗ chat_roundtrip … model on <node>:<port> did not answer (Connection refused)`
+  — a wall of red about a serving layer the operator had just switched off on
+  purpose. **Which shape a deliberate down actually leaves (read, not run):**
+  `cmd_cluster_down` (hscc-cluster/hscc.py:621) issues ONE
+  `sparkrun stop --all --cluster …` (`serving.fleet_down_cmd()`,
+  serving.py:388-399), which discovers and stops sparkrun *workloads on the DGX
+  hosts* (sparkrun/api/_stop_all.py) and never touches the proxy — a LOCAL
+  process on :4000 that only `sparkrun proxy stop` stops. The proxy therefore
+  SURVIVES the down, its discovery sweep prunes the dead backends, and it answers
+  HTTP 200 `{"data": []}` forever (documented verbatim at health.py:1108-1113):
+  the `no models in data list` row, not a connection error. The `connection
+  error:` row only happens if the proxy process itself died, which `cluster
+  down` does not do — both shapes are handled identically anyway.
+  **Does the excuse belong here at all? Yes — and the argument is the daemon's
+  own.** t_ba1424b7 made `health.check_proxy` stand the whole check down while
+  the record stands: no probe, no drift read, no repair, no orphan reap, no
+  relaunch, with the trade-off stated out loud (a proxy started BY HAND during a
+  deliberate down is not health-checked until the record is lifted). A RED verify
+  row about that same process contradicts a gate that deliberately does nothing
+  about it, and disagrees with the fleet's own documented blind spot for the one
+  surface an operator reads on purpose. `check_proxy` already grants this excuse
+  for an autodown window; the stay-down half was simply missing.
+  **The second key — the real design question, answered.** These two rows probe
+  over HTTP, so they have no `intentional` key of their own to agree with the
+  durable record, and a record ALONE is one key: a leftover `deliberate_down`
+  (fleet expected up, record never lifted) would then hide a dead serving layer.
+  The honest second key is the DAEMON'S OWN CURRENT STAY-DOWN STAMP on the stream
+  that supervises whatever the row probes — a different writer from the record,
+  so the two really are independent:
+  `_stay_down_witness_current(name)` reads `state.read_state(name)` (the daemon's
+  own funnel, not a second copy of the fact), requires
+  `intentional == "operator_down"`, and requires that stamp to be *renewed* — the
+  same per-stream staleness rule `check_daemon_streams` applies
+  (`max(600, 2*cadence + 90)` off `daemon_ops.PERIODIC_INTERVALS`), so a stamp the
+  daemon stopped renewing is not evidence.
+  `_stay_down_probe_verdict(witnesses)` then excuses iff the record (via the
+  reused `_operator_down_verdict()` / `_operator_down_label()`, never re-derived)
+  AND a current witness agree, and renders the same
+  `fleet deliberately down (<record reason>)` label. `check_proxy`'s witness is
+  exactly `proxy` — the stream that supervises the very process it probes, as
+  strict per-component as the stream reader's own-marker rule. `chat_roundtrip`
+  probes EVERY unit in serving.json, so its subject is the whole serving layer and
+  its witnesses are its supervisors (`workers`, `dgx`, `gateway`, `proxy`), ANY
+  one being enough: "all" would never excuse an orchestrator-only fleet, because
+  `check_workers` stamps nothing at all when serving.json declares no keep-alive
+  units.
+  **Both gates sit AFTER the autodown window branch and BEFORE any probing**, so
+  the window wording stays byte-identical and nothing in the serving layer is
+  touched while the record stands (the rule every stay-down gate in the daemon
+  follows). Fail-safe direction unchanged: a raising predicate, a shapeless
+  record, an absent/unreadable stream, a non-dict, a missing or unparseable
+  timestamp, a foreign marker value or a stale stamp all read as NO EVIDENCE and
+  the row probes and reports exactly as before. No new JSON key:
+  `hscc verify --json` still emits `{name, ok, detail}`, and the excused lines are
+  the stay-down label + the wording each row already used for a window
+  (`… : serving layer not serving models, none expected` /
+  `… : serving layer not serving, chat not expected`).
+  Consequence, stated rather than discovered: because the excuse precedes the
+  probe, a proxy that still advertises a stale catalogue during a deliberate down
+  reports the stay-down, not its models — exactly what the window gate already
+  does, and what the daemon's own proxy supervisor decided by design.
+- **A leg of `scripts/run_tests.sh` inherited the dispatching worker's live
+  board.** The runner dropped only `HERMES_DELEGATED_CHILD_CONTEXT` (the read
+  fence) before each `pytest`, so a worker-invoked suite still carried the four
+  board *location* pins the dispatcher injects into every worker
+  (`hermes_cli/kanban_db_dispatch.py:2811-2851`: `HERMES_KANBAN_DB`,
+  `HERMES_KANBAN_WORKSPACES_ROOT`, `HERMES_KANBAN_BOARD`). hermes resolves those
+  pins **ahead of caller intent**: `_board_path()` (`hermes_cli/kanban_db.py:540-560`)
+  returns the pin for ANY board whenever `_explicit_board_intent_pinned()` holds,
+  and that predicate (`agent/delegation_context.py:76-93`) holds for every
+  dispatched worker — i.e. for the shell that runs the runner. So any test that
+  asked hermes' **real** resolver for a throwaway board (instead of injecting a
+  fake path) got the operator's board, and inside the fence it could not see the
+  difference. `t_628f03a6` was misled by exactly this in a live run.
+
+- **Measured, and not neutralised by the existing fixtures.** In a dispatched
+  worker shell at `5c718718`, before the change:
+  `kanban_db_path(board="fixture-board")` → `<kanban-home>/kanban/boards/<live-board>/kanban.db`
+  and `workspaces_root(board="fixture-board")` → `<kanban-home>/kanban/boards/<live-board>/workspaces`.
+  The second one is the reason "the suites already isolate themselves" is false:
+  `hscc_daemon/tests/conftest.py:482-500` pins `HERMES_KANBAN_HOME` *and* deletes
+  `HERMES_KANBAN_DB`, and `workspaces_root()` **still** returned the live root,
+  because `_board_path` checks the env pin BEFORE any root resolution — a pinned
+  home cannot neutralise it. (`HERMES_KANBAN_BOARD` is the one the fixture root
+  does neutralise, via `get_current_board()` requiring `board_exists()` under the
+  pinned home; it is scrubbed anyway, so no leg depends on that accident.)
+
+- **The fix is the marker's own treatment, extended.** `SUITE_ENV_UNSET` is now
+  the single list the leg is launched through — `env "${ENV_UNSET_ARGS[@]}"
+  "$PY" -m pytest ...` — and holds the marker plus the four location pins. Set in
+  the RUNNER rather than in a fixture for the same reason as
+  `HSCC_SKIP_COMPACT_PROBE`: monkeypatch does not reach child processes, and much
+  of the suite spawns python/`hermes` children that resolve their own board.
+  `HERMES_KANBAN_ATTACHMENTS_ROOT` is on the list although it is NOT
+  dispatcher-injected (grep: read-only at `hermes_cli/kanban_db.py:575-578`,
+  `gateway/platforms/base.py:836`) — same kind of pin, `HERMES_KANBAN_HOME`
+  cannot neutralise it either, and `env -u` on an unset var costs nothing.
+  The worker IDENTITY vars (`HERMES_KANBAN_TASK`, `_RUN_ID`, `_CLAIM_LOCK`,
+  `_GOAL_MODE`, `_GOAL_MAX_TURNS`, `_WORKSPACE`, `_BRANCH`) are deliberately
+  **not** scrubbed: they name no board location and the suite legitimately goes
+  both ways about them (`hscc-cluster/tests/test_budget_watch.py:46` sets `TASK`
+  to get worker behaviour, five cli-help suites strip it to get a clean
+  subprocess env). Scrubbing identity would silently flip every worker-mode
+  branch to its non-worker side — tests passing because they stopped exercising
+  what they claim to test, a worse outcome than the leak being fixed.
+
+- **Verified — before/after pair, same test code, back-to-back, the dispatcher
+  pins inherited.** Both arms ran the REAL `scripts/run_tests.sh` (an
+  `HSCC_TEST_PY` filter selects the leg; it never touches the environment), the
+  BEFORE arm from a throwaway worktree at `origin/main`:
+
+  | leg | BEFORE `5c718718` / runner blob `002e9ed4` | AFTER branch tip / blob `2c7a8f72` |
+  |---|---|---|
+  | `hscc_daemon` | 3566 passed, exit 0, 87.37 s | **3566 passed, exit 0, 80.84 s** |
+  | `hscc-cluster` | 1100 passed + 3 skipped, exit 0, 50.64 s | **1100 passed + 3 skipped, exit 0, 49.97 s** |
+  | `scripts` | 350 passed + 2 skipped, exit 0 | **357 passed + 2 skipped, exit 0** (+7 = this card's new file) |
+  | `.github/scripts` | 129 passed, exit 0 | **129 passed, exit 0** |
+
+  Nothing moved from "ran" to "skipped": the `-rs` skip REASONS diff
+  byte-identically between the arms (`hscc-cluster`: 2 `SKIPPED` lines, identical
+  text). `git diff --stat` between the arms is 3 files — `scripts/run_tests.sh`,
+  the new test, this fragment — so every file the `hscc_daemon` / `hscc-cluster`
+  legs read is byte-identical and the pair is a pure environment comparison.
+  **No test in the fleet needed the leaked pin to pass.**
+  `origin/main` moved mid-card (PR #268, this card's own parent, merged as
+  `1b5e9eb0`), so the pair was **re-measured after `git merge origin/main`** —
+  same two arms at the new base, back-to-back, pins inherited:
+  BEFORE `1b5e9eb0` (runner blob `002e9ed4`) **3581 passed, 2 skipped, exit 0**
+  (84.23 s) → AFTER `8696c1a3` (runner blob `2c7a8f72`) **3581 passed, 2 skipped,
+  exit 0** (82.35 s), skip REASONS byte-identical. The +15/+2 versus the pre-merge
+  3566 is #268's own `test_board_pin.py` (17 tests). Those tests are the ones most
+  sensitive to pin visibility, and they are identical in both arms — they arm the
+  pin they need with `monkeypatch`, which is exactly why a runner-level scrub
+  neither weakens them nor breaks them: only the AMBIENT pin is removed.
+  Canonical full runner (all 12 legs) at `60c074fa` (the pre-merge branch tip —
+  `#268` had not landed yet; the post-merge leg that both diffs touch is
+  re-measured above), same worker shell:
+  **ALL GREEN, exit 0** in 19 m 40 s — 9238 passed, 6 skipped, 0 failed
+  (hscc-bootstrap 1180, hscc-commands 78, hscc-roles 219, hscc-cluster
+  1100+3sk, hscc-project 1462, hscc_daemon 3566, sparkrun-hermes 12, hscc-api
+  992+1sk, memori_byodb 11, scripts 357+2sk, .github/scripts 129,
+  comfyui-sparkrun 132). `hscc_daemon` measured 3566 passed in all three
+  invocations of this card (before, after, full runner), so the count is not a
+  load artifact.
+
+- **Verified — the guard itself is load-bearing.**
+  `scripts/tests/test_run_tests_harness_env.py` (new, 7 tests) pins the list,
+  pins that the leg is launched *through* it, executes the SHIPPED block against
+  a real child process (pins gone; `HERMES_KANBAN_TASK`, `_WORKSPACE` and `PATH`
+  still there), and pairs every conflict case with a non-vacuity assertion that
+  the same armed env reads the wrong board without the scrub — per pin, through
+  hermes' own resolver, inside a tmp `HERMES_KANBAN_HOME`; the slug pin gets its
+  own case (for a board that exists it redirects a *boardless* `kanban_db_path()`
+  to the sibling board's DB). Mutation probes on a copy (`.git` ignored), control
+  green first (8 passed), each mutation asserted to have applied, file reset to
+  original between probes, provenance asserted (`run_tests.sh` must be read from
+  inside the copy, so a "catch" cannot come from the real repo):
+  revert the whole runner to the pre-fix file → **3 named tests fail**; drop
+  `HERMES_KANBAN_WORKSPACES_ROOT` / `HERMES_KANBAN_ATTACHMENTS_ROOT` /
+  `HERMES_KANBAN_DB` from the list → **2 named tests fail** each; scrub
+  `HERMES_KANBAN_TASK` as well (the decision, other direction) → **2 named**;
+  launch the leg with `env -i` → **1 named**; stop the leg using the list at all
+  → **1 named**. 7/7 caught with the expected failure SET, not just a count.
+  `bash -n scripts/run_tests.sh` clean.
+- **An autodown wake that could not describe the fleet left it pinned
+  "deliberately down" too.** t_278b35b2 moved the wake's `expected_up` record —
+  the act that `pop`s the durable `deliberate_down` stay-down — to step **2a**,
+  before the first unit starts, but the EMPTY-PLAN failure at step 1a returns
+  three statements earlier: `serving.json` missing or unparseable ⇒
+  `load_serving` returns `None` ⇒ `if not plan:` ⇒ clear the block, record
+  `state: "error"`, notify `critical`, return `no-units`. So that path left two
+  supervision surfaces contradicting each other from a single code path: the
+  cleared block + `classify() -> "healthy"` said *"the layer is not up; autodown
+  has released it to the watchdog"*, while the still-stamped record made
+  `health._operator_down()` truthy, so `check_workers` and `check_proxy` stood
+  down entirely and the trigger engine stopped notifying — the fleet down AND
+  unsupervised, which is the one half-state §8 and the v1.9.0 residual this
+  failure path exists to prevent. Step **1b** now ends the stay-down there as
+  well, through the same sanctioned popper (`post_boot.record_expected_up`)
+  with the EMPTY plan, fail-soft + `WARN` like step 2a. Decided deliberately
+  against "leave it set": the record means *"down until the next fleet-up"* and
+  step 1a is reachable only from `autoup()` — the wake, not a successful wake,
+  is the escape hatch (post_boot D1), so by the time this branch runs the order
+  has been revoked; and the operator-action condition a corrupt `serving.json`
+  is gets communicated by the critical notify + honest `state: "error"` +
+  reason, not by silencing the checks. Clearing cannot arm a relaunch: launch
+  authority needs NON-EMPTY `units` (post_boot gate 2) and an empty plan writes
+  `units: []`. That settles the three-state t_278b35b2 left open — `units: []`
+  with no `deliberate_down` means *"nothing is expected up and nobody holds a
+  standing stay-down order"*: the post-boot pass reports `no-marker`, every
+  consumer supervises as it did before the record existed, and the teardown's
+  `cleared_at` (plus `boot baselines`/`attempts`, which `record_expected_up`
+  preserves) survives, so clearing is not erasing. The marker `reason` names the
+  empty plan for whoever reads `~/.hscc/expected-up.json` and is DISPLAY ONLY —
+  no consumer branches on it, or on record presence alone, and both producer
+  wordings are lifted identically.
+- **A monitor running inside a worker shell no longer reports ONE board as the
+  fleet.** A dispatched worker shell carries `HERMES_KANBAN_DB`, and hermes
+  resolves that env pin ahead of an explicit `board=` argument whenever a
+  worker/delegation fence is active (`hermes_cli/kanban_db.py:540-555`
+  `_board_path()` returns `Path(pin)` when `_explicit_board_intent_pinned()` —
+  `kanban_db.py:522` → `agent/delegation_context.py:76-93`). `list_boards()` is
+  not affected by the pin, so `hscc kanban monitor` enumerated every board and
+  opened the SAME pinned DB once per slug: a complete, plausible panel — rows
+  populated, `errors: []` — whose numbers described one board while reading as a
+  statement about all 24. Measured before the fix in a real worker shell:
+  `kanban_db_path(board="default")` → `…/boards/hscc/kanban.db`, and the same for
+  every other slug. The fence is also wider than first reported: it fires for
+  `HERMES_KANBAN_TASK` **and** `HERMES_DELEGATED_CHILD_CONTEXT`, so this session
+  type is affected too.
+  New seam `hscc_daemon/board_pin.py` makes it loud, with the two shapes the
+  task allowed split by access mode. **Reads** (`kanban_live.collect`,
+  `autodown._board_has_active_work`, `autodown.list_stale_tasks`,
+  `autodown.board_db_paths`, the `kanban_blocked` listing, the three
+  `dispatcher_wedge` probes) warn once per (pin, board) naming the pin value, the
+  board asked for, both resolved paths and which fence variable triggered, then
+  open with the pin removed from `os.environ` for the duration of that open.
+  **Writes** (`autodown.archive_stale_task`, `kanban_blocked.recover_blocked_task`,
+  `scripts/dep_pr_watcher.ensure_cards`) raise `BoardPinConflict` naming both
+  values **before** any board is opened — a silently-misdirected read misinforms,
+  a silently-misdirected write mutates the wrong store, and task ids repeat
+  across boards, so the two must not be treated the same way. The `multi=False`
+  legacy single-board shape and every no-`board=` call site are untouched: there
+  the pin IS the intended answer. Detection asks hermes' own `kanban_db_path`
+  twice, with the pin visible and scrubbed, and reports a conflict only when the
+  two disagree — so hscc still never re-derives a board path
+  (`autodown.board_db_paths`' own contract) and stays correct if hermes changes
+  its precedence rules. `hscc kill` is deliberately left fenced (documented in
+  `docs/audits/board-pin-t_b014c2b8.md`): scrubbing there would point a
+  destructive verb at boards a worker shell does not own. 16 tests in
+  `hscc_daemon/tests/test_board_pin.py` — each conflict case paired with a
+  non-vacuity assertion that the same armed env reads the WRONG board without the
+  guard, plus the companion cases (worker reading its own board stays silent,
+  multi-board run with no pin unchanged, legacy shape byte-for-byte, no
+  warning-drip under repeats), two of them driving the real `hermes_cli`
+  resolver against a `HERMES_KANBAN_HOME` fixture root.
+- **The unified `hscc cluster down` still printed `ERROR` for a fleet that was
+  already down — and for a clean stop as well.** t_1244b3b4 (PR #253) taught the
+  *standalone* view (`hscc-cluster/hscc.py::_human_lines`) to read the additive
+  `benign_no_workloads` / `benign_note` keys, but `hscc cluster down` has two
+  human renderers over the same engine dict, and the one the operator actually
+  types into — `hscc_daemon/cluster_render.py::render_down` → `_render_fleet_op`
+  — read `success` alone. Two defects, both measured on `f2cbae3f` by rendering
+  faked `_run_or_print` dicts (no live `cluster down`, no ssh, no sparkrun):
+
+  1. `{success: False, returncode: 1, benign_no_workloads: True, …}` → `ERROR`/1.
+     Fixed by the same two-line read the standalone view uses:
+     `benign = (not ok) and bool(result.get("benign_no_workloads"))`,
+     `shown_ok = ok or benign`, and the note is printed under the OK verdict.
+  2. `{success: True, returncode: 0, error: ""}` → `ERROR`/1 — a *clean*
+     teardown, red. `_run_or_print` always sets `error` (captured stderr, `""`
+     when there was none) and `_object_error` hands that `""` back, so the old
+     `err is None` test read an empty stderr as a failure. Nothing upstream can
+     rescue that shape: `_benign_no_workloads_note` returns None for any rc-0 run
+     by design, so no benign key ever exists there. The veto is now on a
+     NON-EMPTY error string, which is the only thing that key has ever meant.
+
+  **No second classifier.** `hscc-orch`'s constraint on this card was that the
+  renderer must not grow its own copy of `_ALREADY_DOWN_MARKERS` /
+  `_REAL_FAILURE_MARKERS` — two self-consistent tables in two files can
+  disagree about whether a fleet is down with no test able to see it (the
+  `2f90f711` kinds-vs-labels split). It needed none: the verdict is read from
+  the keys the engine sets, and `cluster_render.py` never imports the engine or
+  reads sparkrun's text at all. The seam the new tests use to prove agreement is
+  the production one — `hscc_daemon/hscc.py::_load_cluster_engine` — so the
+  corpus drives the engine's own `_benign_no_workloads_note` and then asserts the
+  unified panel, the standalone `_human_lines` tag and the returned exit code all
+  agree across nine shapes (clean stop, three already-down spellings,
+  `could not query`, ssh permission-denied, already-down-plus-real-failure,
+  unknown wording, hard failure). Two guards back it up: the verdict is asserted
+  invariant to the `output` *text* at fixed keys (so a future text-based classifier
+  in the renderer flips a test instead of drifting silently), and no
+  marker-shaped name may be referenced by the renderer's code.
+
+  Untouched, deliberately: `success` still means "sparkrun exited 0" (the
+  `--json` dict the daemon, scripts and the iOS console dump raw is unchanged,
+  and the renderer does not mutate it), `hscc-cluster/hscc.py` is not edited, and
+  a genuine failure is still red — ssh/docker/auth/timeout, a host sparkrun could
+  not query, or wording no marker knows. One asymmetry survives and is pinned in
+  that direction: the unified view may be STRICTER than the standalone one
+  (`{success: True, error: "…"}` reads OK in `_human_lines`, ERROR here), never
+  softer.
+
+- **Verified:** 25 new tests in
+  `hscc_daemon/tests/test_cluster_down_benign_render.py`, green; `hscc_daemon`
+  leg green at the merged HEAD (3441 passed) and `scripts` leg green there too
+  (350 passed, 2 skipped); at the pre-merge commit `45f8e8d9` the whole
+  `bash scripts/run_tests.sh` ran **11/12 legs green**, the single red being
+  `test_a_table_identical_under_sibling_interpreters`' own 300 s subprocess cap —
+  which raises before its asserts, and which `origin/main` had already fixed in
+  #260 after my branch point. 7/7 mutation probes caught with a pristine CONTROL
+  green (each on a fresh copy at an absolute scratch path, every substitution
+  asserted to have applied, including restoring `cluster_render.py` to `f2cbae3f`
+  and watching the new file go red).
+- **`hscc check post_boot` told an operator `no expected_up marker` when the
+  marker file was sitting right there.** Gate 2 of `hscc_daemon/post_boot.py`
+  reads "empty `units`" as one branch and until now chose between exactly two
+  sentences: the stay-down one (when the `deliberate_down` record is present)
+  and `no expected_up marker (fleet not fleet-upped, or brought down on
+  purpose) — nothing to do` for everything else. #263 (t_9c437f03 step 1b,
+  merged as `c186eb4a`) created a third state that branch had never described:
+  an empty wake plan now calls
+  `record_expected_up([], reason="autodown wake: empty plan (nothing to
+  start)")`, which pops the stay-down and writes `units: []` — so the file
+  EXISTS, there is NO stay-down record, and the second sentence is
+  doubly wrong: it denies a file that exists, and it drops the marker's own
+  `reason`, the one breadcrumb telling the operator that a wake tried and could
+  not describe the fleet (`serving.json` missing/corrupt).
+  `check_post_boot_relaunch` copies `res["message"]` into the stream verbatim,
+  so that sentence is literally what the operator reads — and it was
+  indistinguishable from the case where the fleet was genuinely never
+  fleet-upped.
+
+- **One verdict, three sentences.** Gate 2 now prints which state it found:
+  record present → the existing `fleet deliberately down since <set_at>
+  (<reason>) — nothing to do`; **marker file present and readable with an
+  empty footprint** → `expected_up marker present with an EMPTY footprint
+  (nothing is expected up and nobody holds a standing stay-down order; reason:
+  "…"; cleared_at: …) — nothing to do`, quoting the marker's `reason` and its
+  `cleared_at` when the marker carries one; no readable marker (absent,
+  corrupt, or not a JSON object) → the old absent-marker sentence, kept
+  byte-identical, because an unreadable marker is *absence of evidence* — the
+  same thing `load_marker` reads as an empty marker and `deliberately_down()`
+  reads as `None`, and the wording that promises nothing.
+
+- **Display only, and pinned as such.** Nothing behavioural moved:
+  `result` stays `no-marker` for all three states (it is a member of
+  `_STREAM_OK_RESULTS`, `post_boot.py:777` — a new label would read `ok=False`,
+  turn `hscc verify` red and fire the trigger engine, i.e. page for a state
+  that is not a fault), and the pass stays inert because launch authority needs
+  NON-EMPTY `units`. The new `marker_file_readable(path=None)` predicate is
+  declared DISPLAY-ONLY in its own docstring and fails safe to `False`.
+  Printing the marker's prose is not branching on it, and the PR #243 rule
+  (never decide from record presence or a `reason` substring) is pinned from
+  both sides: `TestWordingIsNotBehaviour::test_no_units_verdict_is_invariant_
+  to_the_reason` runs eight reason strings — including the *verbatim wording of
+  the other two states*, an imperative ("relaunch everything now"), the empty
+  string and a NUL/emoji — through all three states and asserts the identical
+  verdict with zero boot/probe/lock/launch calls, and
+  `test_launch_authority_reads_units_never_prose` asserts a NON-EMPTY footprint
+  behaves identically whatever `reason` claims, even with a hand-stamped
+  `deliberate_down` (a shape no sanctioned writer produces).
+
+- **Verified:** `tests/test_post_boot.py` 47 → 63 (16 new). The third state is
+  reached only through the sanctioned writers — `clear_expected_up` then
+  `record_expected_up([])`, the exact sequence step 1b performs — never by
+  hand-writing a marker shape, and one test guards that the fixture really is
+  the third state rather than one of the older two. Focused
+  `tests/test_post_boot.py tests/test_autodown.py`: **266 passed** at
+  `0ddee987` (63 + 203). Before #263 landed the same command measured **258**
+  (63 + 195) and on #263's open tip it measured the same **266**, so the change
+  is right in either landing order — its files are disjoint from step 1b's.
+  `hscc_daemon` leg of `scripts/run_tests.sh`: **3566 passed, 0 failed** at
+  `0ddee987` (3501 at the pre-merge `63e3236c`; the delta is main's own new
+  test files, not this diff). 9/9 mutation
+  probes caught on a pristine CONTROL green (63 passed), every probe run
+  asserting it imported `post_boot` from inside the copy, each mutation reset to
+  original on a fresh copy and asserted to have applied before running: the
+  empty-footprint branch disabled, the stay-down branch disabled, the `reason`
+  breadcrumb dropped, `cleared_at` printed when absent, the presence predicate
+  answering True for any parseable JSON, the same predicate raising instead of
+  failing safe, gate 2 made to **branch on prose** (caught by the
+  wording-invariance test), the verdict label renamed out of
+  `_STREAM_OK_RESULTS`, and a straight revert to the old lie.
+
+### Verified
+- `hscc_daemon/tests/test_verify_stay_down.py`: **39** new cases on top of the
+  reader half's 44 (file now **83 passed**). `TestProxyRowDuringDeliberateDown`:
+  the empty-catalogue body excused *without the proxy being probed at all*
+  (the spy asserts zero calls), the exact human line, all three sanctioned
+  `clear_expected_up` wordings, the bare label for a record with no reason, the
+  `hscc verify --json` key set against the healthy row, the dead-proxy shape
+  excused on both keys, and the negative controls — record without witness,
+  witness without record, a stamp the daemon stopped renewing, an `autodown`
+  stamp with no window, a foreign marker value — each still the real
+  `no models in data list` / `connection error:` row. `TestChatRoundtripDuringDeliberateDown`:
+  excused by ANY of the four serving-layer supervisors (parametrised) with zero
+  probes fired, still probing-and-failing with no witness / witness-only /
+  stale witness, the byte-identical window wording with the record present, and
+  the `ok: None` unverified row preserved once the witness is gone.
+  `TestStayDownWitnessHelper`: freshness, naive-timestamp-as-UTC, six ways a
+  stamp fails to be current, non-dict stream, absent state dir, a raising
+  `read_state`, the bound scaling with the stream's OWN cadence (nas 900 s fresh
+  at 1200 s old vs proxy not), and the helper's both-keys/never-raises/empty-
+  witness behaviour through the injectable predicate.
+  Focused run (`hscc_daemon`, this venv): the card's four-file command
+  `tests/test_verify.py tests/test_verify_state_schema.py
+  tests/test_verify_stay_down.py tests/test_stay_down_streams.py` ->
+  **211 passed** (172 at the base commit `3e718832`, +39 new; the three files
+  the card did not touch stay unmodified).
+  All **7** mutation probes caught against a GREEN pristine control
+  (**205 passed**): proxy gate disabled (8 red), chat gate disabled (5), the
+  two-key AND weakened to OR (13), witness currentness dropped (3), the
+  `operator_down` marker strictness dropped (4), the label reworded (14), the
+  stay-down/window precedence inverted (1). Each probe ran on a fresh
+  `shutil.copytree` of the worktree (no `.git`, absolute scratch path), every
+  anchor asserted to occur exactly once before writing, and a guard test pinned
+  into every copy asserted `verify.__file__` was inside the copy. Unit tests
+  only — no live `cluster down`, no ssh, no sparkrun call anywhere; the shape a
+  deliberate down leaves was established by READING
+  `hscc-cluster/hscc.py::cmd_cluster_down`, `hscc_daemon/serving.py::fleet_down_cmd`,
+  `sparkrun/api/_stop_all.py` and `hscc_daemon/health.py`.
+- `bash scripts/run_tests.sh` from a CLEAN detached worktree at `8945df44` (the
+  commit carrying this fragment's Fixed + Verified halves): **12/12 legs, ALL
+  GREEN, `RUNTESTS_EXIT=0`** — `hscc-bootstrap 1180`, `hscc-commands 78`,
+  `hscc-roles 219`, `hscc-cluster 1100 +3 skipped`, `hscc-project 1462`,
+  **`hscc_daemon 3499`** (base `3e718832` had 3460 — exactly the 39 new cases),
+  `sparkrun-hermes 12`, `hscc-api 992 +1 skipped`, `memori_byodb 11`,
+  `scripts 349 +3 skipped`, `.github/scripts 129`, `comfyui-sparkrun 132`. A
+  second full run at the code commit `ccb197b9` was also ALL GREEN; its `scripts`
+  leg had one fewer SKIP, and the difference is environmental: a release flow
+  landed `hscc.rb: bump to 2.15.6 for release v2.15.6` in the tap repo at
+  22:19:50, between the two runs, and
+  `scripts/tests/test_formula_dep_drift.py::…` skips by design when the tap
+  trails the checkout's `VERSION`. This card's diff touches nothing that leg
+  reads except the fragment, whose own audit
+  (`scripts/changelog_fragments.py check`) reports
+  `OK — [Unreleased] is pointer, 38 fragment entries consistent`.
+- `hscc_daemon/tests/test_autodown.py`: 195 -> **203** cases (8 new) in
+  `TestEmptyPlanWakeEndsTheStayDown`, wired with the module's own injected fakes
+  — no live fleet call, no ssh, both fences report zero live calls. The empty
+  plan is reached both ways (`serving.json` missing AND present-but-truncated)
+  and both stay-down wordings are seeded through the production writer, so the
+  decided outcome (`deliberately_down() -> None`, `units: []`, `no-units`,
+  `state: "error"`, block cleared, zero starts, the `critical` notify, teardown
+  `cleared_at` retained) is pinned for each pair. Plus the ORDER (a spy on
+  `_clear_intentional_block` snapshots the record at the instant the watchdog is
+  released — it must already be gone), the SAFETY half at post_boot's own gates
+  (`run_post_boot_pass` with fakes returns `no-marker` and reaches no boot
+  sweep, probe, lock or launch surface), fail-soft (a raising
+  `record_expected_up` leaves the failure path intact, the record genuinely
+  still set, and the cause on the log at `WARN`), and the consumer view through
+  the production seams `health._operator_down` / `trigger._operator_down` —
+  stood down before the wake, supervising after it.
+- `cd hscc_daemon && <venv>/bin/python -m pytest -q tests/test_autodown.py
+  tests/test_post_boot.py`: **250 passed** (203 + 47).
+- **6 mutation probes + a pristine control, 6/6 caught**, each on a fresh
+  `shutil.copytree` (no `.git`, no shared index) with the control green first;
+  every probe asserts its target string is present before writing, so a probe
+  can not report a false "caught"/"missed" off a substitution that no-oped:
+  step 1b deleted (the hole verbatim), the pop moved after the block clear,
+  `WARN` -> `DEBUG`, the branch re-stamping instead of clearing, the branch
+  prose-matching the operator wording (the PR #243 anti-pattern), and the branch
+  claiming a NON-EMPTY footprint — each caught, and only by the tests that
+  should be.
+- Full suite, `bash scripts/run_tests.sh` from a clean detached worktree at this
+  commit: **11 of 12 legs green** — `hscc-bootstrap`, `hscc-commands`,
+  `hscc-roles`, `hscc-cluster`, `hscc-project`, `hscc_daemon` (**3399 passed**,
+  the leg that executes `autodown.py`), `sparkrun-hermes`, `hscc-api`,
+  `memori_byodb`, `.github/scripts`, `comfyui-sparkrun`. The only red is
+  `scripts`: `1 failed, 346 passed, 2 skipped` —
+  `test_a_table_identical_under_sibling_interpreters`, whose
+  `scripts/hscc_cli_help_audit.py` subprocess hit its own 300 s wall.
+  **Attributed by measurement, not inherited:** the same single test was re-run in
+  isolation (a) at this commit — `1 failed, 348 deselected in 602.71 s`, same
+  `TimeoutExpired` — and (b) in a clean detached worktree at **this branch's own
+  merge-base** `4dc5599d`, with none of this change present — `1 failed, 348
+  deselected in 604.01 s`, the identical failure. So it is a host property (the
+  sibling interpreter's startup needs more than the audit's own budget here,
+  unloaded), not load and not this diff; this diff adds no CLI surface and no
+  `scripts/` file, so it cannot change the audit's output. Separately,
+  `hscc-bootstrap` / `hscc-api` — red in t_278b35b2's run — are green in this
+  one, which IS load-sensitivity, and it went the lucky way.
+
+### Docs
+- **`docs/UPSTREAM-kanban-wake-once-gate.md` §9.4 no longer asks the question — it
+  records the answer.** The doc parked one open question: which `deliver_wake` branch
+  the `hscc-orch` kanban sub (`platform=local`, `mode=notify+wake`) takes, since the
+  identity-threading half (§3.2) is worth nothing to us if the answer is self-post.
+  `t_12350485` settled it: **the push branch** — `LocalSessionAdapter` inherits
+  `supports_async_delivery = True`, so the wake goes
+  `gateway/wake.py:135 → admit_route_wake(..., "kanban-wake", ...) → session_admissions`,
+  and `_self_post_chat_completion` sits behind `adapter_supports_push` being False and
+  is structurally unreachable for this sub. Proven at runtime, not read off the source:
+  9 `kanban-wake`-shaped `request_id` rows joined 9/9 to the 9
+  `kanban notifier: woke agent … profile=hscc-orch` log lines, each carrying the
+  `uuid.uuid4().hex` nonce minted at `gateway/session_automation.py:837` — the exact
+  token §3.2 replaces, on the branch we take. **Verdict: §3.2 is enough for hscc**, so
+  the upstream ask does *not* extend to `_self_post_chat_completion` and no comment was
+  added to [NousResearch/hermes-agent#152206](https://github.com/NousResearch/hermes-agent/issues/152206)
+  (that follow-up was conditioned on the self-post branch; the issue stays untouched).
+  Two caveats now bind §3.2 and §5's acceptance test, both measured in the same store:
+  the `admit_internal_event` fallback (`gateway/wake.py:149-151`) delivers a wake with
+  **no** admission row (0 of 9 observed), and session retirement moves rows into
+  `state_meta` out of `find_session_admission`'s reach — so a fence row is evidence, not
+  a receipt, the dedupe token must be re-derivable from event identity, and deleting
+  `gateway_wake_cursors` / `gateway_already_delivered` still requires §3.1's board-DB
+  claim. Every anchor re-checked against the live runtime tree at
+  `045881137d6a177cac690b1d373316ce8c271f43`; orchestrator session id redacted.
+- **The upstream half of the doubled orchestrator wake is now a written proposal.**
+  `docs/UPSTREAM-kanban-wake-once-gate.md` designs the symmetric case PR #265 could
+  not reach — the orchestrator waker delivering first and the gateway notifier having
+  no idea — and names the actual hermes root cause: the kanban wake's admission
+  identity is minted `uuid.uuid4().hex` per call
+  (`gateway/session_automation.py:837`), so the durable fence that already has a
+  UNIQUE `(principal, target, request)` key (`hermes_state_runtime.py:157-160`) can
+  never absorb a duplicate. Proposal = thread a caller-supplied dedupe token through
+  `admit_route_wake`/`deliver_wake`, plus one small event-identity wake **claim** in
+  the board DB both emitters can reach, since a cross-emitter duplicate is an
+  `admission_conflict` rather than a replay and the waker's transport is a tmux
+  keystroke. Keeps t_ff520296's posture: dedupe on event identity, every unknown
+  fails open towards delivering. The removal of `gateway_wake_cursors` /
+  `gateway_already_delivered` is the acceptance test for the API. Filed upstream as
+  [NousResearch/hermes-agent#152206](https://github.com/NousResearch/hermes-agent/issues/152206),
+  cross-linked into #144882 (the wake-path map) and #146361 (same root cause), with
+  every anchor re-verified against upstream `main`, not only the pinned fork.
 ## [2.15.6] - 2026-11-09
 
 ### Added

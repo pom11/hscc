@@ -26,9 +26,14 @@ The precedence being defeated is the one measured in the parent audit
 `HERMES_KANBAN_DB` set **and** either fence marker present, the pin wins over the
 explicit `--board`. A dispatched worker (`HERMES_KANBAN_TASK`) or a delegated
 child (`HERMES_DELEGATED_CHILD_CONTEXT`) running the daemon path is exactly such
-a process. `scripts/run_tests.sh` unset `HERMES_DELEGATED_CHILD_CONTEXT` but not
-`HERMES_KANBAN_DB`, so no canonical leg ever ran the gate in the shape (t_7e343e04
-closes the harness half).
+a process. `scripts/run_tests.sh` used to unset `HERMES_DELEGATED_CHILD_CONTEXT` but **not**
+`HERMES_KANBAN_DB`, so no canonical leg ever ran the gate in the shape — the
+harness gap `t_7e343e04` closes (PR #272, landed while this card was running: the
+runner now unsets the board-location pins too, and deliberately leaves the
+worker *identity* vars alone). That is precisely why the cases here arm or clear
+the worker state explicitly instead of trusting the ambient environment: they pass
+inside a worker shell and outside one, and the harness scrubbing the pin cannot
+quiet them.
 
 ## 2. What the gate got wrong — this is not cosmetic
 
