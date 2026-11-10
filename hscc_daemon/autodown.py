@@ -23,6 +23,7 @@ import time
 from typing import Optional
 
 from . import board_pin
+from . import hermes_import
 from .daemon_ops import log
 from .state import now_iso
 from .desktop import send_macos_notification
@@ -746,11 +747,22 @@ def _load_kanban_db_or_default():
 
     Kept in its own function so ``_has_active_work`` (and this module) never
     depend on Hermes being installed at import time, and so tests can inject.
-    Resolves the Hermes runtime dir and puts it on ``sys.path`` only for the
-    duration of this one import — mirroring flightdeck/core/kanban.py:86-111
+    Resolves the Hermes runtime dir and puts it on ``sys.path`` "only for the
+    duration of this one import" — mirroring flightdeck/core/kanban.py:86-111
     — because ``hermes_cli`` lives under ~/.hermes/hermes-agent and is never
     on the daemon's ``sys.path``. Honours ``HOME`` (via expanduser) and the
     ``HERMES_AGENT_PATH`` override the way flightdeck does.
+
+    The window is not hand-rolled here: :func:`hermes_import.agent_tree_on_path`
+    opens it and restores ``sys.path`` in its ``finally``, so this sentence and
+    the code cannot drift apart (t_8eafef82 — the version of this function that
+    promised the sentence and left the entry at ``sys.path[0]`` for the life of
+    the process is what made one planted fake ``hermes_cli`` poison a whole
+    pytest run; see docs/audits/orch-waker-import-leak_t_2be3b04e.md §6).
+    Everything Hermes-side that can trigger an import — both imports below —
+    stays inside the window; the returned module object needs no path to stay
+    usable, because a loaded package resolves its submodules through its own
+    ``__path__``.
 
     On any failure it returns None WITHOUT raising; the caller
     (``_has_active_work``) then fails safe to True (never treat an
@@ -764,26 +776,25 @@ def _load_kanban_db_or_default():
             f"Hermes agent source not found at {hermes_path!r} — cannot import "
             f"hermes_cli.kanban_db. Set HERMES_AGENT_PATH if it lives elsewhere.")
         return None
-    if hermes_path not in sys.path:
-        sys.path.insert(0, hermes_path)
     try:
-        from hermes_cli import kanban_db  # noqa: PLC0415
+        with hermes_import.agent_tree_on_path(hermes_path):
+            from hermes_cli import kanban_db  # noqa: PLC0415
+            # ``connect``/``connect_closing`` moved to ``hermes_cli.kanban_db_connect``;
+            # ``kanban_db.connect`` is a removal-scheduled compat shim that emits
+            # HermesPluginCompatWarning. Bind the canonical callables from the new
+            # module onto ``kanban_db`` so ``.connect`` / ``.connect_closing`` resolve
+            # from __dict__ (never the shim). Do NOT make this a hard gate: a Hermes
+            # with only the pre-move path still works (its ``kanban_db.connect`` is a
+            # native compat shim there — no warning) — only bind what the new module
+            # provides, silently falling back otherwise.
+            try:
+                from hermes_cli import kanban_db_connect  # noqa: PLC0415
+            except Exception:
+                kanban_db_connect = None
     except Exception as e:
         _note_kanban_unavailable(
             f"could not import hermes_cli.kanban_db from {hermes_path!r}: {e}")
         return None
-    # ``connect``/``connect_closing`` moved to ``hermes_cli.kanban_db_connect``;
-    # ``kanban_db.connect`` is a removal-scheduled compat shim that emits
-    # HermesPluginCompatWarning. Bind the canonical callables from the new
-    # module onto ``kanban_db`` so ``.connect`` / ``.connect_closing`` resolve
-    # from __dict__ (never the shim). Do NOT make this a hard gate: a Hermes
-    # with only the pre-move path still works (its ``kanban_db.connect`` is a
-    # native compat shim there — no warning) — only bind what the new module
-    # provides, silently falling back otherwise.
-    try:
-        from hermes_cli import kanban_db_connect  # noqa: PLC0415
-    except Exception:
-        kanban_db_connect = None
     if kanban_db_connect is not None:
         for _n in ("connect", "connect_closing"):
             if hasattr(kanban_db_connect, _n):

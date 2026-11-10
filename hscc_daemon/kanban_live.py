@@ -47,7 +47,6 @@ import json
 import os
 import re
 import sqlite3
-import sys
 import time
 
 from rich.console import Group
@@ -56,6 +55,7 @@ from rich.text import Text
 
 from hscc_daemon import autodown
 from hscc_daemon import board_pin
+from hscc_daemon import hermes_import
 from hscc_daemon.cli_theme import esc
 from hscc_daemon.cluster_live import fmt_tokens
 from hscc_daemon.daemon_ops import log
@@ -161,19 +161,26 @@ def _load_hermes_config():
     """``hermes_cli.config.load_config()`` result. Raises on any real failure.
 
     ``hermes_cli`` lives under the Hermes agent tree and is NOT on the daemon's
-    ``sys.path``, so this resolves that tree and inserts it here — the same
-    thing ``autodown._load_kanban_db_or_default`` does for ``kanban_db``.
-    Doing it HERE rather than assuming somebody else already did it is what
-    makes ``_read_caps`` independent of call order (GAP-D-4): previously the
-    import below only worked once the kanban loader had run, and a caller that
-    read the caps first silently got ``(None, None)``.
+    ``sys.path``, so this resolves that tree and holds it on the path for the
+    duration of this one import AND the call — the same window
+    ``autodown._load_kanban_db_or_default`` opens, via
+    :func:`hermes_import.agent_tree_on_path`, which restores ``sys.path`` in its
+    ``finally`` (t_8eafef82: the version below inserted the tree and never took
+    it back out, so a planted fake tree survived for the whole process). The
+    call belongs inside the window too, not just the import: ``load_config`` can
+    trigger its own fresh top-level import (``hermes_constants``) the first time
+    it runs, and a top-level import is the one thing that does need the path.
+
+    Doing the resolution HERE rather than assuming somebody else already did it
+    is what makes ``_read_caps`` independent of call order (GAP-D-4): previously
+    the import below only worked once the kanban loader had run, and a caller
+    that read the caps first silently got ``(None, None)``.
     """
     hermes_path = os.path.expanduser(
         os.environ.get("HERMES_AGENT_PATH", _HERMES_AGENT_PATH))
-    if os.path.isdir(hermes_path) and hermes_path not in sys.path:
-        sys.path.insert(0, hermes_path)
-    from hermes_cli.config import load_config  # noqa: PLC0415
-    return load_config()
+    with hermes_import.agent_tree_on_path(hermes_path):
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        return load_config()
 
 
 def _read_caps():
