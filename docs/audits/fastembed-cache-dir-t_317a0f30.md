@@ -86,6 +86,21 @@ loads the provider before it embeds anything, and the environment is correct by
 then. That is the guarantee we actually control; a launcher-side pin is a
 promise about one launcher.
 
+**Why the helper exists twice, and must keep doing so.** This is packaging, not
+an accident, so do not "fix" it by factoring out a shared module.
+`install_payload.py` ships `"memori"` and `"memori_byodb"` as two *independent*
+`DEFAULT_PAYLOAD` entries (`:597`), each copied whole into its own
+`plugins_dir/<name>` by `shutil.copytree(..., ignore=_ignore)` (`:304`, filter
+`_EXCLUDE` at `:40`), and Hermes loads a directory plugin with
+`submodule_search_locations=[plugin_dir]` (`hermes_cli/plugins_loader.py:828`) —
+a provider can import only from inside its own deployed dir. So neither provider
+can reach a module living in the other, and a third "shared" payload dir would
+make provider import depend on a second plugin having been installed first. Two
+copies plus the AST drift check
+(`memori_byodb/tests/test_cache_env.py::test_the_two_provider_copies_have_not_drifted`)
+is the shape that survives deployment; the drift check is the thing keeping one
+policy from diverging across the two dirs.
+
 `scripts/run_tests.sh` gets the same export independently (the way
 `HERMES_DISABLE_LAZY_INSTALLS` and `HSCC_SKIP_COMPACT_PROBE` are exported
 there): legs must not depend on a plugin being imported to keep 87 MB out of the
@@ -137,8 +152,9 @@ override were ignored on this platform the two rows would look identical — the
 not. Each probe run also prints the pre-existing root count before and after
 (`9 before, 9 after`) so a probe that added a tenth root would report itself.
 
-`memori/_cache_env.py`'s twin, `memori_byodb/tests/test_cache_env.py` (23 tests)
-and `scripts/tests/test_run_tests_fastembed_cache.py` (6 tests) cover the same
+`memori/_cache_env.py`'s twin, `memori_byodb/tests/test_cache_env.py` (12 tests;
+the whole `memori_byodb` leg collects 23) and
+`scripts/tests/test_run_tests_fastembed_cache.py` (6 tests) cover the same
 contract offline, so a regression names itself without needing the network: env
 semantics including both fail-open branches, the import-time wiring in a child
 process with a tmp `$HOME`, the call-site ordering as text, the runner export
@@ -152,9 +168,12 @@ scrubbed): `memori_byodb` 23 passed; `scripts` 363 passed / 2 skipped in 569 s
 (9:29); `hscc-bootstrap/tests/test_install_payload.py` 43 passed. The full
 `scripts` leg earned its keep: it caught the one thing the new tests could not
 see, a `readme_lint` DOC-UNLISTED failure created by adding this very file
-without enumerating it in `docs/README.md` (fixed in `2262b06a`). The
-sibling-interpreter (3.13) legs are **not** run here — a dual-interpreter stamp
-at the merge SHA is still owed by whoever lands the branch.
+without enumerating it in `docs/README.md` (fixed in `2262b06a`).
+Those numbers were measured in the authoring session, at the pre-review tip. The
+dual-interpreter stamp at the merge SHA — both interpreters, legs from a clean
+detached worktree — is recorded in the pull request rather than pinned in this
+file, because a SHA written into a document goes stale the first time the branch
+is rebased.
 
 ## Deliberately NOT done
 

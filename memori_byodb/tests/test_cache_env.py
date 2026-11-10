@@ -7,7 +7,7 @@ loads the embedding model drops an 87 MB copy of
 such dirs on this host (docs/audits/fastembed-cache-dir-t_317a0f30.md).
 ``_cache_env.ensure_shared_cache_env()`` is the cure, called at provider import.
 
-Five claims, each pinned so a regression names itself:
+Six claims, each pinned so a regression names itself:
 
   1. the default is ``$HOME/.cache/fastembed`` and is NOT cwd-relative;
   2. an explicit ``FASTEMBED_CACHE_DIR`` wins over the default — paired with a
