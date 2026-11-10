@@ -139,7 +139,20 @@ scrub-but-keep-the-pin (4), real runner drops `env=` (1), gate ignores
 `unverifiable` (1), `show` inherits instead of scrubbing (4), capability always
 "cannot" (3), capability always "can" (1), wrapper never forwards (3).
 
-`hscc_daemon/tests` leg at `c1c628a1`: 3591 passed, 2 skipped in 80 s — the 2
-skips are the documented `t_2be3b04e` `hermes_cli`-coherence skips in
-`test_board_pin.py`, not new. The four files this seam shares (new file +
-`test_board_pin.py` + both wedge suites) went 146 → 156.
+Suite measurements (both at a green tree, `env -u HERMES_DELEGATED_CHILD_CONTEXT
+~/.hermes/hermes-agent/venv/bin/python -m pytest -q -rs <leg>/tests -p
+no:cacheprovider`):
+
+* pre-merge, at `c1c628a1` — `hscc_daemon/tests`: 3591 passed, 2 skipped in 80 s.
+  The 2 skips were the then-documented `t_2be3b04e` `hermes_cli`-coherence skips in
+  `test_board_pin.py`, present on `main` too;
+* post-merge (origin/main `a2e23c9d`, which brought #271, #272 and the t_2be3b04e
+  per-test `hermes_cli` isolation), at `9f179571` — `hscc_daemon/tests`: **3610
+  passed, 0 skipped** in 108 s; `hscc-api/tests`: **994 passed, 1 skipped** in
+  252 s;
+* the four files this seam shares (new file + `test_board_pin.py` + both wedge
+  suites) went 146 → 156 pre-merge, and 225 with the parent's wedge probe family
+  and `test_kill_switch.py` in the base.
+
+`scripts/changelog_fragments.py check` OK; `scripts/readme_lint.py` 0 findings,
+docs-index 202/202.
