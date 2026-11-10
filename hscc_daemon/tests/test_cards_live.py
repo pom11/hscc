@@ -337,6 +337,46 @@ def test_render_empty_and_finished_states(tmp_path):
     assert "blocked" in render_text(mon)
 
 
+def test_render_blind_board_read_is_loud_never_no_cards_running(tmp_path):
+    """t_a594ce03: every board read failed (brew venv has no hermes_state).
+
+    The old panel said "no cards running" while data["boards"] was empty and
+    errors named all 23 boards. A blind read must render the errors themselves
+    in a red panel, every one of them, and never the calm idle line.
+    """
+    errors = [f"board 'b{i}' unreadable: No module named 'hermes_state'"
+              for i in range(23)]
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: {"running": [], "ready": [], "events": [],
+                                   "caps": (10, None), "errors": errors,
+                                   "boards": [], "outcomes": {}})
+    mon.refresh()
+    out = render_text(mon, height=40)
+    assert "board read failed" in out
+    assert "no cards running" not in out
+    # EVERY error, not the old two-line footer slice.
+    for err in errors:
+        assert err in out, err
+
+    panel = kanban_live.board_error_panel(errors)
+    assert panel.border_style == "error"       # red, not the idle grey
+
+
+def test_render_partial_board_errors_stay_in_the_footer(tmp_path):
+    """Some boards readable -> the grid still describes the fleet; the errors
+    remain visible as footer lines rather than replacing the whole view."""
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: {"running": [], "ready": [], "events": [],
+                                   "caps": (10, None),
+                                   "errors": ["board 'bad' unreadable: locked"],
+                                   "boards": [{"name": "b"}], "outcomes": {}})
+    mon.refresh()
+    out = render_text(mon, height=20)
+    assert "no cards running" in out
+    assert "board 'bad' unreadable: locked" in out
+    assert "board read failed" not in out
+
+
 def test_render_many_cards_in_small_terminal_does_not_crash(tmp_path):
     rows = [run_row("b", f"t_{i}") for i in range(10)]
     mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap(rows))

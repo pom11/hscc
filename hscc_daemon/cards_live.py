@@ -667,11 +667,18 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
     now = mon.clock() if now is None else now
     keys = mon.panels()
     top = status_line(mon, tools_only, paused, zoom, now, cols)
-    foot = ready_lines(mon, width) + [Text(e, style="error")
-                                      for e in mon.data.get("errors", [])][:2]
+    errors = mon.data.get("errors", [])
+    blind = not mon.data.get("boards") and bool(errors)
+    foot = ready_lines(mon, width)
+    if errors and not blind:
+        foot += [Text(e, style="error") for e in errors][:2]
     grid_h = max(height - 1 - len(foot), 3)
     grid = Layout(name="grid", size=grid_h)
-    if not keys:
+    if blind:
+        # A blind board read is not an idle fleet: never paint "no cards
+        # running" over errors that mean nothing could be read (t_a594ce03).
+        grid.update(kanban_live.board_error_panel(errors))
+    elif not keys:
         grid.update(Panel(Text("no cards running", style=MUTED), border_style=IDLE_BORDER))
     elif zoom:
         k = keys[focus % len(keys)]
