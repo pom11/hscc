@@ -71,22 +71,22 @@ def test_plant_a_fake_agent_tree(tmp_path, monkeypatch):
 _PROBE_FILE = '''
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 from hscc_daemon import autodown
+# The canary asks the SAME question the rest of the suite asks, so it asks the
+# SAME predicate. This nested process has the repo on PYTHONPATH and conftest
+# loaded as a plugin, so file B had no licence to re-derive "is this path a
+# plant" for itself (t_b62da70c) — a third rule here would be exactly the drift
+# this file family exists to prevent.
+from hscc_daemon.tests.hermes_cli_plant import is_planted_path
 
 REAL_AGENT = Path.home() / ".hermes" / "hermes-agent"
-TEMP_ROOTS = (os.path.realpath(tempfile.gettempdir()), "/private/var/folders")
-
-
-def _is_temp(path):
-    return os.path.realpath(str(path)).startswith(TEMP_ROOTS)
 
 
 def test_no_planted_agent_dir_survives_on_sys_path():
     strays = [p for p in sys.path
-              if str(p).endswith("hermes-agent") and _is_temp(p)]
+              if str(p).endswith("hermes-agent") and is_planted_path(p)]
     assert not strays, f"planted tree left on sys.path: {strays}"
 
 

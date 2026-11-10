@@ -259,19 +259,56 @@ def test_malformed_cap_values_do_not_bring_the_monitor_down(tmp_path, monkeypatc
     assert kanban_live._CAPS_READ["reason"] == ""
 
 
-def test_load_hermes_config_resolves_the_agent_tree_once(tmp_path, monkeypatch):
-    """The resolver honours HERMES_AGENT_PATH (the same override autodown uses)
-    and does not re-insert a path that is already present."""
+def test_load_hermes_config_resolves_the_agent_tree_then_closes_the_window(
+        tmp_path, monkeypatch):
+    """THE t_8eafef82 expectation change — read this before "fixing" it.
+
+    The pre-fix version of this test asserted ``str(agent) in sys.path`` AFTER
+    the call, i.e. it *pinned the leak*: ``_load_hermes_config`` put the agent
+    tree at ``sys.path[0]`` and left it there for the life of the process. That
+    assertion was the test-side half of the trap that made one planted fake
+    ``hermes_cli`` poison a whole pytest run
+    (docs/audits/orch-waker-import-leak_t_2be3b04e.md §3, §6), so it is
+    deliberately INVERTED here, not relaxed:
+
+      * the read must still come from the planted tree (``__file__`` inside it —
+        the gate only serves that tree, so this also proves the window really
+        opened: with no window the import could not have resolved at all);
+      * ``sys.path`` must be exactly what it was afterwards, on a successful
+        resolve;
+      * and a repeat call must still leave it unchanged (the pre-fix code
+        passed that one, which is why the leak survived it).
+    """
     agent = tmp_path / "hermes-agent"
     with _HermesCliGate(agent):
         monkeypatch.setenv("HERMES_AGENT_PATH", str(agent))
-        sys.path[:] = [p for p in sys.path
-                       if os.path.realpath(p) != os.path.realpath(str(agent))]
+        before = [p for p in sys.path
+                  if os.path.realpath(p) != os.path.realpath(str(agent))]
+        sys.path[:] = before
         cfg = kanban_live._load_hermes_config()
         assert (cfg.get("kanban") or {}).get("max_in_progress") == PLANTED_CAPS[0]
-        assert str(agent) in sys.path
-        before = list(sys.path)
+        # The window opened: the module the gate allowed us to import lives
+        # inside the planted tree, and the gate serves nothing else.
+        import hermes_cli.config as _planted
+        assert os.path.realpath(_planted.__file__).startswith(
+            os.path.realpath(str(agent)) + os.sep)
+        # …and it closed: no residue, same entries, same order.
+        assert str(agent) not in sys.path
+        assert sys.path == before
         kanban_live._load_hermes_config()          # second call must not duplicate
+        assert sys.path == before
+
+
+def test_load_hermes_config_leaves_no_trace_when_the_import_fails(
+        tmp_path, monkeypatch):
+    """The restore is not on the happy path only — a raising import must also
+    leave ``sys.path`` exactly as it found it (the ``finally`` is the point)."""
+    agent = tmp_path / "hermes-agent"
+    with _HermesCliGate(agent, block=True):
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(agent))
+        before = list(sys.path)
+        with pytest.raises(ModuleNotFoundError):
+            kanban_live._load_hermes_config()
         assert sys.path == before
 
 

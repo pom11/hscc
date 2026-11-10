@@ -118,10 +118,14 @@ def _hermes_gate():
     ``hermes_cli`` lives under ``~/.hermes/hermes-agent`` and is never on the
     plugin's ``sys.path``, so this mirrors the sanctioned lazy-import pattern
     used for ``hermes_cli.kanban_db`` (``autodown._load_kanban_db_or_default``):
-    resolve the runtime dir, extend ``sys.path`` only for the import, and
-    return None on any failure so the caller falls back to the mirror above.
+    try the import as-is, and if that fails hold the runtime dir on ``sys.path``
+    only for the duration of the import. "Only for the duration" is now actually
+    true — :func:`hermes_import.agent_tree_on_path` restores ``sys.path`` in its
+    ``finally`` (t_8eafef82; the hand-rolled insert this replaces documented the
+    promise and kept the entry for the life of the process). Returns None on any
+    failure so the caller falls back to the mirror above.
     """
-    import sys
+    from hscc_daemon import hermes_import
 
     def _load():
         from hermes_constants import (PROFILE_ID_RE, named_profile_has_identity,
@@ -134,13 +138,9 @@ def _hermes_gate():
         return _load()
     except Exception:
         pass
-    hermes_path = os.path.expanduser(
-        os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
-    if not os.path.isdir(hermes_path) or hermes_path in sys.path:
-        return None
-    sys.path.insert(0, hermes_path)
     try:
-        return _load()
+        with hermes_import.agent_tree_on_path():
+            return _load()
     except Exception:
         # Any failure — ImportError, or a module that raises at import time on a
         # partial install — falls back to the mirror. The check must never be

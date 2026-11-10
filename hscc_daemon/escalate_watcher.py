@@ -92,22 +92,31 @@ def scan_and_escalate(*, fail_limit=3, strong_profile=None,
     if _notified is None:
         _notified = set()
     from hscc_daemon import escalate
+    from hscc_daemon import hermes_import
 
     if _kb is None:
         try:
-            from hermes_cli import kanban_db as _kb
-            # ``connect`` moved to ``hermes_cli.kanban_db_connect``; ``kanban_db``
-            # retains it only as a removal-scheduled compat shim that emits
-            # HermesPluginCompatWarning. Bind the canonical version from the new
-            # module unless a test already set it explicitly on the module (only
-            # ``connect_closing`` is used here, but bind both for consistency).
-            if "connect" not in _kb.__dict__:
-                try:
-                    from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
-                    _kb.connect = _kbc.connect
-                    _kb.connect_closing = _kbc.connect_closing
-                except Exception:
-                    pass
+            # The whole resolve runs inside the agent-tree window (t_8eafef82):
+            # a bare ``hermes_cli`` import here used to work only when some
+            # other module in the process had left ~/.hermes/hermes-agent on
+            # sys.path, so whether this watcher could see the board at all
+            # depended on call order. Inside the window also covers the
+            # ``kanban_db_connect`` import below, which is a second fresh
+            # top-level import.
+            with hermes_import.agent_tree_on_path():
+                from hermes_cli import kanban_db as _kb
+                # ``connect`` moved to ``hermes_cli.kanban_db_connect``; ``kanban_db``
+                # retains it only as a removal-scheduled compat shim that emits
+                # HermesPluginCompatWarning. Bind the canonical version from the new
+                # module unless a test already set it explicitly on the module (only
+                # ``connect_closing`` is used here, but bind both for consistency).
+                if "connect" not in _kb.__dict__:
+                    try:
+                        from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
+                        _kb.connect = _kbc.connect
+                        _kb.connect_closing = _kbc.connect_closing
+                    except Exception:
+                        pass
         except Exception:
             return []
 
