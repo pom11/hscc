@@ -59,6 +59,11 @@ task: t_8eafef82
   `reason` in both interpreters because `kanban.max_in_progress` is genuinely
   unset here, not because the read failed — the distinction GAP-D-4 exists to
   keep.
+- **Canonical leg green.** `hscc_daemon/tests scripts/tests` under
+  `~/.hermes/hermes-agent/venv/bin/python -m pytest -q -rfEs -p no:cacheprovider`,
+  harness env (`scripts/run_tests.sh`'s `env -u` of the worker board pin plus
+  `HERMES_DISABLE_LAZY_INSTALLS=1 HSCC_SKIP_COMPACT_PROBE=1`): `3979 passed,
+  2 skipped in 761.17 s`, exit 0, at `a037d29e`.
 - **Five mutation probes, control green, provenance asserted inside every run**
   (each on a copy, original restored before the next probe): M1 the `finally`
   never restores (the pre-fix observable) → 11/11 new tests red; M2 the refcount
