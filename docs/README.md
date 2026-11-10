@@ -309,3 +309,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### memori embedding cache (record)
 
 - `docs/audits/fastembed-cache-dir-t_317a0f30.md` — why the memori SDK's vendored `fastembed` crate wrote one 87 MB model cache per cwd (nine roots / 782 MB measured on this host), the red/green proof that `FASTEMBED_CACHE_DIR` is honoured by the compiled crate, and why the pin lives at provider import rather than in the hermes-owned gateway launchd plist. **record** (t_317a0f30)
+
+### memori provider name shadowing (live)
+
+- `docs/audits/memori-sdk-shadowing-t_2ab0eda1.md` — `memori/` (the cloud provider) is a package named `memori`, so any `sys.path` entry holding it — the repo root, `~/.hermes/plugins` — makes the installed `memori` SDK **unreachable**, not merely wrong: the SDK's own `__init__` does absolute intra-package imports (95 files), measured. Includes the proof that every leg of `run_tests.sh` is in that shape today (`python -m pytest` puts cwd at `sys.path[0]`), the measurement that kills "load the SDK under a private name", the rename blast radius with its stale-deployed-dir trap, and the options table. The check that fails on it is `scripts/verify_memori_sdk_shadowing.py`. **live** — the layout decision is still open (t_2ab0eda1 ships the check, not the fix).
