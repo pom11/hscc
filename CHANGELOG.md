@@ -11,6 +11,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.9] - 2026-11-10
+
+### Changed
+- **Node addresses redacted repo-wide.** Real LAN node addresses committed in
+  configs, docs, audits, the changelog and archived fixtures are replaced with
+  the documented placeholder `10.0.0.x` (code defaults and fixtures use the
+  RFC 5737 range `192.0.2.x`). Forward-only: no history rewrite and no tag
+  amends, so older tags keep what they carried. `scripts/address_guard.py`
+  now also rejects concrete `10.0.0.N` addresses.
+
+### Fixed
+- **The orchestrator waker's wake-once dedupe never suppressed anything.**
+  `_claim_connect` handed out plain tuples while Hermes' claim helpers index
+  rows by name, so every wake-claim read raised a `TypeError` that escaped the
+  fail-open path; the waker treated every event as owed and logged "failing
+  open towards delivering" per board per tick. It now sets `sqlite3.Row`, and
+  tests drive Hermes' real claim helpers over the real connector (#290, #289).
+- **Every dual-interpreter stamp was red before you touched anything.** Under
+  the sanctioned sibling interpreter (`HSCC_TEST_PY=~/miniconda3/envs/p313`) 21
+  tests hard-failed on `ModuleNotFoundError: No module named 'ruamel'` raised
+  inside Hermes — 4 in `hscc-project`, 11 in `hscc_daemon`, 6 in `hscc-api`,
+  identically at `origin/main` with no branch under test — because the sibling
+  is a *thin pytest env* and those tests drive Hermes' real
+  `hermes_cli.kanban_db`, Hermes' real profile predicates, or a real
+  `hermes_state.SessionDB`. Their siblings in the same files already skipped for
+  the same missing module, so the leg could not distinguish "your branch broke
+  3.13" from "this env lacks ruamel" without re-running a baseline first. They
+  now skip through ONE capability probe per leg (`hscc_daemon/tests/real_hermes.py`,
+  `hscc-api/tests/hermes_gap.py`, and two helpers in `hscc-project/tests/`) that
+  asks the production resolver whether Hermes loads *here* and skips with the
+  loader's own reason — never a version check, so under any interpreter that can
+  import Hermes every gated test still runs. `scripts/run_tests.sh` now states
+  the posture where the interpreter is selected. The alternative — installing
+  Hermes' runtime deps into the sibling env — was measured and rejected: it is
+  host state no reviewer can pin, and it makes a second copy of a dependency set
+  Hermes resolves for itself.
+- **The cloud memory provider no longer shadows the installed `memori` SDK.**
+  The repo staged it as `memori/` — a top-level package with the same import name
+  as the third-party SDK the providers import (`from memori import Memori`).
+  Any process with the repo root or `~/.hermes/plugins` on `sys.path` (e.g.
+  `python -m pytest` from the repo root, `scripts/dep_pr_watcher.py`) resolved
+  `memori` to the provider and the SDK became unimportable at all, because the
+  SDK's own `__init__` performs absolute intra-package imports. Renamed the dir
+  to `memori_cloud/`, matching the `memori_byodb/` sibling; the deployed plugin
+  key and `plugin.yaml` name follow, and Hermes still loads it by file location.
+
+  Existing hosts are migrated rather than left with both dirs:
+  `install_payload.RETIRED_PAYLOAD = {"memori": "memori_cloud"}` moves a stale
+  deployed `~/.hermes/plugins/memori/` to
+  `plugins-backups/memori.retired.bak-<stamp>` on the next bootstrap, only when
+  the replacement is installed in the same pass, and never deletes it.
+
+  Guards: `scripts/verify_memori_sdk_shadowing.py` spawns a child per path root
+  and FAILs (exit 1) unless `from memori import Memori, embed_texts` reaches the
+  SDK; `scripts/tests/test_memori_sdk_shadowing.py` covers the mechanism with
+  hermetic fixtures, pins that no top-level `memori/` returns, and loads the
+  renamed provider the way Hermes does (`hermes_plugins.memori_cloud`).
+  Measurement and the rejected options:
+  `docs/audits/memori-sdk-shadowing-t_2ab0eda1.md`.
+- **The memori embedding model is cached once per host, not once per cwd.**
+  The memori SDK vendors the Rust `fastembed` crate inside
+  `site-packages/memori_python.abi3.so`, and that crate's cache directory is the
+  **relative** literal `.fastembed_cache` — the cwd of whichever process loaded
+  the model. `strings` on the shipped `.so` shows both sides, the default and the
+  override: `.fastembed_cachemodel_max_length=` and `FASTEMBED_CACHE_DIR`
+  (alongside `HF_HOME` / `HF_ENDPOINT`), from `fastembed-5.13.1/src/common.rs`.
+  Measured on the fleet host before this change: **nine** such roots, **88,984 KB
+  each — 782.1 MB**, one model (`Qdrant/all-MiniLM-L6-v2-onnx`; the largest blob
+  hashes identically, `bbd7b466…`, across all of them). They sat in five kanban
+  worker workspaces on two boards, two `gateclerk` worktrees, `hermes-agent` (the
+  gateway's `WorkingDirectory`), `~/.fastembed_cache`, and **the root of this
+  repo** — that last one because `run_tests.sh` runs pytest with the repo root as
+  cwd, so a suite could mint one as easily as an agent could.
+  `t_ae3e5f9b`'s `.gitignore` rule (PR #279) only stops one being *committed*;
+  this stops it being *written*.
+
+  **The mechanism was proven, not assumed** — exporting a name the library
+  ignores would pass an env-var check and change nothing, so
+  `scripts/verify_fastembed_cache_dir.py` asserts where the bytes land. Three
+  child processes, each with its own scratch cwd and its own `$HOME`, each making
+  a real `memori.embed_texts` call (`dim=384`):
+
+  | case | pinned? | landed in the pinned dir | cwd gained `.fastembed_cache` |
+  |---|---|---|---|
+  | `red` | nothing | — (target never written) | **yes**, 16 files / 182,204,112 B |
+  | `green` | `FASTEMBED_CACHE_DIR=<fresh, non-existent dir>` | **yes**, 16 files / 182,204,112 B | no |
+  | `plugin` | unset in env; `import memori_byodb` set it | **yes** — under `$HOME/.cache/fastembed` | no |
+
+  In `green` the named directory did not exist beforehand: the library created it,
+  which is the knob being honoured by compiled Rust, not just echoed back by the
+  environment. `red` is the non-vacuity half — the bug still reproduces, so the
+  other two rows mean something. Each run prints the pre-existing root count before
+  and after (`9 before, 9 after`) so a probe that leaked would report itself.
+
+  **Where it is set: the provider, not a launcher.** The gateway's launchd plist
+  does have an `EnvironmentVariables` dict (it is where every worker's
+  `HSCC_MEMORI_AUGMENT_*` come from) but hermes' own installer
+  (`hermes_cli/gateway_launchd_runtime.py`) writes and regenerates that file, and
+  `hermes_cli/kanban_db_dispatch.py:2884` gives each worker a scrubbed copy of the
+  *dispatcher's* `os.environ` — so a plist edit would cover dispatched workers and
+  nothing typed in a shell, no cron run, no TUI, no leg. Every one of those
+  processes does import a memori provider, so `memori_byodb/__init__.py` pins it
+  there, before anything in the package can reach the SDK, via
+  `memori_byodb/_cache_env.py` (three rules: operator value wins; default
+  `~/.cache/fastembed`, host-global and deliberately **not** under `$HERMES_HOME`,
+  so profiles share one copy; **fail open** — an uncreatable or relative target
+  leaves the environment untouched and logs a `WARN`, because a cache optimisation
+  must never be able to break the memory provider). The cloud provider
+  (`memori/`, also in `DEFAULT_PAYLOAD`) carries an identical copy — two plugins,
+  no shared module path — and a leg test compares their ASTs so they cannot drift.
+  `run_tests.sh` exports the same variable independently, so a leg cannot put 87 MB
+  in the tree it is testing even if it never imports the provider.
+
+  12 tests in `memori_byodb/tests/test_cache_env.py` (the whole `memori_byodb`
+  leg collects 23; these 12 cover
+  operator-wins precedence paired with a non-vacuity assertion that the two paths
+  differ, fail-open on an uncreatable *and* on a relative target, the import-time
+  wiring in a child process with a tmp `$HOME`, the call-site ordering as text, and
+  the sibling-copy drift check) + 6 in
+  `scripts/tests/test_run_tests_fastembed_cache.py`, which extracts the shipped
+  runner block and executes it under bash. A new leg conftest for `memori_byodb`
+  (the dir was already registered in `DIRS` but had no tests).
+
+  Two findings surfaced by the probe, both recorded rather than quietly absorbed.
+  (1) `hscc/memori/` — the cloud provider — **shadows the installed `memori` SDK**
+  for any process whose `sys.path` contains it: measured as
+  `ImportError: cannot import name 'embed_texts' from 'memori' (.../hscc/memori/__init__.py)`.
+  Hermes does not hit it (it loads plugins by file location), so the probe and the
+  leg test both use a one-symlink shim dir instead of putting the repo root on the
+  path, and the conftest documents why the repo root stays off `sys.path`. Filed as
+  its own card. (2) The nine existing caches were **not** deleted — they are caches,
+  and ~780 MB is the operator's call to reclaim (and `hscc` / `hermes-agent` may
+  still be live). Once this deploys nothing writes to any of them; the command is
+  in the decision record. Three probe trees from the verification runs remain under
+  `$TMPDIR/fastembed-verify-*` (~260 MB) — their deletion is also left to the
+  operator, as recursive delete is gated in a headless session.
+
+  Decision record: `docs/audits/fastembed-cache-dir-t_317a0f30.md`.
+
+  **Suite runs on this host** (py 3.14.9, `~/.hermes/hermes-agent/venv`, legs
+  invoked as `scripts/run_tests.sh` invokes them — one pytest process per dir,
+  `-p no:cacheprovider`, `HERMES_DISABLE_LAZY_INSTALLS=1
+  HSCC_SKIP_COMPACT_PROBE=1`, `HERMES_DELEGATED_CHILD_CONTEXT` unset):
+  `memori_byodb` leg **23 passed**; `scripts` leg **363 passed, 2 skipped in
+  569 s (9:29)**, 0 failures; `hscc-bootstrap/tests/test_install_payload.py`
+  **43 passed** (the leg-registration/payload contract — this card adds files to
+  two payload plugin dirs and a new `tests/` dir to a dir already in `DIRS`).
+  One failure *was* caused by this diff and caught only by the full leg, not by
+  the new tests: `readme_lint`'s DOC-UNLISTED rule requires every tracked file
+  under `docs/` to be enumerated in `docs/README.md`, so adding the audit doc
+  without an entry broke `test_repo_readmes_pass_the_lint` (fixed in `2262b06a`;
+  88 passed in `test_readme_lint` + `test_changelog_fragments`). Not run here:
+  the sibling-interpreter (3.13) legs — a full dual-interpreter stamp at the
+  merge SHA is still owed by whoever lands this.
+- **`hscc cards monitor` painted "no cards running" while every board read had
+  failed.** On the brew-installed keg the interpreter cannot import Hermes'
+  `hermes_state`, so all 23 boards came back `unreadable: No module named
+  'hermes_state'` and the panel showed a calm idle grid. Both monitors now open
+  each board read-only through Hermes' own path resolver
+  (`board_pin.resolve_board_db_path`), so the brew install reads boards with no
+  wrapper, and when no board at all is readable they render a red
+  `board read failed` panel listing every error instead of the idle line.
+
+### Verified
+- Same three legs under `p313`, one process per dir: **0 failed** (was 21) —
+  every baseline failure is now a skip naming the missing Hermes import
+  (`-rs`): `hscc-project` 1458 passed / 4 skipped, `hscc_daemon` 3672 passed /
+  23 skipped, `hscc-api` 970 passed / 25 skipped.
+- Under Hermes' own venv (3.14.10) every gated test RUNS: `hscc-project` 1462
+  passed, `hscc-api` 994 passed + 1 pre-existing corpus skip, `hscc_daemon`
+  3693 passed + 1 pre-existing wake-claim skip. A full-run
+  `test_api_cli_help_inert` port-tripwire failure passed on an isolated rerun
+  (40 passed) and is unrelated to this gate. Baselines taken one-dir-per-process
+  at `origin/main` `3aca67dd`; a merged-dir probe miscounts (18 vs 15) because
+  cross-file isolation is load-bearing.
+- `hscc_daemon/tests/test_orch_waker.py`: `test_enumeration_reports_unevaluable_when_hermes_is_unreachable`
+  was **split, not gated** — its fail-closed half needs nothing from the
+  interpreter and stays red-on-real under a sibling leg; only the empty-root
+  control skips (41 cases there, was 40).
+- `TestRosterGate.test_mirror_matches_real_hermes_predicates` needed a **call**
+  probe, not `importorskip`: `hermes_cli.profiles` imports fine on a thin env,
+  then `profile_is_standalone` raises inside Hermes, production swallows it as
+  "not standalone", and the drift guard failed `['solo','worker'] == ['worker']`
+  — a wrong answer from a half-installed Hermes rather than a test failure.
+- Measurement, the 21-test roster, the rejected option and the reproduction
+  recipe: `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md`.
 ## [2.15.8] - 2026-11-10
 
 ### Fixed
