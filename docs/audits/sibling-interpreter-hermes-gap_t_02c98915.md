@@ -83,8 +83,8 @@ and `test_session_discovery.py::test_real_sessiondb_read_only_discovers_telegram
    this interpreter: …")`. The 21 are the inconsistent minority; option 1 would
    have made *those* the rule and invalidated the existing skips' premise.
 5. **Coverage is not lost on the interpreter that matters.** Under the primary
-   interpreter (`~/.hermes/hermes-agent/venv/bin/python`, 3.11, hermes' own
-   deps present) all 21 still RUN — the gate only fires when the real hermes
+   interpreter (`~/.hermes/hermes-agent/venv/bin/python`, 3.14.10 on this host,
+   hermes' own deps present) all 21 still RUN — the gate only fires when the real hermes
    import genuinely fails, and the verification below pins that.
 
 What option 2 costs is stated plainly: a 3.13 run no longer exercises
