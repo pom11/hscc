@@ -140,14 +140,24 @@ class FakeProc:
 
 
 class FakeCli:
-    """Fake sanctioned CLI: matches subcommand-key tuples against argv."""
+    """Fake sanctioned CLI: matches subcommand-key tuples against argv.
+
+    Takes the ``env`` keyword the gate's runner contract grew in t_8616f2a5 and
+    records it, so a test can see whether the gate handed the probe a scrubbed
+    child environment. Accepting ``env`` is also what keeps this fake on the
+    *runnable* side of that card's contract: a runner that cannot be handed one
+    makes the gate refuse the probe (fail closed) instead of trusting it, which
+    is a different test's subject (``test_board_pin_gate_cli.py``).
+    """
 
     def __init__(self, payloads):
         self.payloads = payloads
         self.calls = []
+        self.envs = []
 
-    def __call__(self, argv):
+    def __call__(self, argv, env=None):
         self.calls.append([str(a) for a in argv])
+        self.envs.append(env)
         for key, payload in self.payloads.items():
             if all(k in argv for k in key):
                 return FakeProc(payload)
@@ -235,6 +245,14 @@ def test_default_is_guarded_warning_names_both_boards(armed, warnings):
     assert explained is False, (
         f"the pinned board's cap must not silence a wedge on default: {why}")
     assert "unexplained" in why, why
+    # And the argv half is NOT redundant with the child-environment scrub
+    # t_8616f2a5 added: taking the pin out of the child still leaves an unnamed
+    # board resolving through HERMES_KANBAN_BOARD. Both halves are needed before
+    # ``default`` in the panel means ``default`` in the CLI's answer.
+    scrubbed = [e for e in cli.envs if e is not None]
+    assert scrubbed, f"the gate should have handed the probe an env: {cli.envs}"
+    assert all(board_pin.PIN_ENV not in e for e in scrubbed), (
+        "the child must not inherit the pin either")
 
 
 def test_argv_states_the_default_slug_too(armed, warnings):
@@ -357,10 +375,19 @@ def test_legacy_single_board_shape_is_unchanged(tmp_path, monkeypatch,
         ("show", "t_ready"): NO_HOLD,
     })
     explained, why = _drive(lib, cli)
-    assert not warnings, _warn_text(warnings)
-    assert [c[0] for c in lib.connects] == [None], (
-        "the legacy shape must keep the no-board call")
+    pin = lib._canonical(PIN_BOARD)
+    # The direct evidence that the guard was never consulted for OUR open: the
+    # connect named no board AND still saw the pin (an in-process scrub would have
+    # taken it out, and a guarded read would have asked for board="default").
+    assert lib.connects == [(None, pin, os.environ[board_pin.PIN_ENV])], (
+        f"the legacy shape must keep the no-board call, pin visible: "
+        f"{lib.connects}")
     assert all("--board" not in c for c in cli.calls), cli.calls
+    # The gate may still warn about the CLI CHILD (t_8616f2a5 scrubs the pin out
+    # of the subprocess environment, per board, whatever `multi` says) — that
+    # wording is board_pin's own and cannot tell the two surfaces apart, so it is
+    # NOT asserted here; it is the subject of
+    # hscc_daemon/tests/test_board_pin_gate_cli.py.
     # The legacy answer is also the CORRECT one here: this lib has exactly one
     # board, so the file the pin points at is not "another" board. If the fix
     # ever leaked multi=True into this shape the connect above would have asked

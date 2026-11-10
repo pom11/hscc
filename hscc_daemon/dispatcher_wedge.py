@@ -95,6 +95,7 @@ capability), so the suite runs against fakes with ZERO external calls and never
 touches live operator state.
 """
 
+import inspect
 import json
 import os
 import re
@@ -1195,14 +1196,155 @@ def _hermes_cli_argv():
     return [bin_path, "kanban"] if bin_path else None
 
 
-def _gate_cli_json(cli_fn, argv):
+#: Dedupe set for the gate's own one-line warnings (t_8616f2a5). Separate from
+#: ``board_pin._WARNED`` on purpose: board_pin warns about *its* in-process
+#: scrub, this names the gate's child-environment decision — and the daemon
+#: loop re-runs the gate every ~30 s, so an unthrottled line would bury the log
+#: exactly like the monitor warnings board_pin throttles.
+_GATE_WARNED: set = set()
+
+
+def _warn_gate_once(key, msg):
+    """One WARN per ``key`` per process, through the daemon log channel.
+
+    The import is deferred (same shape as ``board_pin._emit``) so the one seam
+    that captures board_pin's warnings — ``daemon_ops.log`` — captures this one
+    too: a test that has to prove the pin and the board were named should not
+    have to know which module reached for the logger. Never raises: a warning
+    that can break the read is worse than a silent one.
+    """
+    if key in _GATE_WARNED:
+        return
+    _GATE_WARNED.add(key)
+    try:
+        from .daemon_ops import log
+        log(msg, "WARN")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cli_runner_takes_env(cli_fn):
+    """True when ``cli_fn`` accepts the ``env`` keyword (the t_8616f2a5 contract).
+
+    The runner contract grew an optional ``env`` because an in-process scrub of
+    ``os.environ`` does not survive ``subprocess.run`` — the only thing that
+    reaches the child is an environment handed to it explicitly. Every existing
+    fake and custom runner is written against the one-argument form and must
+    keep being called byte-identically, so the gate asks instead of guessing.
+
+    An explicit ``cli_env_capable`` attribute wins over the signature: a wrapper
+    closure must be able to state what it actually forwards, rather than have
+    its own signature imply a capability it withheld. Anything whose signature
+    cannot be read counts as "cannot", which routes the probe to the gate's
+    fail-closed verdict instead of to a ``TypeError`` swallowed by
+    :func:`_gate_cli_json`.
+    """
+    flag = getattr(cli_fn, "cli_env_capable", None)
+    if flag is not None:
+        return bool(flag)
+    try:
+        params = inspect.signature(cli_fn).parameters
+    except (TypeError, ValueError):  # builtins, C functions, exotic callables
+        return False
+    for p in params.values():
+        if p.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if p.name == "env" and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY):
+            return True
+    return False
+
+
+def _gate_child_env(kanban_db, board, cli_fn):
+    """Environment for ONE read-only CLI probe of ``board``: ``(env, blocked)``.
+
+    ``env`` is None when nothing would outrank the child's ``--board`` — no pin,
+    no fence marker, the pin already IS the board asked for, or a lib that
+    cannot be interrogated — and that keeps the probe byte-identical to the
+    pre-guard call (the child inherits). It is a copy of ``os.environ`` with
+    ``board_pin.PIN_ENV`` removed when the pin would win: hermes resolves that
+    pin ahead of ``--board`` in ANY process carrying a worker/delegation fence
+    marker (``hermes_cli/kanban_db.py:540-555`` via
+    ``agent/delegation_context.py:76-93``), so without the explicit hand-off the
+    child prints the PINNED board's ready list and hold events while the gate
+    labels them with the board it asked about — and this gate decides whether to
+    RESTART THE GATEWAY.
+
+    Detection and the warning wording are :mod:`hscc_daemon.board_pin`'s, asked
+    per board and deduped per (pin, board) per process, because the guard cannot
+    reach across the fork: ``board_pin.open_board`` scrubs the environment only
+    for the duration of OUR own connection.
+
+    ``blocked`` is a non-empty string — the gate's "board state unverifiable"
+    verdict, which fails closed (the restart proceeds) — when a pin conflicts
+    AND ``cli_fn`` cannot be handed a scrubbed environment. An explanation
+    assembled from a board nobody asked about is worse than no explanation.
+    """
+    conflict = board_pin.pin_conflict(kanban_db, board)
+    if conflict is None:
+        return None, ""
+    if not _cli_runner_takes_env(cli_fn):
+        msg = (f"board '{board}': board state unverifiable — "
+               f"{board_pin.PIN_ENV}={conflict.pin!r} outranks the board "
+               f"{board!r} this gate asked about (trigger: "
+               f"{conflict.fences_named()}) and the CLI runner cannot be handed "
+               f"a scrubbed environment, so the probe would describe "
+               f"{conflict.pinned_path!r} as {board!r}")
+        _warn_gate_once(f"blocked|{conflict.pin}|{conflict.board}", msg)
+        return None, msg
+    # board_pin's own wording, naming the pin and the board asked for.
+    board_pin.guard_board(kanban_db, board, mode="read")
+    child = dict(os.environ)
+    child.pop(board_pin.PIN_ENV, None)
+    return child, ""
+
+
+class _GateCliCaller:
+    """Board-level argv -> subprocess result, with the child env threaded through.
+
+    Binds the sanctioned ``hermes kanban`` prefix onto every call (so an
+    injected fake sees exactly what a human types after ``hermes kanban``, the
+    contract every gate fake in the suite is written against) and forwards the
+    environment ``_gate_child_env`` picked — as the ``env`` keyword, the only
+    route by which it survives ``subprocess.run``.
+
+    It states its own capability as ``cli_env_capable`` instead of letting its
+    signature imply one it withheld: when the wrapped runner is the legacy
+    ``runner(argv)`` shape, forwarding ``env`` would raise inside
+    :func:`_gate_cli_json`'s blanket ``except`` and be reported as an unreadable
+    board with nothing naming the pin. Refusing the probe up front in
+    :func:`_gate_child_env` is the same fail-closed verdict, with the cause
+    named.
+    """
+
+    def __init__(self, runner, base):
+        self._runner = runner
+        self._base = list(base)
+        self.cli_env_capable = _cli_runner_takes_env(runner)
+
+    def __call__(self, argv, env=None):
+        full = self._base + list(argv)
+        if env is None or not self.cli_env_capable:
+            return self._runner(full)
+        return self._runner(full, env=env)
+
+
+def _gate_cli_json(cli_fn, argv, child_env=None):
     """Run the hermes kanban CLI and parse its JSON stdout, or None.
 
     Any failure (non-zero exit, timeout, bad JSON) returns None — the caller
     treats that as "unexplained" (fail closed).
+
+    ``child_env`` (t_8616f2a5) is the environment :func:`_gate_child_env`
+    decided this probe must run in. None keeps the call byte-identical to the
+    pre-guard form (``cli_fn(argv)``, child inherits); a dict is forwarded as the
+    ``env`` keyword, which is the only route by which the scrub survives the
+    fork.
     """
     try:
-        proc = cli_fn(argv)
+        proc = (cli_fn(argv) if child_env is None
+                else cli_fn(argv, env=child_env))
     except Exception:  # noqa: BLE001
         return None
     if proc is None or getattr(proc, "returncode", 1) != 0:
@@ -1213,12 +1355,21 @@ def _gate_cli_json(cli_fn, argv):
         return None
 
 
-def _default_gate_cli_runner(argv):
-    """Default runner for the board-state gate: list-form subprocess, no shell."""
+def _default_gate_cli_runner(argv, env=None):
+    """Default runner for the board-state gate: list-form subprocess, no shell.
+
+    ``env`` (t_8616f2a5) is forwarded to ``subprocess.run`` and is the ONLY way
+    the gate's scrub can reach the child: an in-process ``os.environ`` scrub is
+    gone the moment the fork happens, so a worker's ``HERMES_KANBAN_DB`` would
+    otherwise keep outranking ``--board`` inside ``hermes`` while the gate
+    labelled the answer with the board it asked for. ``env=None`` — every
+    un-pinned environment, and every board the pin already matches — keeps the
+    call exactly the pre-guard one: the child inherits.
+    """
     import subprocess
     try:
         return subprocess.run(list(argv), capture_output=True, text=True,
-                              timeout=_GATE_CLI_TIMEOUT_SECONDS)
+                              timeout=_GATE_CLI_TIMEOUT_SECONDS, env=env)
     except Exception:  # noqa: BLE001
         return None
 
@@ -1289,6 +1440,15 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
     Anything else — a plain ready card with no hold evidence, a board whose
     list cannot be read — returns False (wedge stays actionable).
 
+    Both probes for this board run in the environment
+    :func:`_gate_child_env` picks (t_8616f2a5): the ``list`` that names the
+    ready cards and the ``show`` that supplies the hold evidence are read-only
+    views of the board we asked about, and a worker ``HERMES_KANBAN_DB`` in the
+    inherited environment would silently answer for the PINNED board instead —
+    which this gate has historically used to decide a gateway restart. When that
+    pin conflicts and the runner cannot be handed a scrubbed environment, the
+    board is reported unverifiable (fail closed) rather than explained.
+
     ``nonspawnable`` (optional list, filled in place) is the audit trail for
     the THIRD kind of explanation: cards the dispatcher idles on because their
     assignee is definitely not a Hermes profile. Those hold the restart (a
@@ -1303,9 +1463,12 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
     """
     if multi is None:
         multi = _gate_multi(kanban_db)
+    child_env, blocked = _gate_child_env(kanban_db, board, cli_fn)
+    if blocked:
+        return False, blocked
     list_argv = _gate_board_argv(
         board, multi, ["list", "--status", "ready", "--json"])
-    ready = _gate_cli_json(cli_fn, list_argv)
+    ready = _gate_cli_json(cli_fn, list_argv, child_env)
     if not isinstance(ready, list):
         return False, f"ready list for board '{board}' unreadable via CLI"
     if not ready:
@@ -1337,7 +1500,7 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
         if capped is not None and assignee in capped:
             continue  # per-profile cap — explainable
         status, why = _card_hold_from_cli(cli_fn, board, task.get("id"), now,
-                                          multi=multi)
+                                          child_env, multi=multi)
         if status == "spawnable-hold":
             hold_evidence.append(f"{task.get('id')}: {why}")
             continue
@@ -1432,7 +1595,8 @@ def _capped_assignees(kanban_db, board, max_per_profile, *, multi=None):
     return {r[0] for r in rows if int(r[1]) >= max_per_profile}
 
 
-def _card_hold_from_cli(cli_fn, board, task_id, now, *, multi=None):
+def _card_hold_from_cli(cli_fn, board, task_id, now, child_env=None, *,
+                        multi=None):
     """Classify one ready card via ``hermes kanban show --json``.
 
     Returns ``(status, why)``:
@@ -1443,11 +1607,18 @@ def _card_hold_from_cli(cli_fn, board, task_id, now, *, multi=None):
         (3600 s success, 86400 s PR).
       * ``("unexplained", why)`` — no hold evidence (fail closed).
 
+    ``child_env`` is the environment :func:`_gate_child_env` chose for this
+    board (t_8616f2a5): the hold event is the EVIDENCE the gate attributes to
+    this card, so the ``show`` must not be resolved against a different board
+    than the ``list`` that named it. None (a direct caller) inherits, as before.
+
     ``multi`` (see :func:`_gate_multi`) decides whether the argv states the
-    board slug. Stating it for ``default`` matters exactly as much as for any
-    other slug: without it the CLI resolves the board its own way
-    (``HERMES_KANBAN_BOARD`` / the worker pin), so the hold evidence can come
-    from a different board than the one being explained.
+    board slug — the other half of the same agreement (t_dad0da32). Scrubbing
+    the pin out of the child is not enough on its own: with the pin gone the
+    child still resolves an unnamed board through ``HERMES_KANBAN_BOARD``, so
+    without ``--board <slug>`` the hold evidence can still come from a board
+    nobody asked about. Stating it for ``default`` matters exactly as much as
+    for any other slug.
     """
     if multi is None:
         # No lib in hand to ask (a direct caller), so take the strict side and
@@ -1457,7 +1628,7 @@ def _card_hold_from_cli(cli_fn, board, task_id, now, *, multi=None):
     if not task_id:
         return "unexplained", "no id"
     show_argv = _gate_board_argv(board, multi, ["show", task_id, "--json"])
-    data = _gate_cli_json(cli_fn, show_argv)
+    data = _gate_cli_json(cli_fn, show_argv, child_env)
     if not isinstance(data, dict):
         return "unexplained", "show unreadable"
     # Guard windows as Hermes defines them (kanban_db_dispatch.py).
@@ -1545,9 +1716,7 @@ def board_state_explains_stall(stream, kanban_db=None, max_in_progress=None,
     # ALWAYS bound here so an injected fake sees exactly what a human would
     # type after `hermes kanban`.
     _runner = cli_fn or _default_gate_cli_runner
-
-    def run_cli(argv):
-        return _runner(base + list(argv))
+    run_cli = _GateCliCaller(_runner, base)
 
     if kanban_db is None:
         kanban_db = _load_kanban_db_or_default()
