@@ -1374,8 +1374,54 @@ def _default_gate_cli_runner(argv, env=None):
         return None
 
 
+def _gate_multi(kanban_db):
+    """True when ``kanban_db`` enumerates boards — i.e. when a slug names a REAL
+    board, including ``default``.
+
+    THE SOURCE OF THIS ANSWER IS THE LIB, NOT THE SLUG (t_dad0da32, extending
+    t_147201fa). ``multi`` is autodown's answer to "does this lib enumerate
+    boards?" — ``autodown._enum_board_names``, ``autodown.py:310``,
+    ``hasattr(kanban_db, "list_boards")`` — and ``board_pin.open_board`` reads it
+    as exactly that: "did the caller name a board?" (``board_pin.py:231-242``).
+    t_147201fa removed the ``bool(board) and board != "default"`` heuristic from
+    the per-profile read; this helper is that rule in ONE place so the gate's
+    other two uses — the sanctioned-CLI argv builders — cannot keep guessing from
+    the slug after the DB read has stopped doing it. Before that, argv and DB open
+    disagreed for ``default`` specifically: the guard read the pinned board while
+    ``hermes kanban list`` was told nothing about the board the panel reported.
+
+    Going through ``hasattr`` rather than calling ``list_boards()`` also means a
+    lib that raises mid-enumeration keeps its ``board=``-capable answer instead of
+    losing the guard, and no board metadata is read just to answer the question.
+
+    A lib without ``list_boards`` gets ``False`` and therefore the untouched
+    no-``board=`` call, which is what
+    ``test_board_pin.py::test_single_board_legacy_shape_is_the_old_call_verbatim``
+    pins — the reason this is NOT the card's suggested ``multi = bool(board)``,
+    which would hand ``multi=True`` to a lib that cannot honour a board argument.
+    """
+    return hasattr(kanban_db, "list_boards")
+
+
+def _gate_board_argv(board, multi, rest):
+    """Argv for one board's sanctioned-CLI read: ``--board <slug>`` when the slug
+    names a real board, plus ``rest``.
+
+    One expression for BOTH gate argv sites on purpose (``list --status ready``
+    and ``show <id>``): the old code repeated ``board and board != "default"``
+    at each one, so the CLI quietly dropped the slug for ``default`` and read
+    whatever board ``HERMES_KANBAN_BOARD`` / the pin pointed at while the panel
+    said ``default``. Stating the slug for every board is not a new contract —
+    the sanctioned CLI already takes ``--board default`` (measured: exit 0,
+    valid JSON) and #268 passes ``--board <slug>`` for every other slug.
+    """
+    prefix = ["--board", str(board)] if (multi and board) else []
+    return prefix + list(rest)
+
+
 def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
-                       max_per_profile, now, nonspawnable=None):
+                       max_per_profile, now, nonspawnable=None, *,
+                       multi=None):
     """Explain the zero-spawn state of ONE spawnable board.
 
     Returns ``(explained: bool, why: str)``. ``explained`` is True ONLY when
@@ -1410,12 +1456,18 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
     hold — the caller notifies the operator about them, because "no worker will
     ever run this card" is exactly the silent no-dispatch failure mode this
     watchdog exists to surface (t_ab960663, PR #43 review).
+
+    ``multi`` is the caller's enumeration answer (see :func:`_gate_multi`) and
+    drives BOTH the CLI argv and the DB open below, so the two always describe
+    the same board. ``None`` (a direct/legacy caller) derives it from the lib.
     """
+    if multi is None:
+        multi = _gate_multi(kanban_db)
     child_env, blocked = _gate_child_env(kanban_db, board, cli_fn)
     if blocked:
         return False, blocked
-    list_argv = (["--board", board] if board and board != "default" else []) \
-        + ["list", "--status", "ready", "--json"]
+    list_argv = _gate_board_argv(
+        board, multi, ["list", "--status", "ready", "--json"])
     ready = _gate_cli_json(cli_fn, list_argv, child_env)
     if not isinstance(ready, list):
         return False, f"ready list for board '{board}' unreadable via CLI"
@@ -1424,7 +1476,7 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
         # moved or the two disagree — do not trust the explanation.
         return False, f"board '{board}': probe saw spawnable work, CLI listed none"
 
-    capped = _capped_assignees(kanban_db, board, max_per_profile)
+    capped = _capped_assignees(kanban_db, board, max_per_profile, multi=multi)
     unexplained = []
     hold_evidence = []
     dead_lanes = []
@@ -1448,7 +1500,7 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
         if capped is not None and assignee in capped:
             continue  # per-profile cap — explainable
         status, why = _card_hold_from_cli(cli_fn, board, task.get("id"), now,
-                                          child_env)
+                                          child_env, multi=multi)
         if status == "spawnable-hold":
             hold_evidence.append(f"{task.get('id')}: {why}")
             continue
@@ -1496,7 +1548,7 @@ def _assignee_is_nonspawnable(assignee):
         return False
 
 
-def _capped_assignees(kanban_db, board, max_per_profile):
+def _capped_assignees(kanban_db, board, max_per_profile, *, multi=None):
     """Assignees at their per-profile cap on one board, or None if unknown.
 
     Mirrors the dispatcher's per-profile rule: an assignee with ready work
@@ -1517,12 +1569,23 @@ def _capped_assignees(kanban_db, board, max_per_profile):
     included — is resolved the same way and guarded the same way. A lib that
     cannot enumerate boards still gets the no-``board=`` call verbatim, which is
     the legacy single-board shape the companion tests pin as unaffected.
+
+    ``multi`` may also be passed IN (t_dad0da32): the gate computes the answer
+    once per pass via :func:`_gate_multi` and threads it here and to the argv
+    builders, so this read and the ``hermes kanban list`` beside it can no
+    longer disagree about which board was named. ``None`` — a direct caller —
+    derives it locally, which is why the behaviour above is unchanged either way.
     """
     if max_per_profile is None:
         return None
     try:
-        multi = hasattr(kanban_db, "list_boards")
-        with board_pin.open_board(kanban_db, board, multi=multi) as conn:
+        # t_b014c2b8: read-only probe of ONE named board — under a worker's
+        # HERMES_KANBAN_DB hermes would open the pinned DB while we believed we
+        # were looking at `board`, which is how a wedge detector ends up
+        # restarting the gateway for a stall on a board it never read.
+        with board_pin.open_board(
+                kanban_db, board,
+                multi=_gate_multi(kanban_db) if multi is None else multi) as conn:
             rows = conn.execute(
                 "SELECT assignee, COUNT(*) AS n FROM tasks "
                 "WHERE status = 'running' AND assignee IS NOT NULL "
@@ -1532,7 +1595,8 @@ def _capped_assignees(kanban_db, board, max_per_profile):
     return {r[0] for r in rows if int(r[1]) >= max_per_profile}
 
 
-def _card_hold_from_cli(cli_fn, board, task_id, now, child_env=None):
+def _card_hold_from_cli(cli_fn, board, task_id, now, child_env=None, *,
+                        multi=None):
     """Classify one ready card via ``hermes kanban show --json``.
 
     Returns ``(status, why)``:
@@ -1547,11 +1611,23 @@ def _card_hold_from_cli(cli_fn, board, task_id, now, child_env=None):
     board (t_8616f2a5): the hold event is the EVIDENCE the gate attributes to
     this card, so the ``show`` must not be resolved against a different board
     than the ``list`` that named it. None (a direct caller) inherits, as before.
+
+    ``multi`` (see :func:`_gate_multi`) decides whether the argv states the
+    board slug — the other half of the same agreement (t_dad0da32). Scrubbing
+    the pin out of the child is not enough on its own: with the pin gone the
+    child still resolves an unnamed board through ``HERMES_KANBAN_BOARD``, so
+    without ``--board <slug>`` the hold evidence can still come from a board
+    nobody asked about. Stating it for ``default`` matters exactly as much as
+    for any other slug.
     """
+    if multi is None:
+        # No lib in hand to ask (a direct caller), so take the strict side and
+        # state the slug: omitting it is what let the pinned board answer for a
+        # board nobody asked about.
+        multi = True
     if not task_id:
         return "unexplained", "no id"
-    show_argv = (["--board", board] if board and board != "default" else []) \
-        + ["show", task_id, "--json"]
+    show_argv = _gate_board_argv(board, multi, ["show", task_id, "--json"])
     data = _gate_cli_json(cli_fn, show_argv, child_env)
     if not isinstance(data, dict):
         return "unexplained", "show unreadable"
@@ -1668,10 +1744,16 @@ def board_state_explains_stall(stream, kanban_db=None, max_in_progress=None,
         return GateVerdict(False, "stream names no spawnable board")
     reasons = []
     nonspawnable = []
+    # ONE enumeration answer for the whole gate pass (see _gate_multi): whether
+    # a slug names a real board is a property of the lib, not of the slug, and
+    # the argv and the DB open must agree on it. t_dad0da32 — deriving it per
+    # site from `board != "default"` made `default` the one board the pin guard
+    # could not see.
+    multi = _gate_multi(kanban_db)
     for board in spawnable:
         explained, why = _board_ready_facts(
             run_cli, board, kanban_db, max_in_progress, max_per_profile, now,
-            nonspawnable)
+            nonspawnable, multi=multi)
         reasons.append(why)
         if not explained:
             return GateVerdict(False, "; ".join(reasons))
