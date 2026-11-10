@@ -317,3 +317,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### test environment: the thin sibling interpreter (record)
 
 - `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — why 21 hermes-integration tests hard-failed under the sanctioned `p313` sibling interpreter (it is a thin pytest env with no `ruamel`/`hermes_state`), the 21-test roster, the measured rejection of dep-stuffing the sibling env, and the capability-probe skip posture now written into `scripts/run_tests.sh`. **record** (t_02c98915)
+
+### Test-suite leg strategy (live)
+
+- `docs/audits/hscc-bootstrap-leg-strategy-t_b9e517a9.md` — fresh `--durations=0` measurement of the `hscc-bootstrap` leg (1183 passed in 292.03 s, 14 CPUs, load 2.13/2.53): the three installer-subprocess files are 177.54 s = 60.8 %, every duration is spread rather than timeout-quantised, and the decision is **leave as-is** — share-installed-home loses test isolation, split-leg moves wall time without reducing it on the serial runner. **live** (t_b9e517a9)
