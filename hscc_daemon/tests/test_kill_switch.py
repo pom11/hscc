@@ -13,13 +13,24 @@ demands:
     its result dict verbatim ("reports what actually died").
   * kill on a non-running / missing task reports found=False (404 upstream).
   * host-locality is surfaced and enforced.
+
+The second family (t_147201fa) arms a worker ``HERMES_KANBAN_DB`` + fence
+marker against a fake lib that reproduces hermes' MEASURED precedence rule, and
+asserts the decision recorded in the module docstring — guarded read, refusing
+verb, both driven by one scan. Every conflict case is paired with a non-vacuity
+assertion that the same armed env reads (or kills) the WRONG card without the
+guard, and with companion cases proving the un-armed and legacy shapes behave
+exactly as before.
 """
 
+import os
+import pathlib
 import sqlite3
 from contextlib import contextmanager
 
 import pytest
 
+from hscc_daemon import board_pin
 from hscc_daemon import kill_switch as ks
 
 
@@ -216,3 +227,272 @@ def test_kill_surfaces_sigkill_escalation():
     }
     res = ks.kill_running_task("t_abc", kanban_db=kb)
     assert res["termination"]["sigkill"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the board-pin family (t_147201fa) — a worker's HERMES_KANBAN_DB vs the verb
+# --------------------------------------------------------------------------- #
+
+#: The two markers hermes checks (``agent/delegation_context.py:76-93``). Tests
+#: arm them explicitly rather than inheriting them, so each case reads the same
+#: inside a real worker shell and outside one.
+FENCE_VARS = ("HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT")
+
+
+class _PinKb:
+    """Fake lib reproducing hermes' MEASURED precedence rule (audit §1).
+
+    ``kanban_db_path`` returns the ``HERMES_KANBAN_DB`` pin whenever a fence
+    marker is set, discarding the ``board=`` it was handed — the behaviour
+    measured in ``docs/audits/board-pin-t_b014c2b8.md`` — and rows follow the
+    FILE, so resolving to the pinned path really does return the pinned board's
+    cards (that is what makes the id-collision hazard real rather than
+    theoretical). ``_terminate_reclaimed_worker`` RECORDS the (pid, lock) it was
+    asked to kill instead of signalling anything, so "did the verb touch a
+    process?" is an observable rather than an assumption.
+    """
+
+    def __init__(self, root, boards):
+        self.root = str(root)
+        self.slugs = list(boards)
+        self.connects = []           # (board arg, resolved path, pin seen)
+        self.killed = []             # (pid, claim_lock) handed to the killer
+        self._by_path = {str(self._canonical(s)): _make_conn(rows)
+                         for s, rows in boards.items()}
+
+    def _canonical(self, slug):
+        if slug in (None, "default"):
+            return pathlib.Path(self.root) / "kanban.db"
+        return (pathlib.Path(self.root) / "kanban" / "boards" / str(slug)
+                / "kanban.db")
+
+    def _fenced(self):
+        return any((os.environ.get(v) or "").strip() for v in FENCE_VARS)
+
+    def list_boards(self):
+        return [{"slug": s} for s in self.slugs]
+
+    def kanban_db_path(self, board=None):
+        pin = (os.environ.get(board_pin.PIN_ENV) or "").strip()
+        if pin and (board is None or self._fenced()):
+            return pathlib.Path(pin)
+        return self._canonical(board)
+
+    @contextmanager
+    def connect_closing(self, board=None):
+        path = str(self.kanban_db_path(board=board))
+        self.connects.append((board, path, os.environ.get(board_pin.PIN_ENV)))
+        if path not in self._by_path:
+            raise RuntimeError(f"no board file at {path}")
+        yield self._by_path[path]
+
+    def _claimer_id(self):
+        return "node-1:9999"
+
+    def _terminate_reclaimed_worker(self, pid, claim_lock, *, signal_fn=None):
+        self.killed.append((pid, claim_lock))
+        return {"prev_pid": int(pid) if pid else None, "host_local": True,
+                "termination_attempted": True, "terminated": True,
+                "sigkill": False}
+
+
+def _two_board_fleet(root):
+    """Two boards, one running card each, distinct ids and pids."""
+    return _PinKb(root, {
+        "alpha": [_running_row(task_id="t_alpha", pid=1111, claim="node-1:1111")],
+        "beta": [_running_row(task_id="t_beta", pid=2222, claim="node-1:2222")],
+    })
+
+
+@pytest.fixture
+def pin_alpha(tmp_path, monkeypatch):
+    """Worker-shell state: ``HERMES_KANBAN_DB`` pins board ``alpha``, fence
+    armed. Returns ``(kb, pin_path)``."""
+    kb = _two_board_fleet(tmp_path / "kanban-home")
+    pin = str(kb._canonical("alpha"))
+    monkeypatch.setenv(board_pin.PIN_ENV, pin)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    return kb, pin
+
+
+@pytest.fixture
+def warnings(monkeypatch):
+    """Capture what the guard says. Emission goes through ``daemon_ops.log``
+    (daemon file + stderr, never stdout — stdout is the machine channel for
+    every HSCC CLI), so patching THAT keeps the real ``_emit`` path under test.
+    A fresh ``_WARNED`` set makes the once-per-process dedupe observable."""
+    seen = []
+    import hscc_daemon.daemon_ops as daemon_ops
+    monkeypatch.setattr(daemon_ops, "log",
+                        lambda msg, level="INFO", **kw: seen.append((level, msg)))
+    monkeypatch.setattr(board_pin, "_WARNED", set())
+    return seen
+
+
+def _warn_text(seen):
+    return " || ".join(m for _lvl, m in seen)
+
+
+def test_pinned_listing_reads_the_real_fleet_and_says_so(pin_alpha, warnings):
+    """The consequence the card names: ``kill status`` from a worker shell must
+    stop reporting ONE pinned board as the fleet."""
+    kb, pin = pin_alpha
+    res = ks.list_running_tasks(kanban_db=kb)
+    assert res["errors"] == []
+    assert res["count"] == 2
+    assert {t["id"] for t in res["tasks"]} == {"t_alpha", "t_beta"}, (
+        f"beta was re-read as alpha: {res['tasks']}")
+    text = _warn_text(warnings)
+    assert text, "the override must be loud, not merely correct"
+    assert pin in text, f"the warning must name the pin it overrode: {text}"
+    assert "beta" in text, f"the warning must name the board asked for: {text}"
+    assert "HERMES_KANBAN_TASK" in text, f"it must name the trigger: {text}"
+
+
+def test_the_same_armed_env_reads_alpha_twice_without_the_guard(pin_alpha):
+    """Non-vacuity: under the same env, a naive per-board open hands back
+    alpha's rows for EVERY slug — the panel the phone would have been shown.
+
+    If this ever fails, the fixture stopped reproducing the bug and every
+    guarded test here proves nothing.
+    """
+    kb, _pin = pin_alpha
+    naive = {}
+    for slug in kb.slugs:
+        with kb.connect_closing(board=slug) as conn:
+            naive[slug] = [r["id"] for r in ks._running_rows(conn)]
+    assert naive == {"alpha": ["t_alpha"], "beta": ["t_alpha"]}, naive
+
+
+def test_pinned_verb_refuses_a_foreign_board_before_touching_a_process(pin_alpha):
+    """The verb half of the decision: refuse, name both values, and do it
+    BEFORE a pid is read or a signal is sent."""
+    kb, pin = pin_alpha
+    with pytest.raises(board_pin.BoardPinConflict) as exc:
+        ks.kill_running_task("t_beta", kanban_db=kb)
+    msg = str(exc.value)
+    assert pin in msg, f"must name the pin: {msg}"
+    assert "beta" in msg, f"must name the board asked for: {msg}"
+    assert "kanban.db" in msg, f"both resolved paths belong in it: {msg}"
+    assert kb.killed == [], "the refusal must precede any signal"
+
+
+def test_pinned_verb_still_kills_on_the_board_the_pin_points_at(pin_alpha):
+    """Companion: the fence keeps its mutation half without taking the worker's
+    OWN board away from it — that one card it is allowed to stop."""
+    kb, _pin = pin_alpha
+    res = ks.kill_running_task("t_alpha", kanban_db=kb)
+    assert res["found"] is True
+    assert res["termination"]["terminated"] is True
+    assert kb.killed == [(1111, "node-1:1111")]
+
+
+def test_listing_and_verb_agree_on_every_row(pin_alpha):
+    """The card's own clause: a listing that shows cards the verb will not
+    touch is a trap. Each row's ``killable`` must be exactly what the verb does
+    with that id — and the row's stated reason must be the verb's sentence."""
+    kb, _pin = pin_alpha
+    res = ks.list_running_tasks(kanban_db=kb)
+    assert len(res["tasks"]) == 2, res["tasks"]
+    for t in res["tasks"]:
+        if t["killable"]:
+            assert t["pin_conflict"] is None, t
+            got = ks.kill_running_task(t["id"], kanban_db=kb)
+            assert got["found"] is True, t
+        else:
+            assert t["pin_conflict"], f"an un-killable row must explain itself: {t}"
+            with pytest.raises(board_pin.BoardPinConflict) as exc:
+                ks.kill_running_task(t["id"], kanban_db=kb)
+            assert str(exc.value) == t["pin_conflict"], (
+                "the row's reason and the verb's refusal must be one sentence")
+    assert res["pin_conflicts"] and len(res["pin_conflicts"]) == 1
+    assert kb.killed == [(1111, "node-1:1111")], "only the owned board touched"
+
+
+def test_unpinned_listing_and_verb_are_unchanged(tmp_path, monkeypatch, warnings):
+    """Companion for the daemon/operator environment (no pin, no fence): every
+    row killable, nothing warned, ``board=`` passed through exactly as before.
+    """
+    monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
+    for v in FENCE_VARS:
+        monkeypatch.delenv(v, raising=False)
+    kb = _two_board_fleet(tmp_path / "kanban-home")
+    res = ks.list_running_tasks(kanban_db=kb)
+    assert res["count"] == 2 and res["errors"] == []
+    assert res["pin_conflicts"] == []
+    assert all(t["killable"] and t["pin_conflict"] is None for t in res["tasks"])
+    assert not warnings, _warn_text(warnings)
+    assert [c[0] for c in kb.connects] == ["alpha", "beta"], kb.connects
+    assert all(c[2] is None for c in kb.connects)
+    assert ks.kill_running_task("t_beta", kanban_db=kb)["found"] is True
+    assert kb.killed == [(2222, "node-1:2222")]
+
+
+def test_legacy_single_board_shape_still_honours_the_pin(warnings, monkeypatch):
+    """Companion: a lib WITHOUT ``list_boards`` (``multi=False``) keeps the
+    no-board ``connect_closing()`` verbatim — there the pin IS the intended
+    answer, so nothing is warned and the verb must not refuse what it can
+    legitimately see."""
+    calls = []
+    rows = [_running_row(task_id="t_own", pid=3333, claim="node-1:3333")]
+
+    class _Legacy:
+        def __init__(self):
+            self.conn = _make_conn(rows)
+            self.killed = []
+
+        @contextmanager
+        def connect_closing(self, board=None):
+            calls.append(board)
+            yield self.conn
+
+        def _claimer_id(self):
+            return "node-1:9999"
+
+        def _terminate_reclaimed_worker(self, pid, claim_lock, *, signal_fn=None):
+            self.killed.append((pid, claim_lock))
+            return {"prev_pid": pid, "host_local": True,
+                    "termination_attempted": True, "terminated": True,
+                    "sigkill": False}
+
+    kb = _Legacy()
+    monkeypatch.setenv(board_pin.PIN_ENV, "/elsewhere/pinned/kanban.db")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
+    res = ks.list_running_tasks(kanban_db=kb)
+    assert calls == [None], "the legacy shape must keep the no-board call"
+    assert res["count"] == 1 and res["tasks"][0]["board"] == "default"
+    assert res["tasks"][0]["killable"] is True
+    assert res["pin_conflicts"] == [] and not warnings, _warn_text(warnings)
+    assert ks.kill_running_task("t_own", kanban_db=kb)["found"] is True
+    assert kb.killed == [(3333, "node-1:3333")]
+
+
+def test_a_refused_board_is_never_reported_as_an_unreadable_board(pin_alpha):
+    """Both loops end in an ``except Exception`` handler. A ``BoardPinConflict``
+    must be re-raised there, never folded into ``errors`` (or into a silent
+    not-found) — same posture as ``autodown.archive_stale_task`` and
+    ``kanban_blocked.recover_blocked_task``."""
+    kb, _pin = pin_alpha
+
+    @contextmanager
+    def refusing(board=None):
+        raise board_pin.BoardPinConflict("refused: the pin points elsewhere")
+        yield  # pragma: no cover — unreachable, keeps this a context manager
+
+    kb.connect_closing = refusing
+    with pytest.raises(board_pin.BoardPinConflict) as exc:
+        ks.list_running_tasks(kanban_db=kb)
+    assert "the pin points elsewhere" in str(exc.value)
+    with pytest.raises(board_pin.BoardPinConflict):
+        ks.kill_running_task("t_beta", kanban_db=kb)
+    assert kb.killed == []
+
+
+def test_repeated_renders_warn_once_per_pin_and_board(pin_alpha, warnings):
+    """The API panel polls (``routes_activity`` wraps this same listing), so the
+    override must be said once per (pin, board), not once per render."""
+    kb, _pin = pin_alpha
+    for _ in range(4):
+        assert ks.list_running_tasks(kanban_db=kb)["count"] == 2
+    assert len(warnings) == 1, _warn_text(warnings)

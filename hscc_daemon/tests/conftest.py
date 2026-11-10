@@ -21,6 +21,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from types import ModuleType
 
 import pytest
 
@@ -500,6 +502,124 @@ def _hermetic_kanban_root(tmp_path, monkeypatch):
     yield str(root)
 
 
+# ---------------------------------------------------------------------------
+# hermes_cli import isolation (t_2be3b04e)
+# ---------------------------------------------------------------------------
+#
+# Three of these files (``test_autodown``, and — before this fixture — the two
+# ad-hoc evictors) plant a FAKE ``hermes_cli`` tree under ``tmp_path`` and let
+# the production resolver import it. Two leaks follow, both measured in the
+# failing leg (see ``docs/audits/orch-waker-import-leak_t_2be3b04e.md``):
+#
+#   1. ``autodown._load_kanban_db_or_default`` / ``kanban_live._load_hermes_config``
+#      ``sys.path.insert(0, <agent dir>)`` and never take it back out, so a
+#      planted ``<tmp>/hermes-agent`` sits at the FRONT of ``sys.path`` for the
+#      rest of the process. pytest does not delete tmp dirs until the NEXT
+#      session, so the next test that resolves the lib re-imports the fake from
+#      there — no test had to plant anything itself.
+#   2. That re-imported fake then sits in ``sys.modules`` for the rest of the
+#      process, because the evictor that planted it already ran (it is a
+#      class-scoped finalizer on the class that planted it).
+#
+# Both are invisible to ``_has_active_work`` (a lib without ``list_boards`` is
+# the documented single-board shape) but fatal to board ENUMERATION, which needs
+# hermes' real ``list_boards`` — hence
+# ``test_orch_waker.py::test_enumerate_includes_legacy_default_and_named_boards``
+# losing ``beta`` only when the process is shared.
+
+_TEMP_ROOT_MARKERS = (os.path.realpath(tempfile.gettempdir()),
+                      os.path.realpath("/private/var/folders"))
+
+# Attributes through which a real hermes_cli module binds its siblings at import
+# time (``hermes_cli/kanban_db_*.py`` all do ``import kanban_db as _kb``).
+_HERMES_CLI_COLLABORATORS = ("_kb", "kanban_db")
+
+
+def _is_planted_path(path):
+    """True for a path under a pytest temp root — i.e. a planted fake tree.
+
+    The rule is deliberately narrow: the real ``~/.hermes/hermes-agent`` tree is
+    never a plant and is never touched by any of this.
+    """
+    origin = str(path or "")
+    return bool(origin) and os.path.realpath(origin).startswith(_TEMP_ROOT_MARKERS)
+
+
+def _hermes_cli_names():
+    return [n for n in sys.modules
+            if n == "hermes_cli" or n.startswith("hermes_cli.")]
+
+
+def _hermes_cli_poison_reason():
+    """Name why the resident ``hermes_cli`` cache must not survive, else None.
+
+    Two shapes, both observed at the end of the failing leg:
+      * the module's OWN ``__file__`` is under a temp root (a planted fake still
+        resident), or
+      * a REAL module holds a collaborator bound to such a fake. The real
+        ``hermes_cli.kanban_db_connect`` imported while a fake is resident binds
+        ``_kb = <fake>`` for the life of the process — so evicting the fake alone
+        does NOT repair it, and the next consumer gets a real file with a fake
+        inside it.
+    """
+    for name in _hermes_cli_names():
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        if _is_planted_path(getattr(mod, "__file__", "")):
+            return f"{name} is planted under a temp root"
+        for attr in _HERMES_CLI_COLLABORATORS:
+            other = getattr(mod, attr, None)
+            if isinstance(other, ModuleType) and _is_planted_path(
+                    getattr(other, "__file__", "")):
+                return (f"{name}.{attr} is bound to planted "
+                        f"{getattr(other, '__name__', '?')}")
+    return None
+
+
+def _purge_planted_hermes_cli(saved=None):
+    """Drop the whole ``hermes_cli`` subtree, optionally restoring ``saved``.
+
+    Evicting only the planted entries is not enough (shape 2 above): a real
+    module already holding the fake has to be re-imported too, so the entire
+    ``hermes_cli*`` subtree goes and the next real consumer rebinds cleanly from
+    ``~/.hermes/hermes-agent``. ``saved`` (the cache as it was at the START of
+    the test that poisoned it) is put back by identity so the process keeps the
+    objects its earlier tests were given.
+    """
+    for name in _hermes_cli_names():
+        del sys.modules[name]
+    if saved:
+        sys.modules.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hermes_cli_imports():
+    """Pin the ``hermes_cli`` import cache per test, like every other hermetic
+    autouse fixture here pins the kanban root, the topology and sparkrun.
+
+    Teardown does two things, both cheap (the real subtree re-imports in ~5 ms
+    once the source is cached):
+
+      * drop every ``sys.path`` entry under a pytest temp root, so a planted
+        ``<tmp>/hermes-agent`` cannot be the winner for a LATER test;
+      * if the resident cache is poisoned by this test — a planted module, or a
+        real module still holding one — purge the whole subtree and put back the
+        cache as this test found it.
+
+    A test that only ever touched the REAL library pays nothing: no purge, no
+    re-import. The point is that one file planting a fake can no longer decide
+    what a later file's board enumeration sees.
+    """
+    saved = {n: sys.modules[n] for n in _hermes_cli_names()}
+    yield
+    strays = [p for p in sys.path if _is_planted_path(p)]
+    if strays:
+        sys.path[:] = [p for p in sys.path if not _is_planted_path(p)]
+    if _hermes_cli_poison_reason() is not None:
+        _purge_planted_hermes_cli(saved)
+
+
 def _evict_planted_hermes_cli():
     """Drop any ``hermes_cli`` module planted under a pytest tmp dir.
 
@@ -517,17 +637,13 @@ def _evict_planted_hermes_cli():
 
     The rule is narrow — only a module whose file lives under a pytest temp
     root is a planted fake; the real ``~/.hermes/hermes-agent`` tree is never
-    evicted.
+    evicted. Kept for the fixtures that want to purge *mid-test* (before
+    resolving the real lib); the autouse fixture above is the process-wide
+    guarantee.
     """
-    import sys
-    import tempfile
-
-    markers = (os.path.realpath(tempfile.gettempdir()),
-               os.path.realpath("/private/var/folders"))
-    for name in [n for n in sys.modules if n.startswith("hermes_cli")]:
+    for name in _hermes_cli_names():
         mod = sys.modules.get(name)
-        origin = str(getattr(mod, "__file__", "") or "")
-        if origin and origin.startswith(markers):
+        if mod is not None and _is_planted_path(getattr(mod, "__file__", "")):
             del sys.modules[name]
 
 

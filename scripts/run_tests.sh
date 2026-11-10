@@ -113,6 +113,75 @@ on_sigterm() {
 }
 trap on_sigterm TERM
 
+# ━━━ no worker/dispatcher Kanban pin may reach a leg (t_7e143e04) ━──────────
+# Every leg runs with the vars in SUITE_ENV_UNSET REMOVED from its environment.
+# The marker was already dropped (see the in-loop comment); the four board pins
+# were not, and they are the worse half of the same leak.
+#
+# WHY THE PINS MATTER. The dispatcher injects them into every worker it spawns
+# (hermes_cli/kanban_db_dispatch.py:2811-2851) so the worker's kanban paths keep
+# matching after `hermes -p` rewrites HERMES_HOME. hermes then resolves them
+# AHEAD of caller intent: `_board_path()` (hermes_cli/kanban_db.py:540-560)
+# returns the env pin for ANY board whenever `_explicit_board_intent_pinned()`
+# holds, and that predicate (agent/delegation_context.py:76-93) holds for every
+# dispatched worker — i.e. for the shell that runs this script. So a test that
+# asks hermes' REAL resolver for a throwaway board (rather than injecting a fake
+# path) gets the operator's live board, and inside a fence it cannot even see
+# the difference.
+#
+# MEASURED in a dispatched worker shell at 5c718718, before this change:
+#   kanban_db_path(board="fixture-board")  -> <kanban-home>/kanban/boards/<live-board>/kanban.db
+#   workspaces_root(board="fixture-board") -> <kanban-home>/kanban/boards/<live-board>/workspaces
+# The leak also survives the per-suite defence, so "the fixtures already handle
+# it" is not true: hscc_daemon/tests/conftest.py:482-500 pins
+# HERMES_KANBAN_HOME *and* deletes HERMES_KANBAN_DB, and `workspaces_root()`
+# STILL returned the live root — `_board_path` checks the env pin BEFORE any
+# root resolution, so HERMES_KANBAN_HOME cannot neutralise it. (BOARD is the one
+# the fixture root does neutralise: `get_current_board()` requires
+# `board_exists()` under the pinned home, so a stray slug falls through to
+# `default`. It is scrubbed anyway — a leg must not depend on that accident.)
+#
+# WHY HERE AND NOT IN A FIXTURE: same reason as HSCC_SKIP_COMPACT_PROBE above —
+# monkeypatch does not reach child processes, and a large share of these tests
+# spawn python/`hermes` children that resolve their own board. A runner-level
+# scrub covers the parent and every child it spawns.
+#
+# THE LIST IS MEASURED, NOT GUESSED. The dispatcher writes DB (2847),
+# WORKSPACES_ROOT (2848) and BOARD (2851). ATTACHMENTS_ROOT is NOT
+# dispatcher-injected — grep shows it only ever read (hermes_cli/kanban_db.py:575-578,
+# gateway/platforms/base.py:836) — and it is scrubbed anyway: it is the same kind
+# of location pin, HOME cannot neutralise it either, and `env -u` on a var that
+# is not set costs nothing. scripts/tests/test_run_tests_harness_env.py pins
+# this list and fails if a future dispatcher pin is added without a decision.
+#
+# DELIBERATELY NOT SCRUBBED: the worker IDENTITY vars (HERMES_KANBAN_TASK,
+# _RUN_ID, _CLAIM_LOCK, _GOAL_MODE, _GOAL_MAX_TURNS, _WORKSPACE, _BRANCH). They
+# name no board location, and the suite legitimately goes BOTH ways about them —
+# hscc-cluster/tests/test_budget_watch.py:46 *sets* TASK to get worker
+# behaviour, five cli-help suites *strip* it to get a clean subprocess env. A
+# runner-level scrub would silently flip every worker-mode branch to its
+# non-worker side, i.e. manufacture tests that pass by no longer exercising the
+# thing they claim to test. That failure mode is worse than the one fixed here.
+# The board pins have no such defence: no test can legitimately want the
+# dispatching worker's live board.
+#
+# CONSEQUENCE, per the rule in the in-loop comment: a leg that newly FAILS with
+# these removed was passing while reading the operator's board. That is a
+# harness bug and a finding to report — not something to paper over by putting
+# the pin back.
+SUITE_ENV_UNSET=(
+  HERMES_DELEGATED_CHILD_CONTEXT   # the read fence (in-loop comment)
+  HERMES_KANBAN_DB                 # the board location pins (block above)
+  HERMES_KANBAN_BOARD
+  HERMES_KANBAN_WORKSPACES_ROOT
+  HERMES_KANBAN_ATTACHMENTS_ROOT
+)
+ENV_UNSET_ARGS=()
+for _pin in "${SUITE_ENV_UNSET[@]}"; do
+  ENV_UNSET_ARGS+=(-u "$_pin")
+done
+unset _pin
+
 rc=0
 declare -a summary
 for d in "${DIRS[@]}"; do
@@ -129,6 +198,12 @@ for d in "${DIRS[@]}"; do
   # apply and its absence cannot let a test touch real state. This is a harness
   # fix: a test that only fails inside the delegated worker context is a harness
   # bug, not a code failure — do not report it as "pre-existing".
+  #
+  # The same reasoning covers the BOARD PINS the dispatcher also injects into
+  # this shell (HERMES_KANBAN_DB / _BOARD / _WORKSPACES_ROOT /
+  # _ATTACHMENTS_ROOT), which outrank an explicit board= inside the fence — see
+  # the SUITE_ENV_UNSET block above for the measurement, the list's provenance,
+  # and why the worker IDENTITY vars are deliberately left in place (t_7e143e04).
   #
   # `-rs` prints every skip REASON, not just the count (GAP-D-1, t_b82ad0fe):
   # the httpx-keg guard used to hide a blind keg venv behind a soft-skip that
@@ -147,7 +222,7 @@ for d in "${DIRS[@]}"; do
     bash "$ROOT/scripts/leg_heartbeat.sh" "$d" "$$" "$LEG_T0" "$HEARTBEAT_SECONDS" &
     HB_PID=$!
   fi
-  env -u HERMES_DELEGATED_CHILD_CONTEXT \
+  env "${ENV_UNSET_ARGS[@]}" \
     "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider "$@"
   code=$?
   [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null

@@ -1227,34 +1227,29 @@ def _gate_multi(kanban_db):
     """True when ``kanban_db`` enumerates boards — i.e. when a slug names a REAL
     board, including ``default``.
 
-    THE SOURCE OF THIS ANSWER IS THE ENUMERATION, NOT THE SLUG (t_dad0da32).
-    ``multi`` is autodown's answer to "does this lib enumerate boards?"
-    (``autodown._enum_board_names``, ``autodown.py:290-314``: ``multi =
-    hasattr(kanban_db, "list_boards")``), and ``board_pin.open_board`` reads it
-    as exactly that — "did the caller name a board?" (``board_pin.py:231-242``).
-    Rebuilding it from the slug instead (the old ``bool(board) and board !=
-    "default"``) made ``default`` the one board the pin guard could never see:
-    ``multi=False`` means "no intent expressed", so the guard deferred to the
-    worker's ``HERMES_KANBAN_DB`` pin and the gate read the pinned board while
-    the panel labelled the answer ``default``. Measured in
-    ``docs/audits/wedge-default-board-pin-t_dad0da32.md``: ``list_boards()``
-    reports ``default`` as a slug and its resolved path moves under a fence.
+    THE SOURCE OF THIS ANSWER IS THE LIB, NOT THE SLUG (t_dad0da32, extending
+    t_147201fa). ``multi`` is autodown's answer to "does this lib enumerate
+    boards?" — ``autodown._enum_board_names``, ``autodown.py:310``,
+    ``hasattr(kanban_db, "list_boards")`` — and ``board_pin.open_board`` reads it
+    as exactly that: "did the caller name a board?" (``board_pin.py:231-242``).
+    t_147201fa removed the ``bool(board) and board != "default"`` heuristic from
+    the per-profile read; this helper is that rule in ONE place so the gate's
+    other two uses — the sanctioned-CLI argv builders — cannot keep guessing from
+    the slug after the DB read has stopped doing it. Before that, argv and DB open
+    disagreed for ``default`` specifically: the guard read the pinned board while
+    ``hermes kanban list`` was told nothing about the board the panel reported.
 
-    Deriving it here rather than from ``bool(board)`` also keeps the legacy
-    single-board shape intact: a lib without ``list_boards`` gets ``False`` and
-    therefore the untouched no-``board=`` call, which is what
+    Going through ``hasattr`` rather than calling ``list_boards()`` also means a
+    lib that raises mid-enumeration keeps its ``board=``-capable answer instead of
+    losing the guard, and no board metadata is read just to answer the question.
+
+    A lib without ``list_boards`` gets ``False`` and therefore the untouched
+    no-``board=`` call, which is what
     ``test_board_pin.py::test_single_board_legacy_shape_is_the_old_call_verbatim``
-    pins.
-
-    A lib that raises mid-enumeration falls back to the same rule
-    ``_enum_board_names`` itself uses, so a broken enumeration cannot silently
-    switch the guard off.
+    pins — the reason this is NOT the card's suggested ``multi = bool(board)``,
+    which would hand ``multi=True`` to a lib that cannot honour a board argument.
     """
-    try:
-        _boards, multi = _enum_board_names(kanban_db)
-        return bool(multi)
-    except Exception:  # noqa: BLE001
-        return hasattr(kanban_db, "list_boards")
+    return hasattr(kanban_db, "list_boards")
 
 
 def _gate_board_argv(board, multi, rest):
@@ -1397,15 +1392,26 @@ def _capped_assignees(kanban_db, board, max_per_profile, *, multi=None):
     whose running count is >= ``max_per_profile``. None (no cap configured /
     unreadable) means "no per-profile explanation available".
 
-    ``multi`` is the caller's enumeration answer (see :func:`_gate_multi`) and
-    goes to the pin guard unchanged — it is NOT re-derived from the slug here.
-    That is the t_dad0da32 fix: the old ``multi = bool(board) and board !=
-    "default"`` told ``board_pin`` "no board was named" for ``default``
-    specifically, so under a worker's ``HERMES_KANBAN_DB`` this per-profile read
-    answered from the PINNED board while the caller was explaining board
-    ``default`` — and because a cap-explained card needs no further evidence,
-    the gate then suppressed a restart using counts it never took from the board
-    it claimed to be reading.
+    ``multi`` here is the LIB's capability, never a property of the slug — the
+    same rule ``autodown._enum_board_names`` uses (``autodown.py:310``,
+    ``hasattr(kanban_db, "list_boards")``) and the same answer the two sibling
+    probes (``_board_snapshot``, ``_any_assignee_under_cap``) were handed by
+    their caller. t_b014c2b8 guarded this read but kept the old
+    ``bool(board) and board != "default"`` heuristic, which sent a ``default``
+    read down the no-board path; a worker's ``HERMES_KANBAN_DB`` still steers
+    that call, and it is not even the same file the siblings read for the same
+    board (``kanban_db_path()`` with no intent follows ``HERMES_KANBAN_BOARD``,
+    ``kanban_db_path(board="default")`` is the legacy flat DB). t_147201fa
+    removed the heuristic, so every board this gate asks about — ``default``
+    included — is resolved the same way and guarded the same way. A lib that
+    cannot enumerate boards still gets the no-``board=`` call verbatim, which is
+    the legacy single-board shape the companion tests pin as unaffected.
+
+    ``multi`` may also be passed IN (t_dad0da32): the gate computes the answer
+    once per pass via :func:`_gate_multi` and threads it here and to the argv
+    builders, so this read and the ``hermes kanban list`` beside it can no
+    longer disagree about which board was named. ``None`` — a direct caller —
+    derives it locally, which is why the behaviour above is unchanged either way.
     """
     if max_per_profile is None:
         return None
