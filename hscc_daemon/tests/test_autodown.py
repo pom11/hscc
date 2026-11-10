@@ -838,6 +838,75 @@ class TestLoadKanbanDb:
         assert ad._load_kanban_db_or_default() is not None
         assert ad.kanban_check_state() == {"ok": True, "reason": ""}
 
+    # ── the t_8eafef82 window: docstring and code must be the same story ────
+
+    def test_the_import_window_the_docstring_promises_is_the_one_that_runs(
+            self, tmp_path, monkeypatch):
+        """``sys.path`` is unchanged after a SUCCESSFUL resolve — and the test
+        proves it is not green because nothing was ever inserted.
+
+        The docstring has always said the runtime dir goes on ``sys.path``
+        "only for the duration of this one import". Up to t_8eafef82 the code
+        did not: it inserted the dir and left it at ``sys.path[0]`` for the rest
+        of the process, which is precisely what turned one planted
+        ``<tmp>/hermes-agent`` into a fake that every later consumer re-imported
+        (docs/audits/orch-waker-import-leak_t_2be3b04e.md §3). So this pins both
+        halves:
+
+          1. the promise is still *in* the docstring, quoted from the live
+             function rather than re-typed here, so rewording the sentence has
+             to come with rewording the assertion;
+          2. NON-VACUITY — the planted package records ``sys.path`` at import
+             time, so the snapshot shows the agent dir really was held there
+             *during* the import. Without that assertion this test would also
+             pass on a resolver that never touched ``sys.path`` at all (this
+             venv has hermes editable-installed, so an import can succeed for
+             the wrong reason);
+          3. the resolve then leaves ``sys.path`` exactly as it found it — the
+             same assertion against the pre-fix body goes RED (verified by
+             mutation probe, see the PR).
+        """
+        import sys
+
+        promise = "only for the duration of this one import"
+        # Whitespace collapsed because a docstring reflows; the promise itself
+        # is quoted verbatim out of the live function, not re-typed from prose.
+        doc = " ".join((ad._load_kanban_db_or_default.__doc__ or "").split())
+        assert promise in doc, (
+            "the docstring no longer makes the promise this test checks — update "
+            "both together, never the assertion alone")
+
+        agent = tmp_path / "hermes-agent"
+        cli = agent / "hermes_cli"
+        cli.mkdir(parents=True)
+        (cli / "__init__.py").write_text(
+            "import sys\n"
+            "PATH_AT_IMPORT = list(sys.path)\n")
+        (cli / "kanban_db.py").write_text("MARKER = 'planted'\n")
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(agent))
+
+        # A sibling test here resolves the REAL hermes_cli (and this venv also
+        # installs hermes editable), so without this the import inside the
+        # window would hit sys.modules and hand back the real library — the
+        # assertions below would then be about a module this test did not plant.
+        # The conftest's autouse _hermetic_hermes_cli_imports fixture puts the
+        # cache back by identity at teardown, so the eviction has no tail.
+        for _n in [n for n in list(sys.modules)
+                   if n == "hermes_cli" or n.startswith("hermes_cli.")]:
+            del sys.modules[_n]
+
+        before = list(sys.path)
+        kb = ad._load_kanban_db_or_default()
+
+        assert kb is not None and getattr(kb, "MARKER", None) == "planted"
+        assert ad.kanban_check_state() == {"ok": True, "reason": ""}
+        import hermes_cli as planted_top
+        assert str(agent) in planted_top.PATH_AT_IMPORT, (
+            "the window never opened — the resolve came from somewhere else "
+            "(an editable install?) and the assertion below proves nothing")
+        assert str(agent) not in sys.path
+        assert sys.path == before
+
 
 # ---------------------------------------------------------------------------
 # _default_keepalive_ok — head-only probing for multi-node/tp keepalive units

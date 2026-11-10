@@ -102,6 +102,7 @@ import re
 import time
 
 from . import board_pin
+from . import hermes_import
 from .daemon_ops import log
 
 DISPATCHER_STREAM = "dispatcher"
@@ -337,10 +338,18 @@ def _read_max_per_profile():
     """Read ``kanban.max_in_progress_per_profile`` from the operator's config.
 
     Returns None when unset/unreadable, meaning "no per-profile cap".
+
+    The read opens its OWN import window (t_8eafef82): ``hermes_cli`` is not on
+    this interpreter's path in the venv ``/opt/homebrew/bin/hscc`` runs in, and
+    until now this bare import only resolved when some earlier check —
+    ``autodown._load_kanban_db_or_default`` — happened to have leaked the agent
+    tree onto ``sys.path``. Same order-dependence GAP-D-4 was filed for; the
+    answer must not depend on who ran first.
     """
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
+        with hermes_import.agent_tree_on_path():
+            from hermes_cli.config import load_config
+            cfg = load_config()
         v = (cfg.get("kanban") or {}).get("max_in_progress_per_profile")
         if v is None:
             return None
@@ -366,16 +375,25 @@ def _review_dispatch_config_state():
     (``kanban_decompose._review_policy``) is the *pairing* policy that decides
     who reviews a newly created card, not whether the review lane dispatches, so
     it is NOT the signal to consult here.
+
+    Both the import and the call run inside their own
+    :func:`hermes_import.agent_tree_on_path` window (t_8eafef82) rather than
+    relying on another module having left the agent tree on ``sys.path`` — in
+    the ``/opt/homebrew/bin/hscc`` venv a bare ``hermes_cli`` import answers
+    ``None`` ("unknown") unless somebody leaked first, which made this answer
+    depend on call order.
     """
     try:
-        from hermes_cli import kanban_db_dispatch
+        with hermes_import.agent_tree_on_path():
+            from hermes_cli import kanban_db_dispatch
     except Exception:  # noqa: BLE001 - no dispatch module: unknown, not "off"
         return None
     fn = getattr(kanban_db_dispatch, "review_dispatch_enabled", None)
     if fn is None:
         return None
     try:
-        return bool(fn())
+        with hermes_import.agent_tree_on_path():
+            return bool(fn())
     except Exception:  # noqa: BLE001 - a raising accessor is unknown too
         return None
 
@@ -545,8 +563,9 @@ def _read_max_in_progress():
     cooldown/attempt-cap still protect against acting on a fluke.
     """
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
+        with hermes_import.agent_tree_on_path():
+            from hermes_cli.config import load_config
+            cfg = load_config()
         v = (cfg.get("kanban") or {}).get("max_in_progress")
         if v is None:
             return None
@@ -581,10 +600,16 @@ def _bind_spawnable_helpers(kanban_db):
         methods, then the SQL predicate. This is NOT a silent narrowing — on
         the same interpreter ``_load_kanban_db_or_default`` returns None and
         the whole probe goes fail-safe ``unreachable``, never the SQL fallback
-        with a real board.
+        with a real board. (That equivalence holds because BOTH sides now open
+        the same :func:`hermes_import.agent_tree_on_path` window; up to
+        t_8eafef82 this one leaned on the other having leaked the agent tree
+        onto ``sys.path``, so in the ``/opt/homebrew/bin/hscc`` venv the bind
+        silently succeeded or failed depending on call order — the case this
+        paragraph promises cannot happen.)
     """
     try:
-        from hermes_cli import kanban_db_dispatch
+        with hermes_import.agent_tree_on_path():
+            from hermes_cli import kanban_db_dispatch
     except Exception:  # noqa: BLE001 - no hermes_cli: nothing to bind
         return kanban_db
     for _n in ("has_spawnable_ready", "has_spawnable_review"):
@@ -1537,13 +1562,18 @@ def _assignee_is_nonspawnable(assignee):
     lanes like ``orion-cc``). Unknown (``hermes_cli.profiles`` unimportable —
     test interpreter, no Hermes on PATH) returns False = "assume spawnable",
     which keeps the stricter hold-evidence requirement in force (fail closed).
+    The import and the call each open their own agent-tree window (t_8eafef82)
+    so "unknown" here means genuinely no Hermes, not "nobody resolved the tree
+    before me in this process".
     """
     try:
-        from hermes_cli.profiles import profile_exists
+        with hermes_import.agent_tree_on_path():
+            from hermes_cli.profiles import profile_exists
     except Exception:  # noqa: BLE001
         return False
     try:
-        return not bool(profile_exists(assignee))
+        with hermes_import.agent_tree_on_path():
+            return not bool(profile_exists(assignee))
     except Exception:  # noqa: BLE001
         return False
 
