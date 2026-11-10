@@ -37,6 +37,14 @@ State lives in ``~/.hscc/state/kanban_paused.json``. The hermes CLI runner, the
 inject function and the state path are injectable so the tests never touch a
 real board or a real tmux pane.
 
+Every verb here runs ``hermes kanban --board <b>`` in a SUBPROCESS, which is where
+``board_pin``'s in-process scrub cannot reach (t_70c97264): the read is handed a
+child environment with a worker's ``HERMES_KANBAN_DB`` removed, and every write
+(``reclaim`` / ``block`` / ``unblock``) is REFUSED before anything spawns when that
+pin would outrank the board named — a pinned shell does not get to block, or
+release, a board it does not own. Decision record:
+``docs/audits/board-pin-pause-t_70c97264.md``.
+
 The enforce STREAM stamp is deliberately a DIFFERENT file
 (``~/.hscc/state/kanban_enforce.json``, written through ``state.write_state``)
 — see :func:`STREAM_NAME` for why stamping the paused-state file itself would
@@ -51,6 +59,8 @@ import subprocess
 import sys
 import time
 from typing import Callable, Optional
+
+from . import board_pin
 
 STATE_PATH = os.path.expanduser(
     os.environ.get("HSCC_KANBAN_PAUSE_STATE", "~/.hscc/state/kanban_paused.json"))
@@ -144,9 +154,164 @@ HOLD_STATUSES = ("running", "ready")
 _DEFAULT = object()   # "use the module-level runner", resolved at call time
 
 
-def _run_hermes(args: list) -> subprocess.CompletedProcess:
+def _run_hermes(args: list, env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """One ``hermes kanban <args>`` call.
+
+    ``env`` (t_70c97264) is the child environment :func:`read_child_env` decided
+    for this probe, and the ONLY route by which it survives the fork —
+    ``board_pin``'s in-process scrub of ``os.environ`` is gone the moment the
+    child exists (a fork carries the copy made before the restore). ``env=None``,
+    every un-pinned shell and every board the pin already matches, keeps this the
+    pre-guard call: the child inherits.
+    """
     return subprocess.run(["hermes", "kanban", *args], capture_output=True, text=True,
-                          timeout=60)
+                          timeout=60, env=env)
+
+
+# ── The board-pin guard, fork half (t_70c97264) ────────────────────────────
+#
+# ``board_pin`` guards OUR OWN store opens by scrubbing ``os.environ`` around
+# ``connect_closing``. None of that reaches a child, so this module — the only
+# other place in the repo that shells out to ``hermes kanban`` naming a board —
+# has to decide the child's environment itself, per board, through ``board_pin``'s
+# detection (never a re-derived path). The two accesses get the two shapes
+# ``board_pin`` already splits by mode:
+#
+#   READ  (list_cards)               -> option (a): hand the child a scrubbed copy.
+#   WRITE (_hold, resume's unblock)  -> option (b): REFUSE before spawning. Scrubbing
+#       a write would hand a pinned shell cards on a board it does not own, which is
+#       exactly what ``board_pin``'s ``mode="write"`` refuses outright.
+#
+# Decision record: docs/audits/board-pin-pause-t_70c97264.md.
+
+#: Reserved key in :func:`enforce`'s report — ``{board: reason}`` for every paused
+#: board whose hold this pass could NOT apply. ``_``-prefixed like the state file's
+#: own ``_auto_decompose_was``, and popped by :func:`enforce_tick` before its
+#: arithmetic, so ``held``/``paused`` keep counting what they always counted.
+REFUSED_KEY = "_refused"
+
+#: Dedupe set for THIS module's pin decisions. Separate from ``board_pin._WARNED``
+#: on purpose: that one throttles board_pin's own scrub line, this one throttles
+#: the pause decisions — and ``enforce`` runs on the daemon's 60 s loop, so an
+#: unthrottled warning would bury the log exactly like the monitor warnings.
+_PIN_WARNED: set = set()
+
+
+def _warn_pin_once(key: str, msg: str) -> None:
+    """One WARN per ``key`` per process, through the daemon log channel.
+
+    Deferred import (same shape as ``board_pin._emit`` and
+    ``dispatcher_wedge._warn_gate_once``) so the one seam that captures these
+    lines — ``daemon_ops.log`` — captures all of them. Never raises: a warning
+    that can break the read is worse than a silent one.
+    """
+    if key in _PIN_WARNED:
+        return
+    _PIN_WARNED.add(key)
+    try:
+        from .daemon_ops import log
+        log(msg, "WARN")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _load_kanban_db():
+    """hermes' ``kanban_db`` module, or None — the detection seam, injectable.
+
+    Reached through ``autodown._load_kanban_db_or_default`` (the loader the wedge
+    wraps for the same purpose), which puts the hermes runtime dir on ``sys.path``
+    for one import: this module must not import hermes at load time, and with no
+    pin in the environment this is never even called (see :func:`_pin_conflict`).
+    """
+    try:
+        from .autodown import _load_kanban_db_or_default
+        return _load_kanban_db_or_default()
+    except Exception:  # noqa: BLE001 — no hermes means no guard: board_pin's posture
+        return None
+
+
+def _pin_conflict(board):
+    """``board_pin.pin_conflict`` for ``board``, or None.
+
+    The env check first is not a re-derived path rule — ``pin_conflict`` opens
+    with the same question — it just keeps the daemon's 60 s enforce tick from
+    importing ``hermes_cli`` at all in the shells that carry no pin, which is
+    every daemon on this fleet.
+    """
+    if not (os.environ.get(board_pin.PIN_ENV) or "").strip():
+        return None
+    return board_pin.pin_conflict(_load_kanban_db(), board)
+
+
+def _runner_takes_env(run) -> bool:
+    """True when ``run`` accepts the ``env`` keyword (the grown runner contract).
+
+    Delegates to ``dispatcher_wedge._cli_runner_takes_env`` instead of restating
+    the rule: one contract, one derivation, the way the shared wedge predicates are
+    kept shared. Deferred because the answer is only needed in the conflict branch;
+    a wedge we cannot import means a runner we cannot prove, which fails closed —
+    the read is refused and the reason names the pin.
+    """
+    try:
+        from .dispatcher_wedge import _cli_runner_takes_env
+    except Exception:  # noqa: BLE001
+        return False
+    return _cli_runner_takes_env(run)
+
+
+def read_child_env(board: str, run: Callable = _run_hermes):
+    """``(env, blocked)`` for ONE read-only CLI probe of ``board``.
+
+    ``env`` is None when nothing would outrank the child's ``--board`` — no pin,
+    no fence marker, the pin already IS the board asked for, or a lib that cannot
+    be interrogated — which keeps the probe byte-identical to the pre-guard call
+    (the child inherits). It is a copy of ``os.environ`` with
+    ``board_pin.PIN_ENV`` removed when the pin would win: hermes resolves that pin
+    ahead of ``--board`` in any process carrying a worker/delegation fence marker
+    (``hermes_cli/kanban_db.py:540-555`` via ``agent/delegation_context.py:76-93``),
+    so without the hand-off ``list_cards`` would inventory the PINNED board and the
+    pause report would present those cards as ``board``'s. Warned once per
+    (pin, board) through ``board_pin.guard_board(mode="read")`` — its wording, not
+    a paraphrase.
+
+    ``blocked`` is a non-empty reason when a pin conflicts AND ``run`` is the
+    legacy ``run(argv)`` shape, which cannot be handed a scrubbed environment:
+    an answer describing a board nobody asked about is not a fact, so the probe is
+    never run.
+    """
+    conflict = _pin_conflict(board)
+    if conflict is None:
+        return None, ""
+    if not _runner_takes_env(run):
+        msg = (f"kanban pause: refusing to read board {board!r} — "
+               f"{board_pin.PIN_ENV}={conflict.pin!r} outranks it (trigger: "
+               f"{conflict.fences_named()}) and the CLI runner cannot be handed a "
+               f"scrubbed environment, so the rows would describe "
+               f"{conflict.pinned_path!r} and be reported as {board!r}")
+        _warn_pin_once(f"read-refused|{conflict.pin}|{board}", msg)
+        return None, msg
+    board_pin.guard_board(_load_kanban_db(), board, mode="read")
+    child = dict(os.environ)
+    child.pop(board_pin.PIN_ENV, None)
+    return child, ""
+
+
+def write_refusal(board: str) -> str:
+    """A reason string when a WRITE of ``board`` must be refused, else ``""``.
+
+    The one thing ``board_pin`` §2c rules out is scrubbing a write: a worker or
+    delegated shell pinned at board P must not be able to reclaim, block or
+    unblock a board it does not own — task ids are per-board, so a same-id card on
+    P takes the mutation while the report names ``board``. So every pass here asks
+    this BEFORE spawning anything and reports the refusal instead. The wording is
+    ``board_pin``'s own write error, naming the pin, the board and both paths.
+    """
+    conflict = _pin_conflict(board)
+    if conflict is None:
+        return ""
+    why = conflict.write_error()
+    _warn_pin_once(f"write-refused|{conflict.pin}|{board}", why)
+    return why
 
 
 def load_state(path: Optional[str] = None) -> dict:
@@ -172,8 +337,23 @@ def paused_boards(state: dict) -> list:
 
 
 def list_cards(board: str, run: Callable = _run_hermes) -> list:
-    """``[{"id", "status"}]`` for every card on ``board`` (``[]`` on error)."""
-    r = run(["--board", board, "list", "--json"])
+    """``[{"id", "status"}]`` for every card on ``board`` (``[]`` on error).
+
+    The child environment is decided per call by :func:`read_child_env`
+    (t_70c97264): with a worker pin in the environment and nothing handed over,
+    the child answers for the PINNED board and this list — the pause's whole
+    "every card is accounted for" inventory — would be another board's. A
+    conflicting pin therefore either gets a scrubbed child environment or the
+    probe is never run and ``[]`` comes back with a WARN naming the pin, which is
+    the same "[] on error" contract this function has always had for a failing
+    CLI. The passes below refuse the whole board before reading it, so the
+    scrubbed read is the shape a standalone caller gets.
+    """
+    child_env, blocked = read_child_env(board, run)
+    if blocked:
+        return []
+    argv = ["--board", board, "list", "--json"]
+    r = run(argv) if child_env is None else run(argv, env=child_env)
     try:
         rows = json.loads(r.stdout or "[]")
     except ValueError:
@@ -183,6 +363,17 @@ def list_cards(board: str, run: Callable = _run_hermes) -> list:
 
 
 def _hold(board: str, card: dict, reason: str, run: Callable) -> bool:
+    """Reclaim (if running) then block ONE card. Returns whether ``block`` took.
+
+    Refuses outright with :class:`board_pin.BoardPinConflict` when a worker pin
+    would outrank ``--board`` for this write (t_70c97264): the three passes ask
+    :func:`write_refusal` first so they can REPORT the refusal per board, and a
+    bare caller of this function has no report to write into, so it fails loudly
+    instead of blocking a card on a board the caller does not own.
+    """
+    why = write_refusal(board)
+    if why:
+        raise board_pin.BoardPinConflict(why)
     if card["status"] == "running":
         run(["--board", board, "reclaim", card["id"], "--reason", reason])
     r = run(["--board", board, "block", "--kind", "dependency", card["id"], reason])
@@ -230,6 +421,16 @@ def pause(boards: list, reason: str = "", *, run: Callable = _run_hermes,
         " — resume with `hscc kanban resume <board>`"
     report = {}
     for board in boards:
+        refused = write_refusal(board)
+        if refused:
+            # t_70c97264 (b): NOTHING is spawned for a board this shell cannot
+            # write — no list, no reclaim/block, no orchestrator steer, no cron
+            # park — and the board never enters the paused-state file, so resume
+            # will not be released from a hold that was never placed and
+            # enforce will not keep retrying it. The report names the board.
+            report[board] = {"refused": refused, "held": [], "failed": [],
+                             "triage": []}
+            continue
         entry = state.get(board) or {"paused_at": stamp, "reason": reason, "cards": [],
                                      "triage_left": []}
         held = {c["id"] for c in entry["cards"]}
@@ -278,6 +479,14 @@ def resume(boards: list, *, run: Callable = _run_hermes,
     state = load_state(state_path)
     report = {}
     for board in boards:
+        refused = write_refusal(board)
+        if refused:
+            # Same §2c posture as pause, and the paused record STAYS: a refused
+            # resume must not forget the board is paused (t_70c97264). Under the
+            # pin this write would UNBLOCK a same-id card on the pinned board —
+            # releasing a hold this module never placed.
+            report[board] = {"refused": refused, "released": [], "failed": []}
+            continue
         entry = state.pop(board, None)
         if entry is None:
             report[board] = {"error": "not paused"}
@@ -310,12 +519,24 @@ def enforce(*, run: Callable = _run_hermes, state_path: Optional[str] = None) ->
     The verb behind two callers: ``hscc kanban enforce`` (the operator re-assert)
     and the daemon's ``kanban_enforce`` stream (:func:`enforce_tick`), which is
     what makes the hold continuous instead of remembered (GAP-F-4, t_51931733).
+
+    A board this shell cannot write — a worker ``HERMES_KANBAN_DB`` outranks the
+    ``--board`` we name — is never written and comes back under
+    :data:`REFUSED_KEY` instead of being silently skipped (t_70c97264).
     """
     state = load_state(state_path)
     if not paused_boards(state):
         return {}
     report = {}
+    refused = {}
     for board in paused_boards(state):
+        why = write_refusal(board)
+        if why:
+            # The daemon's 60 s loop must not be the thing that writes the
+            # pinned board every minute (t_70c97264). Recorded, not silent:
+            # enforce_tick turns it into a red stream row.
+            refused[board] = why
+            continue
         entry = state[board]
         held = {c["id"] for c in entry.get("cards") or []}
         text = f"{REASON_PREFIX} by operator (board paused, enforced) — resume with " \
@@ -334,6 +555,11 @@ def enforce(*, run: Callable = _run_hermes, state_path: Optional[str] = None) ->
             report[board] = added
     if report:
         save_state(state, state_path)
+    if refused:
+        # Reserved key (see REFUSED_KEY): the {board: [ids]} shape stands, and a
+        # pass that could not hold a board is reported rather than looking like
+        # "nothing new to hold".
+        report[REFUSED_KEY] = refused
     return report
 
 
@@ -411,13 +637,17 @@ def enforce_tick(now: Optional[float] = None, *, state_path: Optional[str] = Non
 
     The body of :func:`check_kanban_enforce` below — what the
     ``kanban_enforce`` stream in ``daemon_ops.PERIODIC_INTERVALS`` runs every
-    60 s. Like ``orch_waker.waker_tick`` there are three outcomes and ALL of
+    60 s. Like ``orch_waker.waker_tick`` there are four outcomes and ALL of
     them stamp the stream (a stream the daemon is deliberately idling must not
     read as a dead one to verify's staleness math):
 
       * nothing paused -> no board reads at all, ``idle`` (zero subprocess
         cost — enforce() early-returns before enumerating any board);
       * hold made      -> ``held`` naming the boards/cards it just re-blocked;
+      * refused        -> a paused board a worker ``HERMES_KANBAN_DB`` outranks
+        could not be held at all: ``ok: False``, the pin named in the message
+        (t_70c97264) — the same red row a raising tick produces, because the
+        hold really is not being applied;
       * failure        -> ``ok: False`` — a raising enforce still stamps, so
         the failure is VISIBLE instead of looking like a stalled stream
         (GAP-C-1's rule: an inert-but-healthy-looking stream is the worst
@@ -434,13 +664,36 @@ def enforce_tick(now: Optional[float] = None, *, state_path: Optional[str] = Non
     entry: dict = {"last_enforce": now}
     try:
         report = enforce(run=run, state_path=state_path)
+        # The refusal half comes OUT before the arithmetic (see REFUSED_KEY):
+        # ``held``/``paused`` keep counting holds exactly as they always did, and
+        # a board that could not be held at all makes the stream red — which
+        # lands on doctor_check's EXISTING "last enforce tick FAILED … the hold
+        # is NOT being enforced" row instead of reading as "paused, nothing new
+        # to hold" (t_70c97264: the pinned shell that cannot enforce must be
+        # visible, not healthy-looking).
+        refused = report.pop(REFUSED_KEY, None) or {}
         held = sum(len(v) for v in report.values())
-        entry.update(ok=True,
-                     paused=len(report), held=held,
-                     message=(f"held {held} card(s) on {len(report)} paused board(s)"
-                              if held else
-                              (f"{len(report)} board(s) paused, nothing new to hold"
-                               if report else "no boards paused")))
+        if report:
+            message = (f"held {held} card(s) on {len(report)} paused board(s)" if held
+                       else f"{len(report)} board(s) paused, nothing new to hold")
+        elif refused:
+            message = f"{len(refused)} paused board(s), none enforceable"
+        else:
+            message = "no boards paused"
+        if refused:
+            # The PIN VALUE goes in the message because doctor_check truncates it
+            # to 160 chars for the row — a red row that cannot say which pin is
+            # the cause is a red row nobody can act on. The full board_pin
+            # reasons ride on the entry (``refused``) for whoever reads the JSON.
+            message += (f"; REFUSED {len(refused)} paused board(s) with "
+                        f"{board_pin.PIN_ENV}="
+                        f"{(os.environ.get(board_pin.PIN_ENV) or '').strip()!r} — the "
+                        f"hold is NOT being applied there: "
+                        + "; ".join(sorted(refused)))
+        entry.update(ok=not refused,
+                     paused=len(report), held=held, message=message)
+        if refused:
+            entry["refused"] = refused
         if report:
             entry["boards"] = report
         return entry
