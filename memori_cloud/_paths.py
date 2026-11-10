@@ -7,7 +7,10 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
-PLUGIN_NAME = "memori"
+#: Deployed plugin directory / provider key. NOT "memori": a top-level package
+#: named ``memori`` shadows the installed SDK for any process with this repo
+#: root (or the plugins dir) on ``sys.path`` (t_2ab0eda1).
+PLUGIN_NAME = "memori_cloud"
 
 
 def _hermes_home_from_hermes() -> Path | None:

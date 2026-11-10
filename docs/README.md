@@ -309,3 +309,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### memori embedding cache (record)
 
 - `docs/audits/fastembed-cache-dir-t_317a0f30.md` — why the memori SDK's vendored `fastembed` crate wrote one 87 MB model cache per cwd (nine roots / 782 MB measured on this host), the red/green proof that `FASTEMBED_CACHE_DIR` is honoured by the compiled crate, and why the pin lives at provider import rather than in the hermes-owned gateway launchd plist. **record** (t_317a0f30)
+
+### memori SDK shadowing (live)
+
+- `docs/audits/memori-sdk-shadowing-t_2ab0eda1.md` — why the cloud provider dir named `memori/` shadowed the installed `memori` SDK for any repo-root/plugins `sys.path` process, the measured options (private-name load ruled out, rename chosen), the rename to `memori_cloud/`, the installer's `RETIRED_PAYLOAD` migration for stale deployed dirs, and the regression check. **live** (t_2ab0eda1)

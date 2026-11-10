@@ -137,12 +137,12 @@ def _provider_shim_dir(probe_root: Path, repo_root: Path) -> str:
         ImportError: cannot import name 'embed_texts' from 'memori'
           (.../hscc/memori/__init__.py)
 
-    because the repo's ``memori/`` — the CLOUD memory provider — shadows the
-    installed ``memori`` SDK for anything that puts a directory containing it on
-    ``sys.path``. Hermes itself does not hit this (it loads plugins by file
-    location), so the honest way to reproduce a real agent process is a shim dir
-    holding only a symlink to the plugin. The shadowing itself is a separate
-    hazard and is filed as its own card, not fixed here.
+    because the repo's then-named ``memori/`` — the CLOUD memory provider —
+    shadowed the installed ``memori`` SDK for anything that puts a directory
+    containing it on ``sys.path``. That dir is now ``memori_cloud/``
+    (t_2ab0eda1), but the shim stays: the honest way to reproduce a real agent
+    process is a path entry holding only the plugin it needs, not the whole repo
+    root (Hermes loads plugins by file location for the same reason).
     """
     shim = probe_root / "provider-shim"
     shim.mkdir(parents=True, exist_ok=True)

@@ -332,6 +332,56 @@ def test_payload_extra_dest_deploys_plugin_at_category_level(tmp_path):
                                 "video_gen/openai_compat"]
 
 
+def test_default_payload_renames_memori_cloud_and_retires_the_old_name():
+    """`memori` must not be a top-level deployed plugin name (t_2ab0eda1).
+
+    A deployed package named `memori` shadows the installed memori SDK for any
+    process with the plugins dir on sys.path. The new payload entry is
+    `memori_cloud`; the old deployed dir is retired by RETIRED_PAYLOAD.
+    """
+    assert "memori_cloud" in install_payload.DEFAULT_PAYLOAD
+    assert "memori" not in install_payload.DEFAULT_PAYLOAD
+    assert install_payload.RETIRED_PAYLOAD["memori"] == "memori_cloud"
+
+
+def test_renamed_payload_entry_retires_the_stale_deployed_dir(tmp_path):
+    """A rename must not leave the old deployed dir side-by-side (t_2ab0eda1).
+
+    install_payload only overwrites destinations it is installing, so without
+    retirement the stale `memori/` keeps shadowing the SDK forever. It is MOVED
+    to plugins-backups, never deleted — operator data survives.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "memori_cloud").mkdir()
+    (repo / "memori_cloud" / "__init__.py").write_text("new=1\n")
+    plugins = tmp_path / "plugins"
+    (plugins / "memori").mkdir(parents=True)
+    (plugins / "memori" / "__init__.py").write_text("OLD\n")
+
+    res = install_payload.install_payload(
+        repo, plugins, ["memori_cloud"], ts="R")
+
+    assert res["retired"] == ["memori.retired.bak-R"]
+    assert not (plugins / "memori").exists(), "stale shadow dir survived"
+    assert (plugins / "memori_cloud" / "__init__.py").read_text() == "new=1\n"
+    assert (tmp_path / "plugins-backups" / "memori.retired.bak-R"
+            / "__init__.py").read_text() == "OLD\n"
+
+
+def test_retirement_does_not_touch_old_dir_without_the_replacement(tmp_path):
+    """Non-vacuity: retirement is tied to installing the replacement, not to
+    any install pass. A payload without `memori_cloud` must leave `memori/`."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    (plugins / "memori").mkdir(parents=True)
+    (plugins / "memori" / "__init__.py").write_text("OLD\n")
+
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="R")
+
+    assert res["retired"] == []
+    assert (plugins / "memori" / "__init__.py").read_text() == "OLD\n"
+
+
 def test_payload_extra_dest_backup_flattens_name(tmp_path):
     """A nested dest backs up as ONE flat name in plugins-backups/ (never a
     nested dir — the sweep + prune only see direct children of bak_dir)."""

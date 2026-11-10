@@ -21,7 +21,7 @@ Six claims, each pinned so a regression names itself:
   5. importing the provider the way Hermes does actually performs the pin (a
      child process, so it is the real import path), and the pin's call site sits
      above the import that can reach the SDK;
-  6. the cloud provider's copy of the helper (`memori/_cache_env.py`) has not
+  6. the cloud provider's copy of the helper (`memori_cloud/_cache_env.py`) has not
      drifted from this one — they are two plugins with no shared module path.
 
 Offline and hermetic: ``$HOME`` and ``FASTEMBED_CACHE_DIR`` are the helper's only
@@ -201,12 +201,13 @@ print(json.dumps({
 def _provider_shim_dir(probe_root: Path, repo_root: Path) -> Path:
     """A ``sys.path`` entry exposing ONLY ``memori_byodb``, as a symlink.
 
-    The repo root must not go on the child's path: the repo's ``memori/`` (the
-    cloud provider) shadows the installed ``memori`` SDK for any process whose
-    path contains it — measured on this card as
-    ``ImportError: cannot import name 'embed_texts' from 'memori'
-    (.../hscc/memori/__init__.py)``. Hermes loads plugins by file location, so
-    a one-symlink shim is both safer and closer to the real import shape.
+    The repo root must not go on the child's path: before t_2ab0eda1 the repo's
+    top-level ``memori/`` (cloud provider) shadowed the installed ``memori`` SDK
+    for any process whose path contained it — measured as ``ImportError: cannot
+    import name 'embed_texts' from 'memori' (.../hscc/memori/__init__.py)``.
+    The cloud dir is now ``memori_cloud/``, but the shim is still the honest
+    shape: Hermes loads plugins by file location, and the child only needs this
+    one provider, not the whole repo root.
     """
     shim = probe_root / "provider-shim"
     shim.mkdir(parents=True, exist_ok=True)
@@ -284,14 +285,14 @@ def test_pin_call_site_precedes_the_import_that_can_reach_the_sdk():
 
 # ── 6. the cloud provider's copy has not drifted ─────────────────────────────
 
-#: `memori/` (the cloud provider) ships its own copy of this helper: the two
+#: `memori_cloud/` (the cloud provider) ships its own copy of this helper: the two
 #: plugins deploy to separate dirs and share no importable module path, so the
 #: fix cannot live in one file both can reach. Identical code, different
 #: docstrings — hence an AST comparison with the module docstring dropped, not a
 #: hash. In the deployed layout (`~/.hermes/plugins`) the sibling exists but is
 #: a third-party-shaped tree, so this only asserts anything where the repo's
 #: layout is present.
-SIBLING = Path(_cache_env.__file__).resolve().parents[1] / "memori" / "_cache_env.py"
+SIBLING = Path(_cache_env.__file__).resolve().parents[1] / "memori_cloud" / "_cache_env.py"
 
 
 def test_the_two_provider_copies_have_not_drifted():

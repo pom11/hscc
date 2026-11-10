@@ -1,10 +1,14 @@
-# memori
+# memori_cloud
 
 Cloud-backed long-term memory provider for Hermes (agent memory). Hermes
 selects it via its `memory.provider` config; the plugin registers itself
 through the Hermes plugin API — `register(ctx)` calls
 `ctx.register_memory_provider(MemoriMemoryProvider())`
-(`memori/__init__.py:450`).
+(`memori_cloud/__init__.py:459`).
+
+The directory is deliberately **not** named `memori`: a top-level package with
+the SDK's import name shadows the installed `memori` SDK for every process that
+puts the repo root or the plugins dir on `sys.path` (t_2ab0eda1).
 
 ## What it is
 
