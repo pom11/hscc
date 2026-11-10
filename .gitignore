@@ -16,6 +16,15 @@ cluster.json
 cluster-manifest.json
 setup.json
 plugin-state/
+# Embedding-model cache — 87 MB of ONNX weights (models--Qdrant--all-MiniLM-L6-v2-onnx).
+# Written by the Rust `fastembed` crate vendored inside the memori SDK: that binary
+# carries the `.fastembed_cache` default and honours FASTEMBED_CACHE_DIR, and
+# memori_byodb/_client.py is what loads the SDK. The cache path is resolved under the
+# *current* directory, so the download lands in whichever repo an agent or test run
+# happens to cwd in — the same 87 MB sits at 7 different roots on this host (hscc,
+# gateclerk, ecofire-bc). No repo code mentions fastembed, so a repo can only refuse
+# the commit: ignore it, and do not delete it — re-fetching costs bandwidth and time.
+.fastembed_cache/
 
 # Sensitive files — credentials / private machine data
 hf_token
