@@ -128,20 +128,23 @@ was spawned at all).
   `block` argv **mutates** that board's same-id card while the asked board is
   untouched — the CLI fake answers and mutates the board the environment it was
   handed resolves to, so the harm is observable rather than merely flagged.
-- **Targeted trio**: 45 passed — the 12 new plus the 33 existing
-  (`test_kanban_pause.py` 20, `test_kanban_pause_enforce_stream.py` 13), the
-  injected-`run` fakes unchanged as the card required.
-- **Suite pair, back-to-back at `f5af6980`** (this card's code commit — the only
-  later commits are this record and the changelog fragment, no code and no tests),
-  with `run_tests.sh`'s identity vars unset (`HERMES_DELEGATED_CHILD_CONTEXT`,
+- **Targeted five**: 75 passed — the 12 new plus the 33 existing pause tests
+  (`test_kanban_pause.py` 20, `test_kanban_pause_enforce_stream.py` 13, the
+  injected-`run` fakes unchanged as the card required) and the 30 board-pin
+  siblings (`test_board_pin.py`, `test_board_pin_gate_cli.py`).
+- **Suite pair, back-to-back at the merged head `bfd040ca`** — `origin/main`
+  (`06a12aaf`, #276 + #277) merged in mid-card; disjoint from these files, but #277
+  rewrote the planted-`hermes_cli` harness and `test_board_pin.py`, so the
+  measurement was repeated after the merge rather than carried over. Run with
+  `run_tests.sh`'s identity vars unset (`HERMES_DELEGATED_CHILD_CONTEXT`,
   `HERMES_KANBAN_DB`, `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_WORKSPACES_ROOT`,
   `HERMES_KANBAN_ATTACHMENTS_ROOT`):
-  **hscc_daemon 3630 passed / 0 failed** (114s),
-  **hscc-api 994 passed + 1 skipped** (253s).
-  Branch-point pair on `fe530887`: 3618 / 994+1 — the delta is exactly the +12 here,
-  so nothing was renamed or dropped. `changelog_fragments.py check` OK
-  ([Unreleased] pointer, 3 fragment entries consistent); `readme_lint.py` 0 findings,
-  docs-index 204/204.
+  **hscc_daemon 3647 passed / 0 failed** (114s),
+  **hscc-api 994 passed + 1 skipped** (252s).
+  Pre-merge pair at `f5af6980` on base `fe530887`: 3630 / 994+1 — the +17 is main's
+  own new tests, the +12 is this card's file, so nothing was renamed or dropped.
+  `changelog_fragments.py check` OK ([Unreleased] pointer, 3 fragment entries
+  consistent); `readme_lint.py` 0 findings, docs-index 204/204.
 - **Mutation probes: 13/13 decision points caught**, each probe reset to the
   pristine copy first, an unmutated CONTROL run green before any verdict, and
   provenance asserted inside every run (a plugin's FILE sentinel — `-q` suppresses
