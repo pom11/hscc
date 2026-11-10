@@ -48,7 +48,7 @@ task: t_ae3e5f9b
   prints `.gitignore:27:.fastembed_cache/`. The card's baseline was re-verified on
   `main` first: there `git check-ignore -v .fastembed_cache` exits **1 with no
   output** while `git status --short` lists `?? .fastembed_cache/`.
-  Against the *actual* 87 MB directory in the `/Users/desac/dev/hscc`
+  Against the *actual* 87 MB directory in the `/Users/<user>/dev/hscc`
   checkout — this branch cannot modify that checkout, because merging is not mine
   to do — the same rule was applied read-only via
   `-c core.excludesFile=<this .gitignore>`: `check-ignore -v .fastembed_cache` then
