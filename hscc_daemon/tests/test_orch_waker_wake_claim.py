@@ -37,6 +37,7 @@ stub that agrees with whatever it is asked.
 import json
 import os
 import sqlite3
+import time
 
 import pytest
 
@@ -990,3 +991,318 @@ def test_default_adapter_is_used_when_the_seam_is_omitted(tmp_path, monkeypatch)
 
     assert [d["ok"] for d in decisions] == [True]
     assert seen.get("made") is True
+
+
+# --------------------------------------------------------------------------- #
+# the waker's OWN opener against hermes' helpers: rows must be NAME-indexable
+# --------------------------------------------------------------------------- #
+#
+# Why a section of its own: every adapter test above injects BOTH ``lib=`` and
+# ``connect=SpyConnect()``, and the one test that uses the real
+# :func:`orch_waker._claim_connect` only does raw INSERT/read-back with its own
+# row factory. So NOTHING in this file ever put a name-indexed read (hermes'
+# ``row["confirmed_at"]``, ``int(r["event_id"])``) on a row built by the
+# connection the product actually opens. The defect that gap kept alive
+# (CR-1, review t_7c5d2669): ``_claim_connect`` returned a bare connection,
+# every wake-claim READ raised ``TypeError: tuple indices must be integers or
+# slices, not str``, ``TypeError`` is not a ``sqlite3.Error`` so it escaped
+# hermes' fail-open and landed in ``BoardWakeClaim._run``'s handler — which
+# logged "failing open towards delivering" and answered "nothing claimed,
+# everything owed". Safe direction (no wake dropped), and the cross-emitter
+# dedupe inert in exactly the case it exists for, with the whole suite green.
+
+class UpstreamClaimHelpers:
+    """hermes' §3.1 claim helpers: its SQL, its row access, its semantics.
+
+    Not a spy and not a yes-man — each method runs the statement hermes runs,
+    through the connection it is handed, and indexes the resulting row BY NAME
+    exactly as ``hermes_cli/kanban_db_notify.py`` does at §3.1 head
+    ``1f3da154f1`` (``wake_claim_holder`` per the gateway head ``926650a1fc``):
+    ``row["confirmed_at"]`` in ``_wake_claim_row``, ``int(r["event_id"])`` in
+    ``wake_already_claimed``, ``str(row["emitter"])`` in ``wake_claim_holder``.
+    That name-indexing is the whole point of this twin: it is the property the
+    waker's opener has to satisfy, and a stub that ignores the row would let
+    CR-1 back in.
+
+    Only ``_kb.write_txn``'s transaction wrapper is simplified to a plain
+    commit — hermes' transaction bookkeeping (and its fail-open verdicts) are
+    hers and are tested in hermes'. The real module replaces this one wherever
+    the deployed Hermes actually has §3.1: see
+    :func:`test_deployed_hermes_helpers_read_through_the_real_connector`.
+
+    ``now`` pins the lease clock, because the adapter calls these without one
+    (as production does) and the tick's clock is what the lease must be read
+    against.
+    """
+
+    LEASE_S = 120                       # hermes' _WAKE_CLAIM_LEASE_S
+
+    def __init__(self, *, now=None):
+        self.now = now
+        self.calls = []                 # [(op, profile, task_id, ...)]
+
+    def _moment(self, now):
+        return int(now if now is not None else (self.now or time.time()))
+
+    # -- hermes' read side: every row is indexed by column NAME -------------
+    def wake_already_claimed(self, conn, *, profile, task_id, event_ids,
+                             now=None, lease_s=None):
+        self.calls.append(("read", profile, task_id, tuple(event_ids)))
+        ids = sorted({int(e) for e in event_ids})
+        if not ids:
+            return set()
+        cutoff = self._moment(now) - int(lease_s or self.LEASE_S)
+        rows = conn.execute(
+            "SELECT event_id FROM kanban_wake_claims"
+            " WHERE profile = ? AND task_id = ?"
+            f" AND event_id IN ({','.join('?' * len(ids))})"
+            " AND (confirmed_at IS NOT NULL OR claimed_at > ?)",
+            (profile, task_id, *ids, cutoff)).fetchall()
+        return {int(r["event_id"]) for r in rows}
+
+    def wake_claim_holder(self, conn, *, profile, task_id, event_id):
+        row = conn.execute(
+            "SELECT emitter FROM kanban_wake_claims"
+            " WHERE profile = ? AND task_id = ? AND event_id = ?",
+            (profile, task_id, int(event_id))).fetchone()
+        return str(row["emitter"]) if row is not None else None
+
+    def _row(self, conn, *, profile, task_id, event_id):
+        return conn.execute(
+            "SELECT emitter, claimed_at, confirmed_at FROM kanban_wake_claims"
+            " WHERE profile = ? AND task_id = ? AND event_id = ?",
+            (profile, task_id, int(event_id))).fetchone()
+
+    # -- hermes' write side: same CAS, same holder-only rules --------------
+    def try_claim_wake(self, conn, *, profile, task_id, event_id, emitter,
+                       now=None, lease_s=None):
+        self.calls.append(("claim", profile, task_id, int(event_id), emitter))
+        moment = self._moment(now)
+        lease = int(lease_s or self.LEASE_S)
+        row = self._row(conn, profile=profile, task_id=task_id, event_id=event_id)
+        if row is None:
+            conn.execute(
+                "INSERT INTO kanban_wake_claims"
+                " (profile, task_id, event_id, emitter, claimed_at, confirmed_at)"
+                " VALUES (?, ?, ?, ?, ?, NULL)",
+                (profile, task_id, int(event_id), emitter, moment))
+            conn.commit()
+            return True
+        if row["confirmed_at"] is not None:
+            return False
+        if moment - int(row["claimed_at"]) < lease:
+            return False
+        taken = conn.execute(
+            "UPDATE kanban_wake_claims"
+            " SET emitter = ?, claimed_at = ?, confirmed_at = NULL"
+            " WHERE profile = ? AND task_id = ? AND event_id = ?"
+            " AND confirmed_at IS NULL AND claimed_at <= ?",
+            (emitter, moment, profile, task_id, int(event_id), moment - lease))
+        conn.commit()
+        return taken.rowcount > 0
+
+    def confirm_wake(self, conn, *, profile, task_id, event_id, emitter,
+                     now=None):
+        self.calls.append(("confirm", profile, task_id, int(event_id), emitter))
+        cur = conn.execute(
+            "UPDATE kanban_wake_claims SET confirmed_at = ?"
+            " WHERE profile = ? AND task_id = ? AND event_id = ?"
+            " AND emitter = ? AND confirmed_at IS NULL",
+            (self._moment(now), profile, task_id, int(event_id), emitter))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def release_wake(self, conn, *, profile, task_id, event_id, emitter):
+        self.calls.append(("release", profile, task_id, int(event_id), emitter))
+        cur = conn.execute(
+            "DELETE FROM kanban_wake_claims"
+            " WHERE profile = ? AND task_id = ? AND event_id = ? AND emitter = ?",
+            (profile, task_id, int(event_id), emitter))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def collect_one_event(tmp_path):
+    """``(db, state, ev_id)`` — one wake-bearing event, already in ``pending``.
+
+    The tail-start and collect ticks come first, because a fresh event can
+    never be spoken on its own tick (``debounce_s``): this is the state a real
+    tick is in when it reaches the delivery decision. Whether the gateway holds
+    that event's claim is left to the caller — the mirror tests need both.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    state = tmp_path / "state.json"
+    seen_once(db, state)
+    add_events(db, [event()])
+    return db, state, ids_of(db)[0]
+
+
+def real_connector_adapter(now=DELIVER, lib=None, **kw):
+    """The adapter as the product builds it: real helpers, real opener.
+
+    No ``connect=`` seam — passing one is what hid CR-1 — so every row these
+    assertions rest on came out of the shipped :func:`orch_waker._claim_connect`.
+    ``lib`` is passed in by the one test that also asks the helpers a direct
+    question, so it holds the same object the adapter holds.
+    """
+    return ow.BoardWakeClaim(lib=lib or UpstreamClaimHelpers(now=now),
+                             connect=ow._claim_connect, **kw)
+
+
+def test_claim_connect_rows_are_name_indexed_like_hermes_opener(tmp_path):
+    """A row off our opener must answer to a column NAME.
+
+    The mutation this kills: delete ``conn.row_factory = sqlite3.Row`` from
+    ``_claim_connect`` and both modes go red with ``TypeError`` — the exact
+    failure CR-1 measured, at the one line that fixes it. Asserted on the
+    write connection too because ``try_claim_wake`` reads its row INSIDE the
+    write txn, so a read-only-mode-only fix would still leave claims broken.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    FakeClaims(db).seed(ORCH, TASK, 7, emitter=GATEWAY_EMITTER,
+                        claimed_at=NOW - 30, confirmed_at=NOW - 20)
+
+    for write in (False, True):
+        conn = ow._claim_connect(db, write=write)
+        try:
+            row = conn.execute(
+                "SELECT event_id, emitter, claimed_at, confirmed_at"
+                " FROM kanban_wake_claims WHERE profile = ? AND task_id = ?",
+                (ORCH, TASK)).fetchone()
+            assert isinstance(row, sqlite3.Row), \
+                f"write={write}: hermes' own opener hands out Rows; ours must too"
+            assert int(row["event_id"]) == 7
+            assert row["emitter"] == GATEWAY_EMITTER
+            assert row["claimed_at"] == NOW - 30
+            assert row["confirmed_at"] == NOW - 20
+        finally:
+            conn.close()
+
+
+def test_upstream_claim_helpers_read_through_the_real_connector(tmp_path, caplog):
+    """hermes' read + claim answer correctly over OUR connection.
+
+    The four numbers CR-1 measured wrong, on a confirmed claim held by the
+    other emitter (the only situation the second emitter exists to ask about):
+    read says claimed, the claim is refused, the holder is named — and the
+    notifier's row is still there, untouched, because we were refused it.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    FakeClaims(db).seed(ORCH, TASK, 7, emitter=GATEWAY_EMITTER,
+                        claimed_at=NOW - 30, confirmed_at=NOW - 20)
+    helpers = UpstreamClaimHelpers(now=DELIVER)
+    adapter = real_connector_adapter(lib=helpers)
+    idents = [[TASK, "completed", NOW, 7]]
+
+    with caplog.at_level("WARNING"):
+        assert adapter.suppressions(db, ORCH, idents) == {(TASK, 7)}, \
+            "a confirmed delivery by the notifier suppresses our wake"
+        assert adapter.take(db, ORCH, idents) == set(), \
+            "we were refused the claim, so we owe nothing"
+
+    conn = ow._claim_connect(db, write=False)
+    try:
+        assert helpers.wake_claim_holder(
+            conn, profile=ORCH, task_id=TASK, event_id=7) == GATEWAY_EMITTER, \
+            "the read reports WHO holds it, not merely that somebody does"
+    finally:
+        conn.close()
+
+    mine = [r for r in FakeClaims(db).rows() if r["emitter"] == ow.WAKE_CLAIM_EMITTER]
+    assert mine == [], "a refused claim must not be taken over by us"
+    assert not any("failing open" in r.getMessage() for r in caplog.records), \
+        "a read that worked must not be logged as a read that could not happen"
+
+
+def test_upstream_claim_helpers_write_through_the_real_connector(tmp_path):
+    """The same connection must also be able to CLAIM — not just read.
+
+    The mirror half: with no claim row the helpers take it for us and confirm
+    settles it. Without this the assertions above could be satisfied by a
+    connection that always fails (fail-open answers "claimed: nothing, owed:
+    everything" too), which is precisely the shape CR-1 hid behind.
+    """
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    adapter = real_connector_adapter()
+    idents = [[TASK, "completed", NOW, 7]]
+
+    assert adapter.suppressions(db, ORCH, idents) == set()
+    assert adapter.take(db, ORCH, idents) == {(TASK, 7)}
+    rows = FakeClaims(db).rows()
+    assert [(r["emitter"], r["confirmed_at"]) for r in rows] == \
+        [(ow.WAKE_CLAIM_EMITTER, None)], "our lease is the row the board now holds"
+
+    adapter.confirm(db, ORCH, idents)
+    assert FakeClaims(db).rows()[0]["confirmed_at"] == DELIVER, \
+        "the claim write goes through the same opener the read used"
+
+
+def test_a_gateway_claim_silences_the_wake_through_the_real_connector(tmp_path,
+                                                                      caplog):
+    """The product-level version of CR-1: the notifier delivered, we stay shut.
+
+    A full ``tick()`` with the adapter the product would build — real helpers,
+    real ``_claim_connect``, no seam anywhere — which is the pairing no test
+    had. Before the fix this tick delivered a doubled wake AND logged one
+    "failing open towards delivering" warning per board.
+    """
+    db, state, ev_id = collect_one_event(tmp_path)
+    FakeClaims(db).seed(ORCH, TASK, ev_id, emitter=GATEWAY_EMITTER,
+                        claimed_at=NOW, confirmed_at=NOW + 5)
+    inject = StubInject(ok=True)
+
+    with caplog.at_level("WARNING"):
+        decisions = deliver_tick(db, state, inject, real_connector_adapter())
+
+    assert decisions == [] and inject.calls == [], \
+        "the second emitter already woke this profile for this event"
+    assert not any("failing open" in r.getMessage() for r in caplog.records), \
+        "CR-1's signature: a dedupe that silently could not see"
+
+
+def test_no_claim_row_still_wakes_through_the_real_connector(tmp_path):
+    """The same real-connector tick, with nobody holding the event: deliver.
+
+    Companion pin so the suppression above cannot be earned by an opener that
+    simply never reads anything.
+    """
+    db, state, _ev_id = collect_one_event(tmp_path)
+    inject = StubInject(ok=True)
+
+    decisions = deliver_tick(db, state, inject, real_connector_adapter())
+
+    assert [d["ok"] for d in decisions] == [True]
+    assert len(inject.calls) == 1
+
+
+def test_deployed_hermes_helpers_read_through_the_real_connector(tmp_path):
+    """Same four assertions against hermes' ACTUAL §3.1 module, when installed.
+
+    The fleet's deployed Hermes predates §3.1 (no ``try_claim_wake``, no
+    ``kanban_wake_claims`` in its schema), which is what
+    :func:`orch_waker._load_wake_claim_lib` returns ``None`` for and what the
+    waker itself sees — so today this skips LOUDLY instead of quietly passing,
+    and the §3.1-shaped twin above is what guards the connector. The moment
+    §3.1 installs, this test turns itself on with no fake in the loop.
+    """
+    lib = ow._load_wake_claim_lib()
+    if lib is None:
+        pytest.skip("deployed Hermes has no §3.1 wake-claim helpers — "
+                    "UpstreamClaimHelpers above is the stand-in; this test "
+                    "activates when §3.1 installs")
+    db = make_board(tmp_path / "kanban.db", tasks=[(TASK, TITLE)])
+    FakeClaims(db).seed(ORCH, TASK, 7, emitter=GATEWAY_EMITTER,
+                        claimed_at=NOW - 30, confirmed_at=NOW - 20)
+    adapter = ow.BoardWakeClaim(lib=lib)          # default connect: _claim_connect
+    idents = [[TASK, "completed", NOW, 7]]
+
+    assert adapter.suppressions(db, ORCH, idents) == {(TASK, 7)}
+    assert adapter.take(db, ORCH, idents) == set()
+    holder = getattr(lib, "wake_claim_holder", None)
+    if callable(holder):
+        conn = ow._claim_connect(db, write=False)
+        try:
+            assert holder(conn, profile=ORCH, task_id=TASK, event_id=7) \
+                == GATEWAY_EMITTER
+        finally:
+            conn.close()

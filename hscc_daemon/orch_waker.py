@@ -742,10 +742,27 @@ def _claim_connect(db_path, *, write):
     bare path — for the claim writes: ``rw`` FAILS on a missing file instead of
     creating one, so a stale enumeration entry can never leave a phantom board
     DB behind, and the schema-init/migration path still never runs from here.
+
+    ``row_factory = sqlite3.Row`` is NOT decoration — it is what makes this
+    opener able to drive hermes' §3.1 helpers at all. Those helpers
+    NAME-index their rows (``row["confirmed_at"]`` in ``_wake_claim_row``,
+    ``int(r["event_id"])`` in ``wake_already_claimed``), and hermes' own
+    connector sets exactly this factory (``kanban_db_connect.py``), so a row
+    off a bare connection is a tuple and every claim READ raises
+    ``TypeError: tuple indices must be integers or slices, not str``.
+    ``TypeError`` is not a ``sqlite3.Error``, so it escapes
+    hermes' ``_wake_claim_open`` fail-open and lands in
+    :meth:`BoardWakeClaim._run`'s handler — which answers "nothing claimed,
+    everything owed". That is the safe direction (no wake dropped) but it makes
+    the whole cross-emitter dedupe silently inert, the failure class this
+    module's own comments call out. Pinned by
+    ``test_claim_connect_rows_are_name_indexed_like_hermes_opener``.
     """
     uri = Path(_resolve(db_path)).absolute().as_uri() + (
         "?mode=rw" if write else "?mode=ro")
-    return sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_S)
+    conn = sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_S)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _claim_key(ident):
