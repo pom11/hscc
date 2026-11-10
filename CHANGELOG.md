@@ -11,6 +11,592 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.8] - 2026-11-10
+
+### Fixed
+- **The orch-waker and the gateway notifier now wake an orchestrator ONCE per
+  event, against a durable record instead of a cursor.** Both emitters read the
+  same `task_events` row and each woke the orchestrator's REPL; the only thing
+  they shared was `kanban_notify_subs.last_event_id`, which means "the notifier
+  CONSUMED this event", not "the orchestrator was woken" — a `notify` sub, a
+  sub seeded caught-up at boot, and a wake that raised all advance it without
+  anyone taking a turn. §3.1 (hermes-agent#152206) put the real answer in the
+  board DB — `kanban_wake_claims`, keyed by event identity alone
+  (`profile`, `task_id`, `event_id` = the `task_events.id` the waker already
+  carries), a lease until confirmed — but no emitter used it. `hscc_daemon/
+  orch_waker.py` is now a citizen of that table: it suppresses on the read
+  (`wake_already_claimed`, still `mode=ro`) at delivery-decision time beside the
+  cursor ledger, takes the claim through hermes' OWN `try_claim_wake` after
+  every gate and immediately before `repl_inject`, `confirm_wake`s on an
+  accepted keystroke and `release_wake`s on a refused one (WakeNotAccepted), so
+  a dead pane never leaves a row pretending otherwise. The semantics are
+  borrowed, not re-derived — one lease, one CAS, one fail-open verdict — and
+  the helpers are reached through the repo's single hermes-import seam
+  (`autodown._load_kanban_db_or_default`), so a Hermes that predates §3.1 (or
+  has it half-installed) resolves to "no claim knowledge", which means deliver.
+  The timing is the safety property, and each rule is pinned: a claim taken on a
+  tick that then stays quiet (debounce, min-gap, armed dead-pane backoff,
+  `inject=None`) would mute the other emitter for `lease_s` for a wake nobody
+  sent — a dropped wake dressed as a dedupe — so the take sits strictly between
+  the last gate and the keystroke. Only kinds in `GATEWAY_WAKE_KINDS` are ever
+  asked about: `spawn_failed` is scannable but not claimable, and a row written
+  for it would be honoured by the notifier for a wake it can never make.
+  Everything unknown fails open towards DELIVERING, including `PermissionError`
+  from `write_txn`'s delegated-child guard (not a `sqlite3.Error`, so the
+  adapter's own except is deliberately broader than hermes' helper's). Claim
+  writes open the board `mode=rw` — never the bare path, so a stale enumeration
+  entry fails instead of minting a board — and nothing else in a board is
+  written: no task, event, run or subscription, and the card-to-human ping path
+  is untouched. 29 tests in `hscc_daemon/tests/test_orch_waker_wake_claim.py`
+  (28 red against the pre-fix code, and the other emitter modelled as the TABLE — lease-
+  honouring, holder-only, fail-open — not as a stub that agrees with whatever is
+  asked, which is how the fake caught its own wrong-direction reading of
+  "cannot claim"); 5/5 mutation probes caught against a green unmutated control,
+  one of which found the `mode=rw` gap this entry's test now closes.
+- **The sqlite ignore rules are on `main` and now have a changelog entry; the
+  card that asked for them had gone stale, not wrong.** `*.sqlite` and
+  `*.sqlite3` are in `.gitignore` and live, measured in a clean checkout of
+  `main` at `fc7c1caf`: `git check-ignore -v` names the **rules**, not
+  positions — `…:*.sqlite  db.sqlite`, `…:*.sqlite3  probe.sqlite3` and
+  `…:*.sqlite  hscc_daemon/nested.sqlite` — and a planted repo-root `db.sqlite`
+  is invisible to `git add -A`. No line number is quoted, deliberately:
+  `grep -n sqlite .gitignore` answered 75-76 at `8df6a352` and 84-85 at
+  `fc7c1caf`, moved only by blocks other cards appended above them, so a pinned
+  number goes false while the rule `check-ignore` names has not moved. No
+  repo-root `db.sqlite` is tracked (`git ls-tree -r --name-only HEAD |
+  grep -i sqlite` → only `hscc-api/tests_gateway/diag_sqlite.py`, a source
+  file), so the deletion half of `071fdb4e` is moot.
+  **Nothing was landed by this card except this file.** The card's ask was
+  written against `main` at `06a12aaf`; PR #275 squash-merged at
+  `2026-11-10T02:54:34Z` into `8df6a352` and its head already carried
+  `071fdb4e` (authored 01:56 UTC, before that merge), so the squash took the
+  `.gitignore` hunk. Re-landing it would have been an empty diff, and no other
+  PR was merged or touched as a side effect.
+- **Probe lesson, recorded because the wrong probe is what produced the stale
+  card: in a squash-merged repo, ancestry cannot answer "did this change land".**
+  `git merge-base --is-ancestor 071fdb4e main` is `false` *at* `8df6a352` — the
+  squash rewrote the commit — while the content is present and effective, and it
+  is `false` at `fc7c1caf` too. The question "is this change on `main`" is a
+  **tree** question, and the tree answer is scoped to the rules and pinned to a
+  sha: `git diff --stat 071fdb4e 8df6a352 -- .gitignore` is **empty** — the file
+  was byte-identical there, and that is what answered the question. It is *not*
+  empty at `0a4db383` or later (`git diff --stat 071fdb4e 0a4db383 -- .gitignore`
+  is `.gitignore | 9 +++++++++`, #279's unrelated `.fastembed_cache/` block), and
+  the divergence grew again when #283 added the sidecar rules. What survives all
+  of that is the **deletion column**: `git diff --numstat 071fdb4e origin/main
+  -- .gitignore` reads `18 0` at `fc7c1caf` — eighteen lines added by other
+  cards, **zero** removed — and `git show origin/main:.gitignore | grep -cx
+  '*.sqlite'` is `1`, so neither rule has been edited since `071fdb4e`. The
+  durable claim is therefore "the tree matched at `8df6a352`, and everything
+  since is additive", not "the file is byte-identical to `main`": an append by
+  someone else falsifies the latter without moving this change one inch. (Worth
+  recording because this entry's own first correction repeated the mistake: it
+  asserted the diff contained no sqlite line, and #283 merged a block full of
+  them minutes later. The deletion column and `check-ignore` naming the rule were
+  both still true.) Any card that opens on an ancestry check plus a
+  `git branch -a --contains` roster is asserting where the *commit* is, not
+  whether the *change* is, and will go stale the moment the PR it waits on merges.
+- **The changelog half was the only real gap.** `071fdb4e`'s own stat is
+  `.gitignore | 2 ++` + `db.sqlite | 0` — no fragment — and PR #275's squash
+  fragment `changelog.d/t_2cd692f0.md` describes the orch-waker tests, never the
+  ignore rules (`grep -n -i gitignore` on it → no match). So the rules reached a
+  release candidate with nothing in `[Unreleased]` saying the repo now refuses
+  sqlite artifacts, against `changelog.d/README.md` ("one file per card") and
+  against the precedent the sibling `.gitignore` chore PR #279 set
+  (`.gitignore` + `changelog.d/t_ae3e5f9b.md`).
+- **SQLite's WAL companions can no longer ride into a commit on `git add -A`.**
+  PR #275's fix (`071fdb4e`) added `*.sqlite` / `*.sqlite3` and its own message
+  said the class was closed. It was not: `*.sqlite` matches the base file only,
+  while the connection a WAL-mode database opens writes `db.sqlite-wal` and
+  `db.sqlite-shm` **beside** it (`db.sqlite-journal` in rollback mode), and
+  `git add -A` sees those three as ordinary new files. Measured in a clean clone
+  of `origin/main` at `0a4db383` with paths git had never seen:
+  `git check-ignore -v` named `.gitignore:84:*.sqlite` for `db.sqlite` and said
+  nothing for any of the six sidecars probed (three at the root, three under
+  `nested/`), and `git add -A --dry-run .` listed `add 'db.sqlite-wal'`,
+  `'db.sqlite-shm'`, `'db.sqlite-journal'` and the three nested ones — base file
+  ignored, companions staged. `*.sqlite-wal`, `*.sqlite-shm` and
+  `*.sqlite-journal` now sit immediately after `*.sqlite` / `*.sqlite3` as one
+  commented block, so the five sqlite rules stay together instead of scattering.
+  Not extended to directory patterns: a trailing-`/` rule reads as absent for a
+  path that does not exist yet, which makes a present rule look missing under
+  `check-ignore` (the pitfall `t_ae3e5f9b` recorded).
+  One gap in the same class stays open on purpose and is filed as its own card:
+  sqlite names sidecars `<db>-wal`, so a `*.sqlite3` database writes
+  `probe.sqlite3-wal` / `-shm` / `-journal`, which none of these patterns match.
+- **A worker's board pin can no longer decide which board `hscc kanban pause`
+  blocks, releases, or inventories.** `kanban_pause` shells out to the sanctioned
+  CLI the same way the wedge gate does — `_run_hermes` ran
+  `subprocess.run(["hermes", "kanban", …], timeout=60)` on the **inherited**
+  environment — and one of its two calls is a WRITE. Hermes resolves a worker's
+  `HERMES_KANBAN_DB` ahead of an explicit `--board` whenever a worker/delegation
+  fence marker is set (`hermes_cli/kanban_db.py:540-555` →
+  `agent/delegation_context.py:76-93`), and `board_pin`'s scrub only covers *our
+  own* connection (a fork carries the environment copy made before the restore),
+  so from a worker or delegated-child shell — which is what an orchestrator agent
+  typing `hscc kanban pause <other-board>` is — `list_cards` inventoried the
+  **pinned** board while the report named the board being paused, and `_hold`
+  `reclaim`ed and `block`ed same-id cards **there** (ids are per-board). `resume`
+  does the mirror through the same inherited env: `unblock` *releases* a hold the
+  caller never placed. Both halves of `board-pin-fork-t_8616f2a5.md` §4, closed.
+  Detection and wording stay `board_pin`'s; only the action crosses the fork, and
+  it splits by access mode exactly as `board_pin` splits by `mode`. READ:
+  `read_child_env` hands the probe a copy of the environment with
+  `HERMES_KANBAN_DB` removed (warned once per pin+board in `board_pin`'s own
+  wording) and `_run_hermes` forwards it — the only route by which a scrub
+  survives `subprocess.run`; a legacy `run(argv)` cannot be handed one, so the
+  read is refused and warned rather than answered from the wrong board. WRITE:
+  `write_refusal(board)` is consulted at the top of each board's loop in `pause`,
+  `resume` and `enforce`, and a conflicting board is refused **before anything
+  spawns** — no `list`, no `reclaim`/`block`/`unblock`, no orchestrator steer, no
+  cron park — and never enters the paused-state file, so a refused resume still
+  knows the board is paused and `enforce` cannot retry a hold that never
+  happened. The report is per board: `pause alpha beta` from a shell pinned at
+  `alpha` pauses `alpha` and says `beta` was refused. A bare `_hold` call raises
+  `BoardPinConflict` instead, having no report to write into. The write's
+  environment is **never** scrubbed — that is the one thing `board_pin` §2c rules
+  out, and it is why the fix is a refusal rather than the read's scrub. `enforce`
+  reports what it could not do under a reserved `_refused` key that
+  `enforce_tick` pops before its arithmetic, and stamps the stream `ok: False`
+  with the pin named — `doctor_check`'s existing "last enforce tick FAILED … the
+  hold is NOT being enforced" row, not a new shape for the reader half. No pin,
+  no fence, or a pin that already *is* the board asked for keeps every call
+  byte-identical (`run(argv)`, no `env`, child inherits) and says nothing; a lib
+  that cannot answer `kanban_db_path` falls through to the untouched path.
+  Hermes' precedence is untouched. 12 tests in
+  `hscc_daemon/tests/test_board_pin_pause.py` — every conflict case paired with a
+  non-vacuity assertion (the pre-guard `list` answers for the pinned board and the
+  pre-guard `block` argv mutates its same-id card), the observables being the
+  environment the child was handed, whether anything spawned at all, and what the
+  report and the stream say — plus 13/13 decision points caught by mutation
+  probes against a green unmutated control. Decision record:
+  `docs/audits/board-pin-pause-t_70c97264.md`.
+- **The dispatcher-wedge board-state gate no longer lets a worker's board pin
+  decide what the CLI probes report.** The gate asks one question before it will
+  restart the gateway — can a human reading `kanban list` / `kanban show` right
+  now explain every ready card's zero spawn? — and it answers part of it through
+  the sanctioned CLI, in a subprocess: `_default_gate_cli_runner` ran
+  `subprocess.run(argv)` on the **inherited** environment and `_gate_cli_json`
+  parsed whatever came back as fact. A dispatched worker or delegated shell
+  carries `HERMES_KANBAN_DB`, and hermes resolves that pin ahead of `--board`
+  whenever a fence marker is set (`hermes_cli/kanban_db.py:540-555` →
+  `agent/delegation_context.py:76-93`), so the child printed the PINNED board's
+  ready list and hold events while the gate labelled them with the board it had
+  asked about — `"board 'X': all N ready cards explainably held [t_y:
+  respawn_guarded:active_pr]"` built from a board nobody asked about, with a card
+  id that lives elsewhere (ids are per-board). A real wedge could be explained
+  away and its restart suppressed. `hscc_daemon/board_pin.py` is powerless across
+  `subprocess.run`: it scrubs `os.environ` for the duration of *our* connection,
+  and a forked child carries the copy made before the restore — so the only thing
+  that reaches the child is an environment passed explicitly.
+  The gate now computes the child environment per board through `board_pin`'s own
+  detection (no re-derived path): when the pin would outrank `--board`, the probe
+  is handed a copy of the environment with `HERMES_KANBAN_DB` removed and the
+  override is warned once per (pin, board) in `board_pin`'s wording, naming both
+  values; when the injected runner is the legacy `runner(argv)` shape and so
+  cannot be handed one, the probe is never run at all and the board is reported
+  `board state unverifiable` — the gate's existing fail-closed verdict, so the
+  restart proceeds rather than resting on an explanation from the wrong board.
+  No pin, no fence, or a pin that already *is* the board asked for → nothing is
+  handed over and nothing is said (`cli_fn(argv)`, child inherits, argv
+  byte-identical); a probe with no `board=` is left to the pin; `os.environ` is
+  never mutated, so the read half of the fence is not weakened in our own
+  process. The argv builders are untouched — `--board default` reaching the child
+  is `t_dad0da32`'s half, and the same fork hazard in `kanban_pause`'s read *and*
+  its `reclaim`/`block` writes is carded as `t_70c97264`. 10 tests in
+  `hscc_daemon/tests/test_board_pin_gate_cli.py` — every conflict case paired with
+  a non-vacuity assertion (the pre-change call, same armed env, answers the pinned
+  board), the acceptance observable being the environment the CLI was handed and,
+  in one case, `subprocess.run`'s own kwargs through the real runner — plus 8/8
+  decision points caught by mutation probes against a green unmutated control.
+  Decision record: `docs/audits/board-pin-fork-t_8616f2a5.md`.
+- **`autodown._load_kanban_db_or_default` no longer leaves the Hermes agent tree
+  on `sys.path` for the life of the process — and no other module needs it to.**
+  The function documented that it put the resolved runtime dir on `sys.path`
+  "only for the duration of this one import" and then left it at `sys.path[0]`;
+  `kanban_live._load_hermes_config` and `profile_roster._hermes_gate` carried
+  their own copy of the same insert, and nothing took the entry back out. In a
+  daemon that is inert (one real tree). It is not inert in a test process — the
+  leak is what turned one planted fake `hermes_cli` into poison every later
+  consumer re-imported, even after an evictor had cleaned `sys.modules`
+  (`docs/audits/orch-waker-import-leak_t_2be3b04e.md` §6, the production half PR
+  #270 left open) — and it is not inert in the venv `/opt/homebrew/bin/hscc`
+  runs in, where `dispatcher_wedge`'s five bare `from hermes_cli import …`
+  readers could only answer because some *earlier* check had leaked the tree.
+  One module owns the window now: `hscc_daemon/hermes_import.py`, with
+  `agent_tree_on_path()` (and its one-line form `import_hermes()`) inserting the
+  resolved dir and restoring `sys.path` in its `finally` — same entries, same
+  order, exception path included. It is refcounted per path under a lock,
+  because the daemon runs autodown and the wedge loop on their own threads and
+  an unrefcounted restore would let the first window to finish pull the path out
+  from under the other (a `ModuleNotFoundError` nobody could attribute). Every
+  reader now opens its own window — autodown, kanban_live, dispatcher_wedge
+  (five sites), escalate_watcher, profile_roster — so no answer depends on who
+  ran first, which is the GAP-D-4 lesson applied to the wedge gate. Where a site
+  *calls* into Hermes the call is inside the window too: a loaded package
+  resolves its submodules through its own `__path__`, so the returned module
+  needs no path, but a fresh top-level import triggered at call time does.
+- **Deliberate test-expectation change (not collateral).**
+  `test_kanban_live_caps.py::test_load_hermes_config_resolves_the_agent_tree_once`
+  asserted `str(agent) in sys.path` *after* the call — it pinned the leak. It is
+  now `…_then_closes_the_window` and asserts the opposite plus the non-vacuity
+  half (the module it resolved has its `__file__` inside the planted tree and the
+  gate serves nothing else, so the window undeniably opened). The pre-fix "second
+  call must not duplicate" assertion is kept: the pre-fix code passed it, which is
+  why the leak survived it. `autodown` gains the matching guard — the test quotes
+  the promise out of the live docstring and plants a package that records
+  `sys.path` at import time, so one test shows the tree held during the import
+  and `sys.path` byte-identical afterwards.
+- **`.fastembed_cache/` (87 MB of ONNX weights) can no longer ride into a commit
+  on `git add -A`.** The directory was untracked and matched by no rule:
+  `git check-ignore -v .fastembed_cache` exited 1 and `git status --short` listed
+  `?? .fastembed_cache/`. This is the same class as the repo-root `db.sqlite`
+  that a `git add -A` did commit in PR #275, and one `git add -A` from any worker
+  would put 87 MB of model weights into the object store **permanently** — a
+  `git rm` afterwards does not get the blobs back out.
+  The rule is `.fastembed_cache/` in the *Runtime data — machine-specific state,
+  never source* block rather than beside the sqlite rules the card pointed at,
+  because runtime state is the truer home: this is not a source-tree artifact at
+  all. The sqlite rules are not this entry's claim to make, and it makes none of
+  its own: `*.sqlite` / `*.sqlite3` did reach `main` — `071fdb4e` landed with
+  PR #275's squash `8df6a352` — and `changelog.d/t_2eb97ebb.md` (PR #281) is the
+  fragment that records them, so nothing here re-states or re-measures them. The
+  pattern `*.sqlite` does not match WAL sidecars (`db.sqlite-wal` / `-shm` /
+  `-journal`) — those are t_4e553569's subject, not this entry's, and whether they
+  are ignored now is its record to make, not this fragment's.
+  **What writes it, so the rule is justified rather than swallowed:** no `.py` in
+  this repo mentions fastembed (`grep -rn "fastembed" --include=*.py .` → 0 hits),
+  because it is a *transitive* write. `memori_byodb/_client.py:90` does
+  `from memori import Memori`, and the memori SDK (3.3.6) vendors the Rust
+  `fastembed` crate — `memori_python.abi3.so` carries the literal
+  `.fastembed_cache` default, the `FASTEMBED_CACHE_DIR` override, and the model
+  table entry `AllMiniLML6V2 → Qdrant/all-MiniLM-L6-v2-onnx / model.onnx`, which
+  is byte-for-byte the directory content
+  (`models--Qdrant--all-MiniLM-L6-v2-onnx/{blobs,refs,snapshots}`). memori's
+  default embedding model is exactly that one (`memori/_config.py:62`
+  `self.model = "all-MiniLM-L6-v2"`). Because the cache path resolves under the
+  **current working directory**, the download lands wherever an agent or test
+  run happens to cwd — which is why this 87 MB copy at the repo root (Oct 28) is
+  one of **seven** identical ones on this host, spread over `dev/hscc`, two
+  `dev/gateclerk/.worktrees` roots and two `ecofire-bc` workspaces (Oct 8 → Nov 5):
+  the cache follows cwd, not the project. A repo therefore cannot redirect it
+  (that would need `FASTEMBED_CACHE_DIR` set by whoever spawns the agent — filed
+  as follow-up work); it can only refuse to commit it. Hence ignore, not delete:
+  the directory is a cache other runs reuse, and re-fetching costs bandwidth.
+- **The "is this a planted fake `hermes_cli`?" rule has one definition again.**
+  PR #270 (`t_2be3b04e`) stopped one test file's planted fake from deciding what
+  a later file's board enumeration saw, and left the rule with **three** owners:
+  conftest's `_is_planted_path` / `_hermes_cli_poison_reason`,
+  `test_autodown.TestLoadKanbanDb._evict_planted_hermes_cli` (matched its own
+  `tmp_path` *or* a substring of the pytest tmp-dir marker) and
+  `test_board_pin._evict_planted_hermes_cli` (matched that marker alone). Three
+  definitions of one hazard is how this class kept coming back — `t_b014c2b8`
+  hit it from the other direction in `8e2283a7` — and the copies were already
+  diverging: `test_board_pin`'s non-vacuity test built its stub under `/tmp`,
+  which its own substring matched and conftest's temp-root rule did **not**, so
+  the file was testing a rule nothing else in the suite agrees with.
+  The predicate now lives in `hscc_daemon/tests/hermes_cli_plant.py` (moved
+  verbatim: `is_planted_path`, `hermes_cli_names`, `poison_reason`,
+  `purge_planted`, plus `evict_planted` which hands back what it removed so a
+  borrower can restore it) and all four consumers import it. conftest keeps the
+  autouse fixture and rebinds the shared objects under its historic private
+  names, so `test_hermes_cli_import_isolation`'s `cf._…` probes are unchanged —
+  and no test imports conftest to reach the rule, because a second import of
+  conftest re-runs its module-level sparkrun-fence loader and swaps the live
+  fence out from under the running suite. Each site keeps what is genuinely its
+  own: `test_autodown` keeps the class-scoped finalizer (its own plant),
+  `test_board_pin` keeps the borrow-and-`finally`-restore for `real_root`, and
+  the nested probe file B keeps its own canary — now asked through the shared
+  predicate instead of a re-derived `TEMP_ROOTS`.
+  A fix that only moves text is not closed, so
+  `hscc_daemon/tests/test_planted_hermes_cli_single_source.py` sweeps the
+  package and fails if any tracked file re-`def`s a predicate function, carries
+  the tmp-dir-marker or private-temp-root literal, or handles a plant without
+  importing the owner; it also pins that conftest's `_…` names are *the same
+  objects* as the module's, and that importing the module in a fresh interpreter
+  changes neither `sys.path` nor the `hermes_cli`/fence cache. Guard proven
+  non-vacuous by mutation probes (second `def` and marker literal each caught by
+  the named check, unmutated control green). Behaviour is preserved where it was
+  intentional; the one deliberate narrowing is that a path which merely contains
+  the marker substring no longer counts as a plant — it was a false positive, and
+  `hscc-cluster/tests/sparkrun_fence.py::_under_pytest_tmp` needs its *stricter*
+  two-marker rule for a different question, so it stays out of scope (recorded in
+  the guard's docstring so the next reader does not "unify" it).
+- **A `.sqlite3` database's WAL companions can no longer ride into a commit on
+  `git add -A`.** `t_4e553569` (PR #283) closed the `*.sqlite` half of this class
+  and named the rest as its own open gap: sqlite names a database's companions
+  `<db>-wal` / `<db>-shm` / `<db>-journal`, so the suffix family has to be spelled
+  out per database extension — `*.sqlite-wal` does not match the sidecar a
+  `.sqlite3` database writes, any more than `*.sqlite` matched the `.sqlite` one.
+  Measured in a clean clone of `origin/main` at `fc7c1caf` (i.e. *after* #283
+  landed) with paths git had never seen: `git check-ignore -v` printed nothing for
+  `probe.sqlite3-wal`, `probe.sqlite3-shm`, `probe.sqlite3-journal`,
+  `weird.sqlite3-wal` or the two under `nested/` (rc=1), and
+  `git add -A --dry-run .` listed all seven of them. The same command, in the same
+  directories at the same moment, stayed silent for `probe.sqlite-wal` /
+  `-shm` — the two `*.sqlite` sidecars #283 had just made invisible — so the gap
+  was the suffix and not the directory. `*.sqlite3-wal`, `*.sqlite3-shm` and
+  `*.sqlite3-journal` now sit immediately after `*.sqlite-journal`, inside the same
+  commented block, which the block's comment explains: both suffix families have to
+  be listed because the sidecar name is built from the db name. They are listed
+  per family rather than widened to `*-wal` / `*-shm` / `*-journal`, which would
+  also sweep any unrelated file whose name happens to end in those words. No
+  directory patterns, for the trailing-`/` reason `t_ae3e5f9b` recorded.
+- **The dispatcher-wedge gate no longer hides the `default` board from itself.**
+  `dispatcher_wedge`'s layer-2 board-state gate rebuilt autodown's `multi` flag
+  from the *slug* — `bool(board) and board != "default"`, in the per-profile read
+  and in both sanctioned-CLI argv builders — and `multi` is documented to mean
+  exactly one thing to `board_pin.open_board`: *did the caller name a board?*
+  (`board_pin.py:231-242`). So for `default` the gate said "no intent", the guard
+  deferred to the worker's `HERMES_KANBAN_DB` pin, and the gate read **whatever
+  board the pin pointed at while the panel reported `default`**. Not cosmetic: a
+  card explained by a per-profile cap needs no further evidence, so the gate
+  suppressed a gateway restart using `running` counts taken from a board it never
+  read. Measured in a live worker shell: `list_boards()` returns 23 slugs
+  *including `default`*, and `kanban_db_path(board="default")` is
+  `<root>/kanban.db` with the pin scrubbed vs `<root>/kanban/boards/<slug>/kanban.db`
+  with it visible — a different board's file.
+  Split across three cards that reached the same hazard mid-flight: **t_147201fa
+  (PR #271) removed the heuristic from the per-profile DB read**
+  (`multi = hasattr(kanban_db, "list_boards")`) and **t_8616f2a5 (PR #274) stopped
+  the CLI child inheriting the pin at all**. This card covers what both left —
+  the two argv builders still omitted `--board default`, so `hermes kanban list`
+  read whichever board `HERMES_KANBAN_BOARD` / the pin named while the answer was
+  presented as `default` (a scrubbed child does not fix that: with the pin gone, an
+  unnamed board still follows `HERMES_KANBAN_BOARD`), and `multi` was still re-derived
+  per site instead of once per pass. Now `_gate_multi` holds that one rule and the
+  answer is computed once per gate pass and threaded into `_board_ready_facts`,
+  `_capped_assignees` and `_card_hold_from_cli`; both argv sites share one builder,
+  `_gate_board_argv`, so the CLI argv and the DB open can no longer disagree about
+  which board was named.
+  `--board <slug>` is stated for every slug when the lib enumerates boards — the
+  sanctioned CLI accepts `--board default` (measured: exit 0, valid JSON), so this
+  is not a new contract. The legacy no-`list_boards` shape is byte-for-byte
+  unchanged: no `--board`, `connect_closing()` with no `board=`, guard never
+  consulted, no warning — which is also why the card's suggested
+  `multi = bool(board)` was not used (it hands `multi=True` to a lib that cannot
+  honour a board argument).
+  8 tests in `hscc_daemon/tests/test_dispatcher_wedge_default_board_pin.py`, driving
+  the real gate end-to-end with `HERMES_KANBAN_DB` + a fence marker armed and
+  asserting observables only (the `WARN` line naming pin + both boards, the argv a
+  human would type, which rows the probe read), each conflict case paired with a
+  non-vacuity assertion that the same armed environment reads the WRONG board
+  unguarded. Control probes: against `1b5e9eb0`-era code 4 of 8 fail; against
+  `origin/main` after #271, and again after #274, 2 fail and both are the argv leak.
+  Decision record: `docs/audits/wedge-default-board-pin-t_dad0da32.md`.
+
+### Verified
+- **What `071fdb4e` did not close: the WAL sidecar variants — left to their own
+  card on purpose, and their record is not this one's.** `*.sqlite` matches no
+  sidecar: measured at `8df6a352` in a clean clone, `git check-ignore -v
+  db.sqlite-wal db.sqlite-shm db.sqlite-journal` exited 1 with no output and
+  `git add -A --dry-run .` answered `add 'db.sqlite-journal' / add
+  'db.sqlite-shm' / add 'db.sqlite-wal'`. t_4e553569 landed those three rules
+  (`*.sqlite-wal` / `-shm` / `-journal`, PR #283), so this entry claims nothing
+  about whether the class is open now — it is that card's record, and the
+  `*.sqlite3-*` variants are a further card's subject. The ask here named two
+  specific rules and `.gitignore` was a live collision hotspot: PR #279 was
+  appending its block at the same end-of-file hunk (`9 0 .gitignore`), so a
+  second EOF append would have conflicted for no benefit.
+- **No `check-ignore` false-negative from the trailing-slash rule** (skill
+  `cwd-model-caches`): both patterns are file patterns with no trailing `/`, so
+  they match paths git has never seen — the probe planted files that were brand
+  new to the clone and every one still got a rule-naming match. No directory
+  pattern was added by this card, so the caveat never engages.
+- **This card's gate run** of `python3 scripts/changelog_fragments.py check`
+  printed `OK — [Unreleased] is pointer, 8 fragment entries consistent`, exit 0,
+  with this file present (that count is the roster as of that run, not a
+  constant — it reads 13 once #279-#283's fragments landed).
+  `changelog_fragments.py list` shows this card contributing exactly two entries
+  (`Fixed` + `Verified`). `CHANGELOG.md` untouched — the diff was this one new
+  file.
+- **The scan bites, and its limits are named rather than glossed.** Control at the
+  pre-fix tree `8271b81d`: **3** unqualified state-of-`main` claims, exit 1. So
+  “zero” would have meant nothing without it. Two of its judgements are wrong in
+  ways a reviewer must know about: it calls a sentence qualified if *any* 7+ hex
+  token appears, so instance 1's own headline — `git diff 071fdb4e origin/main
+  -- .gitignore` is empty — classified as **qualified even in its falsified
+  form**, because `071fdb4e` is a sha and `origin/main` was the moving side; and
+  its first version reported clean purely because markdown hard-wraps at 80
+  columns and the qualifying sha usually sits on the next physical line. It is a
+  screen, not a proof: the defect this card was written for was found by reading
+  the diff, not by the tool.
+- **One claim of the class is still bare on `main`, and this card did not own its
+  file.** PR #282 rewrote `t_ae3e5f9b.md`'s “not on `main`” sentence but left its
+  baseline clause unqualified: “The card's baseline was re-verified on `main`
+  first: there `git check-ignore -v .fastembed_cache` exits **1 with no
+  output**…”. Recorded here for whoever owns that fragment; `t_0110df98`'s card
+  was scoped to the one sentence and this card was told to stay off the file.
+- **The rule was demonstrated on this card's own text three times while it was
+  being written.** (1) It was going to publish `check`'s “12 fragment entries
+  consistent”. That N counts every pending fragment on the branch, so landing
+  `origin/main` — at `789130dc`, then at `fc7c1caf` — moved it 10 → 12 → 13 → 15
+  as sibling cards merged; the count this card would have shipped was falsified
+  by the mechanism the card exists to
+  remove. What is asserted instead does not move: `check` exits **0**, and
+  `changelog_fragments.py list` attributes exactly one `Docs` and one `Verified`
+  entry to `t_3e3eb030`. (2) The same scan flagged **three sentences of this very
+  file** as bare; each is reproduced above in curly quotes as a *quotation* of an
+  old wording, not a claim, and the one that was a real slip — a count of what the
+  scan “reports at this head”, published before measuring it — has been replaced
+  by the measured numbers in this entry. (3) `fc7c1caf`: PR #283 landed
+  `*.sqlite-wal` / `-shm` / `-journal` (`.gitignore:92-94`) during this run, so
+  the WAL-trio claim — `check-ignore` rc 1 with no output, three `add` lines under
+  `git add -A --dry-run .` — went from true at `8df6a352` and at `8271b81d` to
+  **false at `fc7c1caf`** (rc 0, three rule-named matches, nothing left to add),
+  measured in a throwaway detached worktree at each. Only a claim pinned to the
+  tree it was read at survives that; a present-tense one does not.
+- `scripts/tests/test_changelog_fragments.py`: **49 passed** at the merge of
+  `origin/main` `fc7c1caf`. `git status --short` empty after the commit, and the
+  diff against `origin/main` `fc7c1caf` is two files under `changelog.d/` —
+  `t_2cd692f0.md` and this one — with `CHANGELOG.md` absent from it.
+- **The gate the card set was cleared by fact, not by assumption.** The card
+  forbade touching `.gitignore` while PR #279 was open, on the expectation that
+  #279 appended its `.fastembed_cache/` block to the same end-of-file hunk.
+  #279 merged at `2026-11-10T03:23:13Z` as `0a4db383` — confirmed against
+  `git ls-remote origin main`, not a cached ref — and its block landed at
+  `.gitignore:16-25`, not at EOF, so the two hunks never shared a line. The card
+  also warned its own line numbers would have moved: the sqlite rules are now
+  `.gitignore:84` / `:85` at EOF, and the new block follows at `:87-94`.
+- **The three rules match, named by line, root and nested.** After the change,
+  `git check-ignore -v` prints `.gitignore:92:*.sqlite-wal db.sqlite-wal`,
+  `:93:*.sqlite-shm db.sqlite-shm`, `:94:*.sqlite-journal db.sqlite-journal` and
+  the same three rule lines for `nested/app.sqlite-wal` / `-shm` / `-journal`;
+  `git add -A --dry-run .` no longer lists any of the six. These probes used
+  files that exist, so none of them depends on the trailing-slash caveat.
+- **Non-vacuity in the same command.** The `add -A --dry-run .` that went silent
+  for the six still printed `add 'probe.sqlite3-wal'`, `'probe.sqlite3-shm'`,
+  `'probe.sqlite3-journal'` and `'app.sqlite3-wal'` — created the same moment, in
+  the same two directories — so the new rules are specific, not a blind spot, and
+  the residual `*.sqlite3` gap above is visible in the same output.
+- **Diff scope is two files.** `.gitignore` gains 9 lines (3 patterns + 5 comment
+  + 1 blank) with zero deletions — `git diff --numstat` reports `9 0 .gitignore` —
+  and `changelog.d/t_4e553569.md` is new. Nothing already in `.gitignore` was
+  reordered, reworded or removed. `python3 scripts/changelog_fragments.py check`
+  exits 0 (`OK — [Unreleased] is pointer, …`),
+  `pytest scripts/tests/test_changelog_fragments.py
+  scripts/tests/test_readme_lint.py` is green, and `CHANGELOG.md` is untouched.
+- **The restore does not break a later Hermes call, measured rather than
+  argued.** A probe drove the real chain against the real `~/.hermes/hermes-agent`
+  tree in the daemon's own interpreter. Pre-fix the agent dir was `sys.path[0]`
+  after a resolve; at this commit it is absent and the chain still works —
+  `list_boards()` returned the operator's 23 boards, `board_db_paths()` resolved
+  every per-board DB, a `LIMIT 1` probe read 480 tasks off the live board, and
+  `list_boards()` returned 23 again with `hermes_cli` evicted from `sys.modules`.
+  The same probe records every `find_spec` attempt for a `hermes*` name made
+  during those calls: **zero**, so no consumer triggers a fresh top-level import
+  at call time. In the keg venv `_review_dispatch_config_state()` now answers
+  `True` in a fresh process, where pre-fix it answered `None` until something
+  leaked; `kanban_live._read_caps()` reports `(None, None)` with an empty
+  `reason` in both interpreters because `kanban.max_in_progress` is genuinely
+  unset here, not because the read failed — the distinction GAP-D-4 exists to
+  keep.
+- **Canonical leg green.** `hscc_daemon/tests scripts/tests` under
+  `~/.hermes/hermes-agent/venv/bin/python -m pytest -q -rfEs -p no:cacheprovider`,
+  harness env (`scripts/run_tests.sh`'s `env -u` of the worker board pin plus
+  `HERMES_DISABLE_LAZY_INSTALLS=1 HSCC_SKIP_COMPACT_PROBE=1`): `3979 passed,
+  2 skipped in 761.17 s`, exit 0, at `a037d29e`.
+- **Five mutation probes, control green, provenance asserted inside every run**
+  (each on a copy, original restored before the next probe): M1 the `finally`
+  never restores (the pre-fix observable) → 11/11 new tests red; M2 the refcount
+  removed → the two-thread test and the nested test red; M3 `autodown` plain
+  `sys.path.insert` alongside the window → the acceptance test red; M4 the wedge
+  caps reader back to a bare import → its order-independence test red; M5 the
+  wedge review-dispatch reader likewise → its order test red.
+- **The rule matches, measured against the real 87 MB directory and against a
+  probe dir.** `git check-ignore -v .fastembed_cache/x` in this branch's worktree
+  prints `.gitignore:27:.fastembed_cache/`. The card's baseline was re-verified on
+  `main` first: there `git check-ignore -v .fastembed_cache` exits **1 with no
+  output** while `git status --short` lists `?? .fastembed_cache/`.
+  Against the *actual* 87 MB directory in the `/Users/<user>/dev/hscc`
+  checkout — this branch cannot modify that checkout, because merging is not mine
+  to do — the same rule was applied read-only via
+  `-c core.excludesFile=<this .gitignore>`: `check-ignore -v .fastembed_cache` then
+  prints `.gitignore:27:.fastembed_cache/` and `git status --short` no longer lists
+  `?? .fastembed_cache/`, with `du -sh` still `87M` and `blobs/refs/snapshots`
+  intact. Nothing in the main checkout was written, deleted or cleaned.
+- **One pitfall recorded, because it looks like a failure.** `git check-ignore -v
+  .fastembed_cache` prints nothing for a path that does not exist *yet*, even with
+  the rule in place: a trailing-slash pattern matches directories only, and git
+  cannot prove an absent path is one. Measured in the same worktree — path absent
+  → rc 1; the same path as a directory → rc 0 with the rule line; any path *under*
+  it (`.fastembed_cache/x`) → rc 0 with the rule line while it is still absent.
+  So the rule is right and the bare command is the unreliable one; the `!!` line in
+  `git status --short --ignored` is the check that does not lie either way.
+- **Non-vacuity in both directions.** With a scratch `.fastembed_cache/` holding a
+  file, `git status --short` omits it while still listing a sibling scratch dir
+  created the same moment (so the check is not blind), and
+  `git status --short --ignored` lists the cache as `!! .fastembed_cache/`. Both
+  scratch dirs were created by the probe and removed by it; the real cache was
+  never touched.
+- **Diff scope is two files.** `.gitignore` gains 9 lines (1 pattern + 8 comment);
+  `changelog.d/t_ae3e5f9b.md` is new. Nothing else in `.gitignore` was reordered,
+  reworded or removed — `git diff --numstat` reports `9 0 .gitignore`, i.e. zero
+  deletions. `python3 scripts/changelog_fragments.py check` exits 0
+  (`OK — [Unreleased] is pointer, 7 fragment entries consistent`); `CHANGELOG.md`
+  is untouched.
+- **The sidecars are sqlite's own output, not planted names.** A real WAL-mode
+  connection (`PRAGMA journal_mode=WAL`, insert + commit) wrote `probe.sqlite3-shm`
+  / `probe.sqlite3-wal` and `weird.sqlite3-shm` / `weird.sqlite3-wal` beside their
+  databases, and the process was then killed with `os._exit` while the connections
+  were still open — sqlite checkpoints and *deletes* `-wal`/`-shm` on a clean
+  close, so a probe that opens and closes a WAL database sees no sidecars at all and
+  falsely concludes the rules work. Only `probe.sqlite3-journal` (rollback-journal
+  mode never runs under `WAL`) and the `nested/` copies were planted by name; those
+  test the pattern, not what sqlite writes.
+- **The three rules match, named by line, root and nested.** From a clone of the
+  commit, `git check-ignore -v` prints `.gitignore:100:*.sqlite3-wal
+  probe.sqlite3-wal`, `:101:*.sqlite3-shm probe.sqlite3-shm`,
+  `:102:*.sqlite3-journal probe.sqlite3-journal`, the same `:100` for
+  `weird.sqlite3-wal`, and `:100` / `:101` again for `nested/probe.sqlite3-wal` /
+  `-shm`. All twelve sqlite artifacts (three db files + nine sidecars) appear under
+  `git status --short --ignored` as `!!`, and `git add -A --dry-run .` prints only
+  the controls created beside them — `not_a_sidecar.txt`, `nested/keepme.log`, and
+  `audit-wal` / `audit-shm` / `audit-journal`.
+- **The narrow rules do not overreach, which is why they are narrow.**
+  `check-ignore -v` says nothing (rc=1) for `audit-wal`, `audit-shm` and
+  `audit-journal` — ordinary files whose names end in those words — so the
+  `*-wal` / `*-shm` / `*-journal` widening the card rejected stays unsound, and the
+  controls above stayed visible to `add -A` precisely because the rules are
+  specific.
+- **Diff scope is two files, and the one deletion is a comment's count word.**
+  `git diff --numstat` reports `9 1 .gitignore`: three patterns plus five comment
+  lines added, and the block's "# All five sqlite rules belong together" reworded to
+  "# All eight …" so the comment does not go false — no existing pattern was
+  reordered, reworded or removed. `changelog.d/t_d0045a44.md` is new, `CHANGELOG.md`
+  is untouched, `python3 scripts/changelog_fragments.py check` exits 0
+  (`OK — [Unreleased] is pointer, …`), and
+  `pytest scripts/tests/test_changelog_fragments.py
+  scripts/tests/test_readme_lint.py` is green.
+
+### Docs
+- **A pending fragment no longer reports a test count as a fact about a moving
+  ref.** `changelog.d/` is folded into `CHANGELOG.md` only at `release`, so an
+  entry that predicates something of `main` — or of a diff against it — is a
+  promise about a moving ref, and it is read as fact on the day the release is
+  cut, long after the merge that made it false. `changelog.d/t_2cd692f0.md` said
+  its 29 new tests included “28 red at `origin/main`”. That number was a
+  measurement of one tree; once `main` moved it became unreproducible prose in
+  shipped release notes. Now “28 red **against the pre-fix code**”, which is what
+  the measurement actually meant and stays true whatever `main` does. The count,
+  the non-vacuity claim and the modelling note all stand — substance untouched.
+  `Docs`, not `Fixed`: the diff touches release-note text under `changelog.d/`
+  and no runtime path.
+  **The rest of the class is already owned, so this card lands nothing else.** A
+  sentence-level scan of every pending fragment found three claims of this shape
+  at `8271b81d`. Two belong to other cards and are left to them:
+  `changelog.d/t_2eb97ebb.md` to `t_522411b0`, which is running on that file now,
+  and `changelog.d/t_ae3e5f9b.md`, whose “are not on `main`” sentence
+  `t_0110df98` already fixed as PR #282. One finding is **handed off rather than
+  edited**, because it is `t_522411b0`'s file: `t_2eb97ebb.md` also quotes
+  **rule line numbers** — `.gitignore:75-76` — and the `check-ignore -v` output
+  verbatim (`:75`, `:76`, `:75`), and `0a4db383` (PR #279), whose only
+  `.gitignore` hunk is `@@ -16,6 +16,15 @@` — an insertion *above* those rules —
+  moved them to `:84-85`. A line number quoted from a file another card later
+  edits is the same defect as a diff quoted against `origin/main`, and it moves
+  for the same reason; it wants pinning to `8df6a352` as well. Measured for that
+  handoff: `git diff 071fdb4e 8df6a352 -- .gitignore` is 0 lines, and the same
+  diff against `8271b81d` is 20.
 ## [2.15.7] - 2026-11-10
 
 ### Fixed

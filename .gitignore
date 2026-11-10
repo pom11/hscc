@@ -16,6 +16,15 @@ cluster.json
 cluster-manifest.json
 setup.json
 plugin-state/
+# Embedding-model cache — 87 MB of ONNX weights (models--Qdrant--all-MiniLM-L6-v2-onnx).
+# Written by the Rust `fastembed` crate vendored inside the memori SDK: that binary
+# carries the `.fastembed_cache` default and honours FASTEMBED_CACHE_DIR, and
+# memori_byodb/_client.py is what loads the SDK. The cache path is resolved under the
+# *current* directory, so the download lands in whichever repo an agent or test run
+# happens to cwd in — the same 87 MB sits at 7 different roots on this host (hscc,
+# gateclerk, ecofire-bc). No repo code mentions fastembed, so a repo can only refuse
+# the commit: ignore it, and do not delete it — re-fetching costs bandwidth and time.
+.fastembed_cache/
 
 # Sensitive files — credentials / private machine data
 hf_token
@@ -74,3 +83,20 @@ wt/
 *_pvb_tmp_home*/
 *.sqlite
 *.sqlite3
+
+# SQLite sidecars — the companions a WAL-mode (or rollback-journal) connection
+# writes next to the db. `*.sqlite` above does NOT match them, so before these
+# three an `add -A` swept -wal/-shm/-journal into a commit while the base file
+# stayed ignored: the same hazard PR #275 fixed, still live (t_4e553569).
+# Both suffix families have to be spelled out: sqlite names a companion
+# `<db>-<suffix>`, so the sidecar of a `.sqlite3` db is `db.sqlite3-wal`, which
+# `*.sqlite-wal` does not match. Listed per family rather than widened to
+# `*-wal`/`*-shm`/`*-journal`, which would also sweep any unrelated file whose
+# name happens to end in those words (t_d0045a44).
+# All eight sqlite rules belong together — do not scatter them.
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
