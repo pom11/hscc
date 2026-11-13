@@ -53,6 +53,89 @@ def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
     assert "orch_message" not in worker
 
 
+# --- t_88ec1cb2: rule 5 routes merge ownership through the card -------------
+#
+# Rule 5 used to read "You review and merge your board's PRs." — an
+# unconditional claim. On a board whose finish rail has the WORKER merge its
+# own PR into the integration branch once its gate is green, with review
+# happening once, on the branch, that sentence tells the orchestrator to redo
+# work the worker already did: duplicated review, a second merge attempt, or a
+# wait for a merge that never arrives. The fix keeps the orchestrator as the
+# DEFAULT and makes the card's `HANDOFF` the authority, so no board name has
+# to be baked into text every orchestrator shares.
+
+_PROJECT_AND_BOARD_NAMES = (
+    "pontaje", "gateclerk", "ecofire", "flightdeck", "hscc", "ios-app",
+    "grid", "kronos", "pickolo", "flosana", "efsdriver", "micro-notify",
+)
+
+
+def _work_rule(number):
+    """One numbered rule of the generated 'How you manage work' list."""
+    soul = generator.compose_soul(
+        {"name": "demo-orch", "identity": "You orchestrate demo.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    assert "## How you manage work" in soul
+    text = soul.split("## How you manage work", 1)[1]
+    tail = text[text.index(f"{number}. **"):]
+    nxt = re.search(r"\n(?=\d+\. \*\*)", tail)
+    return tail if nxt is None else tail[: nxt.start()]
+
+
+def test_rule5_makes_the_card_handoff_the_merge_authority():
+    rule = _work_rule(5)
+    assert "`HANDOFF`" in rule
+    # An orchestrator reading it cold is told WHERE the answer lives.
+    assert "card body" in rule
+    # Both override shapes a real rail uses are named, explicitly as overrides.
+    assert "worker merging its own PR" in rule
+    assert "integration branch" in rule
+    assert "overrides the default" in rule
+    # The three failure modes the old sentence produced are now forbidden.
+    for phrase in ("review the same diff twice", "merge it a second time",
+                   "never assigned to you"):
+        assert phrase in rule
+    # The review half of the old rule survived the rewrite.
+    assert "0 errors" in rule and "all green" in rule
+
+
+def test_rule5_keeps_orchestrator_review_and_merge_as_the_default():
+    """The default is retained — but stated ONLY as a default.
+
+    The old bug was not that the orchestrator was the default owner, it was
+    that the default was stated unconditionally, so a card with a different
+    owner read as a contradiction. Every sentence here that hands the merge to
+    the orchestrator has to mark itself the default.
+    """
+    rule = _work_rule(5)
+    assert "Default when the card says nothing" in rule
+    said_default = False
+    for sentence in re.split(r"(?<=[.!?])\s+", rule):
+        if "review and merge" in sentence:
+            said_default = True
+            assert "default" in sentence.lower(), sentence
+    assert said_default, "the default merge policy is no longer stated at all"
+
+
+def test_rule5_names_no_project_or_board():
+    """The block is shared by every orchestrator on the fleet."""
+    rule = _work_rule(5)
+    for name in _PROJECT_AND_BOARD_NAMES:
+        pattern = rf"(?<![\w-]){re.escape(name)}(?![\w-])"
+        assert re.search(pattern, rule, re.I) is None, f"rule 5 names {name!r}"
+
+
+def test_merge_ownership_rule_stays_out_of_worker_souls():
+    """Merge ownership is an orchestration policy; workers get the HANDOFF
+    through their card, not through their identity."""
+    worker = generator.compose_soul(
+        {"name": "coder", "identity": "You build.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert "HANDOFF" not in worker
+    assert "review and merge" not in worker
+
+
 def test_card_budget_rules_reach_workers_and_orchs():
     """Operator 2026-11-01: cards ran 6h+ because workers ground on at 100-200K
     context (93-100% of wall time inside model calls). Workers carry the
