@@ -7,15 +7,20 @@ Uses the Hermes 0.17 native profile API where available:
 Bundled-skill seeding is intentionally skipped (create_profile is called with
 no_skills=True): the hand-written path never seeded skill files either, and the
 config.yaml skills.preload list is what drives preloading. HSCC-specific
-config.yaml (model block, compaction, toolsets) is still written manually
-because the native API has no concept of cluster topology.
+config.yaml content (model block, compaction, toolsets) is HSCC's own, but the
+write goes through Hermes' config writer — the file belongs to Hermes, and
+hand-writing it is what let a regeneration delete keys HSCC never owned.
 """
 import copy
 import json
 import os
+import pathlib
 import yaml
 
-# Allowed non-stdlib import: hermes_cli.profiles (Hermes 0.17 native API)
+# Allowed non-stdlib imports: hermes_cli.profiles (Hermes 0.17 native profile
+# API) and hermes_cli.config.atomic_config_write (Hermes' own config.yaml
+# writer — see _hermes_atomic_config_write). Both are optional: every use is
+# guarded so the plugin still works on a thin interpreter without hermes.
 try:
     from hermes_cli.profiles import (
         create_profile,
@@ -682,6 +687,182 @@ def _carry_operator_sections(existing, generated):
     return generated.rstrip() + "\n\n" + "\n\n".join(kept) + "\n"
 
 
+# ━━━ foreign keys: the whole-file merge (t_10ccaf80) ━━━━━━━━━━━━━━━━━━━━━━━━
+# Every block builder above merges over the profile's existing block and the
+# comment above the write path promises the generator "only fills what is
+# ABSENT". For anything the generator does not *name* that promise was simply
+# false: generate_profile() assembled `config` as a dict from scratch and wrote
+# that dict, so an unknown key was not merged away — it was never in the
+# payload. Measured on the operator's own pre-2.15.10-bootstrap snapshot (49
+# profiles): `_config_version` gone from 45, the whole `browser:` section (a
+# top-level key, not a nested leaf) gone from 25. Losing `_config_version` is
+# not cosmetic — Hermes then runs its silent config migration on that profile's
+# next start, so it was 45 unreviewed migrations nobody asked for.
+#
+# The fix is deliberately NOT a list of keys to keep. `_config_version` and
+# `browser` are only the two that got noticed; a whitelist loses the next
+# foreign key exactly as loudly.
+
+def _read_config_file(pdir):
+    """The profile's on-disk config as ``(mapping, raw_text)``.
+
+    The per-block readers above (`_read_existing_config`, `_read_existing_block`,
+    `_read_existing_memory`, `_read_existing_toolsets`) each pull out the one
+    block the generator owns; this one returns the WHOLE document, because
+    preserving foreign keys needs the file, not the generator's subset of it.
+    The raw text comes along so a no-op regeneration can skip the write
+    entirely (no mtime churn) and so the fallback writer can match the style
+    the file already uses.
+
+    ``(None, None)`` when the file is missing or unreadable; ``(None, text)``
+    when it exists but is not a parseable mapping — `None` mapping means
+    "nothing could be preserved from it", never "it was empty", so a corrupt
+    file is never silently treated as an empty one. Never touches anything but
+    the given profile dir.
+    """
+    path = os.path.join(pdir, "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None, text
+    if not isinstance(data, dict):
+        return None, text
+    return data, text
+
+
+def merge_preserving(existing, generated):
+    """Deep-merge ``generated`` over ``existing`` so keys it does not own live on.
+
+    One line: **``existing`` owns the document, ``generated`` owns only the
+    values it computed.**
+
+      * every key of ``existing`` the generator does not emit is carried through
+        verbatim at every depth — a foreign top-level key, a foreign nested key,
+        and a foreign sub-key under a section the generator DOES emit (the
+        shape that failed here: ``browser:`` held operator content, and an
+        operator's ``auxiliary.goal_judge`` sits beside the generator's
+        ``auxiliary.compression``);
+      * key ORDER follows ``existing``, so a regeneration never reshuffles a
+        file an operator arranged their own way; a key the generator newly
+        emits is appended;
+      * two dict values recurse;
+      * a list or scalar from the generator REPLACES the existing value. That
+        is not a loss — each block builder already folded the existing value
+        into its own output (`_compression_block` / `_memory_block` only raise
+        toward their default, `_merge_toolsets` only appends,
+        `_onboarding_block` only fills absent keys), so replacing is what
+        applies the generator's policy rather than discarding it.
+
+    Returns a fresh structure; neither argument is mutated.
+    """
+    out = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    for key, value in (generated or {}).items():
+        cur = out.get(key)
+        if isinstance(cur, dict) and isinstance(value, dict):
+            out[key] = merge_preserving(cur, value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+class _HermesStyleDumper(yaml.SafeDumper):
+    """``SafeDumper`` that indents block sequences under their mapping key.
+
+    PyYAML is indentless there by design and exposes no flag for it, so the
+    old writer rewrote every hermes-written ``  - hermes-cli`` as ``- hermes-cli``.
+    Round-tripping the operator's 49 real profile configs and comparing bytes:
+    1/49 identical with the stock dumper, 49/49 with this one.
+    """
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, False)
+
+
+def _sniff_sequence_indent(text):
+    """Does *text* indent its block sequences under a mapping key?
+
+    The fallback writer must not restyle a file it is only carrying, and both
+    styles are valid YAML that hermes itself writes depending on who saved
+    last. Decided on the first mapping key whose value is a block sequence:
+    ``key:`` followed by an indented ``- `` item means indented, a column-0
+    ``- `` item means not. A key with an inline value cannot match the probe,
+    and a block scalar (``key: |``) is skipped, so prose that happens to start
+    with ``- `` cannot decide the style. Defaults to indented (hermes' house
+    style) for a file that has no block sequence yet.
+    """
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines[:-1]):
+        if not line.endswith(":"):
+            continue
+        nxt = lines[i + 1]
+        if nxt.startswith("  - "):
+            return True
+        if nxt.startswith("- "):
+            return False
+    return True
+
+
+def _dump_config(config, existing_text=None):
+    """Serialize a profile config, keeping the file's own sequence style.
+
+    ``width`` is wide on purpose: folding an operator's long path or URL across
+    lines is a formatting change this merge is not asked to make, and every
+    value the generator emits is short.
+    """
+    dumper = (_HermesStyleDumper if _sniff_sequence_indent(existing_text)
+              else yaml.SafeDumper)
+    return yaml.dump(config, Dumper=dumper, default_flow_style=False,
+                     sort_keys=False, indent=2, allow_unicode=True, width=4096)
+
+
+def _hermes_atomic_config_write():
+    """Hermes' own config.yaml writer, or ``None`` where hermes is not importable.
+
+    HSCC hand-wrote a file hermes owns, and that is what produced this card's
+    bug. ``hermes_cli.config.atomic_config_write`` is hermes' documented writer
+    for it: ruamel round-trip, so comments, key order, quoting and Unicode all
+    survive, and it REFUSES a payload that would drop an existing mapping path.
+    Fail-closed is the point — the hand-written dump deleted operator keys in
+    silence. The fallback writer stays for the thin interpreter in
+    ``scripts/run_tests.sh`` (no hermes, no ruamel); it preserves every key too,
+    because the payload it writes has already been merged, and only comments
+    are beyond it.
+    """
+    try:
+        from hermes_cli.config import atomic_config_write
+    except Exception:      # noqa: BLE001 - thin env / broken install: fall back
+        return None
+    return atomic_config_write
+
+
+def _write_profile_config(path, config, existing_text):
+    """Write a merged profile config.yaml. Returns changed?
+
+    Two writers, one payload (see ``merge_preserving`` for the payload rule):
+    hermes' round-trip writer when hermes is importable, the local dump
+    otherwise. A file whose merged form is byte-identical to what is already on
+    disk is not written at all, so a no-op regeneration leaves mtime alone.
+    """
+    target = _dump_config(config, existing_text)
+    if existing_text is not None and existing_text == target:
+        return False
+    writer = _hermes_atomic_config_write()
+    if writer is not None:
+        writer(pathlib.Path(path), config)
+        try:
+            with open(path, encoding="utf-8") as f:
+                after = f.read()
+        except (OSError, UnicodeDecodeError):
+            return True
+        return after != (existing_text or "")
+    return _write_if_changed(path, target)
+
+
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
@@ -858,9 +1039,23 @@ def generate_profile(spec, base_identity):
     onboarding = _onboarding_block(existing_onboarding)
     if onboarding is not None:
         config["onboarding"] = onboarding
-    changed |= _write_if_changed(
+    # PRESERVE, never drop, every key this file already holds that the generator
+    # does not compute. Everything above merges PER BLOCK, which protects only
+    # the blocks the generator names — the "operator values survive" / "only
+    # fills what is ABSENT" promises in _compression_block, _memory_block,
+    # _merge_toolsets and _onboarding_block were each true inside their own
+    # block and false for the file as a whole, because this write handed
+    # yaml.safe_dump a dict built from scratch. _config_version and browser died
+    # right here. merge_preserving makes the promise true for the document:
+    # foreign top-level keys, foreign nested keys, and foreign sub-keys under a
+    # section the generator does emit all survive, at any depth.
+    # The read happens here, after the per-block reads above and before any
+    # write, so the merge can never see a document this call already changed.
+    existing_root, existing_text = _read_config_file(pdir)
+    changed |= _write_profile_config(
         os.path.join(pdir, "config.yaml"),
-        yaml.safe_dump(config, default_flow_style=False, sort_keys=False),
+        merge_preserving(existing_root, config),
+        existing_text,
     )
 
     # 4. Write profile.yaml via native API (routing_description → description)
