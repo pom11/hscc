@@ -11,6 +11,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.10] - 2026-11-13
+
+### Added
+- **`hscc cards monitor` now streams what the worker thought, not only what it
+  called.** Each per-card panel read only `content` plus one `┊` line per tool
+  call, while a worker's thinking sits in the session store's reasoning
+  columns. Measured on one operator session store (2026-11-13, read-only): of
+  5424 assistant rows, 5396 carry reasoning and only 2116 carry any reply text
+  at all — the majority of turns rendered as a bare tool line, which was the
+  whole point of the panel. A panel now prints a row's reasoning above that
+  row's reply text in dim italic, through the same `clean_line` + wrapping the
+  rest of the body uses, collapsed to one line per row and cut at
+  `REASON_PREVIEW` (320 chars) with an explicit `…+N more` marker — a measured
+  thought reaches 70 KB, and one thought must not scroll the transcript off a
+  panel that is a dozen rows tall. `t` stays the tools-only view it always
+  was: a thinking line never passes `is_tool_line`. `reasoning` is read, and
+  `reasoning_content` only as its fallback, never both — on that store the two
+  columns hold identical text for every reasoning-bearing row, so a concat or
+  a naive `COALESCE` would print every thought twice. Whether the columns
+  exist is probed with `PRAGMA table_info` once per db file and cached, so a
+  store that predates them reads the same rows and renders as before instead
+  of landing in the blind-read error panel. The transcript page stays ONE
+  definition — only the SELECT list varies, never the display set — and the
+  read is the same additive, read-only `sqlite3` path with no `hermes_state`
+  import, so the brew-installed CLI keeps working with no wrapper.
+
+### Fixed
+- **The sibling-gate premise was only as isolated as the caller's shell.** The
+  failing pin builds a dep-less COPY venv and asserts `import rich` fails, so a
+  sibling that can import the audit's deps cannot make the gate vacuous — but
+  the scripts leg ran with a `PYTHONPATH` naming another interpreter's
+  site-packages, and that handed `rich` to the venv (measured: the same
+  assertion failed in two clean detached worktrees). Every child interpreter
+  probe (`-sibling_is_runnable`, the (A)-only pass, its timeout calibration and
+  the anti-vacuity capability check) now runs with `PYTHONPATH` /
+  `PYTHONHOME` / `PYTHONUSERBASE` / `PYTHONSTARTUP` / `__PYVENV_LAUNCHER__`
+  stripped from the child environment, and the import probes add `-I` so a
+  candidate answers for itself. The premise assertion still demands a
+  `ModuleNotFoundError` for `rich`: the pin got stricter, not weaker. The test
+  now fabricates the exact leak (a hostile `PYTHONPATH` with a fake `rich`)
+  and proves with a control child that the injection is real before the
+  scrubbed probe rejects it, so a regression cannot pass as a green skip. No
+  test in `scripts/tests/` mutates `os.environ["PYTHONPATH"]`; the injection
+  came from the invoking environment, so the fix lives in the probe boundary.
 ## [2.15.9] - 2026-11-10
 
 ### Changed
