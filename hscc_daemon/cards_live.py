@@ -23,7 +23,9 @@ rather than through ``hermes_state``.
 
 Panel header: board · card · worker, then run time, heartbeat age and the
 worker session's tokens — fields are dropped right-to-left when the panel is
-too narrow. Body: the full transcript, or only tool calls (``t`` toggles).
+too narrow. Body: the worker's reasoning (dim italic, one capped line per row)
+above that row's reply text, plus one ``┊`` line per tool call; ``t`` narrows a
+panel to the tool calls alone — no reasoning lives in that view.
 
 Keys (live mode, interactive terminal): Tab / arrows move the focus, Enter or
 ``z`` zooms the focused panel to full screen, Esc leaves zoom, ``t`` toggles
@@ -66,6 +68,14 @@ INITIAL_TAIL_BYTES = 64 * 1024
 MAX_LINES = 600              # kept per card; the panel shows the tail that fits
 READY_ROWS = 3               # waiting-card lines at the bottom (+N more)
 TOOL_PREFIX = "┊"            # the marker this view prints every tool call with
+REASON_PREFIX = "░"          # the marker this view prints a row's thinking with
+#: Per-row cap on the reasoning preview. Measured on one operator store
+#: (n=5396 reasoning rows): p50 ~0.8 KB, p95 ~21 KB, max ~70 KB per row, so an
+#: uncapped thought scrolls a ~15-row panel off the screen by itself.
+#: ``wrap_tail`` already bounds the width of whatever we emit; this is what
+#: bounds the height. The marker names how much was dropped (house style:
+#: ``+N more``).
+REASON_PREVIEW = 320
 SESSION_PAGE = 400           # transcript rows read per tick (appended rows only)
 INITIAL_SESSION_ROWS = 200   # a new session tail starts this many rows back
 PROMPT_PREVIEW = 120         # user-turn preview length (hermes' own timeline does 120)
@@ -103,6 +113,11 @@ FOCUS_BORDER = "#FFBF00"
 TITLE_STYLE = "bold #FFD700"
 IDLE_BORDER = "grey35"
 TOOL_STYLE = "#7A9CC6"
+#: Thinking is the most voluminous thing on the panel and the least
+#: load-bearing per line, so it gets the quietest style we have: grey + italic
+#: separates it from the worker's actual reply text (default style) without
+#: competing with the gold title or the blue tool lines.
+REASON_STYLE = "italic grey58"
 ERROR_LINE_STYLE = "#C97B6B"
 MUTED = "grey50"
 
@@ -162,7 +177,8 @@ def is_tool_line(line: str) -> bool:
 # (``get_messages(after_id=...)`` is ``id > ? ORDER BY id``), advancing a row-id
 # cursor so a tick only pays for the rows appended since the last one.
 # Read-only: ``mode=ro``, a 1 s busy timeout, and any ``sqlite3.Error`` is a
-# blank panel, never a traceback.
+# blank panel, never a traceback. The one ``PRAGMA table_info`` probe per db
+# file (below) rides that same read-only handle.
 
 _MESSAGES_TABLE = "messages"
 
@@ -187,8 +203,27 @@ def _open_ro(path: str):
 # short-circuit into ``json_extract`` on a row whose metadata is not JSON.
 # ``id > :after ORDER BY id`` is hermes' keyset paging (insertion order, never
 # timestamp: clocks regress).
-TRANSCRIPT_SQL = f"""
-    SELECT id, role, content, tool_name, tool_calls, tool_call_id, display_kind
+#
+# The SELECT list is a parameter because the reasoning columns are OPTIONAL:
+# a store that predates them must read the same rows, so which columns are
+# asked for is the only thing that ever varies. Keeping the WHERE clause in
+# exactly one place is what guarantees that — reasoning is an additive column
+# read, never a re-scoping of the display set.
+BASE_COLUMNS = ("id", "role", "content", "tool_name", "tool_calls",
+                "tool_call_id", "display_kind")
+#: Preference order, and AT MOST ONE of these is ever rendered. Measured on one
+#: operator store: all 5396 reasoning-bearing assistant rows fill BOTH of these
+#: with text that is identical after ``TRIM`` (0 rows differ), so concatenating
+#: them — or rendering whichever of the two a row carries — would print every
+#: thought twice. ``reasoning_details`` / ``codex_reasoning_items`` exist but
+#: hold nothing on this fleet (0 filled rows) and are deliberately not read.
+REASONING_COLUMNS = ("reasoning", "reasoning_content")
+
+
+def _transcript_sql(columns) -> str:
+    """One page of the transcript, selecting ``columns``."""
+    return f"""
+    SELECT {", ".join(columns)}
     FROM {_MESSAGES_TABLE}
     WHERE session_id = :sid AND id > :after
       AND (active = 1 OR compacted = 1)
@@ -196,6 +231,59 @@ TRANSCRIPT_SQL = f"""
                THEN 1 ELSE COALESCE(json_extract(display_metadata, '$.model_only'), 0) = 0 END
     ORDER BY id ASC LIMIT :limit
 """
+
+
+#: The pre-reasoning form of the page: what a store without the reasoning
+#: columns reads, and what any caller that passes no reasoning gets.
+TRANSCRIPT_SQL = _transcript_sql(BASE_COLUMNS)
+
+#: ``PRAGMA table_info`` for one db file is stable for the life of the reader
+#: (hermes never ALTERs ``messages`` under a live reader), and the panel
+#: re-opens every store every 0.5 s tick — so probe once per file and cache.
+#: Bounded because the daemon is long-lived and boards/profiles come and go.
+_SCHEMA_CACHE_MAX = 32
+_reasoning_cache: "collections.OrderedDict[str, tuple]" = collections.OrderedDict()
+
+
+def reasoning_columns(conn, path: str) -> tuple:
+    """The reasoning columns this store actually has, in preference order.
+
+    ``()`` when the store predates them (or the pragma reads empty), which
+    makes the caller select ``BASE_COLUMNS`` and the panel render exactly as it
+    did before reasoning existed — never a red error panel. Cached per
+    resolved db path and probed at most once per file. Single-threaded by
+    design, like the live loop that calls it.
+    """
+    key = os.path.abspath(path)
+    hit = _reasoning_cache.get(key)
+    if hit is not None:
+        _reasoning_cache.move_to_end(key)
+        return hit
+    try:
+        names = {row[1] for row in conn.execute(
+            f"PRAGMA table_info({_MESSAGES_TABLE})")}
+    except sqlite3.Error:
+        names = set()
+    found = tuple(c for c in REASONING_COLUMNS if c in names)
+    _reasoning_cache[key] = found
+    while len(_reasoning_cache) > _SCHEMA_CACHE_MAX:
+        _reasoning_cache.popitem(last=False)      # oldest entry first
+    return found
+
+
+def _col(row, name: str):
+    """``row[name]``, or None when the SELECT did not ask for that column.
+
+    A ``sqlite3.Row`` raises ``IndexError`` and a plain dict (what the tests
+    hand ``render_rows``) ``KeyError`` for an unselected column — which is
+    precisely how the renderer stays correct against a store with no reasoning
+    columns: the row simply has no such cell, and no line is emitted.
+    """
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
 
 
 def _content_text(content) -> str:
@@ -257,8 +345,34 @@ def _tool_summary(arguments) -> str:
     return one[:110] + "…" if len(one) > 110 else one
 
 
+def _reasoning_line(row) -> str:
+    """One capped ``░`` line of a row's thinking, or ``""`` when it has none.
+
+    Reads at most ONE column, in the ``REASONING_COLUMNS`` preference order —
+    the live store fills both with the same text, so a concat or a
+    ``COALESCE``-then-append would double-print every thought. The row's whole
+    thought collapses to a single line and is cut at ``REASON_PREVIEW`` with an
+    explicit ``…+N more`` marker: the panel gives a card ~15 rows and a thought
+    can be 70 KB, so one row must never own the screen. ``clean_line`` runs
+    per source line (ANSI/redraws), then the whitespace collapses; ``wrap_tail``
+    still does the width bound downstream, exactly like every other line here.
+    """
+    for col in REASONING_COLUMNS:
+        text = _content_text(_col(row, col))
+        if not text.strip():
+            continue
+        collapsed = " ".join(word for part in text.splitlines()
+                             for word in clean_line(part).split())
+        if len(collapsed) > REASON_PREVIEW:
+            dropped = len(collapsed) - REASON_PREVIEW
+            collapsed = collapsed[:REASON_PREVIEW].rstrip() + f" …+{dropped} more"
+        return f"{REASON_PREFIX} {collapsed}"
+    return ""
+
+
 def render_rows(rows, announced=None) -> list[str]:
-    """Display lines for transcript rows: prose as text, one ``┊`` line per call.
+    """Display lines for transcript rows: thinking, then prose, then one ``┊``
+    line per call.
 
     A tool call is announced by the assistant row whose ``tool_calls`` names it
     — that is the moment the operator wants to see it, before the result
@@ -266,12 +380,22 @@ def render_rows(rows, announced=None) -> list[str]:
     never announced (a tail that starts mid-turn). ``announced`` carries the
     call ids across polls; ``role='user'`` rows become one collapsed preview
     line so the card prompt reads as a line, not an 8 KB dump.
+
+    Reasoning belongs to the row that thought it, so only the assistant branch
+    emits it — and the tools-only view stays empty of it for free: a
+    ``REASON_PREFIX`` line never passes :func:`is_tool_line`.
     """
     seen = announced if announced is not None else set()
     out: list[str] = []
     for row in rows:
         role = row["role"]
         if role == "assistant":
+            # Thinking leads: it is what preceded the words, and usually what
+            # preceded the tool call on the same row, so it reads as the row's
+            # lead-in rather than a footnote.
+            reason = _reasoning_line(row)
+            if reason:
+                out.append(reason)
             text = _content_text(row["content"])
             for para in text.split("\n"):
                 para = clean_line(para)
@@ -337,6 +461,11 @@ class SessionTail:
             return False
         try:
             with _open_ro(self.path) as conn:
+                # One pragma per db file, cached (see ``reasoning_columns``): a
+                # store that predates the reasoning columns selects
+                # BASE_COLUMNS and renders exactly as it did before, which is
+                # why a missing column can never reach SQL as an error panel.
+                cols = reasoning_columns(conn, self.path)
                 hi = self._max_id(conn)
                 if hi is None:
                     return False            # the session has no rows yet
@@ -349,7 +478,7 @@ class SessionTail:
                     self.announced.clear()
                 if hi == self.cursor:
                     return False            # nothing appended since the last tick
-                rows = conn.execute(TRANSCRIPT_SQL,
+                rows = conn.execute(_transcript_sql(BASE_COLUMNS + cols),
                                     {"sid": self.session_id, "after": self.cursor,
                                      "limit": self.page}).fetchall()
         except (sqlite3.Error, OSError):
@@ -603,6 +732,13 @@ def _body(lines: list[str], width: int, height: int, tools_only: bool) -> Text:
         s = r.lstrip()
         if s.startswith(TOOL_PREFIX):
             text.append(r, style=TOOL_STYLE)
+        elif s.startswith(REASON_PREFIX):
+            # BEFORE the error rule: a thought about a failing test says
+            # "error" a lot and must not come back in the warning colour.
+            # (A reply line that genuinely opens with this glyph is styled as
+            # if it were thinking — cosmetic only, and the same trade the
+            # tool-prefix rule already makes.)
+            text.append(r, style=REASON_STYLE)
         elif re.search(r"\b(error|traceback|failed|exception)\b", r, re.I):
             text.append(r, style=ERROR_LINE_STYLE)
         else:
@@ -820,16 +956,19 @@ def snapshot(console, board: str | None = None, tools_only: bool = False,
 HELP = """\
 hscc cards monitor [--live] [--interval <s>] [--board <slug>] [--tools]
 
-One panel per running kanban card, streaming its worker's transcript; the
-grid re-flows as cards start and finish (a finished card lingers ~10 s with
-its outcome). Waiting cards are listed at the bottom. Each panel header shows
-board · card · worker │ run · heartbeat · tokens (as space allows).
+One panel per running kanban card, streaming its worker's transcript — each
+row's thinking (dim italic, one capped line) above its reply text, and one
+┊ line per tool call; the grid re-flows as cards start and finish (a finished
+card lingers ~10 s with its outcome). Waiting cards are listed at the bottom.
+Each panel header shows board · card · worker │ run · heartbeat · tokens (as
+space allows).
 
   --live          full-screen, refreshing until q / Ctrl-C
   --interval <s>  card-list refresh period for --live (default 3; logs stream
                   every 0.5 s regardless)
   --board <slug>  only this board
-  --tools         start in tools-only view (t toggles in --live)
+  --tools         start in tools-only view (t toggles in --live; the tools-only
+                  view shows no reasoning)
 
 Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · +/- bigger
   or smaller panels (fewer/more columns; 0 = auto) · t full/tools · p
