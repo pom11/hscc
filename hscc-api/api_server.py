@@ -33,6 +33,12 @@ import socket
 import subprocess
 from pathlib import Path
 
+# The profile-root INTENT gate (t_c443c001). Imported at module level so the
+# boot assert in create_server() and the request-time choke point in the route
+# modules share ONE module object — and therefore one captured intent (D7).
+# Its own imports are lazy, so this cannot cycle back through routes_profile.
+import profile_root  # noqa: E402
+
 # Single source of truth for the plugin version (this module may be imported
 # bare as `api_server` when the plugin dir is on sys.path — no relative import).
 __version__ = "0.1.0"
@@ -466,12 +472,20 @@ class ApiContext:
 
     Handlers receive this and never re-read disk for auth/port (design §C:
     the parent resolves these before forking so threads authorize fast).
+
+    ``profile_root_intent`` (t_c443c001) is the canonicalised
+    ``HSCC_API_PROFILES_ROOT`` the server booted with, or ``None`` when no
+    intent was configured. It is captured here for the same reason the token is:
+    handlers must never re-read the environment (D7). The guard itself reads
+    ``profile_root``'s captured copy, so the two can never disagree.
     """
 
-    def __init__(self, config: dict, token: str, hscc_dir: str):
+    def __init__(self, config: dict, token: str, hscc_dir: str,
+                 profile_root_intent: "str | None" = None):
         self.config = config
         self.token = token
         self.hscc_dir = hscc_dir
+        self.profile_root_intent = profile_root_intent
 
 
 class _ApiServer(http.server.ThreadingHTTPServer):
@@ -707,11 +721,22 @@ def create_server(
 
     ``addr`` overrides the (host, port) computed from config — used by tests to
     bind loopback port 0 (ephemeral) for a hermetic, parallel-safe suite.
+
+    The profile-root INTENT is asserted FIRST (t_c443c001, D8): it is the
+    cheapest check, it runs before `resolve_config`/`load_token` so a refused
+    boot never reads a token, and it happens before the bind — so a server whose
+    configured ``HSCC_API_PROFILES_ROOT`` does not match every writable root
+    never serves and never writes. No intent ⇒ this is a no-op and today's
+    behaviour is unchanged.
     """
+    resolved_intent = profile_root.assert_boot_intent()
+    profile_root.capture(resolved_intent)
+
     hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
     config = resolve_config(hscc_dir, bind_override, port_override)
     token = load_token(hscc_dir)
-    ctx = ApiContext(config, token, str(hscc_dir))
+    ctx = ApiContext(config, token, str(hscc_dir),
+                     profile_root_intent=resolved_intent)
 
     if addr is None:
         addr = (config["host"], config["port"])
@@ -848,6 +873,15 @@ def serve_main(bind_override=None, port_override=None) -> int:
     try:
         server = create_server(bind_override=bind_override,
                                port_override=port_override)
+    except profile_root.ProfileRootRefusal as exc:
+        # Misconfigured profile root (t_c443c001) — deliberately NOT folded into
+        # the RuntimeError branch below, which means "bind/token failed" and maps
+        # to 1. Exit 2 is how an operator (and launchd's logs) tells a wrong
+        # HSCC_API_PROFILES_ROOT apart from a busy port. Nothing bound, nothing
+        # written, no token read.
+        print(f"hscc-api: refusing to start: profile root intent not honoured\n"
+              f"{exc}", file=sys.stderr, flush=True)
+        return 2
     except RuntimeError as exc:
         # Refused bind / unreadable-or-empty token / malformed api.json.
         print(f"hscc-api: refusing to start: {exc}", file=sys.stderr)
@@ -866,6 +900,10 @@ def serve_main(bind_override=None, port_override=None) -> int:
 
     addr = server.ctx.config
     print(f"hscc-api: listening on {addr['host']}:{addr['port']}", flush=True)
+    # The profiles root this server will actually write, plus the intent it was
+    # given (t_c443c001, adopted from option 1's diagnostic). Printed on every
+    # boot so a wrong-root symptom has a line to be diagnosed against.
+    print(profile_root.startup_line(), flush=True)
 
     bridge = None
     try:

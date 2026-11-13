@@ -41,6 +41,9 @@ from __future__ import annotations
 import re
 
 from api_server import ApiError, ROUTES
+# The profile-root gate (t_c443c001): one implementation, and the write choke
+# point for every mutating backing below.
+import profile_root
 
 # --------------------------------------------------------------------------- #
 # Backing-call seam (monkeypatch these in tests). ``hermes_cli`` is only
@@ -103,6 +106,7 @@ def _backing_describe_get(name):
 def _backing_create(name, *, clone_from=None, clone_all=False, no_alias=False,
                     no_skills=False, description=None):
     """Create a profile. Raises ValueError/FileExistsError on invalid input."""
+    profile_root.guard_write()   # t_c443c001: 503 + nothing written on divergence
     mod = _profiles_module()
     path = mod.create_profile(
         name,
@@ -117,7 +121,13 @@ def _backing_create(name, *, clone_from=None, clone_all=False, no_alias=False,
 
 def _backing_delete(name):
     """Delete a profile (``yes=True`` — the API owns the confirm gate).
-    Raises ValueError/FileNotFoundError on invalid input."""
+    Raises ValueError/FileNotFoundError on invalid input.
+
+    This is the destructive site: one call removes a whole ``<profile>/`` dir.
+    The guard is the FIRST statement precisely so a mis-rooted server cannot
+    delete an operator profile and answer 200.
+    """
+    profile_root.guard_write()   # t_c443c001: refuse BEFORE anything is removed
     mod = _profiles_module()
     path = mod.delete_profile(name, yes=True)
     return str(path)
@@ -125,6 +135,7 @@ def _backing_delete(name):
 
 def _backing_rename(old_name, new_name):
     """Rename a profile. Raises ValueError/FileNotFoundError/FileExistsError."""
+    profile_root.guard_write()   # t_c443c001: moves a whole <profile>/ dir
     mod = _profiles_module()
     path = mod.rename_profile(old_name, new_name)
     return str(path)
@@ -132,6 +143,7 @@ def _backing_rename(old_name, new_name):
 
 def _backing_describe_set(name, text):
     """Set a profile's description. Raises ValueError/FileNotFoundError."""
+    profile_root.guard_write()   # t_c443c001: writes <profile>/profile.yaml
     mod = _profiles_module()
     canon = mod.normalize_profile_name(name)
     mod.validate_profile_name(canon)

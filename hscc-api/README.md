@@ -107,6 +107,59 @@ overrides passed to `create_server()` / the CLI flags.
   at `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. Both that path and
   a bare `tailscale` are probed, plus the interfaces for a `100.x` address.
 
+## Profile-root intent (`HSCC_API_PROFILES_ROOT`)
+
+Every mutating route in this server writes a profile directory, and three
+different resolvers answer "which one": hermes' own `get_profile_dir`, this
+plugin's deliberately call-time ladder (`routes_profile._hermes_profiles_dir`),
+and `rolelib.PROFILES_DIR`. They are not normally in disagreement — but
+`hermes_constants._hermes_root_of` returns the NATIVE home whenever
+`HERMES_HOME` resolves *under* `~/.hermes`, so a server that believes a scratch
+home inside the live root sandboxed it writes (and `POST
+/v1/profiles/{name}/delete` DELETES) inside the operator's real
+`~/.hermes/profiles/**` and answers 200. That is the t_d39c720e class; the CLI
+got its guard in PR #301/#302, this section is the same control over the HTTP
+transport.
+
+State the intent once, at server start, as an env var — the **only** channel.
+There is deliberately no flag for it on an HTTP route, on `serve`'s argv, or on
+`hscc api start`: `serve`'s argv is baked into a generated launchd unit, so a
+flag there would be a second and less visible way to say the same thing.
+
+```console
+HSCC_API_PROFILES_ROOT=~/.hermes/profiles hscc api start   # or: python -m api_server serve
+```
+
+The value is the **profiles dir** — `<hermes-home>/profiles`, the directory
+that directly contains `<profile>/config.yaml` — which is the same contract as
+`rolelib.assert_profile_root(expected)`, so a CLI refusal and an API refusal are
+configured and worded the same way.
+
+| Situation | Behaviour |
+|---|---|
+| unset, empty or whitespace | today's behaviour, unchanged (a `VAR=` in a plist cannot brick the server) |
+| set, equal to every writable root | boots; the intent is carried on `ApiContext` and printed at startup |
+| set, a relative path | refused at boot — "must be an absolute path" |
+| set, any writable root differs | refused at boot, **exit 2** on both entry paths (`python -m api_server serve` and the daemon's `hscc api start`): nothing bound, no token read, nothing written |
+| a root drifts after boot | the write is refused per request — **503 `profile_root_mismatch`**, nothing written |
+| the write is *incidental* (the compaction-threshold ensure on the chat path) | **not** a 503: the write is skipped, the divergence is logged at ERROR, and the chat proceeds on the config the operator already has |
+
+Two gates, one implementation (`profile_root.py`): the boot assert is the primary
+gate — a mis-rooted server never serves, so it never writes — and the write choke
+point is what keeps "nothing written" true afterwards, because the ladder
+re-points at call time by design. A refused boot exits **2** where a busy port or
+an unreadable token exits **1**, so an operator can tell a misconfigured root from
+a transport problem. Every boot also prints the root it will write:
+
+```console
+hscc-api: profiles root /Users/you/.hermes/profiles (intent: none)
+```
+
+Reads are deliberately not guarded: a wrong-root read degrades to an honest empty
+list, it cannot corrupt a tree. The generated launchd unit carries neither
+`HERMES_HOME` nor `HSCC_API_PROFILES_ROOT` — a hand-added `EnvironmentVariables`
+key is honoured, the generator never adds one.
+
 ## Chat delivery: tmux-first, serve fallback (what the app must show)
 
 A `send` on `/v1/projects/{name}/session/ws` is delivered tmux-first: if the

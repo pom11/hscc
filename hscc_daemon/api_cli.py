@@ -337,12 +337,26 @@ def _serve(api, bind_override, port_override):
     Resolves config + token again here (the child has the same disk state) via
     A1's ``create_server`` — which honors the bind rules and fails closed on an
     unreadable/empty token. Cleans up the PID file on exit.
+
+    A refused profile-root INTENT (t_c443c001) exits 2, not 1: like
+    ``serve_main``, an operator must be able to tell a misconfigured
+    ``HSCC_API_PROFILES_ROOT`` apart from a bind/token failure. The PID file is
+    marked stopped so it cannot claim a server that never bound, and the full
+    divergence report (requested root + every divergent root + the env) goes to
+    the API log at ERROR — nothing bound, nothing written.
     """
     try:
         server = api.create_server(
             bind_override=bind_override,
             port_override=port_override,
         )
+    except api.profile_root.ProfileRootRefusal as exc:
+        daemon_ops.log(
+            f"HSCC API start refused (profile root intent not honoured): {exc}",
+            "ERROR", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+        )
+        daemon_ops.write_stopped(API_PID_FILE)
+        os._exit(2)
     except RuntimeError as exc:
         daemon_ops.log(
             f"HSCC API start failed: {exc}", "ERROR",
@@ -354,6 +368,12 @@ def _serve(api, bind_override, port_override):
     addr = server.ctx.config
     daemon_ops.log(
         f"HSCC API listening on {addr['host']}:{addr['port']}",
+        log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+    )
+    # Same startup line as serve_main (t_c443c001) — both entry paths state the
+    # root they will write, so an operator has one thing to look at.
+    daemon_ops.log(
+        api.profile_root.startup_line(),
         log_file=API_LOG_FILE, pid_file=API_PID_FILE,
     )
     # t_29e033a4: own the live ``hermes serve`` sidecar as a supervised child
