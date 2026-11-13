@@ -13,18 +13,42 @@ data: mint one with `create`, adjust it in `roles/<name>.yaml`, rebuild with
 
 ## CLI (`hscc.py`)
 ```
-hscc.py generate            # build all profiles from specs → ~/.hermes/profiles/
+hscc.py generate [--hermes-home DIR]
+                            # build all profiles from specs → ~/.hermes/profiles/
 hscc.py create <name> "…"   # author a new role on demand
 hscc.py list                # roles + whether a profile exists
 hscc.py validate            # validate every role spec (load + required fields)
 hscc.py autonomy [on|off]   # the ~/.hscc/autonomy master flag
-hscc.py orch <project|general>  # ensure a project's orchestrator profile exists
-hscc.py orch-all [--registry P] # ensure an orchestrator for EVERY registry
-                                # project + the `general` catch-all (idempotent, bulk)
+hscc.py orch <project|general> [--registry P] [--hermes-home DIR]
+                            # ensure a project's orchestrator profile exists
+hscc.py orch-all [--registry P] [--hermes-home DIR]
+                            # ensure an orchestrator for EVERY registry
+                            # project + the `general` catch-all (idempotent, bulk)
 hscc.py provision-check [--registry P] [--profile NAME] [--json]
                             # per-profile effective memory provider / char
                             # limit / compaction cap / summarization endpoint
 ```
+
+## Targeting another hermes home (`--hermes-home`)
+
+The three profile-**writing** commands (`generate`, `orch`, `orch-all`) take
+`--hermes-home DIR`: the profiles root becomes `<DIR>/profiles`. It is an
+**assertion, not a hint** — the command points the process at `DIR`, then asks
+hermes' own resolver where it will actually write and refuses (exit **2**, stdout
+empty, nothing written) if the answer is not `<DIR>/profiles`.
+
+Do not substitute `HERMES_HOME` for the flag. Hermes resolves a `HERMES_HOME`
+that lives *under* `~/.hermes` back to the **live** root
+(`hermes_constants._hermes_root_of`), so a throwaway home in a Hermes scratch dir
+silently writes the operator's tree — which is how t_10ccaf80's acceptance run
+lost keys on 45 live profiles while reporting success. Worse, one run resolves
+*two* roots: the native writer uses `get_profile_dir`, skill seeding uses
+`rolelib.PROFILES_DIR`, and they can disagree.
+`rolelib.assert_profile_root(expected)` checks **both**, and is what the flag
+calls; call it yourself before any new profile-writing entry point.
+
+A plain bootstrap passes no flag: nothing is applied, nothing is asserted, and
+the target stays the ambient home.
 
 ## Per-project orchestrators (`orchestrators.py`)
 
