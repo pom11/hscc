@@ -24,6 +24,13 @@ hscc.py orch <project|general> [--registry P] [--hermes-home DIR]
 hscc.py orch-all [--registry P] [--hermes-home DIR]
                             # ensure an orchestrator for EVERY registry
                             # project + the `general` catch-all (idempotent, bulk)
+hscc.py orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
+                  [--hermes-home DIR]
+                            # re-render every live <project>-orch SOUL + add the
+                            # shared orchestrator skill pack (never config)
+hscc.py reasoning-sync [--dry-run] [--json] [--hermes-home DIR]
+                            # set agent/delegation reasoning_effort in every
+                            # live profile from the applied template's policy
 hscc.py provision-check [--registry P] [--profile NAME] [--json]
                             # per-profile effective memory provider / char
                             # limit / compaction cap / summarization endpoint
@@ -31,11 +38,12 @@ hscc.py provision-check [--registry P] [--profile NAME] [--json]
 
 ## Targeting another hermes home (`--hermes-home`)
 
-The three profile-**writing** commands (`generate`, `orch`, `orch-all`) take
-`--hermes-home DIR`: the profiles root becomes `<DIR>/profiles`. It is an
-**assertion, not a hint** — the command points the process at `DIR`, then asks
-hermes' own resolver where it will actually write and refuses (exit **2**, stdout
-empty, nothing written) if the answer is not `<DIR>/profiles`.
+The five profile-**writing** commands (`generate`, `orch`, `orch-all`,
+`orch-sync`, `reasoning-sync`) take `--hermes-home DIR`: the profiles root
+becomes `<DIR>/profiles`. It is an **assertion, not a hint** — the command
+points the process at `DIR`, then asks hermes' own resolver where it will
+actually write and refuses (exit **2**, stdout empty, nothing written) if the
+answer is not `<DIR>/profiles`.
 
 Do not substitute `HERMES_HOME` for the flag. Hermes resolves a `HERMES_HOME`
 that lives *under* `~/.hermes` back to the **live** root
@@ -49,6 +57,23 @@ calls; call it yourself before any new profile-writing entry point.
 
 A plain bootstrap passes no flag: nothing is applied, nothing is asserted, and
 the target stays the ambient home.
+
+**What the flag moves, and what it does not.** A sync also *reads*, and a read
+that stays behind is the same incident wearing a different hat — a "sandboxed"
+run that copies the operator's real skill tree into a throwaway profile is still
+touching the operator's tree:
+
+| root | default | moved by `--hermes-home DIR`? |
+|---|---|---|
+| profiles written | `<hermes-home>/profiles` | yes — that is the flag |
+| `orch-sync` shared skill pack (`--skills-source`) | `<hermes-home>/skills` | **yes** → `DIR/skills`; an explicit `--skills-source` always wins |
+| `reasoning-sync` policy (`$HSCC_REASONING_POLICY`) | `~/.hscc/state/reasoning_policy.json` | **no** — cluster-global config, deliberately outside the hermes home |
+
+So a sandboxed `orch-sync` reads `DIR/skills` and needs the pack to be there; if
+it is not, every skill is reported under `skills_missing_source` rather than
+quietly borrowed from the operator. The policy file is the one input a sandboxed
+`reasoning-sync` still shares with the operator: point
+`HSCC_REASONING_POLICY` at a temp file to isolate it too.
 
 ## Per-project orchestrators (`orchestrators.py`)
 
