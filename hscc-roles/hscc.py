@@ -3,15 +3,27 @@
 
 Usage: hscc-roles <command> [args]
 
+Every profile-WRITING command takes ``--hermes-home DIR`` to name the home it
+must write. That flag is an ASSERTION, not a hint: it points the process at DIR
+and then verifies hermes' own resolver agrees, refusing (exit 2, nothing written)
+when it does not. Setting ``HERMES_HOME`` yourself is not enough — hermes returns
+the LIVE root for any HERMES_HOME that resolves under ``~/.hermes``
+(hermes_constants._hermes_root_of), so a throwaway home inside the live tree
+(which is where Hermes scratch dirs live) silently writes the operator's tree.
+Tests and CI use the flag; they never have to relocate HOME to be safe.
+
 Commands:
-  generate                 Build/refresh all role profiles from roles/*.yaml
+  generate [--hermes-home DIR]
+                           Build/refresh all role profiles from roles/*.yaml
   create <name> <desc...>  Author a new role spec from a description
   list                     List role specs and whether their profile exists
   validate                 Validate every role spec (load + required fields)
   autonomy [on|off]        Show or set the fleet autonomy flag
-  orch <project|general>   Ensure a project's orchestrator profile exists
+  orch <project|general> [--registry P] [--hermes-home DIR]
+                           Ensure a project's orchestrator profile exists
                            (idempotent) and print its resolved identity
-  orch-all [--registry P]  Ensure an orchestrator for EVERY registry project
+  orch-all [--registry P] [--hermes-home DIR]
+                           Ensure an orchestrator for EVERY registry project
                            plus the `general` catch-all (idempotent, bulk)
   orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
                            Bring every live <project>-orch profile in line with
@@ -58,7 +70,84 @@ def _usage(msg: str):
     make_console(file=sys.stderr).print(f"[error]{escape(msg)}[/error]")
 
 
-def cmd_generate():
+# ── --hermes-home: the supported way to point a write at another home ────────
+#
+# Until now the only lever a harness had was the environment, and the
+# environment lies: hermes' resolver returns the LIVE root for any HERMES_HOME
+# that resolves *under* ``~/.hermes`` (hermes_constants._hermes_root_of), so a
+# throwaway home placed in a Hermes scratch dir — which is where every Hermes
+# scratch dir lives — wrote the operator's ``~/.hermes/profiles`` and exited 0
+# (t_10ccaf80). The flag is an explicit INTENT: it applies the home, then proves
+# the writers actually resolve to it before touching anything. A bootstrap that
+# passes no flag runs none of this and still targets the real home.
+#
+# Exit code 2 means "refused before any write" — distinct from 1 (a per-item
+# failure after writes began), so a caller can tell "nothing happened" from
+# "something partially happened".
+HOME_FLAG = "--hermes-home"
+EXIT_WRONG_TARGET = 2
+
+
+def _pop_option(rest, name):
+    """Remove ``--name VALUE`` from *rest* in place. Returns (value, missing_value)."""
+    if name not in rest:
+        return None, False
+    i = rest.index(name)
+    if i + 1 >= len(rest):
+        return None, True
+    value = rest[i + 1]
+    del rest[i:i + 2]
+    return value, False
+
+
+def _pin_profile_root(raw_home, cmd):
+    """Apply ``--hermes-home`` and verify the writers honour it, before any write.
+
+    Returns the profiles dir this run will write. Raises
+    :class:`rolelib.ProfileRootMismatch` when the requested home is not what the
+    writer resolves — the caller must stop with nothing written.
+    """
+    requested = os.path.realpath(os.path.expanduser(raw_home))
+    rolelib.apply_hermes_home(requested)
+    expected = os.path.join(requested, "profiles")
+    rolelib.assert_profile_root(expected, purpose=f"{cmd} {HOME_FLAG}")
+    return expected
+
+
+def _take_home_flag(argv, cmd):
+    """Parse + honour ``--hermes-home`` for a profile-writing command.
+
+    Returns ``(profiles_dir, rest, error_code)``. ``profiles_dir`` is None when
+    no home was requested (the shipped bootstrap path — nothing is applied and
+    nothing is asserted). On a divergence it reports the mismatch to stderr and
+    returns ``EXIT_WRONG_TARGET`` so stdout stays free of a partial report.
+    """
+    rest = list(argv)
+    home, missing = _pop_option(rest, HOME_FLAG)
+    if missing:
+        _usage(f"Usage: hscc.py {cmd} [{HOME_FLAG} DIR]")
+        return None, rest, 1
+    if not home:
+        return None, rest, None
+    try:
+        target = _pin_profile_root(home, cmd)
+    except rolelib.ProfileRootMismatch as e:
+        _usage(str(e))
+        return None, rest, EXIT_WRONG_TARGET
+    # stderr: stdout on these commands is machine-captured JSON.
+    make_console(file=sys.stderr).print(
+        f"[dim]profile-root intent honoured: writing {escape(target)}[/dim]")
+    return target, rest, None
+
+
+def cmd_generate(argv=()):
+    """Refresh every role profile. ``--hermes-home DIR``: see HOME_FLAG."""
+    _target, rest, err = _take_home_flag(argv, "generate")
+    if err is not None:
+        return err
+    if rest:
+        _usage(f"Usage: hscc.py generate [{HOME_FLAG} DIR]")
+        return 1
     base = _base_identity()
     out = []
     failures = []
@@ -141,20 +230,19 @@ def cmd_autonomy(argv):
 def cmd_orch(argv):
     """Ensure + report a project's orchestrator profile (single project).
 
-    Usage: hscc.py orch <project|general> [--registry PATH]
+    Usage: hscc.py orch <project|general> [--registry PATH] [--hermes-home DIR]
     Idempotent — re-running never clobbers an existing profile's memory/sessions.
     """
-    registry = None
     rest = list(argv)
-    if "--registry" in rest:
-        i = rest.index("--registry")
-        if i + 1 >= len(rest):
-            _usage("Usage: hscc.py orch <project|general> [--registry PATH]")
-            return 1
-        registry = rest[i + 1]
-        del rest[i:i + 2]
+    _target, rest, err = _take_home_flag(rest, "orch")
+    if err is not None:
+        return err
+    registry, missing = _pop_option(rest, "--registry")
+    if missing:
+        _usage(f"Usage: hscc.py orch <project|general> [--registry PATH] [{HOME_FLAG} DIR]")
+        return 1
     if len(rest) != 1:
-        _usage("Usage: hscc.py orch <project|general> [--registry PATH]")
+        _usage(f"Usage: hscc.py orch <project|general> [--registry PATH] [{HOME_FLAG} DIR]")
         return 1
     project = rest[0] or None
     base = _base_identity()
@@ -173,7 +261,7 @@ def cmd_orch(argv):
 def cmd_orch_all(argv):
     """Ensure an orchestrator for EVERY registry project + the `general` catch-all.
 
-    Usage: hscc.py orch-all [--registry PATH]
+    Usage: hscc.py orch-all [--registry PATH] [--hermes-home DIR]
 
     Idempotent — re-running never clobbers an existing profile's memory/sessions
     (``ensure_orchestrator`` guarantees this). One invocation covers the whole
@@ -186,15 +274,14 @@ def cmd_orch_all(argv):
     project never aborts the rest — every project is attempted, failures are
     collected, and the exit code is non-zero iff at least one failed.
     """
-    registry = None
     rest = list(argv)
-    if "--registry" in rest:
-        i = rest.index("--registry")
-        if i + 1 >= len(rest):
-            _usage("Usage: hscc.py orch-all [--registry PATH]")
-            return 1
-        registry = rest[i + 1]
-        del rest[i:i + 2]
+    _target, rest, err = _take_home_flag(rest, "orch-all")
+    if err is not None:
+        return err
+    registry, missing = _pop_option(rest, "--registry")
+    if missing:
+        _usage(f"Usage: hscc.py orch-all [--registry PATH] [{HOME_FLAG} DIR]")
+        return 1
 
     base = _base_identity()
 
@@ -570,7 +657,7 @@ def main():
         return 0
     cmd = sys.argv[1]
     if cmd == "generate":
-        return cmd_generate()
+        return cmd_generate(sys.argv[2:])
     if cmd == "create":
         return cmd_create(sys.argv[2:])
     if cmd == "list":

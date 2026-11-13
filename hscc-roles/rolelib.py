@@ -73,6 +73,141 @@ def _hermes_root(home):
 HERMES_HOME = _hermes_root(os.environ.get("HERMES_HOME", "~/.hermes"))
 PROFILES_DIR = os.path.join(HERMES_HOME, "profiles")
 
+# ── profile-root INTENT: assert which hermes home a write is about to hit ───
+#
+# WHY THIS EXISTS (t_d39c720e). A bootstrap run that wanted a throwaway home set
+# ``HERMES_HOME`` and it did not take: the run wrote the operator's live
+# ``~/.hermes/profiles`` and reported success. The reason is a RULE, not an
+# import-time accident — ``hermes_constants._hermes_root_of`` returns the native
+# home whenever ``HERMES_HOME`` resolves *under* ``~/.hermes``, so a sandbox that
+# lives inside the live tree (which is where every Hermes scratch dir lives:
+# ``~/.hermes/profiles/<p>/cache/scratch/…``, ``~/.hermes/kanban/…``) silently
+# resolves back to the live root. Measured at 9422c740:
+#
+#   HERMES_HOME=<scratch under ~/.hermes/…>/.hermes  -> ~/.hermes/profiles  (LIVE)
+#   HERMES_HOME=/tmp/x/.hermes                       -> /tmp/x/profiles     (moved)
+#
+# The second reason it was silent: TWO roots are in play in one run and they can
+# disagree. ``generator.generate_profile`` writes config.yaml/SOUL.md through
+# hermes' own ``get_profile_dir`` (generator.py), while
+# ``orchestrators.ensure_orchestrator`` seeds skills under ``PROFILES_DIR`` here.
+# In the incident the second one followed the sandbox and the first one did not:
+# the checker saw a sandboxed run, the writer hit the operator's tree.
+#
+# So an intent must be ASSERTED, against the same resolver the writers use,
+# before anything is written — never merely computed. Callers that want a
+# non-default home use the ``--hermes-home`` flag on the profile-writing
+# commands (hscc.py), which applies it and then calls
+# :func:`assert_profile_root`. A plain bootstrap passes no flag and changes
+# nothing: this code is inert unless an explicit root was requested.
+
+# A valid profile id (hermes_constants.PROFILE_ID_RE) that is not a real profile
+# on any machine we run on. ``get_profile_dir`` is pure path arithmetic — it does
+# not create or stat anything — so probing it costs nothing and writes nothing.
+_PROFILE_ROOT_PROBE = "hscc-root-probe"
+
+
+class ProfileRootMismatch(RuntimeError):
+    """The profiles root the writers resolve is NOT the root the caller asked for.
+
+    Raised by :func:`assert_profile_root` before any write. Nothing has been
+    touched when this fires — that is the whole point of the pre-flight.
+    """
+
+
+def _canonical(path):
+    """Realpath of an expanded path, for comparing two path *identities*."""
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def native_profiles_dir():
+    """The profiles root HERMES' own resolver hands the writer, or ``None``.
+
+    This is the value that decides where ``generate_profile`` actually writes, so
+    it is the only thing worth trusting: ``PROFILES_DIR`` can (and in the
+    incident did) disagree with it. ``None`` when hermes is not importable — the
+    thin-interpreter case, where :data:`PROFILES_DIR` *is* the writer's root.
+    """
+    try:
+        from hermes_cli.profiles import get_profile_dir
+    except Exception:      # noqa: BLE001 - thin interpreter / broken install
+        return None
+    try:
+        return os.path.dirname(os.path.normpath(str(get_profile_dir(_PROFILE_ROOT_PROBE))))
+    except Exception:      # noqa: BLE001 - a resolver that cannot answer is a mismatch
+        return None
+
+
+def writer_profiles_dir():
+    """THE profiles root a profile write will land in.
+
+    Hermes' answer when hermes is importable (that is what the native writer
+    uses), else :data:`PROFILES_DIR` (the fallback writer's answer).
+    """
+    native = native_profiles_dir()
+    return native if native is not None else PROFILES_DIR
+
+
+def apply_hermes_home(root):
+    """Point THIS process — hscc's paths and hermes' resolver alike — at *root*.
+
+    The only documented way to target a non-default home for tooling and tests.
+    Sets ``HERMES_HOME`` (which hermes' resolver does honour, for a root outside
+    the native one) and re-derives :data:`HERMES_HOME` / :data:`PROFILES_DIR`
+    from it, so the native writer and the fallback writer and every read path
+    agree. Never call this from a real bootstrap: with no argument nothing here
+    runs, and the shipped behaviour (write the real home) stays what it is.
+
+    Returns the resolved hermes root. Does NOT verify anything — that is
+    :func:`assert_profile_root`, and it must be called after this.
+    """
+    global HERMES_HOME, PROFILES_DIR
+    expanded = os.path.realpath(os.path.expanduser(str(root)))
+    os.environ["HERMES_HOME"] = expanded
+    HERMES_HOME = _hermes_root(expanded) or expanded
+    PROFILES_DIR = os.path.join(HERMES_HOME, "profiles")
+    return HERMES_HOME
+
+
+def assert_profile_root(expected, purpose=""):
+    """Fail loudly unless EVERY root the writers resolve *is* ``expected``.
+
+    ``expected`` is the profiles dir the caller intends to be written (the dir
+    that will contain ``<profile>/config.yaml``). Both roots in play are checked
+    against it — hermes' ``get_profile_dir`` (what the native writer uses) and
+    this module's :data:`PROFILES_DIR` (what the fallback writer and the skill
+    seeding use) — because a run that pins one and not the other is exactly how
+    the t_10ccaf80 incident reported success while writing the live tree.
+
+    Returns the canonical :func:`writer_profiles_dir` on success. Raises
+    :class:`ProfileRootMismatch` naming every divergent root, the intent, and the
+    env that produced it. Callers must treat that as a hard stop: no write has
+    happened yet.
+    """
+    want = _canonical(expected)
+    native = native_profiles_dir()
+    divergent = []
+    if native is not None and _canonical(native) != want:
+        divergent.append(("hermes get_profile_dir", native))
+    if _canonical(PROFILES_DIR) != want:
+        divergent.append(("rolelib.PROFILES_DIR", PROFILES_DIR))
+    if divergent:
+        env = ", ".join(f"{k}={os.environ.get(k)!r}"
+                        for k in ("HOME", "HERMES_HOME", "HERMES_REAL_HOME"))
+        lines = [f"refusing to write: profile-root intent not honoured"
+                 f"{' (' + purpose + ')' if purpose else ''}.",
+                 f"  requested profiles root: {expected}",
+                 f"  env: {env}"]
+        for name, got in divergent:
+            lines.append(f"  DIVERGENT {name} -> {got}")
+        lines.append(
+            "  A requested home that lives INSIDE the live hermes root resolves "
+            "back to that live root (hermes_constants._hermes_root_of): the write "
+            "would land in the operator's tree. Use a home outside it.")
+        raise ProfileRootMismatch("\n".join(lines))
+    return writer_profiles_dir()
+
+
 # Full Hermes capability MINUS cluster control. Cluster ops (hscc-cluster) stay
 # orchestrator-only — no worker role may change cluster shape. This is the single
 # capability boundary in the role system; everything else is uniform.
