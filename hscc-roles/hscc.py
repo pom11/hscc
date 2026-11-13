@@ -26,16 +26,25 @@ Commands:
                            Ensure an orchestrator for EVERY registry project
                            plus the `general` catch-all (idempotent, bulk)
   orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
+            [--hermes-home DIR]
                            Bring every live <project>-orch profile in line with
                            the template: re-render SOUL base + Operational /
                            work rules (project Role section kept), add missing
                            standard orchestrator skills. Never touches config,
                            memory, sessions or project skills.
-  reasoning-sync [--dry-run] [--json]
+                           --skills-source is where the shared skill pack is
+                           READ from; it defaults to <hermes-home>/skills, so
+                           --hermes-home DIR moves it to DIR/skills (an
+                           explicit --skills-source always wins).
+  reasoning-sync [--dry-run] [--json] [--hermes-home DIR]
                            Set agent/delegation reasoning_effort in every live
                            profile from the applied template's reasoning policy
                            (tiers: max / standard / light). Run by
                            `hscc template apply`; only those two keys change.
+                           The policy itself is read from
+                           $HSCC_REASONING_POLICY (~/.hscc/state/… by
+                           default): cluster-global config, NOT under the
+                           hermes home, so --hermes-home does not move it.
   provision-check         Report each profile's EFFECTIVE memory provider /
                            char limit / compaction cap / summarization endpoint
                            (provisioning verifier, read-only)
@@ -579,10 +588,31 @@ def cmd_provision_check(argv):
 
 
 def cmd_orch_sync(argv):
-    """`orch-sync`: see orch_sync.py. --dry-run reports without writing."""
+    """`orch-sync`: see orch_sync.py. --dry-run reports without writing.
+
+    Usage: hscc.py orch-sync [--dry-run] [--only A,B] [--skills-source DIR]
+                             [--json] [--hermes-home DIR]
+
+    ``--hermes-home DIR`` (see HOME_FLAG) names the home whose ``profiles/`` this
+    syncs: an assertion, refused with exit 2 and nothing written when hermes'
+    resolver disagrees.
+
+    ``--skills-source DIR`` is where the shared orchestrator skill pack is READ
+    from. It defaults to ``<hermes-home>/skills`` — so a plain run reads the
+    operator's own ``~/.hermes/skills``, and ``--hermes-home DIR`` moves the
+    default to ``DIR/skills`` instead of quietly reading the operator's skill
+    tree into a sandbox. An explicit ``--skills-source`` always wins.
+    """
     rest = list(argv)
-    opts = {"dry": False, "only": None, "json": False,
-            "source": os.path.join(rolelib.HERMES_HOME, "skills")}
+    # BEFORE the option loop: the --skills-source default below is derived from
+    # rolelib.HERMES_HOME, which apply_hermes_home re-derives. Parsing the flag
+    # afterwards would let a sandboxed sync read the operator's skill tree.
+    _target, rest, err = _take_home_flag(rest, "orch-sync")
+    if err is not None:
+        return err
+    opts = {"dry": False, "only": None, "json": False, "source": None}
+    usage = ("Usage: hscc.py orch-sync [--dry-run] [--only A,B] "
+             f"[--skills-source DIR] [--json] [{HOME_FLAG} DIR]")
     while rest:
         a = rest.pop(0)
         if a == "--dry-run":
@@ -596,9 +626,12 @@ def cmd_orch_sync(argv):
             else:
                 opts["source"] = os.path.expanduser(v)
         else:
-            _usage("Usage: hscc.py orch-sync [--dry-run] [--only A,B] "
-                   "[--skills-source DIR] [--json]")
+            _usage(usage)
             return 1
+    if opts["source"] is None:
+        # The read root follows the write root (documented above) rather than
+        # always resolving to the operator's home.
+        opts["source"] = os.path.join(rolelib.HERMES_HOME, "skills")
     reports = orch_sync.sync_all(rolelib.PROFILES_DIR, _base_identity(), opts["source"],
                                  only=opts["only"], dry_run=opts["dry"])
     if opts["json"]:
@@ -616,12 +649,28 @@ def cmd_orch_sync(argv):
 
 
 def cmd_reasoning_sync(argv):
-    """`reasoning-sync`: see reasoning_sync.py."""
-    dry = "--dry-run" in argv
-    as_json = "--json" in argv
-    unknown = [a for a in argv if a not in ("--dry-run", "--json")]
+    """`reasoning-sync`: see reasoning_sync.py.
+
+    Usage: hscc.py reasoning-sync [--dry-run] [--json] [--hermes-home DIR]
+
+    ``--hermes-home DIR`` (see HOME_FLAG) names the home whose ``profiles/`` get
+    the reasoning keys: an assertion, refused with exit 2 and empty stdout when
+    hermes' resolver disagrees — stdout on this command is machine-captured
+    JSON, so a refusal must not print a partial report.
+
+    The POLICY it applies is read from ``$HSCC_REASONING_POLICY``
+    (``~/.hscc/state/reasoning_policy.json`` by default) — cluster-global config
+    that lives outside the hermes home, so ``--hermes-home`` does NOT move it.
+    """
+    rest = list(argv)
+    _target, rest, err = _take_home_flag(rest, "reasoning-sync")
+    if err is not None:
+        return err
+    dry = "--dry-run" in rest
+    as_json = "--json" in rest
+    unknown = [a for a in rest if a not in ("--dry-run", "--json")]
     if unknown:
-        _usage("Usage: hscc.py reasoning-sync [--dry-run] [--json]")
+        _usage(f"Usage: hscc.py reasoning-sync [--dry-run] [--json] [{HOME_FLAG} DIR]")
         return 1
     policy = generator.load_reasoning_policy()
     reports = reasoning_sync.sync_all(rolelib.PROFILES_DIR, policy, dry_run=dry)
