@@ -42,6 +42,8 @@ import tempfile
 from pathlib import Path
 
 from api_server import ApiError, ROUTES
+# The profile-root gate (t_c443c001): the write choke point for _backing_update.
+import profile_root
 
 # Single resolver, shared with the Profile Library route: the profiles tree and
 # the GLOBAL skills dir both live under the Hermes ROOT, never under
@@ -175,6 +177,11 @@ def _backing_update(profile: str, data: dict) -> dict:
     ``preload_skills``, ``description``, ``compression`` (sub-keys
     ``threshold`` / ``threshold_tokens``).
     """
+    # t_c443c001: this writer resolves through the LADDER (routes_profile), which
+    # re-points at call time by design — the boot assert alone would not keep
+    # "nothing written" true if it drifted. The guard is the first statement, so
+    # a divergence means neither config.yaml nor profile.yaml was touched.
+    profile_root.guard_write()
     pdir = _resolve_profile_dir(profile)
     cfg_path = pdir / "config.yaml"
     meta_path = pdir / "profile.yaml"

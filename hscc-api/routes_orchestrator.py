@@ -104,6 +104,10 @@ import time
 from pathlib import Path
 
 from api_server import ApiError, ROUTES
+# The profile-root gate (t_c443c001). This module's write is INCIDENTAL to a chat
+# (D9), so it reads `divergence_message()` and skips rather than calling
+# `guard_write()` and failing the operator's turn.
+import profile_root
 
 # --------------------------------------------------------------------------- #
 # C1 resolver loading (same sys.path pattern as every other sibling plugin)
@@ -907,6 +911,20 @@ def _ensure_compaction_threshold(profile: str) -> dict:
     except Exception:
         return None
 
+    # t_c443c001 / D9 — the INCIDENTAL case. This write is not the request's
+    # purpose; it is a side-effect of a chat / session-guard turn, and this
+    # function is documented FAIL-SAFE ("never break a chat"). So a divergent
+    # profiles root is NOT a 503 here: the write is skipped, the divergence is
+    # logged at ERROR naming every root and the env, and the chat proceeds on
+    # the config the operator already has. Nothing is written either way — that
+    # is what makes both branches of D9 true.
+    _root_msg = profile_root.divergence_message()
+    if _root_msg is not None:
+        logging.getLogger("hscc-api").error(
+            "skipping compression.threshold_tokens on %s (chat proceeds on "
+            "existing config):\n%s", profile, _root_msg)
+        return None
+
     try:
         cur = {}
         if cfg_path.exists():
@@ -943,7 +961,7 @@ def _ensure_compaction_threshold(profile: str) -> dict:
         return None
 
 
-def _ensure_role_profiles() -> dict:
+def _ensure_role_profiles() -> "dict | None":
     """ENSURE ``compression.threshold_tokens`` on every ROLE profile (t_c03fd5ae).
 
     v1.14.0 shipped :func:`_ensure_compaction_threshold` covering only the
@@ -978,6 +996,19 @@ def _ensure_role_profiles() -> dict:
     """
     import logging
     _log = logging.getLogger("hscc-api")
+
+    # t_c443c001 / D9: the sweep is the same INCIDENTAL write as site 1, N times
+    # over. One divergence check up front means one ERROR line per chat turn
+    # instead of one per role profile, and the sweep exits fail-safe (returns
+    # None = "nothing ensured", which is what it already reports when the
+    # enumeration fails). Each per-profile guard stays in place as the choke
+    # point for every other caller of site 1.
+    _root_msg = profile_root.divergence_message()
+    if _root_msg is not None:
+        _log.error("skipping role-profile compaction-threshold sweep "
+                   "(nothing written):\n%s", _root_msg)
+        return None
+
     try:
         from hermes_cli import profiles as profiles_mod
     except Exception:

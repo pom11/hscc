@@ -46,6 +46,8 @@ from pathlib import Path
 
 from api_server import ApiError, ROUTES
 from routes_ops import _parse_body, _require_confirm
+# The profile-root gate (t_c443c001): choke point for _backing_ensure_orchestrator.
+import profile_root
 
 # --------------------------------------------------------------------------- #
 # Sibling-package loading (same sys.path pattern as routes_project/routes_orch)
@@ -206,6 +208,15 @@ def _backing_create_project(name, repo, registry_path, github, private):
 
 
 def _backing_ensure_orchestrator(name, registry_path, base_identity=""):
+    """Ensure the ``<name>-orch`` orchestrator profile (writes through
+    ``rolelib.PROFILES_DIR`` + hermes' ``get_profile_dir`` — the two roots the
+    t_d39c720e incident saw disagree).
+
+    The guard is the FIRST statement (t_c443c001): a divergent root here would
+    mint a whole ``<proj>-orch`` profile in the operator's tree and the endpoint
+    would report the step as OK.
+    """
+    profile_root.guard_write()
     from orchestrators import ensure_orchestrator
     return ensure_orchestrator(
         name, base_identity=base_identity, path=registry_path)
@@ -301,6 +312,15 @@ def handle_create(server, ctx, query, body):
             f"project {name!r} is already registered; choose a new name",
             f"Project {name!r} already exists.")
 
+    # t_c443c001 / D9: this request's PURPOSE is to create a project *and its
+    # orchestrator profile*, so a divergent profiles root is a refusal (503),
+    # not a failed step. It sits after auth (the dispatcher), the confirm gate
+    # and validation, and BEFORE the first mutation, so a mis-rooted server does
+    # not create the repo/board/registry rows and then refuse the profile — the
+    # whole request is refused and nothing at all is done. `_backing_ensure_
+    # orchestrator` keeps its own guard as the choke point for any other caller.
+    profile_root.guard_write()
+
     # 1. repo + board + registry (via flightdeck lifecycle).
     steps = []
     try:
@@ -323,6 +343,12 @@ def handle_create(server, ctx, query, body):
             orch_step["detail"] += " (created)"
         else:
             orch_step["detail"] += " (already existed)"
+    except ApiError:
+        # t_c443c001: a profile-root REFUSAL (503) is a refusal of the whole
+        # request, not a step that half-succeeded. Swallowing it here would
+        # answer 202 "created partially" — a mis-rooted server reporting a
+        # benign-looking partial instead of refusing.
+        raise
     except Exception as exc:
         orch_step["status"] = "failed"
         orch_step["detail"] = f"{name}-orch profile not ensured: {exc}"
