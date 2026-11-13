@@ -1354,3 +1354,429 @@ def test_onboarding_block_returns_none_when_there_is_nothing_to_write():
     assert generator._onboarding_block({}) is None
     assert generator._ONBOARDING_DEFAULTS == {}  # generator owns no onboarding state
 
+
+# ━━━ foreign keys survive the whole-file write (t_10ccaf80) ━━━━━━━━━━━━━━━━━
+#
+# Every merge above is PER BLOCK, so it only ever protected a key the generator
+# already names. `generate_profile` then wrote a dict it had built from scratch,
+# and any key outside that set was not in the file afterwards. Measured on the
+# operator's pre-2.15.10-bootstrap snapshot (49 profiles): `_config_version`
+# lost on 45, the whole `browser:` section lost on 25. A profile with no
+# `_config_version` makes Hermes run its silent config migration on next start,
+# so the loss was 45 unreviewed migrations, not cosmetics.
+#
+# These tests therefore assert on FOREIGN keys — keys HSCC has never heard of —
+# not on a whitelist of the two that got noticed, because the next foreign key
+# must not be lost the same way. All of them run against an isolated fake
+# profile root (tmp_path + monkeypatched HERMES_HOME / PROFILES_DIR), never
+# ~/.hermes/profiles, and none of them needs the network.
+
+#: A config payload holding every shape of foreign key the failure had: a
+#: foreign top-level scalar (`_config_version`), a foreign top-level SECTION
+#: (`browser`, the one that vanished whole), a foreign sub-key under a section
+#: the generator DOES emit (`browser`-shaped failures inside `auxiliary`,
+#: `memory`, `model`, `skills`), and a foreign tree nested four deep.
+_FOREIGN_KEYS = {
+    "_config_version": 52,
+    "browser": {"executable_path": "/Applications/Google Chrome.app/"
+                                         "Contents/MacOS/Google Chrome",
+                "headless": False},
+    "operator_nest": {"a": {"b": {"c": {"keep": "four deep"}}},
+                      "list": [{"x": 1}, {"y": [2, 3]}]},
+}
+
+#: Foreign sub-keys living INSIDE sections the generator emits and rewrites.
+_FOREIGN_SUBKEYS = {
+    "auxiliary": {"goal_judge": {"model": "operator-picked"}},
+    "memory": {"user_char_limit": 999},
+    "model": {"request_timeout": 90},
+    "skills": {"operator_flag": True},
+}
+
+
+def _read_raw(pdir):
+    with open(os.path.join(pdir, "config.yaml"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _write_raw(pdir, text):
+    with open(os.path.join(pdir, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _all_paths(node, prefix=()):
+    """Every dotted key path in a nested mapping, at every depth."""
+    out = set()
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = prefix + (str(k),)
+            out.add(".".join(p))
+            out |= _all_paths(v, p)
+    return out
+
+
+def _value_at(node, dotted):
+    cur = node
+    for part in dotted.split("."):
+        cur = cur[part]
+    return cur
+
+
+def _assert_survives(before, after, label=""):
+    """Every key path in *before* exists in *after* with an equal value.
+
+    Type-strict, because `True == 1` in Python and a `true` that round-trips as
+    `1` is a real change for every YAML reader downstream.
+    """
+    for path in _all_paths(before):
+        assert path in _all_paths(after), f"{label}lost key {path!r}"
+        want, got = _value_at(before, path), _value_at(after, path)
+        assert got == want and type(got) is type(want), (
+            f"{label}{path!r} changed value: {want!r} ({type(want).__name__}) "
+            f"-> {got!r} ({type(got).__name__})")
+
+
+def _regen(tmp_path, monkeypatch, spec):
+    """Re-run the generator over an existing profile; return (cfg, raw, changed)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR",
+                        str(tmp_path / "profiles"))
+    pdir = os.path.join(str(tmp_path / "profiles" / spec["name"]))
+    before = _read_raw(pdir)
+    changed = generator.generate_profile(spec, base_identity="BASE")
+    after = _read_raw(pdir)
+    return yaml.safe_load(after), after, changed, before
+
+
+def test_regen_preserves_foreign_top_level_keys_and_sections(tmp_path, monkeypatch):
+    """The card's headline case: a foreign top-level key and a foreign whole
+    section must survive a regeneration untouched."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    cur.update(_FOREIGN_KEYS)
+    _write_raw(pdir, yaml.safe_dump(cur, sort_keys=False))
+
+    cfg, _, _, _ = _regen(tmp_path, monkeypatch, spec)
+    assert cfg["_config_version"] == 52, "lost _config_version -> silent migration"
+    assert cfg["browser"] == _FOREIGN_KEYS["browser"], "lost the whole browser:"
+    assert cfg["operator_nest"] == _FOREIGN_KEYS["operator_nest"]
+    # and the generator still did its own job
+    assert cfg["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
+
+
+def test_regen_preserves_foreign_subkeys_under_generated_sections(
+        tmp_path, monkeypatch):
+    """The shape that actually failed: a section the generator DOES emit also
+    holds operator-owned content. `auxiliary:` carried the generator's
+    `compression:` AND the operator's own sub-key — the merge must recurse into
+    sections the generator owns instead of replacing them."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    for key, extra in _FOREIGN_SUBKEYS.items():
+        cur.setdefault(key, {})
+        cur[key].update(extra)
+    _write_raw(pdir, yaml.safe_dump(cur, sort_keys=False))
+
+    cfg, _, _, _ = _regen(tmp_path, monkeypatch, spec)
+    for key, extra in _FOREIGN_SUBKEYS.items():
+        for sub, want in extra.items():
+            got = cfg[key][sub]
+            assert got == want and type(got) is type(want), (
+                f"{key}.{sub} lost or altered: {want!r} -> {got!r}")
+    # the generator-owned siblings are still the generator's
+    assert cfg["auxiliary"]["compression"]["model"] == generator.COMPACT_MODEL
+    assert cfg["memory"]["memory_enabled"] is True
+
+
+def test_regen_preserves_every_foreign_path_byte_for_value(tmp_path, monkeypatch):
+    """Whole-tree assertion, not a named-key whitelist: walk the pre-regeneration
+    document and require every path — generator-owned or not — to come back with
+    the same value AND the same type. Falsy operator values (False / 0 / "" /
+    None) and bool-vs-int are the cases a `if not existing` merge gets wrong."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    seed = {
+        "_config_version": 52,
+        "browser": {"executable_path": "/Applications/Google Chrome.app/x",
+                    "headless": False, "timeout": 0},
+        "operator_falsy": {"zero": 0, "no": False, "empty": "", "null": None,
+                           "list": []},
+        "operator_types": {"int": 1, "bool": True, "float": 1.5,
+                           "unicode": "čeština — 日本語", "yes_str": "yes",
+                           "block": "line one\nline two\n",
+                           "nested": [{"k": [1, {"deep": True}]}]},
+    }
+    cur = yaml.safe_load(_read_raw(pdir))
+    before = dict(cur)
+    before.update(seed)
+    _write_raw(pdir, yaml.safe_dump(before, sort_keys=False, allow_unicode=True))
+
+    cfg, _, _, _ = _regen(tmp_path, monkeypatch, spec)
+    _assert_survives(before, cfg)
+
+
+def test_regen_keeps_the_operators_key_order(tmp_path, monkeypatch):
+    """Key ORDER belongs to the file, not to the generator: a regeneration that
+    reshuffles an organised config is a diff the operator never asked for. A key
+    the generator newly emits is appended, never inserted."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    ordered = {"browser": {"executable_path": "/x"}, "_config_version": 52}
+    # Operator puts their own keys FIRST, generator keys after them.
+    merged = dict(ordered)
+    merged.update(cur)
+    _write_raw(pdir, yaml.safe_dump(merged, sort_keys=False))
+
+    cfg, _, _, _ = _regen(tmp_path, monkeypatch, spec)
+    keys = list(cfg.keys())
+    assert keys[:2] == ["browser", "_config_version"], (
+        f"generator reordered the file: {keys}")
+    assert set(merged) <= set(keys), "a key left the document"
+
+
+def test_regen_is_a_byte_identical_no_op_on_a_real_generated_profile(
+        tmp_path, monkeypatch):
+    """Style must not churn either. The generator's writer used to re-indent
+    every block sequence hermes had written (`  - item` -> `- item`), so even a
+    regeneration with nothing to change rewrote the whole file: 1 of the
+    operator's 49 real configs came back byte-identical. Two runs in a row now
+    have to leave the bytes — and the mtime — alone."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    first = _read_raw(pdir)
+    assert "  - " in first, "expected the hermes-house indented sequence style"
+
+    cfg, second, changed, _ = _regen(tmp_path, monkeypatch, spec)
+    assert second == first, "a no-op regeneration restyled / rewrote the file"
+    assert changed is False
+    # "leaves the mtime alone" is a claim, so it is an assertion: the merge is
+    # skipped before the write, not written and then found identical.
+    before_ns = os.stat(os.path.join(pdir, "config.yaml")).st_mtime_ns
+    _regen(tmp_path, monkeypatch, spec)
+    assert os.stat(os.path.join(pdir, "config.yaml")).st_mtime_ns == before_ns, \
+        "a no-op regeneration rewrote the file"
+
+
+def test_regen_does_not_restyle_a_column_zero_config(tmp_path, monkeypatch):
+    """The other house style is equally the operator's: a file written with
+    column-0 sequences (`- item`) must come back with column-0 sequences.
+    Forced onto the fallback writer so this pins the sniffer, not ruamel."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    cur.update(_FOREIGN_KEYS)
+    _write_raw(pdir, yaml.safe_dump(cur, sort_keys=False))
+    monkeypatch.setattr(generator, "_hermes_atomic_config_write", lambda: None)
+
+    cfg, after, _, before = _regen(tmp_path, monkeypatch, spec)
+    # The style of the FIRST block sequence is what the sniffer decides, and a
+    # NESTED sequence is indented in both houses, so the assertion is on the
+    # style itself (a nested `- 2` under `y:` is not a restyle).
+    assert generator._sniff_sequence_indent(before) is False
+    assert generator._sniff_sequence_indent(after) is False, \
+        "fallback writer restyled a column-0 file"
+    assert after == before, "no-op regeneration still rewrote the file"
+    _assert_survives(cur, cfg, label="fallback writer: ")
+
+
+def test_fallback_writer_preserves_foreign_keys_without_hermes(tmp_path, monkeypatch):
+    """The key-preservation property must not DEPEND on hermes being importable:
+    the thin interpreter in scripts/run_tests.sh has no hermes and no ruamel, so
+    the local writer carries the same contract on the same merged payload."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    cur.update(_FOREIGN_KEYS)
+    for key, extra in _FOREIGN_SUBKEYS.items():
+        cur.setdefault(key, {}).update(extra)
+    _write_raw(pdir, yaml.safe_dump(cur, sort_keys=False))
+    monkeypatch.setattr(generator, "_hermes_atomic_config_write", lambda: None)
+
+    cfg, _, _, _ = _regen(tmp_path, monkeypatch, spec)
+    _assert_survives(cur, cfg, label="fallback writer: ")
+
+
+def _hermes_writer_available():
+    return generator._hermes_atomic_config_write() is not None
+
+
+@pytest.mark.skipif(not _hermes_writer_available(),
+                    reason="hermes' round-trip writer is not importable here")
+def test_operator_comments_survive_a_real_change(tmp_path, monkeypatch):
+    """Where hermes writes, its round-trip writer keeps what PyYAML cannot: the
+    operator's own comments. This is the reason the write is delegated instead
+    of hand-rolled, so it is pinned rather than assumed."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    text = _read_raw(pdir)
+    _write_raw(pdir, text.replace(
+        "toolsets:", "# my own note about this file\ntoolsets:", 1))
+    assert "# my own note" in _read_raw(pdir)
+
+    _, after, _, _ = _regen(tmp_path, monkeypatch, spec)
+    assert "# my own note about this file" in after, \
+        "the writer destroyed an operator comment"
+
+
+@pytest.mark.skipif(not _hermes_writer_available(),
+                    reason="hermes' round-trip writer is not importable here")
+def test_a_write_that_would_lose_keys_fails_loudly(tmp_path, monkeypatch):
+    """Fail CLOSED, and check the payload at the writer boundary.
+
+    Hermes' writer refuses a payload that drops a mapping path; swallowing that
+    refusal into the fallback writer would put the silent wipe back, so it has to
+    escape `generate_profile` and leave the file alone. The same probe also
+    asserts what the writer is actually handed: the merged document, foreign keys
+    included — that is the fix, seen at the seam rather than through the file.
+    """
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    cur = yaml.safe_load(_read_raw(pdir))
+    cur.update(_FOREIGN_KEYS)
+    # Something the generator MUST change, or the write is skipped as a no-op
+    # (see test_no_op_regeneration_never_reaches_the_writer) and there is no
+    # payload left to inspect.
+    cur["compression"] = {"threshold": 0.01, "threshold_tokens": 5}
+    _write_raw(pdir, yaml.safe_dump(cur, sort_keys=False))
+    before = _read_raw(pdir)
+
+    captured = {}
+
+    def _refusing_writer(path, data):
+        # Stands in for hermes_cli.config.atomic_config_write's refusal.
+        captured["data"] = data
+        raise ValueError("omitted config paths: browser, _config_version")
+
+    monkeypatch.setattr(generator, "_hermes_atomic_config_write",
+                        lambda: _refusing_writer)
+    with pytest.raises(ValueError):
+        generator.generate_profile(spec, base_identity="BASE")
+    assert _read_raw(pdir) == before, "the file was replaced despite the refusal"
+    payload = captured["data"]
+    assert payload["browser"] == _FOREIGN_KEYS["browser"]
+    assert payload["_config_version"] == 52
+    assert payload["operator_nest"] == _FOREIGN_KEYS["operator_nest"]
+    # ...while the generator still owns the value it came to change.
+    assert payload["compression"]["threshold"] == generator.COMPACT_THRESHOLD
+    assert payload["compression"]["threshold_tokens"] == 5  # operator's lower cap
+
+
+@pytest.mark.skipif(not _hermes_writer_available(),
+                    reason="hermes' round-trip writer is not importable here")
+def test_no_op_regeneration_never_reaches_the_writer(tmp_path, monkeypatch):
+    """Nothing to change = no write at all, so nothing can be lost even in
+    principle. Measured here rather than assumed, because a writer that is only
+    reached on a real change is exactly what makes the fail-closed refusal safe
+    to leave un-caught."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    calls = []
+    monkeypatch.setattr(generator, "_hermes_atomic_config_write",
+                        lambda: (lambda path, data: calls.append(path)))
+    _regen(tmp_path, monkeypatch, spec)
+    assert calls == [], "a no-op regeneration went to the writer anyway"
+
+
+def test_unparseable_config_is_not_silently_replaced(tmp_path, monkeypatch):
+    """A corrupt config.yaml is recoverable operator data. The per-block readers
+    all yield None for it (so the generator would rebuild from defaults), and the
+    old hand-written dump happily overwrote the file. The delegated writer reads
+    it first and refuses, so the operator keeps what they had."""
+    if not _hermes_writer_available():
+        pytest.skip("the refusal lives in hermes' writer")
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    corrupt = "toolsets: [hermes-cli\n  broken: : :\n\t- tabbed\n"
+    _write_raw(pdir, corrupt)
+
+    with pytest.raises(Exception):
+        generator.generate_profile(spec, base_identity="BASE")
+    assert _read_raw(pdir) == corrupt, "a corrupt config was silently overwritten"
+
+
+# -- merge_preserving: the unit behind the write path --
+
+def test_merge_preserving_existing_owns_order_and_foreign_keys():
+    out = generator.merge_preserving(
+        {"z": 1, "shared": {"keep": "me"}, "a": 2},
+        {"a": 3, "shared": {"new": "yours"}, "b": 4})
+    assert list(out) == ["z", "shared", "a", "b"], "existing order, new keys appended"
+    assert out["z"] == 1 and out["shared"]["keep"] == "me"
+    assert out["a"] == 3 and out["shared"]["new"] == "yours"
+
+
+def test_merge_preserving_recurses_to_any_depth_and_replaces_leaves():
+    existing = {"deep": {"l1": {"l2": {"l3": {"mine": True, "theirs": "old"}}}}}
+    out = generator.merge_preserving(
+        existing, {"deep": {"l1": {"l2": {"l3": {"theirs": "new"}}},
+                            "other": 1}})
+    assert out["deep"]["l1"]["l2"]["l3"] == {"mine": True, "theirs": "new"}
+    # a list or scalar from the generator replaces: the block builders already
+    # merged the existing value into their own output, see the docstring.
+    out2 = generator.merge_preserving({"toolsets": ["a", "operator-added"]},
+                                      {"toolsets": ["a", "operator-added", "b"]})
+    assert out2["toolsets"] == ["a", "operator-added", "b"]
+
+
+def test_merge_preserving_never_mutates_or_aliases_either_side():
+    """Same contract as _compression_block / _memory_block / _onboarding_block:
+    the dict read off disk must stay a read-only snapshot."""
+    existing = {"browser": {"executable_path": "/x"}, "n": {"deep": [1, 2]}}
+    generated = {"memory": {"provider": "memori_byodb"}}
+    snapshot = copy.deepcopy(existing)
+    out = generator.merge_preserving(existing, generated)
+    assert existing == snapshot and generated == {"memory": {"provider": "memori_byodb"}}
+    assert out is not existing
+    assert out["browser"] is not existing["browser"]
+    assert out["n"]["deep"] is not existing["n"]["deep"]
+    out["browser"]["executable_path"] = "/mutated"
+    out["n"]["deep"].append(3)
+    assert existing == snapshot, "caller's dict was written through"
+
+
+def test_merge_preserving_tolerates_no_existing_document():
+    """A fresh profile has nothing to preserve: the generated payload comes back
+    as-is, so a brand-new profile is unchanged by this fix."""
+    gen = {"toolsets": ["a"], "model": {"default": "m"}}
+    assert generator.merge_preserving(None, gen) == gen
+    assert generator.merge_preserving({}, gen) == gen
+    assert generator.merge_preserving({"x": 1}, None) == {"x": 1}
+
+
+def test_sniff_sequence_indent_ignores_block_scalars_and_inline_values():
+    """The sniffer decides the fallback writer's style; prose inside a block
+    scalar that happens to start with `- ` must not decide it, and a key with an
+    inline value must not either."""
+    assert generator._sniff_sequence_indent("a:\n  - one\n") is True
+    assert generator._sniff_sequence_indent("a:\n- one\n") is False
+    assert generator._sniff_sequence_indent(
+        "note: |\n  - not a sequence\na:\n- one\n") is False
+    assert generator._sniff_sequence_indent("a: 1\nb: 2\n") is True  # default
+    assert generator._sniff_sequence_indent(None) is True
+
+
