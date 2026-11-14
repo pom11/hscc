@@ -11,6 +11,273 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.11] - 2026-11-14
+
+### Added
+- **`orch-sync` and `reasoning-sync` now take `--hermes-home DIR`, like the
+  three commands `t_d39c720e` covered.** Both resolved `rolelib.PROFILES_DIR`
+  and wrote into it — `orch_sync.sync_all` rewrites `SOUL.md` (plus a
+  `SOUL.md.bak-<stamp>`) and copies skill dirs into every live `<project>-orch`
+  profile, `reasoning_sync.sync_all` rewrites the `agent`/`delegation`
+  `reasoning_effort` keys of every profile `config.yaml` — with no intent check
+  at all. They now share the single parse+apply helper `_take_home_flag`: apply
+  the home, then `rolelib.assert_profile_root(<DIR>/profiles, purpose="<cmd>
+  --hermes-home")` before the first write, refusal = exit **2** with stdout left
+  empty (stdout on both is machine-captured JSON, so a refused run must not
+  print a partial report). No flag still means no apply and no assert: what a
+  real `hscc template apply` targets is unchanged.
+- **`hscc-api` now asserts which profiles root it may write, and
+  `HSCC_API_PROFILES_ROOT` is the only way to name one.** The env var holds the
+  PROFILES DIR (`<hermes-home>/profiles`, the directory that directly contains
+  `<profile>/config.yaml`) — the same contract as
+  `rolelib.assert_profile_root(expected)` from PR #301, so a CLI refusal and an
+  API refusal are configured and worded alike. It is read ONCE in
+  `create_server()` and carried on `ApiContext.profile_root_intent`; handlers
+  never re-read the environment, because a long-lived multithreaded server that
+  re-resolved intent per request would be reading a value that can change
+  underneath a running turn. There is deliberately no flag for it — not on an
+  HTTP route, not on `serve`'s argv, not on `hscc api start` — because `serve`'s
+  argv is baked into a generated launchd unit and a flag there would be a second,
+  less visible channel for the same statement. Unset, empty or whitespace means
+  today's behaviour, unchanged, so a `VAR=` in a plist cannot brick the server;
+  the generated unit gains neither this var nor `HERMES_HOME` (a hand-added key is
+  honoured). Guarding a resolver instead was ruled out as unimplementable:
+  `HERMES_HOME=<root>/profiles/<name>` resolving back to the native home is *the
+  mechanism hermes profile mode runs on*, so the same bytes mean "throwaway
+  sandbox" and "this hermes runs under a profile" and only the caller knows which
+  — which is why the knowledge has to arrive from outside the process.
+- **`hscc-roles` now asserts which hermes home it is about to write, and
+  `--hermes-home DIR` is the supported way to name one.** The three
+  profile-writing commands (`generate`, `orch`, `orch-all`) take the flag,
+  point the process at the requested root, then ask hermes' own resolver where
+  the write will actually land and refuse — exit 2, stdout empty, nothing
+  written — unless the answer is exactly `<DIR>/profiles`. The guard is
+  `rolelib.assert_profile_root(expected)`, which resolves the roots the same way
+  the writers do and checks BOTH of them: hermes' `get_profile_dir` (what
+  `generate_profile` writes config.yaml/SOUL.md through) and
+  `rolelib.PROFILES_DIR` (what the fallback writer and orchestrator skill
+  seeding use). A plain bootstrap passes no flag, so nothing is applied and
+  nothing is asserted: what an operator bootstrap targets is unchanged.
+
+### Changed
+- **`hscc cards monitor` shows whole text by default; `a` toggles the short
+  preview.** Since 2.15.10 every thought was cut at 320 chars with a `…+N more`
+  marker, tool arguments at 110 and user turns at 120, and only the cut line was
+  stored, so no key could bring the text back. Each stored transcript entry now
+  keeps both the whole and the short line (both built once when the row is
+  read); the default view prints the whole one, `a` switches all/short live for
+  text already on screen, and the new `--short` flag starts in the old preview
+  mode for `--live` and the one-shot snapshot. The panel title clip, `READY_ROWS`
+  / `+N more waiting`, `MAX_LINES`, the tools-only view and the whitespace
+  collapse of a thought are unchanged. `wrap_tail` already walks from the last
+  line backwards and stops once the panel height is filled, so no per-tick wrap
+  of the stored buffer was added.
+
+### Fixed
+- **`hscc bootstrap` deleted every profile-config key it did not own.**
+  `generate_profile()` built `config.yaml` as a dict from scratch and wrote
+  that dict, so any key outside its own set vanished — the per-block
+  "operator values survive" merges (`_compression_block`, `_memory_block`,
+  `_merge_toolsets`, `_onboarding_block`) only ever protected the blocks the
+  generator already knew about. Measured against the operator snapshot
+  `pre-2.15.10-bootstrap-20261113-1328` (49 profiles): `_config_version`
+  disappeared from 45 of them and the whole `browser:` section (not a nested
+  leaf — the top-level key) from 25. Losing `_config_version` is not cosmetic:
+  Hermes then runs its silent config migration on that profile's next start,
+  so 45 profiles took an unreviewed migration none of them asked for.
+  `generate_profile()` now merges its generated blocks over the file's
+  COMPLETE existing mapping (existing wins key order and every key the
+  generator does not emit; the generator wins only the values it computes) and
+  writes through Hermes' own `atomic_config_write()`, which keeps comments,
+  key order and quoting and refuses a write that would drop a mapping path —
+  so this class of loss fails loudly instead of deleting operator state.
+- **A "sandboxed" `orch-sync` could no longer copy the operator's real skill
+  tree into a throwaway profile.** `--skills-source` defaulted to
+  `<hermes-home>/skills`, but the default was computed *before* the options were
+  parsed — so it always resolved to the ambient `~/.hermes/skills` even when a
+  different home was requested, and a run that believed it was sandboxed read
+  the operator's skill tree. The read root now follows the write root:
+  `--hermes-home DIR` makes the default `DIR/skills`, and a missing pack there
+  is reported under `skills_missing_source` rather than silently borrowed. An
+  explicit `--skills-source` still wins, and the one root the flag deliberately
+  does **not** move — the reasoning policy, read from `$HSCC_REASONING_POLICY`
+  (`~/.hscc/state/reasoning_policy.json`, cluster-global config outside the
+  hermes home) — is now stated in the help, the command docstrings and the
+  README instead of being something a caller had to know.
+- **Generated orchestrator text claimed the merge unconditionally.** Rule 5 of
+  the "How you manage work" block every `<project>-orch` SOUL is built from
+  read "**You review and merge your board's PRs.**". That is true only where no
+  card says otherwise: on a finish rail where the worker merges its own PR into
+  the integration branch once its gate is green and review happens once, on the
+  branch, the sentence tells the orchestrator to redo work the worker already
+  did — duplicated review, a second merge attempt, or a wait for a merge that
+  never arrives. Rule 5 now separates review from merging, names the card body's
+  `HANDOFF` section as the authority for who merges, keeps "you review and merge
+  your board's PRs" as the stated default for a silent card, and says that a
+  card naming a worker-side or branch-level owner overrides that default
+  explicitly. No project or board name appears in the text, so it reads the same
+  on every board; the default is unchanged.
+- **A mis-rooted API server can no longer write — or delete — an operator
+  profile and report success.** `hscc-api` reached profile files through three
+  resolvers in one process (hermes `get_profile_dir`, the deliberately call-time
+  ladder `routes_profile._hermes_profiles_dir`, and `rolelib.PROFILES_DIR`) and
+  cross-checked none of them, while `hermes_constants._hermes_root_of` returns
+  the NATIVE home for any `HERMES_HOME` that resolves *under* `~/.hermes`. Eight
+  mutating sites were affected, not the two the hazard report named:
+  `routes_profiles.py` create / **delete** / rename / describe-set, the profile
+  editor's `config.yaml` + `profile.yaml` merge, `routes_bootstrap`'s
+  `ensure_orchestrator` (which mints a whole `<proj>-orch` profile through
+  `rolelib.PROFILES_DIR`), and the compaction-threshold ensure in
+  `routes_orchestrator` — one per profile in the role sweep. The destructive one
+  is delete: `delete_profile(name, yes=True)` removes a profile directory and the
+  endpoint answered 200. Now `profile_root.py` gates it twice with one
+  implementation: `assert_boot_intent()` runs before `resolve_config`,
+  `load_token` and bind, so a mis-rooted server never serves at all and exits
+  **2** on both entry paths (`python -m api_server serve` and the daemon's
+  `hscc api start`) — a distinct code from the **1** a busy port or an unreadable
+  token produces, so an operator can tell a misconfigured root from a transport
+  problem — and `guard_write()` is the FIRST statement of every mutating backing,
+  because the ladder re-points at call time by design and the boot assert alone
+  would not keep "nothing written" true under that drift. A divergent write
+  answers 503 `profile_root_mismatch` with the requested root, the
+  `HOME`/`HERMES_HOME`/`HERMES_REAL_HOME` triple and every divergent root named,
+  in the same order the CLI refusal uses. Two deliberate non-503s: the
+  compaction-threshold ensure is *incidental* to a chat or session-guard turn and
+  documented fail-safe ("never break a chat"), so there the write is skipped and
+  the divergence logged at ERROR while the request proceeds — turning a
+  server-config state into a failed operator chat would be the worse bug — and the
+  role-profile sweep checks once up front so a divergence costs one log line, not
+  one per profile. Reads are left unguarded: a wrong-root read degrades to an
+  honest empty list, it cannot corrupt a tree. Every boot now also prints
+  `hscc-api: profiles root <realpath> (intent: none|<path>)`, which is what a
+  wrong-root symptom gets diagnosed against.
+- **A silently-ignored sandbox no longer reports success.** Setting
+  `HERMES_HOME` was the only lever a harness had for a throwaway home, and it
+  half-works: `hermes_constants._hermes_root_of` returns the NATIVE home for any
+  `HERMES_HOME` that resolves *under* `~/.hermes`, so a throwaway home placed in
+  a Hermes scratch dir — where Hermes scratch dirs live — resolves straight back
+  to the live tree. Measured at `9422c740`, same probe, placement the only
+  variable: `HERMES_HOME=<scratch under ~/.hermes/…>/.hermes` resolved
+  `get_profile_dir("architect")` to the live `~/.hermes/profiles/architect`,
+  while `HERMES_HOME=/tmp/<x>/.hermes` redirected correctly to
+  `/tmp/<x>/.hermes/profiles/architect`. In the same first case
+  `rolelib.PROFILES_DIR` *did* follow the throwaway — the two roots one run
+  resolves can disagree, which is why a checker that reads only one of them saw
+  a sandboxed run while the writer (per `changelog.d/t_10ccaf80.md`) wrote the
+  operator's tree. Tests and CI now have a documented way to target another home
+  and no longer have to relocate `HOME` to be safe.
+
+### Verified
+- `hscc-roles/tests/test_generator.py`: 219 -> **235** cases at `19f92670`,
+  green on the canonical interpreter with the board pins stripped. The new
+  cases drive the real `generate_profile` and assert on FOREIGN keys rather
+  than the two that got noticed, plus the fail-closed refusal and the payload
+  handed to the writer.
+- Acceptance ran against a COPY of the operator's own snapshot, never the live
+  tree: bootstrap's two profile steps (`hscc.py generate` + `orch-all`)
+  replayed into a throwaway home seeded from
+  `pre-2.15.10-bootstrap-20261113-1328`, carrying that run's `serving.json`,
+  reasoning policy and project registry so no difference can be an input
+  artifact. 49 profiles compared, **0** `config.yaml` differences. The same
+  harness at `7e546339` reports **45** differences, losing exactly
+  `_config_version` and `browser` — the incident itself reproduced, so the
+  zero is measured against a harness with teeth. Of the 49, 45 are inside
+  bootstrap's generation set; `ecofire-flows-executor`, `flightdeck-orch`,
+  `pontaje-orch` and `probe` are outside it and are left alone by both runs.
+- `hscc-roles/tests/test_sync_profile_root.py`: 15 cases, same shape as
+  `test_profile_root_assert.py` — fake live root under `tmp_path`, `HOME`
+  relocated for the child only, nothing ever written against
+  `~/.hermes/profiles`. The `hscc-roles` leg **250 -> 265** at this commit
+  (0 skips), baseline 250 re-measured at `035e2c52` in the same invocation; the
+  pre-existing 11 profile-root cases stay green, so the two commands did not
+  drift from the three `t_d39c720e` covered.
+- The fingerprint walks **every** file under the live root rather than the
+  parent test's three watched names: `orch-sync` creates files under
+  `<profile>/skills/` and a `SOUL.md.bak-<stamp>`, which a name-limited check
+  would have called "unchanged".
+- Non-vacuity pinned on both sides, per command: the same seed *without* the
+  flag really does change that fingerprint (so "unchanged" after a refusal means
+  something), and a sandboxed run really does produce its claimed output in the
+  requested home. The read-root cases put a different marker in each skill tree,
+  so "it read the operator's tree" is a detected event, not an assumption.
+- Mutation-probed on a copy (control green, provenance asserted from inside the
+  run by a plugin that writes a sentinel): **6/6 CAUGHT**, each by the case that
+  owns the decision — orch-sync continuing after a refusal ->
+  `test_refused_intent_writes_nothing[orch-sync]`; reasoning-sync continuing
+  after a refusal -> the same case for `reasoning-sync`; the read root left
+  pinned on the operator's `~/.hermes/skills` ->
+  `test_skills_source_default_follows_hermes_home`; an explicit
+  `--skills-source` dropped -> `test_explicit_skills_source_beats_the_home_flag`;
+  the flag parsed but never applied -> `test_refused_intent_writes_nothing` and
+  `test_sync_writes_only_the_requested_home` for `reasoning-sync`; a `--dry-run`
+  that writes -> `test_dry_run_with_flag_writes_neither_home`.
+- `hscc-roles/tests`: **219 → 223** cases, both arms green and measured
+  back-to-back on one interpreter (`~/.hermes/hermes-agent/venv/bin/python -m
+  pytest hscc-roles/tests -q`), baseline at revision `7e546339`, head at this
+  branch. The four added cases pin rule 5: the `HANDOFF` is the authority and
+  says where to look, the orchestrator-review-and-merge default is stated only
+  in a sentence that marks it the default, no project or board is named, and the
+  policy stays out of worker SOULs. Eight mutation probes on a scratch copy of
+  `hscc-roles/` (provenance-gated: a plugin asserts the imported `generator` is
+  the copy) ran against a green control — seven failed the expected case (old
+  unconditional wording, removed default marker, an inserted board name, all
+  three `HANDOFF` mentions renamed, a dropped "card body" pointer, neutralised
+  override wording, the policy leaked into `_WORKER_OPS`); the eighth renamed
+  one of the three `HANDOFF` mentions only and was too narrow to bite, so it was
+  re-run on all three.
+- `hscc-api/tests/test_profile_root.py`: 25 cases (29 collected with the
+  per-site parametrization) — the two no-intent regression cases, both entry
+  paths' exit-2 refusal, all six mutating sites refused with nothing written and
+  their no-intent controls really writing, the incidental skip with its writing
+  control, and the launchd-shape pin. Baseline `hscc-api` leg **994 passed, 1
+  skipped** at `origin/main` (throwaway worktree, same invocation); **1023 passed,
+  1 skipped** on this branch — the delta is this file's 29 collected cases and
+  nothing else moved. `hscc_daemon/tests` (the other file this change edits):
+  3706 passed, 1 skipped.
+  The boot cases drive REAL children with `HOME` relocated into `tmp_path` — the
+  three resolvers are the real ones there, and the suite-wide child guard in
+  `hscc-api/tests/conftest.py` refuses any child that inherits the operator env —
+  while the comparison cases inject the resolver answers and drive real loopback
+  HTTP, so the "nothing written" assertions are `(mtime_ns, size)` fingerprints
+  of the fake live tree, not mock call counts. Every refusal test is paired with a
+  control that performs the same request with no intent configured and asserts the
+  tree DID change, so a neutered guard cannot pass.
+- Mutation-probed on a copy, control green first (5/5 CAUGHT, each biting only its
+  own family): guard neutered -> 8 cases (the ladder-drift case, all five mutating
+  sites, `projects/new`, and the control pair's divergence half); exit 2 -> 1 on
+  either entry path -> exactly the three boot cases; the fail-safe skip disabled
+  -> exactly the two incidental cases; the sweep no longer exiting fail-safe -> the
+  sweep case; the guard made to fire with NO intent configured -> the 13 cases that
+  pin the unchanged default path.
+- The operator's live `~/.hermes/profiles` was fingerprinted (`mtime_ns`, size and
+  content hash, ~420k entries) around the six touched test files (188 passed):
+  **zero** changes to any `config.yaml` / `profile.yaml` / `SOUL.md` / `AGENTS.md`
+  / `.env`, and no profile directory added or removed. The whole-tree diff over the
+  same window is not empty and is not this change — the fleet on this host
+  legitimately writes per-profile cron tickers, agent logs and `state.db`, plus
+  `~/.hscc` daemon state — which is why the assertion is scoped to the files a
+  profile write touches instead of the whole tree.
+- `hscc_daemon/tests/test_cards_live.py`: 55 -> **64** test functions (68 cases),
+  green with `~/.hermes/hermes-agent/venv/bin/python -m pytest -q
+  hscc_daemon/tests/test_cards_live.py`.
+- `scripts/run_tests.sh`: ALL GREEN, 12/12 legs, **9,498 passed / 8 skipped**
+  (the documented environment gates).
+- `hscc-roles/tests/test_profile_root_assert.py`: 11 cases, `hscc-roles` leg
+  **239 -> 250** at `aebc0d56` (0 skips) on the canonical interpreter with the
+  board pins stripped; baseline 239 measured at `9422c740` in the same
+  invocation. Every case drives a FAKE live root under `tmp_path` (HOME
+  relocated for the child only), so a regression cannot reach a real tree; the
+  wrong-target cases assert the live root's `(mtime_ns, size)` fingerprint is
+  byte-identical afterwards AND that the profiles really appeared in the
+  requested home, so the check cannot pass by doing nothing.
+- Mutation-probed on a copy with provenance asserted from inside the run
+  (6/6 CAUGHT, control green): guard as a no-op, native-root arm dropped,
+  `PROFILES_DIR` arm dropped, flag parsed but never applied, `apply` without the
+  env write, and CLI continuing after a refusal. Driving the real writers by
+  hand: a flagged run wrote 26 role profiles into the requested temp home with
+  the live tree unmoved, a refused run exited 2 and created nothing, and the
+  no-flag run wrote 27 profiles into the ambient home with the seeded operator
+  key intact.
 ## [2.15.10] - 2026-11-13
 
 ### Added
