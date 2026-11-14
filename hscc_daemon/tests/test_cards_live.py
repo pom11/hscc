@@ -426,6 +426,30 @@ def test_keymap_covers_arrows_tab_and_quit():
     assert km["\t"] == "next" and km["\x1b[Z"] == "prev"
     assert km["\x1b[C"] == "next" and km["\x1b[D"] == "prev"
     assert km["q"] == "quit" and km["t"] == "tools" and km["\r"] == "zoom"
+    assert km["a"] == "short"
+
+
+def test_short_field_toggles_on_apply_and_starts_in_all_mode():
+    v = ViewState()
+    assert not v.short
+    v.apply("short", 3)
+    assert v.short
+    v.apply("short", 3)
+    assert not v.short
+    assert ViewState(short=True).short
+
+
+def test_status_line_flags_short_only_in_short_mode(tmp_path):
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap([run_row("b", "t_1")]))
+    mon.refresh()
+    full = cards_live.status_line(mon, False, False, False, NOW).plain
+    short = cards_live.status_line(mon, False, False, False, NOW, short=True).plain
+    full_flags = full.split("  [", 1)[1].split("]", 1)[0]
+    short_flags = short.split("  [", 1)[1].split("]", 1)[0]
+    assert "short" not in full_flags and "[full]" in full
+    assert "short" in short_flags and "[full short]" in short
+    assert "a all/short" in full and "a all/short" in short
 
 
 def test_cli_help_and_errors(capsys):
@@ -439,6 +463,8 @@ def test_cli_help_and_errors(capsys):
     assert cmd_cards(["monitor", "--what"]) == 2
     err = capsys.readouterr().err
     assert "--interval must be >= 1" in err and "unknown argument" in err
+    assert cards_live._parse(["--short"])[0]["short"] is True
+    assert cards_live._parse([])[0]["short"] is False
 
 
 def test_cli_snapshot_uses_collector(tmp_path, monkeypatch):
@@ -447,6 +473,22 @@ def test_cli_snapshot_uses_collector(tmp_path, monkeypatch):
     console = make_console(file=io.StringIO(), width=120, height=30, color_system=None)
     assert cmd_cards(["monitor", "--board", "b"], console=console) == 0
     assert "b · t_1" in console.file.getvalue()
+
+
+def test_cli_short_flag_starts_the_snapshot_in_short_mode(tmp_path, monkeypatch):
+    thought = "a b " * 2000
+    make_store(tmp_path / "hermes-home/profiles/backend-engineer/state.db",
+               "local-abc", [dict(role="assistant", content="", reasoning=thought)])
+    monkeypatch.setattr(Monitor, "_default_collect", lambda self: snap([
+        dict(run_row("b", "t_1"), session_id="local-abc")]))
+    default = make_console(file=io.StringIO(), width=120, height=40,
+                           color_system=None)
+    assert cmd_cards(["monitor"], console=default) == 0
+    assert "…+" not in default.file.getvalue()
+    short = make_console(file=io.StringIO(), width=120, height=40,
+                         color_system=None)
+    assert cmd_cards(["monitor", "--short"], console=short) == 0
+    assert "…+" in short.file.getvalue()
 
 
 def test_render_fills_exact_height_with_waiting_cards_at_the_bottom(tmp_path):
@@ -535,7 +577,7 @@ WORKER_ROWS = [
 def test_session_shows_prose_and_one_line_per_tool_call(tmp_path):
     t = live_session_tail(tmp_path, rows=WORKER_ROWS)
     assert t.poll() is True
-    lines = t.view(False)
+    lines = t.view(False, short=True)
     assert lines[0].startswith("▸ work kanban task t_1 ")      # the 8 KB card prompt,
     assert len(lines[0]) == cards_live.PROMPT_PREVIEW + 3     # one collapsed preview
     assert lines[1] == "┊ kanban_show  t_1"                    # named when it was CALLED
@@ -728,12 +770,14 @@ def test_reasoning_leads_the_reply_text_of_the_same_row(tmp_path):
 
 
 def test_tools_only_view_hides_the_reasoning(tmp_path):
-    """`t` stays exactly the tools-only view it always was."""
+    """`t` stays exactly the tools-only view it always was, in both text modes."""
     t = live_session_tail(tmp_path, rows=REASONING_ROWS)
     t.poll()
-    assert t.view(True) == ["┊ kanban_show  t_1", "┊ terminal  git status"]
-    assert all(is_tool_line(r) for r in t.view(True))
-    assert not any(r.startswith(R) for r in t.view(True))
+    for short in (False, True):
+        assert t.view(True, short=short) == ["┊ kanban_show  t_1",
+                                             "┊ terminal  git status"]
+        assert all(is_tool_line(r) for r in t.view(True, short=short))
+        assert not any(r.startswith(R) for r in t.view(True, short=short))
     # and it is really there in the full view, so the filter did the hiding
     assert sum(r.startswith(R) for r in t.view(False)) == 3
 
@@ -762,14 +806,17 @@ def test_reasoning_content_is_the_fallback_not_a_second_source(tmp_path):
     assert t.view(False) == [f"{R} fallback thought", f"{R} preferred"]
 
 
-def test_a_long_thought_is_cut_with_an_explicit_marker(tmp_path):
-    """One 8 KB thought must not own a ~15-row panel (measured max: 70 KB/row)."""
+def test_a_long_thought_is_cut_with_an_explicit_marker_in_short_mode(tmp_path):
+    """One 8 KB thought must not own a ~15-row panel (measured max: 70 KB/row).
+
+    Short mode is today's behaviour, so this is the old assertion unchanged.
+    """
     thought = "a b " * 2000
     t = live_session_tail(tmp_path, rows=[
         dict(role="assistant", content="", reasoning=thought),
         dict(role="assistant", content="and then the reply")])
     t.poll()
-    lines = t.view(False)
+    lines = t.view(False, short=True)
     assert len(lines) == 2                              # the thought is ONE line
     head, reply = lines
     collapsed = " ".join(thought.split())               # what the row collapses to
@@ -779,6 +826,78 @@ def test_a_long_thought_is_cut_with_an_explicit_marker(tmp_path):
     assert dropped == len(collapsed) - cards_live.REASON_PREVIEW
     assert len(head) < cards_live.REASON_PREVIEW + 24   # bounded, marker included
     assert reply == "and then the reply"
+
+
+def test_all_mode_is_the_default_and_shows_the_whole_thought(tmp_path):
+    thought = " ".join(f"word{i}" for i in range(500))
+    assert len(thought) > cards_live.REASON_PREVIEW
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="", reasoning=thought)])
+    t.poll()
+    assert t.view(False) == [f"{R} {thought}"]
+    assert "…+" not in t.view(False)[0]
+
+
+def test_short_mode_is_byte_for_byte_the_old_thought_preview(tmp_path):
+    thought = "a b " * 2000
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="", reasoning=thought)])
+    t.poll()
+    collapsed = " ".join(thought.split())
+    short = collapsed[:cards_live.REASON_PREVIEW].rstrip()
+    dropped = len(collapsed) - cards_live.REASON_PREVIEW
+    assert t.view(False, short=True) == [f"{R} {short} …+{dropped} more"]
+
+
+def test_tool_arguments_are_whole_by_default_and_cut_in_short_mode(tmp_path):
+    command = "x" * 300
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="",
+             tool_calls=[call("terminal", {"command": command}, "c1")])])
+    t.poll()
+    assert t.view(False) == [f"┊ terminal  {command}"]
+    assert t.view(False, short=True) == [f"┊ terminal  {command[:110]}…"]
+
+
+def test_user_turns_are_whole_by_default_and_cut_in_short_mode(tmp_path):
+    prompt = "work kanban task t_1 " + "y" * 300
+    t = live_session_tail(tmp_path, rows=[dict(role="user", content=prompt)])
+    t.poll()
+    assert t.view(False) == [f"▸ {prompt}"]
+    assert t.view(False, short=True) == [f"▸ {prompt[:cards_live.PROMPT_PREVIEW]}…"]
+
+
+def test_switching_modes_changes_lines_already_on_screen_without_re_reading(tmp_path):
+    thought = "z " * 500
+    t = live_session_tail(tmp_path, rows=[
+        dict(role="assistant", content="", reasoning=thought)])
+    t.poll()
+    full = t.view(False)
+    short = t.view(False, short=True)
+    cursor, count = t.cursor, len(t.lines)
+    os.remove(t.path)                  # the views below must not need the store
+    assert t.view(False) == full and "…+" not in full[0]
+    assert t.view(False, short=True) == short and short[0].endswith(" more")
+    assert t.view(False) == full        # all -> short -> all, both ways
+    assert (t.cursor, len(t.lines)) == (cursor, count)
+
+
+def test_a_70kb_thought_renders_the_end_of_it_in_a_fixed_panel(tmp_path):
+    """The panel shows the tail that fits; the thought's last words stay visible."""
+    thought = "lorem ipsum dolor sit amet " * 3000
+    assert len(thought) > 70 * 1024
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap([
+        dict(run_row("b", "t_1"), session_id="local-abc")]))
+    make_store(tmp_path / "profiles/backend-engineer/state.db", "local-abc",
+               [dict(role="assistant", content="", reasoning=thought)])
+    mon.refresh()
+    mon.poll_logs()
+    height = 12
+    lines = render_text(mon, width=120, height=height).rstrip("\n").split("\n")
+    collapsed = " ".join(thought.split())
+    assert len(lines) <= height
+    assert lines[-1].strip() and collapsed.endswith(lines[-1].strip())
+    assert "…+" not in "\n".join(lines)
 
 
 def test_a_multiline_thought_collapses_and_keeps_its_ansi_stripped(tmp_path):
