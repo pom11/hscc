@@ -23,15 +23,19 @@ rather than through ``hermes_state``.
 
 Panel header: board · card · worker, then run time, heartbeat age and the
 worker session's tokens — fields are dropped right-to-left when the panel is
-too narrow. Body: the worker's reasoning (dim italic, one capped line per row)
-above that row's reply text, plus one ``┊`` line per tool call; ``t`` narrows a
-panel to the tool calls alone — no reasoning lives in that view.
+too narrow. Body: the worker's reasoning (dim italic, one logical line per row,
+whole by default) above that row's reply text, plus one ``┊`` line per tool
+call; ``t`` narrows a panel to the tool calls alone — no reasoning lives in that
+view. ``a`` switches every transcript line between the whole text (the default)
+and the short preview: thoughts keep a 320-char cap with a ``…+N more`` marker,
+tool arguments are cut at 110 chars and user turns at 120, exactly as this view
+always printed before whole text became the default.
 
 Keys (live mode, interactive terminal): Tab / arrows move the focus, Enter or
-``z`` zooms the focused panel to full screen, Esc leaves zoom, ``t`` toggles
-full transcript / tools only, ``+``/``-`` make panels bigger/smaller (fewer /
-more columns, ``0`` back to auto), ``p`` pauses scrolling, ``q`` quits. Glyph
-size belongs to the terminal (iTerm: Cmd +/-), not to this view.
+``z`` zooms the focused panel to full screen, Esc leaves zoom, ``t`` full/tools,
+``a`` all/short, ``+``/``-`` make panels bigger/smaller (fewer / more columns,
+``0`` back to auto), ``p`` pauses scrolling, ``q`` quits. Glyph size belongs to
+the terminal (iTerm: Cmd +/-), not to this view.
 
 Read-only: card data comes from ``kanban_live.collect`` + ``attach_tokens``
 (the same pass `hscc kanban monitor` makes) and logs are only read. The board,
@@ -69,16 +73,17 @@ MAX_LINES = 600              # kept per card; the panel shows the tail that fits
 READY_ROWS = 3               # waiting-card lines at the bottom (+N more)
 TOOL_PREFIX = "┊"            # the marker this view prints every tool call with
 REASON_PREFIX = "░"          # the marker this view prints a row's thinking with
-#: Per-row cap on the reasoning preview. Measured on one operator store
-#: (n=5396 reasoning rows): p50 ~0.8 KB, p95 ~21 KB, max ~70 KB per row, so an
-#: uncapped thought scrolls a ~15-row panel off the screen by itself.
-#: ``wrap_tail`` already bounds the width of whatever we emit; this is what
-#: bounds the height. The marker names how much was dropped (house style:
-#: ``+N more``).
+#: Per-row cap on the SHORT-mode reasoning preview; all mode shows the thought
+#: whole. Measured on one operator store (n=5396 reasoning rows): p50 ~0.8 KB,
+#: p95 ~21 KB, max ~70 KB per row, so a capped thought is what keeps a short
+#: view from scrolling a ~15-row panel off the screen by itself. ``wrap_tail``
+#: already bounds the width of whatever we emit; in short mode this bounds the
+#: height. The marker names how much was dropped (house style: ``+N more``).
 REASON_PREVIEW = 320
 SESSION_PAGE = 400           # transcript rows read per tick (appended rows only)
 INITIAL_SESSION_ROWS = 200   # a new session tail starts this many rows back
-PROMPT_PREVIEW = 120         # user-turn preview length (hermes' own timeline does 120)
+TOOL_PREVIEW = 110           # short-mode tool-argument preview length
+PROMPT_PREVIEW = 120         # short-mode user-turn preview (hermes' timeline: 120)
 ANNOUNCED_MAX = 4096         # call ids remembered so results are not repeated
 #: Label + colour for the outcome a lingering panel shows. EVERY kind
 #: ``kanban_live.OUTCOME_KINDS`` can deliver has an entry here (MON-23-FIELDS):
@@ -317,8 +322,12 @@ _ARG_KEYS = ("command", "path", "file_path", "pattern", "query", "url", "goal",
              "title", "note", "reason", "message", "skill", "selector", "text")
 
 
-def _tool_summary(arguments) -> str:
-    """One short line naming what a tool call was pointed at (never raises)."""
+def _tool_summary(arguments) -> tuple[str, str]:
+    """``(full, short)`` one line naming what a tool call was pointed at.
+
+    Never raises. Short mode keeps the 110-char argument preview this view has
+    always printed; all mode returns the whole collapsed argument.
+    """
     if not isinstance(arguments, str):
         arguments = "" if arguments is None else json.dumps(arguments)
     try:
@@ -342,20 +351,22 @@ def _tool_summary(arguments) -> str:
     else:
         value = arguments
     one = " ".join(str(value).split())
-    return one[:110] + "…" if len(one) > 110 else one
+    short = one[:TOOL_PREVIEW] + "…" if len(one) > TOOL_PREVIEW else one
+    return one, short
 
 
-def _reasoning_line(row) -> str:
-    """One capped ``░`` line of a row's thinking, or ``""`` when it has none.
+def _reasoning_lines(row) -> tuple[str, str]:
+    """``(full, short)`` ``░`` lines of a row's thinking, or ``("", "")``.
 
     Reads at most ONE column, in the ``REASONING_COLUMNS`` preference order —
     the live store fills both with the same text, so a concat or a
     ``COALESCE``-then-append would double-print every thought. The row's whole
-    thought collapses to a single line and is cut at ``REASON_PREVIEW`` with an
-    explicit ``…+N more`` marker: the panel gives a card ~15 rows and a thought
-    can be 70 KB, so one row must never own the screen. ``clean_line`` runs
-    per source line (ANSI/redraws), then the whitespace collapses; ``wrap_tail``
-    still does the width bound downstream, exactly like every other line here.
+    thought collapses to a single logical line. Short mode cuts it at
+    ``REASON_PREVIEW`` with an explicit ``…+N more`` marker: the panel gives a
+    card ~15 rows and a thought can be 70 KB, so one row must never own the
+    screen in the short view. ``clean_line`` runs per source line
+    (ANSI/redraws), then the whitespace collapses; ``wrap_tail`` still does the
+    width bound downstream, exactly like every other line here.
     """
     for col in REASONING_COLUMNS:
         text = _content_text(_col(row, col))
@@ -363,44 +374,47 @@ def _reasoning_line(row) -> str:
             continue
         collapsed = " ".join(word for part in text.splitlines()
                              for word in clean_line(part).split())
+        full = f"{REASON_PREFIX} {collapsed}"
+        short = collapsed
         if len(collapsed) > REASON_PREVIEW:
             dropped = len(collapsed) - REASON_PREVIEW
-            collapsed = collapsed[:REASON_PREVIEW].rstrip() + f" …+{dropped} more"
-        return f"{REASON_PREFIX} {collapsed}"
-    return ""
+            short = collapsed[:REASON_PREVIEW].rstrip() + f" …+{dropped} more"
+        return full, f"{REASON_PREFIX} {short}"
+    return "", ""
 
 
-def render_rows(rows, announced=None) -> list[str]:
-    """Display lines for transcript rows: thinking, then prose, then one ``┊``
-    line per call.
+def _row_lines(rows, announced=None) -> list[tuple[str, str]]:
+    """``(full, short)`` display lines for transcript rows: thinking, then
+    prose, then one ``┊`` line per call.
 
     A tool call is announced by the assistant row whose ``tool_calls`` names it
     — that is the moment the operator wants to see it, before the result
     arrives — so the result row (``role='tool'``) is not repeated unless it was
     never announced (a tail that starts mid-turn). ``announced`` carries the
-    call ids across polls; ``role='user'`` rows become one collapsed preview
-    line so the card prompt reads as a line, not an 8 KB dump.
+    call ids across polls; ``role='user'`` rows become one collapsed line.
 
-    Reasoning belongs to the row that thought it, so only the assistant branch
-    emits it — and the tools-only view stays empty of it for free: a
-    ``REASON_PREFIX`` line never passes :func:`is_tool_line`.
+    Both text variants are built here, once, when the rows are read: the stored
+    entry can then switch between all and short without re-reading the store or
+    rebuilding the text. Reasoning belongs to the row that thought it, so only
+    the assistant branch emits it — and the tools-only view stays empty of it
+    for free: a ``REASON_PREFIX`` line never passes :func:`is_tool_line`.
     """
     seen = announced if announced is not None else set()
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for row in rows:
         role = row["role"]
         if role == "assistant":
             # Thinking leads: it is what preceded the words, and usually what
             # preceded the tool call on the same row, so it reads as the row's
             # lead-in rather than a footnote.
-            reason = _reasoning_line(row)
-            if reason:
-                out.append(reason)
+            full, short = _reasoning_lines(row)
+            if full:
+                out.append((full, short))
             text = _content_text(row["content"])
             for para in text.split("\n"):
                 para = clean_line(para)
                 if para.strip():
-                    out.append(para)
+                    out.append((para, para))
             calls = row["tool_calls"]
             if isinstance(calls, str):
                 try:
@@ -415,18 +429,33 @@ def render_rows(rows, announced=None) -> list[str]:
                 cid = call.get("id") or call.get("call_id")
                 if cid:
                     seen.add(cid)
-                summary = _tool_summary(fn.get("arguments"))
-                out.append(f"{TOOL_PREFIX} {name}  {summary}".rstrip())
+                full_arg, short_arg = _tool_summary(fn.get("arguments"))
+                head = f"{TOOL_PREFIX} {name}  "
+                out.append((f"{head}{full_arg}".rstrip(),
+                            f"{head}{short_arg}".rstrip()))
         elif role == "tool":
             if row["tool_call_id"] and row["tool_call_id"] in seen:
                 continue
-            out.append(f"{TOOL_PREFIX} {row['tool_name'] or 'tool'}".rstrip())
+            line = f"{TOOL_PREFIX} {row['tool_name'] or 'tool'}".rstrip()
+            out.append((line, line))
         elif role == "user":
             one = " ".join(_content_text(row["content"]).split())
             if one:
-                out.append("▸ " + (one[:PROMPT_PREVIEW] + "…"
-                                   if len(one) > PROMPT_PREVIEW else one))
+                short = (one[:PROMPT_PREVIEW] + "…"
+                         if len(one) > PROMPT_PREVIEW else one)
+                out.append(("▸ " + one, "▸ " + short))
     return out
+
+
+def render_rows(rows, announced=None, short: bool = False) -> list[str]:
+    """Display lines for transcript rows, in the requested text mode.
+
+    ``short=False`` (the default) shows thoughts, tool arguments and user turns
+    whole; ``short=True`` is exactly the preview this view printed before all
+    mode existed. See :func:`_row_lines` for the row rules and the ``announced``
+    set, which carries tool-call ids across polls.
+    """
+    return [s if short else f for f, s in _row_lines(rows, announced)]
 
 
 class SessionTail:
@@ -448,7 +477,9 @@ class SessionTail:
         self.page = page
         self.cursor = None            # None = not positioned yet
         self.announced: set[str] = set()
-        self.lines: collections.deque[str] = collections.deque(maxlen=MAX_LINES)
+        #: ``(full, short)`` per display line, both built once on read.
+        self.lines: collections.deque[tuple[str, str]] = \
+            collections.deque(maxlen=MAX_LINES)
 
     def _max_id(self, conn) -> int | None:
         row = conn.execute(f"SELECT MAX(id) AS hi FROM {_MESSAGES_TABLE} "
@@ -485,18 +516,20 @@ class SessionTail:
             return False                    # unreadable store = no new lines
         added = False
         if rows:
-            lines = render_rows(rows, self.announced)
+            lines = _row_lines(rows, self.announced)
             if len(self.announced) > ANNOUNCED_MAX:
                 self.announced.clear()      # bounded; costs at most one repeat line
-            for line in lines:
-                self.lines.append(line)
+            for entry in lines:
+                self.lines.append(entry)
             added = bool(lines)
         self.cursor = rows[-1]["id"] if rows else hi
         return added
 
-    def view(self, tools_only: bool) -> list[str]:
+    def view(self, tools_only: bool, short: bool = False) -> list[str]:
         rows = list(self.lines)
-        return [r for r in rows if is_tool_line(r)] if tools_only else rows
+        if tools_only:
+            rows = [r for r in rows if is_tool_line(r[0])]
+        return [r[1 if short else 0] for r in rows]
 
 
 def _session_of(row: dict) -> str | None:
@@ -567,7 +600,8 @@ class LogTail:
             self.lines.append(clean_line(r))
         return bool(rows)
 
-    def view(self, tools_only: bool) -> list[str]:
+    def view(self, tools_only: bool, short: bool = False) -> list[str]:
+        # A log file has no row caps, so both text modes return the same lines.
         rows = list(self.lines)
         if self.partial.strip():
             rows.append(clean_line(self.partial))
@@ -747,14 +781,14 @@ def _body(lines: list[str], width: int, height: int, tools_only: bool) -> Text:
 
 
 def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
-               tools_only: bool, now: float) -> Group:
+               tools_only: bool, now: float, short: bool = False) -> Group:
     """One card: a header rule carrying the title, then the transcript tail.
     No side/bottom border; one blank column on the right separates cards."""
     row = mon.cards[key]
     tail = mon.tails.get(key)
     title, details = header_fields(row, now, tail.source if tail else None)
     header = fit_header(title, details, max(width - 6, 8))  # "─ " + title + " ─" + gap
-    lines = tail.view(tools_only) if tail else []
+    lines = tail.view(tools_only, short) if tail else []
     body = _body(lines, max(width - 1, 1), max(height - 1, 1), tools_only)
     if "ended" in row:
         _, line_style = OUTCOME_STYLE.get(row.get("outcome"), ("", "warn"))
@@ -765,7 +799,7 @@ def card_panel(mon: Monitor, key: tuple, width: int, height: int, focused: bool,
 
 
 def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: float,
-                cols: int | None = None) -> Text:
+                cols: int | None = None, short: bool = False) -> Text:
     d = mon.data
     cap = d.get("caps", (None, None))[0]
     running = len(d.get("running", []))
@@ -774,11 +808,13 @@ def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: f
     t.append("hscc cards", style="title")
     t.append(f"  slots {slots} · waiting {len(d.get('ready', []))} · "
              f"{time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
-    flags = ["tools" if tools_only else "full"] + (["PAUSED"] if paused else []) \
+    flags = ["tools" if tools_only else "full"] \
+        + (["short"] if short else []) \
+        + (["PAUSED"] if paused else []) \
         + (["zoom"] if zoom else []) + ([f"cols {cols}"] if cols else [])
     t.append(f"  [{' '.join(flags)}]", style="warn" if paused else MUTED)
-    t.append("  tab/arrows focus · enter zoom · +/- size · t tools · p pause · q quit",
-             style=MUTED)
+    t.append("  tab/arrows focus · enter zoom · +/- size · t tools · a all/short"
+             " · p pause · q quit", style=MUTED)
     return t
 
 
@@ -796,13 +832,13 @@ def ready_lines(mon: Monitor, width: int) -> list[Text]:
 
 def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = False,
            tools_only: bool = False, paused: bool = False, now: float | None = None,
-           cols: int | None = None) -> Layout:
+           cols: int | None = None, short: bool = False) -> Layout:
     """The whole screen as one Layout: status line, card grid, waiting cards,
     errors. Region sizes sum to ``height`` so the grid fills exactly the space
     left and the bottom lines stay on screen."""
     now = mon.clock() if now is None else now
     keys = mon.panels()
-    top = status_line(mon, tools_only, paused, zoom, now, cols)
+    top = status_line(mon, tools_only, paused, zoom, now, cols, short)
     errors = mon.data.get("errors", [])
     blind = not mon.data.get("boards") and bool(errors)
     foot = ready_lines(mon, width)
@@ -818,7 +854,7 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
         grid.update(Panel(Text("no cards running", style=MUTED), border_style=IDLE_BORDER))
     elif zoom:
         k = keys[focus % len(keys)]
-        grid.update(card_panel(mon, k, width, grid_h, True, tools_only, now))
+        grid.update(card_panel(mon, k, width, grid_h, True, tools_only, now, short))
     else:
         focus %= len(keys)
         cols, rows = grid_shape(len(keys), width, grid_h, cols)
@@ -829,7 +865,7 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
             cell_w = width // max(len(cells), 1)
             rl = Layout(size=row_h)
             rl.split_row(*[Layout(card_panel(mon, k, cell_w, row_h, keys.index(k) == focus,
-                                             tools_only, now)) for k in cells])
+                                             tools_only, now, short)) for k in cells])
             row_layouts.append(rl)
         grid.split_column(*row_layouts)
     root = Layout()
@@ -844,7 +880,8 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
 
 KEYMAP = {"\t": "next", "\x1b[C": "next", "\x1b[B": "next", "\x1b[Z": "prev",
           "\x1b[D": "prev", "\x1b[A": "prev", "\r": "zoom", "\n": "zoom", "z": "zoom",
-          "\x1b": "unzoom", "t": "tools", "p": "pause", "q": "quit", "\x03": "quit",
+          "\x1b": "unzoom", "t": "tools", "a": "short", "p": "pause",
+          "q": "quit", "\x03": "quit",
           "+": "bigger", "=": "bigger", "-": "smaller", "_": "smaller", "0": "auto"}
 
 
@@ -875,11 +912,12 @@ def _cbreak(fd):
 
 
 class ViewState:
-    def __init__(self, tools_only=False):
+    def __init__(self, tools_only=False, short=False):
         self.cols: int | None = None   # None = auto grid; +/- pin a column count
         self.focus = 0
         self.zoom = False
         self.tools_only = tools_only
+        self.short = short             # False = whole text, True = short preview
         self.paused = False
         self.quit = False
 
@@ -902,6 +940,8 @@ class ViewState:
             self.zoom = False
         elif action == "tools":
             self.tools_only = not self.tools_only
+        elif action == "short":
+            self.short = not self.short
         elif action == "pause":
             self.paused = not self.paused
         elif action == "quit":
@@ -909,11 +949,11 @@ class ViewState:
 
 
 def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None,
-             tools_only: bool = False, kanban_db=None) -> int:
+             tools_only: bool = False, kanban_db=None, short: bool = False) -> int:
     from rich.live import Live
 
     mon = Monitor(board=board, kanban_db=kanban_db)
-    view = ViewState(tools_only)
+    view = ViewState(tools_only, short)
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     keys_ctx = _cbreak(fd) if fd is not None else contextlib.nullcontext()
     next_refresh = 0.0
@@ -927,7 +967,8 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
                 if not view.paused:
                     mon.poll_logs()
                 live.update(render(mon, console.width, console.height, view.focus, view.zoom,
-                                   view.tools_only, view.paused, cols=view.cols), refresh=True)
+                                   view.tools_only, view.paused, cols=view.cols,
+                                   short=view.short), refresh=True)
                 if fd is None:
                     time.sleep(TICK_S)
                     continue
@@ -941,27 +982,29 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
 
 
 def snapshot(console, board: str | None = None, tools_only: bool = False,
-             kanban_db=None) -> int:
+             kanban_db=None, short: bool = False) -> int:
     mon = Monitor(board=board, kanban_db=kanban_db)
     mon.refresh()
     mon.poll_logs()
     height = max(console.height, 12 * max(len(mon.panels()), 1))
     height = min(height, 200)
-    console.print(render(mon, console.width, height, tools_only=tools_only), height=height)
+    console.print(render(mon, console.width, height, tools_only=tools_only, short=short),
+                  height=height)
     return 1 if mon.data["errors"] and not mon.data["boards"] else 0
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 HELP = """\
-hscc cards monitor [--live] [--interval <s>] [--board <slug>] [--tools]
+hscc cards monitor [--live] [--interval <s>] [--board <slug>]
+                  [--tools] [--short]
 
 One panel per running kanban card, streaming its worker's transcript — each
-row's thinking (dim italic, one capped line) above its reply text, and one
-┊ line per tool call; the grid re-flows as cards start and finish (a finished
-card lingers ~10 s with its outcome). Waiting cards are listed at the bottom.
-Each panel header shows board · card · worker │ run · heartbeat · tokens (as
-space allows).
+row's thinking (dim italic, one logical line, whole text by default) above its
+reply text, and one ┊ line per tool call; the grid re-flows as cards start and
+finish (a finished card lingers ~10 s with its outcome). Waiting cards are
+listed at the bottom. Each panel header shows board · card · worker │ run ·
+heartbeat · tokens (as space allows).
 
   --live          full-screen, refreshing until q / Ctrl-C
   --interval <s>  card-list refresh period for --live (default 3; logs stream
@@ -969,22 +1012,28 @@ space allows).
   --board <slug>  only this board
   --tools         start in tools-only view (t toggles in --live; the tools-only
                   view shows no reasoning)
+  --short         start in short preview mode (a toggles in --live; thoughts,
+                  tool arguments and user turns are capped and thoughts end
+                  with a …+N more marker)
 
 Keys (--live): tab/arrows focus · enter/z zoom · esc unzoom · +/- bigger
-  or smaller panels (fewer/more columns; 0 = auto) · t full/tools · p
-  pause · q quit. Font size itself is the terminal's (iTerm: Cmd +/-).
-  Read-only: never claims, promotes or archives.
+  or smaller panels (fewer/more columns; 0 = auto) · t full/tools ·
+  a all/short · p pause · q quit. Font size itself is the terminal's
+  (iTerm: Cmd +/-). Read-only: never claims, promotes or archives.
 """
 
 
 def _parse(rest):
-    opts = {"live": False, "interval": DEFAULT_INTERVAL, "board": None, "tools": False}
+    opts = {"live": False, "interval": DEFAULT_INTERVAL, "board": None, "tools": False,
+            "short": False}
     it = iter(rest)
     for tok in it:
         if tok == "--live":
             opts["live"] = True
         elif tok == "--tools":
             opts["tools"] = True
+        elif tok == "--short":
+            opts["short"] = True
         elif tok in ("--interval", "--board"):
             val = next(it, None)
             if val is None:
@@ -1019,5 +1068,6 @@ def cmd_cards(argv, console=None) -> int:
         from hscc_daemon.cli_theme import make_console
         console = make_console()
     if opts["live"]:
-        return run_live(console, opts["interval"], opts["board"], opts["tools"])
-    return snapshot(console, opts["board"], opts["tools"])
+        return run_live(console, opts["interval"], opts["board"], opts["tools"],
+                        short=opts["short"])
+    return snapshot(console, opts["board"], opts["tools"], short=opts["short"])
