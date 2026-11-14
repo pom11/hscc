@@ -140,7 +140,7 @@ configured and worded the same way.
 | unset, empty or whitespace | today's behaviour, unchanged (a `VAR=` in a plist cannot brick the server) |
 | set, equal to every writable root | boots; the intent is carried on `ApiContext` and printed at startup |
 | set, a relative path | refused at boot — "must be an absolute path" |
-| set, any writable root differs | refused at boot, **exit 2** on both entry paths (`python -m api_server serve` and the daemon's `hscc api start`): nothing bound, no token read, nothing written |
+| set, any writable root differs | refused at boot, **exit 2** on both entry paths (`python hscc-api/api_server.py serve` and the daemon's `hscc api start`): nothing bound, no token read, nothing written |
 | a root drifts after boot | the write is refused per request — **503 `profile_root_mismatch`**, nothing written |
 | the write is *incidental* (the compaction-threshold ensure on the chat path) | **not** a 503: the write is skipped, the divergence is logged at ERROR, and the chat proceeds on the config the operator already has |
 
