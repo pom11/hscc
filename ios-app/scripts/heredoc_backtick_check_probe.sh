@@ -476,6 +476,31 @@ for spec in "build_check.sh:comment" "sf_symbol_check.sh:quoted" "check_theme.sh
   esac
 done
 
+# ---- the shelltc verdict: refused, and described as what it is ------------------
+# A code-bearing line whose TRAILING comment carries the byte. bash would not expand
+# it, and the gate still refuses it, because deciding "no quote is open earlier on
+# this line" is quote tracking and a payload can corrupt a quote tracker. Two things
+# have to hold, and only the first is obvious: the shape is refused (fail closed), and
+# the refusal does not claim the byte runs. A gate that labels an inert shape
+# "executed" trains people to ignore its findings, so the wording itself is under test
+# here — the discriminator is the phrase only the honest message carries.
+tc="check_theme.sh"                 # a real gate that is NOT splice-capable
+TREE=$(mk_tree "shelltc-$tc")
+rm -f "${TREE}/scripts/$tc"
+tcline="echo hello ${BT}in prose${BT}   # trailing comment carries the byte"
+{ head -1 "${SCRIPTS}/${tc}"
+  printf '%s\n' "$tcline"
+  tail -n +2 "${SCRIPTS}/${tc}"; } > "${TREE}/scripts/$tc"
+chmod +x "${TREE}/scripts/$tc"
+scan "$TREE"
+if [ "$G_RC" -ne 0 ] && [ "$BANNERS" -eq 0 ] \
+   && grep -q "code-bearing line" "$OUT" \
+   && ! grep -q "RUNS when this script runs" "$OUT"; then
+  pok "shelltc ($tc): trailing-comment byte refused fail-closed AND described as a shape the scanner will not vouch for, not as code that runs"
+else
+  pfail "shelltc ($tc): expected a refusal that does NOT claim execution (RC $G_RC, banners $BANNERS); got: $(grep -m1 FINDING "$OUT" | head -c 200)"
+fi
+
 # ---- the residual this gate exists to close --------------------------------
 echo "window above the guard: an in-file guard cannot see this high — REPORTED, closed by refusal"
 wsrc=""

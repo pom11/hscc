@@ -26,9 +26,12 @@
 #       line that is not entirely a '#' comment, is a FINDING in every script.
 #       Inside a heredoc body a leading '#' or '//' is NOT a comment — it is body
 #       text being expanded, which is exactly where the shipped defect lived. A
-#       line carrying code plus a trailing comment is treated as shell position
-#       (fail closed: deciding "this half is a comment" needs quote tracking whose
-#       own corruption would be a silent exemption).
+#       line carrying code plus a trailing comment (reported as region shelltc) is
+#       also refused, though bash would not expand a byte inside that comment:
+#       deciding "no quote is open earlier on this line" is quote tracking, and a
+#       quote tracker whose own state the payload can corrupt is a silent exemption.
+#       It is refused fail-closed and described as what it is — a shape this scanner
+#       will not vouch for — never as code that runs.
 #   R2  FILE-WIDE for splice-capable scripts. If a script contains at least one
 #       unquoted heredoc opener, an unescaped backtick ANYWHERE in it is a
 #       finding — '#' comment lines included. That is t_9e4a731b's ruling, and it
@@ -98,10 +101,13 @@ DQ='"'
 #   HIT <region> <line> <expanding|escaped>  one per line carrying the byte:
 #                                         region = body (unquoted heredoc: bash
 #                                         expands it), shell (a code-bearing line),
+#                                         shelltc (code + a trailing '#' comment:
+#                                         same verdict, different honesty — see R1),
 #                                         hash (an all-comment line), qbody (inside
 #                                         a quoted heredoc); expanding = not escaped
-#                                         away by a backslash. R1 refuses body/shell
-#                                         + expanding; the rest is R2 or R3.
+#                                         away by a backslash. R1 refuses
+#                                         body/shell/shelltc + expanding; the rest is
+#                                         R2 or R3.
 #   HERESTRING <line>                    <<< (informational)
 #   MENTION <line> <word> <plain|quoted>  a <<X token that is not an opener (text)
 #   UNBOUND <line> <word> <plain|quoted>  a real opener bash accepts that this
@@ -126,6 +132,14 @@ function emit(region, line,   v) {   # one record per line that carries the byte
   v = livebt(line)
   # The two axes are separate and both are reported: WHERE the byte sits (region)
   # and whether bash would honour it (expanding vs escaped by a backslash).
+  # shell splits into shelltc for the REPORT only — the verdict is identical. A line
+  # carrying code and a whitespace-preceded '#' would not expand the byte (bash makes
+  # the half after '#' a comment) UNLESS a quote is open earlier on the line, and
+  # deciding "no quote is open here" is quote tracking whose own corruption would be
+  # a silent exemption. So shelltc is refused fail-closed — but it must not be
+  # described as executed, because a gate that cries wolf on an inert shape trains
+  # people to ignore it.
+  if (region == "shell" && line ~ /[[:space:]]#/) region = "shelltc"
   if (v) print "HIT\t" region "\t" NR "\t" (v == 2 ? "expanding" : "escaped")
 }
 function terminator(t, d) {           # is this line the heredoc terminator?
@@ -264,8 +278,8 @@ for f in "${shfiles[@]}"; do
   # R1 candidates: the byte sits where bash expands (unquoted heredoc body or shell
   # position) AND is not escaped away. Everything else is inert-by-region or
   # inert-by-escaping, and is reported as one grouped line per file.
-  live=$(printf '%s\n' "$rec"     | awk -F'\t' '$1=="HIT" && ($2=="body" || $2=="shell") && $4=="expanding" {printf "%s:%s ", $3, $2}')
-  inert=$(printf '%s\n' "$rec"    | awk -F'\t' '$1=="HIT" && !(($2=="body" || $2=="shell") && $4=="expanding") {printf "%s@%s(%s) ", $3, $2, $4}')
+  live=$(printf '%s\n' "$rec"     | awk -F'\t' '$1=="HIT" && ($2=="body" || $2=="shell" || $2=="shelltc") && $4=="expanding" {printf "%s:%s ", $3, $2}')
+  inert=$(printf '%s\n' "$rec"    | awk -F'\t' '$1=="HIT" && !(($2=="body" || $2=="shell" || $2=="shelltc") && $4=="expanding") {printf "%s@%s(%s) ", $3, $2, $4}')
 
   files_scanned=$((files_scanned + 1))
   capable=0
@@ -296,9 +310,11 @@ for f in "${shfiles[@]}"; do
   for e in $live; do
     l="${e%%:*}"; kind="${e##*:}"
     if [ "$kind" = "body" ]; then
-      finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment" 1
+      finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment. Remove the byte from the body (reword it, or write the body with a quoted delimiter if nothing must interpolate)" 1
+    elif [ "$kind" = "shelltc" ]; then
+      finding "$base:$l  backtick after a '#' on a code-bearing line (R1) — bash would comment out that half UNLESS a quote is open earlier on the line, and this scanner does not track quotes: a quote tracker whose own state can be corrupted by the payload is a silent exemption. Refused fail-closed rather than trusted. Move the byte into a whole-line '#' comment, or reword it out" 1
     else
-      finding "$base:$l  backtick in shell position (R1) — a code-bearing line's trailing comment is still shell position; the byte is expanded when this script runs" 1
+      finding "$base:$l  backtick in shell position (R1) — nothing on this line comments it out; the byte is expanded, which means the shell between a balanced pair RUNS when this script runs" 1
     fi
   done
   n_inert=$(nwords "$inert")
