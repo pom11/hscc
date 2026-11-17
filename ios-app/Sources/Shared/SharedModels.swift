@@ -197,6 +197,11 @@ struct KanbanRunningLite: Decodable {
     let tasks: [RunningCardLite]?
     let count: Int?
     let speak: String?
+    /// The registered board names (measured: a bare list of 23 strings, 264 B —
+    /// §4.3). Decoded because the board/project pickers need the list and this
+    /// is the cheapest sanctioned source for it; optional so a payload without
+    /// the key still decodes.
+    let boards: [String]?
 
     func rows(limit: Int) -> [RunningCardLite] { Array((tasks ?? []).prefix(limit)) }
 }

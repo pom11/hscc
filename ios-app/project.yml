@@ -213,6 +213,7 @@ targets:
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/CannedCard.swift
       - path: Sources/HSCC/Intents/AppShortcuts.swift
+      - path: Sources/HSCC/Intents/WidgetScopePickerIntent.swift
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
