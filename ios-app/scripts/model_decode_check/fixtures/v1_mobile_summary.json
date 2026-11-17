@@ -1,0 +1,44 @@
+{
+ "generated_at": "2026-11-17T08:30:00Z",
+ "boards": [
+  {
+   "board": "hscc",
+   "counts": {
+    "todo": 17,
+    "ready": 2,
+    "running": 3,
+    "blocked": 0,
+    "done": 750,
+    "archived": 114
+   },
+   "total": 886
+  },
+  {
+   "board": "headless-display",
+   "counts": {
+    "todo": 0,
+    "ready": 0,
+    "running": 0,
+    "blocked": 10,
+    "done": 12,
+    "archived": 3
+   },
+   "total": 25
+  },
+  {
+   "board": "radio",
+   "counts": {
+    "todo": 4,
+    "ready": 1,
+    "running": 0,
+    "blocked": 0,
+    "done": 40,
+    "archived": 8
+   },
+   "total": 53
+  }
+ ],
+ "board_count": 3,
+ "total_boards": 3,
+ "speak": "3 boards: 37 open, 3 running, 802 done."
+}

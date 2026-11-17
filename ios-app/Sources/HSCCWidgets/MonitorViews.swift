@@ -166,14 +166,9 @@ struct MonitorMeter: View {
     }
 }
 
-/// Displayed node label — the short tail of the node IP, or the sample hostname.
-extension MonitorNode {
-    var displayLabel: String {
-        if let hostname = sample?.hostname, !hostname.isEmpty { return hostname }
-        let parts = host.split(separator: ".")
-        return parts.count > 1 ? "." + parts.suffix(1).joined() : host
-    }
-}
+// The displayed node label (`displayLabel` — sample hostname, else the address
+// tail) lives on `MonitorNode` itself in Sources/Shared/SharedModels.swift, so
+// the widget, the Live Activity and the live probe share one rule (t_595a5fee).
 
 // ---------------------------------------------------------------------------
 // Medium — state line + a compact 2×2 node grid + a slim daemon-host strip

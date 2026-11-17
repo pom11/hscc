@@ -46,6 +46,41 @@ final class DecodeCheck {
             print("FAIL \(name)  →  \(label): \(error)")
         }
     }
+    /// Run a block of assertions. A throw inside is a named failure, not a crash
+    /// of the whole harness, so one drifted fixture still reports the rest.
+    func assertions(_ name: String, _ label: String, _ body: () throws -> Void) {
+        do { try body() } catch {
+            failures.append((name, label, "\(error)"))
+            print("FAIL \(name)  →  \(label): \(error)")
+        }
+    }
+
+    /// Assert a decode that MUST fail: the shape a contract rule forbids. This is
+    /// the §6 "a missing key is a bug, zero is a value" case — a counts map that
+    /// omits `done` has to throw, or a widget renders `done: 0` forever.
+    func checkFails<T: Decodable>(_ type: T.Type, _ name: String, _ label: String) {
+        do {
+            _ = try JSONDecoder().decode(type, from: load(name))
+            failures.append((name, label, "decoded — but this fixture must NOT decode"))
+            print("FAIL \(name)  →  \(label): decoded when it should have thrown")
+        } catch {
+            passed += 1
+            print("OK   \(name)  →  \(label) (rejected as required)")
+        }
+    }
+
+    /// Assert what a surface READS from a payload that decoded, not only that the
+    /// bytes parsed: the row cap, the age order, the degrade path.
+    func expect(_ name: String, _ label: String, _ ok: Bool, _ detail: String = "") {
+        if ok {
+            passed += 1
+            print("OK   \(name)  →  \(label)")
+        } else {
+            failures.append((name, label, detail.isEmpty ? "assertion failed" : detail))
+            print("FAIL \(name)  →  \(label): \(detail)")
+        }
+    }
+
 }
 
 let fixtureDir = CommandLine.arguments.count > 1
@@ -395,6 +430,176 @@ do {
 } catch {
     c.failures.append(("template_preview_hscc-live.json", "serve_delta decode", "\(error)"))
     print("FAIL template_preview_hscc-live.json → serve_delta decode: \(error)")
+}
+
+// ---- Widget / Live Activity payloads (t_595a5fee) -------------------------
+// The five datasets of docs/WIDGET_DATA_CONTRACT.md §3 are what the pivot's
+// surfaces render, and every type below is the REAL one from
+// Sources/Shared/SharedModels.swift. This card deleted the two mirror harnesses
+// (scripts/shared_model_check.swift, scripts/widget_kanban_decode_check.swift)
+// that re-declared these structs: a mirror that drifts is exactly the false
+// green this harness exists to prevent, and the real types decode here anyway.
+
+// Dataset 1 — projects (`reuse`). v1_projects.json is the live capture and it
+// DOES carry `repo` (an absolute path on the operator's machine) and `topic`;
+// ProjectsLite declares neither, so a clean decode plus `carriesRepo` proves the
+// §7 redaction is structural: the value arrives, is ignored, and can never be
+// rendered or written into the App Group container.
+c.assertions("v1_projects.json", "ProjectsLite (widget projects)") {
+    let raw = try c.load("v1_projects.json")
+    let p = try JSONDecoder().decode(ProjectsLite.self, from: raw)
+    let text = String(decoding: raw, as: UTF8.self)
+    c.expect("v1_projects.json", "ProjectsLite: \(p.projects.count) projects + count agrees",
+             !p.projects.isEmpty && p.count == p.projects.count,
+             "count \(String(describing: p.count)) vs \(p.projects.count) rows")
+    c.expect("v1_projects.json", "ProjectsLite: `repo`/`topic` on the wire, NOT in the type",
+             text.contains("\"repo\"") && text.contains("\"topic\""),
+             "fixture lost the fields the redaction proves")
+    c.expect("v1_projects.json", "rows(limit:) caps to what a surface draws (§5.1)",
+             p.rows(limit: 3).count == min(3, p.projects.count)
+             && p.rows(limit: 99).count == p.projects.count,
+             "row cap is not what §5.1 sizes")
+    c.expect("v1_projects.json", "every row has a name (its identity)",
+             p.projects.allSatisfy { !$0.name.isEmpty }, "empty name")
+}
+
+// Dataset 2 — board status counts (`GET /v1/mobile/summary`, §6). The route is
+// not deployed yet (PR #310 open; a live GET 404s — verified 2026-11-17), so
+// these fixtures are authored from routes_mobile.py::_assemble and its degrade
+// paths; provenance is recorded in fixtures/README.md.
+c.assertions("v1_mobile_summary.json", "MobileSummaryResponse (§6 counts)") {
+    let ok = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                      from: try c.load("v1_mobile_summary.json"))
+    c.expect("v1_mobile_summary.json", "decodes, not degraded, speak present",
+             !ok.degraded && ok.entries.count == 3 && !ok.speak.isEmpty, "expected 3 tiles")
+    c.expect("v1_mobile_summary.json", "every tile carries all six counts",
+             ok.entries.allSatisfy { $0.counts != nil && $0.error == nil },
+             "a tile without counts is a bug, not a quiet board")
+    c.expect("v1_mobile_summary.json", "openTotal = total − done − archived (§6)",
+             ok.board("hscc")?.openTotal == 22
+             && ok.entries.reduce(0) { $0 + ($1.openTotal ?? 0) } == 37,
+             "open math drifted from the server's _open_total")
+    c.expect("v1_mobile_summary.json", "openCount + hasBlocked drive the tile",
+             ok.board("headless-display")?.counts?.openCount == 10
+             && ok.board("headless-display")?.counts?.hasBlocked == true
+             && ok.board("hscc")?.counts?.hasBlocked == false,
+             "the blocked-is-red rule is wrong")
+    c.expect("v1_mobile_summary.json", "an absent board reads nil, never a zero tile",
+             ok.board("does-not-exist") == nil, "the lookup invented a tile")
+
+    // §6 rule 7: the degrade path sends no `boards` key at all.
+    let deg = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                       from: try c.load("v1_mobile_summary_degraded.json"))
+    c.expect("v1_mobile_summary_degraded.json", "degraded: zero tiles, no counts, speak only",
+             deg.degraded && deg.entries.isEmpty && deg.board_count == nil
+             && deg.speak == "Board counts unavailable.", "degrade body changed shape")
+
+    // One unreadable board must stay an error, not become a zero.
+    let partial = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                           from: try c.load("v1_mobile_summary_board_error.json"))
+    c.expect("v1_mobile_summary_board_error.json", "per-board error stays an error",
+             partial.entries.count == 2
+             && partial.board("headless-display")?.counts == nil
+             && partial.board("headless-display")?.error != nil
+             && partial.board("headless-display")?.openTotal == nil
+             && partial.board("hscc")?.counts?.done == 750,
+             "an unreadable board was rendered as data")
+
+    // The 4 KB Live-Activity budget trims the tail and announces it.
+    let trunc = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                         from: try c.load("v1_mobile_summary_truncated.json"))
+    c.expect("v1_mobile_summary_truncated.json", "truncation is announced, never silent",
+             trunc.truncated == true && trunc.omitted_boards == 22
+             && trunc.unreadable_boards == 1 && trunc.entries.count == 1
+             && trunc.total_boards == 23, "a trimmed payload no longer reports the trim")
+
+    // §6 rule 1 — the case that shipped the original lie: counts without `done`.
+    c.checkFails(MobileSummaryResponse.self, "v1_mobile_summary_missing_done.json",
+                 "BoardStatusCounts requires all six statuses")
+}
+
+// Datasets 3 + 4 — the kanban trio. v1_kanban_running.json is a LIVE capture that
+// still carries `boards`, `errors`, `pid` and `host_local`; the Lite types declare
+// none of them — §5.3's narrowing plus the read-only pivot (no surface may see
+// which process a kill would stop).
+c.assertions("v1_kanban_running.json", "the kanban trio (Lite decoders)") {
+    let raw = try c.load("v1_kanban_running.json")
+    let r = try JSONDecoder().decode(KanbanRunningLite.self, from: raw)
+    let text = String(decoding: raw, as: UTF8.self)
+    c.expect("v1_kanban_running.json", "KanbanRunningLite decodes the live envelope",
+             (r.tasks?.count ?? -1) == r.count && (r.speak ?? "").isEmpty == false,
+             "count/tasks disagree")
+    c.expect("v1_kanban_running.json",
+             "`boards`/`errors`/`pid`/`host_local` on the wire, not in the type",
+             text.contains("\"boards\"") && text.contains("\"errors\"")
+             && text.contains("\"pid\"") && text.contains("\"host_local\""),
+             "fixture lost the fields the narrowing proves")
+    c.expect("v1_kanban_running.json", "rows(limit:) caps the surface",
+             r.rows(limit: 2).count == min(2, r.tasks?.count ?? 0), "row cap wrong")
+
+    let b = try JSONDecoder().decode(KanbanBlockedLite.self, from: try c.load("kanban_blocked.json"))
+    let ages = b.rows(limit: 3).map { $0.age_days ?? 0 }
+    c.expect("kanban_blocked.json", "KanbanBlockedLite: rows capped, stuck-longest-first (§5.3)",
+             !ages.isEmpty && ages == ages.sorted(by: >) && ages.count <= 3,
+             "the row order drifted: \(ages)")
+    c.expect("kanban_blocked.json", "block prose (`why`/`comments`) is on the wire, not in the type",
+             String(decoding: try c.load("kanban_blocked.json"), as: UTF8.self)
+                .contains("\"why\""), "fixture no longer carries the prose to ignore")
+
+    let s = try JSONDecoder().decode(KanbanStaleLite.self, from: try c.load("kanban_stale.json"))
+    c.expect("kanban_stale.json", "KanbanStaleLite: envelope agrees, rows capped at 8",
+             (s.tasks?.count ?? -1) == s.count && s.rows(limit: 8).count <= 8,
+             "envelope or row cap wrong")
+
+    // The committed `kanban_stale.json` is a 2-row capture whose rows are both
+    // `running`, so it cannot exercise the two things a queue-depth tile depends
+    // on. `kanban_stale_queued.json` is shape-faithful from
+    // `autodown.list_stale_tasks` (§4.3's keys) and carries the mixed spread:
+    // queue depth = the ready+todo rows, and rows(limit:) must order oldest first.
+    let q = try JSONDecoder().decode(KanbanStaleLite.self,
+                                     from: try c.load("kanban_stale_queued.json"))
+    let queued = (q.tasks ?? []).filter { $0.status == "ready" || $0.status == "todo" }
+    c.expect("kanban_stale_queued.json", "queue depth = ready+todo rows (§5.3's small family)",
+             queued.count == 4 && q.count == q.tasks?.count,
+             "got \(queued.count) queued of \(String(describing: q.count))")
+    let qAges = q.rows(limit: 3).map { $0.age_days ?? -1 }
+    c.expect("kanban_stale_queued.json", "rows(limit:) returns the oldest 3 first",
+             qAges == [12, 7, 5], "ages came back \(qAges)")
+}
+
+// Dataset 5 — cluster monitor + daemon host. `output` (54% of the body) is not
+// declared, and `displayLabel` is §7's redacted node identity: asserted here so no
+// surface can quietly render a LAN address.
+c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/LA)") {
+    let m = try JSONDecoder().decode(MonitorResponse.self, from: try c.load("v1_cluster_monitor.json"))
+    c.expect("v1_cluster_monitor.json", "MonitorResponse: 4 nodes, every metric parses",
+             m.nodes.count == 4 && m.nodes.allSatisfy { $0.sample != nil }
+             && m.nodes.allSatisfy { $0.sample?.cpuUsagePct != nil && $0.sample?.memUsedPct != nil }
+             && m.nodes.allSatisfy { $0.sample?.gpuUtilPct != nil },
+             "node metrics stopped parsing")
+    c.expect("v1_cluster_monitor.json", "displayLabel never leaks the node's LAN address (§7)",
+             m.nodes.allSatisfy { node in
+                 !node.displayLabel.contains(node.host)
+                 && (node.displayLabel == node.sample?.hostname
+                     || (node.displayLabel.hasPrefix(".")
+                         && node.displayLabel.dropFirst().allSatisfy { ch in ch.isNumber }))
+             }, "a surface could render a full address")
+    c.expect("v1_cluster_monitor.json", "shortTail reduces an address to its last octet (§7)",
+             m.nodes.allSatisfy { MonitorNode.shortTail($0.host)
+                 == "." + ($0.host.split(separator: ".").last.map(String.init) ?? "") }
+             && MonitorNode.shortTail("192.0.2.244 up 3d") == ".244",
+             "the shared tail rule is not a tail")
+    let down = try JSONDecoder().decode(MonitorResponse.self,
+                                        from: try c.load("v1_cluster_monitor_unavailable.json"))
+    c.expect("v1_cluster_monitor_unavailable.json", "fleet-down degrade: no json key, no nodes",
+             down.nodes.isEmpty && down.speak == "fleet monitor unavailable",
+             "degrade shape changed")
+
+    let h = try JSONDecoder().decode(MonitorDaemonHost.self, from: try c.load("v1_daemon_host.json"))
+    c.expect("v1_daemon_host.json", "daemon host (live capture): cpu/mem/disk + uptime parse",
+             h.cpuPercent != nil && h.memPercent != nil && h.diskPercent != nil
+             && h.uptimeText != nil && h.cpuCount == 14 && !h.speak.isEmpty,
+             "the daemon-host sidecar stopped decoding")
 }
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
