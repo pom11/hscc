@@ -56,8 +56,13 @@ trap 'rm -rf "$TMP"' EXIT
 SUBJECT=Sources/HSCCWidgets/ClusterWidget.swift
 VIEWS=Sources/HSCCWidgets/ClusterWidgetViews.swift
 METRICS=Sources/HSCCWidgets/ClusterWidgetMetrics.swift
+# `ClusterFleet`'s host tally IS this file since t_f2867fb3 (the cluster-health
+# Live Activity projects through the same call), so the harness that executes
+# ClusterFleet has to compile it — a projection that moved out and was not added
+# here would leave this gate asserting a claim about code it no longer sees.
+TALLY=Sources/Shared/ClusterNodeTally.swift
 STORE=Sources/Shared/SharedStore.swift
-for f in "$SUBJECT" "$VIEWS" "$METRICS" "$STORE" \
+for f in "$SUBJECT" "$VIEWS" "$METRICS" "$TALLY" "$STORE" \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
@@ -172,6 +177,7 @@ echo "executed proofs (macOS compile of the real widget + shared sources)"
 
 xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$METRICS" \
+  "$TALLY" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

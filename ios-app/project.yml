@@ -161,6 +161,9 @@ targets:
       # The cluster-health activity's launch sweep (t_0120475a). Same split:
       # the rendering lives in the monitor extension target, this is the app half.
       - path: Sources/HSCC/ClusterHealthActivitySweep.swift
+      # Its feeder (t_f2867fb3): the poll-and-push loop, the Active toggle and
+      # the cadence, and the BGAppRefreshTask that keeps it alive backgrounded.
+      - path: Sources/HSCC/ClusterHealthActivityDriver.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
@@ -234,6 +237,10 @@ targets:
       # sliced by live_activity_rehydration_check.sh and executed there, so the
       # file is compiled into the app (sweep) and the monitor extension (views).
       - path: Sources/Shared/ClusterHealthActivity.swift
+      # The monitor host tally BOTH the cluster widget and the cluster-health
+      # activity project through (t_f2867fb3), so one surface cannot call a
+      # fleet degraded while the other calls it healthy. Foundation-only.
+      - path: Sources/Shared/ClusterNodeTally.swift
       - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/WakingActivity.swift
     entitlements:
@@ -307,8 +314,14 @@ targets:
         # the app, and when backgrounded it uses BGAppRefreshTask to push data
         # on a best-effort OS schedule. iOS only allows scheduling task
         # identifiers listed under BGTaskSchedulerPermittedIdentifiers.
+        #
+        # The cluster-health activity (t_f2867fb3) registers its OWN identifier
+        # rather than sharing the monitor's: the two drivers have independent
+        # cadences and independent Active toggles, and one identifier would mean
+        # one surface's BGTask waking (and pushing for) the other.
         BGTaskSchedulerPermittedIdentifiers:
           - com.hscc.ios.monitor.backgroundRefresh
+          - com.hscc.ios.clusterhealth.backgroundRefresh
         # The camera is used ONLY to scan the setup QR code from `hscc api
         # status`. Without this key iOS kills the app the instant the scanner
         # opens — which is the first thing an operator does.
@@ -360,6 +373,10 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # `ClusterFleet`'s host tally IS this projection (t_f2867fb3) — the
+      # cluster-health Live Activity runs the same call, so the widget and the
+      # bubble cannot disagree about a fleet that is half down.
+      - path: Sources/Shared/ClusterNodeTally.swift
       # Theme tokens shared with the app (design-system palette, no raw hex).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
@@ -476,6 +493,10 @@ targets:
       - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/CardsRunningActivity.swift
       - path: Sources/Shared/ClusterHealthActivity.swift
+      # Needed by the projection block inside the file above — the extension
+      # renders the state the app pushed and never projects a payload itself,
+      # but the attributes file now names this one. t_f2867fb3.
+      - path: Sources/Shared/ClusterNodeTally.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:

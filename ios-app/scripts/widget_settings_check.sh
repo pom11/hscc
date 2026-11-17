@@ -79,7 +79,15 @@ func check(_ name: String, _ cond: Bool) {
 // 1. defaulting is backward compatible: absent store -> every surface on, 5/15
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
-check("defaults has all 4 surfaces", defaults.surfaces.count == 4)
+// The count is READ, not remembered. This line used to be
+// `defaults.surfaces.count == 4`, which every new surface turned red — a
+// healthy gate failing on a correct change, which trains everyone to expect
+// noise here. `defaults()` is built FROM allCases, so what this case must
+// actually prove is that no case is missing from the defaults and none is
+// invented, which is a set comparison rather than a number.
+check("defaults seed exactly every WidgetSurfaceKind case",
+      Set(defaults.surfaces.keys) == Set(WidgetSurfaceKind.allCases)
+      && defaults.surfaces.count == WidgetSurfaceKind.allCases.count)
 for kind in WidgetSurfaceKind.allCases {
     let s = defaults.setting(for: kind)
     check("\(kind.rawValue) defaults active", s.isActive)
