@@ -33,7 +33,10 @@ task: t_2bed5fe3
   switch on, so "fall back to the snapshot" is one age formula instead of five
   hand-rolled ones — and a 2xx that fails to decode lands in `.decoding`, which
   is what keeps §6 rule 1 (a missing `done` must not render as `0`) honest end to
-  end.
+  end. `scripts/widget_data_client_check.sh` proves all of it by executing the
+  committed type through a stubbed `URLProtocol` (no network), and owns the exact
+  audited path set as an assertion, so adding a read is a deliberate act in two
+  files rather than a silent widening.
 ---
 kind: Removed
 task: t_2bed5fe3
