@@ -212,6 +212,16 @@ mapped onto drawer destinations.
     `?? .standard` on the shared suite and that the share write is gated on
     availability, plus a compiled harness exercises the real `SharedStore`
     availability logic (nil provider → unavailable; real store → available).
+  - `widget_data_client_check.sh` — drives the **real** `WidgetDataClient.swift`
+    (plus `SharedModels.swift` + `SharedStore.swift`) through a stubbed
+    `URLProtocol` and asserts the four promises the extension surfaces rest on:
+    the read allowlist is exactly the audited routes and a mutating path is
+    refused **before** a request is built; the per-request deadline is on the
+    request; every transport/status/decode outcome maps to one
+    `WidgetDataFailure` case (including §6 rule 1 — a counts payload missing
+    `done` is `.decoding`, never a zero); and `WidgetData.read` yields
+    `.live`/`.stale`/`.failed`, never falling back to a snapshot when the real
+    problem is that nothing was configured (t_5c554c5b). No network is touched.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
 

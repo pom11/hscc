@@ -479,7 +479,8 @@ enum WidgetData {
     ///     `MonitorSnapshotStore`, …). It is consulted only when
     ///     `failure.showsStaleData` is true, and the caller decides which value
     ///     it may keep — the client never reads or writes the container.
-    ///   - body: one dataset read, e.g. `{ $0.kanbanRunning() }`.
+    ///   - body: one dataset read, e.g. `{ await $0.kanbanRunning() }` (the
+    ///     closure is `async`, so the `await` is written, not implied).
     static func read<Value>(
         using client: WidgetDataClient?,
         lastKnown: () -> (value: Value, at: Date)? = { nil },
