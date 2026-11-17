@@ -12,7 +12,7 @@ import Combine
 /// source of truth and the two sides cannot drift. Only the app mutates; the
 /// extensions are read-only consumers.
 final class WidgetSettingsStore: ObservableObject {
-    /// The whole registry (all four surfaces). Published so Settings re-renders
+    /// The whole registry (every surface). Published so Settings re-renders
     /// as the operator edits any surface.
     @Published private(set) var settings: AppGroupWidgetSettings
 

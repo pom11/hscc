@@ -822,7 +822,7 @@ struct ConfigView: View {
 //
 // ONE reusable editor for every surface — the "Widgets & Live Activities"
 // sub-editor for a single surface: Active toggle, refresh-rate picker, and
-// content-selection toggles. All four surfaces use this same component; only
+// content-selection toggles. Every surface uses this same component; only
 // the surface-kind metadata (name/icon/sections) differs, and that lives in
 // the display mapping below. No bespoke per-surface editors.
 
@@ -846,7 +846,7 @@ private struct ScopeChoice: Identifiable {
     let subtitle: String?
 }
 
-/// The shared editor reused by all four surfaces. Reads/writes the store via
+/// The shared editor reused by every surface. Reads/writes the store via
 /// the `WidgetSettingsStore` (app-side ObservableObject backed by the App
 /// Group), which the enclosing sub-editor owns.
 struct WidgetSurfaceEditor: View {
@@ -967,17 +967,25 @@ struct WidgetSurfaceEditor: View {
             // timer.
             .task(id: kind) { await loadScopeOptions() }
 
-            Section {
-                ForEach(sectionRows(kind), id: \.self) { section in
-                    Toggle(sectionLabel(section), isOn: Binding(
-                        get: { surface.showSections.contains(section) },
-                        set: { _ in store.toggleSection(section, for: kind) }
-                    ))
+            // A surface whose widget has exactly one dataset declares an EMPTY
+            // `availableSections` (t_09cd8abf: the board status widget draws
+            // five counts and nothing else). Showing an empty "Show Content"
+            // group with a "choose which sections" footer underneath would
+            // advertise a choice that does not exist, so the group appears
+            // only when there is something to choose.
+            if !sectionRows(kind).isEmpty {
+                Section {
+                    ForEach(sectionRows(kind), id: \.self) { section in
+                        Toggle(sectionLabel(section), isOn: Binding(
+                            get: { surface.showSections.contains(section) },
+                            set: { _ in store.toggleSection(section, for: kind) }
+                        ))
+                    }
+                } header: {
+                    Text("Show Content")
+                } footer: {
+                    Text("Choose which sections this surface renders. Sections you turn off are hidden from its layout.")
                 }
-            } header: {
-                Text("Show Content")
-            } footer: {
-                Text("Choose which sections this surface renders. Sections you turn off are hidden from its layout.")
             }
         }
         .navigationTitle(surfaceName(kind))
@@ -1096,6 +1104,7 @@ extension WidgetSurfaceKind {
         switch self {
         case .widgetCluster: return "Cluster Widget"
         case .widgetMonitor: return "Monitor Widget"
+        case .widgetBoardStatus: return "Board Status Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
@@ -1107,6 +1116,9 @@ extension WidgetSurfaceKind {
         switch self {
         case .widgetCluster: return "square.grid.2x2"
         case .widgetMonitor: return "gauge"
+        // The same glyph the widget itself draws in its header, so the row and
+        // the widget are visibly the same thing.
+        case .widgetBoardStatus: return "square.stack.3d.up"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
         // Health, not a gauge: this surface answers "is the fleet up", which is
