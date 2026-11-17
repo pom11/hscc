@@ -49,19 +49,35 @@ task: t_71deac83
   last, the stored row cap, an unparseable `started_at` giving no age.
   `widget_settings_check.sh` gained two content guards (a content group is not
   offered for a surface with no sections; the scope pickers appear only where
-  the route honours a scope) and two fixes to assertions that were already
-  misjudging the code: the *all cases are editable* check required
-  `sectionRow(kind:)` for a surface with no sections and never for one with any,
-  which contradicts the shipped board-monitor/cluster-health rows, and the
-  surface count was transcribed as `== 4` while the model had grown a fifth
-  case — a literal that reddened the next legitimate surface and would have
-  invited someone to delete a real one. The count is now derived from the code
-  the check already reads.
-  Negative tests, each reverted and verified byte-identical after: a suffixed
-  marker fails the rehydration script by name; letting a blind read start a
-  bubble, letting a non-live push carry no label, and letting a down blocked
-  route answer `0` each fail a named assertion; replacing either config-screen
-  guard with `if true` fails its named guard; and copying the five-surface model
-  onto the pre-fix script fails `defaults has all 4 surfaces` — the trap the fix
-  removes. Full gate at the head, every `scripts/*check*.sh` run side by side
-  with a clean checkout of the base: no script changed colour.
+  the route honours a scope) and the registry-invariant cases: no two surfaces
+  share a registry key, every key is namespaced by surface kind, a surface with
+  no sections stays section-less through the bounded read, and the running-cards
+  surface is push-fed under a stable key. Each reads the registry's own
+  `allCases` rather than a remembered number, so the next surface cannot redden
+  a healthy gate.
+
+- **Two edits this branch first brought are deliberately NOT in the delivered
+  diff, because `main` already carries the same rule in a better form** (rebase
+  onto `main` @ `e550f944`). The surface-count assertion is already a set
+  comparison over `allCases`, and the backtick splice this branch patched by
+  routing the extracted model block through `printf` inside quoted heredocs is
+  settled file-wide by the same card's ban plus the committed harness golden —
+  keeping the branch's narrower shape would have put a second mechanism in place
+  of one and frozen the harness body out of the escape the ban documents. That
+  the ban is the sufficient half is measurable rather than argued: the committed
+  golden carries backticked lines lifted verbatim out of
+  `Sources/Shared/SharedStore.swift`, intact, so a backtick arriving through an
+  expansion is inert text and only the ones typed into this gate's own prose can
+  splice.
+
+- **One pre-existing red on `main` is repaired by this branch.** At `e550f944`
+  `widget_settings_check.sh` failed its OWN backtick guard — comment lines in the
+  harness body had landed carrying literal backticks after the guard shipped — so
+  it exited before compiling anything; and its committed harness reference had
+  never been refreshed for the model block `main` grew since, so no current model
+  matches those bytes. Both are fixed here: the prose interpolates the documented
+  escape instead of carrying the byte, and the reference is refreshed for the
+  current model plus the cases this branch adds. Measured by running the same
+  script set in two clean worktrees — the base and this head: the base fails
+  exactly this one gate and passes every other script in the set, and this head
+  passes the whole set.
