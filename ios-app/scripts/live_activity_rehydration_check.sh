@@ -17,45 +17,69 @@
 # instead of quietly shrinking the table, which is the failure mode every
 # path-anchored harness in this directory has eventually died of.
 #
-# Both blocks are Foundation-only on purpose (no ActivityKit, no Theme), which
-# is what lets them compile on the macOS SDK with this harness.
+# PART 3 — the cluster-health activity (t_0120475a). The same arrangement in a
+# SECOND file: the two blocks in Sources/Shared/ClusterHealthActivity.swift
+# (`…: cluster-health-reading-rules` and `…: cluster-health-orphan-decision`)
+# are sliced by the identical awk rule, so the table executes the
+# `ClusterHealthOrphanRule` that `ClusterHealthActivitySweep` applies at launch
+# and the words, tally and colour that `ClusterHealthLiveActivity` draws. The
+# specs below therefore name the FILE each marker lives in — a spec that only
+# named the marker would silently start slicing the wrong file the day a rule
+# moved, and a green table would be proving nothing.
+#
+# Every sliced block is Foundation-only on purpose (no ActivityKit, no Theme),
+# which is what lets it compile on the macOS SDK with this harness.
+#
+# SharedModels.swift + model_decode_check/ThemeStub.swift are compiled in for
+# exactly one reason: PART 3 asserts this activity's state table against the
+# real `ClusterState` the app and the widget share — the one agreement a sliced
+# copy of a table cannot prove about itself. No other model is used here, and
+# nothing in this script decodes a fixture (that is model_decode_check's job).
 #
 # Usage: scripts/live_activity_rehydration_check.sh
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-SRC=Sources/Shared/CardsRunningActivity.swift
+CARDS_SRC=Sources/Shared/CardsRunningActivity.swift
+CLUSTER_SRC=Sources/Shared/ClusterHealthActivity.swift
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
-slice() {  # slice <marker-name> — print the bracketed block, markers excluded
-  awk -v b="// GATE-SLICE-BEGIN: $1" -v e="// GATE-SLICE-END: $1" \
-      '$0==b{s=1;next} $0==e{s=0} s' "$SRC"
+slice() {  # slice <file> <marker-name> — print the bracketed block, markers excluded
+  awk -v b="// GATE-SLICE-BEGIN: $2" -v e="// GATE-SLICE-END: $2" \
+      '$0==b{s=1;next} $0==e{s=0} s' "$1"
 }
 
-printf 'import Foundation\n' > "$OUT/CardsRules.swift"
-for spec in "cards-reading-rules:displayCount" "cards-orphan-decision:isOrphan"; do
-  name="${spec%%:*}"; want="${spec##*:}"
-  grep -q "^// GATE-SLICE-BEGIN: ${name}$" "$SRC" || {
-    echo "FAIL: $SRC has no 'GATE-SLICE-BEGIN: ${name}' marker." >&2
-    echo "      The running-cards rules moved — re-point this gate at them." >&2
+printf 'import Foundation\n' > "$OUT/SlicedRules.swift"
+# <file>|<marker name>|<the func that block must declare>
+for spec in "$CARDS_SRC|cards-reading-rules|displayCount" \
+            "$CARDS_SRC|cards-orphan-decision|isOrphan" \
+            "$CLUSTER_SRC|cluster-health-reading-rules|headline" \
+            "$CLUSTER_SRC|cluster-health-orphan-decision|isOrphan"; do
+  src="${spec%%|*}"; rest="${spec#*|}"; name="${rest%%|*}"; want="${rest##*|}"
+  grep -q "^// GATE-SLICE-BEGIN: ${name}$" "$src" || {
+    echo "FAIL: $src has no 'GATE-SLICE-BEGIN: ${name}' marker." >&2
+    echo "      The ${name} rules moved — re-point this gate at them." >&2
     echo "      Deleting these assertions instead would un-prove the surface." >&2
     exit 1
   }
-  slice "$name" > "$OUT/slice.swift"
-  [ -s "$OUT/slice.swift" ] || { echo "FAIL: empty slice for '$name' in $SRC" >&2; exit 1; }
+  slice "$src" "$name" > "$OUT/slice.swift"
+  [ -s "$OUT/slice.swift" ] || { echo "FAIL: empty slice for '$name' in $src" >&2; exit 1; }
   # The range must be the block that DECLARES the rule, not a comment window
   # that happens to sit between two markers.
   grep -q "func ${want}" "$OUT/slice.swift" || {
     echo "FAIL: slice '$name' does not declare '${want}' — wrong range sliced" >&2
     exit 1
   }
-  cat "$OUT/slice.swift" >> "$OUT/CardsRules.swift"
+  cat "$OUT/slice.swift" >> "$OUT/SlicedRules.swift"
 done
 
 cp scripts/live_activity_rehydration_check/main.swift "$OUT/main.swift"
 
-swiftc -o "$OUT/check" "$OUT/main.swift" "$OUT/CardsRules.swift" 2>&1 || {
+swiftc -o "$OUT/check" \
+  "$OUT/main.swift" "$OUT/SlicedRules.swift" \
+  Sources/Shared/SharedModels.swift \
+  scripts/model_decode_check/ThemeStub.swift 2>&1 || {
   echo "compile failed" >&2; exit 1; }
 
 "$OUT/check"

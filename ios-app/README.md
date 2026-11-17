@@ -165,6 +165,11 @@ file-by-file disposition of the remaining console files is
     background-refresh task registration. The per-project **session activity**
     and its `SessionActivityDriver` were retired with the chat they mirrored
     (t_3b15b8c9).
+  - `ClusterHealthActivitySweep.swift` — the re-hydration half of the
+    **cluster-health Live Activity** (t_0120475a): ends the bubble a force-quit
+    stranded, on the pure rule its attributes file declares. It has no settings
+    key and no poll loop yet — the driver that feeds that surface is its own
+    slice, so the sweep is this activity's only app-side hook.
   - `OfflineSendQueue.swift` — chat composed while unreachable is queued
     (persisted), visually distinct, flushed on reconnect — never lost, never
     sent twice.
@@ -195,20 +200,23 @@ file-by-file disposition of the remaining console files is
   widget) and the **HSCC Monitor** widget (per-node monitor data).
 - `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivityMonitor/` — the two
   Live Activity extensions: fleet-wake progress, and the **monitor target**,
-  which carries TWO Live Activities — the cluster/daemon-host monitor and the
+  which carries THREE Live Activities — the cluster/daemon-host monitor, the
   **running-cards** activity (board · card · worker · run time, the Island and
-  Lock Screen form of `hscc cards monitor --live`'s panel header). An
+  Lock Screen form of `hscc cards monitor --live`'s panel header), and the
+  **cluster-health** activity (serving state + the node tally up/down, with the
+  nodes that did not answer named, t_0120475a). An
   extension's `@main` is a `WidgetBundle`, and one bundle may declare one
   `ActivityConfiguration` per attributes type — so the "one Live Activity per
-  target" rule this file used to state is false, and the two monitor-family
+  target" rule this file used to state is false, and the three monitor-family
   activities share a target. Each activity still ends explicitly on success or
-  failure, and the cards activity is re-hydrated at launch
-  (`CardsRunningActivitySweep`) like the wake one. The third extension that
+  failure, and the cards and cluster-health activities are re-hydrated at launch
+  (`CardsRunningActivitySweep`, `ClusterHealthActivitySweep`) like the wake one.
+  The third extension that
   used to sit here, `HSCCLiveActivitySession`, was deleted with the session it
   mirrored (t_3b15b8c9).
 - `project.yml` — XcodeGen spec, listing every source file explicitly. Four
   app-facing targets (app, widgets, two Live Activity extensions carrying
-  three Live Activities). The
+  four Live Activities). The
   `HSCCUITests` UI-test bundle was retired with the console (t_0f3f70e6).
 - `scripts/` — verification helpers:
   - `build_check.sh` — full per-target **compile** of every target with its

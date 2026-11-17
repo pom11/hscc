@@ -166,30 +166,43 @@ enum ClusterHealthReading {
         return "+\(down - shown) more"
     }
 
-    /// The headline: a state word plus the up tally. A read that answered
-    /// nothing leads with its own failure label instead, and a state with no
-    /// signal at all is an em dash — never "Down" (that word is the server's
-    /// answer, not our guess) and never "0/0 up".
+    /// The headline. The branch is "was a number told", in this order:
+    ///   * a number was told → the state word plus that tally. Even under a
+    ///     failure label: last-known numbers stay on screen and the `stale ·`
+    ///     line carries the failure, which is what keeps a stale surface useful
+    ///     instead of blank.
+    ///   * no number, but a failure label → the label. A read that answered
+    ///     nothing leads with what it knows, not with a state word.
+    ///   * no number, no label, and a state the app models → that state alone
+    ///     (the node route may have failed while autodown answered).
+    ///   * nothing at all → an em dash. Never "Down" (that word is the server's
+    ///     answer, not our guess) and never "0/0 up".
     static func headline(_ signals: ClusterHealthSignals) -> String {
-        if signals.isEmpty {
-            if let failureLabel = signals.failureLabel, !failureLabel.isEmpty { return failureLabel }
-            return "—"
-        }
         let head = stateLabel(signals.servingState)
-        let tally = tallyText(up: signals.nodesUp, total: signals.nodesTotal)
-        if tally == "— up" { return head }
-        return "\(head) · \(tally)"
+        if let up = signals.nodesUp {
+            return "\(head) · \(tallyText(up: up, total: signals.nodesTotal))"
+        }
+        if let failureLabel = signals.failureLabel, !failureLabel.isEmpty { return failureLabel }
+        if signals.isEmpty { return "—" }
+        return head
     }
 
-    /// The Dynamic Island compact-trailing string: `3/4`, or `!` for a read that
-    /// produced nothing, or `—` when nothing was told. Clipped, because the
-    /// compact region is about four characters wide.
+    /// The Dynamic Island compact-trailing string: `3/4`, or `3` when the route
+    /// named no total, or `!` for a read that produced nothing, or `—` when
+    /// nothing was told. Clipped, because the compact region is about four
+    /// characters wide.
+    ///
+    /// A told `up` ALWAYS prints something: a surface that shows `—` while the
+    /// app knows three nodes are answering is lying about knowing.
     static func compactTrailing(_ signals: ClusterHealthSignals) -> String {
-        guard let up = signals.nodesUp, let total = signals.nodesTotal else {
+        guard let up = signals.nodesUp else {
             return (signals.failureLabel?.isEmpty == false) ? "!" : "—"
         }
-        if up > 9 || total > 9 { return "9+" }
-        return "\(up)/\(total)"
+        if let total = signals.nodesTotal {
+            if up > 9 || total > 9 { return "9+" }
+            return "\(up)/\(total)"
+        }
+        return up > 9 ? "9+" : "\(up)"
     }
 
     /// The colour. Read top to bottom, because the order is the rule:
