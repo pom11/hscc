@@ -19,6 +19,9 @@ import WidgetKit
 ///   * small/medium/large — Projects: the projects row of WIDGET_DATA_CONTRACT
 ///                     §3, one `GET /v1/projects` read, each row with its board,
 ///                     configured through the widget's own project picker.
+///   * systemSmall/Medium/Large + the three accessory families — Board Status:
+///                     todo/ready/running/blocked/done for ONE board, picked in
+///                     the widget's own configuration sheet (t_6d8731ab).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -31,5 +34,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         CardsRunningWidget()
         KanbanMonitorWidget()
         ProjectsWidget()
+        BoardStatusWidget()
     }
 }

@@ -1,0 +1,12 @@
+{
+  "count": 5,
+  "errors": [],
+  "speak": "5 cards blocked across 2 boards.",
+  "tasks": [
+    { "board": "hscc", "id": "b_1", "status": "blocked", "assignee": "ios-engineer", "age_days": 9, "block_kind": "needs_input", "title": "hscc blocked one" },
+    { "board": "hscc", "id": "b_2", "status": "blocked", "assignee": "backend-engineer", "age_days": 4, "block_kind": "dependency", "title": "hscc blocked two" },
+    { "board": "hscc", "id": "b_3", "status": "blocked", "assignee": null, "age_days": 1, "block_kind": "needs_input", "title": "hscc blocked three" },
+    { "board": "radio", "id": "b_4", "status": "blocked", "assignee": "ios-engineer", "age_days": 6, "block_kind": "needs_input", "title": "radio blocked one" },
+    { "board": "radio", "id": "b_5", "status": "blocked", "assignee": "ios-engineer", "age_days": 2, "block_kind": "dependency", "title": "radio blocked two" }
+  ]
+}
