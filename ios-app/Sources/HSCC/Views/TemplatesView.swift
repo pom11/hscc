@@ -1,18 +1,13 @@
 import SwiftUI
 
-/// The templates library — browse, preview, and confirm-gated apply.
+/// The templates library — browse only (t_0f3f70e6, console retirement).
+/// The detail screen — shape, dry-run preview, confirm-gated apply — is gone;
+/// the new app is read-only and fires no actions.
 ///
-/// Replaces the old single-dropdown section: the operator picks a fleet layout
-/// the way they pick a configuration — by seeing what it does to the cluster.
-/// Templates are grouped by their `group` (1node / 2node / … / other), each
-/// shows its families, and the currently-applied one is marked distinctly.
-///
-/// Selecting a template opens `TemplateDetailView`, which shows its shape
-/// (`TemplateTopologyView`), a read-only preview of exactly what applying it
-/// would change (`GET /v1/template/preview/{name}`), and the confirm-gated
-/// apply. Apply never fires from a single tap: the confirmation states the
-/// real consequence in plain words — it stops and restarts serving units and
-/// takes several minutes, during which the fleet cannot serve. After apply the
+/// Replaces the old single-dropdown section: the operator sees what fleet
+/// layouts exist and which one is live. Templates are grouped by their
+/// `group` (1node / 2node / … / other), each shows its families, and the
+/// currently-applied one is marked distinctly. After apply the
 /// view shows the fleet reloading and polls `/v1/template/status` +
 /// `/v1/verify` rather than claiming instant success.
 ///
@@ -46,19 +41,6 @@ struct TemplatesView: View {
         .task {
             if client != nil, status.value == nil, !status.isLoading {
                 await loadAll()
-            }
-        }
-        // Sheet → PUSH (spec §3.1): TemplateDetail rides the app-wide stack
-        // (a ClusterTemplate is the navigation value); the L4 sheet-in-sheet
-        // chain is gone. The destination lives here so the push can still
-        // hand the detail its `refreshStatus` callback.
-        .navigationDestination(for: ClusterTemplate.self) { template in
-            if let client {
-                TemplateDetailView(client: client,
-                                   template: template,
-                                   onApplied: { await refreshStatus() })
-            } else {
-                HSConnectGate(systemImage: "square.grid.2x2", verb: "to apply a template")
             }
         }
     }
@@ -181,36 +163,32 @@ struct TemplatesView: View {
     }
 
     /// One template row: families, description, and an unmistakable Applied
-    /// marker when it's the one live right now. A plain List row inside a
-    /// NavigationLink — List supplies the disclosure chevron, so the row no
-    /// longer draws its own card background or chevron.
+    /// marker when it's the one live right now. Plain, NON-interactive list
+    /// row — the tap-through detail retired with the console (t_0f3f70e6).
     private func templateRow(_ template: ClusterTemplate, applied: Bool) -> some View {
-        NavigationLink(value: template) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
-                    Text(template.name)
-                        .font(.headline)
-                        .foregroundColor(Theme.Semantic.onSurface)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 0)
-                    if applied {
-                        AppliedBadge()
-                    }
-                }
-                if let desc = template.description, !desc.isEmpty {
-                    Text(desc)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        .multilineTextAlignment(.leading)
-                }
-                if let fams = template.families, !fams.isEmpty {
-                    Text("Families: \(fams.joined(separator: ", "))")
-                        .font(.hsccMono(.caption2))
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
+                Text(template.name)
+                    .font(.headline)
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                if applied {
+                    AppliedBadge()
                 }
             }
+            if let desc = template.description, !desc.isEmpty {
+                Text(desc)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .multilineTextAlignment(.leading)
+            }
+            if let fams = template.families, !fams.isEmpty {
+                Text("Families: \(fams.joined(separator: ", "))")
+                    .font(.hsccMono(.caption2))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
         }
-        .accessibilityHint("Shows what applying \(template.name) would change.")
     }
 
     /// The name of the currently-applied template, if any.

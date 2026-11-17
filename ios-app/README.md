@@ -8,11 +8,11 @@ the Tailscale tailnet.
 distributed, and is deliberately NOT App Store–ready.**
 
 > **STATUS: built and exercised in automated gates; not yet on a device.**
-> Every target compiles clean (`scripts/build_check.sh`), the whole surface has
-> been walked on an iPhone-16-class simulator by the XCUITest nav-graph gate
-> (17/17 drawer rows — enter, back, pull-to-refresh, honest empty + error
-> states; t_810ab152), and every Codable model decodes the committed live
-> fixtures (88/88, `scripts/model_decode_check.sh`). Still **unverified at
+> Every target compiles clean (`scripts/build_check.sh`) and every Codable
+> model decodes the committed live fixtures (`scripts/model_decode_check.sh`).
+> The XCUITest nav-graph lane was retired with the operator console
+> (t_0f3f70e6, `docs/CONSOLE_RETIREMENT.md` §5 S1); the two surviving screens
+> get a fresh, small UI-test lane as a separate card. Still **unverified at
 > runtime**: Siri App Intents, the Home Screen widget, and the Live Activities
 > need a signed build on real hardware. See **"Honest limits"** below.
 
@@ -53,16 +53,19 @@ mapped onto drawer destinations.
   - `Views/AppShell.swift` — the root shell: owns `AppDestination` (one enum,
     one stack; legacy aliases like `.boardHygiene` resolve to their merged
     destination instead of failing), the drawer state, the shared detail
-    stack, the approvals-badge poller, and the offline-queue banner. The
+    stack, the approvals-badge poller retired with the console (t_0f3f70e6),
+    and the offline-queue banner. The
     drawer is a slide-over the shell owns — **not** the compact column of a
     `NavigationSplitView`, which is a proven dead end on iPhone compact
     (t_5ed5d281, RED-first on the sim).
-  - `Views/Sidebar.swift` — the drawer's 17 rows:
-    - **Work**: Home · Chats · Projects · Cards · Approvals
-    - **Cluster**: Fleet · Nodes & serving · Ops & health · Autodown &
-      self-heal · Cron · Logs
-    - **Knowledge**: Memory · Templates · Sessions · Activity feed
+  - `Views/Sidebar.swift` — the drawer's rows:
+    - **Work**: Home · Chats · Projects · Cards
+    - **Cluster**: Fleet · Nodes & serving · Cron · Logs
+    - **Knowledge**: Templates · Activity feed
     - **App**: Search · Settings
+    Approvals, Ops & health, Autodown & self-heal and Memory retired with the
+    console (t_0f3f70e6); their destinations still resolve as mapped aliases
+    onto the root.
     Its header shows the active cluster + a live connection dot (the
     ConnectionMonitor probe, t_e5d24c6d).
   - `ContentView.swift` — the legacy tab vocabulary + `ConnectionBanner`
@@ -83,8 +86,9 @@ mapped onto drawer destinations.
     token in the Keychain; legacy single-cluster configs import on first run.
   - `Views/` — all screens, grouped:
     - `AppShell` + `HomeView` (above) — Home is the launch screen with the
-      5-verb dock (Chat · Fleet · Cluster · Approvals · Settings; a
-      start-line, not a tab bar).
+      4-verb dock (Chat · Fleet · Cluster · Settings; a
+      start-line, not a tab bar; the Approvals verb retired with its screen,
+      t_0f3f70e6).
     - `Views/ChatsRootView.swift` — the global Chat destination: every
       project row pushes straight into its full-bleed chat with unread counts.
     - `Views/ProjectsView.swift` — the project list from `/v1/projects`
@@ -113,40 +117,22 @@ mapped onto drawer destinations.
       (unit→node attribution parses the verbatim `sparkrun status` text in
       `GET /v1/cluster/hosts` — see `ServingPlacement.swift`). The old Cluster
       hub was retired into this screen (t_65d791da).
-    - `Views/OpsView.swift` — Ops & health: verify / daemon / triggers /
-      escalations / profiles (+ profile editor).
     - `Views/FleetView.swift` — Fleet: health, stats, throughput, streams,
       autoscale, the applied-template read, and the confirm-gated fleet
       up/down (the old FleetControl screen folded in here, t_2a29a7ab).
-    - `Views/AutodownView.swift` — Autodown **& self-heal** (the old
-      SelfHeal screen is this screen's trailing section): the live
-      `/v1/autodown/status` report + confirm-gated enable / disable / wake /
-      cancel. Wake enters a polling "waking" state and starts the **Live
-      Activity** (the fleet wake is ~9 minutes — never block the UI).
+    - Autodown **& self-heal** retired with the console (t_0f3f70e6): the
+      screen and its confirm-gated enable / disable / wake / cancel are gone
+      (rule 2). The `/v1/autodown/status` read survives for the widget, and
+      the wake **Live Activity** sweep still ends orphaned wake bubbles
+      started before the pivot.
     - `Views/CronView.swift` · `Views/LogsView.swift` — cron jobs; daemon/log
       tail with redaction (`Views/LogRedactor.swift`).
-    - `Views/MemoryView.swift` — the memory provider list / delete.
-    - `Views/SessionsView.swift` + `Views/SessionHistoryView.swift` — live
-      sessions and per-session event history.
     - `Views/ActivityFeedView.swift` — the fleet activity feed.
-    - `Views/TemplatesView.swift` + `Views/TemplateDetailView.swift` — the
-      **Templates library**: browse (`/v1/template/list`), preview against the
-      node topology (`/v1/template/preview/{name}`, read-only dry-run), and
-      **confirm-gated apply** (`/v1/template/apply`), with post-apply reload
-      polling of `/v1/template/status` + `/v1/verify`.
-    - `Views/ApprovalsView.swift` — the **approvals inbox + board hygiene**
-      (spec §8 merge: `BoardHygieneView` retired): ONE List whose sections are
-      the blocked cards genuinely waiting on a human decision — presented as a
-      decision surface ("worker wants to force-push X — allow?") — then the
-      auto-resume blocked cards (recoverable early), then the stale cards.
-      Uses `/v1/kanban/blocked` partitioned by
-      `BlockedCard.isPendingApproval` (human-decision kinds
-      `needs_input`/`capability`/unclassified; `dependency`/`transient`
-      auto-resume and drop to the "Other blocked" section) plus
-      `/v1/kanban/stale`. **Allow** / **Recover** recover the card so the
-      worker proceeds; leaving it blocked is the decline.
-      `Views/ApprovalBadge.swift` backs the drawer row's pending-approvals
-      badge (polls the same read, same classification).
+    - `Views/TemplatesView.swift` — the **Templates library**, browse-only:
+      `/v1/template/list` + the applied-template status. The detail screen
+      (topology, dry-run preview, confirm-gated apply) retired with the
+      console (t_0f3f70e6); `Views/TemplateTopologyView.swift` +
+      `Views/AppliedTemplateStatus.swift` survive as shared read-only parts.
     - `Views/CardsRootView.swift` — the drawer's cross-board card list (every
       open card, grouped by board).
     - `Views/SearchView.swift` — **cross-project search** over last-known
@@ -179,20 +165,10 @@ mapped onto drawer destinations.
   - `Notify/` — the "operator needed" local-notification engine
     (`NeedsOperatorNotifier` computes alerts purely;
     `NotificationCoordinator` delivers them).
-  - `DebugHarness.swift` — DEBUG-only seams the gates rely on (fixture dir,
-    forced failures, offline mode, the live served-count probe). Never
-    compiled into Release.
   - `Intents/` — Siri App Intents:
-    - `ProjectIntents.swift` — **per-project Siri shortcuts (job-based)**:
-      `HSCCProject` (a String `AppEnum` of the canned project list),
-      `AskOrchestratorIntent` (job-based chat — ack immediately, poll in a
-      detached task, speak the reply), `ProjectStatusIntent` (speak the
-      per-project `speak` summary verbatim).
-    - `ClusterStatusIntent` + `ReviewQueueIntent` — speak each endpoint's
-      `speak` one-liner.
-    - `ApprovalsIntent` — voices the pending approval count (read-only,
-      classified by `BlockedCard.isPendingApproval`, no confirm needed):
-      "3 pending approvals await your decision." / "No pending approvals."
+    - `ClusterStatusIntent` — speak the cluster-status `speak` one-liner.
+      (The project ask/status, review-queue and approvals intents retired with
+      the console — t_0f3f70e6.)
     - `CannedCard` + `DispatchCannedCardIntent` — voice-dispatch a KNOWN card
       via the confirm-gated client (never free-form dictation).
     - `AppShortcuts` — the `AppShortcutsProvider` with natural phrases.
@@ -215,29 +191,15 @@ mapped onto drawer destinations.
   explicitly on success or failure; a widget extension body allows only one
   Live Activity per target, hence three bundles.
 - `project.yml` — XcodeGen spec, listing every source file explicitly. Five
-  app-facing targets (app, widgets, three Live Activities) plus the
-  `HSCCUITests` UI-test bundle.
-- `UITests/` — the XCUITest suites the gates run: `DrawerNavigationUITests`
-  (drawer open/close/round-trips), `NavGraphUITests` + the generated
-  `NavGraphScreenTable` (the walker below).
+  app-facing targets (app, widgets, three Live Activities). The
+  `HSCCUITests` UI-test bundle was retired with the console (t_0f3f70e6).
 - `scripts/` — verification helpers:
   - `build_check.sh` — full per-target **compile** of every target with its
     real file set (typecheck alone hides SIL-level errors; see its header).
-  - `nav_graph_check.sh` — the **navigation-graph gate** (t_810ab152):
-    XCUITest walker over every drawer screen — enter via drawer → marker →
-    back → same-row re-tap, one level into detail pushes, real pull-to-refresh
-    (coordinate drag, receipt = the app's live served-count AX probe), honest
-    EMPTY + ERROR states, a disconnected pass, and a guarded negative
-    self-check that must turn the walk RED. Screen list is code-derived
-    (`nav_graph_screens.py`); fails naming the screen + missing edge. See
-    `docs/design/NAV_GRAPH_t_810ab152.md`.
-  - `capture_screens.sh` — tap-free per-screen screenshot capture
-    (`HSCC_DEBUG_SCREEN` + fixture seeding); the current clean set — 12
-    screens × light/dark — is in `docs/design/screens/`.
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
     `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
-    committed live fixtures (62 JSONs under
-    `scripts/model_decode_check/fixtures/`, 88 decode checks — some fixtures
+    committed live fixtures (55 JSONs under
+    `scripts/model_decode_check/fixtures/`, 89 decode checks — some fixtures
     are checked against more than one model), so it can never drift into a
     false green like a mirrored validator could. The widget / Live Activity
     payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
@@ -268,10 +230,9 @@ the app pre-fills `8788` to match this deployment.
 
 Be plain about what the gates have and have not seen:
 
-- **Never run on a real device.** The simulator gates (compile, nav-graph
-  walk, screenshots, decode) cover the app target's UI and data path. A
-  signed on-device build — the actual sideload the operator uses — has not
-  happened yet.
+- **Never run on a real device.** The simulator gates (full compile, decode)
+  cover the app target's UI and data path. A signed on-device build — the
+  actual sideload the operator uses — has not happened yet.
 - **Siri intents cannot be validated without a signed build on hardware.**
   The AppEnum, parameter summaries, and confirm dialogs are written but
   unrun; a real device build is required to know they resolve and fire.
@@ -279,10 +240,10 @@ Be plain about what the gates have and have not seen:
   Their model shapes decode the live JSON and their targets compile, but the
   extension bundles have not been installed or run — widget refresh, Dynamic
   Island rendering, and Live Activity lifecycle are all untested.
-- **The gates are fixture-fed.** The walk and the screenshots run against the
-  committed live captures (kept decode-current by the decode gate), not a
-  live fleet. Live-server behaviour (WS streams, real wake timings) is
-  covered only structurally.
+- **The decode gate is fixture-fed.** `model_decode_check.sh` runs against
+  the committed live captures, not a live fleet. Live-server behaviour
+  (WS streams, real wake timings) is covered only structurally. The former
+  fixture-fed walk and screenshot lane is gone with the console (t_0f3f70e6).
 - **Per-project chat depends on session health.** A healthy session answers in
   ~1.8 s; a **bloated session wedges chat** (measured: a 600 s timeout against
   a fresh 1.8 s). The chat surface can only be as healthy as the orchestrator's
@@ -401,9 +362,7 @@ with Xcode — none of it needs the real cluster:
 ```sh
 cd ios-app
 scripts/build_check.sh          # full per-target compile
-scripts/nav_graph_check.sh      # XCUITest walk of all 17 drawer rows + negative self-check
-scripts/model_decode_check.sh   # real models vs the 62 committed live fixtures
-scripts/capture_screens.sh      # tap-free screenshot set → docs/design/screens/
+scripts/model_decode_check.sh   # real models vs the committed live fixtures
 ```
 
 ## Sideloading onto your own device

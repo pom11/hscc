@@ -9,11 +9,12 @@ import SwiftUI
 // The dock is a START-LINE, not a tab bar — it does not persist selection on
 // other screens, which is what keeps it from re-becoming the tab bar §3 removed.
 
-/// The five dock destinations (design §3.2): the daily verbs of a cluster
-/// operator — talk to the REPL, is it healthy, what is on the nodes, what
-/// needs my yes, change a setting. Home is deliberately NOT in the dock.
+/// The four dock destinations (design §3.2): the daily verbs of a cluster
+/// operator — talk to the REPL, is it healthy, what is on the nodes, change
+/// a setting. Home is deliberately NOT in the dock (the Approvals verb
+/// retired with its screen, t_0f3f70e6).
 enum DockItem: String, CaseIterable, Identifiable {
-    case chat, fleet, cluster, approvals, settings
+    case chat, fleet, cluster, settings
 
     var id: String { rawValue }
 
@@ -32,7 +33,6 @@ enum DockItem: String, CaseIterable, Identifiable {
         // against `selection`, and `AppShell.go` normalises every alias before it
         // lands there. The glyph and label below keep the spec's "Cluster" word.
         case .cluster: .nodesServing
-        case .approvals: .approvals
         case .settings: .settings
         }
     }
@@ -42,7 +42,6 @@ enum DockItem: String, CaseIterable, Identifiable {
         case .chat: "Chat"
         case .fleet: "Fleet"
         case .cluster: "Cluster"
-        case .approvals: "Approvals"
         case .settings: "Settings"
         }
     }
@@ -52,7 +51,6 @@ enum DockItem: String, CaseIterable, Identifiable {
         case .chat: "bubble.left.and.bubble.right"
         case .fleet: "chart.bar"
         case .cluster: "bolt"
-        case .approvals: "checkmark.circle"
         case .settings: "gearshape"
         }
     }
@@ -60,7 +58,6 @@ enum DockItem: String, CaseIterable, Identifiable {
 
 struct HomeView: View {
     @Binding var selection: AppDestination?
-    let approvalCount: Int?
 
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var unread: ProjectUnreadCenter
@@ -184,14 +181,14 @@ struct HomeView: View {
         }
     }
 
-    // MARK: Tiles (§3.3: 2x2 of the most-tapped non-dock destinations)
+    // MARK: Tiles (§3.3: the most-tapped non-dock destinations; the Approvals
+    // tile retired with its screen, t_0f3f70e6)
 
     private var tileGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Spacing.md.rawValue),
                             GridItem(.flexible(), spacing: Theme.Spacing.md.rawValue)],
                   spacing: Theme.Spacing.md.rawValue) {
             tile(.projects, "Projects", "folder")
-            tile(.approvals, "Approvals", "checkmark.circle", badge: approvalCount)
             tile(.activity, "Activity", "waveform.path.ecg")
             tile(.cards, "Cards", "square.grid.2x2")
         }
@@ -267,16 +264,6 @@ struct HomeView: View {
                         .foregroundColor(isActive ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
-                    if item == .approvals, let count = approvalCount, count > 0 {
-                        Text("\(count)")
-                            .font(.caption2.weight(.bold))
-                            .foregroundColor(Theme.Semantic.onAccent)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Theme.Semantic.accent)
-                            .clipShape(Capsule())
-                            .offset(x: 8, y: -2)
-                            .accessibilityLabel("\(count) pending approvals")
-                    }
                     // Chat carries the waiting-replies badge (spec §3.2: the
                     // dock's Chat icon is the operator's way back in; the
                     // count is the pull). Text, not only colour (§9).

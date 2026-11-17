@@ -16,14 +16,12 @@ import SwiftUI
 
 struct Sidebar: View {
     @Binding var selection: AppDestination?
-    let approvalCount: Int?
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var unread: ProjectUnreadCenter
     /// The shared monitor, OBSERVED: the header dot/text must redraw when the
     /// most-recent-request outcome changes, not only when this view is built.
     @ObservedObject private var monitor = ConnectionMonitor.shared
 
-    private var pendingBadge: Int { approvalCount ?? 0 }
     private var chatBadge: Int { unread.totalUnread }
 
     var body: some View {
@@ -36,7 +34,6 @@ struct Sidebar: View {
                 row(.chats, badge: chatBadge)
                 row(.projects)
                 row(.cards)
-                row(.approvals, badge: pendingBadge)
             }
             group("Cluster") {
                 row(.fleet)
@@ -52,19 +49,21 @@ struct Sidebar: View {
                 // fleet up/down are Sections of Fleet's List, so one row covers
                 // both. `.fleetControl` still resolves — as a mapped alias in
                 // AppShell.normalized, never as a second row.
-                row(.opsHealth)
-                // spec §3.1: "Autodown & self-heal (was Autodown; history
-                // becomes a section)" — ONE row. The old `.selfHeal` row is
-                // gone; its destination still resolves (see AppShell.go).
-                row(.autodown)
+                // "Ops & health" retired with OpsView (t_0f3f70e6); `.opsHealth`
+                // still resolves — as a mapped alias onto the root, never as a row.
+                // "Autodown & self-heal" retired with AutodownView
+                // (t_0f3f70e6); `.autodown` (and the merged `.selfHeal`)
+                // still resolve — as mapped aliases onto the root, never as rows.
                 row(.cron)
                 row(.logs)
-                // spec §8: BoardHygiene is merged into Approvals — its row is
-                // gone; the `.boardHygiene` destination still resolves (see
-                // AppShell.go), landing on the Approvals List.
+                // spec §8 merged BoardHygiene into Approvals; Approvals itself
+                // then retired with the console (t_0f3f70e6) — the
+                // `.boardHygiene` destination still resolves (see
+                // AppShell.normalized), landing on the app root.
             }
             group("Knowledge") {
-                row(.memory)
+                // "Memory" retired with MemoryView (t_0f3f70e6); `.memory`
+                // resolves as a mapped alias onto the root, never as a row.
                 row(.templates)
                 // The "Sessions" row is gone (t_3778b7bd, console retirement):
                 // `SessionsView` is deleted with the console, so the session list

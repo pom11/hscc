@@ -7,8 +7,8 @@ import SwiftUI
 // column of a NavigationSplitView: on iPhone compact (iOS 26.3) the system
 // sidebar column is a dead end — no dismiss affordance of any kind once it
 // takes the screen, row taps never leave it, and the documented column
-// controls are inert (verified RED-first on the iPhone 16 simulator in
-// UITests/DrawerNavigationUITests.swift). Explicit `drawerOpen`/`drawerClose`
+// controls are inert (verified RED-first on the iPhone 16 simulator; the
+// XCUITest lane retired with the console, t_0f3f70e6). Explicit `drawerOpen`/`drawerClose`
 // buttons replace the system toggle and the (non-existent) swipe-back.
 //
 // The home screen alone carries the dock (§3.2); every other screen reaches
@@ -53,11 +53,10 @@ enum AppDestination: String, Hashable, Identifiable {
     /// silently failing. New code must route `.nodesServing`. (Same pattern as
     /// `.selfHeal` below.)
     case clusterHub
-    /// LEGACY alias, kept deliberately (spec §8 merge: SelfHealHistoryView is
-    /// now the trailing section of AutodownView). No drawer row and no screen
-    /// of its own — but any stale caller that still names `.selfHeal`
-    /// (rawValue "selfHeal") lands on the MERGED destination instead of
-    /// silently failing. New code must route `.autodown`.
+    /// LEGACY alias (spec §8 merged SelfHeal into Autodown; the Autodown
+    /// screen then retired with the console — t_0f3f70e6). No drawer row and
+    /// no screen of its own — `.selfHeal` (rawValue "selfHeal") normalises to
+    /// the app ROOT, like `.autodown` itself.
     case selfHeal
     /// LEGACY alias, kept deliberately (spec §8 merge: BoardHygieneView is
     /// merged into Approvals — blocked + stale are sections of that one
@@ -75,7 +74,7 @@ enum AppDestination: String, Hashable, Identifiable {
         case .chats: "Chats"
         case .projects: "Projects"
         case .cards: "Cards"
-        case .approvals: "Approvals"
+        case .approvals: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
         case .fleet: "Fleet"
         // The retired screen's alias carries the MERGED destination's title
         // ("Fleet" — where its sections now live), exactly as `.clusterHub`
@@ -84,17 +83,17 @@ enum AppDestination: String, Hashable, Identifiable {
         case .fleetControl: "Fleet"
         case .clusterHub: "Nodes & serving"
         case .nodesServing: "Nodes & serving"
-        case .opsHealth: "Ops & health"
-        case .autodown: "Autodown & self-heal"
-        case .selfHeal: "Autodown & self-heal"   // legacy alias, §3.1 wording
+        case .opsHealth: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
+        case .autodown: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
+        case .selfHeal: "Home"   // legacy alias — same retired destination
         case .cron: "Cron"
         case .logs: "Logs"
-        case .boardHygiene: "Approvals"   // legacy alias — merged destination
-        case .memory: "Memory"
+        case .boardHygiene: "Home"   // legacy alias — its merged destination retired too (t_0f3f70e6)
+        case .memory: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
         case .templates: "Templates"
         // The retired session list's alias carries the ROOT destination's title
         // (where a stale `.sessions` caller now lands), never the name of a
-        // screen that no longer exists — same rule as `.boardHygiene: "Approvals"`.
+        // screen that no longer exists — same rule every t_0f3f70e6 retirement follows.
         case .sessions: "Home"
         case .activity: "Activity feed"
         case .search: "Search"
@@ -106,20 +105,20 @@ enum AppDestination: String, Hashable, Identifiable {
         switch self {
         case .home: "square.grid.2x2"
         case .projects: "folder"
-        case .approvals: "checkmark.circle"
+        case .approvals: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
         case .fleet: "chart.bar"
         case .clusterHub: "bolt"
         case .chats: "bubble.left.and.bubble.right"
         case .cards: "square.grid.2x2"
         case .fleetControl: "slider.horizontal.3"
         case .nodesServing: "server.rack"
-        case .opsHealth: "heart.text.square"
-        case .autodown: "power"
-        case .selfHeal: "power"   // legacy alias — same destination, same glyph
+        case .opsHealth: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
+        case .autodown: "square.grid.2x2"   // retired alias — lands on Home, the Home glyph
+        case .selfHeal: "square.grid.2x2"   // legacy alias — same retired destination
         case .cron: "clock"
         case .logs: "doc.text.magnifyingglass"
-        case .boardHygiene: "checkmark.circle"   // legacy alias — same destination, same glyph
-        case .memory: "brain"
+        case .boardHygiene: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
+        case .memory: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
         case .templates: "square.stack.3d.up"
         case .sessions: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
         case .activity: "waveform.path.ecg"
@@ -130,28 +129,18 @@ enum AppDestination: String, Hashable, Identifiable {
 }
 
 /// The root shell. Owns drawer selection, the shared detail stack, the
-/// approval badge poller, the offline-queue drop banner and every app-level
-/// lifecycle hook the old TabView root carried.
+/// offline-queue drop banner and every app-level lifecycle hook the old
+/// TabView root carried.
 struct AppShell: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @EnvironmentObject private var router: DeepLinkRouter
     @State private var selection: AppDestination? = AppShell.initialSelection()
-    @StateObject private var approvals = ApprovalPoller()
 
-    /// Debug-only capture seam (t_0d5632bc, DebugHarness.swift): a capture
-    /// launch opens one named drawer destination directly — that is the
-    /// "drive navigation without taps" path, since this device refuses the
-    /// only headless dismissal of the first-run alert (proof in
-    /// PHASE2_PROGRESS_t_25aed701 "Screenshots"). Unknown values and Release
-    /// builds get the normal `.home` default; this NEVER guesses a screen.
-    /// (Fixture seeding for the same launch runs in onAppear below.)
-    static func initialSelection() -> AppDestination? {
-        #if DEBUG
-        if let screen = DebugHarness.requestedScreen() { return screen }
-        #endif
-        return .home
-    }
+    /// The shell always launches on the app root (t_0f3f70e6: the capture
+    /// seam that could open one named drawer destination is retired with the
+    /// console — there is no debug launch state left to pick a screen from).
+    static func initialSelection() -> AppDestination? { .home }
 
     /// Whether the drawer is on screen (t_5ed5d281). The drawer is NOT the
     /// NavigationSplitView sidebar column any more: on iPhone compact
@@ -159,41 +148,15 @@ struct AppShell: View {
     /// (toggle/edge-swipe) it exposes ZERO dismiss affordances, row taps do
     /// not switch columns, and both column controls the field brief names
     /// (`preferredCompactColumn`, `columnVisibility`) are inert from the app
-    /// side in BOTH directions (RED evidence: DrawerNavigationUITests,
-    /// iPhone 16 sim, this card). The shell therefore owns the presentation
+    /// side in BOTH directions. The shell therefore owns the presentation
     /// outright: a slide-over panel over the one app-wide stack. Any row
     /// activation closes it (`go`), the panel's own close button closes it,
     /// and the `drawerOpen` toolbar button — visible on every screen's nav
-    /// bar — opens it. `HSCC_DEBUG_OPEN_DRAWER=1` starts inside the drawer
-    /// so the XCUITest walk begins in the operator's exact stuck state;
-    /// Release builds only ever see `false`.
-    @State private var drawerOpen = AppShell.initialDrawerOpen()
+    /// bar — opens it. It always starts closed (t_0f3f70e6: the debug
+    /// drawer-open launch seam is retired with the console).
+    @State private var drawerOpen = false
 
-    static func initialDrawerOpen() -> Bool {
-        #if DEBUG
-        if DebugHarness.openDrawerAtLaunch { return true }
-        #endif
-        return false
-    }
-
-    #if DEBUG
-    /// NEGATIVE-TEST seam for the nav-graph walker (t_810ab152): with
-    /// `HSCC_DEBUG_NEGATE_BACK=1` the shell's drawer affordances — the
-    /// `drawerOpen` toolbar button and the `drawerClose` button — are not
-    /// rendered. A walker that cannot go RED when the way back disappears is
-    /// not a gate; `nav_graph_check.sh` runs the walk once under this flag and
-    /// REQUIRES it to fail naming the screen. Debug-only like every other
-    /// harness seam (the Release build reads the literal `false` below and
-    /// the affordances are unconditionally present).
-    private var negateBackForTest: Bool {
-        ProcessInfo.processInfo.environment["HSCC_DEBUG_NEGATE_BACK"] == "1"
-    }
-    #else
-    private var negateBackForTest: Bool { false }
-    #endif
-
-    /// The app-owned drawer entry (t_5ed5d281), split out only so the
-    /// negative-test seam above can omit it in one place.
+    /// The app-owned drawer entry (t_5ed5d281).
     private var drawerOpenButton: some View {
         Button {
             openDrawer()
@@ -218,20 +181,6 @@ struct AppShell: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            #if DEBUG
-            // Live served-count probe for the walker's pull-to-refresh
-            // receipt (DebugHarness.ptrProbeFeed). Off the visible canvas
-            // (the offset pushes it below the safe area, off-screen) but IN
-            // the AX tree — the XCUITest runner reads it with a label query
-            // and never taps it. Renders on fixture launches that opt in;
-            // nothing else ever sees it.
-            if let feed = DebugHarness.ptrProbeFeed, DebugHarness.fixturesEnabled {
-                PtrProbeView(feed: feed)
-                    .accessibilityIdentifier("ptrProbe")
-                    .offset(y: 1200)
-                    .allowsHitTesting(false)
-            }
-            #endif
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
@@ -253,9 +202,7 @@ struct AppShell: View {
                         // sits opposite it, where no screen's own leading
                         // item can crowd it out.
                         ToolbarItem(placement: .topBarTrailing) {
-                            if !negateBackForTest {
-                                drawerOpenButton
-                            }
+                            drawerOpenButton
                         }
                     }
             }
@@ -275,24 +222,8 @@ struct AppShell: View {
             droppedBanner = dropped
         }
         .onAppear {
-            // t_810ab152: quiet-poller fixture launches (the walker's PTR
-            // pass) skip the two BADGE pollers — ApprovalPoller's 60 s
-            // kanban/blocked and StreamReplyWatcher's 30 s projects/session
-            // polls bump the same served counters the walker reads as
-            // pull-to-refresh receipts, and a timer increment is not proof
-            // the gesture fired. Purely informational badges; zero navigation
-            // change; default-off so capture_screens.sh is untouched.
-            #if DEBUG
-            if !DebugHarness.quietPollers {
-                approvals.setClient(makeClient())
-                replyWatcher.setClient(makeClient())
-                NotificationCoordinator.shared.setClient(makeClient())
-            }
-            #else
-            approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
-            #endif
             router.setClient(makeClient())
             seedOfflineQueue()
             applyPendingTabRequest()
@@ -303,7 +234,6 @@ struct AppShell: View {
         }
         .onChange(of: settings.connectionIdentity) {
             ConnectionMonitor.shared.reset()
-            approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
             router.setClient(makeClient())
@@ -346,11 +276,11 @@ struct AppShell: View {
     private func destinationView(_ destination: AppDestination) -> some View {
         let client = makeClient()
         switch destination {
-        case .home: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
+        case .home: HomeView(selection: drawerBinding)
         case .chats: ChatsRootView(client: client)
         case .projects: ProjectsView(client: client)
         case .cards: CardsRootView(client: client)
-        case .approvals: ApprovalsView(client: client)
+        case .approvals: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         case .fleet: FleetView(client: client)
         // §8 merge (t_65d791da): the retired Cluster hub has no view of its own
         // any more; its destination lands on the SAME merged screen as
@@ -362,23 +292,22 @@ struct AppShell: View {
         // sections. Same recipe as `.clusterHub` → NodesServingView.
         case .fleetControl: FleetView(client: client)
         case .nodesServing: NodesServingView(client: client)
-        case .opsHealth: OpsView(client: client)
-        case .autodown: AutodownView(client: client)
+        case .opsHealth: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
+        case .autodown: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         // §8 merge: the retired screen has no view of its own any more; its
-        // destination lands on the SAME merged screen as `.autodown`.
-        case .selfHeal: AutodownView(client: client)
+        // destination lands on the app ROOT, like `.autodown` itself.
+        case .selfHeal: HomeView(selection: drawerBinding)
         case .cron: CronView(client: client)
         case .logs: LogsView(client: client)
-        // §8 merge: same for BoardHygiene — blocked + stale are sections of
-        // the Approvals List, so its destination lands on ApprovalsView.
-        case .boardHygiene: ApprovalsView(client: client)
-        case .memory: MemoryView(client: client)
+        // The §8 BoardHygiene merge died with ApprovalsView itself
+        // (t_0f3f70e6): the retired destination lands on the app ROOT.
+        case .boardHygiene: HomeView(selection: drawerBinding)
+        case .memory: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         case .templates: TemplatesView(client: client)
         // t_3778b7bd (iOS pivot): `SessionsView` is deleted with the console, so
         // the retired destination lands on the app ROOT — the one destination that
         // is always present and from which every surviving screen is one tap away.
-        // Same recipe as `.selfHeal` → AutodownView, `.boardHygiene` → ApprovalsView.
-        case .sessions: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
+        case .sessions: HomeView(selection: drawerBinding)
         case .activity: ActivityFeedView(client: client)
         case .search: SearchView(client: client)
         case .settings: SettingsView()
@@ -445,29 +374,24 @@ struct AppShell: View {
                         .font(.largeTitle.bold())
                         .foregroundColor(Theme.Semantic.onSurface)
                     Spacer()
-                    // The negative-test seam (t_810ab152) omits the close too:
-                    // under HSCC_DEBUG_NEGATE_BACK=1 the drawer is a real trap,
-                    // which is what the walker's negative run must catch.
-                    if !negateBackForTest {
-                        Button {
-                            closeDrawer()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title2)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                .frame(minWidth: 44, minHeight: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Close menu")
-                        .accessibilityIdentifier("drawerClose")
+                    Button {
+                        closeDrawer()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close menu")
+                    .accessibilityIdentifier("drawerClose")
                 }
                 .padding(.horizontal, Theme.Spacing.lg.rawValue)
                 .padding(.top, Theme.Spacing.md.rawValue)
                 .padding(.bottom, Theme.Spacing.xs.rawValue)
 
-                Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
+                Sidebar(selection: drawerBinding)
             }
             .frame(maxWidth: 320)
             .frame(maxHeight: .infinity)
@@ -492,8 +416,10 @@ struct AppShell: View {
     /// with nothing marked.
     private func normalized(_ destination: AppDestination?) -> AppDestination? {
         switch destination {
-        case .selfHeal: return .autodown
-        case .boardHygiene: return .approvals
+        // t_0f3f70e6: autodown (and its merged `.selfHeal` alias), approvals,
+        // boardHygiene (merged into approvals), ops and memory retire with the
+        // console; their destinations normalise to the root the pivot keeps.
+        case .selfHeal, .autodown, .boardHygiene, .approvals, .opsHealth, .memory: return .home
         case .clusterHub: return .nodesServing
         case .fleetControl: return .fleet
         // t_3778b7bd: the session list is retired with the console, so its
@@ -515,8 +441,9 @@ struct AppShell: View {
     /// retired screen's destination resolves to the merged screen it now lives
     /// inside, so the selection identity — and the sidebar row's highlight — is
     /// the real row, never a phantom second one.
-    ///   .selfHeal    -> Autodown & self-heal  (t_1a9bd7f8)
-    ///   .boardHygiene-> Approvals             (t_31d037ac)
+    ///   .selfHeal/.autodown -> Home (t_0f3f70e6, console retirement)
+    ///   .boardHygiene/.approvals/.opsHealth/.memory -> Home (t_0f3f70e6,
+    ///     console retirement — the merged destination itself is gone)
     ///   .clusterHub  -> Nodes & serving       (t_65d791da)
     ///   .fleetControl-> Fleet                 (t_2a29a7ab)
     ///   .sessions    -> Home                  (t_3778b7bd, console retirement)
@@ -564,20 +491,8 @@ struct AppShell: View {
     }
 
     private func makeClient() -> HSCCClient? {
-        #if DEBUG
-        // Capture harness (t_0d5632bc): a headless `simctl launch` cannot write
-        // the Keychain (OSStatus -34018 errSecMissingEntitlement), so the seeded
-        // fixture cluster reads back as "no token" and every optional-client
-        // screen would honestly show its connect gate — proving the shell but
-        // not the list recipe. Fixture mode therefore builds the client
-        // directly, bypassing the Keychain entirely; its URLSession is the
-        // fixture protocol (HSCCClient.defaultSession), which forwards NOTHING
-        // to the network. Release builds never take this path.
-        if DebugHarness.fixturesEnabled {
-            return HSCCClient(host: "fixtures.invalid", port: 8788,
-                              token: "debug-fixture-token")
-        }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the fixture-mode client bypass is retired
+        // with the capture harness — no launch path builds a fake-token client.
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }
@@ -627,28 +542,6 @@ extension AppDestination {
 // fleet-wide up/down mutations — an unusable-but-present client would render
 // those buttons against `unconfigured.invalid`, where a connect gate is the
 // honest surface.
-
-#if DEBUG
-/// The AX probe AppShell renders for the walker (see AppShell.body): polls
-/// the fixture protocol's served counter for `feed` twice a second and
-/// publishes "ptr:<feed>:<count>" as its AX label. DEBUG-compiled only.
-struct PtrProbeView: View {
-    let feed: String
-    @State private var count = 0
-
-    var body: some View {
-        Text("ptr:\(feed):\(count)")
-            .font(.system(size: 1))
-            .foregroundColor(.clear)
-            .task {
-                while !Task.isCancelled {
-                    count = FixtureURLProtocol.servedCount(forPath: feed)
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                }
-            }
-    }
-}
-#endif
 
 #Preview("Shell — home") {
     let center = ProjectUnreadCenter()

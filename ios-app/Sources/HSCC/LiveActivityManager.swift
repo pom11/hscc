@@ -38,9 +38,10 @@ final class LiveActivityManager {
     /// When the current wake started — drives the enforced elapsed-time gauge.
     private var wakeStart = Date()
 
-    /// The operator can leave the Autodown screen (or the app) mid-wake; the
-    /// wake can take ~9 minutes. If this manager is torn down while a wake is
-    /// live — the view that owns it (@State in AutodownView) is popped and the
+    /// A wake outlives any screen — the Autodown screen that used to own the
+    /// wake state retired with the console (t_0f3f70e6) — and can take ~9
+    /// minutes. If this manager is torn down while a wake is
+    /// live — the Task that owns it is cancelled and the
     /// polling Task holds `[weak self]`, so it dies with us — an ActivityKit
     /// activity that is not ended keeps an orphaned, never-updated bubble on
     /// the Lock Screen/Dynamic Island ("started and never ended"). Releasing
@@ -108,14 +109,8 @@ final class LiveActivityManager {
         endCurrentSilently()
 
         // Start the Live Activity (throws if the system can't show one).
-        #if DEBUG
-        // Capture harness (t_0d5632bc): see MonitorActivityDriver.push —
-        // Activity.request re-raises the notification authorization sheet.
-        if DebugHarness.suppressNotifications {
-            DebugHarness.noteSuppressed("live-activity:waking")
-            return
-        }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the capture-harness suppression seam is
+        // retired with the console — the Live Activity always requests for real.
         let attributes = WakingActivityAttributes()
         let initialState = WakingActivityAttributes.ContentState(
             state: "waking",

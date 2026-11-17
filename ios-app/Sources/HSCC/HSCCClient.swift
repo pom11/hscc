@@ -25,17 +25,10 @@ struct HSCCClient {
     private let token: String
     private let session: URLSession
 
-    /// The session a caller gets when it passes none. Release: always
-    /// `.shared` — identical to the previous default argument. Debug: a
-    /// capture launch (HSCC_DEBUG_FIXTURES=1) gets the canned-fixture
-    /// session instead of the network (see DebugHarness.swift; the session
-    /// still drives ConnectionMonitor through the normal decode path, so a
-    /// screen rendered from fixtures reports its dot exactly as it would
-    /// live).
+    /// The session a caller gets when it passes none: always `.shared`.
+    /// (The debug fixture session that a capture launch used to swap in is
+    /// retired with the console — t_0f3f70e6.)
     static func defaultSession() -> URLSession {
-        #if DEBUG
-        if DebugHarness.fixturesEnabled { return DebugHarness.fixtureSession() }
-        #endif
         return .shared
     }
 
@@ -630,45 +623,9 @@ struct HSCCClient {
 
     // MARK: - Memory viewer (list / correct / delete)
 
-    /// GET /v1/memory?profile=<name> — a profile's memory cards.
-    ///
-    /// Read-only (no `confirm`). Returns every card the agent remembers, each
-    /// with its stable graph node id (`memory:<memory|profile>:<index>`) that
-    /// the operator passes back to correct/delete. The profile whose memories
-    /// to inspect is chosen by the operator in the view's field at the top.
-    func memories(profile: String) async throws -> MemoryListResponse {
-        // Same defect as sessions(profile:): escaped backslash, not interpolation,
-        // plus a literal `?` the path setter percent-encodes.
-        return try await get(path: "/v1/memory",
-                             queryItems: [URLQueryItem(name: "profile", value: profile)],
-                             as: MemoryListResponse.self)
-    }
-
-    /// POST /v1/memory/{node_id}/delete — delete one memory card.
-    ///
-    /// Body: `{ profile, confirm: true }`. Permanently removes the card from
-    /// the profile's memory file. Requires the confirm UI gate (MutationButton)
-    /// before calling — this is destructive.
-    func deleteMemory(nodeID: String, profile: String) async throws -> MemoryMutationResponse {
-        let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
-        return try await post("/v1/memory/\(encoded)/delete",
-                              body: ["profile": profile, "confirm": true],
-                              as: MemoryMutationResponse.self)
-    }
-
-    /// POST /v1/memory/{node_id}/edit — correct one memory card.
-    ///
-    /// Body: `{ profile, content, confirm: true }`. Replaces the card's content
-    /// with the corrected text. Requires the confirm UI gate before calling.
-    func editMemory(nodeID: String, profile: String,
-                    content: String) async throws -> MemoryMutationResponse {
-        let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
-        return try await post("/v1/memory/\(encoded)/edit",
-                              body: ["profile": profile,
-                                     "content": content,
-                                     "confirm": true],
-                              as: MemoryMutationResponse.self)
-    }
+    // GET /v1/memory + POST /v1/memory/{node_id}/delete and /edit left with
+    // the memory viewer (t_0f3f70e6, console retirement): delete/edit were
+    // mutations (rule 2) and the list read had no other caller.
 
     /// GET /v1/kanban/blocked — blocked cards across all boards.
     func kanbanBlocked() async throws -> KanbanBlockedResponse {
@@ -733,18 +690,8 @@ struct HSCCClient {
         try await get("/v1/template/status", as: TemplateStatusResponse.self)
     }
 
-    /// GET /v1/template/preview/{name} — dry-run of what applying a template
-    /// would change (READ-ONLY; never mutates).
-    ///
-    /// A template with no preview yet returns a minimal `{ speak }` body; one
-    /// with a preview returns the full changes + routing. Unknown template →
-    /// 404. This is the browse/preview step BEFORE any confirmed apply.
-    func templatePreview(name: String) async throws -> TemplatePreviewResponse {
-        // Inline the encoding expression (matches `cardDetail`/`reviewDetail`
-        // so a slash or space can't break the route).
-        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        return try await get("/v1/template/preview/\(encoded)", as: TemplatePreviewResponse.self)
-    }
+    // GET /v1/template/preview/{name} left with the template detail screen
+    // (t_0f3f70e6, console retirement): its only caller was that dry-run.
 
     // MARK: - Mutating endpoints (B4, ALL confirm-gated)
 
@@ -784,20 +731,8 @@ struct HSCCClient {
                               as: MergeCardResponse.self)
     }
 
-    /// POST /v1/template/apply — apply a cluster template.
-    ///
-    /// Body: `{ name, force_recreate?, confirm: true }`. A blocked or partially
-    /// applied template returns a non-2xx / `success: false`, which throws and
-    /// is surfaced as a failure (never a success checkmark). Never fires without
-    /// the confirm UI gate.
-    func applyTemplate(name: String,
-                       forceRecreate: Bool = false) async throws -> TemplateApplyResponse {
-        var payload: [String: Any] = ["name": name, "confirm": true]
-        if forceRecreate {
-            payload["force_recreate"] = true
-        }
-        return try await post("/v1/template/apply", body: payload, as: TemplateApplyResponse.self)
-    }
+    // POST /v1/template/apply left with the template detail screen
+    // (t_0f3f70e6, console retirement): a confirm-gated POST (rule 2).
 
     /// POST /v1/cluster/stop — stop a running workload.
     ///
@@ -866,36 +801,10 @@ struct HSCCClient {
 
     // MARK: - C6 mutations (confirm-gated)
 
-    /// POST /v1/autodown/enable — arm idle autodown.
-    ///
-    /// Body: `{ idle_minutes, force?, confirm: true }`. Non-2xx (409 for a
-    /// cron conflict unless force, 400 for a bad idle_minutes) always throws.
-    func autodownEnable(idleMinutes: Int, force: Bool = false) async throws -> AutodownEnableResponse {
-        var payload: [String: Any] = ["idle_minutes": idleMinutes, "confirm": true]
-        if force { payload["force"] = true }
-        return try await post("/v1/autodown/enable", body: payload, as: AutodownEnableResponse.self)
-    }
-
-    /// POST /v1/autodown/disable — disarm + release the intentional block.
-    /// Body: `{ confirm: true }`. Always confirms.
-    func autodownDisable() async throws -> AutodownDisableResponse {
-        try await post("/v1/autodown/disable", body: ["confirm": true], as: AutodownDisableResponse.self)
-    }
-
-    /// POST /v1/autodown/wake — force autoup (running in the background).
-    ///
-    /// Body: `{ confirm: true }`. Returns promptly with `state: waking`; autoup
-    /// can take ~9 minutes. The view polls /v1/autodown/status rather than
-    /// blocking. Always confirms.
-    func autodownWake() async throws -> AutodownWakeResponse {
-        try await post("/v1/autodown/wake", body: ["confirm": true], as: AutodownWakeResponse.self)
-    }
-
-    /// POST /v1/autodown/cancel — abort an in-progress teardown.
-    /// Body: `{ confirm: true }`. Always confirms.
-    func autodownCancel() async throws -> AutodownCancelResponse {
-        try await post("/v1/autodown/cancel", body: ["confirm": true], as: AutodownCancelResponse.self)
-    }
+    // POST /v1/autodown/{enable,disable,wake,cancel} left with the Autodown
+    // screen (t_0f3f70e6, console retirement): all four were confirm-gated
+    // POSTs (rule 2). The read (`GET /v1/autodown/status`) stays — the widget
+    // and the wake Live Activity still consume it.
 
     /// POST /v1/kanban/blocked/{id}/recover — recover ONE blocked card.
     ///
