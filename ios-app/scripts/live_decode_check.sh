@@ -12,7 +12,8 @@
 #   Sources/HSCC/Models.swift
 #   Sources/Shared/SharedModels.swift
 #   Sources/HSCC/APIError.swift
-#   Sources/HSCC/SessionEvent.swift
+# (Sources/HSCC/SessionEvent.swift was here until t_9d5a30c9 retired the chat
+#  stream layer with the chat family — the session-events decode below went too.)
 # plus the same Theme shim model_decode_check uses (a UI design token, not a
 # model — needed only because SharedModels.swift references Theme.Semantic.*).
 # The population check lives in main.swift and uses Mirror reflection, so it
@@ -34,7 +35,6 @@ real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/HSCC/APIError.swift
-  Sources/HSCC/SessionEvent.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

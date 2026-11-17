@@ -93,8 +93,6 @@ file-by-file disposition of the remaining console files is
     (`docs/CONSOLE_RETIREMENT.md` §5) and they are listed because they still
     compile and still gate (`build_check.sh`, `model_decode_check.sh`) until
     then.
-    - `Views/ChatsRootView.swift` — the global Chat destination: every
-      project row pushes straight into its full-bleed chat with unread counts.
     - `Views/ProjectsView.swift` — the project list from `/v1/projects`
       (14 projects in the registry as of 2026-10-19 — the app renders whatever
       the endpoint returns), each opening a detail screen with segmented
@@ -170,9 +168,6 @@ file-by-file disposition of the remaining console files is
     stranded, on the pure rule its attributes file declares. It has no settings
     key and no poll loop yet — the driver that feeds that surface is its own
     slice, so the sweep is this activity's only app-side hook.
-  - `OfflineSendQueue.swift` — chat composed while unreachable is queued
-    (persisted), visually distinct, flushed on reconnect — never lost, never
-    sent twice.
   - `DeepLink.swift` — the `hscc://` scheme: open a project / card / session
     directly; the single entry point for notifications and Handoff.
   - `Notify/` — the "operator needed" local-notification engine
@@ -222,8 +217,8 @@ file-by-file disposition of the remaining console files is
   - `build_check.sh` — full per-target **compile** of every target with its
     real file set (typecheck alone hides SIL-level errors; see its header).
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
-    `SharedModels.swift` + `SharedStore.swift` + `APIError.swift` +
-    `SessionEvent.swift` into a macOS CLI and decodes every fixture under
+    `SharedModels.swift` + `SharedStore.swift` + `APIError.swift`
+    into a macOS CLI and decodes every fixture under
     `scripts/model_decode_check/fixtures/`, so it can never drift into a
     false green like a mirrored validator could. **No fixture or check count is
     quoted here, on purpose:** the run prints its own tally
@@ -284,7 +279,9 @@ file-by-file disposition of the remaining console files is
 cached, and when the cluster (or Tailscale) is unreachable, views show the
 last-known data clearly marked stale with its age via `StaleBanner` — never a
 blank lie. `LoadState.offline`/`.stale`, `StateCache`, and `SnapshotStore` back
-this; outbound chat composes into `OfflineSendQueue` until the link returns.
+this. (Outbound chat used to compose into `OfflineSendQueue` until the link
+returned; the app has no actions to queue any more — t_9d5a30c9 retired it with
+the chat family.)
 
 No third-party dependencies. Sideload-friendly. **This deployment runs the API
 on port `8788`** (an override in `~/.hscc/api.json`), so the app must be set to

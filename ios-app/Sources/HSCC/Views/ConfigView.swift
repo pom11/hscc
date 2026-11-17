@@ -136,9 +136,6 @@ struct ConfigView: View {
     /// Deep-link router: the only entry point left that can navigate, and the
     /// only thing that can still report a failed link (t_136762f3).
     @EnvironmentObject private var router: DeepLinkRouter
-    /// Still injected while the chat views that read it are on disk; retired
-    /// with them (CONSOLE_RETIREMENT §5 S2).
-    @EnvironmentObject private var replyWatcher: StreamReplyWatcher
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -806,15 +803,14 @@ struct ConfigView: View {
         LiveActivityManager.sweepLeftoverWakes()
     }
 
-    /// The three subsystems that still reach the daemon all take the same
+    /// The two subsystems that still reach the daemon both take the same
     /// client: the operator-alert notifier (`Notify/`, which polls on its own
-    /// schedule), the deep-link router, and the reply watcher (still injected
-    /// until the chat family that reads it is retired).
+    /// schedule) and the deep-link router. (The reply watcher took a third
+    /// seeding until the chat family it served was retired — t_9d5a30c9.)
     private func seedClients() {
         let client = makeClient()
         NotificationCoordinator.shared.setClient(client)
         router.setClient(client)
-        replyWatcher.setClient(client)
     }
 
 }

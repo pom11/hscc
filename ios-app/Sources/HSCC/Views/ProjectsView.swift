@@ -15,8 +15,6 @@ import SwiftUI
 struct ProjectsView: View {
     let client: HSCCClient?
 
-    @EnvironmentObject private var unread: ProjectUnreadCenter
-
     @State private var projects = LoadState<ProjectsResponse>.idle
 
     var body: some View {
@@ -133,27 +131,9 @@ struct ProjectsView: View {
                 Text(project.name)
                     .font(.body.weight(.medium))
                     .foregroundColor(Theme.Semantic.onSurface)
-                unreadBadge(project.name)
             }
             HSMetaLine([project.board,
                         project.displayTopic.isEmpty ? nil : "topic \(project.displayTopic)"])
-        }
-    }
-
-    /// The unread badge for a project row — the app's notification mechanism
-    /// (t_267da363). Shown only when there are unread replies waiting; hidden
-    /// (empty view) at zero so the list stays clean.
-    @ViewBuilder
-    private func unreadBadge(_ project: String) -> some View {
-        let count = unread.count(for: project)
-        if count > 0 {
-            Text("\(count) unread")
-                .font(.caption2.weight(.bold))
-                .foregroundColor(.white)  // theme-allow: white on the amber unread chip, fixed hue
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Theme.Semantic.warn, in: Capsule())
-                .accessibilityLabel("\(count) unread")
         }
     }
 
@@ -242,11 +222,11 @@ struct ProjectDetailView: View {
 ///   2. Git state — branch + ahead/behind + dirty (how sync'd local is).
 ///   3. Session health — the orchestrator's compaction headroom so a bloating
 ///      context is visible before it wedges.
-///   4. A tappable last-reply preview that jumps to the Chat section.
 ///
-/// Data: GET /v1/projects/{name} (+ the app's own persisted ChatStore for the
-/// last-reply preview). Unreadable in ~3 seconds on purpose: no dense tables,
-/// risk-first ordering.
+/// Data: GET /v1/projects/{name}. Unreadable in ~3 seconds on purpose: no dense
+/// tables, risk-first ordering. (The tappable last-reply preview that used to
+/// sit here read the app's own persisted chat transcript, `ChatStore`, which
+/// the pivot retires with the chat screens — t_9d5a30c9.)
 struct ProjectOverviewView: View {
     let client: HSCCClient
     let name: String
@@ -343,10 +323,6 @@ struct ProjectOverviewView: View {
 
             if let health = state.session_health {
                 sessionHealthSection(health)
-            }
-
-            if let last = lastReply(state) {
-                lastReplySection(last)
             }
         }
         .listStyle(.plain)
@@ -590,59 +566,6 @@ struct ProjectOverviewView: View {
             return "Last compaction failed: \(err)"
         }
         return "Session context is healthy."
-    }
-
-    // MARK: - Last reply preview (tappable → Chat)
-
-    /// The most recent orchestrator reply from the app's own persisted
-    /// transcript, if there is one. Read from ChatStore (the SAME store the
-    /// Chat section uses) so the preview always matches what Chat shows without
-    /// a second network round-trip.
-    private func lastReply(_ state: ProjectDetailResponse) -> String? {
-        let store = ChatStore(project: name)
-        guard let entry = store.transcript.last(where: { if case .reply = $0 { return true }; return false }) else {
-            return nil
-        }
-        return entry.text
-    }
-
-    @ViewBuilder
-    private func lastReplySection(_ text: String) -> some View {
-        Section {
-            Button(action: onOpenChat) {
-                HStack(alignment: .top, spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.accentColor.opacity(0.15))
-                            .frame(width: 30, height: 30)
-                        Image(systemName: "bubble.left.and.bubble.right.fill")
-                            .font(.system(size: 14))
-                            .foregroundColor(Color.accentColor)
-                    }
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text("Last reply")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(Theme.Semantic.onSurface)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                        Text(text)
-                            .font(.subheadline)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            .lineLimit(3)
-                            .multilineTextAlignment(.leading)
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-        } header: {
-            Text("Chat")
-        } footer: {
-            Text("Tap to open the chat for this project.")
-        }
     }
 
     private func timeAgo(_ seconds: Int) -> String {

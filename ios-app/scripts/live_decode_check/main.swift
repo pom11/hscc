@@ -16,7 +16,8 @@ import Foundation
 //   Sources/HSCC/Models.swift
 //   Sources/Shared/SharedModels.swift
 //   Sources/HSCC/APIError.swift
-//   Sources/HSCC/SessionEvent.swift
+// (Sources/HSCC/SessionEvent.swift was in this list until t_9d5a30c9 retired
+//  the chat stream layer with the chat family.)
 // plus the same Theme shim as model_decode_check (UI token, not a model).
 //
 // POPULATED vs all-nil is decided by runtime Mirror reflection over the decoded
@@ -95,6 +96,11 @@ final class LiveCheck {
     let dir: String
     var decodes = 0
     var populated = 0
+    /// Every `decode(...)` call counts itself here, so the summary's denominator
+    /// is derived (t_9d5a30c9): it used to be a hand-kept literal that every
+    /// added or removed route had to remember to bump — the same transcribed-count
+    /// rot `ios-app/README.md` now explicitly forbids for this gate family.
+    var attempted = 0
     var decodeFailures: [(file: String, model: String, error: String)] = []
     var emptyFailures: [(file: String, model: String)] = []
 
@@ -175,7 +181,8 @@ c.decode(ProfileEditorResponse.self,    "v1_profile_editor.json",      "ProfileE
 c.decode(KanbanBlockedResponse.self,    "v1_kanban_blocked.json",      "KanbanBlockedResponse")
 c.decode(KanbanStaleResponse.self,      "v1_kanban_stale.json",        "KanbanStaleResponse")
 c.decode(ActivityFeedResponse.self,     "v1_activity_feed.json",       "ActivityFeedResponse")
-c.decode(SessionHistoryResponse.self,   "v1_project_session_events.json", "SessionHistoryResponse")
+// SessionHistoryResponse.self left with Sources/HSCC/SessionEvent.swift
+// (t_9d5a30c9: the chat stream layer retired with the chat family).
 c.decode(TemplateListResponse.self,     "v1_template_list.json",       "TemplateListResponse")
 c.decode(TemplateStatusResponse.self,   "v1_template_status.json",     "TemplateStatusResponse")
 c.decode(SessionsListResponse.self,     "v1_sessions.json",            "SessionsListResponse")
