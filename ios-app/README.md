@@ -459,11 +459,15 @@ runs, which is how `merge_base_check.sh`'s trip-wire ended up untested for four
 orchestrator attempts (t_cedc5f9e). This gate discovers them by **glob**, so a new
 probe needs no wiring and no edit here; the runner refusing a zero-probe set is
 what makes that guarantee worth something. It runs each probe in name order, prints
-one line per probe with its real exit code and its own final verdict line, and
-keeps its logs outside the checkout. It is **not** part of `build_check.sh` (that
-gate is already ~14 minutes of Swift compile; each probe costs 5-8 minutes more),
-and a probe must never be renamed to `*_check.sh` for that same reason — the runner
-refuses either arrangement rather than trusting the convention.
+one line per probe with its real exit code and its own final verdict line, kills any
+probe that hangs (`PROBES_CHECK_TIMEOUT`, default 900 s — the seconds it prints per
+probe are the number to judge the budget with), and keeps its logs outside the
+checkout. Two conventions keep it honest: a probe must END with an uppercase `PASSED`
+or `FAILED` banner, because an exit 0 with no verdict is indistinguishable from a probe
+that ran nothing; and a probe keeps the `*_probe.sh` leaf rather than the `*_check.sh`
+gate convention — the runner refuses if `build_check.sh` ever starts naming a probe and
+flags a `*_check.sh` file that carries a probe's marker-file signature, so neither
+decision survives only as a comment.
 
 ## Sideloading onto your own device
 

@@ -61,9 +61,10 @@
 #      exits 0 is refused too: that is the shipped-defect shape this class descends
 #      from — exit 0 while something red just happened.
 #   4. a probe that never finishes. Each probe gets PROBES_CHECK_TIMEOUT seconds
-#      (default 900 — the whole set measured 76 s clean, so 900 is headroom, not a
-#      budget) and is then killed along with its process tree, reported as a harness
-#      error naming the probe and its elapsed seconds.
+#      (default 900) and is then killed along with its process tree, reported as a
+#      harness error naming the probe and its elapsed seconds. The seconds this script
+#      prints per probe are the number to judge that limit against; 900 is headroom,
+#      not a budget.
 #   5. the runner itself not completing. The PASS banner is printed only after an
 #      invariant holds: probes discovered == probes entered the loop == verdicts
 #      counted. A future edit that adds a branch or a continue which forgets to count
@@ -152,7 +153,7 @@ say 'probes_check.sh: repo %s @ %s\n' \
   "$REPO" "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || printf 'not a work tree')"
 
 if [ -f "$BUILD_CHECK" ] && grep -q '_probe' "$BUILD_CHECK"; then
-  refuse "build_check.sh names a probe — the probes are deliberately not in that gate (measured on main: build_check.sh globs nothing, it compiles four hard-coded targets from project.yml, so the only way a probe gets in there is someone adding it by hand, which puts 5-8 minutes of planted-payload harness in front of every compile)"
+  refuse "build_check.sh names a probe — the probes are deliberately not in that gate (measured on main: build_check.sh globs nothing, it compiles four hard-coded targets parsed from project.yml, so the only way a probe gets in there is someone adding it by hand — and a probe is not a gate, it is the evidence a gate cannot be walked past, so it belongs in this runner, whose per-probe seconds say what it actually costs)"
 fi
 command -v swiftc >/dev/null 2>&1 ||
   refuse "no swiftc on PATH — the probes run copies of gates that compile Swift, so a failure now would be an environment fault reported as a finding"
