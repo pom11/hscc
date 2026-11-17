@@ -309,8 +309,20 @@ struct MonitorNode: Codable, Identifiable {
     let sample: MonitorSample?
     let used_slots: Int?
     let free_slots: Int?
+    /// What this host is serving (t_56b910c8). NO default here on purpose: a
+    /// stored property with an initial value is silently NOT decoded (the
+    /// compiler warns "immutable property will not be decoded"), which would
+    /// have made every model count read `nil` while still compiling. Call sites
+    /// that build placeholder nodes pass it explicitly.
+    let workloads: [MonitorWorkload]?
 
     var id: String { host }
+
+    /// Whether to count this host as UP. The honest reading of the wire: the
+    /// route lists every host it tried to sample and puts the failure in
+    /// `error`, so a host with no error answered — a missing `sample` is a
+    /// metric gap on a live host, not a host that is down.
+    var isUp: Bool { error == nil }
 
     /// The node's display label: the sample hostname when the API carried one,
     /// otherwise the last octet of `host` — never the whole address (§7). This is
@@ -333,6 +345,19 @@ struct MonitorNode: Codable, Identifiable {
     }
 }
 
+/// One workload as `/v1/cluster/monitor` reports it under each host.
+///
+/// ONLY `cluster_id` is declared. The sibling keys in the same object are
+/// `recipe` (an absolute path on the operator's machine), `containers[].name`
+/// (a workload name) and `image` — three §7 redaction items — and a key that is
+/// not declared is never decoded, so they can be neither rendered nor persisted
+/// (structural redaction, not a scrub). Counting DISTINCT ids is how "models
+/// served" is answered: a tensor-parallel model occupies both hosts of a pair
+/// under one id (measured in the committed 4-node fixture: 4 hosts, 2 ids).
+struct MonitorWorkload: Codable {
+    let cluster_id: String?
+}
+
 /// The per-node `sample` dict — all numeric metrics are STRINGS (may be empty
 /// `""` when a metric is unreadable). Parsed via the computed `Double?`
 /// accessors.
@@ -346,6 +371,15 @@ struct MonitorSample: Codable {
     let gpu_name: String?
     let gpu_util_pct: String?
     let gpu_mem_used_pct: String?
+    /// Thermal + load reads the cluster widget renders (t_56b910c8). Declared
+    /// WITHOUT a default for the same reason as `MonitorNode.workloads`: a
+    /// stored property with an initial value is not decoded, it just compiles.
+    /// `cpu_load_5m`/`_15m`, `gpu_power_w` and the rest of the 31 sample keys
+    /// stay undeclared on purpose: no surface here renders them, and an
+    /// undeclared key is never decoded (§7's structural redaction).
+    let cpu_temp_c: String?
+    let gpu_temp_c: String?
+    let cpu_load_1m: String?
 
     // MARK: Parsed numeric accessors (nil when unreadable/empty)
 
@@ -356,6 +390,9 @@ struct MonitorSample: Codable {
     var memUsedMB: Double? { Self.num(mem_used_mb) }
     var gpuUtilPct: Double? { Self.num(gpu_util_pct) }
     var gpuMemUsedPct: Double? { Self.num(gpu_mem_used_pct) }
+    var cpuTempC: Double? { Self.num(cpu_temp_c) }
+    var gpuTempC: Double? { Self.num(gpu_temp_c) }
+    var cpuLoad1m: Double? { Self.num(cpu_load_1m) }
 
     /// A human uptime ("2d 11h") from `uptime_sec`, or nil when unreadable.
     var uptimeText: String? {

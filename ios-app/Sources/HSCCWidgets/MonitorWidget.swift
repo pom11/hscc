@@ -234,23 +234,34 @@ struct MonitorTimelineProvider: TimelineProvider {
     // MARK: - Sample data (placeholder / first render)
 
     /// Used for placeholder + first render before any real fetch.
+    ///
+    /// The three t_56b910c8 sample keys (`cpu_temp_c`, `gpu_temp_c`,
+    /// `cpu_load_1m`) and `workloads` are nil here on purpose: this placeholder
+    /// feeds the MONITOR widget, which renders CPU/RAM/GPU and slots, and
+    /// inventing a temperature for a preview nobody measures is exactly the
+    /// "number no route serves" failure. The cluster widget's own placeholder
+    /// (`ClusterTimelineProvider.placeholder`) carries real-shaped metric values.
     static let sampleNodes: [MonitorNode] = [
         MonitorNode(host: ".244", error: nil, sample: MonitorSample(
             hostname: "orch-1", uptime_sec: "172800", cpu_usage_pct: "42", mem_used_pct: "61",
             mem_total_mb: "196608", mem_used_mb: "119930", gpu_name: "GB10", gpu_util_pct: "55",
-            gpu_mem_used_pct: "47"), used_slots: 1, free_slots: 1),
+            gpu_mem_used_pct: "47", cpu_temp_c: nil, gpu_temp_c: nil, cpu_load_1m: nil),
+            used_slots: 1, free_slots: 1, workloads: nil),
         MonitorNode(host: ".246", error: nil, sample: MonitorSample(
             hostname: "orch-2", uptime_sec: "172800", cpu_usage_pct: "38", mem_used_pct: "57",
             mem_total_mb: "196608", mem_used_mb: "112066", gpu_name: "GB10", gpu_util_pct: "49",
-            gpu_mem_used_pct: "44"), used_slots: 1, free_slots: 1),
+            gpu_mem_used_pct: "44", cpu_temp_c: nil, gpu_temp_c: nil, cpu_load_1m: nil),
+            used_slots: 1, free_slots: 1, workloads: nil),
         MonitorNode(host: ".247", error: nil, sample: MonitorSample(
             hostname: "work-1", uptime_sec: "172800", cpu_usage_pct: "78", mem_used_pct: "74",
             mem_total_mb: "196608", mem_used_mb: "145490", gpu_name: "GB10", gpu_util_pct: "88",
-            gpu_mem_used_pct: "71"), used_slots: 2, free_slots: 0),
+            gpu_mem_used_pct: "71", cpu_temp_c: nil, gpu_temp_c: nil, cpu_load_1m: nil),
+            used_slots: 2, free_slots: 0, workloads: nil),
         MonitorNode(host: ".248", error: nil, sample: MonitorSample(
             hostname: "work-2", uptime_sec: "172800", cpu_usage_pct: "64", mem_used_pct: "69",
             mem_total_mb: "196608", mem_used_mb: "135659", gpu_name: "GB10", gpu_util_pct: "73",
-            gpu_mem_used_pct: "58"), used_slots: 1, free_slots: 1),
+            gpu_mem_used_pct: "58", cpu_temp_c: nil, gpu_temp_c: nil, cpu_load_1m: nil),
+            used_slots: 1, free_slots: 1, workloads: nil),
     ]
 
     static let sampleDaemonHost = MonitorDaemonHost(
