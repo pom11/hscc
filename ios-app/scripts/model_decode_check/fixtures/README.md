@@ -53,8 +53,12 @@ response type surfaced by the live capture (`live_decode_check`).
 
 **How many checks are green is whatever the run prints, not what this file
 says.** `./scripts/model_decode_check.sh` ends with `ALL DECODE CHECKS PASSED —
-N/N fixtures decoded against the real models` and exits nonzero on the first
-miss, so the script reports its own count and is never stale, while a figure
+N/N checks (over F committed fixtures) decoded against the real models`. Both
+numbers are printed because they are not the same number, and the line used to
+call the check count "fixtures", which read as a fixture total that never
+existed: `N` is checks, `F` is distinct files opened, and neither is typed
+anywhere. It exits nonzero on the first miss, so the script reports its own
+counts and is never stale, while a figure
 typed in here is a snapshot that starts ageing the moment a fixture is added or
 deleted. That is not hypothetical — this paragraph carried `88/88 (62 JSON
 bodies)` while the run printed `98/98`, and the set shrank again when the

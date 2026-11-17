@@ -21,11 +21,26 @@ final class DecodeCheck {
     var failures: [(fileName: String, type: String, error: String)] = []
     var passed = 0
 
+    /// Distinct fixture files whose bytes this run actually read, recorded in
+    /// `load`. The summary names this next to `passed` so the banner's units
+    /// cannot be confused: `passed` counts CHECKS (one fixture can carry several,
+    /// and a `checkFails` fixture adds one by *throwing*), this set counts
+    /// FIXTURES (distinct files opened). Neither number is ever typed into a
+    /// string, here or in the README — a typed count rots (t_74b0c758 measured it
+    /// drifting twice, once inside the commit that wrote it), so both are derived
+    /// from what the run did. New fixture reads must go through `load`: a fixture
+    /// read only by an inline `Data(contentsOf:)` would not be counted here.
+    /// (Every committed fixture is read through `load` today — the handful of
+    /// older inline reads in this file all name a fixture that `load` also opens.)
+    var fixturesRead: Set<String> = []
+
     init(dir: String) { self.dir = dir }
 
-    /// Load fixture bytes.
+    /// Load fixture bytes, and remember that this fixture was read.
     func load(_ name: String) throws -> Data {
-        try Data(contentsOf: URL(fileURLWithPath: dir + "/" + name))
+        let data = try Data(contentsOf: URL(fileURLWithPath: dir + "/" + name))
+        fixturesRead.insert(name)
+        return data
     }
 
     /// Decode `T` from fixture `name`; record a named failure on any throw.
@@ -733,13 +748,18 @@ c.checkFails(MonitorSnapshotStore.Snapshot.self, "v1_monitor_snapshot_legacy.jso
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
-// against the real models. ----
+// against the real models. The exit code is the guard; the words below only
+// report, and they name their UNITS: `passed` is CHECKS, `fixturesRead` is
+// FIXTURES (fewer, because one fixture can carry several checks and a negative
+// fixture contributes a check while being one file). Both are read off this run,
+// never typed — the README defers to this line as the authority for how many are
+// green, so a wrong unit here would ship a wrong unit into the docs.
 print("")
 if c.failures.isEmpty {
-    print("ALL DECODE CHECKS PASSED — \(c.passed)/\(c.passed) fixtures decoded against the real models")
+    print("ALL DECODE CHECKS PASSED — \(c.passed)/\(c.passed) checks (over \(c.fixturesRead.count) committed fixtures) decoded against the real models")
     exit(0)
 } else {
-    print("DECODE FAILURES — \(c.failures.count) fixture(s) did not decode against the real models:")
+    print("DECODE FAILURES — \(c.failures.count) check(s) did not pass against the real models:")
     for f in c.failures {
         print("  ✗ \(f.fileName) → \(f.type): \(f.error)")
     }
