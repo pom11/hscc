@@ -222,11 +222,19 @@ file-by-file disposition of the remaining console files is
   - `build_check.sh` — full per-target **compile** of every target with its
     real file set (typecheck alone hides SIL-level errors; see its header).
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
-    `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
-    committed live fixtures (55 JSONs under
-    `scripts/model_decode_check/fixtures/`, 89 decode checks — some fixtures
-    are checked against more than one model), so it can never drift into a
-    false green like a mirrored validator could. The widget / Live Activity
+    `SharedModels.swift` + `SharedStore.swift` + `APIError.swift` +
+    `SessionEvent.swift` into a macOS CLI and decodes every fixture under
+    `scripts/model_decode_check/fixtures/`, so it can never drift into a
+    false green like a mirrored validator could. **No fixture or check count is
+    quoted here, on purpose:** the run prints its own tally
+    (`ALL DECODE CHECKS PASSED — N/N`) and exits nonzero on the first miss, so
+    the script is the authority and a card that adds or deletes a fixture
+    changes its output and edits no prose. A number in this file has nothing
+    gating it and rots — it did so twice, and the second time it was already
+    stale in the commit that wrote it (`#314` advertised 88 checks while that
+    same commit's run printed 98). The check count is higher than the file
+    count because some fixtures decode against more than one model and the
+    widget blocks assert derived values too. The widget / Live Activity
     payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
     here too — which is why the two mirror harnesses that used to re-declare
     them (`shared_model_check.swift`, `widget_kanban_decode_check.swift`) were

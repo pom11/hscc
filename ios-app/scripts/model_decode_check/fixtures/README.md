@@ -39,18 +39,38 @@ the real captures: the Card model reads only `id/title/status/assignee/board`
 (unknown fields are ignored by Decodable), so the bulky card `body` prose —
 which contained a tailnet IP and a token-file path — was dropped and the real
 key structure preserved. The decode contract is therefore exercised identically.
-All 62 JSON fixtures in this directory autovalidate as JSON (re-verified
-2026-11-17 by `ls *.json | wc -l` + re-encode). If ever in doubt, re-encode a
-fresh capture and diff the key structure.
+Every JSON fixture in this directory autovalidates as JSON (last re-verified
+2026-11-17: every `*.json` here parsed cleanly under `python3 -m json.tool`).
+The count of files is deliberately **not** stated here — see **Coverage** for
+why the number lives in the script's own output instead of in this file. If
+ever in doubt, re-encode a fresh capture and diff the key structure.
 
 ## Coverage
 
 The committed fixtures cover every decodable response model in Models.swift +
 SharedModels.swift that has a decode check wired into `main.swift`, plus every
-response type surfaced by the live capture (`live_decode_check`). Current green:
-88/88 committed-fixture checks (62 JSON bodies; several are decoded by more than
-one model, and the widget blocks assert derived values too) + 36/36 live routes
-(see Phase 4 and the widget-payload additions below for the count reconciliation).
+response type surfaced by the live capture (`live_decode_check`).
+
+**How many checks are green is whatever the run prints, not what this file
+says.** `./scripts/model_decode_check.sh` ends with `ALL DECODE CHECKS PASSED —
+N/N fixtures decoded against the real models` and exits nonzero on the first
+miss, so the script reports its own count and is never stale, while a figure
+typed in here is a snapshot that starts ageing the moment a fixture is added or
+deleted. That is not hypothetical — this paragraph carried `88/88 (62 JSON
+bodies)` while the run printed `98/98`, and the set shrank again when the
+operator console was retired. So the rule for the next card is: **a card that
+adds, rewrites or deletes a fixture changes no number in this file** — it runs
+the script and reads its last line, which is the authority by construction.
+
+What does not rot, and so is kept: the number of **checks** is higher than the
+number of **files**, because several fixtures are decoded against more than one
+model, the widget blocks assert derived values on top of the decode, and two
+fixtures (`v1_mobile_summary_missing_done.json`,
+`v1_monitor_snapshot_legacy.json`) are *negative* — they pass by **failing** to
+decode. The live axis (`scripts/live_decode_check.sh`) is a separate harness
+that needs `scripts/capture_live.sh` run against a live daemon, and its captures
+are not committed, so every live-route figure below is a point-in-time
+measurement of one run, not a green a checkout can reproduce.
 
 `cron_list.json` is the Phase 3 scheduled-job roster (`GET /v1/cron/list`,
 added 2026-09-27). It is a faithful 11-job capture of the REAL live response
@@ -60,14 +80,19 @@ no IPs (the roster never contains host addresses). See `routes_cron.py`
 The `main.swift` block additionally asserts the active/paused classification
 via `CronJob.isActive` and that every nullable field tolerates null.
 
-The 17 mutation/detail fixtures added 2026-08-30 (`dispatch_card`, `merge_card`,
+The mutation/detail fixtures added 2026-08-30 (`dispatch_card`, `merge_card`,
 `template_apply`, `stop_cluster`, `recover_card`, `session_retire`,
 `memory_list`, `memory_delete`, `autodown_enable/disable/wake/cancel`,
 `cluster_up`, `cluster_down`, `orchestrator_chat`,
 `orchestrator_chat_status`, `review_detail`) were not captured from the live
 host — their shapes were derived from the actual hscc-api handlers so each
-fixture mirrors what the real endpoint returns on a 2xx success. See the
-handler at the cited source for each:
+fixture mirrors what the real endpoint returns on a 2xx success. **Seven of
+these names are no longer files in this directory** — `template_apply`,
+`memory_list`, `memory_delete` and the four `autodown_*` mutations went with the
+operator console screens that read them (t_0f3f70e6); they are listed because
+the provenance statement (handler-derived, not captured) is what tells the next
+reader whether a shape is a capture or an inference, and the surviving fixtures
+here still mix both kinds. See the handler at the cited source for each:
 - `dispatch_card.json` — routes_actions.py `handle_create_card`
 - `merge_card.json` — routes_actions.py `handle_merge_card` (clean close branch)
 - `template_apply.json` — routes_actions.py `handle_template_apply` + cluster_template.py `apply_template`
@@ -109,9 +134,12 @@ API and committed as shape-faithful sanitizations, closing the last decode gaps:
 `capture_live.sh`, `live_decode_check/main.swift` and
 `compare_fixtures_live.py` were extended so every live capture now includes
 these three routes and both decode-axis harnesses (committed fixtures +
-live-population) guard them. Coverage: 62/62 committed fixtures decode
-(= 56 before Phase 4 + 3 new `c.check` rows + 3 new contract assertions) and
-36/36 live routes decode populated.
+live-population) guard them. What that card measured at the time — a
+point-in-time tally of its own run, superseded by every fixture change since,
+and deliberately not restated as a current green: the committed set decoded
+`62/62`, which it reconciled as 56 fixtures before Phase 4 + 3 new `c.check`
+rows + 3 new contract assertions, with `36/36` live routes decoding populated.
+**Today's number is the one `model_decode_check.sh` prints**, not this one.
 
 ## Running the check
 
