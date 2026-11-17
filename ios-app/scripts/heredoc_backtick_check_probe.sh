@@ -528,8 +528,20 @@ else
   ( cd "$(dirname "$TREE")" && TMPDIR="$(dirname "$TREE")" bash "${TREE}/scripts/${wsrc}" >"$OUT" 2>"$ERR" )
   W_RC=$?
   if [ -e "$MARKER" ]; then
-    gl=$(awk '/GUARD-SENTINEL/ { print NR; exit }' "${SCRIPTS}/${wsrc}")
-    pnote "window-above: the payload ABOVE the guard of $wsrc EXECUTED (marker created, gate exited $W_RC). Its guard's first line is $gl, so that much prologue is outside its reach — measured every run on purpose. Whoever can write there can also delete the guard, which is why the closure is an EXTERNAL scanner and not a bigger in-file guard."
+    # The reach boundary is the guard FIRST EXECUTABLE STATEMENT, never the comment
+    # that names it: a marker token also matches the prose explaining the marker, and
+    # exactly that mistake measured a guard reach 11x wrong on PR #345. So the matched
+    # line must start with code, and when no line qualifies NO figure is printed —
+    # these numbers get copied into fragments and other cards, and a derived number
+    # that cannot be anchored is worth less than no number.
+    gl=$(awk '/GUARD-FIRST-EXEC/ { t = $0; sub(/^[[:space:]]*/, "", t)
+                                 if (t != "" && t !~ /^#/) { print NR; exit } }' \
+             "${SCRIPTS}/${wsrc}")
+    if [ -n "$gl" ]; then
+      pnote "window-above: the payload ABOVE the guard of $wsrc EXECUTED (marker created, gate exited $W_RC). Its first executable statement is line $gl, so lines 2..$((gl - 1)) are outside its reach — measured every run on purpose. Whoever can write there can also delete the guard, which is why the closure is an EXTERNAL scanner and not a bigger in-file guard."
+    else
+      pnote "window-above: the payload ABOVE the guard of $wsrc EXECUTED (marker created, gate exited $W_RC), but no executable GUARD-FIRST-EXEC line was found in it, so no reach figure is printed. The execution is the measured fact; the span is not guessed."
+    fi
   else
     pnote "window-above: the payload above the guard of $wsrc did not execute this run (gate exited $W_RC). Reported rather than counted as a pass: whether it executes depends on where the guard sits, and a guard's reach is never something this probe should rely on."
   fi
