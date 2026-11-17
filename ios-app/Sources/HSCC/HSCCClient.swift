@@ -160,8 +160,12 @@ struct HSCCClient {
     /// the guard was `if queryItems.isEmpty`, so NONE of these ever wrote to
     /// the cache and their offline fallback (`.stale`) was dead — on a
     /// cold-start offline they surfaced `.failed` instead of last-known data.
-    /// The only paging call site is `sessionEvents`, which marks older pages
-    /// with a `before` cursor; a paging read must not overwrite the tail.
+    /// The `before` rule outlived its last producer: `sessionEvents` (the chat
+    /// log pager) left with the chat family in t_9d5a30c9 and no other method
+    /// here pages by `before`, so today the branch is defensive — it stays
+    /// because the next pager must not clobber the tail, and because
+    /// `scripts/offline_cache_fix_check.sh` cases 2 + 5 still assert the rule
+    /// (that harness explains why no live gate can force a real cursor).
     func get<T: Decodable>(path: String,
                            queryItems: [URLQueryItem],
                            as type: T.Type = T.self) async throws -> T {
@@ -655,29 +659,6 @@ struct HSCCClient {
         try await get(path: "/v1/activity/feed",
                       queryItems: [URLQueryItem(name: "limit", value: String(limit))],
                       as: ActivityFeedResponse.self)
-    }
-
-    /// GET /v1/projects/{name}/session/events — page the project's chat log.
-    ///
-    /// On open (no `before`) this fetches the NEWEST page (the tail) so the
-    /// operator sees context that predates this install — the thing that makes
-    /// a project's chat a SESSION, not a log the app happens to own. Pass
-    /// `before` = the returned `next_before` to page further BACK (strictly
-    /// older seq). `limit` defaults to the server's 200 and is capped at 1000.
-    ///
-    /// Query parameters are built with `URLQueryItem` (not embedded in the
-    /// path) so `before`/`limit` survive percent-decoding exactly — unlike a
-    /// literal `?` in the path string, which URLComponents would encode as
-    /// `%3F` and turn into a wrong path.
-    func sessionEvents(project: String,
-                       before: Int? = nil,
-                       limit: Int = 200) async throws -> SessionHistoryResponse {
-        var query: [URLQueryItem] = []
-        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
-        query.append(URLQueryItem(name: "limit", value: String(limit)))
-        return try await get(path: "/v1/projects/\(pathComponent(project))/session/events",
-                             queryItems: query,
-                             as: SessionHistoryResponse.self)
     }
 
     /// GET /v1/template/list — available cluster templates.

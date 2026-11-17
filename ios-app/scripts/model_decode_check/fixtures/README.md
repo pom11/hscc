@@ -148,11 +148,13 @@ From `ios-app/`:
     ./scripts/model_decode_check.sh       # exit 0 == every fixture decodes
 
 The script compiles the real model files — `Models.swift`, `SharedModels.swift`,
-`APIError.swift`, `SessionEvent.swift`, and since t_438aa6ce also
+`APIError.swift`, and since t_438aa6ce also
 `SharedStore.swift`, because §7 binds the **stored** shape and the monitor
 snapshot's bytes are production types, not mirrors — with the harness into a
 temporary macOS CLI and runs it, so it never falls out of sync with the models the
-app actually ships.
+app actually ships. (`SessionEvent.swift` was in that list until t_9d5a30c9
+retired the chat stream layer with the chat family; `v1_session_events.json` left
+in the same commit — struct, fixture and `main.swift` block always move together.)
 
 ## Widget / Live Activity payload additions (t_595a5fee, 2026-11-17)
 

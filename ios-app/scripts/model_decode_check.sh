@@ -42,7 +42,6 @@ real_models=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
   Sources/HSCC/APIError.swift
-  Sources/HSCC/SessionEvent.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
