@@ -2,7 +2,12 @@
 
 The contract this decomposition must preserve. Every entry below is one check the harness
 prints a verdict for; the split moves checks between files and may not weaken, drop, merge or
-" simplify" any of them.
+simplify any of them.
+
+**Every count in this file is a point-in-time measurement at `c270ba84`, not a figure to keep
+in sync.** The harness prints its own verdict lines and fails on a miss; nothing reads these
+numbers. A later card that adds a check makes the totals here historical, and that is correct —
+do not "update" them, extend the inventory with the new check's entry.
 
 Subject of measurement for every entry: the committed Swift under `ios-app/Sources/`. Nothing
 here renders pixels (no iOS runtime on this host) — the greps prove structure, the compiled
