@@ -198,8 +198,8 @@ mapped onto drawer destinations.
     real file set (typecheck alone hides SIL-level errors; see its header).
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
     `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
-    committed live fixtures (62 JSONs under
-    `scripts/model_decode_check/fixtures/`, 88 decode checks — some fixtures
+    committed live fixtures (55 JSONs under
+    `scripts/model_decode_check/fixtures/`, 89 decode checks — some fixtures
     are checked against more than one model), so it can never drift into a
     false green like a mirrored validator could. The widget / Live Activity
     payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
@@ -230,10 +230,9 @@ the app pre-fills `8788` to match this deployment.
 
 Be plain about what the gates have and have not seen:
 
-- **Never run on a real device.** The simulator gates (compile, nav-graph
-  walk, screenshots, decode) cover the app target's UI and data path. A
-  signed on-device build — the actual sideload the operator uses — has not
-  happened yet.
+- **Never run on a real device.** The simulator gates (full compile, decode)
+  cover the app target's UI and data path. A signed on-device build — the
+  actual sideload the operator uses — has not happened yet.
 - **Siri intents cannot be validated without a signed build on hardware.**
   The AppEnum, parameter summaries, and confirm dialogs are written but
   unrun; a real device build is required to know they resolve and fire.
