@@ -27,11 +27,11 @@ SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Slice the REAL `AppGroup` enum out of SharedModels.swift so the lastSeen store
+# Slice the REAL `AppGroup` enum out of SharedStore.swift so the lastSeen store
 # links against the genuine suite name, not a redeclaration. The enum must exist
 # and be self-contained (starts `enum AppGroup {`, ends at the first standalone
 # `}`).
-shared="Sources/Shared/SharedModels.swift"
+shared="Sources/Shared/SharedStore.swift"
 if ! grep -q '^enum AppGroup {' "$shared"; then
   echo "error: could not locate the real AppGroup enum (marker moved?)" >&2
   exit 1

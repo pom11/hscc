@@ -20,9 +20,12 @@
 #
 # Sources are listed explicitly (not via a folder glob) so a source added
 # without updating this file is easy to spot in review. The shared sources
-# under Sources/Shared are compiled into EVERY target. Info.plist keys are
-# generated from the `info` block below; a physical `Info.plist` is not
-# required (XcodeGen emits one at build time).
+# under Sources/Shared are compiled into EVERY target: `SharedModels.swift`
+# holds the Codable wire payloads, `SharedStore.swift` holds the App Group
+# identifier and the typed stores (connection settings, widget/Live Activity
+# configuration, last-known snapshots) the app writes and the extensions read.
+# Info.plist keys are generated from the `info` block below; a physical
+# `Info.plist` is not required (XcodeGen emits one at build time).
 
 name: HSCC
 options:
@@ -240,6 +243,7 @@ targets:
       - path: Sources/HSCC/Intents/ProjectIntents.swift
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/ExtensionClient.swift
       - path: Sources/Shared/WakingActivity.swift
@@ -352,6 +356,7 @@ targets:
       - path: Sources/HSCCWidgets/MonitorViews.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/ExtensionClient.swift
       # Theme tokens shared with the app (design-system palette, no raw hex).
       - path: Sources/HSCC/Views/Theme.swift
@@ -401,6 +406,7 @@ targets:
       - path: Sources/HSCCLiveActivity/HSCCLiveActivity.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/WakingActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
@@ -456,6 +462,7 @@ targets:
       - path: Sources/HSCCLiveActivitySession/HSCCLiveActivitySession.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/SessionActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
@@ -511,6 +518,7 @@ targets:
       - path: Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
