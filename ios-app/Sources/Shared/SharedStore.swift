@@ -11,9 +11,9 @@ import Security
 // the Codable wire payloads only: anything that is STORED belongs here,
 // anything that is DECODED belongs there.
 //
-// Compiled into ALL five targets (HSCC, HSCCWidgets, HSCCLiveActivity,
-// HSCCLiveActivitySession, HSCCLiveActivityMonitor) through each target's
-// `sources:` list in project.yml. It imports Foundation + Security only — no
+// Compiled into ALL four targets (HSCC, HSCCWidgets, HSCCLiveActivity,
+// HSCCLiveActivityMonitor) through each target's `sources:` list in
+// project.yml. It imports Foundation + Security only — no
 // SwiftUI, no app-only code — so an extension can compile it on its own.
 //
 // THE CONTRACT (binding on every surface that touches the group):
