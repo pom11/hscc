@@ -16,6 +16,9 @@ import WidgetKit
 ///   * accessory + small/medium/large — Kanban Monitor: `hscc kanban monitor
 ///                     --live`'s running / ready / blocked, from the kanban trio,
 ///                     with a visible error pane when a board read fails.
+///   * systemSmall/Medium/Large + the three accessory families — Board Status:
+///                     todo/ready/running/blocked/done for ONE board, picked in
+///                     the widget's own configuration sheet (t_6d8731ab).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -27,5 +30,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         MonitorWidget()
         CardsRunningWidget()
         KanbanMonitorWidget()
+        BoardStatusWidget()
     }
 }
