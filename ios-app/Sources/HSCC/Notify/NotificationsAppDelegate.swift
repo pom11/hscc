@@ -70,6 +70,11 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
             // cards activity exists — the launch sweep is the invariant the
             // surface depends on, so it runs from the first launch onward.
             CardsRunningActivitySweep.sweepLeftoverCards()
+            // Cluster-health Live Activity (t_0120475a): the same re-hydration
+            // treatment. Idempotent, and a no-op while no cluster-health
+            // activity exists. Its rule is pure (no settings key), so this is
+            // the surface's only app-side hook until its driver lands.
+            ClusterHealthActivitySweep.sweepLeftoverClusterHealth()
         }
         return true
     }

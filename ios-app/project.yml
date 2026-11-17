@@ -158,6 +158,9 @@ targets:
       # The running-cards activity's launch sweep (t_f9cc34e0). The activity's
       # rendering lives in the monitor extension target; this is the app half.
       - path: Sources/HSCC/CardsRunningActivitySweep.swift
+      # The cluster-health activity's launch sweep (t_0120475a). Same split:
+      # the rendering lives in the monitor extension target, this is the app half.
+      - path: Sources/HSCC/ClusterHealthActivitySweep.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
@@ -225,6 +228,11 @@ targets:
       # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
       # and into the monitor extension (which renders the activity).
       - path: Sources/Shared/CardsRunningActivity.swift
+      # Cluster-health Live Activity attributes + its pure reading/orphan rules
+      # (t_0120475a). Same arrangement as the cards file above: the rules are
+      # sliced by live_activity_rehydration_check.sh and executed there, so the
+      # file is compiled into the app (sweep) and the monitor extension (views).
+      - path: Sources/Shared/ClusterHealthActivity.swift
       - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/WakingActivity.swift
     entitlements:
@@ -449,11 +457,15 @@ targets:
       - path: Sources/HSCCLiveActivityMonitor/HSCCLiveActivityMonitorBundle.swift
       - path: Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
       - path: Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
+      # The cluster-health activity (t_0120475a): renders the state the app
+      # pushed, never fetches.
+      - path: Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/CardsRunningActivity.swift
+      - path: Sources/Shared/ClusterHealthActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
