@@ -341,6 +341,9 @@ targets:
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
+      # Projects surface (small + medium + large), t_d739d163. Its configuration
+      # intent and entity query live in the same file as the widget they configure.
+      - path: Sources/HSCCWidgets/ProjectsWidget.swift
       # Running cards with worker and age (`hscc cards monitor --live` on the
       # Home Screen), read through WidgetDataClient — see the file header.
       - path: Sources/HSCCWidgets/CardsRunningWidget.swift
