@@ -42,6 +42,14 @@ for path in pathlib.Path("Sources").rglob("*.swift"):
             i += 1
         body = text[m.end():i - 1]
         out.update(re.findall(r'"([a-z0-9.]+)"', body))
+    # A third shape the greps above cannot see: a ternary INSIDE the call —
+    #   Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+    # The first grep wants a literal right after `systemName:`, so a gate pane
+    # that swaps its glyph by state (t_fa7926fb's paused/invite panes) had BOTH
+    # of its names invisible to this gate, and a wrong one is a blank pane with
+    # only a console line as evidence. Both arms of the ternary are taken.
+    for m in re.finditer(r'systemName:\s*[^"()]*\?\s*"([a-z0-9.]+)"\s*:\s*"([a-z0-9.]+)"', text):
+        out.update(m.groups())
 with open(sys.argv[1], "w") as f:
     f.write("\n".join(sorted(out)))
 PY

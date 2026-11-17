@@ -39,11 +39,18 @@ import WidgetKit
 // an unparseable timestamp is not a card that started this instant).
 //
 // THE LOUD FAILURE (§5.4 + the card's own acceptance rule: a blind read must
-// never look like an idle board). Three distinct states, never collapsed:
+// never look like an idle board). Four distinct states, never collapsed:
 //
 //   * not configured       → the setup invite, checked FIRST in every family
 //                            (the audit-3 invariant `widget_view_dispatch_check`
 //                            enforces for the cluster widget).
+//   * paused in Settings    → "Paused in Settings", taken in the SAME step as
+//                            the invite (t_fa7926fb, once `WidgetSurfaceKind`
+//                            gained `widget.cardsRunning`). No rows, no counts,
+//                            no last-known snapshot, and no request sent for
+//                            any of it: a panel that kept drawing the fleet
+//                            after the operator turned it off is the failure
+//                            this state exists to refuse.
 //   * read failed, nothing
 //     usable               → the failure, rendered: `exclamationmark.triangle.fill`
 //                            in `Theme.Semantic.bad` plus
@@ -277,13 +284,52 @@ struct CardsRunningEntry: TimelineEntry {
     let failure: WidgetDataFailure?
     /// False only when the operator has no host/token yet — the setup invite.
     let configured: Bool
+    /// True when the operator paused THIS surface in Settings (t_fa7926fb).
+    ///
+    /// A paused entry carries no projection and no failure: it is neither live
+    /// data, nor stale data, nor an error, and drawing any of those instead of
+    /// an honest "paused" is the failure `ClusterEntry.paused` exists to avoid.
+    /// The widget cannot remove itself programmatically, so this pane IS the
+    /// pause — and the provider never sends the two requests that could have
+    /// produced rows to draw here.
+    let paused: Bool
 
     static let sample = CardsRunningEntry(date: .now, projection: .preview,
-                                          ageMinutes: nil, failure: nil, configured: true)
+                                          ageMinutes: nil, failure: nil,
+                                          configured: true, paused: false)
 
     static func unconfigured() -> CardsRunningEntry {
         CardsRunningEntry(date: .now, projection: nil, ageMinutes: nil,
-                          failure: .notConfigured, configured: false)
+                          failure: .notConfigured, configured: false, paused: false)
+    }
+
+    /// The paused state (t_fa7926fb): nothing but the fact that it is paused.
+    /// No projection, no snapshot, no failure — the operator asked for no data,
+    /// so the surface shows none, and `CardsRunningSnapshotStore` is deliberately
+    /// not consulted (stale rows on a paused panel would be the lie this state
+    /// exists to refuse).
+    static func paused() -> CardsRunningEntry {
+        CardsRunningEntry(date: .now, projection: nil, ageMinutes: nil,
+                          failure: nil, configured: true, paused: true)
+    }
+
+    // MARK: Gate copy (unconfigured / paused)
+
+    /// The line the gate pane draws. One owner, so six families cannot invent
+    /// six paused messages, and the setup invite wins when both apply
+    /// (audit-3 / t_5c554c5b): an app that was never configured has not paused
+    /// anything.
+    var gateLine: String {
+        if !configured { return "Set up the app to see running cards." }
+        return "Paused in Settings"
+    }
+
+    /// The label the accessory families draw for a gate state — the ~25-character
+    /// budget §5.4 gives the inline row. `configured` is checked FIRST inside
+    /// it, so a device that was simply never set up can never render "paused".
+    var shortGateLabel: String {
+        if !configured { return "Set up in HSCC" }
+        return "Paused"
     }
 
     // MARK: Text the families draw (one rule per string, so six families cannot
@@ -293,7 +339,10 @@ struct CardsRunningEntry: TimelineEntry {
     /// "counts only — use row 2/3"). A long variant drops the board-free
     /// commentary rather than the numbers.
     var inlineLine: String {
-        if !configured { return "Set up in HSCC" }
+        // Both gate states through ONE copy rule, and the rule itself puts the
+        // setup invite first — an unconfigured device can never read as "paused"
+        // (audit-3, t_5c554c5b).
+        if !configured || paused { return shortGateLabel }
         guard let projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
         var parts: [String] = []
         if let running = projection.runningCount { parts.append("\(running) running") }
@@ -309,6 +358,12 @@ struct CardsRunningEntry: TimelineEntry {
 
     /// The ring's colour is the question a complication answers: is the fleet
     /// working, is something stuck, or did we not get to look?
+    ///
+    /// No `.paused` case, on purpose: `CardsRunningCircularView` decides
+    /// `entry.paused` in the SAME step as `!entry.configured` and draws the gate
+    /// LABEL before it ever asks for a glance (a paused ring drawing a count
+    /// would be the false zero §6 rule 1 refuses). A case no body can reach is a
+    /// case that rots, so the pause stays out of the glance vocabulary.
     enum Glance { case idle, working, stuck, unreadable, stale, invite }
 
     var circularGlance: Glance {
@@ -369,8 +424,12 @@ struct CardsRunningEntry: TimelineEntry {
 
     /// True when the failure must be drawn rather than a count. `projection`
     /// nil is the only blind state, and `failure` is non-nil in all of them —
-    /// the views assert on this rather than re-deriving it.
-    var showsFailureLoudly: Bool { configured && projection == nil }
+    /// the views assert on this rather than re-deriving it. `!paused` because a
+    /// paused entry has no projection either and is NOT blind: nothing was
+    /// refused, nothing was asked for. Every body gates the pause before it
+    /// reaches this, and the type says so too so a future body cannot get it
+    /// wrong on the entry's word alone.
+    var showsFailureLoudly: Bool { configured && !paused && projection == nil }
 }
 
 // MARK: - The last-known snapshot (the stale-while-error half)
@@ -411,32 +470,73 @@ enum CardsRunningSnapshotStore {
 // MARK: - Timeline provider
 
 struct CardsRunningTimelineProvider: TimelineProvider {
-    /// Cadence, not a poll. The operator's per-surface cadence lives in
-    /// `AppGroupWidgetSettings`, and `WidgetSurfaceKind` has no case for this
-    /// surface yet — honouring the shared toggle/cadence needs `SharedStore.swift`
-    /// plus the app's config screen, i.e. another card's file set, so this widget
-    /// uses the conservative quarter-hour and lets WidgetKit's budget have the
-    /// last word. Same choice and same reason as the board-status widget.
-    private static let refreshMinutes = 15
+    /// The cadence when the operator has never touched the settings screen: the
+    /// shared widget default (`AppGroupWidgetSettings.setting(for:)` gives a
+    /// self-fetching widget 5 minutes). This file used a conservative
+    /// quarter-hour while `WidgetSurfaceKind` had no case for the surface; since
+    /// t_fa7926fb added `widget.cardsRunning` the operator's choice wins and
+    /// this is only the fallback for a store that was never written.
+    private static let defaultRefreshMinutes = 5
+
+    // GATE-SLICE-BEGIN: cards_running_cadence
+    /// The ONE cadence decision, kept free of WidgetKit so a gate can execute
+    /// it: nil means Off (cadence picker at 0) — the timeline gets
+    /// `policy: .atEnd` and the OS wakes the widget when it likes — and a date
+    /// means `.after(date)`. Written inline, the Off branch (the one that
+    /// becomes a refresh loop if it is wrong) would be the only branch in this
+    /// file no gate ever runs.
+    static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
+        guard refreshMinutes > 0 else { return nil }
+        return Calendar.current.date(byAdding: .minute, value: refreshMinutes, to: now)
+            ?? now.addingTimeInterval(TimeInterval(refreshMinutes * 60))
+    }
+    // GATE-SLICE-END: cards_running_cadence
+
+    /// The operator's entry for THIS surface, or nil when the registry blob has
+    /// never been written. `setting(for:)` fills an absent surface in with ON at
+    /// the widget cadence, so nil here means "the app has never run its settings
+    /// screen" — never "paused", which is why a fresh install still renders.
+    private static func surface() -> WidgetSurfaceSettings? {
+        AppGroupWidgetSettings.load()?.setting(for: .widgetCardsRunning)
+    }
 
     func placeholder(in context: Context) -> CardsRunningEntry { .sample }
 
     func getSnapshot(in context: Context, completion: @escaping (CardsRunningEntry) -> Void) {
-        Task { completion(await entry()) }
+        // The gallery preview reads the SAME registry entry the timeline does, so
+        // a paused widget previews as paused instead of showing a fleet the
+        // operator explicitly switched off.
+        let surface = Self.surface()
+        Task { completion(await entry(surface: surface)) }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<CardsRunningEntry>) -> Void) {
         Task {
-            let entry = await entry()
-            let next = Calendar.current.date(byAdding: .minute, value: Self.refreshMinutes, to: .now)
-                ?? .now.addingTimeInterval(900)
+            let surface = Self.surface()
+            let entry = await entry(surface: surface)
+            // 0 = Off in the cadence picker: no scheduled refresh, the OS
+            // decides. Same shape as `ClusterWidgetTimelineProvider.getTimeline`.
+            guard let next = Self.nextRefreshDate(
+                refreshMinutes: surface?.refreshMinutes ?? Self.defaultRefreshMinutes
+            ) else {
+                completion(Timeline(entries: [entry], policy: .atEnd))
+                return
+            }
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 
     // MARK: Fetch
 
-    private func entry() async -> CardsRunningEntry {
+    private func entry(surface: WidgetSurfaceSettings?) async -> CardsRunningEntry {
+        // Paused is checked BEFORE the client is built and before any read: a
+        // paused surface spends zero requests (§2's ceiling is two here, and it
+        // now spends none) and draws zero rows — no live counts, no last-known
+        // snapshot, no failure pane. `!isActive` can only come from a blob the
+        // app wrote, so an install that never opened Settings cannot land here.
+        if let surface, !surface.isActive {
+            return .paused()
+        }
         let client = WidgetDataClient.makeIfConfigured()
         guard let client else {
             // No host, no token: the ONE job here is the setup invite. The
@@ -452,13 +552,16 @@ struct CardsRunningTimelineProvider: TimelineProvider {
         case .live(let projection, let fetchedAt):
             CardsRunningSnapshotStore.save(projection, at: fetchedAt)
             return CardsRunningEntry(date: .now, projection: projection,
-                                     ageMinutes: nil, failure: nil, configured: true)
+                                     ageMinutes: nil, failure: nil, configured: true,
+                                     paused: false)
         case .stale(let projection, let ageMinutes, let reason):
             return CardsRunningEntry(date: .now, projection: projection,
-                                     ageMinutes: ageMinutes, failure: reason, configured: true)
+                                     ageMinutes: ageMinutes, failure: reason, configured: true,
+                                     paused: false)
         case .failed(let failure):
             return CardsRunningEntry(date: .now, projection: nil,
-                                     ageMinutes: nil, failure: failure, configured: true)
+                                     ageMinutes: nil, failure: failure, configured: true,
+                                     paused: false)
         }
     }
 
@@ -551,8 +654,15 @@ struct CardsRunningCircularView: View {
     let entry: CardsRunningEntry
 
     var body: some View {
-        if !entry.configured {
-            CardsRunningInviteView(compact: true)
+        if !entry.configured || entry.paused {
+            // The ring draws a LABEL, never a number: `0` or `—` in this ring on
+            // a paused surface would both claim something about the fleet that
+            // nothing was asked about (§6 rule 1), and the copy rule inside
+            // `shortGateLabel` keeps the setup invite first.
+            Text(entry.shortGateLabel)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .accessibilityLabel(entry.shortGateLabel)
         } else if entry.projection == nil {
             // The blind state: a glyph, not a zero. `0` in this ring would read
             // "nothing is running", which is the opposite of what is known.
@@ -598,8 +708,8 @@ struct CardsRunningRectangularView: View {
     let entry: CardsRunningEntry
 
     var body: some View {
-        if !entry.configured {
-            CardsRunningInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            CardsRunningGateView(entry: entry)
         } else if entry.projection == nil {
             VStack(alignment: .leading, spacing: 1) {
                 Label(entry.failure?.shortLabel ?? "No data",
@@ -644,8 +754,8 @@ struct CardsRunningSmallView: View {
     let entry: CardsRunningEntry
 
     var body: some View {
-        if !entry.configured {
-            CardsRunningInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            CardsRunningGateView(entry: entry)
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: true)
         } else {
@@ -667,8 +777,8 @@ struct CardsRunningMediumView: View {
     let entry: CardsRunningEntry
 
     var body: some View {
-        if !entry.configured {
-            CardsRunningInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            CardsRunningGateView(entry: entry)
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
@@ -687,8 +797,8 @@ struct CardsRunningLargeView: View {
     let entry: CardsRunningEntry
 
     var body: some View {
-        if !entry.configured {
-            CardsRunningInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            CardsRunningGateView(entry: entry)
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
@@ -829,17 +939,26 @@ struct CardsRunningFailureView: View {
     }
 }
 
-/// The unconfigured invite: what to do, not what broke (audit-3).
-struct CardsRunningInviteView: View {
-    let compact: Bool
+/// The gate a family draws when it has nothing to draw: the setup invite
+/// (audit-3 — what to do, not what broke) or the honest paused state
+/// (t_fa7926fb). One pane, two copies, chosen by `entry.paused`, exactly as
+/// `ClusterWidgetViews`' gate and `KanbanMonitorGateView` do, so a paused surface
+/// can never fall through to live rows, to a stale snapshot, or to a blank. It
+/// kept `CardsRunningInviteView`'s typography exactly: every caller passed
+/// `compact: false`, and the ring that used `true` now draws `shortGateLabel`
+/// itself (a paused complication showing a count would be the false zero §6
+/// rule 1 refuses), so the parameter had one value left and is gone.
+struct CardsRunningGateView: View {
+    let entry: CardsRunningEntry
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-            Label("Running cards", systemImage: "square.stack.3d.up")
-                .font(compact ? .caption2 : .subheadline.weight(.semibold))
+            Label("Running cards",
+                  systemImage: entry.paused ? "pause.circle" : "square.stack.3d.up")
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.Semantic.onSurface)
                 .lineLimit(1)
-            Text("Set up the app to see running cards.")
+            Text(entry.gateLine)
                 .font(.system(size: 9))
                 .foregroundStyle(Theme.Semantic.onSurfaceMuted)
                 .lineLimit(2)

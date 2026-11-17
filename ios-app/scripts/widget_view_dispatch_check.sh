@@ -191,7 +191,10 @@ widget_surface_gate() {
 
   # (2) The paused copy belongs to the entry, once: six families drawing six
   # different paused messages is the same drift this file's header exists for.
-  n=$(grep -c '"Paused in Settings"' "$file")
+  # Comment lines are excluded — a header bullet that QUOTES the copy is not a
+  # second owner of it, and the day one file really does own it twice the count
+  # goes to 2 and this fails (that negative was run).
+  n=$(grep '"Paused in Settings"' "$file" | grep -v '^[[:space:]]*//' | wc -l | tr -d ' ')
   if [ "$n" -eq 1 ]; then
     wok "one paused copy, owned by the entry (gateLine)"
   else
@@ -199,12 +202,34 @@ widget_surface_gate() {
   fi
 
   # (3) The accessory families draw the LABEL, never a count: a paused ring or
-  # gauge still showing a number is the false zero §6 rule 1 refuses.
-  n=$(grep -c 'Text(entry.shortGateLabel)' "$file")
+  # gauge still showing a number is the false zero §6 rule 1 refuses. Two shapes
+  # are legitimate — the body draws `Text(entry.shortGateLabel)` directly
+  # (kanban monitor), or the body draws the entry's own inline line and THAT
+  # routes both gate states through `return shortGateLabel` (running cards,
+  # mirroring `BoardStatusEntry.inlineLine`). Either way the string the
+  # complication renders belongs to the entry.
+  n=$(grep -cE 'Text\(entry\.shortGateLabel\)|return shortGateLabel' "$file")
   if [ "$n" -ge 2 ]; then
     wok "accessory families draw shortGateLabel ($n sites)"
   else
-    wbad "only $n accessory sites draw shortGateLabel (want >= 2 — inline and circular)"
+    wbad "only $n accessory sites route through shortGateLabel (want >= 2 — inline and circular)"
+  fi
+
+  # (3b) And the copy rule itself must put the setup invite FIRST: an
+  # unconfigured device reading as "paused" is the t_5c554c5b failure wearing
+  # different words. Order measured inside `var shortGateLabel`, the only place
+  # the rule lives.
+  copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' "$file")
+  if [ -z "$copy" ]; then
+    wbad "could not locate var shortGateLabel in $file — the invite-first rule is not being measured"
+  else
+    u=$(printf '%s\n' "$copy" | grep -n '!configured' | head -1 | cut -d: -f1)
+    p=$(printf '%s\n' "$copy" | grep -n 'Paused' | head -1 | cut -d: -f1)
+    if [ -n "$u" ] && [ -n "$p" ] && [ "$u" -lt "$p" ]; then
+      wok "shortGateLabel checks !configured (line $u) before any paused copy (line $p) — an unconfigured device cannot read as paused"
+    else
+      wbad "shortGateLabel does NOT check !configured first (configured-check line=$u paused-copy line=$p)"
+    fi
   fi
 
   # (4) Cadence and pause come from the shared registry, not a private default.
@@ -297,6 +322,19 @@ widget_surface_gate \
   6 \
   '/private func fetchEntry\(surface:/ {f=1} f {print} f && /^    \}$/ {exit}' \
   widgetKanbanMonitor
+
+# The running-cards widget: same four claims, and SIX families of its own — the
+# card body's "check every family body takes the gate step, one per body" is
+# what the `want` count below is for (5 here: circular, rectangular, small,
+# medium, large; the inline family routes through `inlineLine`, which check (3)
+# measures on the entry).
+widget_surface_gate \
+  Sources/HSCCWidgets/CardsRunningWidget.swift \
+  cards_running_cadence \
+  "return .paused()" \
+  5 \
+  '/private func entry\(surface:/ {f=1} f {print} f && /^    \}$/ {exit}' \
+  widgetCardsRunning
 
 if [ "$wgfail" -ne 0 ]; then
   echo "WIDGET SURFACE GATE CHECK FAILED — a registry-driven surface can draw data it was told not to fetch"
