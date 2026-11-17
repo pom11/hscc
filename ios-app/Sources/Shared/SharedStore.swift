@@ -283,7 +283,7 @@ extension WidgetSurfaceKind {
     ///   - "timing"    — wake timing / elapsed (Live Activities)
     var availableSections: Set<String> {
         switch self {
-        case .widgetCluster:    return ["state", "topology", "models", "board"]
+        case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
         case .widgetMonitor:    return ["state", "nodes", "host"]
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
