@@ -151,9 +151,15 @@ let off = AppGroupWidgetSettings(surfaces: [
 ])
 check("Off (0) refresh is stored", off.setting(for: .widgetCluster).refreshMinutes == 0)
 
-// 7. registry raw values are the stable keys the siblings consume.
+// 7. registry raw values are the stable keys the siblings consume. A raw value
+//    IS the App Group key: renaming one silently orphans whatever the operator
+//    already set on an installed device, so each one is pinned to its literal.
+//    (The t_fa7926fb pair is the reason this list exists at all — a permanent
+//    identifier chosen in a card body deserves one assertion that says so.)
 check("widget.cluster registry key", WidgetSurfaceKind.widgetCluster.rawValue == "widget.cluster")
 check("liveActivity.monitor registry key", WidgetSurfaceKind.liveActivityMonitor.rawValue == "liveActivity.monitor")
+check("widget.cardsRunning registry key", WidgetSurfaceKind.widgetCardsRunning.rawValue == "widget.cardsRunning")
+check("widget.kanbanMonitor registry key", WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
 // 7b. The board status surface (t_09cd8abf): the key itself, the two settings
 //     this entry exists for (pause + cadence) surviving the encode/decode the
@@ -181,6 +187,47 @@ if let boardData = try? JSONEncoder().encode(pausedBoard),
 let untouchedBoard = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetBoardStatus)
 check("board status with no stored entry defaults ON", untouchedBoard.isActive)
 check("board status with no stored entry defaults 5 min", untouchedBoard.refreshMinutes == 5)
+
+// 7c. the two surfaces t_fa7926fb added (running cards, kanban monitor) behave
+//     like the widgets they are. First half: the rule that keeps a fresh install
+//     rendering — an absent entry means "the settings screen was never opened",
+//     NEVER "paused" — and the seed a brand-new store gets must not pause them
+//     either. `AppGroupWidgetSettings.defaults()` DERIVES from `isLiveActivity`
+//     and `availableSections`, so this is the executed proof that the pair
+//     landed in the 5-minute widget branch and not the 15-minute Live Activity
+//     one; a wrong branch there is a widget that refreshes three times too
+//     slowly on every device, quietly.
+for kind in [WidgetSurfaceKind.widgetCardsRunning, .widgetKanbanMonitor] {
+    let s = AppGroupWidgetSettings(surfaces: [:]).setting(for: kind)
+    check("\(kind.rawValue) with no entry is ON (absent is not paused)", s.isActive)
+    check("\(kind.rawValue) with no entry takes the 5-min widget cadence",
+          s.refreshMinutes == 5)
+    let seeded = AppGroupWidgetSettings.defaults().setting(for: kind)
+    check("\(kind.rawValue) is ON at the widget cadence in the first-launch seed",
+          seeded.isActive && seeded.refreshMinutes == 5)
+    check("\(kind.rawValue) is not a Live Activity", !kind.isLiveActivity)
+    check("\(kind.rawValue) declares no sections (one dataset, nothing optional)",
+          kind.availableSections.isEmpty)
+    check("\(kind.rawValue)'s seed carries no sections either", seeded.showSections.isEmpty)
+}
+//     Second half: the pause itself, through the same bounding pass every widget
+//     read goes through — OFF must survive, the cadence must ride along with it,
+//     and a surface that declares no sections must end up with NONE even when a
+//     foreign blob claims otherwise (`showSections: ["state"]` below is stripped
+//     because `availableSections` is empty — the consumer of the ruling written
+//     in `SharedStore`).
+let pausedPair = AppGroupWidgetSettings(surfaces: [
+    .widgetCardsRunning: WidgetSurfaceSettings(isActive: false, refreshMinutes: 60,
+                                               showSections: ["state"]),
+    .widgetKanbanMonitor: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0,
+                                                showSections: []),
+])
+let pausedCards = pausedPair.setting(for: .widgetCardsRunning)
+check("paused running-cards stays paused through setting(for:)", !pausedCards.isActive)
+check("paused running-cards keeps the cadence the operator chose", pausedCards.refreshMinutes == 60)
+check("running-cards honours its empty section declaration", pausedCards.showSections.isEmpty)
+check("kanban monitor Off (0) survives alongside the pause",
+      pausedPair.setting(for: .widgetKanbanMonitor).refreshMinutes == 0)
 
 // ---- widget scope (t_98fb8726): the intent's write, the widget's read ------
 // Everything from here to the restore is the code the configuration intent

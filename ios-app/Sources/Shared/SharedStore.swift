@@ -198,6 +198,26 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// widget; t_09cd8abf gave it this registry entry so Settings can pause it
     /// and set its cadence like every other surface).
     case widgetBoardStatus = "widget.boardStatus"
+    /// The "Running cards" widget (t_fa7926fb): the cards being worked right
+    /// now, with the worker running each and how long it has been going.
+    ///
+    /// Until this case existed the widget hard-coded a quarter-hour on its own
+    /// provider and could not be paused at all — the operator's only lever was
+    /// pulling the widget off the Home Screen. A raw value is permanent (it is
+    /// the key written into the installed App Group blob the moment the
+    /// operator touches the row), so it is chosen once, here:
+    /// `widget.cardsRunning` names the surface the widget calls itself
+    /// (`configurationDisplayName("Running Cards")`, kind
+    /// `CardsRunningWidget`), not one dataset inside it.
+    case widgetCardsRunning = "widget.cardsRunning"
+    /// The "Kanban Monitor" widget (t_fa7926fb): the
+    /// `hscc kanban monitor --live` panel — running / ready / blocked plus the
+    /// merged row list.
+    ///
+    /// Same reason and same shape as above. Its header claimed it "uses the
+    /// widget default cadence (5 min) and is never 'paused'", which was true
+    /// only because no registry entry existed that could say otherwise.
+    case widgetKanbanMonitor = "widget.kanbanMonitor"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -329,7 +349,9 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus: return false
+        case .widgetCluster, .widgetMonitor, .widgetBoardStatus, .widgetCardsRunning,
+             .widgetKanbanMonitor:
+            return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth: return true
         }
     }
@@ -356,8 +378,15 @@ extension WidgetSurfaceKind {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
         case .widgetMonitor:    return ["state", "nodes", "host"]
-        // One dataset, nothing optional — see the rule above.
+        // One dataset, nothing optional — see the rule above. The board tile is
+        // five counts for one board; the running-cards widget is the row list
+        // plus the running/blocked counts its header and footer are built from;
+        // the monitor panel is running/ready/blocked plus that same merged list.
+        // A toggle for any part of those would either empty the surface or do
+        // nothing, and every entry here renders a Toggle — so an invented id is
+        // a dead control the operator can touch.
         case .widgetBoardStatus: return []
+        case .widgetCardsRunning, .widgetKanbanMonitor: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this

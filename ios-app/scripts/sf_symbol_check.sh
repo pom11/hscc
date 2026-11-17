@@ -21,6 +21,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 # literal — and a name that exists nowhere renders a BLANK drawer icon with only a
 # console line as evidence. That is exactly how `serverrack` (not a real SF
 # Symbol; the real one is `server.rack`) reached the Cluster row and stayed there.
+# `WidgetSurfaceKind.displayIcon` (ConfigView.swift) is the same shape — the
+# settings row draws `Image(systemName: kind.displayIcon)` from another file — so
+# its body is extracted by the same pass (t_fa7926fb added the first two icon
+# names to that switch that appear nowhere else in Sources, which this gate would
+# otherwise have waved through).
 # Extract those literals too, from inside the property's own braces only, so the
 # `title`/`description` switches next door are not mistaken for symbol names.
 python3 - "$WORK/syms_extra.txt" <<'PY'
@@ -28,7 +33,7 @@ import re, sys, pathlib
 out = set()
 for path in pathlib.Path("Sources").rglob("*.swift"):
     text = path.read_text(encoding="utf-8", errors="replace")
-    for m in re.finditer(r"var\s+symbol\s*:\s*String\s*\{", text):
+    for m in re.finditer(r"var\s+(?:symbol|displayIcon)\s*:\s*String\s*\{", text):
         # Brace-match the property body: cheap, and enough for these switches.
         i, depth = m.end(), 1
         while i < len(text) and depth:
