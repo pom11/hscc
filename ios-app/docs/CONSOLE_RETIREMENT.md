@@ -207,7 +207,8 @@ section. `HSCCApp.swift` roots it and drops the `unread` / `replyWatcher` /
 
 ### 2.4 Tier D — KEEP, untouched (41 files)
 
-`Sources/Shared/`: `SharedModels.swift`, `ExtensionClient.swift`,
+`Sources/Shared/`: `SharedModels.swift`, `WidgetDataClient.swift` (the read-only
+client that replaced `ExtensionClient.swift`),
 `MonitorActivity.swift`, `WakingActivity.swift`, and `SessionActivity.swift`
 (unless D1b).
 
