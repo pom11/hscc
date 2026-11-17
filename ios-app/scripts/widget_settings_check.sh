@@ -25,6 +25,12 @@
 #             model block or to this gate's harness is INTENDED; the gate names
 #             this line when the two drift apart.
 set -uo pipefail
+# Resolved BEFORE the cd below: the script then runs from the ios-app root, so a
+# path handed to it by the caller ("./ios-app/scripts/widget_settings_check.sh")
+# stops resolving. The interpolation guard has to read this very file, so it gets
+# a path that cannot rot — which is also what makes a copied-aside probe of the
+# gate still probe the right text.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 SRC="Sources/Shared/SharedStore.swift"
 INTENT="Sources/HSCC/Intents/WidgetScopePickerIntent.swift"
@@ -113,7 +119,7 @@ count_unescaped_bt() {
 # is cut to a temp file so ONE counter — the same one the harness check uses —
 # decides both. `[$]` in the first pattern is grep's way of matching a literal
 # dollar, which the opening line really contains ($WORK is expanded at run time).
-GATE="${BASH_SOURCE[0]}"
+GATE="${SELF_DIR}/widget_settings_check.sh"
 region_start=$(grep -n '^cat > "[$]WORK/main\.swift" <<SWIFT$' "$GATE" | head -1 | cut -d: -f1)
 region_end=$(awk -v s="$region_start" 'NR > s && /^SWIFT$/ { print NR; exit }' "$GATE")
 if [ -z "$region_start" ] || [ -z "$region_end" ]; then
