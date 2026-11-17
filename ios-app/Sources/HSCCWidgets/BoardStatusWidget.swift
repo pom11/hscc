@@ -34,15 +34,22 @@ import WidgetKit
 //      rather than a guess.
 //   2. Only when that produced no counts (404 on an older cluster, a degraded
 //      §6-rule-7 response, or one board carrying its own `error` per §6 rule 4):
-//      `kanbanStale(olderThanDays: 0)` — ONE request that already carries every
-//      non-terminal card with its `status`, so the four OPEN numbers come from a
-//      per-status histogram and `done` renders `—`, never `0`. Board scope is
-//      client-side because `?board=` is measured-ignored by that route (§4.3).
+//      the interim §5.2 grants — `kanbanStale(olderThanDays: 0)` for todo/ready/
+//      running (it carries every non-terminal card with its `status`), and
+//      `kanbanBlocked()` for `blocked`, run in parallel with it. `blocked` cannot
+//      come from the stale list: measured against the live daemon on 2026-11-17
+//      it answered `count: 18` with 18 rows while `stale?older_than=0` answered
+//      15 rows with no `blocked` status among them, so histogramming the stale
+//      list would have drawn `blocked: 0` next to eighteen stuck cards. Board
+//      scope is client-side because `?board=` is measured-ignored by these
+//      routes (§4.3), and a list that sends fewer rows than its own `count`
+//      refuses the read rather than under-counting.
 //
-// Worst case that is 2 requests per refresh (1 once §6's route is everywhere),
-// inside §2's ≤2-request budget, and the fallback failure — not the summary's —
-// is what a total failure reports, because "can't reach the cluster" is the
-// story whenever BOTH reads fail.
+// So: 1 request per refresh on a cluster with §6's route (the steady state), 3
+// on one without it — exactly the three §5.2 authorises for the open-only
+// subset, in two parallel round trips — and `done` renders `—`, never `0`, until
+// the compact route lands. `WidgetDataPath` is the only way any of these URLs
+// gets built, and all three of these paths are already in its allowlist.
 //
 // CONFIGURATION: `AppIntentConfiguration` + a `WidgetConfigurationIntent` with
 // one `@Parameter` board, so the picker is the system's own (long-press the
@@ -125,9 +132,9 @@ struct BoardStatusProjection: Codable, Equatable {
         return todo + ready + running + blocked
     }
 
-    /// True when `done` is `—` because the cluster has no §6 route yet. The
-    /// surfaces say so instead of letting a dash look like a design choice.
-    var needsCompactRoute: Bool { source == .openOnly }
+    /// True when `blocked` is `—` because its own read did not answer — the
+    /// surface says so, rather than leaving a dash to be read as a design choice.
+    var blockedUnknown: Bool { source == .openOnly && blocked == nil }
 
     /// The §6 tile for this board, if the payload carried one that is usable.
     /// nil = degraded (§6 rule 7), a board-level `error` (§6 rule 4), or the
@@ -156,14 +163,34 @@ struct BoardStatusProjection: Codable, Equatable {
         }
     }
 
-    /// The §5.2 interim: the four open numbers, counted out of the non-terminal
-    /// card list, scoped to one board. `done` stays nil — this route cannot know
-    /// it (§5.2), and `—` is the only honest way to draw that.
-    init(openOnly tasks: [StaleCardLite], boardSlug: String?) {
+    /// §5.2's interim: the four OPEN numbers.
+    ///
+    /// `staleTasks` is `GET /v1/kanban/stale?older_than=0` — every non-terminal
+    /// card, each with its own `status`, which is what the queue-depth and
+    /// running numbers key on (measured 2026-11-17: `count` 15 for 15 rows, and
+    /// its `running` rows agree with `GET /v1/kanban/running`'s `count` of 3).
+    ///
+    /// `blocked` does NOT come from that list, and that is a measured fact, not a
+    /// guess: the same fleet answered `/v1/kanban/blocked` with `count: 18` and
+    /// 18 rows while `stale?older_than=0` answered with 15 rows and **no
+    /// `blocked` status among them**. Histogramming `blocked` out of the stale
+    /// list would therefore have drawn a confident `0` next to eighteen stuck
+    /// cards — the exact §6 rule 1 failure this dataset exists to avoid. So the
+    /// blocked number comes from `/v1/kanban/blocked`: `blockedRows` scoped to
+    /// the board, `blockedTotal` (the fleet-wide `count`) for the all-boards
+    /// tile. Both nil — or a list shorter than its own `count`, i.e. truncated —
+    /// means this refresh does not know `blocked`, and it draws `—`.
+    ///
+    /// `done` stays nil because no route an extension may read can count it
+    /// (§5.2), and `—` is the only honest way to draw that.
+    init(interimStale staleTasks: [StaleCardLite],
+         blockedRows: [BlockedCardLite]?,
+         blockedTotal: Int?,
+         boardSlug: String?) {
         source = .openOnly
         self.boardSlug = boardSlug
-        var todo = 0, ready = 0, running = 0, blocked = 0
-        for card in tasks {
+        var todo = 0, ready = 0, running = 0
+        for card in staleTasks {
             // `?board=` is IGNORED by the kanban routes (measured, §4.3), so the
             // scope happens here. A card whose `board` is nil is kept for the
             // all-boards tile and skipped for a named one — never guessed at.
@@ -174,14 +201,19 @@ struct BoardStatusProjection: Codable, Equatable {
             // `claimed`/`in_progress` are the same fact in another dialect — the
             // same folding `Theme.cardStatusColor` already does for colour.
             case "running", "claimed", "in_progress": running += 1
-            case "blocked": blocked += 1
+            // No `blocked` case on purpose: the route does not list them, and
+            // counting a status it never sends is how a zero becomes a lie.
             default: break  // `review` and anything else are not one of the five
             }
         }
         self.todo = todo
         self.ready = ready
         self.running = running
-        self.blocked = blocked
+        if let boardSlug {
+            self.blocked = blockedRows?.reduce(0) { $0 + ($1.board == boardSlug ? 1 : 0) }
+        } else {
+            self.blocked = blockedTotal ?? blockedRows?.count
+        }
         self.done = nil
     }
 }
@@ -271,8 +303,14 @@ struct BoardStatusEntry: TimelineEntry {
         if !configured { return "Set up the app to see this board." }
         if let age = ageMinutes { return "last known \(age) min ago · \(failure?.shortLabel ?? "no answer")" }
         if let failure { return failure.operatorLine }
-        if let projection, projection.needsCompactRoute {
-            return "done needs /v1/mobile/summary on this cluster"
+        // On the interim path a dash is a fact about the cluster, and the footer
+        // names it: `done` needs the compact route, `blocked` needs its own read
+        // to have answered. Silence here would let a `—` look like the design.
+        if let projection, projection.source == .openOnly {
+            var gaps: [String] = []
+            if projection.done == nil { gaps.append("done needs /v1/mobile/summary on this cluster") }
+            if projection.blockedUnknown { gaps.append("blocked unreadable this refresh") }
+            if !gaps.isEmpty { return gaps.joined(separator: " · ") }
         }
         return "counts from this refresh"
     }
@@ -495,9 +533,17 @@ struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
         }
     }
 
-    /// §6's route first, §5.2's interim second. Two reads at the very worst
-    /// (1 once the compact route is deployed everywhere), and never a zero for a
-    /// status the payload did not carry.
+    /// §6's route first, §5.2's interim second.
+    ///
+    /// Requests per refresh: ONE on a cluster that has the compact route, three
+    /// on one that does not (the summary attempt, then the two interim reads) —
+    /// and §5.2 grants exactly that: "the board-status card may ship the
+    /// open-only subset … from `/v1/kanban/{running,blocked,stale}` counts
+    /// (3 reads, 11.7 KB)". The two interim reads run in parallel, so the interim
+    /// costs two round trips of wall clock, not three. `/v1/mobile/summary`
+    /// answered 404 live on 2026-11-17 (PR #310 is the server half), so the
+    /// interim is the path that runs today; it self-heals to one read the moment
+    /// that route deploys, because the summary is always attempted first.
     private static func readCounts(client: WidgetDataClient,
                                    boardSlug: String?) async -> Result<BoardStatusProjection, WidgetDataFailure> {
         switch await client.mobileSummary(boards: boardSlug.map { [$0] } ?? []) {
@@ -514,21 +560,58 @@ struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
             break  // 404 on a cluster without the route, unreachable, token bad: the interim path decides what to say
         }
 
-        switch await client.kanbanStale(olderThanDays: 0) {
-        case .success(let stale):
-            guard let tasks = stale.tasks else {
+        async let staleRead = client.kanbanStale(olderThanDays: 0)
+        async let blockedRead = client.kanbanBlocked()
+        let (stale, blocked) = await (staleRead, blockedRead)
+
+        switch stale {
+        case .failure(let failure):
+            // The queue read is the one the interim cannot do without, so its
+            // failure is the failure the surface renders.
+            return .failure(failure)
+
+        case .success(let value):
+            guard let staleTasks = value.tasks else {
                 // A 2xx with no `tasks` array is not "the board is empty", it is
                 // a payload this build cannot read a count out of. `decoding`
                 // keeps the last-known numbers instead of drawing zeros.
                 return .failure(.decoding(detail: "kanban/stale carried no tasks array"))
             }
-            return .success(BoardStatusProjection(openOnly: tasks, boardSlug: boardSlug))
-        case .failure(let failure):
-            // The interim read's failure is the honest one: if the compact route
-            // is merely missing, this read succeeded, so a failure here means
-            // the cluster itself did not answer.
-            return .failure(failure)
+            guard !Self.isTruncated(returned: staleTasks.count, total: value.count) else {
+                // Fewer rows than the envelope advertises means a subset, and a
+                // subset histogram under-counts quietly. Keep the snapshot rather
+                // than draw a number that is low by construction.
+                return .failure(.decoding(detail: "kanban/stale sent fewer rows than its count"))
+            }
+
+            // `blocked` has its own read — see `init(interimStale:…)`, which
+            // carries the measurement for why the stale list cannot answer it.
+            // This read failing nils only the blocked tile (`—`), never the
+            // whole board: the numbers that DID arrive are still true.
+            var blockedRows: [BlockedCardLite]?
+            var blockedTotal: Int?
+            if case .success(let blockedValue) = blocked {
+                let rows = blockedValue.tasks
+                let truncated = rows.map { Self.isTruncated(returned: $0.count, total: blockedValue.count) } ?? false
+                if !truncated {
+                    blockedRows = rows
+                    blockedTotal = blockedValue.count
+                }
+            }
+            return .success(BoardStatusProjection(interimStale: staleTasks,
+                                                  blockedRows: blockedRows,
+                                                  blockedTotal: blockedTotal,
+                                                  boardSlug: boardSlug))
         }
+    }
+
+    /// True when a list holds fewer rows than its own envelope claims — the
+    /// shape of a truncated payload, where counting client-side under-reports.
+    /// Measured today both routes send `count` == rows, so this is a guard for
+    /// the day one of them starts capping, not a case in the current data.
+    private static func isTruncated(returned: Int, total: Int?) -> Bool {
+        guard let total else { return false }
+        return returned < total
     }
 }
 
