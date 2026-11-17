@@ -229,6 +229,44 @@ check("running-cards honours its empty section declaration", pausedCards.showSec
 check("kanban monitor Off (0) survives alongside the pause",
       pausedPair.setting(for: .widgetKanbanMonitor).refreshMinutes == 0)
 
+// 7d. the projects surface (t_5f246177), the LAST widget in HSCCWidgets to join
+//     this registry. Same three claims as 7c, asserted separately because this
+//     raw value is the one that gets written to an installed device the moment
+//     the operator touches its row — and because the failure it guards against is
+//     specific to a NEW key: setting(for:) fills an absent surface with ON, so
+//     adding the key cannot blank a widget already on the Home Screen of an
+//     installed device, and if that ever stopped being true the widget would
+//     silently stop drawing projects on every device that never opened Settings.
+//     (No backticks in this heredoc body on purpose — the heredoc is UNQUOTED, so
+//     bash command-substitutes a backtick pair instead of leaving it in the Swift,
+//     which mangles the line and prints a command-not-found nobody reads.)
+check("widget.projects registry key (permanent App Group key)",
+      WidgetSurfaceKind.widgetProjects.rawValue == "widget.projects")
+check("projects is a widget (self-fetching, 5-min default)",
+      !WidgetSurfaceKind.widgetProjects.isLiveActivity)
+check("projects declares no optional content section",
+      WidgetSurfaceKind.widgetProjects.availableSections.isEmpty)
+let projectsAbsent = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetProjects)
+check("widget.projects with no entry is ON (absent is not paused)",
+      projectsAbsent.isActive)
+check("widget.projects with no entry takes the 5-min widget cadence",
+      projectsAbsent.refreshMinutes == 5)
+let projectsSeeded = AppGroupWidgetSettings.defaults().setting(for: .widgetProjects)
+check("widget.projects is ON at the widget cadence in the first-launch seed",
+      projectsSeeded.isActive && projectsSeeded.refreshMinutes == 5)
+check("the seed for widget.projects carries no sections either",
+      projectsSeeded.showSections.isEmpty)
+let pausedProjects = AppGroupWidgetSettings(surfaces: [
+    .widgetProjects: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0,
+                                           showSections: ["state", "board"])
+]).setting(for: .widgetProjects)
+check("paused projects stays paused through the bounding read the widget performs",
+      !pausedProjects.isActive)
+check("widget.projects Off (0) survives alongside the pause (the provider maps it to atEnd)",
+      pausedProjects.refreshMinutes == 0)
+check("widget.projects honours its empty section declaration against a foreign blob",
+      pausedProjects.showSections.isEmpty)
+
 // ---- widget scope (t_98fb8726): the intent's write, the widget's read ------
 // Everything from here to the restore is the code the configuration intent
 // runs: buildPickerSelection folds the sheet's raw strings, apply persists
