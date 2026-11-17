@@ -120,11 +120,8 @@ final class SessionActivityDriver {
     }
 
     private func start(_ content: SessionActivityAttributes.ContentState) {
-        #if DEBUG
-        // Capture harness (t_0d5632bc): see MonitorActivityDriver.push —
-        // Activity.request re-raises the notification authorization sheet.
-        if DebugHarness.suppressNotifications { return }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the capture-harness suppression seam is
+        // retired with the console — the Live Activity always requests for real.
         let attributes = SessionActivityAttributes()
         do {
             current = try Activity.request(

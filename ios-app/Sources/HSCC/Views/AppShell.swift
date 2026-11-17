@@ -7,8 +7,8 @@ import SwiftUI
 // column of a NavigationSplitView: on iPhone compact (iOS 26.3) the system
 // sidebar column is a dead end — no dismiss affordance of any kind once it
 // takes the screen, row taps never leave it, and the documented column
-// controls are inert (verified RED-first on the iPhone 16 simulator in
-// UITests/DrawerNavigationUITests.swift). Explicit `drawerOpen`/`drawerClose`
+// controls are inert (verified RED-first on the iPhone 16 simulator; the
+// XCUITest lane retired with the console, t_0f3f70e6). Explicit `drawerOpen`/`drawerClose`
 // buttons replace the system toggle and the (non-existent) swipe-back.
 //
 // The home screen alone carries the dock (§3.2); every other screen reaches
@@ -139,19 +139,10 @@ struct AppShell: View {
     @State private var selection: AppDestination? = AppShell.initialSelection()
     @StateObject private var approvals = ApprovalPoller()
 
-    /// Debug-only capture seam (t_0d5632bc, DebugHarness.swift): a capture
-    /// launch opens one named drawer destination directly — that is the
-    /// "drive navigation without taps" path, since this device refuses the
-    /// only headless dismissal of the first-run alert (proof in
-    /// PHASE2_PROGRESS_t_25aed701 "Screenshots"). Unknown values and Release
-    /// builds get the normal `.home` default; this NEVER guesses a screen.
-    /// (Fixture seeding for the same launch runs in onAppear below.)
-    static func initialSelection() -> AppDestination? {
-        #if DEBUG
-        if let screen = DebugHarness.requestedScreen() { return screen }
-        #endif
-        return .home
-    }
+    /// The shell always launches on the app root (t_0f3f70e6: the capture
+    /// seam that could open one named drawer destination is retired with the
+    /// console — there is no debug launch state left to pick a screen from).
+    static func initialSelection() -> AppDestination? { .home }
 
     /// Whether the drawer is on screen (t_5ed5d281). The drawer is NOT the
     /// NavigationSplitView sidebar column any more: on iPhone compact
@@ -159,41 +150,15 @@ struct AppShell: View {
     /// (toggle/edge-swipe) it exposes ZERO dismiss affordances, row taps do
     /// not switch columns, and both column controls the field brief names
     /// (`preferredCompactColumn`, `columnVisibility`) are inert from the app
-    /// side in BOTH directions (RED evidence: DrawerNavigationUITests,
-    /// iPhone 16 sim, this card). The shell therefore owns the presentation
+    /// side in BOTH directions. The shell therefore owns the presentation
     /// outright: a slide-over panel over the one app-wide stack. Any row
     /// activation closes it (`go`), the panel's own close button closes it,
     /// and the `drawerOpen` toolbar button — visible on every screen's nav
-    /// bar — opens it. `HSCC_DEBUG_OPEN_DRAWER=1` starts inside the drawer
-    /// so the XCUITest walk begins in the operator's exact stuck state;
-    /// Release builds only ever see `false`.
-    @State private var drawerOpen = AppShell.initialDrawerOpen()
+    /// bar — opens it. It always starts closed (t_0f3f70e6: the debug
+    /// drawer-open launch seam is retired with the console).
+    @State private var drawerOpen = false
 
-    static func initialDrawerOpen() -> Bool {
-        #if DEBUG
-        if DebugHarness.openDrawerAtLaunch { return true }
-        #endif
-        return false
-    }
-
-    #if DEBUG
-    /// NEGATIVE-TEST seam for the nav-graph walker (t_810ab152): with
-    /// `HSCC_DEBUG_NEGATE_BACK=1` the shell's drawer affordances — the
-    /// `drawerOpen` toolbar button and the `drawerClose` button — are not
-    /// rendered. A walker that cannot go RED when the way back disappears is
-    /// not a gate; `nav_graph_check.sh` runs the walk once under this flag and
-    /// REQUIRES it to fail naming the screen. Debug-only like every other
-    /// harness seam (the Release build reads the literal `false` below and
-    /// the affordances are unconditionally present).
-    private var negateBackForTest: Bool {
-        ProcessInfo.processInfo.environment["HSCC_DEBUG_NEGATE_BACK"] == "1"
-    }
-    #else
-    private var negateBackForTest: Bool { false }
-    #endif
-
-    /// The app-owned drawer entry (t_5ed5d281), split out only so the
-    /// negative-test seam above can omit it in one place.
+    /// The app-owned drawer entry (t_5ed5d281).
     private var drawerOpenButton: some View {
         Button {
             openDrawer()
@@ -218,20 +183,6 @@ struct AppShell: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            #if DEBUG
-            // Live served-count probe for the walker's pull-to-refresh
-            // receipt (DebugHarness.ptrProbeFeed). Off the visible canvas
-            // (the offset pushes it below the safe area, off-screen) but IN
-            // the AX tree — the XCUITest runner reads it with a label query
-            // and never taps it. Renders on fixture launches that opt in;
-            // nothing else ever sees it.
-            if let feed = DebugHarness.ptrProbeFeed, DebugHarness.fixturesEnabled {
-                PtrProbeView(feed: feed)
-                    .accessibilityIdentifier("ptrProbe")
-                    .offset(y: 1200)
-                    .allowsHitTesting(false)
-            }
-            #endif
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
@@ -253,9 +204,7 @@ struct AppShell: View {
                         // sits opposite it, where no screen's own leading
                         // item can crowd it out.
                         ToolbarItem(placement: .topBarTrailing) {
-                            if !negateBackForTest {
-                                drawerOpenButton
-                            }
+                            drawerOpenButton
                         }
                     }
             }
@@ -275,24 +224,9 @@ struct AppShell: View {
             droppedBanner = dropped
         }
         .onAppear {
-            // t_810ab152: quiet-poller fixture launches (the walker's PTR
-            // pass) skip the two BADGE pollers — ApprovalPoller's 60 s
-            // kanban/blocked and StreamReplyWatcher's 30 s projects/session
-            // polls bump the same served counters the walker reads as
-            // pull-to-refresh receipts, and a timer increment is not proof
-            // the gesture fired. Purely informational badges; zero navigation
-            // change; default-off so capture_screens.sh is untouched.
-            #if DEBUG
-            if !DebugHarness.quietPollers {
-                approvals.setClient(makeClient())
-                replyWatcher.setClient(makeClient())
-                NotificationCoordinator.shared.setClient(makeClient())
-            }
-            #else
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
-            #endif
             router.setClient(makeClient())
             seedOfflineQueue()
             applyPendingTabRequest()
@@ -445,23 +379,18 @@ struct AppShell: View {
                         .font(.largeTitle.bold())
                         .foregroundColor(Theme.Semantic.onSurface)
                     Spacer()
-                    // The negative-test seam (t_810ab152) omits the close too:
-                    // under HSCC_DEBUG_NEGATE_BACK=1 the drawer is a real trap,
-                    // which is what the walker's negative run must catch.
-                    if !negateBackForTest {
-                        Button {
-                            closeDrawer()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title2)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                .frame(minWidth: 44, minHeight: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Close menu")
-                        .accessibilityIdentifier("drawerClose")
+                    Button {
+                        closeDrawer()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close menu")
+                    .accessibilityIdentifier("drawerClose")
                 }
                 .padding(.horizontal, Theme.Spacing.lg.rawValue)
                 .padding(.top, Theme.Spacing.md.rawValue)
@@ -564,20 +493,8 @@ struct AppShell: View {
     }
 
     private func makeClient() -> HSCCClient? {
-        #if DEBUG
-        // Capture harness (t_0d5632bc): a headless `simctl launch` cannot write
-        // the Keychain (OSStatus -34018 errSecMissingEntitlement), so the seeded
-        // fixture cluster reads back as "no token" and every optional-client
-        // screen would honestly show its connect gate — proving the shell but
-        // not the list recipe. Fixture mode therefore builds the client
-        // directly, bypassing the Keychain entirely; its URLSession is the
-        // fixture protocol (HSCCClient.defaultSession), which forwards NOTHING
-        // to the network. Release builds never take this path.
-        if DebugHarness.fixturesEnabled {
-            return HSCCClient(host: "fixtures.invalid", port: 8788,
-                              token: "debug-fixture-token")
-        }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the fixture-mode client bypass is retired
+        // with the capture harness — no launch path builds a fake-token client.
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }
@@ -627,28 +544,6 @@ extension AppDestination {
 // fleet-wide up/down mutations — an unusable-but-present client would render
 // those buttons against `unconfigured.invalid`, where a connect gate is the
 // honest surface.
-
-#if DEBUG
-/// The AX probe AppShell renders for the walker (see AppShell.body): polls
-/// the fixture protocol's served counter for `feed` twice a second and
-/// publishes "ptr:<feed>:<count>" as its AX label. DEBUG-compiled only.
-struct PtrProbeView: View {
-    let feed: String
-    @State private var count = 0
-
-    var body: some View {
-        Text("ptr:\(feed):\(count)")
-            .font(.system(size: 1))
-            .foregroundColor(.clear)
-            .task {
-                while !Task.isCancelled {
-                    count = FixtureURLProtocol.servedCount(forPath: feed)
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                }
-            }
-    }
-}
-#endif
 
 #Preview("Shell — home") {
     let center = ProjectUnreadCenter()

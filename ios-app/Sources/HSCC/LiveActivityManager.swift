@@ -108,14 +108,8 @@ final class LiveActivityManager {
         endCurrentSilently()
 
         // Start the Live Activity (throws if the system can't show one).
-        #if DEBUG
-        // Capture harness (t_0d5632bc): see MonitorActivityDriver.push —
-        // Activity.request re-raises the notification authorization sheet.
-        if DebugHarness.suppressNotifications {
-            DebugHarness.noteSuppressed("live-activity:waking")
-            return
-        }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the capture-harness suppression seam is
+        // retired with the console — the Live Activity always requests for real.
         let attributes = WakingActivityAttributes()
         let initialState = WakingActivityAttributes.ContentState(
             state: "waking",

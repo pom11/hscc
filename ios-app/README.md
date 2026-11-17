@@ -8,11 +8,11 @@ the Tailscale tailnet.
 distributed, and is deliberately NOT App Store–ready.**
 
 > **STATUS: built and exercised in automated gates; not yet on a device.**
-> Every target compiles clean (`scripts/build_check.sh`), the whole surface has
-> been walked on an iPhone-16-class simulator by the XCUITest nav-graph gate
-> (17/17 drawer rows — enter, back, pull-to-refresh, honest empty + error
-> states; t_810ab152), and every Codable model decodes the committed live
-> fixtures (88/88, `scripts/model_decode_check.sh`). Still **unverified at
+> Every target compiles clean (`scripts/build_check.sh`) and every Codable
+> model decodes the committed live fixtures (`scripts/model_decode_check.sh`).
+> The XCUITest nav-graph lane was retired with the operator console
+> (t_0f3f70e6, `docs/CONSOLE_RETIREMENT.md` §5 S1); the two surviving screens
+> get a fresh, small UI-test lane as a separate card. Still **unverified at
 > runtime**: Siri App Intents, the Home Screen widget, and the Live Activities
 > need a signed build on real hardware. See **"Honest limits"** below.
 
@@ -179,9 +179,6 @@ mapped onto drawer destinations.
   - `Notify/` — the "operator needed" local-notification engine
     (`NeedsOperatorNotifier` computes alerts purely;
     `NotificationCoordinator` delivers them).
-  - `DebugHarness.swift` — DEBUG-only seams the gates rely on (fixture dir,
-    forced failures, offline mode, the live served-count probe). Never
-    compiled into Release.
   - `Intents/` — Siri App Intents:
     - `ProjectIntents.swift` — **per-project Siri shortcuts (job-based)**:
       `HSCCProject` (a String `AppEnum` of the canned project list),
@@ -215,25 +212,11 @@ mapped onto drawer destinations.
   explicitly on success or failure; a widget extension body allows only one
   Live Activity per target, hence three bundles.
 - `project.yml` — XcodeGen spec, listing every source file explicitly. Five
-  app-facing targets (app, widgets, three Live Activities) plus the
-  `HSCCUITests` UI-test bundle.
-- `UITests/` — the XCUITest suites the gates run: `DrawerNavigationUITests`
-  (drawer open/close/round-trips), `NavGraphUITests` + the generated
-  `NavGraphScreenTable` (the walker below).
+  app-facing targets (app, widgets, three Live Activities). The
+  `HSCCUITests` UI-test bundle was retired with the console (t_0f3f70e6).
 - `scripts/` — verification helpers:
   - `build_check.sh` — full per-target **compile** of every target with its
     real file set (typecheck alone hides SIL-level errors; see its header).
-  - `nav_graph_check.sh` — the **navigation-graph gate** (t_810ab152):
-    XCUITest walker over every drawer screen — enter via drawer → marker →
-    back → same-row re-tap, one level into detail pushes, real pull-to-refresh
-    (coordinate drag, receipt = the app's live served-count AX probe), honest
-    EMPTY + ERROR states, a disconnected pass, and a guarded negative
-    self-check that must turn the walk RED. Screen list is code-derived
-    (`nav_graph_screens.py`); fails naming the screen + missing edge. See
-    `docs/design/NAV_GRAPH_t_810ab152.md`.
-  - `capture_screens.sh` — tap-free per-screen screenshot capture
-    (`HSCC_DEBUG_SCREEN` + fixture seeding); the current clean set — 12
-    screens × light/dark — is in `docs/design/screens/`.
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
     `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
     committed live fixtures (62 JSONs under
@@ -279,10 +262,10 @@ Be plain about what the gates have and have not seen:
   Their model shapes decode the live JSON and their targets compile, but the
   extension bundles have not been installed or run — widget refresh, Dynamic
   Island rendering, and Live Activity lifecycle are all untested.
-- **The gates are fixture-fed.** The walk and the screenshots run against the
-  committed live captures (kept decode-current by the decode gate), not a
-  live fleet. Live-server behaviour (WS streams, real wake timings) is
-  covered only structurally.
+- **The decode gate is fixture-fed.** `model_decode_check.sh` runs against
+  the committed live captures, not a live fleet. Live-server behaviour
+  (WS streams, real wake timings) is covered only structurally. The former
+  fixture-fed walk and screenshot lane is gone with the console (t_0f3f70e6).
 - **Per-project chat depends on session health.** A healthy session answers in
   ~1.8 s; a **bloated session wedges chat** (measured: a 600 s timeout against
   a fresh 1.8 s). The chat surface can only be as healthy as the orchestrator's
@@ -401,9 +384,7 @@ with Xcode — none of it needs the real cluster:
 ```sh
 cd ios-app
 scripts/build_check.sh          # full per-target compile
-scripts/nav_graph_check.sh      # XCUITest walk of all 17 drawer rows + negative self-check
-scripts/model_decode_check.sh   # real models vs the 62 committed live fixtures
-scripts/capture_screens.sh      # tap-free screenshot set → docs/design/screens/
+scripts/model_decode_check.sh   # real models vs the committed live fixtures
 ```
 
 ## Sideloading onto your own device

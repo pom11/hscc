@@ -40,41 +40,11 @@ struct HSCCApp: App {
         let center = ProjectUnreadCenter()
         _unread = StateObject(wrappedValue: center)
         _replyWatcher = StateObject(wrappedValue: StreamReplyWatcher(unread: center))
-        #if DEBUG
-        // Capture harness (t_0d5632bc): a fixture launch needs a CONFIGURED
-        // cluster or every screen honestly shows "Not connected" — which
-        // would prove the shell but not the list recipe. Seed a fake cluster
-        // pointing at a reserved-bogus host with a placeholder token;
-        // FixtureURLProtocol answers the requests and forwards NOTHING to the
-        // network, so this config can never reach (or name) a real machine.
-        // Idempotent across launches (fixed UUID → saveCluster updates in
-        // place). Release builds never take this path.
-        if DebugHarness.fixturesEnabled {
-            let store = SettingsStore()
-            DebugHarness.seedFixtureCluster(in: store)
-            // Fail-mode launches (nav-graph ERROR pass) must not inherit the
-            // previous launch's last-known cache or Offline.load would render
-            // stale rows instead of the failed row the walk asserts.
-            DebugHarness.clearStateCacheForFailModeLaunchIfNeeded()
-            DebugHarness.writeCaptureManifest(settings: store)
-            _settings = StateObject(wrappedValue: store)
-        } else if DebugHarness.offlineAtLaunch {
-            // The nav-graph walker's DISCONNECTED pass (t_810ab152): start as
-            // a fresh install — delete ONLY the DEBUG fixture seed cluster
-            // (fixed UUID; a real saved cluster is never touched) and wipe
-            // the last-known cache, so every screen shows its honest
-            // unconfigured/offline row instead of what a previous fixture
-            // launch persisted.
-            let store = SettingsStore()
-            store.deleteCluster(DebugHarness.fixtureClusterID)
-            StateCache.clear()
-            _settings = StateObject(wrappedValue: store)
-        } else {
-            _settings = StateObject(wrappedValue: SettingsStore())
-        }
-        #else
+        // t_0f3f70e6 (iOS pivot): the fixture/offline capture harness
+        // (DebugHarness.swift) is retired with the console — its only
+        // consumers were the XCUITest nav lane and the screenshot capture
+        // scripts. There is no debug launch state left to branch on.
         _settings = StateObject(wrappedValue: SettingsStore())
-        #endif
     }
 
     var body: some Scene {

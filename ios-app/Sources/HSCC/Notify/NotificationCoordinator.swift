@@ -227,16 +227,8 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     /// Fire delivered alerts through UNUserNotificationCenter, honoring the
     /// per-event-class toggles (a class the operator turned off is skipped).
     private func fire(_ alerts: [OperatorAlert]) async {
-        #if DEBUG
-        // Capture harness (t_0d5632bc): presenting from a notDetermined app
-        // RE-PROMPTS the system authorization alert (that's the modal that
-        // re-appeared even with the launch-time request skipped — the
-        // approvals poll reaching needs-operator state calls add() and iOS
-        // shows the permission sheet again, dimming the whole screen). A
-        // banner is not screenshot content, so a fixture capture launch
-        // drops it. Release path untouched.
-        if DebugHarness.fixturesEnabled { return }
-        #endif
+        // t_0f3f70e6 (iOS pivot): the fixture-capture suppression seam is
+        // retired with the console — every launch is a real launch now.
         let center = UNUserNotificationCenter.current()
         for alert in alerts where NotifyPreferences.isEnabled(for: alert.kind) {
             let content = UNMutableNotificationContent()
