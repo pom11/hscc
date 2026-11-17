@@ -328,6 +328,7 @@ targets:
     sources:
       - path: Sources/HSCCWidgets/HSCCWidgetsBundle.swift
       - path: Sources/HSCCWidgets/ClusterWidget.swift
+      - path: Sources/HSCCWidgets/ClusterWidgetMetrics.swift
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift

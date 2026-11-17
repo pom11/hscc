@@ -247,6 +247,20 @@ file-by-file disposition of the remaining console files is
     and compiles them with the harness, so the gate executes the rules the app
     sweep calls and the Island views draw. A moved marker fails the script by
     name rather than shrinking the table (t_f9cc34e0).
+  - `cluster_widget_check.sh` — compiles the cluster widget's **real** data layer
+    (`ClusterWidgetMetrics.swift`, split out of the provider/view pair because
+    WidgetKit marks the `accessory*` families `@available(macOS, unavailable)`)
+    plus `SharedModels.swift` / `SharedStore.swift` / `WidgetDataClient.swift`
+    into a macOS CLI and executes the rules a cluster tile is judged on: the
+    `/v1/cluster/monitor` projection against the committed fixtures (nodes
+    up/down, models served as a count of DISTINCT `cluster_id` — summing
+    per-host workload lists double-counts a tensor-parallel pair — and worst-node
+    not mean for GPU util and both temperatures), the nil-is-not-zero honesty
+    rules for §4.4's 38 B down-state answer and an errored host, §7's workload
+    redaction off the real body, the heat bands `MonitorMeter` uses, and which
+    families pay for the board row. Structural greps pin the layout file: the
+    two-read budget, no `cluster/status` read, the accessory dispatch, and that
+    an accessory body never reads the board row's fields. No network, no device.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
 
