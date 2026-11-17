@@ -1,0 +1,61 @@
+{
+ "boards": [
+  "headless-display",
+  "hscc",
+  "radio"
+ ],
+ "tasks": [
+  {
+   "board": "hscc",
+   "id": "t_1a1a1a1a",
+   "status": "todo",
+   "assignee": "ios-engineer",
+   "age_days": 12,
+   "title": "widget: cluster surface renders stale age"
+  },
+  {
+   "board": "hscc",
+   "id": "t_2b2b2b2b",
+   "status": "ready",
+   "assignee": "backend-engineer",
+   "age_days": 7,
+   "title": "api: expose /v1/mobile/summary counts"
+  },
+  {
+   "board": "radio",
+   "id": "t_3c3c3c3c",
+   "status": "ready",
+   "assignee": "ios-engineer",
+   "age_days": 5,
+   "title": "widget: board tile needs the board picker"
+  },
+  {
+   "board": "headless-display",
+   "id": "t_4d4d4d4d",
+   "status": "todo",
+   "assignee": "planner",
+   "age_days": 3,
+   "title": "board hygiene: prune blocked cards"
+  },
+  {
+   "board": "hscc",
+   "id": "t_5e5e5e5e",
+   "status": "in_progress",
+   "assignee": "ios-engineer",
+   "age_days": 1,
+   "title": "live activity: monitor content state"
+  },
+  {
+   "board": "radio",
+   "id": "t_6f6f6f6f",
+   "status": "blocked",
+   "assignee": "qa-engineer",
+   "age_days": 0,
+   "title": "qa: flaky screenshot gate"
+  }
+ ],
+ "errors": [],
+ "older_than": 0,
+ "count": 6,
+ "speak": "6 stale tasks across 3 boards."
+}
