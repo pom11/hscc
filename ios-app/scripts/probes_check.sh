@@ -228,6 +228,11 @@ done < <(find "$SCRIPTS" -maxdepth 1 -name '*probe*.sh' 2>/dev/null | LC_ALL=C s
 
 while IFS= read -r line; do
   [ -n "$line" ] || continue
+  # This file is the one exception, and it is a fact about wording rather than a pass:
+  # the note below and the pattern above necessarily spell the tokens out, so the runner
+  # would flag its own source on every single run — a permanent false alarm is exactly
+  # how a disclosure gets ignored. Nothing else in the directory is exempt.
+  [ "$(basename "$line")" = "probes_check.sh" ] && continue
   if grep -qE 'MARKER_|mk_tree|pfail\(\)' "$line" 2>/dev/null; then
     say '  note: %s carries a planted-payload signature (a MARKER_ file, mk_tree, or pfail()) but is named like a gate, so no glob runs it and it is invisible to build_check too — rename it to *_probe.sh so this gate executes it.\n' "$(basename "$line")"
   fi
