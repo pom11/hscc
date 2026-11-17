@@ -223,3 +223,70 @@ enum CardsRunningOrphanRule {
     }
 }
 // GATE-SLICE-END: cards-orphan-decision
+
+// GATE-SLICE-BEGIN: cards-feed-decision
+// ---------------------------------------------------------------------------
+// The feed decision — the ONE rule the app's driver applies to each refresh.
+//
+// Same arrangement as the two blocks above, for the same reason: the driver
+// itself is ActivityKit code (`Activity.request` / `update` / `end`) that no
+// macOS harness can compile, so the DECISION it makes lives here, where
+// `live_activity_rehydration_check.sh` slices it out and executes it as a
+// table. What the driver adds on top of this is transport and timing, not
+// judgement.
+//
+// It is deliberately the same shape as `CardsRunningOrphanRule.isOrphan` above
+// — rows first, age second — because driver and launch sweep MUST agree. If
+// they disagreed, the app would push a bubble the next launch immediately
+// ends, which is the flicker an ambient surface cannot have.
+// ---------------------------------------------------------------------------
+enum CardsRunningFeedRule {
+    /// What one refresh tells the driver to do with the activity.
+    enum Action: Equatable {
+        /// Start the activity if it is not up, otherwise `update` it with this state.
+        case push
+        /// `end` it. An empty bubble is never "still in flight" — the same
+        /// conclusion `CardsRunningOrphanRule` reaches at launch.
+        case end
+        /// Nothing to do: there is no activity up and nothing worth starting.
+        case idle
+    }
+
+    /// The decision for one refresh.
+    ///
+    ///   * `rowCount == 0` → END if one is up, else nothing. This is the rule
+    ///     the card decides on: a Live Activity about work, with no work, is
+    ///     noise — so the driver ENDS when it learns nothing is running rather
+    ///     than leaving an empty bubble up. It applies to both kinds of empty:
+    ///     the real zero (a live read that counted none) and a blind read with
+    ///     no fallback rows, neither of which names a card to show.
+    ///   * rows and a live read → PUSH. A subset (`rowsAreComplete` false)
+    ///     still pushes: the headline counts the server's own `count`, not the
+    ///     rows, so a partial list cannot under-report the fleet.
+    ///   * rows carried by a stale read → PUSH only when one is already up. A
+    ///     snapshot can HOLD a bubble honest (the label says why this refresh
+    ///     did not answer); it must not START one, because a bubble that was
+    ///     never live is a bubble whose age the operator cannot see.
+    static func decide(activityIsUp: Bool, rowCount: Int, failureLabel: String?) -> Action {
+        if rowCount == 0 { return activityIsUp ? .end : .idle }
+        if failureLabel == nil { return .push }
+        return activityIsUp ? .push : .idle
+    }
+
+    /// The `failureLabel` a push carries: nil only for a live read, and never
+    /// empty for one that was not live.
+    ///
+    /// The second half is the invariant the whole surface rests on, seen from
+    /// the push side: a refresh that did not answer ALWAYS says so. A nil
+    /// label on a non-live push is what would let a blind refresh render as a
+    /// quiet, current board — which is the one failure mode §5.4 refuses.
+    /// `reason` is `WidgetDataFailure.shortLabel` (≤ 18 chars by contract);
+    /// the fallback word is for the case where the caller had a failure and no
+    /// label, and it must still be a sentence the operator can read.
+    static func label(reason: String?, live: Bool) -> String? {
+        guard !live else { return nil }
+        guard let reason, !reason.isEmpty else { return "No answer" }
+        return reason
+    }
+}
+// GATE-SLICE-END: cards-feed-decision

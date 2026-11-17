@@ -41,6 +41,10 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
         // handler installed before its first submit — same fatal-exception
         // ordering rule as above.
         ClusterHealthActivityDriver.registerBackgroundTasks()
+        // The running-cards activity has its OWN identifier and its OWN launch
+        // handler (t_71deac83), registered here for the same reason and with the
+        // same synchronous-before-submit requirement.
+        CardsRunningActivityDriver.registerBackgroundTasks()
 
         // The async block holds everything that must not block launch AND does
         // not need to precede registration: the notification-auth request and
@@ -75,6 +79,13 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
             // cards activity exists — the launch sweep is the invariant the
             // surface depends on, so it runs from the first launch onward.
             CardsRunningActivitySweep.sweepLeftoverCards()
+            // …and now that the sweep has taken the orphans down, FEED the
+            // surface (t_71deac83): the toggle is honoured first, so a surface
+            // the operator switched off sends zero requests and pushes nothing;
+            // otherwise one refresh runs now and the next background wake is
+            // scheduled. Idempotent, like everything else in this block, and in
+            // the same sweep-then-feeder order as the pair below.
+            CardsRunningActivityDriver.shared.sceneDidBecomeActive()
             // Cluster-health Live Activity (t_0120475a): the re-hydration
             // sweep, then its feeder (t_f2867fb3) — in THAT order, so a bubble
             // the rule flags as an orphan is ended before the poll loop could

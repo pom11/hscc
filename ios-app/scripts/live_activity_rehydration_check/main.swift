@@ -513,10 +513,175 @@ check("and is never the empty bubble the launch sweep ends",
 check("a read that did not answer is — up; a stated zero is 0/4 up",
       ClusterHealthReading.tallyText(up: nil, total: nil) == "— up"
       && ClusterHealthReading.tallyText(up: 0, total: 4) == "0/4 up")
+// ===========================================================================
+// PART 5 — the running-cards FEED rule (t_71deac83), sliced, plus the
+// projection the driver pushes FROM (compiled from the same source file).
+//
+// The driver is ActivityKit code, so no macOS harness can run it. What it
+// *decides* is in `CardsRunningFeedRule` (sliced out of
+// Sources/Shared/CardsRunningActivity.swift by the script that runs this
+// program), and what it *pushes* is built by `CardsRunningProjection`
+// (Sources/Shared/CardsRunningProjection.swift, compiled here as-is). Those two
+// are the whole claim of the surface: a refresh that did not answer can neither
+// start a bubble nor print a zero, and a refresh that found nothing running
+// takes the bubble down. Everything below asserts exactly that, over the code
+// the app and the widget actually build.
+// ===========================================================================
+
+print("\nRunning cards — the feed rule (sliced) and the projection it pushes from\n")
+
+let feedLive: String? = nil
+let feedBlind = "No connection"
+
+// A live read that named cards always pushes: up or not up, that is a surface
+// with something true to say.
+check("live + rows + up -> push",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 2, failureLabel: feedLive) == .push)
+check("live + rows + not up -> push (starts the activity)",
+      CardsRunningFeedRule.decide(activityIsUp: false, rowCount: 1, failureLabel: feedLive) == .push)
+
+// A live read that counted nothing is a REAL zero, and a Live Activity about
+// work with no work is noise: END it, do not leave an empty bubble up.
+check("live + zero rows + up -> end",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 0, failureLabel: feedLive) == .end)
+check("live + zero rows + not up -> idle",
+      CardsRunningFeedRule.decide(activityIsUp: false, rowCount: 0, failureLabel: feedLive) == .idle)
+
+// A stale snapshot may HOLD a bubble (with its label), but it must never START
+// one: a bubble that was never live has no age the operator can see.
+check("stale + rows + up -> push",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 2, failureLabel: feedBlind) == .push)
+check("stale + rows + not up -> idle (a blind read never starts a bubble)",
+      CardsRunningFeedRule.decide(activityIsUp: false, rowCount: 2, failureLabel: feedBlind) == .idle)
+check("blind + no rows + up -> end",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 0, failureLabel: feedBlind) == .end)
+check("blind + no rows + not up -> idle",
+      CardsRunningFeedRule.decide(activityIsUp: false, rowCount: 0, failureLabel: feedBlind) == .idle)
+
+// The driver and the launch sweep must reach the SAME conclusion about an empty
+// bubble, or the app pushes what the next launch immediately kills.
+check("driver and sweep agree: zero rows is gone either way",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 0, failureLabel: feedBlind) == .end
+        && CardsRunningOrphanRule.isOrphan(rowCount: 0, updatedAt: now, now: now))
+check("driver and sweep agree: rows + a fresh push is alive",
+      CardsRunningFeedRule.decide(activityIsUp: true, rowCount: 1, failureLabel: feedLive) == .push
+        && !CardsRunningOrphanRule.isOrphan(rowCount: 1, updatedAt: now, now: now))
+
+// The label: nil only for a live read, and never empty otherwise — that label
+// is the only thing standing between a blind refresh and a quiet, current
+// looking board.
+check("a live push carries no label", CardsRunningFeedRule.label(reason: nil, live: true) == nil)
+check("a non-live push keeps its reason", CardsRunningFeedRule.label(reason: feedBlind, live: false) == feedBlind)
+check("a non-live push with no reason still says something",
+      CardsRunningFeedRule.label(reason: nil, live: false) == "No answer")
+check("an empty reason still says something",
+      CardsRunningFeedRule.label(reason: "", live: false) == "No answer")
+// Every failure this surface can actually hit has a label short enough for the
+// Island region and long enough to read — the shortLabel list is the vocabulary
+// `failureLabel` is built from, so it is checked rather than assumed.
+let feedFailures: [WidgetDataFailure] = [
+    .notConfigured, .invalidURL, .pathNotAllowed(path: "/v1/nope"), .timeout(seconds: 8),
+    .unreachable(code: nil), .unauthorized, .notFound(path: "/v1/nope"),
+    .http(status: 500, code: nil), .decoding(detail: "x"),
+]
+for failure in feedFailures {
+    check("shortLabel \"\(failure.shortLabel)\" is printable in the Island",
+          !failure.shortLabel.isEmpty && failure.shortLabel.count <= 18,
+          "count \(failure.shortLabel.count)")
+    check("label(\(failure.shortLabel)) survives the feed rule",
+          CardsRunningFeedRule.label(reason: failure.shortLabel, live: false) == failure.shortLabel)
+}
+
+// ---- the projection the push is built from (compiled, not transcribed) -----
+// `CardsRunningProjection` is the type both the widget provider and the driver
+// fill, and it is where "not told" stays nil instead of becoming 0. The
+// `tasks == nil` case is NOT reachable through it — `CardsRunningFeed.read`
+// turns that payload into a `decoding` failure before a projection exists — so
+// the projection's job is the honest zero and the honest subset.
+func feedStamp(_ minutesAgo: Int) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.string(from: now.addingTimeInterval(-Double(minutesAgo) * 60))
+}
+func runningCard(_ id: String, board: String, startedMinutesAgo: Int?) -> RunningCardLite {
+    RunningCardLite(board: board, id: id, title: "Card \(id)", assignee: "ios-engineer",
+                    status: "running",
+                    started_at: startedMinutesAgo.map(feedStamp))
+}
+func running(tasks: [RunningCardLite]?, count: Int?) -> KanbanRunningLite {
+    KanbanRunningLite(tasks: tasks, count: count, speak: nil, boards: nil)
+}
+func blocked(tasks: [BlockedCardLite]?, count: Int?) -> KanbanBlockedLite {
+    KanbanBlockedLite(tasks: tasks, count: count, speak: nil)
+}
+func blockedCard(_ id: String) -> BlockedCardLite {
+    BlockedCardLite(board: "hscc", id: id, status: "blocked", assignee: "reviewer",
+                    age_days: 2, block_kind: "needs_input", title: "Stuck \(id)")
+}
+
+// The real zero: the route answered `tasks: []`, so the fleet IS idle, and a
+// zero here is a fact the server sent — the one case a zero is allowed.
+let idleProjection = CardsRunningProjection(running: running(tasks: [], count: nil),
+                                            blocked: nil, now: now)
+check("an answered empty list is a real zero (runningCount 0, not nil)",
+      idleProjection.runningCount == 0 && idleProjection.rows.isEmpty)
+check("the empty list is the whole set", idleProjection.rowsAreComplete)
+
+// A count the server sent wins over counting the rows, and a short list is
+// marked a subset so no family claims it is everything.
+let subset = CardsRunningProjection(running: running(tasks: [runningCard("t_a", board: "hscc", startedMinutesAgo: 5)],
+                                                     count: 5),
+                                    blocked: nil, now: now)
+check("the server's count beats the row count", subset.runningCount == 5)
+check("a short list is a subset, not the whole fleet", !subset.rowsAreComplete)
+let matched = CardsRunningProjection(running: running(tasks: [runningCard("t_a", board: "hscc", startedMinutesAgo: 5)],
+                                                      count: 1),
+                                     blocked: nil, now: now)
+check("rows that match the count are the whole set", matched.rowsAreComplete)
+
+// The blocked route is a SEPARATE answer: down means `—`, never 0, and never a
+// claim that the board has nothing stuck.
+let blockedDown = CardsRunningProjection(running: running(tasks: [], count: 0), blocked: nil, now: now)
+check("a blocked read that did not answer yields nil, never 0", blockedDown.blockedCount == nil)
+let blockedCounted = CardsRunningProjection(
+    running: running(tasks: [], count: 0),
+    blocked: blocked(tasks: [blockedCard("t_b")], count: 3), now: now)
+check("the blocked route's own count wins", blockedCounted.blockedCount == 3)
+let blockedUncounted = CardsRunningProjection(
+    running: running(tasks: [], count: 0),
+    blocked: blocked(tasks: [blockedCard("t_b"), blockedCard("t_c")], count: nil), now: now)
+check("a blocked payload with no count falls back to its rows", blockedUncounted.blockedCount == 2)
+
+// Rows are ordered by run time with the unknown age LAST (an unknown age is not
+// "the oldest"), and capped — the blob the App Group holds must not be the
+// whole card list (§7).
+let ordered = CardsRunningProjection(
+    running: running(tasks: [runningCard("t_new", board: "hscc", startedMinutesAgo: 1),
+                             runningCard("t_old", board: "radio", startedMinutesAgo: 90),
+                             runningCard("t_none", board: "hscc", startedMinutesAgo: nil)],
+                     count: 3),
+    blocked: nil, now: now)
+check("longest-running first", ordered.rows.first?.cardID == "t_old")
+check("an unknown age sorts LAST, not first", ordered.rows.last?.cardID == "t_none")
+check("a row with no started_at has no age (draws —, never 0m)",
+      ordered.rows.last?.ageMinutes == nil)
+check("the stored row cap is the large family's row limit", CardsRunningProjection.rowCap == 8)
+let many = (1...12).map { runningCard("t_\($0)", board: "hscc", startedMinutesAgo: $0) }
+check("a 12-card fleet stores 8 rows, not the whole board",
+      CardsRunningProjection(running: running(tasks: many, count: 12), blocked: nil, now: now).rows.count == 8)
+
+// An unparseable start is "no age", which draws `—`; a stamp ahead of this
+// clock is "just started", never a negative.
+check("an unparseable started_at yields no age",
+      CardsRunningRow.age(from: "not-a-date", now: now) == nil)
+check("a missing started_at yields no age", CardsRunningRow.age(from: nil, now: now) == nil)
+check("a stamp ahead of this clock reads 0 minutes, never negative",
+      CardsRunningRow.age(from: feedStamp(-30), now: now) == 0)
+check("30 minutes ago reads 30", CardsRunningRow.age(from: feedStamp(30), now: now) == 30)
 
 print()
 if failures == 0 {
-    print("ALL PASS — wake decider (transcribed) + running-cards and cluster-health orphan rules and reading rules (sliced from source) cover every documented case")
+    print("ALL PASS — wake decider (transcribed) + running-cards and cluster-health orphan rules and reading rules (sliced from source) + the cluster-health projection and the running-cards feed rule (sliced) and the projection the cards push is built from (compiled from source) cover every documented case")
 } else {
     print("\(failures) FAILURE(S)")
 }

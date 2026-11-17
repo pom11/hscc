@@ -156,6 +156,21 @@ GOLDEN="scripts/widget_settings_check.harness.golden"
 # Sources/HSCC/WidgetSettingsStore.swift compiled alongside it (case 16 drives
 # that store rather than a copy of it), with a second file in the module Swift
 # rejects top-level statements in a file that is not main.swift.
+#
+# QUOTING — settled by main (t_9e4a731b), and this branch's alternative is
+# deliberately DROPPED. The heredoc stays UNQUOTED because $suite_container and
+# $model must be expanded into it, and $model is lifted verbatim out of
+# Sources/Shared/SharedStore.swift — that extraction is the whole reason the
+# harness cannot drift from the code it tests. A backtick arriving through an
+# expansion is inert text (a shell never re-scans an expansion), and the
+# committed reference proves it rather than asserts it:
+# scripts/widget_settings_check.harness.golden carries backticked lines taken
+# straight out of that model block, intact. The splices this gate used to suffer
+# came from backticks typed in THIS file's own prose, which is exactly what the
+# ban at the head of the file refuses. t_71deac83 first treated the symptom by
+# routing $model through printf inside two quoted heredocs; that also froze the
+# body out of ${BT} interpolation and duplicated the rule in a narrower place, so
+# one mechanism remains: the ban plus the golden.
 cat > "$WORK/main.swift" <<SWIFT
 import Foundation
 
@@ -192,6 +207,31 @@ for kind in WidgetSurfaceKind.allCases {
     check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 5)",
           s.refreshMinutes == (kind.isLiveActivity ? 15 : 5))
 }
+
+// 1a. The registry's own invariants (t_71deac83 added a surface; these are the
+//     properties a new surface must not break, asserted over every case rather
+//     than over a transcription of one).
+var registryKeys: [String] = []
+for kind in WidgetSurfaceKind.allCases { registryKeys.append(kind.rawValue) }
+var namespacedCount = 0
+for key in registryKeys where key.hasPrefix("widget.") || key.hasPrefix("liveActivity.") {
+    namespacedCount += 1
+}
+let noEntries = AppGroupWidgetSettings(surfaces: [:])
+check("no two surfaces share a registry key (one toggle, one surface)",
+      Set(registryKeys).count == registryKeys.count)
+check("every registry key is namespaced by surface kind",
+      namespacedCount == registryKeys.count)
+// A surface with NO sections is a real answer (one dataset, nothing optional),
+// not a gap the editor has to paper over: the bounded read path must keep the
+// set empty rather than invent one.
+check("a surface with no sections stays section-less through the bounded path",
+      defaults.setting(for: .liveActivityCards).showSections.isEmpty)
+check("the running-cards surface is push-fed (15-min default)",
+      WidgetSurfaceKind.liveActivityCards.isLiveActivity
+        && noEntries.setting(for: .liveActivityCards).refreshMinutes == 15)
+check("the running-cards registry key is stable",
+      WidgetSurfaceKind.liveActivityCards.rawValue == "liveActivity.cards")
 
 // 2. empty store (no entry for a surface) -> setting(for:) still returns ON
 //    defaults (the pre-existing Cluster widget must render unchanged).
@@ -288,8 +328,8 @@ check("board status with no stored entry defaults 5 min", untouchedBoard.refresh
 //     like the widgets they are. First half: the rule that keeps a fresh install
 //     rendering — an absent entry means "the settings screen was never opened",
 //     NEVER "paused" — and the seed a brand-new store gets must not pause them
-//     either. `AppGroupWidgetSettings.defaults()` DERIVES from `isLiveActivity`
-//     and `availableSections`, so this is the executed proof that the pair
+//     either. ${BT}AppGroupWidgetSettings.defaults()${BT} DERIVES from ${BT}isLiveActivity${BT}
+//     and ${BT}availableSections${BT}, so this is the executed proof that the pair
 //     landed in the 5-minute widget branch and not the 15-minute Live Activity
 //     one; a wrong branch there is a widget that refreshes three times too
 //     slowly on every device, quietly.
@@ -309,9 +349,9 @@ for kind in [WidgetSurfaceKind.widgetCardsRunning, .widgetKanbanMonitor] {
 //     Second half: the pause itself, through the same bounding pass every widget
 //     read goes through — OFF must survive, the cadence must ride along with it,
 //     and a surface that declares no sections must end up with NONE even when a
-//     foreign blob claims otherwise (`showSections: ["state"]` below is stripped
-//     because `availableSections` is empty — the consumer of the ruling written
-//     in `SharedStore`).
+//     foreign blob claims otherwise (${BT}showSections: ["state"]${BT} below is stripped
+//     because ${BT}availableSections${BT} is empty — the consumer of the ruling written
+//     in ${BT}SharedStore${BT}).
 let pausedPair = AppGroupWidgetSettings(surfaces: [
     .widgetCardsRunning: WidgetSurfaceSettings(isActive: false, refreshMinutes: 60,
                                                showSections: ["state"]),
@@ -689,6 +729,16 @@ cok "the Node list comes from the sheet's own query" "WidgetScopeNodeQuery().sug
 # editor must then show no "Show Content" group at all — an empty group with a
 # "choose which sections" footer would advertise a choice that does not exist.
 cok "a surface with no sections shows no content group" "if !sectionRows(kind).isEmpty"
+# t_71deac83 added a surface whose routes cannot be scoped: "/v1/kanban/running"
+# and "/v1/kanban/blocked" were measured to ignore "?board=" (§4.3, and the
+# no-backtick rule at the head of this file is why these paths are in quotes
+# rather than in the repo's usual code spans). Offering such a surface the scope
+# pickers would write a value the surface ignores and print a board name under a
+# row that always shows the whole fleet. Both guards read the surface's own
+# metadata rather than naming a case, so a surface that later gains a scopeable
+# route still gets its pickers.
+cok "the scope pickers appear only where the route honours a scope" 'if kind.supportsScope {'
+cok "a surface that cannot be scoped says so instead of printing a scope" 'guard kind.supportsScope else'
 # Gate-integrity assertions (the generated harness): reported with the greps
 # because they are assertions about THIS gate rather than about the app, and
 # both must be clean before any PASSED banner may print.

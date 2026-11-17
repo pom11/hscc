@@ -154,6 +154,11 @@ targets:
       - path: Sources/HSCC/SetupQRCode.swift
       - path: Sources/HSCC/LiveActivityManager.swift
       - path: Sources/HSCC/MonitorActivityDriver.swift
+      # The running-cards activity's poll-and-push driver (t_71deac83): reads
+      # the kanban pair through WidgetDataClient and pushes the ContentState the
+      # monitor extension renders. The sibling of the file above, second
+      # BGAppRefreshTask identifier.
+      - path: Sources/HSCC/CardsRunningActivityDriver.swift
       # The running-cards activity's launch sweep (t_f9cc34e0). The activity's
       # rendering lives in the monitor extension target; this is the app half.
       - path: Sources/HSCC/CardsRunningActivitySweep.swift
@@ -230,6 +235,10 @@ targets:
       # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
       # and into the monitor extension (which renders the activity).
       - path: Sources/Shared/CardsRunningActivity.swift
+      # The running-cards projection + its last-known snapshot (t_71deac83),
+      # shared with the widget because the driver's `lastKnown:` and the widget
+      # timeline read and write ONE App Group key — one blob, one decoder.
+      - path: Sources/Shared/CardsRunningProjection.swift
       # Cluster-health Live Activity attributes + its pure reading/orphan rules
       # (t_0120475a). Same arrangement as the cards file above: the rules are
       # sliced by live_activity_rehydration_check.sh and executed there, so the
@@ -313,13 +322,17 @@ targets:
         # on a best-effort OS schedule. iOS only allows scheduling task
         # identifiers listed under BGTaskSchedulerPermittedIdentifiers.
         #
-        # The cluster-health activity (t_f2867fb3) registers its OWN identifier
-        # rather than sharing the monitor's: the two drivers have independent
-        # cadences and independent Active toggles, and one identifier would mean
-        # one surface's BGTask waking (and pushing for) the other.
+        # Each Live Activity registers its OWN identifier rather than sharing
+        # the monitor's: the drivers have independent cadences and independent
+        # Active toggles, and one identifier would mean one surface's BGTask
+        # waking (and pushing for) the other.
+        #   monitor        — t_03d318cd
+        #   clusterhealth  — t_f2867fb3
+        #   cards          — t_71deac83
         BGTaskSchedulerPermittedIdentifiers:
           - com.hscc.ios.monitor.backgroundRefresh
           - com.hscc.ios.clusterhealth.backgroundRefresh
+          - com.hscc.ios.cards.backgroundRefresh
         # The camera is used ONLY to scan the setup QR code from `hscc api
         # status`. Without this key iOS kills the app the instant the scanner
         # opens — which is the first thing an operator does.
@@ -375,6 +388,10 @@ targets:
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
       - path: Sources/Shared/ClusterNodeTally.swift
+      # The running-cards projection + last-known snapshot (t_71deac83): the
+      # provider saves through it and the app's Live Activity driver reads the
+      # same slot back, so it lives in Shared with one decoder.
+      - path: Sources/Shared/CardsRunningProjection.swift
       # Theme tokens shared with the app (design-system palette, no raw hex).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
