@@ -204,6 +204,20 @@ struct WidgetSurfaceSettings: Codable, Equatable {
     var refreshMinutes: Int
     /// Which content sections the surface renders (set membership, bounded).
     var showSections: Set<String>
+    /// What THIS ONE surface is pointed at (t_3dd38411 — the config screen's
+    /// per-widget board/project/node picker). Three states, and they are NOT
+    /// interchangeable once a fleet-wide default exists:
+    ///   * key absent / nil  — the operator never chose for this surface, so
+    ///     it INHERITS `AppGroupWidgetSettings.scope` (what the widget's
+    ///     configuration intent wrote for the whole fleet);
+    ///   * `WidgetScope()`   — the operator explicitly chose All for THIS
+    ///     surface: render everything, do not inherit. An empty scope encodes
+    ///     as `{}`, which is why it is distinguishable from key absence;
+    ///   * a named board / project / node — scoped.
+    /// Optional on purpose twice over: a blob written before this field
+    /// existed decodes to nil (an absent key is not a decode failure), so an
+    /// old install inherits instead of breaking.
+    var scope: WidgetScope? = nil
 }
 
 /// The full registry: one entry per surface kind. Stored as one JSON blob.
@@ -216,6 +230,11 @@ struct AppGroupWidgetSettings: Codable, Equatable {
     /// for a device where the operator never picked anything. Living in THIS
     /// blob — not a second key — is what keeps the config intent's write and
     /// the widgets' read one and the same code path.
+    ///
+    /// Since t_3dd38411 this is the FLEET DEFAULT rather than the whole
+    /// answer: a single surface may override it with its own `scope` (see
+    /// `WidgetSurfaceSettings.scope`), and `scope(for:)` is the one call that
+    /// resolves the two. Nothing about the intent's write path changes.
     var scope: WidgetScope? = nil
 
     /// The key used to store/read this blob in the App Group suite.
@@ -253,7 +272,25 @@ struct AppGroupWidgetSettings: Codable, Equatable {
         // schedule an instant refresh loop.
         return WidgetSurfaceSettings(isActive: s.isActive,
                                      refreshMinutes: max(0, s.refreshMinutes),
-                                     showSections: s.showSections.intersection(Set(kind.availableSections)))
+                                     showSections: s.showSections.intersection(Set(kind.availableSections)),
+                                     // The scope survives the bounding pass.
+                                     // Dropping it here would silently erase
+                                     // the operator's per-widget choice on
+                                     // every read (widget_settings_check.sh
+                                     // pins this line with an executed case).
+                                     scope: s.scope)
+    }
+
+    /// The scope ONE surface renders (t_3dd38411). Its own choice when the
+    /// config screen made one for this surface — including the explicit
+    /// `WidgetScope()` that means "All, and do not inherit" — otherwise the
+    /// fleet-wide selection the surface's configuration intent wrote, and nil
+    /// when neither exists (render everything). Two levels, one blob, ONE read
+    /// path: a widget timeline calls this and never learns which level the
+    /// answer came from, which is the whole reason the per-widget choice lives
+    /// inside this blob rather than in a second key.
+    func scope(for kind: WidgetSurfaceKind) -> WidgetScope? {
+        surfaces[kind]?.scope ?? scope
     }
 
     /// The full defaults (all on, 5/15-min cadence, all sections), used to

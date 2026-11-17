@@ -17,6 +17,15 @@ import SwiftUI
 //   * `makeClient()` and the lifecycle seeding from `AppShell.swift`.
 // Renaming the screen to `ConfigView` is the only content change.
 //
+// t_3dd38411 (the widget/Live Activity configuration half of the pivot) is the
+// ONE addition on top of that move: the Scope section inside
+// `WidgetSurfaceEditor` and the resolved-scope line under each surface row. It
+// adds no second screen, no second status view (`ConnectionBanner` above is
+// still the only connection readout), no second store and no second fetch
+// path — it reads through `WidgetSettingsStore.scope(for:)`, writes through
+// `WidgetSettingsStore.setScope(_:for:)`, and populates its pickers with the
+// three `EntityQuery` types the widget configuration sheet already uses.
+//
 // What the shell carried that this root deliberately does NOT:
 //   * the offline-send-queue `sendHandler` seeding and the cluster-switch drop
 //     banner — queueing an orchestrator message is a MUTATION, and the pivot
@@ -306,7 +315,7 @@ struct ConfigView: View {
                 } header: {
                     Text("Widgets & Live Activities")
                 } footer: {
-                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, and choose which content to show. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, choose which content to show, and be pointed at one board, project or node — a surface with no choice of its own follows the fleet-wide scope. The OS does not reliably honor widget refresh rates below about 5 minutes.")
                 }
 
                 Section {
@@ -684,6 +693,14 @@ struct ConfigView: View {
                             Text("\(surface.refreshMinutes) min refresh")
                                 .font(.caption)
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            // What this surface will actually show (t_3dd38411).
+                            // Read through the SAME resolution the widget
+                            // extensions use — `scope(for:)`, own choice first,
+                            // then the fleet default — so a row can never
+                            // advertise a slice the store does not hold for it.
+                            Text(scopeLine(kind))
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                         Spacer(minLength: 0)
                     }
@@ -711,6 +728,19 @@ struct ConfigView: View {
     /// Display name for a surface.
     private func surfaceName(_ kind: WidgetSurfaceKind) -> String {
         kind.displayName
+    }
+
+    /// The scope sentence under one surface's row (t_3dd38411). Resolved
+    /// through `WidgetSettingsStore.scope(for:)` — the widgets' own read path,
+    /// own choice first then the fleet default — so a row can never advertise
+    /// a slice the store does not hold for that surface. Marked
+    /// "(fleet default)" when the surface has made no choice of its own, so
+    /// the operator can tell an inherited value from one set here.
+    private func scopeLine(_ kind: WidgetSurfaceKind) -> String {
+        let resolved = (widgetSettings.scope(for: kind) ?? WidgetScope()).summaryLine
+        return widgetSettings.setting(for: kind).scope == nil
+            ? "\(resolved) (fleet default)"
+            : resolved
     }
 
     // MARK: - QR scan
@@ -810,12 +840,39 @@ private let refreshPresets: [(label: String, minutes: Int?)] = [
     ("60 min", 60),
 ]
 
+/// A row in a scope picker: the identifier that gets persisted, plus what kind
+/// of thing it is (shown as the row suffix so the three pickers cannot be
+/// confused for one list). A plain view-local value — deliberately NOT the
+/// intent's `WidgetScopeOption`: the screen maps that AppEntity down to these
+/// two strings, so no AppIntents type has to live in the view's state.
+private struct ScopeChoice: Identifiable {
+    let id: String
+    let subtitle: String?
+}
+
 /// The shared editor reused by all four surfaces. Reads/writes the store via
 /// the `WidgetSettingsStore` (app-side ObservableObject backed by the App
 /// Group), which the enclosing sub-editor owns.
 struct WidgetSurfaceEditor: View {
     let kind: WidgetSurfaceKind
     let store: WidgetSettingsStore
+
+    /// Which of the three pickers a binding belongs to (t_3dd38411). The three
+    /// pickers are ONE choice — at most one field of a scope may be set — so a
+    /// write from any of them replaces the whole choice instead of merging
+    /// into it, which is what keeps a stored scope honest.
+    private enum ScopeLevel { case board, project, node }
+
+    /// The three picker lists, fetched while this editor is on screen
+    /// (t_3dd38411). `nil` = never fetched; a list holding only the "All"
+    /// sentinel = fetched and nothing came back, which the UI says out loud
+    /// rather than dressing up as an empty cluster.
+    @State private var boardOptions: [ScopeChoice]?
+    @State private var projectOptions: [ScopeChoice]?
+    @State private var nodeOptions: [ScopeChoice]?
+    /// Seeded true: the fetch starts the moment the editor appears, so the
+    /// "nothing came back" line cannot flash before the first result lands.
+    @State private var loadingScopeOptions = true
 
     var body: some View {
         let surface = store.setting(for: kind)
@@ -850,6 +907,70 @@ struct WidgetSurfaceEditor: View {
                     : "How often the widget refreshes its timeline. The OS does not reliably honor widget refresh rates below about 5 minutes.")
             }
 
+            // MARK: Scope — what THIS widget points at (t_3dd38411)
+            Section {
+                LabeledContent("Shows") {
+                    Text((store.scope(for: kind) ?? WidgetScope()).summaryLine)
+                        .multilineTextAlignment(.trailing)
+                }
+                Picker("Board", selection: scopeSelection(.board)) {
+                    scopeRows(boardOptions ?? [], showSubtitle: false)
+                }
+                Picker("Project", selection: scopeSelection(.project)) {
+                    scopeRows(projectOptions ?? [], showSubtitle: true)
+                }
+                Picker("Node", selection: scopeSelection(.node)) {
+                    scopeRows(nodeOptions ?? [], showSubtitle: false)
+                }
+
+                if loadingScopeOptions {
+                    HStack(spacing: Theme.Spacing.md.rawValue) {
+                        ProgressView()
+                        Text("Loading boards, projects and nodes…")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                } else if scopeListsAreEmpty {
+                    Text("No board, project or node came back from the cluster, so only All is offered here. Check the connection at the top of this screen, then reload.")
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button {
+                    Task { await loadScopeOptions() }
+                } label: {
+                    Label("Reload scope lists", systemImage: "arrow.clockwise")
+                }
+
+                if store.setting(for: kind).scope != nil {
+                    // The one way back to "follow the fleet default": writing
+                    // nil drops the surface's own entry rather than storing an
+                    // empty scope (which would mean "All, explicitly").
+                    Button("Use the fleet default for this widget") {
+                        store.setScope(nil, for: kind)
+                    }
+                }
+            } header: {
+                Text("Scope")
+            } footer: {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                    Text("Point this widget at one slice of the fleet. The picker you touch decides the whole scope: choosing a board drops a project or node, and choosing All in any of them clears it for this widget.")
+                    if store.setting(for: kind).scope == nil {
+                        Text("This widget has no choice of its own, so it follows the fleet-wide scope — currently \((store.settings.scope ?? WidgetScope()).summaryLine). That one is set in the widget's own configuration sheet, or by Siri.")
+                    } else {
+                        Text("This widget's own choice wins over the fleet-wide scope, currently \((store.settings.scope ?? WidgetScope()).summaryLine).")
+                    }
+                }
+            }
+            // Fetching the lists is an OPERATOR action, not a timeline refresh,
+            // so it spends none of WIDGET_DATA_CONTRACT §2's requests-per-
+            // refresh budget — that rule governs what a widget does on each
+            // scheduled refresh, and this is not one. It runs when the surface
+            // editor appears and on Reload, and nothing here re-fetches on a
+            // timer.
+            .task(id: kind) { await loadScopeOptions() }
+
             Section {
                 ForEach(sectionRows(kind), id: \.self) { section in
                     Toggle(sectionLabel(section), isOn: Binding(
@@ -864,6 +985,84 @@ struct WidgetSurfaceEditor: View {
             }
         }
         .navigationTitle(surfaceName(kind))
+    }
+
+    // MARK: - Scope pickers (t_3dd38411)
+
+    /// True when every list came back holding nothing but the "All" sentinel —
+    /// i.e. the cluster answered nothing. Reported as such, never as an empty
+    /// fleet.
+    private var scopeListsAreEmpty: Bool {
+        (boardOptions?.count ?? 0) <= 1
+            && (projectOptions?.count ?? 0) <= 1
+            && (nodeOptions?.count ?? 0) <= 1
+    }
+
+    /// The rows of one picker. "All" is ALWAYS present and needs no network, so
+    /// an unreachable cluster still yields a usable picker (the same rule the
+    /// configuration sheet follows).
+    @ViewBuilder
+    private func scopeRows(_ options: [ScopeChoice], showSubtitle: Bool) -> some View {
+        Text("All").tag(WidgetScope.wildcard)
+        ForEach(options, id: \.id) { option in
+            if showSubtitle, let subtitle = option.subtitle, !subtitle.isEmpty {
+                Text("\(option.id) — \(subtitle)").tag(option.id)
+            } else {
+                Text(option.id).tag(option.id)
+            }
+        }
+    }
+
+    /// The binding for ONE of the three pickers. Reading is per-field, writing
+    /// is whole-scope: the picker the operator touched decides everything,
+    /// folded by the SAME static the configuration intent folds with
+    /// (`WidgetScope.buildPickerSelection`), so the three pickers cannot store
+    /// a scope that names a board and a node at once.
+    private func scopeSelection(_ level: ScopeLevel) -> Binding<String> {
+        Binding(
+            get: {
+                guard let stored = store.setting(for: kind).scope else {
+                    return WidgetScope.wildcard
+                }
+                switch level {
+                case .board:   return stored.board ?? WidgetScope.wildcard
+                case .project: return stored.project ?? WidgetScope.wildcard
+                case .node:    return stored.node ?? WidgetScope.wildcard
+                }
+            },
+            set: { picked in
+                let folded = WidgetScope.buildPickerSelection(
+                    board: level == .board ? picked : nil,
+                    project: level == .project ? picked : nil,
+                    node: level == .node ? picked : nil)
+                // nil back means the operator chose All. For THIS widget that
+                // is a decision, not an absence, so it stores the EMPTY scope
+                // — an absent key would quietly re-inherit the fleet default,
+                // which is the opposite of what was just tapped. Cases 15 and
+                // 17 of widget_settings_check.sh pin that distinction on disk.
+                store.setScope(folded ?? WidgetScope(), for: kind)
+            }
+        )
+    }
+
+    /// Pull the three lists through the queries the configuration sheet
+    /// already uses (t_98fb8726) — one definition of what a board, a project
+    /// and a node are, two entry points, and no second fetch path to drift.
+    /// Each query is read-only (`WidgetDataClient`, GET allowlist) and answers
+    /// with the sentinel alone on any failure, so a failure here is an empty
+    /// picker, never a fabricated row.
+    private func loadScopeOptions() async {
+        loadingScopeOptions = true
+        defer { loadingScopeOptions = false }
+        async let boards = WidgetScopeBoardQuery().suggestedEntities()
+        async let projects = WidgetScopeProjectQuery().suggestedEntities()
+        async let nodes = WidgetScopeNodeQuery().suggestedEntities()
+        let fetchedBoards = (try? await boards) ?? []
+        let fetchedProjects = (try? await projects) ?? []
+        let fetchedNodes = (try? await nodes) ?? []
+        boardOptions = fetchedBoards.map { ScopeChoice(id: $0.id, subtitle: $0.subtitle) }
+        projectOptions = fetchedProjects.map { ScopeChoice(id: $0.id, subtitle: $0.subtitle) }
+        nodeOptions = fetchedNodes.map { ScopeChoice(id: $0.id, subtitle: $0.subtitle) }
     }
 
     // MARK: - Display metadata

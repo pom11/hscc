@@ -40,6 +40,15 @@ final class WidgetSettingsStore: ObservableObject {
         settings.setting(for: kind)
     }
 
+    /// What one surface will actually render: its own scope when the operator
+    /// picked one for it here, otherwise the fleet-wide scope the surface's
+    /// configuration intent wrote (t_3dd38411). Same call the widget
+    /// extensions make, so the screen can never display a scope the store does
+    /// not hold.
+    func scope(for kind: WidgetSurfaceKind) -> WidgetScope? {
+        settings.scope(for: kind)
+    }
+
     // MARK: - Mutation (each persists immediately to the shared suite)
 
     /// Toggle whether a surface is active/enabled.
@@ -65,8 +74,26 @@ final class WidgetSettingsStore: ObservableObject {
         }
     }
 
+    /// Point ONE surface at a board / project / node (t_3dd38411). The screen
+    /// hands this the folded selection (exactly one field set) or an explicit
+    /// `WidgetScope()` for "All for this widget", and `nil` to drop the
+    /// surface's own choice so it inherits the fleet default again. The write
+    /// itself is the existing `update` path — same blob, same key, same
+    /// persist, so a per-widget scope cannot survive without cadence and
+    /// sections surviving with it.
+    func setScope(_ scope: WidgetScope?, for kind: WidgetSurfaceKind) {
+        update(kind) { $0.scope = scope }
+    }
+
     /// Apply a closure to one surface's settings and persist the whole blob.
     private func update(_ kind: WidgetSurfaceKind, _ mutate: (inout WidgetSurfaceSettings) -> Void) {
+        // Re-read the blob before mutating. The widget's configuration intent
+        // (`WidgetScope.apply`) writes the FLEET-wide scope from the app
+        // process too, and it can do that while this screen is open; without
+        // the re-read, this write would persist the store's copy from launch
+        // and silently roll that choice back. Surfaces still come from the
+        // bounded read path, so nothing else changes.
+        if let fresh = AppGroupWidgetSettings.load() { settings = fresh }
         var entry = settings.setting(for: kind)
         mutate(&entry)
         settings.surfaces[kind] = entry
