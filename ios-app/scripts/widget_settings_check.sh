@@ -79,7 +79,11 @@ func check(_ name: String, _ cond: Bool) {
 // 1. defaulting is backward compatible: absent store -> every surface on, 5/15
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
-check("defaults has all 4 surfaces", defaults.surfaces.count == 4)
+// The count comes from the enum, never from a number transcribed here: a new
+// surface must not have to edit this gate to be covered (the loop below runs
+// every case, and t_09cd8abf found this line hard-coding 4).
+check("defaults seed every surface (" + String(WidgetSurfaceKind.allCases.count) + " today)",
+      defaults.surfaces.count == WidgetSurfaceKind.allCases.count)
 for kind in WidgetSurfaceKind.allCases {
     let s = defaults.setting(for: kind)
     check("\(kind.rawValue) defaults active", s.isActive)
@@ -146,6 +150,33 @@ check("Off (0) refresh is stored", off.setting(for: .widgetCluster).refreshMinut
 // 7. registry raw values are the stable keys the siblings consume.
 check("widget.cluster registry key", WidgetSurfaceKind.widgetCluster.rawValue == "widget.cluster")
 check("liveActivity.monitor registry key", WidgetSurfaceKind.liveActivityMonitor.rawValue == "liveActivity.monitor")
+
+// 7b. The board status surface (t_09cd8abf): the key itself, the two settings
+//     this entry exists for (pause + cadence) surviving the encode/decode the
+//     extension actually performs, and the honest default for an install that
+//     has never seen this surface (ON at the widget cadence — a new registry
+//     key must never silently pause a widget that is on the Home Screen).
+check("widget.boardStatus registry key",
+      WidgetSurfaceKind.widgetBoardStatus.rawValue == "widget.boardStatus")
+check("board status is a widget (self-fetching, 5-min default)",
+      !WidgetSurfaceKind.widgetBoardStatus.isLiveActivity)
+check("board status declares no optional content section",
+      WidgetSurfaceKind.widgetBoardStatus.availableSections.isEmpty)
+let pausedBoard = AppGroupWidgetSettings(surfaces: [
+    .widgetBoardStatus: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0, showSections: [])
+])
+if let boardData = try? JSONEncoder().encode(pausedBoard),
+   let boardBack = try? JSONDecoder().decode(AppGroupWidgetSettings.self, from: boardData) {
+    check("paused board status reads back paused",
+          boardBack.setting(for: .widgetBoardStatus).isActive == false)
+    check("board status Off cadence stays 0 (the provider maps 0 to atEnd, not a loop)",
+          boardBack.setting(for: .widgetBoardStatus).refreshMinutes == 0)
+} else {
+    check("paused board status encodes and decodes", false)
+}
+let untouchedBoard = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetBoardStatus)
+check("board status with no stored entry defaults ON", untouchedBoard.isActive)
+check("board status with no stored entry defaults 5 min", untouchedBoard.refreshMinutes == 5)
 
 // ---- widget scope (t_98fb8726): the intent's write, the widget's read ------
 // Everything from here to the restore is the code the configuration intent
@@ -437,6 +468,10 @@ cok "following the fleet default is a real option, not just a sentence" "store.s
 cok "the Board list comes from the sheet's own query" "WidgetScopeBoardQuery().suggestedEntities()"
 cok "the Project list comes from the sheet's own query" "WidgetScopeProjectQuery().suggestedEntities()"
 cok "the Node list comes from the sheet's own query" "WidgetScopeNodeQuery().suggestedEntities()"
+# t_09cd8abf: a surface with ONE dataset declares no content sections, and the
+# editor must then show no "Show Content" group at all — an empty group with a
+# "choose which sections" footer would advertise a choice that does not exist.
+cok "a surface with no sections shows no content group" "if !sectionRows(kind).isEmpty"
 if [ "$grepfail" -gt 0 ]; then
   echo "WIDGET SETTINGS CHECK FAILED — $grepfail intent + config-screen delegation assertion(s)"
   exit 1

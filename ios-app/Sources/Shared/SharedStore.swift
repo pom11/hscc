@@ -181,7 +181,7 @@ enum AppGroup {
 // defaults to on (backward compatible — the Cluster widget predates this and
 // must keep rendering exactly as it does today until the operator edits it).
 
-/// The four surfaces the operator controls. The raw values are the registry
+/// The five surfaces the operator controls. The raw values are the registry
 /// keys stored in the App Group — stable identifiers, not display names.
 enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// The existing Home Screen cluster widget (state / topology / models /
@@ -189,6 +189,11 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     case widgetCluster = "widget.cluster"
     /// The new monitor widget (sibling card t_6d545375).
     case widgetMonitor = "widget.monitor"
+    /// The board status widget — five counts for the ONE board the operator
+    /// picked in the widget's own configuration sheet (t_6d8731ab shipped the
+    /// widget; t_09cd8abf gave it this registry entry so Settings can pause it
+    /// and set its cadence like every other surface).
+    case widgetBoardStatus = "widget.boardStatus"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -310,7 +315,7 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor: return false
+        case .widgetCluster, .widgetMonitor, .widgetBoardStatus: return false
         case .liveActivityWake, .liveActivityMonitor: return true
         }
     }
@@ -326,10 +331,19 @@ extension WidgetSurfaceKind {
     ///   - "nodes"     — per-node cluster monitor metrics (CPU/RAM/GPU)
     ///   - "host"      — daemon-host machine data (the machine HSCC runs on)
     ///   - "timing"    — wake timing / elapsed (Live Activities)
+    ///
+    /// A surface with ONE dataset and no optional part declares the empty set:
+    /// the board status widget draws five counts for one board and nothing
+    /// else, so every candidate section here would be a toggle that either
+    /// empties the widget or does nothing — and a toggle that does nothing is
+    /// a lie in the settings UI (`WidgetSurfaceEditor` hides its whole
+    /// "Show Content" group for exactly this case).
     var availableSections: Set<String> {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
         case .widgetMonitor:    return ["state", "nodes", "host"]
+        // One dataset, nothing optional — see the rule above.
+        case .widgetBoardStatus: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         }
