@@ -132,17 +132,16 @@ targets:
       - path: Sources/HSCC/Notify/NeedsOperatorNotifier.swift
       - path: Sources/HSCC/Notify/NotificationCoordinator.swift
       - path: Sources/HSCC/Notify/NotificationsAppDelegate.swift
-      - path: Sources/HSCC/SessionStreamCursor.swift
-      - path: Sources/HSCC/StreamConnectionError.swift
-      - path: Sources/HSCC/StreamHello.swift
       - path: Sources/HSCC/SessionEvent.swift
       # The session Live Activity's whole input path is gone (t_3b15b8c9):
       # StreamingTranscript.swift went first (t_bd6e7c0a), then
       # SessionActivitySummary.swift (ChatItem / ChatRow / ToolRender + the
       # JSONValue rendering helpers — every one of them had exactly one
-      # consumer, the driver) and SessionActivityDriver.swift. `SessionEvent`
-      # stays: StreamReplyWatcher and HSCCClient's session-history read still
-      # decode it, and scripts/ws_decode_check.sh compiles it.
+      # consumer, the driver) and SessionActivityDriver.swift. The stream
+      # plumbing (SessionStreamCursor, StreamHello, StreamConnectionError) went
+      # in t_9d5a30c9 — its only consumers were reconnect_check.sh and
+      # ws_decode_check.sh, retired with it. `SessionEvent` still decodes for
+      # StreamReplyWatcher and HSCCClient's session-history read.
       # Unit->node attribution for "Nodes & serving" (t_65d791da): the ONE place
       # that reads the live `sparkrun status` text out of /v1/cluster/hosts.
       # Headless-gated by scripts/serving_placement_check.sh.
