@@ -150,7 +150,10 @@ targets:
       - path: Sources/HSCC/StreamConnectionError.swift
       - path: Sources/HSCC/StreamHello.swift
       - path: Sources/HSCC/SessionEvent.swift
-      - path: Sources/HSCC/StreamingTranscript.swift
+      # StreamingTranscript.swift (the live-chat row-folding core) deleted by
+      # t_bd6e7c0a, iOS pivot. The pure vocabulary the session Live Activity
+      # still takes as input (ChatItem / ChatRow / ToolRender + the JSONValue
+      # rendering helpers) moved into SessionActivitySummary.swift.
       - path: Sources/HSCC/SessionActivitySummary.swift
       - path: Sources/HSCC/SessionActivityDriver.swift
       # Unit->node attribution for "Nodes & serving" (t_65d791da): the ONE place
@@ -186,8 +189,11 @@ targets:
       - path: Sources/HSCC/Views/MutationSupport.swift
       - path: Sources/HSCC/Views/ChatStore.swift
       - path: Sources/HSCC/Views/ChatEntry.swift
-      - path: Sources/HSCC/Views/StreamingChatStore.swift
-      - path: Sources/HSCC/Views/StreamingChatView.swift
+      # StreamingChatStore.swift + StreamingChatView.swift deleted by t_bd6e7c0a
+      # (iOS pivot: no operator console, so no live-chat screen). `StreamPhase` /
+      # `ConnectionPhase` moved into SessionActivitySummary.swift with the rest of
+      # the Live Activity's input vocabulary; `TurnState` and `StreamSettings`
+      # were chat-only banners and went with the store.
       - path: Sources/HSCC/Views/ComposerText.swift
       - path: Sources/HSCC/Views/StreamReplyWatcher.swift
       - path: Sources/HSCC/Views/SessionHistoryView.swift

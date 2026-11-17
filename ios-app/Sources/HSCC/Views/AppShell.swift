@@ -379,8 +379,18 @@ struct AppShell: View {
             switch route {
             case .projectDetail(let name, let board):
                 ProjectDetailView(client: client, project: Project(name: name, repo: nil, board: board, topic: nil))
+            // LEGACY route alias, kept deliberately (t_bd6e7c0a, iOS pivot):
+            // `StreamingChatView` is deleted, so a `hscc://session/<project>`
+            // deep link and every in-app "Chat" tap land on the project
+            // Overview instead of silently failing — the same convention
+            // `.clusterHub` / `.selfHeal` / `.boardHygiene` / `.fleetControl`
+            // follow for a retired screen. The Chat segment and its row are
+            // retired by t_9664a1c8, which collapses the app to its two
+            // surviving screens; until then a stale caller must never route to
+            // a view that no longer exists.
             case .chat(let name):
-                StreamingChatView(project: name)
+                ProjectDetailView(client: client,
+                                  project: Project(name: name, repo: nil, board: nil, topic: nil))
             case .board(let name, let board):
                 ProjectBoardView(client: client, board: board)
                     .navigationTitle("\(name) · Board")
