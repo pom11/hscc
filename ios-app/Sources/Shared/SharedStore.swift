@@ -204,11 +204,38 @@ struct WidgetSurfaceSettings: Codable, Equatable {
     var refreshMinutes: Int
     /// Which content sections the surface renders (set membership, bounded).
     var showSections: Set<String>
+    /// What THIS ONE surface is pointed at (t_3dd38411 — the config screen's
+    /// per-widget board/project/node picker). Three states, and they are NOT
+    /// interchangeable once a fleet-wide default exists:
+    ///   * key absent / nil  — the operator never chose for this surface, so
+    ///     it INHERITS `AppGroupWidgetSettings.scope` (what the widget's
+    ///     configuration intent wrote for the whole fleet);
+    ///   * `WidgetScope()`   — the operator explicitly chose All for THIS
+    ///     surface: render everything, do not inherit. An empty scope encodes
+    ///     as `{}`, which is why it is distinguishable from key absence;
+    ///   * a named board / project / node — scoped.
+    /// Optional on purpose twice over: a blob written before this field
+    /// existed decodes to nil (an absent key is not a decode failure), so an
+    /// old install inherits instead of breaking.
+    var scope: WidgetScope? = nil
 }
 
 /// The full registry: one entry per surface kind. Stored as one JSON blob.
 struct AppGroupWidgetSettings: Codable, Equatable {
     var surfaces: [WidgetSurfaceKind: WidgetSurfaceSettings]
+    /// The board / project / node the widgets are pointed at — one fleet-wide
+    /// selection, nil meaning "everything" (t_98fb8726). Optional on purpose,
+    /// twice over: a blob written before this field existed decodes to nil
+    /// (an absent key is not a decode failure), and nil is the honest default
+    /// for a device where the operator never picked anything. Living in THIS
+    /// blob — not a second key — is what keeps the config intent's write and
+    /// the widgets' read one and the same code path.
+    ///
+    /// Since t_3dd38411 this is the FLEET DEFAULT rather than the whole
+    /// answer: a single surface may override it with its own `scope` (see
+    /// `WidgetSurfaceSettings.scope`), and `scope(for:)` is the one call that
+    /// resolves the two. Nothing about the intent's write path changes.
+    var scope: WidgetScope? = nil
 
     /// The key used to store/read this blob in the App Group suite.
     static let storageKey = AppGroup.widgetSettingsKey
@@ -245,7 +272,25 @@ struct AppGroupWidgetSettings: Codable, Equatable {
         // schedule an instant refresh loop.
         return WidgetSurfaceSettings(isActive: s.isActive,
                                      refreshMinutes: max(0, s.refreshMinutes),
-                                     showSections: s.showSections.intersection(Set(kind.availableSections)))
+                                     showSections: s.showSections.intersection(Set(kind.availableSections)),
+                                     // The scope survives the bounding pass.
+                                     // Dropping it here would silently erase
+                                     // the operator's per-widget choice on
+                                     // every read (widget_settings_check.sh
+                                     // pins this line with an executed case).
+                                     scope: s.scope)
+    }
+
+    /// The scope ONE surface renders (t_3dd38411). Its own choice when the
+    /// config screen made one for this surface — including the explicit
+    /// `WidgetScope()` that means "All, and do not inherit" — otherwise the
+    /// fleet-wide selection the surface's configuration intent wrote, and nil
+    /// when neither exists (render everything). Two levels, one blob, ONE read
+    /// path: a widget timeline calls this and never learns which level the
+    /// answer came from, which is the whole reason the per-widget choice lives
+    /// inside this blob rather than in a second key.
+    func scope(for kind: WidgetSurfaceKind) -> WidgetScope? {
+        surfaces[kind]?.scope ?? scope
     }
 
     /// The full defaults (all on, 5/15-min cadence, all sections), used to
@@ -288,6 +333,101 @@ extension WidgetSurfaceKind {
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Widget scope — what a widget is pointed AT (card t_98fb8726)
+// ---------------------------------------------------------------------------
+//
+// ONE fleet-wide selection — a board, a project, or a node — stored as one
+// optional field of the SAME `hscc.widgetSettings` blob every extension
+// already reads, so the config intent and the widgets share one write path,
+// one storage key and one load path; two stores for one concept is how the
+// two sides drift.
+//
+// Honesty rules:
+//   * at most one field is set — the three pickers are one choice, and a
+//     scope naming a board AND a node simultaneously has no honest meaning;
+//   * the picker's "All" option is the `wildcard` sentinel in the SHEET only;
+//     `normalized` folds it to nil, so the store never holds the sentinel and
+//     a consumer never learns a magic string exists;
+//   * a node is named by `MonitorNode.displayLabel` (sample hostname, else the
+//     last octet) — never the address (`WIDGET_DATA_CONTRACT.md` §7:
+//     `/v1/cluster/monitor` host addresses must never reach the App Group).
+
+/// The one scope a widget renders: nil fields = "everything".
+struct WidgetScope: Codable, Equatable {
+    /// The sheet's "All" option id. Folded to nil by `normalized` — it never
+    /// reaches the store, so absence and "All" are one state in the blob.
+    static let wildcard = "*"
+
+    /// Kanban board slug — scopes the card/kanban datasets.
+    var board: String?
+    /// Project name (`GET /v1/projects`) — a project lives on exactly one
+    /// board, so the widget scopes the project's board itself.
+    var project: String?
+    /// Node label (`MonitorNode.displayLabel`), never an address (§7).
+    var node: String?
+
+    init(board: String? = nil, project: String? = nil, node: String? = nil) {
+        self.board = board
+        self.project = project
+        self.node = node
+    }
+
+    /// Nothing chosen (or "All" chosen): every widget renders fleet-wide.
+    var isAll: Bool { board == nil && project == nil && node == nil }
+
+    /// The sentence the config intent speaks and the config screen shows —
+    /// built only from the stored values, so it can never name a scope the
+    /// store does not hold.
+    var summaryLine: String {
+        if let board { return "board \(board)" }
+        if let project { return "project \(project)" }
+        if let node { return "node \(node)" }
+        return "all boards, projects and nodes"
+    }
+}
+
+extension WidgetScope {
+    /// nil for nil/blank/the sentinel — the one normalization every write goes
+    /// through, so the store holds real identifiers or nothing.
+    static func normalized(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty, trimmed != wildcard else { return nil }
+        return trimmed
+    }
+
+    /// The scope a configuration sheet's raw picker strings select: EXACTLY ONE
+    /// real thing, board → project → node precedence, the sentinel and blanks
+    /// folded away, and nil when the operator chose "All" in every picker.
+    /// "Exactly one picker is set" is the sheet's rule; the fold enforces it
+    /// anyway, because a stored scope naming a board AND a node has no honest
+    /// meaning — the first real name wins and the rest are dropped, not
+    /// silently kept. This is the intent's whole decision, as data —
+    /// `widget_settings_check.sh` extracts this block and executes it verbatim
+    /// against a real named suite.
+    static func buildPickerSelection(board: String?, project: String?, node: String?) -> WidgetScope? {
+        if let board = normalized(board) { return WidgetScope(board: board) }
+        if let project = normalized(project) { return WidgetScope(project: project) }
+        if let node = normalized(node) { return WidgetScope(node: node) }
+        return nil
+    }
+
+    /// Persist the selection into the registry the extensions read: read-modify-
+    /// write of the ONE `hscc.widgetSettings` blob, surfaces untouched. `nil`
+    /// stores nil ("All") — never the sentinel. Returns false when the shared
+    /// suite cannot be opened; writing through `UserDefaults.standard` instead
+    /// would persist to a store no extension can read.
+    @discardableResult
+    static func apply(_ scope: WidgetScope?) -> Bool {
+        guard let suite = UserDefaults(suiteName: AppGroup.suiteName) else { return false }
+        var settings = AppGroupWidgetSettings.load() ?? AppGroupWidgetSettings.defaults()
+        settings.scope = scope
+        guard let data = try? JSONEncoder().encode(settings) else { return false }
+        suite.set(data, forKey: AppGroupWidgetSettings.storageKey)
+        return true
     }
 }
 
