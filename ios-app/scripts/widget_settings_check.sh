@@ -2,9 +2,14 @@
 set -uo pipefail
 
 # ---- interpolation guard (t_9e4a731b) --------------------------------------
-# GUARD-SENTINEL: the guard's first executable statement is at the bottom of
-# this block, and scripts/widget_settings_check_backtick_probe.sh measures the
-# window above it every run.
+# GUARD-SENTINEL: this paragraph is NOT the boundary and must not be used as
+# one. The boundary is the line carrying GUARD-FIRST-EXEC at the bottom of this
+# block — the ban's first executable statement — and
+# scripts/widget_settings_check_backtick_probe.sh measures the window above THAT
+# line every run. Measuring from this paragraph instead reported an uncovered
+# prologue more than ten times smaller than the real one, and a payload planted
+# inside the difference executed. If you move this prose, keep the two markers
+# where they are: SENTINEL names this block, FIRST-EXEC names the statement.
 #
 # This gate writes its Swift harness with an UNQUOTED heredoc, deliberately:
 # $suite_container and $model are shell-expanded into it, and $model is lifted
@@ -37,15 +42,18 @@ set -uo pipefail
 # harness they generate is byte-for-byte what it was before this rule existed.
 #
 # The limit, stated instead of hidden: this guard can only judge the text below
-# it. A payload above its first line is outside its reach, and anyone who can
-# edit there can also delete the guard — so the probe prints that window every
-# run and the real fix for the window is a meta-gate scanning every script in
-# this directory, not a longer comment here.
+# its first executable statement (GUARD-FIRST-EXEC below). Lines between the
+# shebang and that statement are outside its reach, and anyone who can edit
+# there can also delete the guard. The probe measures that span from the marker
+# on this file and prints it every run — deliberately no figure is written here,
+# because a number in prose is a number that can lag the thing it describes, and
+# lagging is what this card is about. The real fix for the span is a meta-gate
+# scanning every script in this directory, not a longer comment here.
 #
 # Fail closed: grep rc 1 means clean, rc 0 means the byte was found (refuse),
 # rc 2 or more means it could not read the file it is judging (refuse). A guard
 # that waves the run through because it failed to look is not a guard.
-SELF_SRC="${BASH_SOURCE[0]}"   # captured before the cd below, or the path rots
+SELF_SRC="${BASH_SOURCE[0]}"   # GUARD-FIRST-EXEC — captured before the cd below, or the path rots
 BT="$(printf '\140')"          # the banned byte, so this file never has to carry one
 bt_scan=$(grep -nF -- "$BT" "$SELF_SRC" 2>&1); bt_rc=$?
 if [ "$bt_rc" -ne 1 ]; then

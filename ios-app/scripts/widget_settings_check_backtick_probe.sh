@@ -33,10 +33,14 @@
 #   comment      a real '#' comment line. Inert on its own — measured, not
 #                guessed — and still banned, because a comment is only a comment
 #                while its line stays a comment.
-#   boundary     payload above the guard's own first line. REPORTED, never
-#                asserted: content above a guard is outside that guard's reach,
-#                and whoever can insert here can also delete the guard. Printed
-#                every run so the size of the window stays visible.
+#   boundary     payload at line 2 — the first line ABOVE the ban's first
+#                executable statement (the GUARD-FIRST-EXEC marker), which is
+#                where the ban can no longer act. Reported with the measured
+#                span, never claimed as a pass: whoever can write here can also
+#                delete the guard. Anchoring this leg on the guard's COMMENT
+#                paragraph is what made the reported span wrong by an order of
+#                magnitude, so the span is derived from the statement marker and
+#                the anchor line is itself checked for not being a comment.
 #
 # Non-destructive: the gate is never edited and never run from its own path.
 # Each leg runs a copy inside a private ios-app-shaped tree whose Sources/ and
@@ -58,19 +62,59 @@ IOSAPP="$(cd "${SELF_DIR}/.." && pwd)"
 
 # The byte under discussion, without writing it into this file.
 BT="$(printf '\140')"
-# The guard's own anchor, so "above the guard" is measured rather than assumed.
+# The guard's anchors, so "above the guard" is measured rather than assumed.
+# There are TWO, and only the second is the boundary:
+#   GUARD-SENTINEL     the guard's explanatory comment. NOT the boundary.
+#   GUARD-FIRST-EXEC   the ban's first executable statement. THE boundary:
+#                      bash has already expanded everything above it.
+# Anchoring on the comment paragraph is the defect this replaces: it reported a
+# window beginning dozens of lines above where the guard can actually act, and a
+# payload planted in that gap executed while the probe called the gap covered.
 SENTINEL="GUARD-SENTINEL"
+FIRST_EXEC="GUARD-FIRST-EXEC"
 
 probe_fail=0
 pok()   { echo "  ok: $1"; }
 pfail() { echo "  FAIL: $1"; probe_fail=$((probe_fail + 1)); }
 pnote() { echo "  note: $1"; }
 
-guard_line=$(awk -v s="$SENTINEL" 'index($0, s) { print NR; exit }' "$GATE")
-if [ -z "$guard_line" ]; then
+sentinel_line=$(awk -v s="$SENTINEL" 'index($0, s) { print NR; exit }' "$GATE")
+if [ -z "$sentinel_line" ]; then
   pfail "no line carrying the guard sentinel '$SENTINEL' in $GATE — the boundary leg cannot localise the guard, and a guard that cannot be found cannot be probed"
-  guard_line=1
+  sentinel_line=1
 fi
+
+# The boundary line, in order of trust: the explicit marker on the ban
+# statement, else the first line after the sentinel that bash could execute
+# (first line whose first non-blank character is neither '#' nor nothing).
+ban_line=$(awk -v s="$FIRST_EXEC" 'index($0, s) { print NR; exit }' "$GATE")
+ban_how="marker $FIRST_EXEC"
+if [ -z "$ban_line" ]; then
+  ban_line=$(awk -v s="$SENTINEL" '
+      !seen && index($0, s) { seen = 1; next }
+      seen { t = $0; gsub(/^[[:space:]]/, "", t)
+             if (t != "" && substr(t, 1, 1) != "#") { print NR; exit } }' "$GATE")
+  ban_how="derived (no $FIRST_EXEC marker — first executable line after the sentinel)"
+fi
+if [ -z "$ban_line" ]; then
+  pfail "cannot locate the ban's first executable statement in $GATE — the boundary window cannot be measured, and a boundary that is guessed is the bug this leg exists to catch; refusing to report a number"
+  ban_line="$sentinel_line"; ban_how="UNRELIABLE fallback to the sentinel line"
+else
+  # Guard the guard's own measurement: an anchor that lands on a comment is a
+  # prose anchor, which is exactly the round-2 failure. Fail rather than print.
+  ban_text=$(awk -v n="$ban_line" 'NR == n { print }' "$GATE")
+  ban_lead=$(printf '%s' "$ban_text" | sed -e 's/^[[:space:]]*//' -e 's/^\(.\).*/\1/')
+  if [ "$ban_lead" = "#" ]; then
+    pfail "boundary anchor $GATE:$ban_line is a COMMENT line ($ban_text) — comments do not stop bash, so this is not the boundary; point $FIRST_EXEC at the first statement below it"
+  fi
+  if [ "$ban_line" -lt "$sentinel_line" ]; then
+    pfail "$FIRST_EXEC ($ban_line) sits above $SENTINEL ($sentinel_line) — one of the two markers has moved; the window below would be meaningless"
+  fi
+fi
+# Insertable lines above the ban: line 1 is the shebang, so 2..ban_line-1.
+uncovered=$((ban_line - 2)); [ "$uncovered" -ge 0 ] || uncovered=0
+echo "guard boundary: ban's first executable statement = $GATE:$ban_line [$ban_how]"
+echo "  sentinel at :$sentinel_line; lines 2..$((ban_line - 1)) = $uncovered insertable line(s) sit ABOVE the ban"
 
 # A line in shell position (not inside the heredoc, not the guard itself) to
 # plant in: the cd that re-roots the gate. Below the guard, so a leg planted
@@ -78,7 +122,7 @@ fi
 shell_anchor=$(awk '$0 ~ /^cd / { print NR; exit }' "$GATE")
 if [ -z "$shell_anchor" ]; then
   pfail "no top-level cd found in $GATE — the shell-position legs have nowhere to plant"
-  shell_anchor="$guard_line"
+  shell_anchor="$ban_line"
 fi
 
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/wscprobe.XXXXXX")"
@@ -130,9 +174,9 @@ classify() {
   banners=$(grep -c 'PASSED' "$OUT" 2>/dev/null); banners=${banners:-0}
   if [ "$expect" = "report" ]; then
     if [ -e "$MARKER" ]; then
-      pnote "$name: payload EXECUTED above the guard. Guard starts at line $guard_line, so the uncovered prologue is $((guard_line - 1)) line(s). Documented limit: content above a guard is outside its reach, and whoever can write here can also delete the guard — that residual belongs to a meta-gate scanning every script, not to this file."
+      pnote "$name: payload EXECUTED (planted at line 2, the first of the lines above the ban). Uncovered prologue = lines 2..$((ban_line - 1)) = $uncovered line(s) above $GATE:$ban_line, measured not assumed — bash expands them before the ban's first statement runs. Documented limit, reported rather than failed: content above a guard is outside that guard's reach, and whoever can write here can also delete the guard. Closing it for real is a meta-gate over every script in this directory (t_4558fd32), not a longer comment in the file being judged."
     else
-      pok "$name: payload above the guard did not execute"
+      pok "$name: payload above the ban did not execute (ban at $GATE:$ban_line, $uncovered line(s) above it — check this leg still plants above the ban if it ever turns green by accident)"
     fi
     return 0
   fi
@@ -151,10 +195,16 @@ classify() {
       fi
       ;;
     inert-ok)
+      # Three outcomes, named for what actually happened. The old pair called a
+      # refusal "inert", which is the wrong word for the wrong mechanism: an
+      # inert context is one bash never expands, a refused one is one the ban
+      # stopped. Only the first is a property of the comment.
       if [ "$RC" -ne 0 ] && [ "$banners" -eq 0 ]; then
-        pok "$name: refused by the ban (RC $RC) — this context is inert by itself, the ban is what keeps it inert when the line stops being a comment"
+        pok "$name: REFUSED BY THE BAN (RC $RC, 0 banners) — the ban caught it before bash expanded anything; do not read this as the comment being inert"
+      elif [ "$RC" -eq 0 ] && [ "$banners" -eq 3 ]; then
+        pok "$name: INERT (RC 0, 3 banners) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
       else
-        pok "$name: inert (RC $RC) — a '#' comment never expands, and the ban is what makes that safe even if the line moves"
+        pfail "$name: unexplained outcome (RC $RC, $banners banner(s)) — a comment leg must either be refused by the ban or run clean to three banners"
       fi
       ;;
     passing)
