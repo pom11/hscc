@@ -199,7 +199,6 @@ targets:
       # were chat-only banners and went with the store.
       - path: Sources/HSCC/Views/ComposerText.swift
       - path: Sources/HSCC/Views/StreamReplyWatcher.swift
-      - path: Sources/HSCC/Views/SessionHistoryView.swift
       - path: Sources/HSCC/Views/AutodownView.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
       - path: Sources/HSCC/Views/ProjectUnreadCenter.swift
@@ -229,7 +228,6 @@ targets:
       - path: Sources/HSCC/Views/TemplateDetailView.swift
       - path: Sources/HSCC/Views/TemplateTopologyView.swift
       - path: Sources/HSCC/Views/SearchView.swift
-      - path: Sources/HSCC/Views/SessionsView.swift
       - path: Sources/HSCC/Views/SlashCommandPalette.swift
       - path: Sources/HSCC/Views/SlashCommandPreview.swift
       - path: Sources/HSCC/Views/ActivityFeedView.swift
@@ -237,9 +235,6 @@ targets:
       # Phase 3 cron roster (t_a2c8e456): read-only GET /v1/cron/list surface.
       - path: Sources/HSCC/Views/CronView.swift
       - path: Sources/HSCC/Views/CreateCardSheet.swift
-      # Per-card read-only diff (t_cb93feee): a card's changed files + hunks,
-      # paged, from GET /v1/review/{card_id}/diff.
-      - path: Sources/HSCC/Views/DiffDetailView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift

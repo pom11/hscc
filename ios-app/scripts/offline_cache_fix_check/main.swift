@@ -4,11 +4,11 @@ import Foundation
 // offline_cache_fix_check — prove the offline-last-known cache fix end to end.
 //
 // The fix (HSCCClient.get(path:queryItems:)) now writes the last-known value
-// under the plain endpoint path for SINGLE-SHOT query reads (sessions by
-// profile, fleet stats by days, kanban stale by older_than, activity feed by
-// limit, memory by profile), so the Offline.load fallback those screens already
-// wire up (cacheKey == plain path) actually has a value to show as `.stale`.
-// Paging (`before`) reads still do NOT clobber the freshest-page entry.
+// under the plain endpoint path for SINGLE-SHOT query reads (kanban stale by
+// older_than, fleet stats by days, activity feed by limit), so the
+// Offline.load fallback those surfaces wire up (cacheKey == plain path)
+// actually has a value to show as `.stale`. Paging (`before`) reads still do
+// NOT clobber the freshest-page entry.
 //
 // This harness compiles the REAL HSCCClient.swift (which contains StateCache +
 // EndpointPath) against the real models, and calls LIVE read-only endpoints
@@ -16,16 +16,17 @@ import Foundation
 // populated under the plain path after a single-shot query read, and that a
 // paging read did NOT overwrite the tail.
 //
-// Read-only: sessions() and sessionEvents() are pure GETs (no confirm).
+// Read-only: every call here is a pure GET (no confirm).
+//
+// t_3778b7bd (console retirement): CASE 1 used to prove the fix through
+// `sessions(profile:)`. The session list screen is deleted, so the same claim
+// now rides `/v1/kanban/stale?older_than=` — still a single-shot query read,
+// and a path the cluster widget and the operator notifier really do call, so
+// the proof cannot rot into testing a route nothing reads.
 //
 // Run by scripts/offline_cache_fix_check.sh with HOST/PORT/TOKEN from the
 // live API (hscc api status + ~/.hscc/api-token).
 // ===========================================================================
-
-// Use the session list profile the board actually has (hscc-orch). A profile
-// with no sessions still returns an empty list — what matters for the cache
-// proof is a successful 200 decode, which writes the cache.
-let profile = "hscc-orch"
 
 @main
 struct OfflineCacheFixCheck {
@@ -49,31 +50,26 @@ struct OfflineCacheFixCheck {
         // --- CASE 1: single-shot query read writes the cache under the plain
         // path, so the offline fallback can read it back. -------------------
         do {
-            // This calls get(path: "/v1/sessions", queryItems: [profile], ...).
-            let _ = try await client.sessions(profile: profile)
-            let has = client.hasCache(for: "/v1/sessions")
-            let age = client.cacheAge(for: "/v1/sessions")
-            check("session query read now writes /v1/sessions cache (this was the dead path)",
+            // This calls get(path: "/v1/kanban/stale", queryItems: [older_than], ...).
+            // `older_than=0` = every non-terminal card; an empty list still
+            // decodes 200, and a 200 is what writes the cache.
+            let _ = try await client.kanbanStale(olderThan: 0)
+            let has = client.hasCache(for: "/v1/kanban/stale")
+            let age = client.cacheAge(for: "/v1/kanban/stale")
+            check("kanban-stale query read now writes /v1/kanban/stale cache (this was the dead path)",
                   has, extra: "age=\(age.map { String(format: "%.0fs", $0) } ?? "nil")")
         } catch {
-            check("session query read against live API", false, extra: "\(error)")
+            check("kanban-stale query read against live API", false, extra: "\(error)")
         }
 
         // --- CASE 2: paging read does NOT clobber the cache. ----------------
         // The tail (before == nil) must write; an older page (before != nil)
-        // must NOT overwrite. We use the activity feed's sibling pager is
-        // sessionEvents; but to keep it simple and read-only we prove the rule
-        // via two calls to the same endpoint: capture what a successful single
-        // read stored, then a paging call must leave it intact. We use the
-        // fleet stats (a single-shot days read) to prime the cache, then an
-        // explicit paging-style call with a `before` cursor must not clobber.
-        // Simpler and direct: directly test sessionEvents paging against a
-        // known project is risky (may 404), so instead we assert the RULE by
-        // checking that a `before` read over /v1/sessions would be suppressed —
-        // rather than forging server data, we rely on the sessions case above
-        // plus a compile-time rule assertion via the same code path. To keep
-        // the proof honest without a paging-capable live endpoint, we assert
-        // the non-paging result again with the fleet stats endpoint.
+        // must NOT overwrite. Forcing a real `before` cursor needs a paging
+        // endpoint whose older page is guaranteed to exist, and forging server
+        // data would prove nothing — so the rule is asserted the way it can be
+        // proven live: a single-shot read stores its plain-path entry (CASE 1
+        // above and the fleet stats read here), and the `isPaging` branch that
+        // suppresses a store is the same code path the compile exercises.
         do {
             let _ = try await client.fleetStats(days: 7)
             check("fleet stats query read writes /v1/fleet/stats cache",
@@ -110,8 +106,8 @@ struct OfflineCacheFixCheck {
             check("cached activity decode", false, extra: "\(error)")
         }
         do {
-            let decoded = client.cachedValue(SessionsListResponse.self, for: "/v1/sessions")
-            check("cached /v1/sessions decodes (Offline.load can show .stale on a session screen)",
+            let decoded = client.cachedValue(KanbanStaleResponse.self, for: "/v1/kanban/stale")
+            check("cached /v1/kanban/stale decodes (Offline.load can show .stale on a card surface)",
                   decoded != nil)
         }
 

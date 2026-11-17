@@ -9,7 +9,7 @@
 # and calls live read-only endpoints, then asserts the cache became populated
 # under the plain path.
 #
-# Read-only: sessions / fleetStats / activityFeed are pure GETs.
+# Read-only: kanbanStale / fleetStats / activityFeed are pure GETs.
 #
 # Usage:
 #   scripts/offline_cache_fix_check.sh [HOST [PORT [TOKEN]]]

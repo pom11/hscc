@@ -22,8 +22,17 @@ enum AppDestination: String, Hashable, Identifiable {
     case home, chats, projects, cards, approvals
     case fleet, nodesServing, opsHealth
     case autodown, cron, logs
-    case memory, templates, sessions, activity
+    case memory, templates, activity
     case search, settings
+    /// RETIRED by t_3778b7bd (iOS pivot): `SessionsView` — the cluster-wide
+    /// session list — is deleted with the console, so this destination has no
+    /// screen and no drawer row of its own. The CASE stays registered and
+    /// `AppShell.normalized` maps it onto `.home`, so a stale caller that still
+    /// names `.sessions` (rawValue "sessions") lands on the app root instead of
+    /// routing to a view that no longer exists — the same convention
+    /// `.clusterHub`, `.selfHeal`, `.boardHygiene` and `.fleetControl` follow.
+    /// The whole enum goes with the two-screen collapse.
+    case sessions
     /// LEGACY alias, kept deliberately (spec §8 "FleetView · FleetControlView |
     /// drawer · Fleet (+ Control section)", folded into t_2a29a7ab because the
     /// ruling that put model-serving in Fleet also put fleet-wide up/down in
@@ -83,7 +92,10 @@ enum AppDestination: String, Hashable, Identifiable {
         case .boardHygiene: "Approvals"   // legacy alias — merged destination
         case .memory: "Memory"
         case .templates: "Templates"
-        case .sessions: "Sessions"
+        // The retired session list's alias carries the ROOT destination's title
+        // (where a stale `.sessions` caller now lands), never the name of a
+        // screen that no longer exists — same rule as `.boardHygiene: "Approvals"`.
+        case .sessions: "Home"
         case .activity: "Activity feed"
         case .search: "Search"
         case .settings: "Settings"
@@ -109,7 +121,7 @@ enum AppDestination: String, Hashable, Identifiable {
         case .boardHygiene: "checkmark.circle"   // legacy alias — same destination, same glyph
         case .memory: "brain"
         case .templates: "square.stack.3d.up"
-        case .sessions: "person.2"
+        case .sessions: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
         case .activity: "waveform.path.ecg"
         case .search: "magnifyingglass"
         case .settings: "gearshape"
@@ -362,7 +374,11 @@ struct AppShell: View {
         case .boardHygiene: ApprovalsView(client: client)
         case .memory: MemoryView(client: client)
         case .templates: TemplatesView(client: client)
-        case .sessions: SessionsView(client: client)
+        // t_3778b7bd (iOS pivot): `SessionsView` is deleted with the console, so
+        // the retired destination lands on the app ROOT — the one destination that
+        // is always present and from which every surviving screen is one tap away.
+        // Same recipe as `.selfHeal` → AutodownView, `.boardHygiene` → ApprovalsView.
+        case .sessions: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
         case .activity: ActivityFeedView(client: client)
         case .search: SearchView(client: client)
         case .settings: SettingsView()
@@ -480,6 +496,9 @@ struct AppShell: View {
         case .boardHygiene: return .approvals
         case .clusterHub: return .nodesServing
         case .fleetControl: return .fleet
+        // t_3778b7bd: the session list is retired with the console, so its
+        // destination normalises to the root the pivot keeps.
+        case .sessions: return .home
         default: return destination
         }
     }
@@ -500,6 +519,7 @@ struct AppShell: View {
     ///   .boardHygiene-> Approvals             (t_31d037ac)
     ///   .clusterHub  -> Nodes & serving       (t_65d791da)
     ///   .fleetControl-> Fleet                 (t_2a29a7ab)
+    ///   .sessions    -> Home                  (t_3778b7bd, console retirement)
     private func go(_ destination: AppDestination?) {
         selection = normalized(destination)
         router.projectsPath = []

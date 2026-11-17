@@ -43,17 +43,11 @@ struct CardDetailView: View {
                         row("Assignee", value: card.assignee)
                         row("Board", value: card.board)
                     }
-                    // Read-only per-card diff (t_cb93feee): the files changed on
-                    // the card's branch and their hunks, paged. OPENED for any
-                    // card; the diff view shows a clear notice if the card does
-                    // not resolve to a reviewable branch (the endpoint 404s).
-                    Section {
-                        NavigationLink {
-                            DiffDetailView(cardID: cardID)
-                        } label: {
-                            Label("Files & diff", systemImage: "doc.plaintext")
-                        }
-                    }
+                    // The "Files & diff" entry (t_cb93feee) is gone with
+                    // `DiffDetailView` itself (t_3778b7bd, console retirement):
+                    // the per-card worker diff was a console screen and the pivot
+                    // keeps no diff surface, so the detail carries no link to a
+                    // view that no longer exists.
                     // Board actions that have routes. Only surface what the API
                     // actually supports — a control that can't act is worse than
                     // none. Today that is UNBLOCK (POST /v1/kanban/blocked/{id}/recover)
