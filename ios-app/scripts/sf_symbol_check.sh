@@ -21,6 +21,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 # literal — and a name that exists nowhere renders a BLANK drawer icon with only a
 # console line as evidence. That is exactly how `serverrack` (not a real SF
 # Symbol; the real one is `server.rack`) reached the Cluster row and stayed there.
+# `WidgetSurfaceKind.displayIcon` (ConfigView.swift) is the same shape — the
+# settings row draws `Image(systemName: kind.displayIcon)` from another file — so
+# its body is extracted by the same pass (t_fa7926fb added the first two icon
+# names to that switch that appear nowhere else in Sources, which this gate would
+# otherwise have waved through).
 # Extract those literals too, from inside the property's own braces only, so the
 # `title`/`description` switches next door are not mistaken for symbol names.
 python3 - "$WORK/syms_extra.txt" <<'PY'
@@ -28,7 +33,7 @@ import re, sys, pathlib
 out = set()
 for path in pathlib.Path("Sources").rglob("*.swift"):
     text = path.read_text(encoding="utf-8", errors="replace")
-    for m in re.finditer(r"var\s+symbol\s*:\s*String\s*\{", text):
+    for m in re.finditer(r"var\s+(?:symbol|displayIcon)\s*:\s*String\s*\{", text):
         # Brace-match the property body: cheap, and enough for these switches.
         i, depth = m.end(), 1
         while i < len(text) and depth:
@@ -37,6 +42,14 @@ for path in pathlib.Path("Sources").rglob("*.swift"):
             i += 1
         body = text[m.end():i - 1]
         out.update(re.findall(r'"([a-z0-9.]+)"', body))
+    # A third shape the greps above cannot see: a ternary INSIDE the call —
+    #   Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+    # The first grep wants a literal right after `systemName:`, so a gate pane
+    # that swaps its glyph by state (t_fa7926fb's paused/invite panes) had BOTH
+    # of its names invisible to this gate, and a wrong one is a blank pane with
+    # only a console line as evidence. Both arms of the ternary are taken.
+    for m in re.finditer(r'systemName:\s*[^"()]*\?\s*"([a-z0-9.]+)"\s*:\s*"([a-z0-9.]+)"', text):
+        out.update(m.groups())
 with open(sys.argv[1], "w") as f:
     f.write("\n".join(sorted(out)))
 PY

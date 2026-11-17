@@ -87,7 +87,7 @@ check("notConfigured is the one failure that never falls back",
       !WidgetDataFailure.notConfigured.showsStaleData)
 let unconfiguredEntry = ProjectsEntry(date: .now, configuration: nil, rows: [],
                                       selectedName: nil, status: .failed(.notConfigured))
-check("and the entry the view receives invites setup", unconfiguredEntry.isUnconfigured)
+check("and the entry the view receives invites setup", !unconfiguredEntry.configured)
 
 // A bad host/port is a settings problem, and it must not be dressed as staleness
 // either — it is the second case `showsStaleData` refuses.
@@ -117,7 +117,7 @@ let staleEntry = ProjectsEntry(date: .now, configuration: nil,
                                status: .stale(minutes: staleOutcome.ageMinutes ?? 0,
                                               reason: staleOutcome.failure ?? .unreachable(code: nil)))
 check("a stale entry renders rows, not the failure pane",
-      !staleEntry.isUnconfigured && staleEntry.status.failure == nil
+      staleEntry.configured && staleEntry.status.failure == nil
       && staleEntry.rows.count == 3)
 
 let noSnapshot = await WidgetData.read(
@@ -192,17 +192,22 @@ check("rows(limit:) still caps at the payload size (§5.1)", payload.rows(limit:
 // ---------------------------------------------------------------------------
 // 7. The dispatch chain, mirrored from the three family bodies (which the
 //    script proves by grep are still in that order in the real source).
+//
+//    The FIRST step is ONE test for BOTH gate states since t_5f246177
+//    (`!entry.configured || entry.paused`), so this mirror has one gate branch,
+//    not two — and the check that matters is `paused with rows present`: a body
+//    that gated only `configured` would return "rows:3" for that entry.
 // ---------------------------------------------------------------------------
 print("\n[7] view dispatch (mirrored chain; order proven by grep in the script)")
 func dispatch(_ entry: ProjectsEntry) -> String {
-    if entry.isUnconfigured { return "setup" }
+    if !entry.configured || entry.paused { return "gate" }
     if let failure = entry.status.failure { return "failure:\(failure.shortLabel)" }
     if entry.rows.isEmpty { return "empty:\(entry.selectedName ?? "all")" }
     return "rows:\(min(entry.rows.count, ProjectsEntry.rowLimit(for: .systemLarge)))"
 }
 check("unconfigured wins over everything",
       dispatch(ProjectsEntry(date: .now, configuration: nil, rows: rows,
-                             selectedName: nil, status: .failed(.notConfigured))) == "setup")
+                             selectedName: nil, status: .failed(.notConfigured))) == "gate")
 check("a token problem says so",
       dispatch(ProjectsEntry(date: .now, configuration: nil, rows: [],
                              selectedName: nil, status: .failed(.unauthorized))) == "failure:Token rejected")
@@ -220,6 +225,73 @@ check("the large family crops 60 rows to 8",
       dispatch(ProjectsEntry(date: .now, configuration: nil,
                              rows: (0..<60).map { ProjectRow(name: "p\($0)", board: "b") },
                              selectedName: nil, status: .live)) == "rows:8")
+// The one that makes the single-step gate worth writing: rows ARE present here,
+// so a body that forgot `paused` (or tested it after the data branches) would
+// draw a project list on a tile the operator paused.
+check("PAUSED wins even when rows are present — it never falls through to the list",
+      dispatch(ProjectsEntry(date: .now, configuration: nil, rows: rows,
+                             selectedName: nil, status: .paused)) == "gate")
+check("and a paused entry carries no failure at all, so no pane could draw an error",
+      dispatch(ProjectsEntry(date: .now, configuration: nil, rows: [],
+                             selectedName: nil,
+                             status: .paused)) == "gate"
+      && ProjectsStatus.paused.failure == nil)
+
+// ---------------------------------------------------------------------------
+// 8. The registry entry this surface reads (t_5f246177). `AppGroupWidgetSettings`
+//    is compiled into this harness from Sources/Shared/SharedStore.swift, so
+//    these are the SAME calls the widget's own `surface()` makes, on the same
+//    type — not a transcription. The failure they guard is the loud one: a
+//    surface that defaults to paused blanks a widget the operator already has on
+//    their Home Screen, and a cadence that lands in the Live Activity branch is a
+//    tile that refreshes three times too slowly on every device, quietly.
+// ---------------------------------------------------------------------------
+print("\n[8] the registry entry (widget.projects) — absent is ON, never paused")
+check("the raw value the widget greps for is the one that exists",
+      WidgetSurfaceKind.widgetProjects.rawValue == "widget.projects")
+check("it is a widget (self-fetching), not a Live Activity",
+      !WidgetSurfaceKind.widgetProjects.isLiveActivity)
+check("it declares NO optional content section, so the editor shows no dead Toggle",
+      WidgetSurfaceKind.widgetProjects.availableSections.isEmpty)
+let neverWritten = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetProjects)
+check("a store that was never written reads ON (nil-from-load is not paused)",
+      neverWritten.isActive)
+check("…at the 5-minute widget cadence, not the 15-minute activity one",
+      neverWritten.refreshMinutes == 5)
+let seeded = AppGroupWidgetSettings.defaults().setting(for: .widgetProjects)
+check("the first-launch seed is ON too", seeded.isActive && seeded.refreshMinutes == 5)
+let pausedBlob = AppGroupWidgetSettings(surfaces: [
+    .widgetProjects: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0, showSections: ["state"])
+])
+check("an operator's pause survives the read the widget performs",
+      !pausedBlob.setting(for: .widgetProjects).isActive)
+check("…and so does its Off (0) cadence, which the provider maps to atEnd",
+      pausedBlob.setting(for: .widgetProjects).refreshMinutes == 0)
+check("…and the empty section declaration bounds a foreign blob to nothing",
+      pausedBlob.setting(for: .widgetProjects).showSections.isEmpty)
+
+// The paused ENTRY itself: what the provider hands the views when the registry
+// says off. Nothing here may claim data.
+let pausedEntry = ProjectsEntry.paused(selectedName: "radio")
+check("the paused factory carries no rows", pausedEntry.rows.isEmpty)
+check("…no age, no failure, no staleness",
+      pausedEntry.status.ageMinutes == nil && pausedEntry.status.failure == nil
+      && !pausedEntry.status.isStale && pausedEntry.status.staleReason == nil)
+check("…and it is paused, not unconfigured (so the pane cannot read as an invite)",
+      pausedEntry.paused && pausedEntry.configured)
+check("its copy is exactly one owner's \"Paused in Settings\"",
+      pausedEntry.gateLine == "Paused in Settings")
+check("an unconfigured entry's copy is the invite and NEVER the paused line",
+      unconfiguredEntry.gateLine == "Set up the app to see your projects"
+      && unconfiguredEntry.gateLine != pausedEntry.gateLine)
+check("a live entry is neither gate state",
+      ProjectsEntry.placeholderEntry.configured && !ProjectsEntry.placeholderEntry.paused)
+check("the cadence rule the timeline uses: Off is nil (atEnd), 5 min is +300s",
+      ProjectsTimelineProvider.nextRefreshDate(refreshMinutes: 0) == nil
+      && ProjectsTimelineProvider.nextRefreshDate(refreshMinutes: -3) == nil
+      && ProjectsTimelineProvider.nextRefreshDate(refreshMinutes: 5,
+                                                  from: twelveMinutesAgo)
+         == twelveMinutesAgo.addingTimeInterval(300))
 
 // ---------------------------------------------------------------------------
 print("")

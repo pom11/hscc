@@ -968,11 +968,12 @@ struct WidgetSurfaceEditor: View {
             .task(id: kind) { await loadScopeOptions() }
 
             // A surface whose widget has exactly one dataset declares an EMPTY
-            // `availableSections` (t_09cd8abf: the board status widget draws
-            // five counts and nothing else). Showing an empty "Show Content"
-            // group with a "choose which sections" footer underneath would
-            // advertise a choice that does not exist, so the group appears
-            // only when there is something to choose.
+            // `availableSections` (t_09cd8abf for the board status tile,
+            // t_fa7926fb for the running-cards and kanban-monitor panels).
+            // Showing an empty "Show Content" group with a "choose which
+            // sections" footer underneath would advertise a choice that does
+            // not exist, so the group appears only when there is something to
+            // choose.
             if !sectionRows(kind).isEmpty {
                 Section {
                     ForEach(sectionRows(kind), id: \.self) { section in
@@ -1105,6 +1106,9 @@ extension WidgetSurfaceKind {
         case .widgetCluster: return "Cluster Widget"
         case .widgetMonitor: return "Monitor Widget"
         case .widgetBoardStatus: return "Board Status Widget"
+        case .widgetCardsRunning: return "Running Cards Widget"
+        case .widgetKanbanMonitor: return "Kanban Monitor Widget"
+        case .widgetProjects: return "Projects Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
@@ -1119,6 +1123,27 @@ extension WidgetSurfaceKind {
         // The same glyph the widget itself draws in its header, so the row and
         // the widget are visibly the same thing.
         case .widgetBoardStatus: return "square.stack.3d.up"
+        // These two have no header glyph to copy — the running-cards widget
+        // draws no glyph at all outside its failure banner, and the monitor
+        // panel's headline is a Text of counts. So the row glyph is chosen to
+        // read as the surface AND to stay distinguishable from the rows above
+        // it in the same list: a second `square.stack.3d.up` two rows under the
+        // board tile is the same row twice at a glance. Both names went through
+        // the same NSImage check `sf_symbol_check.sh` uses before being written
+        // here — a name that resolves nowhere renders a BLANK row, and until
+        // this commit the gate did not scan `displayIcon` at all.
+        case .widgetCardsRunning: return "rectangle.stack.badge.play"
+        case .widgetKanbanMonitor: return "list.bullet.rectangle"
+        // NOT the bare `folder` the widget draws — that glyph belongs to one
+        // project ROW (ProjectRowView draws it once per project), and this row
+        // is the surface, not one of its rows. The gear badge says "the list you
+        // control here", which is what this row is for since t_5f246177. Checked
+        // through the same NSImage(systemSymbolName:) call sf_symbol_check.sh
+        // uses: this name RESOLVES, and the tempting `folder.badge.list` does
+        // not exist at all — the row would have rendered blank and, before #341,
+        // nothing in the gate set looked at displayIcon. No neighbour row in this
+        // list uses a folder glyph.
+        case .widgetProjects: return "folder.badge.gearshape"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
         // Health, not a gauge: this surface answers "is the fleet up", which is

@@ -34,6 +34,16 @@ import WidgetKit
 // age, or a `WidgetDataFailure` the operator can act on. `WidgetData.read` owns
 // that rule, so this widget cannot invent a fallback (t_5c554c5b: an
 // unconfigured app must invite setup, never claim "can't reach the cluster").
+//
+// WIRED TO THE ACTIVE TOGGLE / CADENCE (t_5f246177). Its registry entry is
+// `WidgetSurfaceKind.widgetProjects` — the last widget in this directory to get
+// one. The provider reads it BEFORE it builds a client, so a paused surface
+// sends ZERO requests (WIDGET_DATA_CONTRACT §2's budget) and draws the honest
+// "Paused in Settings" in every family: never its last-known rows, which is
+// exactly what a paused tile claiming an operator still has 18 projects would
+// be. Cadence 0 (Off in the picker) means `policy: .atEnd`, not a 0-minute loop.
+// It borrows nothing from `.widgetCluster` or `.widgetMonitor` — pausing those
+// must not blank this list, which is why one key per surface is the rule.
 // ---------------------------------------------------------------------------
 
 // MARK: - The stored projection (§7)
@@ -202,6 +212,13 @@ enum ProjectsStatus: Equatable {
     case stale(minutes: Int, reason: WidgetDataFailure)
     /// Nothing usable to draw.
     case failed(WidgetDataFailure)
+    /// The operator paused THIS surface in Settings (t_5f246177). Neither live
+    /// data, nor stale data, nor an error — and deliberately a case of THIS
+    /// enum rather than a second `paused` flag next to it, because two
+    /// representations of one state are two things that can disagree. It is
+    /// never produced by `WidgetData.read`: the provider returns the paused
+    /// entry before a client exists, so no read can have happened.
+    case paused
 
     /// The failure that left this entry with nothing. Not the reason a `.stale`
     /// entry is stale — those are different views and must not share an accessor.
@@ -238,10 +255,37 @@ struct ProjectsEntry: TimelineEntry {
     let selectedName: String?
     let status: ProjectsStatus
 
-    /// The t_5c554c5b invariant, expressed once: an unconfigured app shows the
-    /// setup invite, never "can't reach the cluster". Every family checks this
-    /// FIRST.
-    var isUnconfigured: Bool { status.failure == .notConfigured }
+    // MARK: Gate state (unconfigured / paused)
+
+    /// False when the app has no target configured. Derived from the ONE owner
+    /// of that fact — `status == .failed(.notConfigured)`, which is what
+    /// `WidgetData.read` returns for a nil client — rather than a second stored
+    /// flag that could disagree with it. The t_5c554c5b invariant lives here:
+    /// an unconfigured app shows the setup invite, never "can't reach the
+    /// cluster".
+    var configured: Bool { status.failure != .notConfigured }
+
+    /// True when the operator paused THIS surface in Settings (t_5f246177).
+    /// Read off `status` for the same single-owner reason as `configured`.
+    var paused: Bool { status == .paused }
+
+    /// The line the gate pane draws. One owner for the copy, so three families
+    /// cannot invent three paused messages, and the setup invite is checked
+    /// FIRST: an app that was never configured has not "paused" anything
+    /// (audit-3 / t_5c554c5b).
+    ///
+    /// There is deliberately no `shortGateLabel` on this entry. `supportedFamilies`
+    /// is small/medium/large — no corner, circular, rectangular or inline
+    /// complication exists to run out of room and need a label-only copy — and a
+    /// string no body can reach is one that rots (the ruling #341 applied to a
+    /// glance case that no family could ask for). `widget_view_dispatch_check.sh`
+    /// proves the absence rather than trusting it: called with `home-screen-only`
+    /// it fails if an accessory family ever appears in `supportedFamilies` while
+    /// this entry still has no label rule to draw.
+    var gateLine: String {
+        if !configured { return "Set up the app to see your projects" }
+        return "Paused in Settings"
+    }
 
     /// Rows this family can afford (§5.1: small 3, medium 6, large 8).
     static func rowLimit(for family: WidgetFamily) -> Int {
@@ -266,6 +310,20 @@ struct ProjectsEntry: TimelineEntry {
                                                 rows: sampleRows,
                                                 selectedName: nil,
                                                 status: .live)
+
+    /// The paused state (t_5f246177): the project the operator had scoped to,
+    /// and nothing else. No rows, no snapshot, no age, no failure — the operator
+    /// asked for no data, so the surface draws none, and the provider builds this
+    /// BEFORE a client exists, which is what makes "a paused surface sends zero
+    /// requests" a property of the code rather than of the rendering.
+    static func paused(selectedName: String?,
+                       configuration: ProjectFilterIntent? = nil) -> ProjectsEntry {
+        ProjectsEntry(date: .now,
+                      configuration: configuration,
+                      rows: [],
+                      selectedName: selectedName,
+                      status: .paused)
+    }
 }
 
 // MARK: - Timeline provider
@@ -273,23 +331,56 @@ struct ProjectsEntry: TimelineEntry {
 /// The provider. One read per refresh, the outcome resolved by `WidgetData.read`,
 /// and a usable entry on every path — there is no branch that returns a blank.
 struct ProjectsTimelineProvider: AppIntentTimelineProvider {
-    /// Cadence. `WidgetSurfaceKind` has no `widgetProjects` case yet, so this
-    /// surface is not in the shared cadence/Active registry the other widgets
-    /// read; 5 minutes is the contract's stated widget default (§2) and the same
-    /// cadence `ClusterWidget`/`MonitorWidget` use until the config-screen slice
-    /// adds the surface (then this reads `setting(for:)` like they do).
-    static let refreshMinutes = 5
+    /// The cadence when the operator has never touched the settings screen: the
+    /// shared widget default (`AppGroupWidgetSettings.setting(for:)` gives a
+    /// self-fetching widget 5 minutes), which is what this file hard-coded while
+    /// `WidgetSurfaceKind` had no case for this surface. Since t_5f246177 the
+    /// registry's answer wins and this is only the fallback for a store that was
+    /// never written — the same value, so a fresh install changes nothing.
+    static let defaultRefreshMinutes = 5
+
+    // GATE-SLICE-BEGIN: projects_cadence
+    /// The ONE cadence decision, kept free of WidgetKit so a gate can execute
+    /// it: nil means Off (cadence picker at 0) — the timeline gets
+    /// `policy: .atEnd` and the OS wakes the widget when it likes — and a date
+    /// means `.after(date)`. Written inline, the Off branch (the one that
+    /// becomes a refresh loop if it is wrong) would be the only branch in this
+    /// file no gate ever runs.
+    static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
+        guard refreshMinutes > 0 else { return nil }
+        return Calendar.current.date(byAdding: .minute, value: refreshMinutes, to: now)
+            ?? now.addingTimeInterval(TimeInterval(refreshMinutes * 60))
+    }
+    // GATE-SLICE-END: projects_cadence
+
+    /// The operator's entry for THIS surface, or nil when the registry blob has
+    /// never been written. `setting(for:)` fills an absent surface in with ON at
+    /// the widget cadence, so nil here means "the app has never run its settings
+    /// screen" — never "paused". Reading nil as paused would blank every widget
+    /// on first boot, which is the failure this distinction exists to stop.
+    private static func surface() -> WidgetSurfaceSettings? {
+        AppGroupWidgetSettings.load()?.setting(for: .widgetProjects)
+    }
 
     func placeholder(in context: Context) -> ProjectsEntry { .placeholderEntry }
 
     func snapshot(for configuration: ProjectFilterIntent, in context: Context) async -> ProjectsEntry {
-        await fetch(for: configuration)
+        // The gallery preview reads the SAME registry entry the timeline does, so
+        // a paused widget previews as paused instead of showing a project list the
+        // operator explicitly turned off.
+        await fetch(for: configuration, surface: Self.surface())
     }
 
     func timeline(for configuration: ProjectFilterIntent, in context: Context) async -> Timeline<ProjectsEntry> {
-        let entry = await fetch(for: configuration)
-        let next = Calendar.current.date(byAdding: .minute, value: Self.refreshMinutes, to: .now)
-            ?? .now.addingTimeInterval(300)
+        let surface = Self.surface()
+        let entry = await fetch(for: configuration, surface: surface)
+        // 0 = Off in the cadence picker: no scheduled refresh, the OS decides.
+        // Same shape as `KanbanMonitorTimelineProvider.getTimeline`.
+        guard let next = Self.nextRefreshDate(
+            refreshMinutes: surface?.refreshMinutes ?? Self.defaultRefreshMinutes
+        ) else {
+            return Timeline(entries: [entry], policy: .atEnd)
+        }
         return Timeline(entries: [entry], policy: .after(next))
     }
 
@@ -301,8 +392,27 @@ struct ProjectsTimelineProvider: AppIntentTimelineProvider {
 
     // MARK: Fetch
 
-    private func fetch(for configuration: ProjectFilterIntent) async -> ProjectsEntry {
+    /// Always returns a renderable entry: unconfigured, paused and failed are
+    /// states, not blanks.
+    ///
+    /// One note on the OTHER read in this file — `ProjectEntityQuery.candidates()`
+    /// builds a client too, and it stays that way on purpose. That fetch runs when
+    /// the operator opens the configuration sheet (an action they took, not a
+    /// timeline refresh, so it is outside §2's per-refresh budget, as the comment
+    /// on that type says). Pausing a surface governs what it does on its own
+    /// schedule; it does not silence the sheet the operator just opened, and the
+    /// options there are what let them pick a project.
+    private func fetch(for configuration: ProjectFilterIntent,
+                       surface: WidgetSurfaceSettings?) async -> ProjectsEntry {
         let selectedName = configuration.selectedName
+        // Paused is decided BEFORE the client is built and before any read: a
+        // paused surface spends zero of WIDGET_DATA_CONTRACT §2's request budget
+        // and draws zero rows — no live list, no last-known snapshot, no failure
+        // pane. `!isActive` can only come from a blob the app wrote, so an
+        // install that never opened Settings cannot land here.
+        if let surface, !surface.isActive {
+            return .paused(selectedName: selectedName, configuration: configuration)
+        }
         let outcome = await WidgetData.read(using: WidgetDataClient.makeIfConfigured(),
                                            lastKnown: ProjectsSnapshotStore.lastKnown) { client in
             switch await client.projects() {
@@ -372,7 +482,8 @@ struct ProjectsWidget: Widget {
 // MARK: - Views
 
 /// Picks the layout by family. Every family runs the same dispatch order:
-/// unconfigured → failure → nothing to draw → rows.
+/// (unconfigured OR paused) → failure → nothing to draw → rows. The first step
+/// is one test, not two, so no family can gate one state and forget the other.
 struct ProjectsWidgetView: View {
     let entry: ProjectsEntry
     @Environment(\.widgetFamily) private var family
@@ -416,22 +527,33 @@ private struct ProjectRowView: View {
     }
 }
 
-/// The t_5c554c5b invite. Shown for `.notConfigured` only — a bad host/port or a
-/// rejected token is a different sentence, and it comes from `operatorLine`.
-private struct ProjectsSetupView: View {
+/// The gate a family draws when it has nothing to draw: the setup invite
+/// (t_5c554c5b — the ONLY thing an unconfigured app may show) or the honest
+/// paused state (t_5f246177). One pane, two copies, chosen by the entry, so a
+/// paused tile can never fall through to its last-known rows or to a blank.
+/// The words belong to `ProjectsEntry.gateLine`, not to this view, which is how
+/// three families are kept from inventing three sentences.
+///
+/// `compact` stays (unlike the running-cards pane, where #341 could drop it):
+/// the small family really does draw the tighter version of this pane, so it has
+/// two values in use.
+private struct ProjectsGateView: View {
+    let entry: ProjectsEntry
     var compact = false
 
     var body: some View {
         VStack(alignment: compact ? .leading : .center, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: "gearshape")
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
                 .font(.system(size: compact ? 12 : 20))
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            Text("Set up in HSCC")
+            Text(entry.gateLine)
                 .font(compact ? .caption2.weight(.semibold) : .footnote)
                 .foregroundColor(Theme.Semantic.onSurface)
                 .fixedSize(horizontal: false, vertical: true)
             if !compact {
-                Text(WidgetDataFailure.notConfigured.operatorLine)
+                Text(entry.paused
+                     ? "Turn it back on under Widgets & Live Activities in the HSCC app."
+                     : WidgetDataFailure.notConfigured.operatorLine)
                     .font(.caption2)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     .multilineTextAlignment(.center)
@@ -529,8 +651,14 @@ private struct SmallProjectsWidget: View {
 
     var body: some View {
         Group {
-            if entry.isUnconfigured {
-                ProjectsSetupView(compact: true)
+            if !entry.configured || entry.paused {
+                // ONE step for both gate states (t_5f246177): a body that tests
+                // them in two branches is a body that can take the invite step
+                // and still fall through to rows on a paused tile. The copy
+                // inside the pane puts the invite first (`gateLine` checks
+                // `configured` before any paused line), so this does not swap
+                // the audit-3 order — it only widens the first step.
+                ProjectsGateView(entry: entry, compact: true)
             } else if let failure = entry.status.failure {
                 ProjectsEmptyView(failure: failure, compact: true)
             } else if entry.rows.isEmpty {
@@ -570,8 +698,9 @@ private struct MediumProjectsWidget: View {
 
     var body: some View {
         Group {
-            if entry.isUnconfigured {
-                ProjectsSetupView()
+            if !entry.configured || entry.paused {
+                // Same ONE gate step as the small body above, for both states.
+                ProjectsGateView(entry: entry)
             } else if let failure = entry.status.failure {
                 ProjectsEmptyView(failure: failure)
             } else if entry.rows.isEmpty {
@@ -611,8 +740,9 @@ private struct LargeProjectsWidget: View {
 
     var body: some View {
         Group {
-            if entry.isUnconfigured {
-                ProjectsSetupView()
+            if !entry.configured || entry.paused {
+                // Same ONE gate step as the small body above, for both states.
+                ProjectsGateView(entry: entry)
             } else if let failure = entry.status.failure {
                 ProjectsEmptyView(failure: failure)
             } else if entry.rows.isEmpty {

@@ -19,6 +19,15 @@
 #     operator's machine — plus `speak`. The widget stores a projection, so the
 #     harness decodes a payload that HAS both fields and then asserts the bytes
 #     it writes contain neither, nor any absolute path.
+#   * PAUSED IS A STATE, NOT A ZERO (t_5f246177). Since this surface joined the
+#     settings registry its provider can be told to stop, and the two ways that
+#     goes wrong are invisible: a paused tile that keeps drawing its last-known
+#     rows claims projects nobody read, and a surface whose registry entry is
+#     missing defaults to paused would blank the widget on a fresh install. So
+#     the harness builds the paused entry, checks it carries no rows, no age and
+#     no failure, runs it through the mirrored dispatch WITH rows present, and
+#     asks the real `AppGroupWidgetSettings` (compiled in from SharedStore.swift)
+#     what an absent entry and an operator's pause each answer.
 #
 # What it compiles (all real, nothing redeclared):
 #   Sources/HSCCWidgets/ProjectsWidget.swift          (subject)
@@ -84,10 +93,24 @@ report "no ExtensionClient alias use" \
 # One rule, two call sites (the timeline and the configuration sheet's options).
 count_is "both reads go through WidgetData.read" "$SUBJECT" 'WidgetData\.read\(' 2
 count_is "both reads build the client the same way" "$SUBJECT" 'WidgetDataClient\.makeIfConfigured\(\)' 2
-# The unconfigured-first dispatch, in all three family bodies.
-count_is "small+medium+large each check unconfigured first" "$SUBJECT" 'if entry\.isUnconfigured' 3
+# The gate step every family takes, in all three family bodies. ONE branch for
+# both states since t_5f246177: two branches is how a body gates the invite and
+# forgets the pause, and the executed mirror in main.swift [7] proves which one
+# the real bodies match.
+count_is "small+medium+large each take the ONE gate step (unconfigured OR paused)" \
+  "$SUBJECT" 'if !entry\.configured \|\| entry\.paused' 3
 count_is "…then the failure branch, three times" "$SUBJECT" 'else if let failure = entry\.status\.failure' 3
 count_is "…then the empty branch, three times" "$SUBJECT" 'else if entry\.rows\.isEmpty' 3
+# The paused state is built by the entry's own factory, and the copy belongs to
+# the entry — one `var gateLine` and one call to that factory in the provider.
+count_is "one paused factory, called from the provider" "$SUBJECT" 'return \.paused\(selectedName:' 1
+count_is "the gate copy has exactly one owner" "$SUBJECT" 'var gateLine: String {' 1
+count_is "the provider reads its pause from the registry entry" \
+  "$SUBJECT" 'if let surface, !surface\.isActive' 1
+# The cadence decision must be the sliced, executed one, and the markers must be
+# the end-anchored pair widget_view_dispatch_check.sh looks for.
+count_is "the cadence slice markers are the pair the gate executes" \
+  "$SUBJECT" '// GATE-SLICE-(BEGIN|END): projects_cadence$' 2
 # §7: the App Group is touched on exactly two lines, and both are the projection
 # store's own save/load — the response type is never written.
 count_is "the App Group suite is touched twice, both in the store" "$SUBJECT" 'UserDefaults\(suiteName' 2

@@ -198,6 +198,43 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// widget; t_09cd8abf gave it this registry entry so Settings can pause it
     /// and set its cadence like every other surface).
     case widgetBoardStatus = "widget.boardStatus"
+    /// The "Running cards" widget (t_fa7926fb): the cards being worked right
+    /// now, with the worker running each and how long it has been going.
+    ///
+    /// Until this case existed the widget hard-coded a quarter-hour on its own
+    /// provider and could not be paused at all — the operator's only lever was
+    /// pulling the widget off the Home Screen. A raw value is permanent (it is
+    /// the key written into the installed App Group blob the moment the
+    /// operator touches the row), so it is chosen once, here:
+    /// `widget.cardsRunning` names the surface the widget calls itself
+    /// (`configurationDisplayName("Running Cards")`, kind
+    /// `CardsRunningWidget`), not one dataset inside it.
+    case widgetCardsRunning = "widget.cardsRunning"
+    /// The "Kanban Monitor" widget (t_fa7926fb): the
+    /// `hscc kanban monitor --live` panel — running / ready / blocked plus the
+    /// merged row list.
+    ///
+    /// Same reason and same shape as above. Its header claimed it "uses the
+    /// widget default cadence (5 min) and is never 'paused'", which was true
+    /// only because no registry entry existed that could say otherwise.
+    case widgetKanbanMonitor = "widget.kanbanMonitor"
+    /// The "Projects" widget (t_5f246177): the cluster's projects and the board
+    /// each one lives on.
+    ///
+    /// The last widget in `HSCCWidgets` outside this registry, and its provider
+    /// said so out loud: "`WidgetSurfaceKind` has no `widgetProjects` case yet,
+    /// so this surface is not in the shared cadence/Active registry", with a
+    /// private `refreshMinutes = 5` and no way for the operator to pause it —
+    /// the same dead end the three widgets above were in.
+    ///
+    /// The raw value is permanent the moment an installed device writes it, so
+    /// it is named here once: after the surface the widget calls itself
+    /// (`configurationDisplayName("Projects")`, kind `ProjectsWidget`), not after
+    /// one dataset inside it. It is deliberately NOT a reuse of `widget.cluster`
+    /// or `widget.monitor` — switching off the cluster widget must never blank
+    /// the project list, which is the reason #341 refused to let the monitor
+    /// panel borrow `.widgetMonitor`'s entry either.
+    case widgetProjects = "widget.projects"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -329,7 +366,9 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus: return false
+        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
+            return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth: return true
         }
     }
@@ -356,8 +395,31 @@ extension WidgetSurfaceKind {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
         case .widgetMonitor:    return ["state", "nodes", "host"]
-        // One dataset, nothing optional — see the rule above.
+        // One dataset, nothing optional — see the rule above. The board tile is
+        // five counts for one board; the running-cards widget is the row list
+        // plus the running/blocked counts its header and footer are built from;
+        // the monitor panel is running/ready/blocked plus that same merged list.
+        // A toggle for any part of those would either empty the surface or do
+        // nothing, and every entry here renders a Toggle — so an invented id is
+        // a dead control the operator can touch.
         case .widgetBoardStatus: return []
+        case .widgetCardsRunning, .widgetKanbanMonitor: return []
+        // The projects surface is the same ruling, and the card asked explicitly
+        // whether its per-project rows make a section genuine. They do not:
+        //   * it draws ONE dataset (`GET /v1/projects` → `{name, board}` rows)
+        //     and BOTH keys carry the fact — this file's own header says the
+        //     surface exists to show which projects exist "and which board each
+        //     one lives on", so a "board" toggle that emptied the board column
+        //     would remove the reason the surface exists, not trim a garnish;
+        //   * per-project scoping is already a control the operator has and can
+        //     see: `ProjectFilterIntent`'s Project picker in the widget's own
+        //     configuration sheet. A second copy of that choice in this store
+        //     would be a Toggle the sheet never reads.
+        // So: nothing here is optional, and `WidgetSurfaceEditor` hides its whole
+        // "Show Content" group for exactly this case (ConfigView's
+        // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
+        // control the operator can touch and nothing obeys.
+        case .widgetProjects: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this
