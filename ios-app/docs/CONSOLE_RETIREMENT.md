@@ -179,7 +179,7 @@ turns the gate red.
 | `Sources/HSCC/Views/LogsView.swift` | 210 | `logs_redactor_check.sh` |
 | `Sources/HSCC/Views/LogRedactor.swift` | 95 | `logs_redactor_check.sh` (its only subject). **Security note:** this is the app's second redaction line; if any surviving surface ever prints server log text, it must stay |
 | `Sources/HSCC/Views/CronView.swift` | 202 | fixture `cron_list`, `seed_fixtures.sh` MAIN_LIST |
-| `Sources/HSCC/Views/CardsView.swift` | 151 | `widget_kanban_decode_check.swift` **stays** (widget decodes cards) |
+| `Sources/HSCC/Views/CardsView.swift` | 151 | *(harness gone — `widget_kanban_decode_check.swift` was deleted by t_595a5fee; the widget card decoders are covered by `model_decode_check` against the real types)* |
 | `Sources/HSCC/Views/CardsRootView.swift` | 130 | nav lane (`.cards`) |
 | `Sources/HSCC/Views/ProjectsView.swift` | 976 | `live_decode_check` fixture `v1_projects`; `ProjectStatusIntent` if D1b |
 | `Sources/HSCC/Views/ActivityFeedView.swift` | 277 | `offline_cache_fix_check` (`/v1/activity/feed`, `main.swift:98-114`), `model_decode_check` fixture `v1_activity_feed` |
@@ -353,8 +353,11 @@ move to `ConfigView`; `connection_probe_check/main.swift:152` mentions
 (`SetupQRCode` + `SettingsStore` + `KeychainStore` — the surviving first-run
 path); `fleet_offline_check.sh` (subject is `Views/LoadState.swift`, the
 `Offline` enum, which the config screen still uses); `snapshot_store_check.sh`,
-`widget_settings_check.sh`, `shared_model_check.swift`,
-`widget_kanban_decode_check.swift`, `widget_view_dispatch_check.sh`
+`widget_settings_check.sh`, `widget_view_dispatch_check.sh`
+(`shared_model_check.swift` and `widget_kanban_decode_check.swift` were on this
+list until t_595a5fee: both were mirrors that re-declared the shared structs and
+neither was wired to any `.sh`. They are deleted, and `model_decode_check` covers
+the same payloads against the real types — the counts in §1 above predate that.)
 (`SharedModels` + `ClusterWidgetViews` — widget side, untouched);
 `live_activity_rehydration_check.sh`, `monitor_activity_check.sh` + `run.py` +
 `template.swift`, `monitor_datapath_live/`, `widget_datapath_live/` (monitor +
