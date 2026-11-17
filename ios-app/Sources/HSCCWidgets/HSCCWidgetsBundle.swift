@@ -10,6 +10,9 @@ import WidgetKit
 ///   * systemMedium/systemLarge — HSCC Monitor: per-node `hscc cluster monitor`
 ///                     metrics (CPU/RAM/GPU) + the daemon-host machine data,
 ///                     refreshed on the operator's configured cadence.
+///   * accessory + small/medium/large — Kanban Monitor: `hscc kanban monitor
+///                     --live`'s running / ready / blocked, from the kanban trio,
+///                     with a visible error pane when a board read fails.
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -19,5 +22,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
     var body: some Widget {
         ClusterWidget()
         MonitorWidget()
+        KanbanMonitorWidget()
     }
 }
