@@ -1,4 +1,65 @@
 #!/bin/bash
+set -uo pipefail
+
+# ---- interpolation guard (t_9e4a731b) --------------------------------------
+# GUARD-SENTINEL: the guard's first executable statement is at the bottom of
+# this block, and scripts/widget_settings_check_backtick_probe.sh measures the
+# window above it every run.
+#
+# This gate writes its Swift harness with an UNQUOTED heredoc, deliberately:
+# $suite_container and $model are shell-expanded into it, and $model is lifted
+# verbatim out of Sources/Shared/SharedStore.swift — that extraction is the
+# whole reason the harness cannot drift from the code it tests. Quoting the
+# delimiter (<<'SWIFT') would kill the extraction, so it is not the fix.
+#
+# The price of an unquoted heredoc is that bash runs every backtick in it as a
+# command substitution. It is wider than the heredoc, though, and that is the
+# part a first fix misses: a backtick anywhere in this file that is not inside
+# single quotes runs, whether or not it looks like prose. A '#' comment never
+# expands (measured: a backticked touch inside one leaves no marker file), but a
+# comment is only a comment while its line stays a comment, and a comment-SHAPED
+# line ("// ...") sitting in shell position IS a command word. So the rule is
+# the whole file: this gate carries NO BACKTICK CHARACTER AT ALL, in any context.
+#
+# What that rule is worth, measured against origin/main @ 3b5e475c: three
+# "command not found" / "syntax error: unexpected end of file" lines on stderr on
+# every single run, and SIX backticks spliced out of the harness this gate
+# compiles and asserts on — the balanced pairs vanished silently, only the odd
+# ones were reported. That is how a gate quietly changes what it proves while
+# still printing ALL PASS: prose in a Swift comment became shell, and whatever
+# the backticked words resolved to is what got compiled.
+#
+# To emit a literal backtick INTO the generated harness, interpolate ${BT}
+# (defined below) instead of typing one — braces, because $BTdefaults would be
+# read as one variable name. A shell never re-scans the result of an expansion,
+# so ${BT} is inert text — which is precisely why it is safe here and a
+# typed backtick is not. The three Swift comments that need one use ${BT}, and the
+# harness they generate is byte-for-byte what it was before this rule existed.
+#
+# The limit, stated instead of hidden: this guard can only judge the text below
+# it. A payload above its first line is outside its reach, and anyone who can
+# edit there can also delete the guard — so the probe prints that window every
+# run and the real fix for the window is a meta-gate scanning every script in
+# this directory, not a longer comment here.
+#
+# Fail closed: grep rc 1 means clean, rc 0 means the byte was found (refuse),
+# rc 2 or more means it could not read the file it is judging (refuse). A guard
+# that waves the run through because it failed to look is not a guard.
+SELF_SRC="${BASH_SOURCE[0]}"   # captured before the cd below, or the path rots
+BT="$(printf '\140')"          # the banned byte, so this file never has to carry one
+bt_scan=$(grep -nF -- "$BT" "$SELF_SRC" 2>&1); bt_rc=$?
+if [ "$bt_rc" -ne 1 ]; then
+  if [ "$bt_rc" -eq 0 ]; then
+    bt_count=$(printf '%s\n' "$bt_scan" | wc -l | tr -d ' ')
+    echo "WIDGET SETTINGS CHECK FAILED — the file that is running ($SELF_SRC) contains $bt_count backtick character(s), listed with line numbers below. In this gate a backtick is command substitution: bash executes it while building the harness and splices shell into the Swift this gate then compiles and asserts on (measured on origin/main @ 3b5e475c: six of them spliced out of the generated harness, the balanced pairs silently). Write prose with quotes; to put a literal backtick into the generated harness interpolate \${BT}, which is inert because a shell never re-scans an expansion. Re-point this guard at the new text if this file moves — do not delete it, it is the only thing standing between the unquoted heredoc below and a gate that proves something other than what it says." >&2
+    printf '%s\n' "$bt_scan" >&2
+  else
+    echo "WIDGET SETTINGS CHECK FAILED — the backtick guard could not read the file that is executing ($SELF_SRC, grep rc $bt_rc): $bt_scan. Refusing to run a gate whose guard could not look at it." >&2
+  fi
+  exit 1
+fi
+
+# ---- what this gate proves -------------------------------------------------
 # widget_settings_check.sh — prove the Widgets & Live Activities shared
 # settings model (t_dea36c48) round-trips: encode/decode, defaulting, bounded
 # sections, and persistence through a REAL named UserDefaults suite.
@@ -6,7 +67,7 @@
 # Why this exists: acceptance criterion #1 is "settings persist round-trip
 # through the App Group on the DEVICE (set -> relaunch -> still set, readable
 # in the extension target)". A physical device is not reachable from this
-# build host, and `containerURL(forSecurityApplicationGroupIdentifier:)`
+# build host, and 'containerURL(forSecurityApplicationGroupIdentifier:)'
 # returns a URL on macOS even for an UNREGISTERED group (shared_store_check.sh
 # documents this), so the container itself cannot be proven here. What CAN be
 # proven by execution is the EXACT part that breaks: the Codable serialization
@@ -24,29 +85,28 @@
 #             golden in the same change) whenever a change to the extracted
 #             model block or to this gate's harness is INTENDED; the gate names
 #             this line when the two drift apart.
-set -uo pipefail
 # Resolved BEFORE the cd below: the script then runs from the ios-app root, so a
 # path handed to it by the caller ("./ios-app/scripts/widget_settings_check.sh")
 # stops resolving. The interpolation guard has to read this very file, so it gets
 # a path that cannot rot — which is also what makes a copied-aside probe of the
 # gate still probe the right text.
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SELF_DIR="$(cd "$(dirname "$SELF_SRC")" && pwd)"
+cd "${SELF_DIR}/.."
 SRC="Sources/Shared/SharedStore.swift"
 INTENT="Sources/HSCC/Intents/WidgetScopePickerIntent.swift"
 
 # t_98fb8726 extended this gate in two layers: the executed cases 8-17 below
-# run the REAL `WidgetScope.buildPickerSelection` + `apply` (extracted with
+# run the REAL 'WidgetScope.buildPickerSelection' + 'apply' (extracted with
 # this same verbatim mechanism, since they live on the shared model the intent
 # delegates to) against the REAL suite domain — proving the configuration
-# intent's write lands exactly where `AppGroupWidgetSettings.load()` reads —
+# intent's write lands exactly where 'AppGroupWidgetSettings.load()' reads —
 # and the structural greps at the foot of the script prove the committed
 # intent file really calls those statics (delegation, not a private copy) and
 # never opens a UserDefaults handle of its own.
 #
 # t_3dd38411 added the PER-WIDGET layer: a scope per surface entry inside this
 # same blob (cases 15-17). Case 16-17 drive the real app-side
-# `Sources/HSCC/WidgetSettingsStore.swift` — compiled in, not copied — because
+# 'Sources/HSCC/WidgetSettingsStore.swift' — compiled in, not copied — because
 # that is the only writer the config screen has, and case 17 pins the race
 # where a fleet-wide scope written by the intent while the screen is open used
 # to be rolled back by the screen's next write.
@@ -66,85 +126,21 @@ $suite
 $wkey
 }"
 
-# ---- the interpolation guard (t_9e4a731b) ---------------------------------
-# The heredoc below is UNQUOTED on purpose: $suite_container and $model are
-# shell-expanded into the harness, and that extraction is the whole point of
-# this gate (no hand-copy -> no drift). An unquoted heredoc also runs every
-# UNESCAPED backtick it contains as a command substitution, and that is not a
-# cosmetic problem: it rewrites the Swift the gate then compiles and runs.
-# Measured against origin/main @ 3b5e475c with a byte-exact capture of the
-# harness its own script generated: three of those substitutions were reported
-# on stderr (defaults.surfaces.count, defaults(), surfaces) and SIX backticks
-# had been deleted from the generated harness — every unescaped one, the pairs
-# silently and the odd ones loudly. That is how a gate quietly changes what it
-# proves: prose in a Swift comment becomes shell, and whatever the backticked
-# words resolve to is what gets compiled and asserted on.
-#
-# Two guards, so the class cannot come back: the static scan below refuses the
-# file before the heredoc is ever expanded, and the harness integrity +
-# byte-stability block at the foot of this script refuses it after generation
-# (a harness whose bytes moved is a harness whose assertions moved — and that
-# second one also covers backticks arriving through $model, which is extracted
-# from Sources/Shared/SharedStore.swift at run time and so is invisible to a
-# scan of this file).
-#
-# Count the UNESCAPED backticks on a line: a backslash-escaped backtick is
-# literal text (that is the fix), a backslash-backslash is a literal backslash
-# and leaves the next backtick live, so parity of the run before each backtick
-# decides. `count_unescaped_bt FILE` prints the count and exits 1 when non-zero.
-integrityfail=0
-# NOTE on the awk below: BSD awk (the macOS /usr/bin/awk) treats a `$` in the
-# MIDDLE of a regex as a literal dollar sign, not an anchor — `/\\$/` therefore
-# matches "backslash then a dollar character" and never fails on ordinary text,
-# so an anchored backslash test must be spelled with /$\\$/ (anchor first) or
-# not use a regex at all. The trailing-backslash test here is written with
-# substr() instead, which is identical in every awk.
-count_unescaped_bt() {
-  awk 'BEGIN { n = 0; bad = 0 }
-       { line = $0
-         while (match(line, /`/)) {
-           head = substr(line, 1, RSTART - 1)
-           bs = 0
-           L = length(head)
-           while (L > 0 && substr(head, L, 1) == "\\") { bs++; L-- }
-           if (bs % 2 == 0) { n++; bad = 1 }
-           line = substr(line, RSTART + 1)
-         }
-       }
-       END { print n + 0; exit bad }' "$1"
-}
-
-# Static scan: the committed text of the `<<SWIFT` region, before it is expanded.
-# The bounds are located with grep (no awk program to get wrong) and the region
-# is cut to a temp file so ONE counter — the same one the harness check uses —
-# decides both. `[$]` in the first pattern is grep's way of matching a literal
-# dollar, which the opening line really contains ($WORK is expanded at run time).
-GATE="${SELF_DIR}/widget_settings_check.sh"
-region_start=$(grep -n '^cat > "[$]WORK/main\.swift" <<SWIFT$' "$GATE" | head -1 | cut -d: -f1)
-region_end=$(awk -v s="$region_start" 'NR > s && /^SWIFT$/ { print NR; exit }' "$GATE")
-if [ -z "$region_start" ] || [ -z "$region_end" ]; then
-  echo "WIDGET SETTINGS CHECK FAILED — cannot bound the <<SWIFT heredoc region in $GATE (the opening 'cat > \"\$WORK/main.swift\" <<SWIFT' or its closing SWIFT delimiter moved). The unescaped-backtick guard cannot run; re-point it, do not delete it." >&2
-  exit 1
-fi
-# The scan runs before WORK exists (it must refuse the file before the heredoc
-# is ever expanded), so its scratch lives in the system temp dir directly.
-region_file="${TMPDIR:-/tmp}/widget_check_region_$$"
-sed -n "$((region_start + 1)),$((region_end - 1))p" "$GATE" > "$region_file"
-if ! region_bt=$(count_unescaped_bt "$region_file"); then
-  echo "WIDGET SETTINGS CHECK FAILED — the heredoc body is bash-expanded, so an UNESCAPED backtick in it runs as a command substitution and splices shell into the generated harness (measured on origin/main @ 3b5e475c: every unescaped backtick in the body was spliced out of the harness this gate compiles and runs — the pairs silently, the odd ones loudly). Escape them as backslash-backtick — this is a Swift COMMENT inside an unquoted heredoc, so escaping is what keeps the prose intact — or move the prose outside the heredoc. $region_bt unescaped backtick(s) in the region $region_start..$region_end of $GATE. Lines carrying a backtick (escaped ones listed for contrast; only the unescaped ones are the offence):" >&2
-  awk -v s="$region_start" '{ if (index($0, "`") > 0) print (s + NR) ": " $0 }' "$region_file" >&2
-  rm -f "$region_file"
-  exit 1
-fi
-rm -f "$region_file"
+# (the interpolation guard for this file lives at the top of it, t_9e4a731b)
 
 WORK="${TMPDIR:-/tmp}/widget_check_$$"
 mkdir -p "$WORK"
-# Byte-stability reference for the generated harness (t_9e4a731b). $harness
-# below must equal this file byte for byte, which is what proves the gate is
-# still testing the code it was written against — and it is the guard a static
-# scan cannot be: it also sees splices coming from $model / $suite / $wkey,
-# which are extracted from Sources/ at run time.
+# Byte-stability reference for the generated harness (t_9e4a731b).
+# "harness" below must equal this file byte for byte. It is a DRIFT check, and
+# that is the honest scope of it: the harness is assembled from $model, $suite
+# and $wkey, all lifted out of Sources/ at run time, so anything that moves in
+# those inputs — or in this file's own heredoc body — moves these bytes. A
+# harness whose bytes moved is a harness whose ASSERTIONS moved, which is what
+# makes the comparison worth having. It is NOT a backtick detector: the harness
+# legitimately carries backticks (Swift doc comments inside the extracted model
+# text use them), and a backtick arriving through an expansion is inert text
+# anyway — a shell never re-scans an expansion. Backticks are settled once, at
+# the top of this file, before any of this runs.
 GOLDEN="scripts/widget_settings_check.harness.golden"
 # The harness is top-level code, so it MUST be named main.swift: with the real
 # Sources/HSCC/WidgetSettingsStore.swift compiled alongside it (case 16 drives
@@ -170,9 +166,9 @@ func check(_ name: String, _ cond: Bool) {
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
 // The count is READ, not remembered. This line used to be
-// \`defaults.surfaces.count == 4\`, which every new surface turned red — a
+// ${BT}defaults.surfaces.count == 4${BT}, which every new surface turned red — a
 // healthy gate failing on a correct change, which trains everyone to expect
-// noise here. \`defaults()\` is built FROM allCases, so what this case must
+// noise here. ${BT}defaults()${BT} is built FROM allCases, so what this case must
 // actually prove is that no case is missing from the defaults and none is
 // invented, which is a set comparison rather than a number.
 check("defaults seed exactly every WidgetSurfaceKind case",
@@ -407,7 +403,7 @@ check("an explicit All on the surface does not inherit the fleet default",
 // The on-disk shape of the two states that look alike: a never-chosen surface
 // carries NO scope key, an explicit All carries an empty object. Hand-typed
 // JSON would prove nothing about the shape this encoder writes — and the shape
-// IS surprising: \`surfaces\` is keyed by an enum that is not a CodingKey, so
+// IS surprising: ${BT}surfaces${BT} is keyed by an enum that is not a CodingKey, so
 // Swift writes the FLAT alternating key/value array, not a JSON object. These
 // assertions read that real array; a fixture that assumed an object would have
 // been a silent false green.
@@ -517,18 +513,12 @@ swiftc -o "$WORK/bin" "$WORK/main.swift" \
   echo "compile failed" >&2; exit 1; }
 
 harness="$WORK/main.swift"
+integrityfail=0
 # Refresh first, then assert: a refresh on purpose must not leave the run red.
+# Deliberately a "note:" line and not an "ok:" one — the assertion count this
+# gate documents is what a plain run prints, and refresh mode must not move it.
 if [ "${WSC_UPDATE_GOLDEN:-}" = "1" ]; then
-  cp "$harness" "$GOLDEN" && echo "  ok: harness reference refreshed (WSC_UPDATE_GOLDEN=1)"
-fi
-# The harness is Swift: it has no backtick syntax at all (interpolation is
-# backslash-paren). A live backtick therefore means bash spliced a command
-# substitution into it — the defect this card fixed — and this is the only way
-# to catch one that came from the EXTRACTED sources rather than from this file's
-# own heredoc body.
-if live_bt=$(count_unescaped_bt "$harness") && [ "$live_bt" != "0" ]; then
-  echo "WIDGET SETTINGS CHECK FAILED — the generated harness carries $live_bt UNESCAPED backtick(s); an unquoted heredoc ran them as command substitutions, so this gate compiled something other than the source it extracted. The harness is kept for inspection at $harness." >&2
-  integrityfail=$((integrityfail + 1))
+  cp "$harness" "$GOLDEN" && echo "  note: harness reference refreshed (WSC_UPDATE_GOLDEN=1) — commit scripts/widget_settings_check.harness.golden with this change"
 fi
 # Byte-stability of the generated harness — the byte-stability acceptance item.
 if ! cmp -s "$harness" "$GOLDEN" 2>/dev/null; then
@@ -543,7 +533,7 @@ if ! cmp -s "$harness" "$GOLDEN" 2>/dev/null; then
   integrityfail=$((integrityfail + 1))
 fi
 if [ "$integrityfail" -gt 0 ]; then
-  echo "WIDGET SETTINGS CHECK FAILED — $integrityfail harness-integrity assertion(s), before the harness was run"
+  echo "WIDGET SETTINGS CHECK FAILED — $integrityfail harness-integrity assertion(s), before the harness was run" >&2
   rm -rf "$WORK"
   exit 1
 fi
@@ -608,7 +598,7 @@ cok "a surface with no sections shows no content group" "if !sectionRows(kind).i
 # because they are assertions about THIS gate rather than about the app, and
 # both must be clean before any PASSED banner may print.
 if [ "$integrityfail" -gt 0 ]; then
-  echo "WIDGET SETTINGS CHECK FAILED — $integrityfail harness-integrity assertion(s) (see the harness diff above)"
+  echo "WIDGET SETTINGS CHECK FAILED — $integrityfail harness-integrity assertion(s) (see the harness diff above)" >&2
   rm -rf "$WORK"
   exit 1
 fi
