@@ -41,12 +41,13 @@ import WidgetKit
 // pane. That mirrors the CLI, which prints its error lines beside the tables it
 // did manage to build (`render()`'s `blind` distinguishes exactly these two).
 //
-// NOT WIRED TO THE ACTIVE TOGGLE / CADENCE. `WidgetSurfaceKind`
-// (`Shared/SharedStore.swift`) has no case for this surface, and adding one means
-// that file plus the app's widget settings screen — another card's file set. So
-// this widget uses the widget default cadence (5 min) and is never "paused": it
-// deliberately does NOT borrow `.widgetMonitor`'s entry, because switching off
-// the cluster monitor must not silently blank the board monitor.
+// WIRED TO THE ACTIVE TOGGLE / CADENCE (t_fa7926fb). Its registry entry is
+// `WidgetSurfaceKind.widgetKanbanMonitor`: the provider reads it before it builds
+// a client, so a paused surface sends ZERO requests and draws the honest "Paused
+// in Settings" pane in every family — never its last-known numbers, which is what
+// a paused panel showing a busy board would be. It deliberately does NOT borrow
+// `.widgetMonitor`'s entry: switching off the cluster monitor must not silently
+// blank the board monitor.
 // ---------------------------------------------------------------------------
 
 // MARK: - The projection
@@ -167,6 +168,15 @@ struct KanbanMonitorEntry: TimelineEntry {
     let ageMinutes: Int?
     /// The refresh cadence for the timeline (0 = let the OS decide).
     let refreshMinutes: Int
+    /// True when the operator paused THIS surface in Settings (t_fa7926fb).
+    ///
+    /// A paused entry carries no counts, no rows and no failure: it is neither
+    /// live data, nor stale data, nor an error, and drawing any of those instead
+    /// of an honest "paused" is exactly the failure `ClusterEntry.paused` exists
+    /// to avoid. A widget cannot remove itself programmatically, so the paused
+    /// pane IS the pause — and the provider never sends a request that could
+    /// have produced a number to draw here.
+    let paused: Bool
 
     /// The largest row list any family draws (§5.3's `large` row count).
     static let maxRows = 7
@@ -181,7 +191,43 @@ struct KanbanMonitorEntry: TimelineEntry {
                                                  failure: nil,
                                                  partialFailure: nil,
                                                  ageMinutes: nil,
-                                                 refreshMinutes: KanbanMonitorTimelineProvider.defaultRefreshMinutes)
+                                                 refreshMinutes: KanbanMonitorTimelineProvider.defaultRefreshMinutes,
+                                                 paused: false)
+
+    /// The paused state (t_fa7926fb): the cadence it was built with and nothing
+    /// else. No counts, no rows, no failure, no snapshot — the operator asked
+    /// for no data, so the surface shows none.
+    static func paused(refreshMinutes: Int) -> KanbanMonitorEntry {
+        KanbanMonitorEntry(date: .now,
+                           configured: true,
+                           counts: KanbanMonitorCounts(running: nil, ready: nil, blocked: nil),
+                           rows: [],
+                           failure: nil,
+                           partialFailure: nil,
+                           ageMinutes: nil,
+                           refreshMinutes: refreshMinutes,
+                           paused: true)
+    }
+
+    // MARK: Gate copy (unconfigured / paused)
+
+    /// The line the gate pane draws in the Home Screen families. One owner for
+    /// the copy, so six families cannot invent six paused messages — and the
+    /// setup invite still wins when both gates apply (audit-3, t_5c554c5b): an
+    /// app that was never configured has not "paused" anything.
+    var gateLine: String {
+        if !configured { return "Set up the app to see the board" }
+        return "Paused in Settings"
+    }
+
+    /// The label the accessory families draw for a gate state. `accessoryInline`
+    /// and `accessoryCircular` have no room for a pane, so they draw this, and
+    /// because the check inside it puts the setup invite FIRST, neither can ever
+    /// render "paused" on a device that was simply never set up.
+    var shortGateLabel: String {
+        if !configured { return "Set up in HSCC" }
+        return "Paused"
+    }
 
     /// A first-render / placeholder entry: real shape, sample rows, no claim of
     /// liveness beyond the fact that it is a placeholder the system replaces.
@@ -202,7 +248,8 @@ struct KanbanMonitorEntry: TimelineEntry {
                            failure: nil,
                            partialFailure: nil,
                            ageMinutes: nil,
-                           refreshMinutes: KanbanMonitorTimelineProvider.defaultRefreshMinutes)
+                           refreshMinutes: KanbanMonitorTimelineProvider.defaultRefreshMinutes,
+                           paused: false)
     }
 }
 
@@ -212,36 +259,79 @@ struct KanbanMonitorEntry: TimelineEntry {
 /// read-only, named, and goes through `WidgetDataClient` — which is GET-only by
 /// construction and refuses any path outside its allowlist before a URL exists.
 struct KanbanMonitorTimelineProvider: TimelineProvider {
-    /// The cadence a widget surface defaults to in `AppGroupWidgetSettings`
-    /// (`setting(for:)` gives widgets 5 min). Held here rather than read from the
-    /// registry because this surface has no registry case yet — see the header.
+    /// The cadence when the operator has never touched the settings screen: the
+    /// shared widget default (`AppGroupWidgetSettings.setting(for:)` gives a
+    /// self-fetching widget 5 minutes), which is what this file used while
+    /// `WidgetSurfaceKind` had no case for this surface. Since t_fa7926fb the
+    /// registry's answer wins and this is only the fallback for a store that was
+    /// never written.
     static let defaultRefreshMinutes = 5
+
+    // GATE-SLICE-BEGIN: kanban_monitor_cadence
+    /// The ONE cadence decision, kept free of WidgetKit so a gate can execute
+    /// it: nil means Off (cadence picker at 0) — the timeline gets
+    /// `policy: .atEnd` and the OS wakes the widget when it likes — and a date
+    /// means `.after(date)`. Written inline, the Off branch (the one that
+    /// becomes a refresh loop if it is wrong) would be the only branch in this
+    /// file no gate ever runs.
+    static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
+        guard refreshMinutes > 0 else { return nil }
+        return Calendar.current.date(byAdding: .minute, value: refreshMinutes, to: now)
+            ?? now.addingTimeInterval(TimeInterval(refreshMinutes * 60))
+    }
+    // GATE-SLICE-END: kanban_monitor_cadence
+
+    /// The operator's entry for THIS surface, or nil when the registry blob has
+    /// never been written. `setting(for:)` fills an absent surface in with ON at
+    /// the widget cadence, so nil here means "the app has never run its settings
+    /// screen" — never "paused". That distinction is why a fresh install still
+    /// renders: reading nil as paused would blank every widget on first boot.
+    private static func surface() -> WidgetSurfaceSettings? {
+        AppGroupWidgetSettings.load()?.setting(for: .widgetKanbanMonitor)
+    }
 
     func placeholder(in context: Context) -> KanbanMonitorEntry {
         .placeholder
     }
 
     func getSnapshot(in context: Context, completion: @escaping (KanbanMonitorEntry) -> Void) {
-        Task { completion(await fetchEntry()) }
+        // The gallery preview reads the SAME registry entry the timeline does, so
+        // a paused widget previews as paused instead of showing a busy board the
+        // operator explicitly turned off.
+        let surface = Self.surface()
+        Task { completion(await fetchEntry(surface: surface)) }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<KanbanMonitorEntry>) -> Void) {
         Task {
-            let entry = await fetchEntry()
-            let next = Calendar.current.date(byAdding: .minute,
-                                             value: entry.refreshMinutes,
-                                             to: .now)
-                ?? .now.addingTimeInterval(300)
+            let surface = Self.surface()
+            let entry = await fetchEntry(surface: surface)
+            // 0 = Off in the cadence picker: no scheduled refresh, the OS
+            // decides. Same shape as `ClusterWidgetTimelineProvider.getTimeline`.
+            guard let next = Self.nextRefreshDate(
+                refreshMinutes: surface?.refreshMinutes ?? Self.defaultRefreshMinutes
+            ) else {
+                completion(Timeline(entries: [entry], policy: .atEnd))
+                return
+            }
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 
     // MARK: Fetch
 
-    /// Always returns a renderable entry: unconfigured and failed are states, not
-    /// blanks. The three reads run together (they are independent and the
-    /// extension's budget is short) and each resolves on its own.
-    private func fetchEntry() async -> KanbanMonitorEntry {
+    /// Always returns a renderable entry: unconfigured, paused and failed are
+    /// states, not blanks. The three reads run together (they are independent and
+    /// the extension's budget is short) and each resolves on its own.
+    private func fetchEntry(surface: WidgetSurfaceSettings?) async -> KanbanMonitorEntry {
+        // Paused is decided BEFORE the client is built and before any read: a
+        // paused surface spends zero of WIDGET_DATA_CONTRACT §2's request budget
+        // and draws zero numbers — no live counts, no last-known snapshot, no
+        // failure pane. `!isActive` can only come from a blob the app wrote, so
+        // an install that never opened Settings cannot land here.
+        if let surface, !surface.isActive {
+            return .paused(refreshMinutes: surface.refreshMinutes)
+        }
         let client = WidgetDataClient.makeIfConfigured()
         guard let client else {
             // Not configured → the widget's ONE job is to invite setup. Never
@@ -257,7 +347,8 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         let (running, blocked, stale) = await (runningOutcome, blockedOutcome, staleOutcome)
 
         return KanbanMonitorEntry.resolve(running: running, blocked: blocked, stale: stale,
-                                          refreshMinutes: Self.defaultRefreshMinutes)
+                                          refreshMinutes: surface?.refreshMinutes
+                                              ?? Self.defaultRefreshMinutes)
     }
 }
 
@@ -289,7 +380,12 @@ extension KanbanMonitorEntry {
                                       failure: firstFailure ?? .notConfigured,
                                       partialFailure: nil,
                                       ageMinutes: nil,
-                                      refreshMinutes: refreshMinutes)
+                                      refreshMinutes: refreshMinutes,
+                                      // Every state `resolve` can produce is a
+                                      // READ — live, stale or failed. Paused is
+                                      // never built here: the provider returns
+                                      // `.paused` before it has a client.
+                                      paused: false)
         }
 
         let rows = mergedRows(running: running.value?.tasks ?? [],
@@ -305,7 +401,8 @@ extension KanbanMonitorEntry {
                                   failure: nil,
                                   partialFailure: firstFailure,
                                   ageMinutes: oldestAge(running: running, blocked: blocked, stale: stale),
-                                  refreshMinutes: refreshMinutes)
+                                  refreshMinutes: refreshMinutes,
+                                  paused: false)
     }
 
     /// The route's own `count` when it sent one, else the rows it sent. Both
@@ -500,18 +597,35 @@ struct KanbanMonitorWidgetView: View {
 // for the cluster widget, and every family here repeats it in the same order:
 // unconfigured (invites setup) BEFORE failed (can't read the board) BEFORE
 // content. Swapping the first two is the t_5c554c5b bug.
+//
+// Paused (t_fa7926fb) shares that FIRST step rather than joining after it: every
+// body tests `!entry.configured || entry.paused` in ONE step, so no family can
+// forget the second state and reach a number. The ordering above still holds
+// inside the gate, because the copy both panes draw (`gateLine` /
+// `shortGateLabel`) checks `configured` first.
 
-/// The setup invite — the only thing an unconfigured app may show.
-struct KanbanMonitorSetup: View {
+/// The gate a family draws when it has nothing to draw: the setup invite
+/// (t_5c554c5b — the ONLY thing an unconfigured app may show) or the honest
+/// paused state (t_fa7926fb). One pane, two copies, chosen by `entry.paused`,
+/// exactly as `ClusterWidgetViews`' gate and `BoardStatusGateView` do, so a
+/// paused surface can never fall through to live counts, to stale numbers, or to
+/// a blank. The accessory families draw `shortGateLabel` as text instead — a ring
+/// has no room for three lines, and a paused gauge that still drew the running
+/// count would be the false number §6 rule 1 refuses.
+struct KanbanMonitorGateView: View {
+    let entry: KanbanMonitorEntry
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: "gearshape")
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
                 .font(.subheadline)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            Text(WidgetDataFailure.notConfigured.shortLabel)
+            Text(entry.gateLine)
                 .font(.caption2.weight(.semibold))
                 .foregroundColor(Theme.Semantic.onSurface)
-            Text(WidgetDataFailure.notConfigured.operatorLine)
+            Text(entry.paused
+                 ? "Turn it back on under Widgets & Live Activities in the HSCC app."
+                 : WidgetDataFailure.notConfigured.operatorLine)
                 .font(.caption2)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .lineLimit(3)
@@ -693,8 +807,11 @@ struct KanbanMonitorInline: View {
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        if !entry.configured {
-            Text(WidgetDataFailure.notConfigured.shortLabel)
+        if !entry.configured || entry.paused {
+            // Both gate states through ONE copy rule, and that rule itself puts
+            // the setup invite first — an unconfigured device can never read as
+            // "paused" (audit-3, t_5c554c5b).
+            Text(entry.shortGateLabel)
         } else if let failure = entry.failure {
             Text(failure.shortLabel)
         } else {
@@ -708,8 +825,12 @@ struct KanbanMonitorCircular: View {
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        if !entry.configured {
-            Image(systemName: "gearshape")
+        if !entry.configured || entry.paused {
+            // A LABEL, not a gauge: a paused ring that still drew the running
+            // count would be the false number §6 rule 1 refuses, and the same
+            // copy rule as the inline family puts setup first.
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+            Text(entry.shortGateLabel)
         } else if let failure = entry.failure {
             Image(systemName: "exclamationmark.triangle.fill")
             Text(failure.shortLabel)
@@ -747,8 +868,8 @@ struct KanbanMonitorRectangular: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-            if !entry.configured {
-                Text(WidgetDataFailure.notConfigured.shortLabel)
+            if !entry.configured || entry.paused {
+                Text(entry.gateLine)
                     .font(.caption2.weight(.semibold))
             } else if let failure = entry.failure {
                 Text("board read failed")
@@ -785,8 +906,8 @@ struct SmallKanbanMonitor: View {
 
     var body: some View {
         Group {
-            if !entry.configured {
-                KanbanMonitorSetup()
+            if !entry.configured || entry.paused {
+                KanbanMonitorGateView(entry: entry)
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure)
             } else {
@@ -818,8 +939,8 @@ struct MediumKanbanMonitor: View {
 
     var body: some View {
         Group {
-            if !entry.configured {
-                KanbanMonitorSetup()
+            if !entry.configured || entry.paused {
+                KanbanMonitorGateView(entry: entry)
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure)
             } else {
@@ -851,8 +972,8 @@ struct LargeKanbanMonitor: View {
 
     var body: some View {
         Group {
-            if !entry.configured {
-                KanbanMonitorSetup()
+            if !entry.configured || entry.paused {
+                KanbanMonitorGateView(entry: entry)
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure, detailed: true)
             } else {

@@ -147,4 +147,161 @@ SWIFT
   rm -rf "$CW"
 fi
 
+# ---------------------------------------------------------------------------
+# The widgets that read the settings registry (t_fa7926fb: kanban monitor +
+# running cards).
+#
+# Their views import WidgetKit and name accessory families, so nothing here can
+# EXECUTE a body — the dispatch is therefore STRUCTURAL (which step every body
+# takes, in which order), and the one decision in each file that is pure
+# Foundation — the cadence — is sliced out of the committed source by
+# GATE-SLICE marker and EXECUTED, so the Off branch is not a comment.
+#
+# The invariant is the same one the header of this file states: an unconfigured
+# entry invites setup in every family. Paused joins that FIRST step rather than
+# arriving after it, which is why the greps below look for one
+# `!configured || paused` test and not for a second branch.
+#
+# The board-status tile above keeps the hand-written section #340 shipped with
+# it. Converting that section into a call here would rewrite a merged card's
+# gate for no added coverage, so this function is what the widgets AFTER it use
+# — one call per surface, no copy of the checks. The day a third registry widget
+# lands, it is two lines, not another forty greps.
+# ---------------------------------------------------------------------------
+
+wgfail=0
+wok() { echo "  ok: $1"; }
+wbad() { echo "  FAIL: $1"; wgfail=1; }
+
+# widget_surface_gate <file> <slice-marker> <paused-factory-literal>
+#                     <min gated bodies> <awk program naming the fetch fn>
+#                     <registry key without the leading dot>
+widget_surface_gate() {
+  file="$1"; slice="$2"; factory="$3"; want="$4"; region_re="$5"; key="$6"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
+
+  # (1) Every family that can draw live data gates on BOTH states in ONE step,
+  # so no family can forget the second state and reach a number.
+  n=$(grep -c 'if !entry.configured || entry.paused' "$file")
+  if [ "$n" -ge "$want" ]; then
+    wok "$n bodies gate on !configured||paused (want >= $want)"
+  else
+    wbad "only $n bodies gate on !configured||paused (want >= $want) — a family can draw data on a paused surface"
+  fi
+
+  # (2) The paused copy belongs to the entry, once: six families drawing six
+  # different paused messages is the same drift this file's header exists for.
+  n=$(grep -c '"Paused in Settings"' "$file")
+  if [ "$n" -eq 1 ]; then
+    wok "one paused copy, owned by the entry (gateLine)"
+  else
+    wbad "\"Paused in Settings\" appears $n times (want exactly 1 — the copy must be owned by the entry)"
+  fi
+
+  # (3) The accessory families draw the LABEL, never a count: a paused ring or
+  # gauge still showing a number is the false zero §6 rule 1 refuses.
+  n=$(grep -c 'Text(entry.shortGateLabel)' "$file")
+  if [ "$n" -ge 2 ]; then
+    wok "accessory families draw shortGateLabel ($n sites)"
+  else
+    wbad "only $n accessory sites draw shortGateLabel (want >= 2 — inline and circular)"
+  fi
+
+  # (4) Cadence and pause come from the shared registry, not a private default.
+  if grep -qF "setting(for: .$key)" "$file"; then
+    wok "cadence and pause come from WidgetSurfaceKind.$key (one registry, one write path)"
+  else
+    wbad "$file reads its cadence somewhere other than WidgetSurfaceKind.$key"
+  fi
+
+  # (5) A paused entry is built by the entry's own factory — no projection, no
+  # counts, no failure pane.
+  if grep -qF "$factory" "$file"; then
+    wok "the provider returns the entry's own paused factory ($factory)"
+  else
+    wbad "the provider does not build its paused entry with $factory"
+  fi
+
+  # (6) Paused is decided BEFORE the client exists. Line order IS the claim
+  # (a paused surface must spend zero of §2's request budget), and it is
+  # measured INSIDE the function that owns both, because `makeIfConfigured()`
+  # also occurs elsewhere in these files — comparing file-global line numbers
+  # reads the wrong occurrence and fails for the wrong reason.
+  region=$(awk "$region_re" "$file")
+  if [ -z "$region" ]; then
+    wbad "could not locate the fetch function in $file — the order claim is not being measured"
+  else
+    a=$(printf '%s\n' "$region" | grep -n 'if let surface, !surface.isActive' | head -1 | cut -d: -f1)
+    c=$(printf '%s\n' "$region" | grep -n 'WidgetDataClient.makeIfConfigured()' | head -1 | cut -d: -f1)
+    if [ -n "$a" ] && [ -n "$c" ] && [ "$a" -lt "$c" ]; then
+      wok "inside the fetch: paused decided (line $a) before the client exists (line $c) — zero requests when paused"
+    else
+      wbad "inside the fetch, paused is NOT decided before the client is built (active=$a client=$c)"
+    fi
+  fi
+
+  # (7) The cadence, EXECUTED. The marker match is END-ANCHORED, so a marker
+  # that grew a suffix cannot keep this table green while the name it claims to
+  # cover is gone (that negative was run: suffixing the marker fails it by name).
+  s=$(grep -n "// GATE-SLICE-BEGIN: ${slice}[[:space:]]*$" "$file" | head -1 | cut -d: -f1)
+  e=$(grep -n "// GATE-SLICE-END: ${slice}[[:space:]]*$" "$file" | head -1 | cut -d: -f1)
+  if [ -z "$s" ] || [ -z "$e" ]; then
+    wbad "GATE-SLICE marker $slice missing from $file — the cadence table is not covering the committed rule"
+    return
+  fi
+  body=$(sed -n "$((s+1)),$((e-1))p" "$file")
+  case "$body" in
+    *"func nextRefreshDate"*) : ;;
+    *) wbad "$slice slice does not contain nextRefreshDate" ;;
+  esac
+  CW="$TMPDIR/widget_cadence_${slice}_$$"
+  mkdir -p "$CW"
+  {
+    echo "import Foundation"
+    echo "enum CadenceHost {"
+    echo "$body"
+    echo "}"
+    cat <<'SWIFT'
+var fails = 0
+func check(_ name: String, _ cond: Bool) {
+    if cond { print("  ok: cadence " + name) } else { print("FAIL: cadence " + name); fails += 1 }
+}
+let t = Date(timeIntervalSince1970: 1_700_000_000)
+// Off (0) is nil, and the provider turns nil into `policy: .atEnd`.
+check("Off cadence yields no next date (policy .atEnd)",
+      CadenceHost.nextRefreshDate(refreshMinutes: 0, from: t) == nil)
+// A corrupt negative must not schedule an instant loop either.
+check("negative cadence yields no next date (no refresh loop)",
+      CadenceHost.nextRefreshDate(refreshMinutes: -5, from: t) == nil)
+// Every real cadence is minutes, not seconds, from `now`.
+check("5 min cadence is exactly +300s",
+      CadenceHost.nextRefreshDate(refreshMinutes: 5, from: t) == t.addingTimeInterval(300))
+check("60 min cadence is exactly +3600s",
+      CadenceHost.nextRefreshDate(refreshMinutes: 60, from: t) == t.addingTimeInterval(3600))
+if fails > 0 { print("RESULT: FAIL - cadence table broke"); exit(1) }
+print("RESULT: OK - cadence: Off and negative mean atEnd, real values mean minutes")
+SWIFT
+  } > "$CW/main.swift"
+  xcrun swiftc -sdk "$SDK" -o "$CW/bin" "$CW/main.swift" 2>&1 \
+    || wbad "$slice cadence slice did not compile"
+  if [ -x "$CW/bin" ]; then
+    "$CW/bin" || wbad "$slice cadence assertions failed"
+  fi
+  rm -rf "$CW"
+}
+
+widget_surface_gate \
+  Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+  kanban_monitor_cadence \
+  ".paused(refreshMinutes:" \
+  6 \
+  '/private func fetchEntry\(surface:/ {f=1} f {print} f && /^    \}$/ {exit}' \
+  widgetKanbanMonitor
+
+if [ "$wgfail" -ne 0 ]; then
+  echo "WIDGET SURFACE GATE CHECK FAILED — a registry-driven surface can draw data it was told not to fetch"
+  exit 1
+fi
+echo "WIDGET SURFACE GATE CHECK PASSED — every registry-driven widget body gates paused and unconfigured in one step, decides pause before the client exists, and its cadence is executed off the committed source"
+
 exit $rc
