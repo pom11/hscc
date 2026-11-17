@@ -13,6 +13,9 @@ import WidgetKit
 ///   * small/medium/large + the three accessory families — Running Cards: the
 ///                     cards being worked right now, each with its worker and
 ///                     its run time (`hscc cards monitor --live`, narrowed).
+///   * accessory + small/medium/large — Kanban Monitor: `hscc kanban monitor
+///                     --live`'s running / ready / blocked, from the kanban trio,
+///                     with a visible error pane when a board read fails.
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -23,5 +26,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         ClusterWidget()
         MonitorWidget()
         CardsRunningWidget()
+        KanbanMonitorWidget()
     }
 }
