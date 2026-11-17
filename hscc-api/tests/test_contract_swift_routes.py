@@ -469,8 +469,8 @@ def test_matrices_name_routes_the_client_still_calls():
     gates report "the client sends none of the required fields" — a real-looking
     red whose actual cause is a dead row. That is exactly what happened after
     be154aec deleted the memory viewer and the template detail screen: four
-    rows for routes the app no longer calls sat in both matrices and failed
-    the two gates above for a day.
+    rows for routes the app no longer calls sat in both matrices and have
+    failed the two gates above ever since.
 
     Asserting the rows name live routes is a GATE, not a filter: the point is
     to name the stale row precisely, and to forbid "fixing" such a red by
