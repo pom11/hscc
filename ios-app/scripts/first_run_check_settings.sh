@@ -15,7 +15,7 @@
 # unusable — the operator was told success while nothing worked.
 #
 # Fix: SettingsStore.connectionIdentity (host|port|token-hash) changes in every
-# one of those cases, and ContentView now re-probes on it. This harness compiles
+# one of those cases, and the root view now re-probes on it. This harness compiles
 # the REAL SettingsStore + KeychainStore + a SharedModels slice (never
 # redeclared) into a plain macOS CLI and asserts:
 #   * isConfigured stays true across a wrong-token swap and a host change

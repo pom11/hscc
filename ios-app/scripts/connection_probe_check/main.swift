@@ -149,7 +149,7 @@ let urlReport = await ConnectionProbe.runReachabilityProbe(on: m) {
 }
 assert(urlReport == .transportFailure, "an unbuildable URL classifies as transport failure (no HTTP answer)")
 
-// 4) Cluster switch: AppShell's reset() puts .unknown again — the probe loop
+// 4) Cluster switch: ConfigView's reset() puts .unknown again — the probe loop
 //     restarts on connectionIdentity and re-resolves it. The monitor itself
 //     must not spontaneously "remember" the old cluster's reachability.
 m.reset()

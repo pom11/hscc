@@ -5,7 +5,10 @@
 // ConnectionMonitor.swift. Only the surrounding app types are stubbed.
 //
 // What the router actually touches from the outside world:
-//   * ContentView.Tab            (real: Sources/HSCC/ContentView.swift)
+//   * ContentView.Tab            (real: Sources/HSCC/DeepLink.swift — the tab
+//                                  root was deleted by t_9664a1c8, so the router
+//                                  now declares its own vocabulary and this
+//                                  harness must NOT redeclare it)
 //   * ProjectDetailView.Section  (real: Sources/HSCC/Views/ProjectsView.swift)
 //   * HSCCClient.projects() / cardDetail(_:)  (real: Sources/HSCC/HSCCClient.swift)
 //
@@ -14,14 +17,6 @@
 // relies on and lets the harness swap the responses per scenario.
 
 import Foundation
-
-// MARK: ContentView.Tab (real: Sources/HSCC/ContentView.swift)
-
-enum ContentView {
-    enum Tab: Hashable {
-        case projects, cluster, settings
-    }
-}
 
 // MARK: ProjectDetailView.Section (real: Sources/HSCC/Views/ProjectsView.swift)
 

@@ -49,12 +49,13 @@ struct HSCCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // Root (IOS_REDESIGN 2026-10-14 Phase 2): the drawer shell replaces
-            // the three-tab TabView root. The SAME five environment objects are
-            // injected — and `unread`/`replyWatcher` still share the ONE
-            // ProjectUnreadCenter built in init() (two centers would disagree
-            // about what has been read).
-            AppShell()
+            // The two-screen root (t_9664a1c8, pivot slice S1): connection
+            // settings + widget/Live Activity configuration. No drawer, no dock,
+            // no detail stack — every data surface the console rendered is now a
+            // widget or a Live Activity. `unread`/`replyWatcher` stay injected
+            // because the chat views that read them are still on disk (S2 retires
+            // them), and they share the ONE ProjectUnreadCenter built in init().
+            ConfigView()
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
                 .environmentObject(unread)
