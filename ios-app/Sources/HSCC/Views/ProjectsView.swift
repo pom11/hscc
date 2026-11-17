@@ -276,19 +276,11 @@ struct ProjectOverviewView: View {
         .task {
             if detail.value == nil, !detail.isLoading { await load() }
         }
-        .toolbar {
-            // Session history — the project's chat log as a read-back pager
-            // (t_2776ea3c). Lived on the old segment sandwich's toolbar; the
-            // chat screen keeps this same action, so the history stays one
-            // tap from both entry points.
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    SessionHistoryView(client: client, project: name)
-                } label: {
-                    Label("Session History", systemImage: "clock.arrow.circlepath")
-                }
-            }
-        }
+        // The "Session History" toolbar entry (t_2776ea3c) is gone with
+        // `SessionHistoryView` itself (t_3778b7bd, console retirement): the
+        // read-back session pager was a console screen, and the pivot keeps no
+        // session screen at all — so the overview carries no entry to a view
+        // that no longer exists.
     }
 
     @ViewBuilder

@@ -73,7 +73,9 @@ final class NavGraphUITests: XCTestCase {
         expect("logs", titleMarker: "the daemon core — scheduler, fleet, trigger engine", emptyMarker: "Clean tail", errMarker: "Debug fixture failure", ptrPath: "/v1/logs"),
         expect("memory", titleMarker: "Memories", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/memory"),
         expect("templates", titleMarker: "Applied template", emptyMarker: "No templates", errMarker: "Debug fixture failure", ptrPath: "/v1/template/list"),
-        expect("sessions", titleMarker: "Sessions", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/sessions"),
+        // "sessions" is gone (t_3778b7bd): SessionsView was deleted with the
+        // console, so the drawer has no session row to walk — the generator
+        // fails an expectation whose row no longer exists.
         expect("activity", titleMarker: "Latest", emptyMarker: "Idle", errMarker: "Couldn't load the feed", ptrPath: "/v1/activity/feed"),
         expect("search", titleMarker: "Search", emptyMarker: nil, errMarker: nil, ptrPath: nil),
         expect("settings", titleMarker: "Settings", emptyMarker: nil, errMarker: nil, ptrPath: nil),
@@ -414,7 +416,11 @@ final class NavGraphUITests: XCTestCase {
         assertMarker(app, "Refresh cards", screen: "cards", edge: "card list never rendered")
 
         tapContaining(app, "t_049d6986", screen: "cards")
-        assertMarker(app, "Files & diff", screen: "cardDetail",
+        // Marker swapped from "Files & diff" (t_3778b7bd): that NavigationLink
+        // left with `DiffDetailView`, so the walk now proves the card detail
+        // rendered through the Card section's "Assignee" row, which the fixture
+        // card (backend-engineer) always renders.
+        assertMarker(app, "Assignee", screen: "cardDetail",
                      edge: "card detail never rendered after tapping a card row")
         tapBack(app, landsOnMarker: "Refresh cards", screen: "cardDetail",
                 expectedLabel: "Cards")

@@ -66,7 +66,10 @@ struct Sidebar: View {
             group("Knowledge") {
                 row(.memory)
                 row(.templates)
-                row(.sessions)
+                // The "Sessions" row is gone (t_3778b7bd, console retirement):
+                // `SessionsView` is deleted with the console, so the session list
+                // has no screen to open. `.sessions` still resolves — as a mapped
+                // alias onto the root in AppShell.normalized, never as a row.
                 row(.activity)
             }
             group("App") {

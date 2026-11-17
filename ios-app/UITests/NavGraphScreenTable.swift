@@ -11,7 +11,7 @@
 //  a walk expectation breaks the gate BEFORE the walker even runs,
 //  which is the point: a new screen cannot dodge the walk.
 //
-//  Generated 2026-10-16 from the code as committed.
+//  Generated 2026-11-17 from the code as committed.
 
 import Foundation
 
@@ -42,7 +42,6 @@ enum NavGraphScreenTable {
         NavScreenExpectation(raw: "logs", appTitle: "Logs", titleMarker: "the daemon core — scheduler, fleet, trigger engine", emptyMarker: "Clean tail", errMarker: "Debug fixture failure", ptrPath: "/v1/logs"),
         NavScreenExpectation(raw: "memory", appTitle: "Memory", titleMarker: "Memories", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/memory"),
         NavScreenExpectation(raw: "templates", appTitle: "Templates", titleMarker: "Applied template", emptyMarker: "No templates", errMarker: "Debug fixture failure", ptrPath: "/v1/template/list"),
-        NavScreenExpectation(raw: "sessions", appTitle: "Sessions", titleMarker: "Sessions", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/sessions"),
         NavScreenExpectation(raw: "activity", appTitle: "Activity feed", titleMarker: "Latest", emptyMarker: "Idle", errMarker: "Couldn't load the feed", ptrPath: "/v1/activity/feed"),
         NavScreenExpectation(raw: "search", appTitle: "Search", titleMarker: "Search", emptyMarker: nil, errMarker: nil, ptrPath: nil),
         NavScreenExpectation(raw: "settings", appTitle: "Settings", titleMarker: "Settings", emptyMarker: nil, errMarker: nil, ptrPath: nil),
