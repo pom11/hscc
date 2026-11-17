@@ -1,0 +1,768 @@
+import AppIntents
+import Foundation
+import SwiftUI
+import WidgetKit
+
+// ---------------------------------------------------------------------------
+// BoardStatusWidget.swift — one board, five numbers.
+//
+// `docs/WIDGET_DATA_CONTRACT.md` §5.2 is the spec: todo / ready / running /
+// blocked / done for ONE board the operator picks in the widget's own
+// configuration sheet, rendered across the Home Screen families and the three
+// accessory families. Read-only, like every surface in the pivot: this file
+// fetches through `WidgetDataClient` (GET-only, closed read allowlist) and
+// mutates nothing.
+//
+// WHY A NEW WIDGET RATHER THAN AN EXTRA ROW ON `ClusterWidget`: the cluster
+// widget answers "is the fleet up". This one answers "what does this board need
+// from me", which is per-board and five numbers deep — the §7 hygiene rules make
+// those two different projections with different lifetimes, so they get
+// different stores and different timelines.
+//
+// THE `done` PROBLEM, AND WHAT THIS FILE DOES ABOUT IT (§5.2, §6 rule 1).
+// `done` is not in any route an extension may read: `/v1/cards?status=done`
+// answers with ZERO cards and the archived listing costs 8.6 MB, so a widget
+// that derived counts from a card list would render `done: 0` forever — the
+// honesty failure §5.2 refuses. `GET /v1/mobile/summary` (§6) counts it
+// server-side and is the primary read here. It is not deployed on every cluster
+// yet, so the read plan is two steps and the fallback is the §5.2-granted
+// interim, not an invention of this file:
+//
+//   1. `mobileSummary(boards:)` — one request, all five numbers, real `done`.
+//      `?boards=` scopes it (§6 rule 2); with no board chosen the route returns
+//      every board and the tile is the sum of them, which is a real answer
+//      rather than a guess.
+//   2. Only when that produced no counts (404 on an older cluster, a degraded
+//      §6-rule-7 response, or one board carrying its own `error` per §6 rule 4):
+//      `kanbanStale(olderThanDays: 0)` — ONE request that already carries every
+//      non-terminal card with its `status`, so the four OPEN numbers come from a
+//      per-status histogram and `done` renders `—`, never `0`. Board scope is
+//      client-side because `?board=` is measured-ignored by that route (§4.3).
+//
+// Worst case that is 2 requests per refresh (1 once §6's route is everywhere),
+// inside §2's ≤2-request budget, and the fallback failure — not the summary's —
+// is what a total failure reports, because "can't reach the cluster" is the
+// story whenever BOTH reads fail.
+//
+// CONFIGURATION: `AppIntentConfiguration` + a `WidgetConfigurationIntent` with
+// one `@Parameter` board, so the picker is the system's own (long-press the
+// widget → Edit Widget) and needs no screen in the app — which matters while the
+// console is being retired (`CONSOLE_RETIREMENT.md`). `AppEntity`/`EntityQuery`
+// are conformed to BY HAND: this SDK's `@AppEntity` macro takes only
+// `schema:` (the `name:` form is gone), and nothing here needs the schema bridge.
+// The picker's rows come from `GET /v1/projects` — the sanctioned board-name
+// source (§5.1: `{name, board}` only is decoded, `repo` never) — falling back to
+// the slugs this device last saw, because a picker that is empty while the
+// cluster is down is useless.
+//
+// STORAGE (§7): the projection only — board slug, five optional ints, the
+// source, and the fetch date. No response body, no card text, no path, no
+// address, no token, and the writes go through `SharedStore.suite` (never a
+// `.standard` fallback). A snapshot is only ever kept for the board it belongs
+// to: last week's `hscc` numbers are not last-known data for `radio`.
+// ---------------------------------------------------------------------------
+
+// MARK: - The projection (what is stored, and what the views draw)
+
+/// Where a set of numbers came from, which decides whether `done` is a number.
+enum BoardStatusSource: String, Codable {
+    /// §6's compact summary route: all five statuses, `done` included.
+    case compact
+    /// The §5.2 interim: open counts from `kanban/stale`, `done` unknown.
+    case openOnly
+}
+
+/// The five numbers for one board (or for every board together).
+///
+/// Every status is OPTIONAL on purpose: `nil` means "this payload did not carry
+/// that status", which draws `—`, while `0` means "the server counted none".
+/// §6 rule 1 is exactly that distinction, and it is the reason
+/// `BoardStatusCounts` (the shared wire type, all-required) is not reused as the
+/// storage shape — the interim path genuinely does not know `done`.
+struct BoardStatusProjection: Codable, Equatable {
+    /// The board these numbers belong to; nil = every board together. Kept as a
+    /// slug so a snapshot can never be handed to the wrong board's tile.
+    let boardSlug: String?
+    var todo: Int?
+    var ready: Int?
+    var running: Int?
+    var blocked: Int?
+    var done: Int?
+    let source: BoardStatusSource
+
+    /// What the header draws when no board was picked.
+    static let allBoardsLabel = "All boards"
+
+    /// The designated init. Written out rather than relying on the memberwise
+    /// one, because the two payload inits below remove the implicit memberwise
+    /// initializer — and the preview fixture needs one.
+    init(boardSlug: String?, todo: Int?, ready: Int?, running: Int?,
+         blocked: Int?, done: Int?, source: BoardStatusSource) {
+        self.boardSlug = boardSlug
+        self.todo = todo
+        self.ready = ready
+        self.running = running
+        self.blocked = blocked
+        self.done = done
+        self.source = source
+    }
+
+    /// What `placeholder(in:)` draws: plausible numbers, clearly not a real
+    /// cluster, and the same shape a live entry takes so every family can be
+    /// eyeballed in the gallery. A preview fixture, never a stored state.
+    static let preview = BoardStatusProjection(boardSlug: "hscc", todo: 17, ready: 2,
+                                               running: 3, blocked: 0, done: 750, source: .compact)
+
+    var displayName: String { boardSlug ?? Self.allBoardsLabel }
+
+    /// Whether anything at all is drawable. False means draw the failure, not zeros.
+    var hasNumbers: Bool { todo != nil || ready != nil || running != nil || blocked != nil || done != nil }
+
+    /// The "N open" figure, only when all four operands are known — a partial
+    /// sum would be a number that means something else.
+    var openCount: Int? {
+        guard let todo, let ready, let running, let blocked else { return nil }
+        return todo + ready + running + blocked
+    }
+
+    /// True when `done` is `—` because the cluster has no §6 route yet. The
+    /// surfaces say so instead of letting a dash look like a design choice.
+    var needsCompactRoute: Bool { source == .openOnly }
+
+    /// The §6 tile for this board, if the payload carried one that is usable.
+    /// nil = degraded (§6 rule 7), a board-level `error` (§6 rule 4), or the
+    /// board simply was not in the response.
+    init?(summary: MobileSummaryResponse, boardSlug: String?) {
+        guard !summary.degraded else { return nil }
+        source = .compact
+        self.boardSlug = boardSlug
+        if let slug = boardSlug {
+            guard let tile = summary.board(slug), let counts = tile.counts, tile.error == nil else { return nil }
+            todo = counts.todo
+            ready = counts.ready
+            running = counts.running
+            blocked = counts.blocked
+            done = counts.done
+        } else {
+            // Every board: sum the tiles that carry counts. A tile with an
+            // `error` is skipped rather than counted as nothing.
+            let usable = summary.entries.filter { $0.counts != nil && $0.error == nil }
+            guard !usable.isEmpty else { return nil }
+            todo = usable.reduce(0) { $0 + ($1.counts?.todo ?? 0) }
+            ready = usable.reduce(0) { $0 + ($1.counts?.ready ?? 0) }
+            running = usable.reduce(0) { $0 + ($1.counts?.running ?? 0) }
+            blocked = usable.reduce(0) { $0 + ($1.counts?.blocked ?? 0) }
+            done = usable.reduce(0) { $0 + ($1.counts?.done ?? 0) }
+        }
+    }
+
+    /// The §5.2 interim: the four open numbers, counted out of the non-terminal
+    /// card list, scoped to one board. `done` stays nil — this route cannot know
+    /// it (§5.2), and `—` is the only honest way to draw that.
+    init(openOnly tasks: [StaleCardLite], boardSlug: String?) {
+        source = .openOnly
+        self.boardSlug = boardSlug
+        var todo = 0, ready = 0, running = 0, blocked = 0
+        for card in tasks {
+            // `?board=` is IGNORED by the kanban routes (measured, §4.3), so the
+            // scope happens here. A card whose `board` is nil is kept for the
+            // all-boards tile and skipped for a named one — never guessed at.
+            if let boardSlug, card.board != boardSlug { continue }
+            switch card.status?.lowercased() {
+            case "todo": todo += 1
+            case "ready": ready += 1
+            // `claimed`/`in_progress` are the same fact in another dialect — the
+            // same folding `Theme.cardStatusColor` already does for colour.
+            case "running", "claimed", "in_progress": running += 1
+            case "blocked": blocked += 1
+            default: break  // `review` and anything else are not one of the five
+            }
+        }
+        self.todo = todo
+        self.ready = ready
+        self.running = running
+        self.blocked = blocked
+        self.done = nil
+    }
+}
+
+// MARK: - The timeline entry
+
+struct BoardStatusEntry: TimelineEntry {
+    let date: Date
+    /// nil = every board together (the picker's default).
+    let boardSlug: String?
+    /// nil when nothing usable came back — `failure` then says why.
+    let projection: BoardStatusProjection?
+    /// Set only for stale-while-error: minutes since the stored numbers were fetched.
+    let ageMinutes: Int?
+    /// The reason there are no live numbers. Rendered, never swallowed.
+    let failure: WidgetDataFailure?
+    /// False only when the operator has no host/token yet — the setup invite.
+    let configured: Bool
+
+    /// The fixture `placeholder` draws: plausible, clearly not a real cluster,
+    /// and the same shape a live entry takes so the families can be eyeballed.
+    static let sample = BoardStatusEntry(
+        date: .now,
+        boardSlug: "hscc",
+        projection: .preview,
+        ageMinutes: nil,
+        failure: nil,
+        configured: true
+    )
+
+    static func unconfigured(boardSlug: String?) -> BoardStatusEntry {
+        BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: nil,
+                         ageMinutes: nil, failure: .notConfigured, configured: false)
+    }
+
+    // MARK: Text the families draw (kept here so it is one rule per string)
+
+    var titleText: String { boardSlug ?? BoardStatusProjection.allBoardsLabel }
+
+    /// `accessoryInline`: one short line. §5.2 budgets ~25 characters, and a
+    /// long slug is dropped rather than truncated — half a board name is
+    /// ambiguous, the counts are not.
+    var inlineLine: String {
+        if !configured { return "Set up in HSCC" }
+        guard let projection = projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
+        let counts = Self.countsShortLine(projection)
+        let withBoard = "\(titleText) · \(counts)"
+        return withBoard.count <= 25 ? withBoard : counts
+    }
+
+    /// `accessoryRectangular`'s second line and the small/medium footer: at most
+    /// two operands, most urgent first. §5.2's example is "17 todo · 6 run";
+    /// a nonzero `blocked` outruns everything, because it is the number that
+    /// means "someone is waiting on you".
+    var countsShortLine: String {
+        guard let projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
+        return Self.countsShortLine(projection)
+    }
+
+    private static func countsShortLine(_ projection: BoardStatusProjection) -> String {
+        var parts: [String] = []
+        if let blocked = projection.blocked, blocked > 0 { parts.append("\(blocked) blocked") }
+        if let running = projection.running { parts.append("\(running) run") }
+        if let todo = projection.todo { parts.append("\(todo) todo") }
+        if let ready = projection.ready { parts.append("\(ready) ready") }
+        if let done = projection.done, parts.isEmpty { parts.append("\(done) done") }
+        guard !parts.isEmpty else { return "quiet" }
+        return parts.prefix(2).joined(separator: " · ")
+    }
+
+    /// The number the `accessoryCircular` draws: §5.2 says one scalar, and the
+    /// one worth a glance is what is stuck. Falls back to the open total when
+    /// `blocked` was not in the payload.
+    var circularNumber: Int? {
+        if let blocked = projection?.blocked { return blocked }
+        return projection?.openCount
+    }
+
+    /// The ring's colour is the one question a circular complication answers:
+    /// does this board need me? (The five TILES use `Theme.cardStatusColor`,
+    /// where a blocked card is amber — that is a status among many, and Theme
+    /// documents the difference on purpose.)
+    var circularIsUrgent: Bool { (projection?.blocked ?? 0) > 0 }
+
+    /// The age / failure line every home-screen family can show.
+    var footerLine: String {
+        if !configured { return "Set up the app to see this board." }
+        if let age = ageMinutes { return "last known \(age) min ago · \(failure?.shortLabel ?? "no answer")" }
+        if let failure { return failure.operatorLine }
+        if let projection, projection.needsCompactRoute {
+            return "done needs /v1/mobile/summary on this cluster"
+        }
+        return "counts from this refresh"
+    }
+
+    /// The five tiles in the order the board reads them.
+    var tiles: [BoardStatusTile] {
+        guard let projection else { return BoardStatusTile.empty() }
+        return BoardStatusTile.statuses.map { status in
+            BoardStatusTile(status: status.label,
+                            value: projection.value(for: status.key),
+                            color: Theme.cardStatusColor(status.key))
+        }
+    }
+}
+
+/// One status tile. `value == nil` draws `—`, never `0` (§6 rule 1).
+struct BoardStatusTile: Identifiable {
+    let status: String
+    let value: Int?
+    let color: Color
+
+    var id: String { status }
+
+    /// The five statuses, in board order. One list so no family can quietly
+    /// drop one (a widget that shows four of five is a widget that lies).
+    static let statuses: [(key: String, label: String)] = [
+        ("todo", "todo"),
+        ("ready", "ready"),
+        ("running", "run"),
+        ("blocked", "blocked"),
+        ("done", "done"),
+    ]
+
+    /// The no-data shape: five `—` tiles. The reason for the gap is the
+    /// footer/header's job (it carries `WidgetDataFailure.shortLabel`), so a
+    /// tile never invents its own copy.
+    static func empty() -> [BoardStatusTile] {
+        statuses.map { item in BoardStatusTile(status: item.label, value: nil, color: Theme.Semantic.neutral) }
+    }
+}
+
+extension BoardStatusProjection {
+    /// Look a status up by its key, so the tile list and the payload cannot
+    /// drift apart silently.
+    func value(for key: String) -> Int? {
+        switch key {
+        case "todo": return todo
+        case "ready": return ready
+        case "running": return running
+        case "blocked": return blocked
+        case "done": return done
+        default: return nil
+        }
+    }
+}
+
+// MARK: - The last-known snapshot (the stale-while-error half)
+
+/// The projection + its age, in the App Group suite, keyed by board.
+///
+/// Two shapes are stored and both are §7-clean: the numbers for one board (or
+/// for all of them) with the date they were read, and the board slugs the board
+/// picker offers while the cluster is unreachable. A board slug is a name the
+/// contract calls public (§7), and neither shape can hold a card body, a path,
+/// an address or a token.
+enum BoardStatusSnapshotStore {
+    private static let snapshotKey = "hscc.boardstatus.snapshot"
+    private static let boardsKey = "hscc.boardstatus.boards"
+
+    private struct Stored: Codable {
+        let projection: BoardStatusProjection
+        let at: Date
+    }
+
+    /// Keep the numbers for the board they belong to. A snapshot of another
+    /// board is not "last known" for this one — it is someone else's board.
+    static func load(boardSlug: String?) -> (value: BoardStatusProjection, at: Date)? {
+        guard let data = SharedStore.suite?.data(forKey: snapshotKey),
+              let stored = try? JSONDecoder().decode(Stored.self, from: data),
+              stored.projection.boardSlug == boardSlug,
+              stored.projection.hasNumbers else { return nil }
+        return (stored.projection, stored.at)
+    }
+
+    static func save(_ projection: BoardStatusProjection, at date: Date) {
+        guard let defaults = SharedStore.suite, projection.hasNumbers else { return }
+        guard let data = try? JSONEncoder().encode(Stored(projection: projection, at: date)) else { return }
+        defaults.set(data, forKey: snapshotKey)
+    }
+
+    /// Slugs the picker falls back to when the cluster is not answering.
+    static func loadBoardSlugs() -> [String] {
+        SharedStore.suite?.stringArray(forKey: boardsKey) ?? []
+    }
+
+    static func saveBoardSlugs(_ slugs: [String]) {
+        guard let defaults = SharedStore.suite, !slugs.isEmpty else { return }
+        defaults.set(Array(slugs.prefix(50)), forKey: boardsKey)
+    }
+}
+
+// MARK: - Configuration: the board picker
+
+/// One board in the picker. Hand-written `AppEntity` conformance — see the
+/// header for why the macro is not used.
+struct BoardStatusBoardEntity: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = TypeDisplayRepresentation(name: "Board")
+    static var defaultQuery = BoardStatusBoardQuery()
+
+    let id: String
+
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(id)") }
+}
+
+/// Where the picker's rows come from: `GET /v1/projects` while the cluster
+/// answers (its `{name, board}` pairs are the sanctioned board-name source,
+/// §5.1), the last-known slugs when it does not.
+struct BoardStatusBoardQuery: EntityQuery {
+    func entities(for identifiers: [BoardStatusBoardEntity.ID]) async throws -> [BoardStatusBoardEntity] {
+        identifiers.map { BoardStatusBoardEntity(id: $0) }
+    }
+
+    func suggestedEntities() async throws -> [BoardStatusBoardEntity] {
+        let slugs = await liveBoardSlugs() ?? BoardStatusSnapshotStore.loadBoardSlugs()
+        return slugs.map { BoardStatusBoardEntity(id: $0) }
+    }
+
+    /// nil = "no board picked", which the widget renders as every board together.
+    func defaultResult() async -> BoardStatusBoardEntity? { nil }
+
+    private func liveBoardSlugs() async -> [String]? {
+        guard let client = WidgetDataClient.makeIfConfigured() else { return nil }
+        guard case .success(let projects) = await client.projects() else { return nil }
+        let slugs = Set(projects.projects.compactMap { $0.board }).sorted()
+        guard !slugs.isEmpty else { return nil }
+        BoardStatusSnapshotStore.saveBoardSlugs(Array(slugs))
+        return Array(slugs)
+    }
+}
+
+/// The widget's only configuration: which board.
+struct BoardStatusConfigurationIntent: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource = "Board"
+    static var description = IntentDescription("Pick the board whose counts this widget shows. Leave it unset for every board together.")
+
+    @Parameter(title: "Board")
+    var board: BoardStatusBoardEntity?
+}
+
+// MARK: - Timeline provider
+
+struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
+    /// Cadence, not a poll. The operator's per-surface cadence lives in
+    /// `AppGroupWidgetSettings`, whose `WidgetSurfaceKind` has no case for this
+    /// widget yet (adding one is a `SharedStore.swift` + config-screen change,
+    /// outside this card's file set), so the widget uses the conservative
+    /// quarter-hour and lets WidgetKit's own budget have the last word.
+    private static let refreshMinutes = 15
+
+    func recommendations() -> [AppIntentRecommendation<BoardStatusConfigurationIntent>] {
+        // The Smart Stack suggestions have to exist without a network, so they
+        // come from what this device has already seen.
+        let known = Array(BoardStatusSnapshotStore.loadBoardSlugs().prefix(3))
+        if known.isEmpty {
+            return [AppIntentRecommendation(intent: BoardStatusConfigurationIntent(),
+                                            description: BoardStatusProjection.allBoardsLabel)]
+        }
+        // `let`, not `var`: a `@Parameter` setter writes through the wrapper's
+        // own box rather than mutating the struct, so this is a `let` as far as
+        // the compiler is concerned (it warns on the `var`).
+        return known.map { slug in
+            let intent = BoardStatusConfigurationIntent()
+            intent.board = BoardStatusBoardEntity(id: slug)
+            return AppIntentRecommendation(intent: intent, description: slug)
+        }
+    }
+
+    func placeholder(in context: Context) -> BoardStatusEntry { .sample }
+
+    func snapshot(for configuration: BoardStatusConfigurationIntent,
+                  in context: Context) async -> BoardStatusEntry {
+        await entry(for: configuration)
+    }
+
+    func timeline(for configuration: BoardStatusConfigurationIntent,
+                  in context: Context) async -> Timeline<BoardStatusEntry> {
+        let entry = await entry(for: configuration)
+        let next = Calendar.current.date(byAdding: .minute, value: Self.refreshMinutes, to: .now)
+            ?? .now.addingTimeInterval(900)
+        return Timeline(entries: [entry], policy: .after(next))
+    }
+
+    // MARK: Fetch
+
+    private func entry(for configuration: BoardStatusConfigurationIntent) async -> BoardStatusEntry {
+        let boardSlug = configuration.board?.id
+        let client = WidgetDataClient.makeIfConfigured()
+        guard let client else {
+            // No host, no token: the ONE job here is the setup invite, and the
+            // snapshot stays out of it — `WidgetData.read` encodes that rule
+            // (`.notConfigured` never falls back), and this early return keeps
+            // the invite ahead of every other state in every family.
+            return .unconfigured(boardSlug: boardSlug)
+        }
+
+        let outcome = await WidgetData.read(using: client,
+                                           lastKnown: { BoardStatusSnapshotStore.load(boardSlug: boardSlug) },
+                                           { c in await Self.readCounts(client: c, boardSlug: boardSlug) })
+        switch outcome {
+        case .live(let projection, let fetchedAt):
+            BoardStatusSnapshotStore.save(projection, at: fetchedAt)
+            return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: projection,
+                                    ageMinutes: nil, failure: nil, configured: true)
+        case .stale(let projection, let ageMinutes, let reason):
+            return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: projection,
+                                    ageMinutes: ageMinutes, failure: reason, configured: true)
+        case .failed(let failure):
+            return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: nil,
+                                    ageMinutes: nil, failure: failure, configured: true)
+        }
+    }
+
+    /// §6's route first, §5.2's interim second. Two reads at the very worst
+    /// (1 once the compact route is deployed everywhere), and never a zero for a
+    /// status the payload did not carry.
+    private static func readCounts(client: WidgetDataClient,
+                                   boardSlug: String?) async -> Result<BoardStatusProjection, WidgetDataFailure> {
+        switch await client.mobileSummary(boards: boardSlug.map { [$0] } ?? []) {
+        case .success(let response):
+            if let projection = BoardStatusProjection(summary: response, boardSlug: boardSlug) {
+                return .success(projection)
+            }
+            // Degraded (§6 rule 7: `speak` and no `boards`, because empty counts
+            // would read as "every board is quiet"), or our board carried its own
+            // `error`. Neither is a transport failure, so the interim path is
+            // tried before the surface gives up — and it may still know the open
+            // four.
+        case .failure:
+            break  // 404 on a cluster without the route, unreachable, token bad: the interim path decides what to say
+        }
+
+        switch await client.kanbanStale(olderThanDays: 0) {
+        case .success(let stale):
+            guard let tasks = stale.tasks else {
+                // A 2xx with no `tasks` array is not "the board is empty", it is
+                // a payload this build cannot read a count out of. `decoding`
+                // keeps the last-known numbers instead of drawing zeros.
+                return .failure(.decoding(detail: "kanban/stale carried no tasks array"))
+            }
+            return .success(BoardStatusProjection(openOnly: tasks, boardSlug: boardSlug))
+        case .failure(let failure):
+            // The interim read's failure is the honest one: if the compact route
+            // is merely missing, this read succeeded, so a failure here means
+            // the cluster itself did not answer.
+            return .failure(failure)
+        }
+    }
+}
+
+// MARK: - Widget + families
+
+/// The Board Status widget: five counts for one board.
+struct BoardStatusWidget: Widget {
+    let kind = "BoardStatusWidget"
+
+    var body: some WidgetConfiguration {
+        AppIntentConfiguration(kind: kind, intent: BoardStatusConfigurationIntent.self,
+                               provider: BoardStatusTimelineProvider()) { entry in
+            BoardStatusWidgetView(entry: entry)
+                .containerBackground(for: .widget) {
+                    Theme.Semantic.surface
+                }
+        }
+        .configurationDisplayName("Board Status")
+        .description("Todo, ready, running, blocked and done for one board you pick.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .accessoryInline, .accessoryCircular, .accessoryRectangular])
+    }
+}
+
+/// One entry, six families. The dispatch order is the audit-3 invariant the
+/// cluster widget also obeys: the setup invite is checked BEFORE any failure or
+/// stale state, so an unconfigured app never renders as "can't reach the cluster".
+struct BoardStatusWidgetView: View {
+    let entry: BoardStatusEntry
+    @Environment(\.widgetFamily) private var family
+
+    var body: some View {
+        switch family {
+        case .accessoryInline:
+            Text(entry.inlineLine)
+        case .accessoryCircular:
+            BoardStatusCircularView(entry: entry)
+        case .accessoryRectangular:
+            BoardStatusRectangularView(entry: entry)
+        case .systemLarge:
+            BoardStatusLargeView(entry: entry)
+        case .systemMedium:
+            BoardStatusMediumView(entry: entry)
+        default:
+            BoardStatusSmallView(entry: entry)
+        }
+    }
+}
+
+// MARK: Accessory families
+
+struct BoardStatusCircularView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        if !entry.configured {
+            BoardStatusInviteView(compact: true)
+        } else {
+            let color = entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.ok
+            VStack(spacing: 0) {
+                Text(entry.circularNumber.map { "\($0)" } ?? "—")
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(color)
+                Text(entry.circularIsUrgent ? "blocked" : "open")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+}
+
+struct BoardStatusRectangularView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        if !entry.configured {
+            BoardStatusInviteView(compact: false)
+        } else {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.titleText)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Text(entry.countsShortLine)
+                    .font(.hsccMono(.caption2, weight: .medium))
+                    .foregroundStyle(entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+// MARK: Home Screen families
+
+struct BoardStatusSmallView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        if !entry.configured {
+            BoardStatusInviteView(compact: false)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                BoardStatusHeaderView(entry: entry)
+                BoardStatusTileGrid(tiles: entry.tiles, columns: 3)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+struct BoardStatusMediumView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        if !entry.configured {
+            BoardStatusInviteView(compact: false)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                BoardStatusHeaderView(entry: entry)
+                BoardStatusTileGrid(tiles: entry.tiles, columns: 5)
+                Text(entry.footerLine)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(2)
+            }
+        }
+    }
+}
+
+struct BoardStatusLargeView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        if !entry.configured {
+            BoardStatusInviteView(compact: false)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
+                BoardStatusHeaderView(entry: entry)
+                // `large` has room for the five numbers read as rows, so each
+                // one gets its own line and its own share of the open total.
+                // Card ROWS deliberately do not live here: they would cost a
+                // second read on every refresh (§2's budget), and the kanban
+                // monitor widget is already the surface that lists cards.
+                ForEach(entry.tiles) { tile in
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        Circle()
+                            .fill(tile.color)
+                            .frame(width: 7, height: 7)
+                        Text(tile.status)
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.Semantic.onSurface)
+                        Spacer(minLength: Theme.Spacing.xs.rawValue)
+                        Text(tile.value.map { "\($0)" } ?? "—")
+                            .font(.hsccMono(.title3, weight: .semibold))
+                            .foregroundStyle(tile.value == nil ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                    }
+                }
+                Spacer(minLength: 0)
+                Text(entry.footerLine)
+                    .font(.caption)
+                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+}
+
+// MARK: Shared pieces
+
+private struct BoardStatusHeaderView: View {
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.xs.rawValue) {
+            Image(systemName: entry.circularIsUrgent ? "exclamationmark.triangle.fill" : "square.stack.3d.up")
+                .font(.system(size: 10))
+                .foregroundStyle(entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.neutral)
+            Text(entry.titleText)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.Semantic.onSurface)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let age = entry.ageMinutes {
+                Text("\(age) min")
+                    .font(.hsccMono(.caption2, weight: .medium))
+                    .foregroundStyle(Theme.Semantic.warn)
+            }
+        }
+    }
+}
+
+private struct BoardStatusTileGrid: View {
+    let tiles: [BoardStatusTile]
+    let columns: Int
+
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Theme.Spacing.xs.rawValue), count: columns),
+                  spacing: Theme.Spacing.xs.rawValue) {
+            ForEach(tiles) { tile in
+                VStack(spacing: 1) {
+                    Text(tile.value.map { "\($0)" } ?? "—")
+                        .font(.hsccMono(.headline, weight: .semibold))
+                        .foregroundStyle(tile.value == nil ? Theme.Semantic.onSurfaceMuted : tile.color)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    Text(tile.status)
+                        .font(.system(size: 8))
+                        .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                    .fill(Theme.Semantic.tintOverlay(tile.color)))
+            }
+        }
+    }
+}
+
+/// The unconfigured state — the only thing an unconfigured app may show
+/// (t_5c554c5b, enforced for the cluster widget by `widget_view_dispatch_check`).
+private struct BoardStatusInviteView: View {
+    let compact: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            Image(systemName: "gearshape")
+                .font(compact ? .system(size: 12) : .title3)
+                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+            if !compact {
+                Text("Set up the app to see this board")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+}

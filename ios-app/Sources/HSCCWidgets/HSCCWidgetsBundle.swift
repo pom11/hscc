@@ -10,6 +10,9 @@ import WidgetKit
 ///   * systemMedium/systemLarge — HSCC Monitor: per-node `hscc cluster monitor`
 ///                     metrics (CPU/RAM/GPU) + the daemon-host machine data,
 ///                     refreshed on the operator's configured cadence.
+///   * systemSmall/Medium/Large + the three accessory families — Board Status:
+///                     todo/ready/running/blocked/done for ONE board, picked in
+///                     the widget's own configuration sheet (t_6d8731ab).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -19,5 +22,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
     var body: some Widget {
         ClusterWidget()
         MonitorWidget()
+        BoardStatusWidget()
     }
 }
