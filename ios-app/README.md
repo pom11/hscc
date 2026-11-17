@@ -274,6 +274,24 @@ file-by-file disposition of the remaining console files is
     an accessory body never reads the board row's fields. No network, no device.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
+  - `merge_base_check.sh` — the stale-base guard: a branch whose merge-base with
+    `main` has drifted too far behind **fails before review**. It exists because
+    GitHub's `mergeable` badge is structurally blind to the failure mode that
+    killed a whole line of work here: re-adding files `main` deleted is not a
+    conflict, so a branch can sit on a long-dead base, keep re-landing files the
+    retirement work removed on purpose, and still read `MERGEABLE/CLEAN`. It
+    measures the commits `main` has that the branch's *base* lacks — the same set
+    `git rebase --onto origin/main <merge-base>` has to absorb — against a single
+    named constant, `STALE_BASE_FAIL_AT`, and fails hard rather than warning (the
+    author it is for already had a green badge). The failure names the count and
+    the base SHA and prints the rebase that drops only the inherited commits. It
+    never fetches, so every run also prints the base ref's SHA: if that is not the
+    `main` you mean to rebase onto, fetch and re-run. **No drift figure is quoted
+    here, on purpose** — the run prints its own count and the number that matters
+    is `STALE_BASE_FAIL_AT` in the script, which is the only thing to edit. What
+    it does NOT prove: drift is not harm (a commit of typo fixes is not a commit
+    of file retirement), and a green run is not a claim that the branch tree
+    matches `main`.
 
 **Offline last-known state** is a first-class feature: every successful read is
 cached, and when the cluster (or Tailscale) is unreachable, views show the
@@ -423,9 +441,15 @@ with Xcode — none of it needs the real cluster:
 
 ```sh
 cd ios-app
+scripts/merge_base_check.sh     # branch base not too far behind origin/main — run BEFORE review
 scripts/build_check.sh          # full per-target compile
 scripts/model_decode_check.sh   # real models vs the committed live fixtures
 ```
+
+`merge_base_check.sh` gates the **branch**, not the app: it needs no Xcode and no
+simulator, and it is the one to run first, because every other gate in this repo
+passes happily on a branch whose base is so far behind `main` that the PR is
+already superseded content.
 
 ## Sideloading onto your own device
 
