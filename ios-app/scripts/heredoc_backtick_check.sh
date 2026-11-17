@@ -95,11 +95,17 @@ DQ='"'
 #   CLOSE <line> <delim>                 its terminator
 #   UNCLOSED <line> <delim>              ran off EOF without a terminator
 #   QOPEN <line> <delim>                 quoted-delimiter heredoc (inert region)
-#   QBODY <line>                         backtick inside a quoted body
-#   BODY <line> <delim>                  backtick inside an unquoted body
-#   SHELL <line>                         backtick on a non-comment-led shell line
-#   HASH <line>                          backtick on an all-comment line
+#   HIT <region> <line> <expanding|escaped>  one per line carrying the byte:
+#                                         region = body (unquoted heredoc: bash
+#                                         expands it), shell (a code-bearing line),
+#                                         hash (an all-comment line), qbody (inside
+#                                         a quoted heredoc); expanding = not escaped
+#                                         away by a backslash. R1 refuses body/shell
+#                                         + expanding; the rest is R2 or R3.
 #   HERESTRING <line>                    <<< (informational)
+#   MENTION <line> <word> <plain|quoted>  a <<X token that is not an opener (text)
+#   UNBOUND <line> <word> <plain|quoted>  a real opener bash accepts that this
+#                                         scanner cannot bound (delimiter not at EOL)
 #   MULTI <line>                         >1 unquoted opener token on one line
 AWKPROG=$(cat <<'AWK'
 function parity(s, i,   n) {          # backslashes immediately before index i
@@ -107,10 +113,20 @@ function parity(s, i,   n) {          # backslashes immediately before index i
   while (i - n - 1 >= 1 && substr(s, i - n - 1, 1) == "\\") n++
   return n
 }
-function livebt(s,   i) {             # 1 if an UNESCAPED backtick occurs in s
+function livebt(s,   i, seen) {  # 2 = an UNESCAPED backtick, 1 = only escaped ones, 0 = none
+  seen = 0
   for (i = 1; i <= length(s); i++)
-    if (substr(s, i, 1) == BT && parity(s, i) % 2 == 0) return 1
-  return 0
+    if (substr(s, i, 1) == BT) {
+      if (parity(s, i) % 2 == 0) return 2
+      seen = 1
+    }
+  return seen
+}
+function emit(region, line,   v) {   # one record per line that carries the byte
+  v = livebt(line)
+  # The two axes are separate and both are reported: WHERE the byte sits (region)
+  # and whether bash would honour it (expanding vs escaped by a backslash).
+  if (v) print "HIT\t" region "\t" NR "\t" (v == 2 ? "expanding" : "escaped")
 }
 function terminator(t, d) {           # is this line the heredoc terminator?
   if (dash) sub(/^\t+/, "", t)
@@ -121,20 +137,20 @@ BEGIN { state = 0 }                    # 0 shell, 1 unquoted body, 2 quoted body
   line = $0
   if (state == 1) {
     if (terminator(line, delim)) { print "CLOSE\t" NR "\t" delim; state = 0; next }
-    if (livebt(line)) print "BODY\t" NR "\t" delim       # '#' here is body text
+    emit("body", line)                             # a '#' here is body text, not a comment
     next
   }
   if (state == 2) {
     if (terminator(line, delim)) { print "CLOSE\t" NR "\t" delim; state = 0; next }
-    if (livebt(line)) print "QBODY\t" NR                 # inert: bash cannot expand
+    emit("qbody", line)                            # inert: bash cannot expand this
     next
   }
   # ---- shell position ----
   if (line ~ /^[[:space:]]*#/) {
-    if (livebt(line)) print "HASH\t" NR
-    next                                                # never an opener
+    emit("hash", line)
+    next                                           # never an opener
   }
-  if (livebt(line)) print "SHELL\t" NR
+  emit("shell", line)
   ncand = 0
   i = index(line, "<<")
   while (i > 0) {
@@ -142,22 +158,52 @@ BEGIN { state = 0 }                    # 0 shell, 1 unquoted body, 2 quoted body
     d = 0
     if (substr(rest, 1, 1) == "-") { d = 1; rest = substr(rest, 2) }
     q = substr(rest, 1, 1)
-    if (q == QT || q == DQ) {                 # quoted word: bash cannot expand it
-      delim = rest
-      gsub(/[[:space:]]/, "", delim)
-      sub(/^[^A-Za-z_]/, "", delim)           # drop the opening quote
-      sub(/[^A-Za-z_0-9]$/, "", delim)        # drop the closing quote
-      print "QOPEN\t" NR "\t" delim "\t" (q == QT ? "sq" : "dq")
-      dash = d
-      if (length(delim)) state = 2             # skip the body through its terminator
-      ncand++
-      break
+    if (q == QT || q == DQ) {                 # a quoted word: bash cannot expand it
+      # Strict: quote + word + the SAME quote + end of line. Anything else is text.
+      # A line merely MENTIONING the operator inside a string — index($0, "<<") —
+      # must not open a region that never closes. That shape is planted and
+      # asserted by heredoc_backtick_check_probe.sh.
+      w = substr(rest, 2)                      # drop the opening quote
+      m = match(w, /[^A-Za-z_0-9]/)            # where the word ends
+      if (m > 1 && substr(w, m, 1) == q) {
+        tail = substr(w, m + 1)
+        if (tail ~ /^[[:space:]]*$/) {
+          delim = substr(w, 1, m - 1)
+          dash = d
+          state = 2                            # skip the body through its terminator
+          print "QOPEN\t" NR "\t" delim "\t" (q == QT ? "sq" : "dq")
+          ncand++
+          break
+        }
+        t = tail; sub(/^[[:space:]]+/, "", t)
+        if (t ~ /^[0-9]*[>&|]/) {              # bash: cat <<WORD > f — a real heredoc
+          print "UNBOUND\t" NR "\t" substr(w, 1, m - 1) "\tquoted"; ncand++; break
+        }
+        print "MENTION\t" NR "\t" substr(w, 1, m - 1) "\tquoted"; break
+      }
+      # not quote + word + quote: text that mentions the operator. Keep looking.
     }
     if (rest ~ /^[A-Za-z_][A-Za-z_0-9]*[[:space:]]*$/) {
       delim = rest; gsub(/[[:space:]]/, "", delim); dash = d
       state = 1; ncand++
       print "OPEN\t" NR "\t" delim "\t" (d ? "dash" : "plain")
       break
+    }
+    if (rest ~ /^[A-Za-z_]/) {
+      # A delimiter word followed by more text. bash accepts a heredoc opener whose
+      # delimiter is followed by redirections (cat <<WORD > f), and such a region
+      # cannot be bounded by this scanner — so it is REFUSED as unbounded rather
+      # than quietly unread. Anything else (a quoted string naming the operator) is
+      # text and is counted as a mention, so the reader can see it was not skipped
+      # by accident.
+      m2 = match(rest, /[^A-Za-z_0-9]/)
+      if (m2 > 1) {
+        r = substr(rest, m2); sub(/^[[:space:]]+/, "", r)
+        if (r ~ /^[0-9]*[>&|]/) {
+          print "UNBOUND\t" NR "\t" substr(rest, 1, m2 - 1) "\tplain"; ncand++; break
+        }
+        print "MENTION\t" NR "\t" substr(rest, 1, m2 - 1) "\tplain"; break
+      }
     }
     if (substr(rest, 1, 1) == "<") print "HERESTRING\t" NR   # <<<, not a heredoc
     j = index(substr(line, i + 1), "<<")
@@ -182,8 +228,8 @@ files_scanned=0
 splice_capable_files=0
 
 nwords() { local n=0 w; for w in $1; do n=$((n + 1)); done; printf '%s' "$n"; }
-finding() { echo "  FINDING  $1"; live_findings=$((live_findings + $2)); fail=1; }
-measured() { echo "  measured $1"; measured_total=$((measured_total + $2)); }
+finding() { echo "  FINDING  $1"; live_findings=$((live_findings + ${2:-1})); fail=1; }
+measured() { echo "  measured $1"; measured_total=$((measured_total + ${2:-1})); }
 
 echo "heredoc backtick meta-check (t_4558fd32)"
 echo "  tree:    $IOSAPP"
@@ -210,47 +256,58 @@ for f in "${shfiles[@]}"; do
   opens=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="OPEN"     {printf "%s ", $2 ":" $3}')
   qopens=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="QOPEN"   {printf "%s ", $2}')
   unclosed=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="UNCLOSED" {printf "%s ", $2 ":" $3}')
+  unbound=$(printf '%s\n' "$rec"  | awk -F'\t' '$1=="UNBOUND" {printf "%s ", $2 ":" $3}')
+  mention=$(printf '%s\n' "$rec"  | awk -F'\t' '$1=="MENTION" {c++} END {print c + 0}')
   multi=$(printf '%s\n' "$rec"   | awk -F'\t' '$1=="MULTI"  {printf "%s ", $2}')
   hstring=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="HERESTRING" {c++} END{print c+0}')
-  body=$(printf '%s\n' "$rec"    | awk -F'\t' '$1=="BODY"   {printf "%s:%s ", $2, $3}')
-  shell=$(printf '%s\n' "$rec"   | awk -F'\t' '$1=="SHELL"  {printf "%s ", $2}')
-  hash=$(printf '%s\n' "$rec"    | awk -F'\t' '$1=="HASH"   {printf "%s ", $2}')
-  qbody=$(printf '%s\n' "$rec"   | awk -F'\t' '$1=="QBODY"  {printf "%s ", $2}')
+  hits=$(printf '%s\n' "$rec"     | awk -F'\t' '$1=="HIT"   {printf "%s ", $0}')
+  # R1 candidates: the byte sits where bash expands (unquoted heredoc body or shell
+  # position) AND is not escaped away. Everything else is inert-by-region or
+  # inert-by-escaping, and is reported as one grouped line per file.
+  live=$(printf '%s\n' "$rec"     | awk -F'\t' '$1=="HIT" && ($2=="body" || $2=="shell") && $4=="expanding" {printf "%s:%s ", $3, $2}')
+  inert=$(printf '%s\n' "$rec"    | awk -F'\t' '$1=="HIT" && !(($2=="body" || $2=="shell") && $4=="expanding") {printf "%s@%s(%s) ", $3, $2, $4}')
 
   files_scanned=$((files_scanned + 1))
   capable=0
-  [ -n "$opens" ] && { capable=1; splice_capable_files=$((splice_capable_files + 1)); }
+  # UNBOUND counts too: bash really does interpolate that heredoc, the scanner just
+  # cannot see its extent — so the file is splice-capable and held to the same ban.
+  if [ -n "$opens" ] || [ -n "$unbound" ]; then
+    capable=1; splice_capable_files=$((splice_capable_files + 1))
+  fi
 
-  printf 'scanned %-38s unquoted-heredoc=%s quoted-heredoc=%s here-strings=%s\n' \
-    "$base" "${opens:-none}" "${qopens:-none}" "${hstring:-0}"
+  printf 'scanned %-38s bytes=%s unquoted-heredoc=%s quoted-heredoc=%s here-strings=%s operator-mentions=%s\n' \
+    "$base" "$(nwords "$hits")" "${opens:-none}" "${qopens:-none}" "${hstring:-0}" "${mention:-0}"
 
   # A region that never closes cannot be bounded, so nothing about the rest of the
   # file is trustworthy: refuse rather than guess where the body ended.
   if [ -n "$unclosed" ]; then
-    finding "$base: heredoc opened but never terminated (record $unclosed) — the region cannot be bounded, so the scan cannot vouch for the lines after it"
+    finding "$base: heredoc opened but never terminated (record(s) $unclosed) — the region cannot be bounded, so the scan cannot vouch for the lines after it"
+  fi
+  if [ -n "$unbound" ]; then
+    # bash expands this heredoc (cat <<WORD > f is valid), but a scanner that only
+    # follows a delimiter at end of line cannot see where its body starts. This is
+    # the one shape that would otherwise be a SILENT blind spot, so it is a refusal.
+    finding "$base: heredoc opener(s) whose delimiter does not end the line (record(s) $unbound) — bash expands this body but its region cannot be bounded here; move the delimiter to the end of the line so the audit can see the whole body"
   fi
   if [ -n "$multi" ]; then
     finding "$base: line(s) $multi carry more than one heredoc opener — only the first is bounded; split them onto separate lines so every body is auditable"
   fi
 
-  for l in $body; do
-    finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment" 1
+  for e in $live; do
+    l="${e%%:*}"; kind="${e##*:}"
+    if [ "$kind" = "body" ]; then
+      finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment" 1
+    else
+      finding "$base:$l  backtick in shell position (R1) — a code-bearing line's trailing comment is still shell position; the byte is expanded when this script runs" 1
+    fi
   done
-  for l in $shell; do
-    finding "$base:$l  backtick in shell position (R1) — a code-bearing line's trailing comment is still shell position; the byte is expanded when this script runs" 1
-  done
-  n_hash=$(nwords "$hash")
-  n_qbody=$(nwords "$qbody")
+  n_inert=$(nwords "$inert")
   if [ "$capable" = "1" ]; then
-    [ "$n_hash" -gt 0 ] && finding \
-      "$base: $n_hash '#' comment line(s) carrying the byte (lines $hash) — SPLICE-CAPABLE script (it writes a file with an interpolating heredoc), so R2 does not accept 'it is only a comment' here" "$n_hash"
-    [ "$n_qbody" -gt 0 ] && finding \
-      "$base: $n_qbody byte(s) inside QUOTED heredoc bodies (lines $qbody) — inert by themselves, but this file is held to the R2 file-wide ban" "$n_qbody"
+    [ "$n_inert" -gt 0 ] && finding \
+      "$base: $n_inert byte(s) that do NOT expand — $inert (line@region why). R2 still refuses them: this script writes a file with an interpolating heredoc, so 'it is only a comment' and 'it is only quoted' are not accepted here" "$n_inert"
   else
-    [ "$n_hash" -gt 0 ] && measured \
-      "$base: $n_hash '#' comment line(s) (lines $hash) — a comment line never expands, and this file has no unquoted heredoc to make that claim load-bearing (R3)" "$n_hash"
-    [ "$n_qbody" -gt 0 ] && measured \
-      "$base: $n_qbody byte(s) inside QUOTED heredoc bodies (lines $qbody) — bash cannot expand a quoted delimiter, so a payload there would prove nothing (R3)" "$n_qbody"
+    [ "$n_inert" -gt 0 ] && measured \
+      "$base: $n_inert byte(s) that do NOT expand — $inert (line@region why). A '#' comment never expands and a quoted delimiter cannot expand; this file has no unquoted heredoc, so R3 prints them instead of refusing (R3)" "$n_inert"
   fi
 done
 
@@ -282,6 +339,12 @@ else
 fi
 echo "  limit quoted-delimiter bodies are skipped by R1 (bash cannot expand them) but"
 echo "        are still reported under R3, and are findings inside a splice-capable file"
+echo "  limit a <<X is treated as an opener only when X is a well-formed delimiter word"
+echo "        ending the line (bare, or quote + word + the same quote). Anything else —"
+echo "        a line merely MENTIONING the operator inside a string, or a delimiter not"
+echo "        at end of line — is read as text, so no phantom region is opened. A real"
+echo "        heredoc whose delimiter does not end its line is therefore NOT bounded by"
+echo "        this gate: it is reported as an unbounded region and refused, not guessed."
 echo "  limit here-strings are not heredocs; their content is one line and R1 covers it"
 echo "  limit this gate reads only. The guard that refuses a mutated gate EARLY —"
 echo "        before its heredoc expands — is the in-file guard in the gate itself"
