@@ -87,18 +87,24 @@ fi
 # The boundary line, in order of trust: the explicit marker on the ban
 # statement, else the first line after the sentinel that bash could execute
 # (first line whose first non-blank character is neither '#' nor nothing).
-ban_line=$(awk -v s="$FIRST_EXEC" 'index($0, s) { print NR; exit }' "$GATE")
+# Both paths require a NON-COMMENT line: the marker string also appears in the
+# pointer comment that explains it, and an anchor that matches prose is exactly
+# the round-2 defect, so a comment line is never a valid answer here.
+ban_ok=1
+ban_line=$(awk -v s="$FIRST_EXEC" '
+    index($0, s) { t = $0; gsub(/^[[:space:]]/, "", t)
+                   if (t != "" && substr(t, 1, 1) != "#") { print NR; exit } }' "$GATE")
 ban_how="marker $FIRST_EXEC"
 if [ -z "$ban_line" ]; then
   ban_line=$(awk -v s="$SENTINEL" '
       !seen && index($0, s) { seen = 1; next }
       seen { t = $0; gsub(/^[[:space:]]/, "", t)
              if (t != "" && substr(t, 1, 1) != "#") { print NR; exit } }' "$GATE")
-  ban_how="derived (no $FIRST_EXEC marker — first executable line after the sentinel)"
+  ban_how="derived (no executable line carrying $FIRST_EXEC — first executable line after the sentinel)"
 fi
 if [ -z "$ban_line" ]; then
   pfail "cannot locate the ban's first executable statement in $GATE — the boundary window cannot be measured, and a boundary that is guessed is the bug this leg exists to catch; refusing to report a number"
-  ban_line="$sentinel_line"; ban_how="UNRELIABLE fallback to the sentinel line"
+  ban_ok=0
 else
   # Guard the guard's own measurement: an anchor that lands on a comment is a
   # prose anchor, which is exactly the round-2 failure. Fail rather than print.
@@ -106,15 +112,21 @@ else
   ban_lead=$(printf '%s' "$ban_text" | sed -e 's/^[[:space:]]*//' -e 's/^\(.\).*/\1/')
   if [ "$ban_lead" = "#" ]; then
     pfail "boundary anchor $GATE:$ban_line is a COMMENT line ($ban_text) — comments do not stop bash, so this is not the boundary; point $FIRST_EXEC at the first statement below it"
+    ban_ok=0
   fi
   if [ "$ban_line" -lt "$sentinel_line" ]; then
     pfail "$FIRST_EXEC ($ban_line) sits above $SENTINEL ($sentinel_line) — one of the two markers has moved; the window below would be meaningless"
+    ban_ok=0
   fi
 fi
 # Insertable lines above the ban: line 1 is the shebang, so 2..ban_line-1.
-uncovered=$((ban_line - 2)); [ "$uncovered" -ge 0 ] || uncovered=0
-echo "guard boundary: ban's first executable statement = $GATE:$ban_line [$ban_how]"
-echo "  sentinel at :$sentinel_line; lines 2..$((ban_line - 1)) = $uncovered insertable line(s) sit ABOVE the ban"
+uncovered=0; [ "$ban_ok" = 1 ] && uncovered=$((ban_line - 2)); [ "$uncovered" -ge 0 ] || uncovered=0
+if [ "$ban_ok" = 1 ]; then
+  echo "guard boundary: ban's first executable statement = $GATE:$ban_line [$ban_how]"
+  echo "  sentinel at :$sentinel_line; lines 2..$((ban_line - 1)) = $uncovered insertable line(s) sit ABOVE the ban"
+else
+  echo "guard boundary: UNMEASURABLE — the anchor was rejected (see FAIL above); this probe prints no span rather than a guessed one"
+fi
 
 # A line in shell position (not inside the heredoc, not the guard itself) to
 # plant in: the cd that re-roots the gate. Below the guard, so a leg planted
@@ -173,8 +185,10 @@ classify() {
   local name="$1" expect="$2" banners
   banners=$(grep -c 'PASSED' "$OUT" 2>/dev/null); banners=${banners:-0}
   if [ "$expect" = "report" ]; then
-    if [ -e "$MARKER" ]; then
-      pnote "$name: payload EXECUTED (planted at line 2, the first of the lines above the ban). Uncovered prologue = lines 2..$((ban_line - 1)) = $uncovered line(s) above $GATE:$ban_line, measured not assumed — bash expands them before the ban's first statement runs. Documented limit, reported rather than failed: content above a guard is outside that guard's reach, and whoever can write here can also delete the guard. Closing it for real is a meta-gate over every script in this directory (t_4558fd32), not a longer comment in the file being judged."
+    if [ "$ban_ok" != 1 ]; then
+      pfail "$name: cannot report the uncovered span because the boundary anchor was rejected — a leg that cannot measure its own window must not report a number"
+    elif [ -e "$MARKER" ]; then
+      pnote "$name: payload EXECUTED (planted at line 2, the first of the lines above the ban). Uncovered prologue = lines 2..$((ban_line - 1)) = $uncovered line(s) above $GATE:$ban_line [$ban_how], measured not assumed — bash expands them before the ban's first statement runs. Documented limit, reported rather than failed: content above a guard is outside that guard's reach, and whoever can write here can also delete the guard. Closing it for real is a meta-gate over every script in this directory (t_4558fd32), not a longer comment in the file being judged."
     else
       pok "$name: payload above the ban did not execute (ban at $GATE:$ban_line, $uncovered line(s) above it — check this leg still plants above the ban if it ever turns green by accident)"
     fi
@@ -279,9 +293,9 @@ echo "planting inside a real '#' comment"
 run_leg "comment" "$shell_anchor" hash
 classify "comment (payload inside a '#' comment line)" "inert-ok"
 
-echo "measuring the window above the guard itself"
+echo "measuring the window above the ban itself"
 run_leg "boundary" 1 slash slash above
-classify "boundary (payload above the guard's first line)" "report"
+classify "boundary (payload at line 2, above the ban's first executable statement)" "report"
 
 echo "control: the same copy mechanism, nothing mutated"
 run_leg "control" "-" slash

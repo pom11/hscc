@@ -1,15 +1,28 @@
 #!/bin/bash
 set -uo pipefail
+# ---- backtick ban (t_9e4a731b): the FIRST executable code, deliberately -----
+# GUARD-SENTINEL names this block. The FIRST-EXEC marker on the next line names
+# the real boundary: the ban cannot judge text above its own first statement.
+SELF_SRC="${BASH_SOURCE[0]}"   # GUARD-FIRST-EXEC — captured before the cd below, or the path rots
+BT="$(printf '\140')"          # the banned byte, so this file never has to carry one
+bt_scan=$(grep -nF -- "$BT" "$SELF_SRC" 2>&1); bt_rc=$?
+if [ "$bt_rc" -ne 1 ]; then
+  if [ "$bt_rc" -eq 0 ]; then
+    bt_count=$(printf '%s\n' "$bt_scan" | wc -l | tr -d ' ')
+    echo "WIDGET SETTINGS CHECK FAILED — the file that is running ($SELF_SRC) contains $bt_count backtick character(s), listed with line numbers below. In this gate a backtick is command substitution: bash executes it while building the harness and splices shell into the Swift this gate then compiles and asserts on (measured on origin/main @ 3b5e475c: six of them spliced out of the generated harness, the balanced pairs silently). Write prose with quotes; to put a literal backtick into the generated harness interpolate \${BT}, which is inert because a shell never re-scans an expansion. Re-point this guard at the new text if this file moves — do not delete it, it is the only thing standing between the unquoted heredoc below and a gate that proves something other than what it says." >&2
+    printf '%s\n' "$bt_scan" >&2
+  else
+    echo "WIDGET SETTINGS CHECK FAILED — the backtick guard could not read the file that is executing ($SELF_SRC, grep rc $bt_rc): $bt_scan. Refusing to run a gate whose guard could not look at it." >&2
+  fi
+  exit 1
+fi
 
-# ---- interpolation guard (t_9e4a731b) --------------------------------------
-# GUARD-SENTINEL: this paragraph is NOT the boundary and must not be used as
-# one. The boundary is the line carrying GUARD-FIRST-EXEC at the bottom of this
-# block — the ban's first executable statement — and
-# scripts/widget_settings_check_backtick_probe.sh measures the window above THAT
-# line every run. Measuring from this paragraph instead reported an uncovered
-# prologue more than ten times smaller than the real one, and a payload planted
-# inside the difference executed. If you move this prose, keep the two markers
-# where they are: SENTINEL names this block, FIRST-EXEC names the statement.
+# ---- why the ban exists, and what it does not cover (t_9e4a731b) ------------
+# The reasoning sits BELOW the ban rather than above it, because everything above
+# the ban's first executable statement is text bash has already expanded by the
+# time the guard can act on it. Documentation loses nothing by sitting here —
+# the whole-file scan judges it either way — and the span the guard cannot judge
+# shrinks to what the interpreter itself needs plus the marker pointer below.
 #
 # This gate writes its Swift harness with an UNQUOTED heredoc, deliberately:
 # $suite_container and $model are shell-expanded into it, and $model is lifted
@@ -35,37 +48,26 @@ set -uo pipefail
 # the backticked words resolved to is what got compiled.
 #
 # To emit a literal backtick INTO the generated harness, interpolate ${BT}
-# (defined below) instead of typing one — braces, because $BTdefaults would be
+# (defined above) instead of typing one — braces, because $BTdefaults would be
 # read as one variable name. A shell never re-scans the result of an expansion,
 # so ${BT} is inert text — which is precisely why it is safe here and a
 # typed backtick is not. The three Swift comments that need one use ${BT}, and the
 # harness they generate is byte-for-byte what it was before this rule existed.
 #
-# The limit, stated instead of hidden: this guard can only judge the text below
-# its first executable statement (GUARD-FIRST-EXEC below). Lines between the
-# shebang and that statement are outside its reach, and anyone who can edit
-# there can also delete the guard. The probe measures that span from the marker
-# on this file and prints it every run — deliberately no figure is written here,
-# because a number in prose is a number that can lag the thing it describes, and
-# lagging is what this card is about. The real fix for the span is a meta-gate
-# scanning every script in this directory, not a longer comment here.
+# The limit, stated instead of hidden: this guard can only judge the text at or
+# below GUARD-FIRST-EXEC. Lines above it (line 1 is the shebang; line 2 is the
+# set line) are outside its reach, and anyone who can edit there can also delete the
+# guard. scripts/widget_settings_check_backtick_probe.sh measures that span from
+# the marker on this file and prints it every run — deliberately no figure is
+# written into prose here, because a number in prose is a number that can lag the
+# thing it describes, and lagging is what this card is about. The real fix for
+# any span that remains is a meta-gate scanning every script in this directory,
+# not a longer comment in the file being judged.
 #
 # Fail closed: grep rc 1 means clean, rc 0 means the byte was found (refuse),
 # rc 2 or more means it could not read the file it is judging (refuse). A guard
 # that waves the run through because it failed to look is not a guard.
-SELF_SRC="${BASH_SOURCE[0]}"   # GUARD-FIRST-EXEC — captured before the cd below, or the path rots
-BT="$(printf '\140')"          # the banned byte, so this file never has to carry one
-bt_scan=$(grep -nF -- "$BT" "$SELF_SRC" 2>&1); bt_rc=$?
-if [ "$bt_rc" -ne 1 ]; then
-  if [ "$bt_rc" -eq 0 ]; then
-    bt_count=$(printf '%s\n' "$bt_scan" | wc -l | tr -d ' ')
-    echo "WIDGET SETTINGS CHECK FAILED — the file that is running ($SELF_SRC) contains $bt_count backtick character(s), listed with line numbers below. In this gate a backtick is command substitution: bash executes it while building the harness and splices shell into the Swift this gate then compiles and asserts on (measured on origin/main @ 3b5e475c: six of them spliced out of the generated harness, the balanced pairs silently). Write prose with quotes; to put a literal backtick into the generated harness interpolate \${BT}, which is inert because a shell never re-scans an expansion. Re-point this guard at the new text if this file moves — do not delete it, it is the only thing standing between the unquoted heredoc below and a gate that proves something other than what it says." >&2
-    printf '%s\n' "$bt_scan" >&2
-  else
-    echo "WIDGET SETTINGS CHECK FAILED — the backtick guard could not read the file that is executing ($SELF_SRC, grep rc $bt_rc): $bt_scan. Refusing to run a gate whose guard could not look at it." >&2
-  fi
-  exit 1
-fi
+
 
 # ---- what this gate proves -------------------------------------------------
 # widget_settings_check.sh — prove the Widgets & Live Activities shared
