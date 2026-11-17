@@ -25,6 +25,7 @@ every live endpoint is the route table itself: each `/v1/...` endpoint is a
 | template | `/v1/template/list`, `/v1/template/status`, `/v1/template/preview/{name}` |
 | profiles / sessions / memory | `/v1/profiles/*`, `/v1/profile/*`, `/v1/sessions`, `/v1/memory` (list/delete/edit) |
 | ops + observability | `/v1/verify`, `/v1/daemon/status`, `/v1/triggers`, `/v1/escalate`, `/v1/logs`, `/v1/daemon/history`, `/v1/activity/feed`, `/v1/cron/list`, `/v1/commands` |
+| mobile summary (read-only) | `/v1/mobile/summary` — per-board status counts (todo/ready/running/blocked/done/archived always present), counted server-side, capped at 4 KB for a Live Activity; `?boards=a,b` narrows it |
 | session events | `/v1/projects/{name}/session/events` (history) + WebSocket `/v1/projects/{name}/session/ws` (live) |
 
 Phases: cluster read (A2), project/kanban read (A3), mutating confirm-gated
