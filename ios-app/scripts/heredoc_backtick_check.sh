@@ -172,15 +172,18 @@ AWK
 )
 
 # ---- verdict machinery ------------------------------------------------------
+# A finding is a line that EXECUTES; a measured line is one that is inert today
+# and is printed with the reason. Both are counted in BYTES-OFFENDING-LINES, not
+# in messages, so collapsing the output cannot change a number a reader checks.
 fail=0
 live_findings=0
 measured_total=0
 files_scanned=0
 splice_capable_files=0
-notes=()
 
-finding() { echo "  FINDING  $1"; live_findings=$((live_findings + 1)); fail=1; }
-measured() { echo "  measured $1"; measured_total=$((measured_total + 1)); }
+nwords() { local n=0 w; for w in $1; do n=$((n + 1)); done; printf '%s' "$n"; }
+finding() { echo "  FINDING  $1"; live_findings=$((live_findings + $2)); fail=1; }
+measured() { echo "  measured $1"; measured_total=$((measured_total + $2)); }
 
 echo "heredoc backtick meta-check (t_4558fd32)"
 echo "  tree:    $IOSAPP"
@@ -231,25 +234,23 @@ for f in "${shfiles[@]}"; do
   fi
 
   for l in $body; do
-    finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment"
+    finding "$base:$l  backtick in an UNQUOTED heredoc body (R1) — bash expands this body; a leading '#' or '//' on such a line is body text, not a comment" 1
   done
   for l in $shell; do
-    finding "$base:$l  backtick in shell position (R1) — a code-bearing line's trailing comment is still shell position; the byte is expanded when this script runs"
+    finding "$base:$l  backtick in shell position (R1) — a code-bearing line's trailing comment is still shell position; the byte is expanded when this script runs" 1
   done
+  n_hash=$(nwords "$hash")
+  n_qbody=$(nwords "$qbody")
   if [ "$capable" = "1" ]; then
-    for l in $hash; do
-      finding "$base:$l  backtick in a '#' comment of a SPLICE-CAPABLE script (R2) — this file writes a file with an interpolating heredoc, so 'it is only a comment' is not accepted here"
-    done
-    for l in $qbody; do
-      finding "$base:$l  backtick inside a quoted heredoc body of a SPLICE-CAPABLE script (R2) — inert by itself, but this file is held to the file-wide ban"
-    done
+    [ "$n_hash" -gt 0 ] && finding \
+      "$base: $n_hash '#' comment line(s) carrying the byte (lines $hash) — SPLICE-CAPABLE script (it writes a file with an interpolating heredoc), so R2 does not accept 'it is only a comment' here" "$n_hash"
+    [ "$n_qbody" -gt 0 ] && finding \
+      "$base: $n_qbody byte(s) inside QUOTED heredoc bodies (lines $qbody) — inert by themselves, but this file is held to the R2 file-wide ban" "$n_qbody"
   else
-    for l in $hash; do
-      measured "$base:$l  '#' comment in a script with no unquoted heredoc — a comment line never expands, and there is no splice surface in this file to make that claim load-bearing (R3)"
-    done
-    for l in $qbody; do
-      measured "$base:$l  inside a QUOTED heredoc body — bash cannot expand a quoted delimiter, so a payload here would prove nothing (R3)"
-    done
+    [ "$n_hash" -gt 0 ] && measured \
+      "$base: $n_hash '#' comment line(s) (lines $hash) — a comment line never expands, and this file has no unquoted heredoc to make that claim load-bearing (R3)" "$n_hash"
+    [ "$n_qbody" -gt 0 ] && measured \
+      "$base: $n_qbody byte(s) inside QUOTED heredoc bodies (lines $qbody) — bash cannot expand a quoted delimiter, so a payload there would prove nothing (R3)" "$n_qbody"
   fi
 done
 
@@ -291,9 +292,10 @@ echo
 echo "summary: $files_scanned shell script(s) scanned, $splice_capable_files splice-capable" \
      "(unquoted heredoc present), $live_findings finding(s), $measured_total measured-inert."
 if [ "$measured_total" -gt 0 ]; then
-  echo "The measured-inert lines are NOT exemptions handed out silently: they are printed"
-  echo "above, one per line, with the reason each is inert today and the rule that would"
-  echo "make it a finding (the line stopping being a comment, or the file gaining a heredoc)."
+  echo "The measured-inert lines are NOT exemptions handed out silently: each is printed"
+  echo "above, per file and region kind, naming EVERY offending line number, with the"
+  echo "reason it is inert today and the rule that would make it a finding (the line"
+  echo "stopping being a comment, or the file gaining an unquoted heredoc)."
 fi
 
 if [ "$fail" -ne 0 ]; then

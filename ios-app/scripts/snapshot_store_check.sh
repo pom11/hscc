@@ -5,13 +5,13 @@
 #
 # Why this exists (t_15a88458): the widget's SnapshotStore saved a last-known
 # topology to the App Group so an unreachable window could show yesterday's
-# real per-node state. encode used `|` for BOTH the node separator and the
-# label/state separator, so decode (split on `|`, then re-split a token that no
-# longer contained `|`) always recovered 0 nodes. The interleaving made the
-# `.244|up|.246|up|…` format unrecoverable.
+# real per-node state. encode used '|' for BOTH the node separator and the
+# label/state separator, so decode (split on '|', then re-split a token that no
+# longer contained '|') always recovered 0 nodes. The interleaving made the
+# '.244|up|.246|up|...' format unrecoverable.
 #
 # This harness EXTRACTS the two private functions verbatim from the committed
-# source (so it can never drift), re-homes them under a `SnapshotStore` enum
+# source (so it can never drift), re-homes them under a 'SnapshotStore' enum
 # with the same nested types, and asserts a multi-state round-trip. It cannot
 # run on a device (no iOS runtime on this host); it proves the serialization
 # contract executes correctly — the exact part that was broken.
@@ -22,7 +22,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 SRC="Sources/Shared/SharedStore.swift"
 
 # Extract the two functions verbatim from the source (no hand-copy -> no drift),
-# then drop the `private` so the harness main can call them (bodies unchanged).
+# then drop the 'private' so the harness main can call them (bodies unchanged).
 fns=$(awk '/private static func encodeNodes/,/^    \}/' "$SRC")
 fns="$fns"$'\n'"$(awk '/private static func decodeNodes/,/^    \}/' "$SRC")"
 fns=${fns//private static func/static func}

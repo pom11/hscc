@@ -111,7 +111,7 @@ fetch "$BASE/v1/logs?source=daemon&limit=50"         v1_logs_daemon             
 # --------------------------------------------------------------------------- #
 # Pass 1: parameterized routes — resolve {param} from the pass-0 captures
 # --------------------------------------------------------------------------- #
-json_get() { # json_get <file> <python-expr>  (expr has access to `d`)
+json_get() { # json_get <file> <python-expr>  (expr has access to 'd')
   "$PY" -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
