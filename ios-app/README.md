@@ -12,7 +12,7 @@ distributed, and is deliberately NOT App Store–ready.**
 > been walked on an iPhone-16-class simulator by the XCUITest nav-graph gate
 > (17/17 drawer rows — enter, back, pull-to-refresh, honest empty + error
 > states; t_810ab152), and every Codable model decodes the committed live
-> fixtures (62/62, `scripts/model_decode_check.sh`). Still **unverified at
+> fixtures (88/88, `scripts/model_decode_check.sh`). Still **unverified at
 > runtime**: Siri App Intents, the Home Screen widget, and the Live Activities
 > need a signed build on real hardware. See **"Honest limits"** below.
 
@@ -236,12 +236,15 @@ mapped onto drawer destinations.
     screens × light/dark — is in `docs/design/screens/`.
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +
     `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
-    committed live fixtures (54 JSONs under
-    `scripts/model_decode_check/fixtures/`, 62 decode checks — some fixtures
+    committed live fixtures (62 JSONs under
+    `scripts/model_decode_check/fixtures/`, 88 decode checks — some fixtures
     are checked against more than one model), so it can never drift into a
-    false green like a mirrored validator could.
-  - `shared_model_check.swift` — decodes the shared widget/Live Activity
-    model shapes against live API JSON (runs as a macOS CLI).
+    false green like a mirrored validator could. The widget / Live Activity
+    payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
+    here too — which is why the two mirror harnesses that used to re-declare
+    them (`shared_model_check.swift`, `widget_kanban_decode_check.swift`) were
+    deleted by t_595a5fee: a mirror that drifts is the exact failure this
+    script exists to catch.
   - `shared_store_check.sh` — proves the App Group sharing failure is **loud,
     not silent**: a grep guard asserts SettingsStore no longer falls back to
     `?? .standard` on the shared suite and that the share write is gated on
@@ -399,7 +402,7 @@ with Xcode — none of it needs the real cluster:
 cd ios-app
 scripts/build_check.sh          # full per-target compile
 scripts/nav_graph_check.sh      # XCUITest walk of all 17 drawer rows + negative self-check
-scripts/model_decode_check.sh   # real models vs the 54 committed live fixtures
+scripts/model_decode_check.sh   # real models vs the 62 committed live fixtures
 scripts/capture_screens.sh      # tap-free screenshot set → docs/design/screens/
 ```
 
