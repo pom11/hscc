@@ -62,6 +62,17 @@ import WidgetKit
 // the slugs this device last saw, because a picker that is empty while the
 // cluster is down is useless.
 //
+// CADENCE AND PAUSE (t_09cd8abf): this surface has a registry entry —
+// `WidgetSurfaceKind.widgetBoardStatus` — so the app's "Widgets & Live
+// Activities" screen owns both: the Active toggle and the cadence picker. A
+// paused surface returns a `paused` entry BEFORE any read (zero requests, zero
+// numbers, never a stale snapshot and never a blank) and an Off cadence yields
+// `policy: .atEnd`, both matching `ClusterWidgetTimelineProvider`. Until this
+// entry existed the widget hard-coded a quarter-hour and could not be paused at
+// all; an install whose registry blob has never been written still gets the
+// shared widget default (ON, 5 min), so adding the key cannot silently pause a
+// widget that is already on a Home Screen.
+//
 // STORAGE (§7): the projection only — board slug, five optional ints, the
 // source, and the fetch date. No response body, no card text, no path, no
 // address, no token, and the writes go through `SharedStore.suite` (never a
@@ -92,6 +103,13 @@ struct BoardStatusEntry: TimelineEntry {
     let failure: WidgetDataFailure?
     /// False only when the operator has no host/token yet — the setup invite.
     let configured: Bool
+    /// True when the operator paused this surface in Settings (t_09cd8abf). A
+    /// paused entry carries NO projection and NO failure: it is neither live
+    /// data nor stale data nor an error, and drawing any of those instead of
+    /// an honest "paused" is the failure mode `ClusterEntry.paused` exists to
+    /// avoid. The widget cannot remove itself programmatically, so the paused
+    /// pane IS the honest pause.
+    let paused: Bool
 
     /// The fixture `placeholder` draws: plausible, clearly not a real cluster,
     /// and the same shape a live entry takes so the families can be eyeballed.
@@ -101,12 +119,44 @@ struct BoardStatusEntry: TimelineEntry {
         projection: .preview,
         ageMinutes: nil,
         failure: nil,
-        configured: true
+        configured: true,
+        paused: false
     )
 
     static func unconfigured(boardSlug: String?) -> BoardStatusEntry {
         BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: nil,
-                         ageMinutes: nil, failure: .notConfigured, configured: false)
+                         ageMinutes: nil, failure: .notConfigured, configured: false,
+                         paused: false)
+    }
+
+    /// The paused state: the slug it belongs to and nothing else. No
+    /// projection, no snapshot, no failure — the operator asked for no data,
+    /// so the surface shows none (and the provider never sends a request for
+    /// it; see `BoardStatusTimelineProvider.entry`).
+    static func paused(boardSlug: String?) -> BoardStatusEntry {
+        BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: nil,
+                         ageMinutes: nil, failure: nil, configured: true,
+                         paused: true)
+    }
+
+    // MARK: Gate copy (unconfigured / paused)
+
+    /// The line the gate pane draws in the Home Screen and rectangular
+    /// families.
+    var gateLine: String {
+        paused ? "Paused in Settings" : "Set up the app to see this board"
+    }
+
+    /// The label the accessory families draw for a gate state. Unconfigured is
+    /// checked FIRST — the audit-3 rule that an unconfigured app invites setup
+    /// in every family, before a paused or failing state can be drawn.
+    var shortGateLabel: String {
+        if !configured { return "Set up in HSCC" }
+        // A paused accessory still says WHICH board is paused, inside the same
+        // ~25-character budget as the live line, and drops the slug rather than
+        // truncating it (the same rule `inlineLine` follows below).
+        let withBoard = "\(titleText) · paused"
+        return withBoard.count <= 25 ? withBoard : "Paused"
     }
 
     // MARK: Text the families draw (kept here so it is one rule per string)
@@ -117,7 +167,9 @@ struct BoardStatusEntry: TimelineEntry {
     /// long slug is dropped rather than truncated — half a board name is
     /// ambiguous, the counts are not.
     var inlineLine: String {
-        if !configured { return "Set up in HSCC" }
+        // One call for both gate states, and `shortGateLabel` itself puts the
+        // setup invite first — an unconfigured app never reads as paused.
+        if !configured || paused { return shortGateLabel }
         guard let projection = projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
         let counts = BoardStatusReading.countsShortLine(projection)
         let withBoard = "\(titleText) · \(counts)"
@@ -246,12 +298,26 @@ struct BoardStatusConfigurationIntent: WidgetConfigurationIntent {
 // MARK: - Timeline provider
 
 struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
-    /// Cadence, not a poll. The operator's per-surface cadence lives in
-    /// `AppGroupWidgetSettings`, whose `WidgetSurfaceKind` has no case for this
-    /// widget yet (adding one is a `SharedStore.swift` + config-screen change,
-    /// outside this card's file set), so the widget uses the conservative
-    /// quarter-hour and lets WidgetKit's own budget have the last word.
-    private static let refreshMinutes = 15
+    /// The cadence when the operator has never touched the settings screen:
+    /// the shared widget default (`AppGroupWidgetSettings.setting(for:)` gives
+    /// a self-fetching widget 5 minutes), not the quarter-hour this file
+    /// hard-coded while `WidgetSurfaceKind` had no case for this surface.
+    /// t_09cd8abf added `widget.boardStatus`, so the operator's choice now
+    /// wins and this is only the fallback for a store that was never written.
+    private static let defaultRefreshMinutes = 5
+
+    // GATE-SLICE-BEGIN: board_status_cadence
+    /// The ONE cadence decision, kept free of WidgetKit so a gate can execute
+    /// it: nil means Off — the timeline gets `policy: .atEnd` and the OS wakes
+    /// the widget when it likes — and a date means `.after(date)`. Written
+    /// inline, the Off branch (the one that becomes a refresh loop if it is
+    /// wrong) would be the only branch in this file no gate ever runs.
+    static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
+        guard refreshMinutes > 0 else { return nil }
+        return Calendar.current.date(byAdding: .minute, value: refreshMinutes, to: now)
+            ?? now.addingTimeInterval(TimeInterval(refreshMinutes * 60))
+    }
+    // GATE-SLICE-END: board_status_cadence
 
     func recommendations() -> [AppIntentRecommendation<BoardStatusConfigurationIntent>] {
         // The Smart Stack suggestions have to exist without a network, so they
@@ -275,21 +341,47 @@ struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: BoardStatusConfigurationIntent,
                   in context: Context) async -> BoardStatusEntry {
-        await entry(for: configuration)
+        // The gallery preview reads the same registry entry the timeline does,
+        // so a paused widget previews as paused instead of showing a live board
+        // the operator explicitly turned off.
+        await entry(for: configuration, surface: Self.surface())
     }
 
     func timeline(for configuration: BoardStatusConfigurationIntent,
                   in context: Context) async -> Timeline<BoardStatusEntry> {
-        let entry = await entry(for: configuration)
-        let next = Calendar.current.date(byAdding: .minute, value: Self.refreshMinutes, to: .now)
-            ?? .now.addingTimeInterval(900)
+        let surface = Self.surface()
+        let entry = await entry(for: configuration, surface: surface)
+        // 0 = Off in the cadence picker: no scheduled refresh, the OS decides.
+        // Same shape as `ClusterWidgetTimelineProvider.getTimeline`.
+        guard let next = Self.nextRefreshDate(
+            refreshMinutes: surface?.refreshMinutes ?? Self.defaultRefreshMinutes
+        ) else {
+            return Timeline(entries: [entry], policy: .atEnd)
+        }
         return Timeline(entries: [entry], policy: .after(next))
+    }
+
+    /// The operator's entry for THIS surface, or nil when the registry blob has
+    /// never been written. `setting(for:)` fills in an absent surface with ON at
+    /// the widget cadence, so nil here means "the app has never run its settings
+    /// screen" — never "paused", which is why a fresh install still renders.
+    private static func surface() -> WidgetSurfaceSettings? {
+        AppGroupWidgetSettings.load()?.setting(for: .widgetBoardStatus)
     }
 
     // MARK: Fetch
 
-    private func entry(for configuration: BoardStatusConfigurationIntent) async -> BoardStatusEntry {
+    private func entry(for configuration: BoardStatusConfigurationIntent,
+                       surface: WidgetSurfaceSettings?) async -> BoardStatusEntry {
         let boardSlug = configuration.board?.id
+        // Paused is checked BEFORE the client is built and before any read: a
+        // paused surface spends zero requests (§2's budget) and draws zero
+        // numbers — no live counts, no last-known snapshot, no failure pane.
+        // `!isActive` can only come from a blob the app wrote, so an install
+        // that never opened Settings cannot land here.
+        if let surface, !surface.isActive {
+            return .paused(boardSlug: boardSlug)
+        }
         let client = WidgetDataClient.makeIfConfigured()
         guard let client else {
             // No host, no token: the ONE job here is the setup invite, and the
@@ -306,13 +398,13 @@ struct BoardStatusTimelineProvider: AppIntentTimelineProvider {
         case .live(let projection, let fetchedAt):
             BoardStatusSnapshotStore.save(projection, at: fetchedAt)
             return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: projection,
-                                    ageMinutes: nil, failure: nil, configured: true)
+                                    ageMinutes: nil, failure: nil, configured: true, paused: false)
         case .stale(let projection, let ageMinutes, let reason):
             return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: projection,
-                                    ageMinutes: ageMinutes, failure: reason, configured: true)
+                                    ageMinutes: ageMinutes, failure: reason, configured: true, paused: false)
         case .failed(let failure):
             return BoardStatusEntry(date: .now, boardSlug: boardSlug, projection: nil,
-                                    ageMinutes: nil, failure: failure, configured: true)
+                                    ageMinutes: nil, failure: failure, configured: true, paused: false)
         }
     }
 
@@ -379,6 +471,10 @@ struct BoardStatusWidget: Widget {
 /// One entry, six families. The dispatch order is the audit-3 invariant the
 /// cluster widget also obeys: the setup invite is checked BEFORE any failure or
 /// stale state, so an unconfigured app never renders as "can't reach the cluster".
+/// A paused entry (t_09cd8abf) joins the same gate step — it renders the
+/// "Paused in Settings" pane, never a stale number and never a blank — and the
+/// gate copy itself puts the setup invite first, so an unconfigured app cannot
+/// read as "paused" either.
 struct BoardStatusWidgetView: View {
     let entry: BoardStatusEntry
     @Environment(\.widgetFamily) private var family
@@ -407,8 +503,16 @@ struct BoardStatusCircularView: View {
     let entry: BoardStatusEntry
 
     var body: some View {
-        if !entry.configured {
-            BoardStatusInviteView(compact: true)
+        if !entry.configured || entry.paused {
+            // Same shape the cluster widget's circular takes for a gate state:
+            // a label, not a number. A paused ring that still drew a count
+            // would be exactly the false zero §6 rule 1 refuses.
+            Text(entry.shortGateLabel)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(entry.shortGateLabel)
         } else {
             let color = entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.ok
             VStack(spacing: 0) {
@@ -428,8 +532,8 @@ struct BoardStatusRectangularView: View {
     let entry: BoardStatusEntry
 
     var body: some View {
-        if !entry.configured {
-            BoardStatusInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            BoardStatusGateView(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.titleText)
@@ -451,8 +555,8 @@ struct BoardStatusSmallView: View {
     let entry: BoardStatusEntry
 
     var body: some View {
-        if !entry.configured {
-            BoardStatusInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            BoardStatusGateView(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                 BoardStatusHeaderView(entry: entry)
@@ -467,8 +571,8 @@ struct BoardStatusMediumView: View {
     let entry: BoardStatusEntry
 
     var body: some View {
-        if !entry.configured {
-            BoardStatusInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            BoardStatusGateView(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                 BoardStatusHeaderView(entry: entry)
@@ -486,8 +590,8 @@ struct BoardStatusLargeView: View {
     let entry: BoardStatusEntry
 
     var body: some View {
-        if !entry.configured {
-            BoardStatusInviteView(compact: false)
+        if !entry.configured || entry.paused {
+            BoardStatusGateView(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                 BoardStatusHeaderView(entry: entry)
@@ -571,21 +675,24 @@ private struct BoardStatusTileGrid: View {
     }
 }
 
-/// The unconfigured state — the only thing an unconfigured app may show
-/// (t_5c554c5b, enforced for the cluster widget by `widget_view_dispatch_check`).
-private struct BoardStatusInviteView: View {
-    let compact: Bool
+/// The gate a family draws when it has nothing to draw: the setup invite
+/// (t_5c554c5b — the ONLY thing an unconfigured app may show) or the honest
+/// paused state (t_09cd8abf). One pane, two copies, chosen by `entry.paused`
+/// exactly as `ClusterWidgetViews`' gate does, so a paused surface can never
+/// fall through to live data, to a stale snapshot, or to a blank. The accessory
+/// circular draws `shortGateLabel` as text instead — there is no room for an
+/// icon in a ring.
+private struct BoardStatusGateView: View {
+    let entry: BoardStatusEntry
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: "gearshape")
-                .font(compact ? .system(size: 12) : .title3)
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+                .font(.title3)
                 .foregroundStyle(Theme.Semantic.onSurfaceMuted)
-            if !compact {
-                Text("Set up the app to see this board")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
-            }
+            Text(entry.gateLine)
+                .font(.caption2)
+                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
         }
     }
 }
