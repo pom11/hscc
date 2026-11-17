@@ -44,8 +44,10 @@ struct MonitorWidgetView: View {
 
 /// Honest rendition of the gate states (unconfigured / paused / unreachable).
 /// `entry.isLive` distinguishes live content from a full-pane gate. The
-/// unreachable pane carries the last-known snapshot (if any) dimmed with its
-/// age — a stale read is never presented as live data.
+/// unreachable pane says whether a last-known snapshot exists and how old it is
+/// — a stale read is never presented as live data, and no stale node row is
+/// drawn at all, so the only thing the container hands back to a view is the
+/// projected node COUNT plus the daemon-host block (§7).
 extension MonitorEntry {
     var isLive: Bool { configured && !paused && state != .unreachable }
 
@@ -77,7 +79,7 @@ extension MonitorEntry {
                     .foregroundColor(Theme.Semantic.onSurface)
                 Spacer()
             }
-            if !nodes.isEmpty {
+            if lastKnownNodeCount > 0 {
                 Text("showing last-known data")
                     .font(.caption2)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -166,14 +168,9 @@ struct MonitorMeter: View {
     }
 }
 
-/// Displayed node label — the short tail of the node IP, or the sample hostname.
-extension MonitorNode {
-    var displayLabel: String {
-        if let hostname = sample?.hostname, !hostname.isEmpty { return hostname }
-        let parts = host.split(separator: ".")
-        return parts.count > 1 ? "." + parts.suffix(1).joined() : host
-    }
-}
+// The displayed node label (`displayLabel` — sample hostname, else the address
+// tail) lives on `MonitorNode` itself in Sources/Shared/SharedModels.swift, so
+// the widget, the Live Activity and the live probe share one rule (t_595a5fee).
 
 // ---------------------------------------------------------------------------
 // Medium — state line + a compact 2×2 node grid + a slim daemon-host strip

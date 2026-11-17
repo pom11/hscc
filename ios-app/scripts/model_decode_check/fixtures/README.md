@@ -39,8 +39,8 @@ the real captures: the Card model reads only `id/title/status/assignee/board`
 (unknown fields are ignored by Decodable), so the bulky card `body` prose —
 which contained a tailnet IP and a token-file path — was dropped and the real
 key structure preserved. The decode contract is therefore exercised identically.
-All 54 JSON fixtures in this directory autovalidate as JSON (verified 2026-10-19
-by `ls *.json | wc -l` + re-encode). If ever in doubt, re-encode a
+All 62 JSON fixtures in this directory autovalidate as JSON (re-verified
+2026-11-17 by `ls *.json | wc -l` + re-encode). If ever in doubt, re-encode a
 fresh capture and diff the key structure.
 
 ## Coverage
@@ -48,8 +48,9 @@ fresh capture and diff the key structure.
 The committed fixtures cover every decodable response model in Models.swift +
 SharedModels.swift that has a decode check wired into `main.swift`, plus every
 response type surfaced by the live capture (`live_decode_check`). Current green:
-62/62 committed fixtures + 36/36 live routes (see Phase 4 additions below for
-the count reconciliation).
+88/88 committed-fixture checks (62 JSON bodies; several are decoded by more than
+one model, and the widget blocks assert derived values too) + 36/36 live routes
+(see Phase 4 and the widget-payload additions below for the count reconciliation).
 
 `cron_list.json` is the Phase 3 scheduled-job roster (`GET /v1/cron/list`,
 added 2026-09-27). It is a faithful 11-job capture of the REAL live response
@@ -118,6 +119,64 @@ From `ios-app/`:
 
     ./scripts/model_decode_check.sh       # exit 0 == every fixture decodes
 
-The script compiles the three real model files with the harness into a temporary
-macOS CLI and runs it, so it never falls out of sync with the models the app
-actually ships.
+The script compiles the real model files — `Models.swift`, `SharedModels.swift`,
+`APIError.swift`, `SessionEvent.swift`, and since t_438aa6ce also
+`SharedStore.swift`, because §7 binds the **stored** shape and the monitor
+snapshot's bytes are production types, not mirrors — with the harness into a
+temporary macOS CLI and runs it, so it never falls out of sync with the models the
+app actually ships.
+
+## Widget / Live Activity payload additions (t_595a5fee, 2026-11-17)
+
+`SharedModels.swift` narrowed to the five datasets of
+`docs/WIDGET_DATA_CONTRACT.md` §3, and `main.swift` now decodes those types too.
+Eight fixtures, provenance stated per file because the repo's rule is that a
+fixture is a capture unless labelled otherwise:
+
+- **Live captures** (read-only `GET`s against the running daemon, base derived at
+  runtime, value-sanitized only — shape untouched, same keys/types/nesting):
+  - `v1_daemon_host.json` — `GET /v1/daemon/host` → `MonitorDaemonHost`. 445 B
+    served. `hostname` and the `speak` line sanitized to `gateway-1` per the
+    mapping above; the numbers (cpu/mem/disk/uptime) are as served. No route
+    covered this payload before, and the widget + monitor Live Activity read it.
+  - `v1_kanban_running.json` — `GET /v1/kanban/running` → `KanbanRunningLite`.
+    Kept **with** `boards`, `errors`, `pid` and `host_local`, because the point of
+    the check is that the wire carries them and the type does not (§5.3 + the
+    read-only pivot). Nothing here is a credential or an address.
+- **Authored from the handler** (the route is not deployed: `GET
+  /v1/mobile/summary` returned 404 live on 2026-11-17, PR #310 being the server
+  half). Shapes are read off `hscc-api/routes_mobile.py` — `_fold_counts`,
+  `_assemble`, `_fit_budget` and `handle_mobile_summary` — not guessed:
+  - `v1_mobile_summary.json` — the healthy payload: three tiles, all six statuses
+    present, `total` equal to the sum of the statuses the way the server folds it.
+  - `v1_mobile_summary_degraded.json` — §6 rule 7: `generated_at` + `speak` and
+    **no `boards` key**, so a client can never confuse "no counts" with "quiet".
+  - `v1_mobile_summary_board_error.json` — the `?boards=` path: one good tile and
+    one `{"board": slug, "error": "counts unavailable"}` (no counts, no total).
+  - `v1_mobile_summary_truncated.json` — the 4 KB budget trimmed the tail:
+    `truncated`, `omitted_boards`, `unreadable_boards` all set and asserted.
+  - `v1_mobile_summary_missing_done.json` — a **negative** fixture: a counts map
+    with no `done`. `main.swift` asserts it *fails* to decode (§6 rule 1: a missing
+    key is a bug, zero is a value — defaulting `done` to 0 is the bug this route
+    exists to kill).
+- **Shape-faithful rewrite** of a real capture, in the `cards.json` tradition:
+  - `kanban_stale_queued.json` — keys exactly as `autodown.list_stale_tasks`
+    serves them (§4.3). Needed because the committed `kanban_stale.json` is a
+    two-row capture whose rows are both `running` at `age_days: 0`, so the tile's
+    queue-depth derivation (`ready` + `todo`) and §5.3's oldest-first row order
+    were exercised by nothing at all.
+
+## Stored-shape additions (t_438aa6ce, 2026-11-17)
+
+§7 binds what the App Group container may hold, so the subject here is a *stored*
+blob rather than a route response.
+
+- `v1_monitor_snapshot_legacy.json` — a **negative** fixture: the exact shape
+  `MonitorSnapshotStore` wrote before this card, when `Snapshot.nodes` was
+  `[MonitorNode]` — a node object with `host` (RFC 5737 test-net `192.0.2.1`,
+  sanitized per the mapping above), `error`, and the full `sample` including
+  `sparkrun_job_names`. `main.swift` asserts it **fails** to decode into the real
+  `MonitorSnapshotStore.Snapshot`: `MonitorNodeEntry` declares no such fields, so
+  an upgraded build refuses the legacy blob outright (`load()` returns nil) instead
+  of reading an address back out of the container. That rejection *is* the migration
+  behaviour, so it is asserted rather than argued.

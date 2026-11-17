@@ -10,10 +10,17 @@
 # What it compiles (all real, none redeclared here):
 #   Sources/HSCC/Models.swift
 #   Sources/Shared/SharedModels.swift
+#   Sources/Shared/SharedStore.swift
 #   Sources/HSCC/APIError.swift
 # The only non-model shim (ThemeStub.swift — a UI design token, not a model)
 # exists because SharedModels.swift references Theme.Semantic.* colors, which on
 # macOS render nothing but satisfy the needed types.
+#
+# SharedStore.swift is in the list because §7 binds the STORED shape, not the
+# decoded one: `MonitorNodeEntry` + `MonitorSnapshotStore.project` + `Snapshot`
+# are production types here, so the §7 monitor-snapshot assertions at the end of
+# main.swift check the bytes the App Group would actually hold. It is Foundation
+# + Security only, so it compiles for macOS like the models do.
 #
 # Runs on macOS only — there is no iOS platform runtime on this host, and the
 # decode logic is pure Foundation (the model files are iOS-Codable but decode
@@ -33,6 +40,7 @@ trap 'rm -rf "$TMP"' EXIT
 real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
+  Sources/Shared/SharedStore.swift
   Sources/HSCC/APIError.swift
   Sources/HSCC/SessionEvent.swift
 )

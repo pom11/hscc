@@ -1,0 +1,62 @@
+{
+ "boards": [
+  "default",
+  "ecofire-app",
+  "ecofire-bc",
+  "ecofire-flows",
+  "ecofire-notify",
+  "ecofire-pontaje",
+  "efsdriver",
+  "flightdeck",
+  "flosana",
+  "gateclerk",
+  "grid",
+  "headless-display",
+  "hscc",
+  "ios-app",
+  "kronos",
+  "micro-notify",
+  "myproj",
+  "pickolo",
+  "pom",
+  "powerbi",
+  "radio",
+  "soconn",
+  "sphoin"
+ ],
+ "tasks": [
+  {
+   "board": "ecofire-pontaje",
+   "id": "t_ccb89685",
+   "title": "BC-P42 pontaje r4: open assignment add must hit the lock wall",
+   "assignee": "ecofire-pontaje-engineer",
+   "status": "running",
+   "pid": 86837,
+   "host_local": true,
+   "started_at": "2026-11-17T09:34:24+00:00"
+  },
+  {
+   "board": "hscc",
+   "id": "t_3778b7bd",
+   "title": "ios: Delete session history, sessions list and diff views, plus the nav-graph UI tests",
+   "assignee": "ios-engineer",
+   "status": "running",
+   "pid": 96012,
+   "host_local": true,
+   "started_at": "2026-11-17T09:40:12+00:00"
+  },
+  {
+   "board": "hscc",
+   "id": "t_595a5fee",
+   "title": "ios: Narrow SharedModels to the five widget payloads and keep the decode check green",
+   "assignee": "ios-engineer",
+   "status": "running",
+   "pid": 79605,
+   "host_local": true,
+   "started_at": "2026-11-17T09:28:20+00:00"
+  }
+ ],
+ "errors": [],
+ "count": 3,
+ "speak": "3 running tasks."
+}

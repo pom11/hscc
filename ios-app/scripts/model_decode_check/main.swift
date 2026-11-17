@@ -46,6 +46,41 @@ final class DecodeCheck {
             print("FAIL \(name)  →  \(label): \(error)")
         }
     }
+    /// Run a block of assertions. A throw inside is a named failure, not a crash
+    /// of the whole harness, so one drifted fixture still reports the rest.
+    func assertions(_ name: String, _ label: String, _ body: () throws -> Void) {
+        do { try body() } catch {
+            failures.append((name, label, "\(error)"))
+            print("FAIL \(name)  →  \(label): \(error)")
+        }
+    }
+
+    /// Assert a decode that MUST fail: the shape a contract rule forbids. This is
+    /// the §6 "a missing key is a bug, zero is a value" case — a counts map that
+    /// omits `done` has to throw, or a widget renders `done: 0` forever.
+    func checkFails<T: Decodable>(_ type: T.Type, _ name: String, _ label: String) {
+        do {
+            _ = try JSONDecoder().decode(type, from: load(name))
+            failures.append((name, label, "decoded — but this fixture must NOT decode"))
+            print("FAIL \(name)  →  \(label): decoded when it should have thrown")
+        } catch {
+            passed += 1
+            print("OK   \(name)  →  \(label) (rejected as required)")
+        }
+    }
+
+    /// Assert what a surface READS from a payload that decoded, not only that the
+    /// bytes parsed: the row cap, the age order, the degrade path.
+    func expect(_ name: String, _ label: String, _ ok: Bool, _ detail: String = "") {
+        if ok {
+            passed += 1
+            print("OK   \(name)  →  \(label)")
+        } else {
+            failures.append((name, label, detail.isEmpty ? "assertion failed" : detail))
+            print("FAIL \(name)  →  \(label): \(detail)")
+        }
+    }
+
 }
 
 let fixtureDir = CommandLine.arguments.count > 1
@@ -396,6 +431,342 @@ do {
     c.failures.append(("template_preview_hscc-live.json", "serve_delta decode", "\(error)"))
     print("FAIL template_preview_hscc-live.json → serve_delta decode: \(error)")
 }
+
+// ---- Widget / Live Activity payloads (t_595a5fee) -------------------------
+// The five datasets of docs/WIDGET_DATA_CONTRACT.md §3 are what the pivot's
+// surfaces render, and every type below is the REAL one from
+// Sources/Shared/SharedModels.swift. This card deleted the two mirror harnesses
+// (scripts/shared_model_check.swift, scripts/widget_kanban_decode_check.swift)
+// that re-declared these structs: a mirror that drifts is exactly the false
+// green this harness exists to prevent, and the real types decode here anyway.
+
+// Dataset 1 — projects (`reuse`). v1_projects.json is the live capture and it
+// DOES carry `repo` (an absolute path on the operator's machine) and `topic`;
+// ProjectsLite declares neither, so a clean decode plus `carriesRepo` proves the
+// §7 redaction is structural: the value arrives, is ignored, and can never be
+// rendered or written into the App Group container.
+c.assertions("v1_projects.json", "ProjectsLite (widget projects)") {
+    let raw = try c.load("v1_projects.json")
+    let p = try JSONDecoder().decode(ProjectsLite.self, from: raw)
+    let text = String(decoding: raw, as: UTF8.self)
+    c.expect("v1_projects.json", "ProjectsLite: \(p.projects.count) projects + count agrees",
+             !p.projects.isEmpty && p.count == p.projects.count,
+             "count \(String(describing: p.count)) vs \(p.projects.count) rows")
+    c.expect("v1_projects.json", "ProjectsLite: `repo`/`topic` on the wire, NOT in the type",
+             text.contains("\"repo\"") && text.contains("\"topic\""),
+             "fixture lost the fields the redaction proves")
+    c.expect("v1_projects.json", "rows(limit:) caps to what a surface draws (§5.1)",
+             p.rows(limit: 3).count == min(3, p.projects.count)
+             && p.rows(limit: 99).count == p.projects.count,
+             "row cap is not what §5.1 sizes")
+    c.expect("v1_projects.json", "every row has a name (its identity)",
+             p.projects.allSatisfy { !$0.name.isEmpty }, "empty name")
+}
+
+// Dataset 2 — board status counts (`GET /v1/mobile/summary`, §6). The route is
+// not deployed yet (PR #310 open; a live GET 404s — verified 2026-11-17), so
+// these fixtures are authored from routes_mobile.py::_assemble and its degrade
+// paths; provenance is recorded in fixtures/README.md.
+c.assertions("v1_mobile_summary.json", "MobileSummaryResponse (§6 counts)") {
+    let ok = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                      from: try c.load("v1_mobile_summary.json"))
+    c.expect("v1_mobile_summary.json", "decodes, not degraded, speak present",
+             !ok.degraded && ok.entries.count == 3 && !ok.speak.isEmpty, "expected 3 tiles")
+    c.expect("v1_mobile_summary.json", "every tile carries all six counts",
+             ok.entries.allSatisfy { $0.counts != nil && $0.error == nil },
+             "a tile without counts is a bug, not a quiet board")
+    c.expect("v1_mobile_summary.json", "openTotal = total − done − archived (§6)",
+             ok.board("hscc")?.openTotal == 22
+             && ok.entries.reduce(0) { $0 + ($1.openTotal ?? 0) } == 37,
+             "open math drifted from the server's _open_total")
+    c.expect("v1_mobile_summary.json", "openCount + hasBlocked drive the tile",
+             ok.board("headless-display")?.counts?.openCount == 10
+             && ok.board("headless-display")?.counts?.hasBlocked == true
+             && ok.board("hscc")?.counts?.hasBlocked == false,
+             "the blocked-is-red rule is wrong")
+    c.expect("v1_mobile_summary.json", "an absent board reads nil, never a zero tile",
+             ok.board("does-not-exist") == nil, "the lookup invented a tile")
+
+    // §6 rule 7: the degrade path sends no `boards` key at all.
+    let deg = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                       from: try c.load("v1_mobile_summary_degraded.json"))
+    c.expect("v1_mobile_summary_degraded.json", "degraded: zero tiles, no counts, speak only",
+             deg.degraded && deg.entries.isEmpty && deg.board_count == nil
+             && deg.speak == "Board counts unavailable.", "degrade body changed shape")
+
+    // One unreadable board must stay an error, not become a zero.
+    let partial = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                           from: try c.load("v1_mobile_summary_board_error.json"))
+    c.expect("v1_mobile_summary_board_error.json", "per-board error stays an error",
+             partial.entries.count == 2
+             && partial.board("headless-display")?.counts == nil
+             && partial.board("headless-display")?.error != nil
+             && partial.board("headless-display")?.openTotal == nil
+             && partial.board("hscc")?.counts?.done == 750,
+             "an unreadable board was rendered as data")
+
+    // The 4 KB Live-Activity budget trims the tail and announces it.
+    let trunc = try JSONDecoder().decode(MobileSummaryResponse.self,
+                                         from: try c.load("v1_mobile_summary_truncated.json"))
+    c.expect("v1_mobile_summary_truncated.json", "truncation is announced, never silent",
+             trunc.truncated == true && trunc.omitted_boards == 22
+             && trunc.unreadable_boards == 1 && trunc.entries.count == 1
+             && trunc.total_boards == 23, "a trimmed payload no longer reports the trim")
+
+    // §6 rule 1 — the case that shipped the original lie: counts without `done`.
+    c.checkFails(MobileSummaryResponse.self, "v1_mobile_summary_missing_done.json",
+                 "BoardStatusCounts requires all six statuses")
+}
+
+// Datasets 3 + 4 — the kanban trio. v1_kanban_running.json is a LIVE capture that
+// still carries `boards`, `errors`, `pid` and `host_local`; the Lite types declare
+// none of them — §5.3's narrowing plus the read-only pivot (no surface may see
+// which process a kill would stop).
+c.assertions("v1_kanban_running.json", "the kanban trio (Lite decoders)") {
+    let raw = try c.load("v1_kanban_running.json")
+    let r = try JSONDecoder().decode(KanbanRunningLite.self, from: raw)
+    let text = String(decoding: raw, as: UTF8.self)
+    c.expect("v1_kanban_running.json", "KanbanRunningLite decodes the live envelope",
+             (r.tasks?.count ?? -1) == r.count && (r.speak ?? "").isEmpty == false,
+             "count/tasks disagree")
+    c.expect("v1_kanban_running.json",
+             "`boards`/`errors`/`pid`/`host_local` on the wire, not in the type",
+             text.contains("\"boards\"") && text.contains("\"errors\"")
+             && text.contains("\"pid\"") && text.contains("\"host_local\""),
+             "fixture lost the fields the narrowing proves")
+    c.expect("v1_kanban_running.json", "rows(limit:) caps the surface",
+             r.rows(limit: 2).count == min(2, r.tasks?.count ?? 0), "row cap wrong")
+
+    let b = try JSONDecoder().decode(KanbanBlockedLite.self, from: try c.load("kanban_blocked.json"))
+    let ages = b.rows(limit: 3).map { $0.age_days ?? 0 }
+    c.expect("kanban_blocked.json", "KanbanBlockedLite: rows capped, stuck-longest-first (§5.3)",
+             !ages.isEmpty && ages == ages.sorted(by: >) && ages.count <= 3,
+             "the row order drifted: \(ages)")
+    c.expect("kanban_blocked.json", "block prose (`why`/`comments`) is on the wire, not in the type",
+             String(decoding: try c.load("kanban_blocked.json"), as: UTF8.self)
+                .contains("\"why\""), "fixture no longer carries the prose to ignore")
+
+    let s = try JSONDecoder().decode(KanbanStaleLite.self, from: try c.load("kanban_stale.json"))
+    c.expect("kanban_stale.json", "KanbanStaleLite: envelope agrees, rows capped at 8",
+             (s.tasks?.count ?? -1) == s.count && s.rows(limit: 8).count <= 8,
+             "envelope or row cap wrong")
+
+    // The committed `kanban_stale.json` is a 2-row capture whose rows are both
+    // `running`, so it cannot exercise the two things a queue-depth tile depends
+    // on. `kanban_stale_queued.json` is shape-faithful from
+    // `autodown.list_stale_tasks` (§4.3's keys) and carries the mixed spread:
+    // queue depth = the ready+todo rows, and rows(limit:) must order oldest first.
+    let q = try JSONDecoder().decode(KanbanStaleLite.self,
+                                     from: try c.load("kanban_stale_queued.json"))
+    let queued = (q.tasks ?? []).filter { $0.status == "ready" || $0.status == "todo" }
+    c.expect("kanban_stale_queued.json", "queue depth = ready+todo rows (§5.3's small family)",
+             queued.count == 4 && q.count == q.tasks?.count,
+             "got \(queued.count) queued of \(String(describing: q.count))")
+    let qAges = q.rows(limit: 3).map { $0.age_days ?? -1 }
+    c.expect("kanban_stale_queued.json", "rows(limit:) returns the oldest 3 first",
+             qAges == [12, 7, 5], "ages came back \(qAges)")
+}
+
+// Dataset 5 — cluster monitor + daemon host. `output` (54% of the body) is not
+// declared, and `displayLabel` is §7's redacted node identity: asserted here so no
+// surface can quietly render a LAN address.
+c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/LA)") {
+    let m = try JSONDecoder().decode(MonitorResponse.self, from: try c.load("v1_cluster_monitor.json"))
+    c.expect("v1_cluster_monitor.json", "MonitorResponse: 4 nodes, every metric parses",
+             m.nodes.count == 4 && m.nodes.allSatisfy { $0.sample != nil }
+             && m.nodes.allSatisfy { $0.sample?.cpuUsagePct != nil && $0.sample?.memUsedPct != nil }
+             && m.nodes.allSatisfy { $0.sample?.gpuUtilPct != nil },
+             "node metrics stopped parsing")
+    c.expect("v1_cluster_monitor.json", "displayLabel never leaks the node's LAN address (§7)",
+             m.nodes.allSatisfy { node in
+                 !node.displayLabel.contains(node.host)
+                 && (node.displayLabel == node.sample?.hostname
+                     || (node.displayLabel.hasPrefix(".")
+                         && node.displayLabel.dropFirst().allSatisfy { ch in ch.isNumber }))
+             }, "a surface could render a full address")
+    c.expect("v1_cluster_monitor.json", "shortTail reduces an address to its last octet (§7)",
+             m.nodes.allSatisfy { MonitorNode.shortTail($0.host)
+                 == "." + ($0.host.split(separator: ".").last.map(String.init) ?? "") }
+             && MonitorNode.shortTail("192.0.2.244 up 3d") == ".244",
+             "the shared tail rule is not a tail")
+    let down = try JSONDecoder().decode(MonitorResponse.self,
+                                        from: try c.load("v1_cluster_monitor_unavailable.json"))
+    c.expect("v1_cluster_monitor_unavailable.json", "fleet-down degrade: no json key, no nodes",
+             down.nodes.isEmpty && down.speak == "fleet monitor unavailable",
+             "degrade shape changed")
+
+    let h = try JSONDecoder().decode(MonitorDaemonHost.self, from: try c.load("v1_daemon_host.json"))
+    c.expect("v1_daemon_host.json", "daemon host (live capture): cpu/mem/disk + uptime parse",
+             h.cpuPercent != nil && h.memPercent != nil && h.diskPercent != nil
+             && h.uptimeText != nil && h.cpuCount == 14 && !h.speak.isEmpty,
+             "the daemon-host sidecar stopped decoding")
+}
+
+// ---- §7 storage shape: what the App Group may actually hold (t_438aa6ce) ----
+//
+// `MonitorSnapshotStore` writes the last-known monitor snapshot into
+// `group.com.hscc.ios`, which every extension can read and which outlives the
+// app process. So the shape §7 binds is the STORED JSON, not the decoded
+// response — and this is the one place that checks it. `SharedStore.swift` is in
+// `model_decode_check.sh`'s real-source list, so `MonitorNodeEntry`,
+// `MonitorSnapshotStore.project` and `Snapshot` here are the production types,
+// not mirrors.
+//
+// The control that gives the address scan teeth: the live capture's
+// `hosts[].host` values ARE dotted quads (192.0.2.1 / 192.0.2.2), so persisting
+// `MonitorNode` instead of the projection fails this check rather than passing
+// it vacuously.
+
+/// A JSON value, declared by the VALIDATOR (not a model — nothing in
+/// `Sources/` reads it) so the stored bytes can be walked key by key.
+private enum StoredJSON: Decodable {
+    case null, bool(Bool), number(Double), string(String)
+    case array([StoredJSON]), object([String: StoredJSON])
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let d = try? c.decode(Double.self) { self = .number(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if let a = try? c.decode([StoredJSON].self) { self = .array(a); return }
+        if let o = try? c.decode([String: StoredJSON].self) { self = .object(o); return }
+        throw DecodingError.dataCorruptedError(in: c, debugDescription: "unsupported JSON value")
+    }
+
+    /// Every string the stored bytes could be hiding an address in: each key
+    /// name and each string value, each with its JSON path so a failure says
+    /// WHERE the address was found.
+    func addressCandidates(_ path: String = "$") -> [(at: String, text: String)] {
+        switch self {
+        case .null, .bool, .number:
+            return []
+        case .string(let s):
+            let key = path.split(separator: ".").last.map(String.init) ?? path
+            return [(path, key), (path, s)]
+        case .array(let items):
+            return items.enumerated().flatMap { addressCandidates(at: "\(path)[\($0.offset)]", from: $0.element) }
+        case .object(let pairs):
+            return pairs.sorted { $0.key < $1.key }.flatMap { k, v in
+                [(path, k)] + addressCandidates(at: "\(path).\(k)", from: v)
+            }
+        }
+    }
+
+    private func addressCandidates(at path: String, from v: StoredJSON) -> [(at: String, text: String)] {
+        v.addressCandidates(path)
+    }
+
+    /// Every object in the document with its JSON path and key set, so a check
+    /// can name the exact field list a stored object is allowed to have.
+    func objects(_ path: String = "$") -> [(path: String, keys: Set<String>)] {
+        var out: [(path: String, keys: Set<String>)] = []
+        switch self {
+        case .object(let pairs):
+            out.append((path, Set(pairs.keys)))
+            for (k, v) in pairs.sorted(by: { $0.key < $1.key }) {
+                out.append(contentsOf: v.objects("\(path).\(k)"))
+            }
+        case .array(let items):
+            for (i, item) in items.enumerated() { out.append(contentsOf: item.objects("\(path)[\(i)]")) }
+        default:
+            break
+        }
+        return out
+    }
+}
+
+/// Four dot-separated groups of 1–3 digits — a dotted-quad IPv4 address, e.g.
+/// `100.64.0.1` (the docs/tests placeholder) or the LAN address §7 forbids.
+private let dottedQuadRE = try! NSRegularExpression(pattern: #"\d{1,3}(?:\.\d{1,3}){3}"#)
+
+private func holdsDottedQuad(_ s: String) -> Bool {
+    dottedQuadRE.firstMatch(in: s, range: NSRange(location: 0, length: s.utf16.count)) != nil
+}
+
+c.assertions("§7_monitor_snapshot", "the App Group holds the projection, never MonitorNode") {
+    let monitor = try JSONDecoder().decode(MonitorResponse.self,
+                                           from: try c.load("v1_cluster_monitor.json"))
+    let host = try JSONDecoder().decode(MonitorDaemonHost.self,
+                                        from: try c.load("v1_daemon_host.json"))
+
+    // (0) The control: the fixture's wire nodes really do carry addresses.
+    c.expect("§7_monitor_snapshot", "control — the fixture's MonitorNode.host is a dotted-quad",
+             !monitor.nodes.isEmpty && monitor.nodes.allSatisfy { holdsDottedQuad($0.host) },
+             "fixture hosts stopped being addresses, so the scan below proves nothing")
+
+    // (1) project() — the only wire→storage path — drops the address and keeps
+    //     the six §3 row-5 fields per node.
+    let entries = MonitorSnapshotStore.project(monitor.nodes)
+    let zipped = zip(entries, monitor.nodes)
+    c.expect("§7_monitor_snapshot", "project() yields one entry per node, labelled by displayLabel and never by host",
+             entries.count == monitor.nodes.count
+             && zipped.allSatisfy { e, n in
+                 e.label == n.displayLabel && e.label != n.host && !holdsDottedQuad(e.label)
+             }, "a projected label stopped being displayLabel, or an address reached a label")
+    c.expect("§7_monitor_snapshot", "project() carries the six §3 fields (cpu/mem/gpu util + used/free slots) unchanged",
+             zipped.allSatisfy { e, n in
+                 e.cpuUsagePct == n.sample?.cpuUsagePct && e.memUsedPct == n.sample?.memUsedPct
+                 && e.gpuUtilPct == n.sample?.gpuUtilPct
+                 && e.usedSlots == n.used_slots && e.freeSlots == n.free_slots
+             }, "the projection lost or renamed a field the widget/contract needs")
+
+    // (2) Round-trip through the REAL store encode/decode (same JSONEncoder /
+    //     JSONDecoder + Snapshot type the App Group sees).
+    let snap = MonitorSnapshotStore.Snapshot(date: 1_788_468_629.041858,
+                                             nodes: entries, daemonHost: host)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let storedData = try encoder.encode(snap)
+    let revived = try JSONDecoder().decode(MonitorSnapshotStore.Snapshot.self, from: storedData)
+    c.expect("§7_monitor_snapshot", "MonitorNodeEntry round-trips through the real Snapshot encode/decode",
+             revived.nodes == entries && revived.date == snap.date
+             && revived.daemonHost?.hostname == host.hostname
+             && revived.daemonHost?.cpuPercent == host.cpuPercent,
+             "the stored form no longer survives a write+read")
+
+    // (3) The stored bytes: no key and no string value may hold a dotted-quad.
+    let stored = try JSONDecoder().decode(StoredJSON.self, from: storedData)
+    let hits = stored.addressCandidates().filter { holdsDottedQuad($0.text) }
+    c.expect("§7_monitor_snapshot", "no key or value in the stored snapshot JSON holds a dotted-quad (§7)",
+             hits.isEmpty,
+             "address-shaped value at \(hits.prefix(3).map { "\($0.at)=\($0.text)" }.joined(separator: ", "))")
+
+    // (4) Structural: a stored node object's keys are EXACTLY the six
+    //     projection fields. `host` / `sparkrun_job_names` are not merely unset
+    //     — they are undeclared, so no future field can smuggle an address in.
+    let nodeKeys = stored.objects().filter { $0.path.hasPrefix("$.nodes[") }.flatMap { $0.keys }
+    let projectionKeys: Set<String> = ["label", "cpuUsagePct", "memUsedPct",
+                                       "gpuUtilPct", "usedSlots", "freeSlots"]
+    c.expect("§7_monitor_snapshot", "a stored node object declares no key outside the six projection fields (§7)",
+             Set(nodeKeys).isSubset(of: projectionKeys),
+             "stored node keys grew: \(Set(nodeKeys).subtracting(projectionKeys).sorted())")
+    let firstNodeKeys = stored.objects().first { $0.path == "$.nodes[0]" }?.keys
+    c.expect("§7_monitor_snapshot", "the first stored node object holds all six projection fields (Codable names intact)",
+             firstNodeKeys == projectionKeys,
+             "stored node keys: \(firstNodeKeys.map { $0.sorted().joined(separator: ",") } ?? "<no node object>")")
+
+    // (5) daemonHost STAYS in the snapshot (t_595a5fee's decision) because it
+    //     carries no address: its stored keys are exactly §5.5's machine fields,
+    //     and `hostname` is the daemon host's own name, not where it lives.
+    let daemonHostKeys = stored.objects().first { $0.path == "$.daemonHost" }?.keys ?? []
+    c.expect("§7_monitor_snapshot", "the stored daemon-host object holds exactly §5.5's machine fields — no address field",
+             daemonHostKeys == ["hostname", "platform", "arch", "uptime_seconds", "cpu", "memory",
+                                "disk", "processes", "daemon_running", "daemon_uptime_seconds", "speak"],
+             "daemon-host keys changed: \(daemonHostKeys.sorted())")
+    c.expect("§7_monitor_snapshot", "the daemon host's hostname is a name, not an address (§5.5/§7)",
+             host.hostname.map { !holdsDottedQuad($0) } ?? false,
+             "hostname held an address")
+}
+
+// The old stored shape (§7's violation): the bytes `MonitorSnapshotStore` wrote
+// before t_438aa6ce persisted the projection — a node object with `host`,
+// `error` and the full `sample`, `sparkrun_job_names` included. It MUST fail to
+// decode now: `MonitorNodeEntry` has no such fields, so a build that upgrades in
+// place refuses the legacy blob instead of reading an address back out of the
+// container. That is the migration behaviour, asserted here rather than argued.
+c.checkFails(MonitorSnapshotStore.Snapshot.self, "v1_monitor_snapshot_legacy.json",
+             "legacy snapshot blob (nodes carried `host` + raw sample) is rejected outright")
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes

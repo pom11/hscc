@@ -53,7 +53,11 @@ struct MonitorEntry: TimelineEntry {
     let configured: Bool
     /// True when the operator paused this surface in Settings.
     let paused: Bool
-    /// The per-node cluster monitor snapshot (CPU/RAM/GPU per host).
+    /// The per-node cluster monitor snapshot (CPU/RAM/GPU per host), from THIS
+    /// fetch. In-memory only and never written to the App Group: `MonitorNode`
+    /// carries the node's LAN address, which §7 forbids in shared storage, so
+    /// the last-known snapshot below is stored as the `MonitorNodeEntry`
+    /// projection instead.
     let nodes: [MonitorNode]
     /// The daemon-host machine data (the machine HSCC runs on).
     let daemonHost: MonitorDaemonHost?
@@ -64,6 +68,11 @@ struct MonitorEntry: TimelineEntry {
     let showSections: Set<String>
     /// Age of the last-known snapshot in minutes, set only when `.unreachable`.
     let lastKnownAgeMinutes: Int?
+    /// How many nodes the persisted last-known projection held, 0 when no
+    /// snapshot exists. The unreachable pane needs exactly this fact — "did the
+    /// last good fetch have nodes?" — and draws no stale rows, so the wire node
+    /// type never has to come back out of the container (§7).
+    let lastKnownNodeCount: Int
 
     /// The sections this surface knows about (drives fallback defaults).
     static let availableSections = WidgetSurfaceKind.widgetMonitor.availableSections
@@ -76,7 +85,8 @@ struct MonitorEntry: TimelineEntry {
                                            daemonHost: nil,
                                            refreshMinutes: 5,
                                            showSections: availableSections,
-                                           lastKnownAgeMinutes: nil)
+                                           lastKnownAgeMinutes: nil,
+                                           lastKnownNodeCount: 0)
 
     static func paused(_ date: Date = .now) -> MonitorEntry {
         MonitorEntry(date: date,
@@ -87,7 +97,8 @@ struct MonitorEntry: TimelineEntry {
                      daemonHost: nil,
                      refreshMinutes: 0,
                      showSections: availableSections,
-                     lastKnownAgeMinutes: nil)
+                     lastKnownAgeMinutes: nil,
+                     lastKnownNodeCount: 0)
     }
 }
 
@@ -105,7 +116,8 @@ struct MonitorTimelineProvider: TimelineProvider {
                      daemonHost: Self.sampleDaemonHost,
                      refreshMinutes: 5,
                      showSections: MonitorEntry.availableSections,
-                     lastKnownAgeMinutes: nil)
+                     lastKnownAgeMinutes: nil,
+                     lastKnownNodeCount: 0)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (MonitorEntry) -> Void) {
@@ -166,19 +178,23 @@ struct MonitorTimelineProvider: TimelineProvider {
         let anyData = !nodes.isEmpty || hostReached
 
         guard anyData else {
-            // Neither source returned data → unreachable. Fall back to the
-            // last-known snapshot for honest stale data with its age.
+            // Neither source reached us → unreachable. Fall back to the
+            // last-known snapshot for honest stale data with its age. What comes
+            // back out of the container is the projection's node COUNT, never
+            // `[MonitorNode]` (§7: the wire type holds the node's LAN address,
+            // and the pane below draws no stale rows, so nothing is lost).
             if let last = MonitorSnapshotStore.load() {
                 let age = Int(Date().timeIntervalSince1970 - last.date) / 60
                 return MonitorEntry(date: .now,
                                     state: .unreachable,
                                     configured: true,
                                     paused: false,
-                                    nodes: last.nodes,
+                                    nodes: [],
                                     daemonHost: last.daemonHost,
                                     refreshMinutes: refreshMinutes,
                                     showSections: showSections,
-                                    lastKnownAgeMinutes: age)
+                                    lastKnownAgeMinutes: age,
+                                    lastKnownNodeCount: last.nodes.count)
             }
             return MonitorEntry(date: .now,
                                 state: .unreachable,
@@ -188,7 +204,8 @@ struct MonitorTimelineProvider: TimelineProvider {
                                 daemonHost: nil,
                                 refreshMinutes: refreshMinutes,
                                 showSections: showSections,
-                                lastKnownAgeMinutes: nil)
+                                lastKnownAgeMinutes: nil,
+                                lastKnownNodeCount: 0)
         }
 
         // At least one source reached us. Some nodes may have errored — that's
@@ -197,8 +214,10 @@ struct MonitorTimelineProvider: TimelineProvider {
         let state: MonitorState = nodeErrors > 0 ? .degraded : .monitoring
 
         // Record the last-known snapshot so a later unreachable window can show
-        // this real data with its age.
-        MonitorSnapshotStore.save(nodes: nodes, daemonHost: daemonHost)
+        // this real data with its age. PROJECTED on the way in — the container
+        // holds `MonitorNodeEntry`, never the wire node with its address (§7).
+        MonitorSnapshotStore.save(nodes: MonitorSnapshotStore.project(nodes),
+                                  daemonHost: daemonHost)
 
         return MonitorEntry(date: .now,
                             state: state,
@@ -208,7 +227,8 @@ struct MonitorTimelineProvider: TimelineProvider {
                             daemonHost: daemonHost,
                             refreshMinutes: refreshMinutes,
                             showSections: showSections,
-                            lastKnownAgeMinutes: nil)
+                            lastKnownAgeMinutes: nil,
+                            lastKnownNodeCount: 0)
     }
 
     // MARK: - Sample data (placeholder / first render)

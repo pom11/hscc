@@ -1,0 +1,26 @@
+{
+  "date": 1788468629.041858,
+  "nodes": [
+    {
+      "host": "192.0.2.1",
+      "error": null,
+      "sample": {
+        "timestamp": "2026-09-03T20:50:27Z",
+        "hostname": "gx10-cad0",
+        "uptime_sec": "2644262",
+        "cpu_usage_pct": "8.1",
+        "mem_used_pct": "96.4",
+        "mem_total_mb": "124546",
+        "mem_used_mb": "120131",
+        "gpu_name": "NVIDIA GB10",
+        "gpu_util_pct": "0",
+        "gpu_mem_used_pct": "",
+        "sparkrun_jobs": "1",
+        "sparkrun_job_names": "sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_0"
+      },
+      "used_slots": 1,
+      "free_slots": 0
+    }
+  ],
+  "daemonHost": null
+}
