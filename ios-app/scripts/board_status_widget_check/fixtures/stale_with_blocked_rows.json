@@ -1,0 +1,19 @@
+{
+  "count": 11,
+  "older_than": 0,
+  "errors": [],
+  "speak": "11 stale cards.",
+  "tasks": [
+    { "board": "hscc", "id": "t_1a", "status": "todo", "assignee": "ios-engineer", "age_days": 3, "title": "todo one" },
+    { "board": "hscc", "id": "t_1b", "status": "todo", "assignee": "backend-engineer", "age_days": 2, "title": "todo two" },
+    { "board": "hscc", "id": "t_2a", "status": "ready", "assignee": null, "age_days": 1, "title": "ready one" },
+    { "board": "hscc", "id": "t_3a", "status": "running", "assignee": "ios-engineer", "age_days": 0, "title": "running one" },
+    { "board": "hscc", "id": "t_3b", "status": "claimed", "assignee": "ios-engineer", "age_days": 0, "title": "claimed folds into running" },
+    { "board": "hscc", "id": "t_4a", "status": "blocked", "assignee": "ios-engineer", "age_days": 9, "title": "blocked row the stale list must NOT count" },
+    { "board": "hscc", "id": "t_4b", "status": "blocked", "assignee": "backend-engineer", "age_days": 12, "title": "second blocked row the stale list must NOT count" },
+    { "board": "hscc", "id": "t_5a", "status": "review", "assignee": "reviewer", "age_days": 1, "title": "review is not one of the five" },
+    { "board": "hscc", "id": "t_5b", "status": null, "assignee": null, "age_days": 4, "title": "no status is not a count" },
+    { "board": "radio", "id": "r_1a", "status": "todo", "assignee": "ios-engineer", "age_days": 5, "title": "another board's todo" },
+    { "board": "radio", "id": "r_4a", "status": "blocked", "assignee": "ios-engineer", "age_days": 7, "title": "another board's blocked row" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "count": 15,
+  "older_than": 0,
+  "errors": [],
+  "speak": "15 stale cards.",
+  "tasks": [
+    { "board": "hscc", "id": "t_1a", "status": "todo", "assignee": "ios-engineer", "age_days": 3, "title": "row one of a capped list" },
+    { "board": "hscc", "id": "t_3a", "status": "running", "assignee": "ios-engineer", "age_days": 0, "title": "row two of a capped list" },
+    { "board": "radio", "id": "r_1a", "status": "ready", "assignee": null, "age_days": 1, "title": "row three of a capped list" }
+  ]
+}
