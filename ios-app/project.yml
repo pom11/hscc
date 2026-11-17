@@ -346,6 +346,9 @@ targets:
       # `hscc kanban monitor --live`'s running / ready / blocked, read-only
       # through WidgetDataClient — see the file header.
       - path: Sources/HSCCWidgets/KanbanMonitorWidget.swift
+      # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
+      # through WidgetDataClient — see the file header.
+      - path: Sources/HSCCWidgets/BoardStatusWidget.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
