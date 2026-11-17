@@ -23,27 +23,21 @@ struct HSCCApp: App {
     /// Settings UI as an EnvironmentObject so it can read/write the App-Group
     /// store that every widget/Live Activity extension reads read-only.
     @StateObject private var widgetSettings = WidgetSettingsStore()
-    @StateObject private var unread: ProjectUnreadCenter
-    @StateObject private var replyWatcher: StreamReplyWatcher
     /// Deep-link router (t_136762f3): the single entry point for `hscc://`
     /// URLs, notification taps and Handoff, injected everywhere navigation
     /// happens so every external link can land the operator on the exact
     /// project, card or session.
     @StateObject private var router = DeepLinkRouter.shared
 
-    /// `replyWatcher` needs the SAME `ProjectUnreadCenter` the rest of the app
-    /// sees, but a property initializer cannot reference another property —
-    /// they run before `self` exists. Build both in `init()` and seed the
-    /// wrappers directly, which keeps one shared unread center rather than two
-    /// that silently disagree about what has been read.
     init() {
-        let center = ProjectUnreadCenter()
-        _unread = StateObject(wrappedValue: center)
-        _replyWatcher = StateObject(wrappedValue: StreamReplyWatcher(unread: center))
         // t_0f3f70e6 (iOS pivot): the fixture/offline capture harness
         // (DebugHarness.swift) is retired with the console — its only
         // consumers were the XCUITest nav lane and the screenshot capture
         // scripts. There is no debug launch state left to branch on.
+        //
+        // The `unread` / `replyWatcher` pair this used to build in init() (they
+        // had to share ONE ProjectUnreadCenter) went with the chat family in
+        // t_9d5a30c9 — CONSOLE_RETIREMENT §5 S2.
         _settings = StateObject(wrappedValue: SettingsStore())
     }
 
@@ -52,14 +46,10 @@ struct HSCCApp: App {
             // The two-screen root (t_9664a1c8, pivot slice S1): connection
             // settings + widget/Live Activity configuration. No drawer, no dock,
             // no detail stack — every data surface the console rendered is now a
-            // widget or a Live Activity. `unread`/`replyWatcher` stay injected
-            // because the chat views that read them are still on disk (S2 retires
-            // them), and they share the ONE ProjectUnreadCenter built in init().
+            // widget or a Live Activity.
             ConfigView()
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
-                .environmentObject(unread)
-                .environmentObject(replyWatcher)
                 .environmentObject(router)
         }
         // HSCC Monitor Live Activity (t_03d318cd). Scene phase drives the

@@ -122,9 +122,10 @@ targets:
       - path: Sources/HSCC/HSCCClient.swift
       - path: Sources/HSCC/ConnectionMonitor.swift
       - path: Sources/HSCC/StateCache.swift
-      # Offline queue (t_42ba90d2): app-scoped, persisted outbound chat queue
-      # flushed when ConnectionMonitor reports reachable again.
-      - path: Sources/HSCC/OfflineSendQueue.swift
+      # The offline outbound chat queue (t_42ba90d2) went with the chat family
+      # in t_9d5a30c9 (CONSOLE_RETIREMENT §1.2 rule 2: the app keeps no actions,
+      # §5 S2/S6): its only writer was ChatStore and its only gate was the
+      # already-red offline_queue_check.sh, retired beside it.
       # Notify-operator (t_0454eb56): pure differential engine + foreground
       # coordinator + one-time auth delegate.
       - path: Sources/HSCC/Notify/OperatorAlert.swift
@@ -170,25 +171,24 @@ targets:
       # "what runs on each of them". Its `.clusterHub` drawer row and destination
       # went with the shell collapse (t_9664a1c8), which deleted AppDestination.
       - path: Sources/HSCC/Views/NodesServingView.swift
-      # Phase 2 shell (IOS_REDESIGN 2026-10-14 §3): drawer roots for the
-      # dock's Chat verb (project list that pushes chat directly) and the
-      # drawer's cross-board Cards row (the id-less card route).
-      - path: Sources/HSCC/Views/ChatsRootView.swift
+      # Phase 2 shell (IOS_REDESIGN 2026-10-14 §3) had a drawer root for the
+      # dock's Chat verb (ChatsRootView — a project list that pushed straight
+      # into chat). It was already unreachable when t_9d5a30c9 retired it with
+      # the rest of the chat family; the cross-board Cards root below survives.
       - path: Sources/HSCC/Views/CardsRootView.swift
       - path: Sources/HSCC/Views/FleetView.swift
       - path: Sources/HSCC/Views/CardsView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
-      - path: Sources/HSCC/Views/ChatStore.swift
-      - path: Sources/HSCC/Views/ChatEntry.swift
-      # StreamingChatStore.swift + StreamingChatView.swift deleted by t_bd6e7c0a
-      # (iOS pivot: no operator console, so no live-chat screen); `TurnState` and
-      # `StreamSettings` were chat-only banners and went with the store.
-      # `StreamPhase` / `ConnectionPhase` outlived that slice as the session Live
-      # Activity's phase vocabulary and went with the activity (t_3b15b8c9).
-      - path: Sources/HSCC/Views/ComposerText.swift
-      - path: Sources/HSCC/Views/StreamReplyWatcher.swift
+      # The whole chat family is gone (t_9d5a30c9, CONSOLE_RETIREMENT §5 S2):
+      # ChatStore + ChatEntry (the persisted transcript and its bubble
+      # vocabulary), ComposerText (the composer's frozen copy), StreamReplyWatcher
+      # (the 30 s poll that drove the unread badge) and ProjectUnreadCenter (the
+      # badge's store). StreamingChatStore.swift + StreamingChatView.swift went
+      # first (t_bd6e7c0a) and StreamPhase / ConnectionPhase with the session
+      # Live Activity (t_3b15b8c9). Nothing writes a transcript any more, so
+      # ProjectOverviewView lost its last-reply preview and ProjectsView its
+      # unread badge in the same commit.
       - path: Sources/HSCC/Views/ProjectsView.swift
-      - path: Sources/HSCC/Views/ProjectUnreadCenter.swift
       - path: Sources/HSCC/Views/ProfileEditorView.swift
       - path: Sources/HSCC/Views/LogsView.swift
       - path: Sources/HSCC/Views/LogRedactor.swift
