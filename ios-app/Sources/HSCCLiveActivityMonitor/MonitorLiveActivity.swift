@@ -6,10 +6,9 @@ import ActivityKit
 /// Monitor Live Activity.
 ///
 /// Hosted by the `HSCCLiveActivityMonitor` app-extension target (a SEPARATE
-/// target from `HSCCLiveActivity` (wake) and `HSCCLiveActivitySession`
-/// (session) — one widget extension body can only contain ONE
-/// `ActivityConfiguration`, so each Live Activity attribute type gets its own
-/// extension target).
+/// target from `HSCCLiveActivity` (wake) — one widget extension body can only
+/// contain ONE `ActivityConfiguration`, so each Live Activity attribute type
+/// gets its own extension target).
 ///
 /// This is the live cluster/daemon-host monitor: it renders the data the APP
 /// pushes (`MonitorActivityDriver` polls GET /v1/cluster/monitor +

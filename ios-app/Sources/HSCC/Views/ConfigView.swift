@@ -764,14 +764,16 @@ struct ConfigView: View {
     }
 
     /// One onAppear for the whole app: seed the surviving subsystems with a
-    /// client built from the CURRENT settings, then re-hydrate any Live Activity
-    /// orphan the last process kill left behind (a deinit does not run when the
-    /// process is killed, so these sweeps are what ends a stale bubble).
+    /// client built from the CURRENT settings, then re-hydrate any wake Live
+    /// Activity orphan the last process kill left behind (a deinit does not run
+    /// when the process is killed, so this sweep is what ends a stale bubble).
+    /// The monitor activity's matching `sweepLeftoverMonitors()` runs from
+    /// `NotificationsAppDelegate` / `HSCCApp`, not here; the session activity's
+    /// `sweepLeftoverSessions()` left with the activity itself (t_3b15b8c9).
     private func rootDidAppear() {
         loadFromStore()
         seedClients()
         LiveActivityManager.sweepLeftoverWakes()
-        SessionActivityDriver.sweepLeftoverSessions()
     }
 
     /// The three subsystems that still reach the daemon all take the same

@@ -160,10 +160,11 @@ file-by-file disposition of the remaining console files is
     polls `/v1/autodown/status` + `/v1/cluster/status` for per-node readiness,
     and **ends** it with an explicit success/failure message. Honest progress
     only — elapsed time + per-unit readiness, never a fabricated percentage.
-  - `SessionActivityDriver.swift` / `MonitorActivityDriver.swift` — drive the
-    two extra Live Activities: the per-project **session activity** (a live
-    turn visible on Lock Screen / Dynamic Island) and the **HSCC Monitor**
-    (per-node CPU/GPU/RAM while pinned).
+  - `MonitorActivityDriver.swift` — drives the **HSCC Monitor** Live Activity
+    (per-node CPU/GPU/RAM while pinned), owns its orphan sweep and its
+    background-refresh task registration. The per-project **session activity**
+    and its `SessionActivityDriver` were retired with the chat they mirrored
+    (t_3b15b8c9).
   - `OfflineSendQueue.swift` — chat composed while unreachable is queued
     (persisted), visually distinct, flushed on reconnect — never lost, never
     sent twice.
@@ -185,20 +186,21 @@ file-by-file disposition of the remaining console files is
   need (`AutodownStatusResponse`, `ClusterStatusResponse` / `ClusterWorkload`,
   `TopologyPair` / `TopologyNode`), the App Group `group.com.hscc.ios`,
   shared Keychain access, `APIConfig`, the last-known `SnapshotStore`, and
-  the three `ActivityKit` attribute types (`WakingActivity`,
-  `SessionActivity`, `MonitorActivity`).
+  the two `ActivityKit` attribute types (`WakingActivity`,
+  `MonitorActivity`).
 - `Sources/HSCCWidgets/` — the widget extension: the cluster Home Screen
   widget (`systemSmall` + medium — last-known state + compact topology;
   **`Unreachable` is a first-class state** — "Can't reach the cluster" with
   the last-known state and its age, never a blank or stale-looking-live
   widget) and the **HSCC Monitor** widget (per-node monitor data).
-- `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivitySession/` +
-  `Sources/HSCCLiveActivityMonitor/` — the three Live Activity extensions
-  (fleet-wake progress, project-session activity, monitor). Each ends
-  explicitly on success or failure; a widget extension body allows only one
-  Live Activity per target, hence three bundles.
-- `project.yml` — XcodeGen spec, listing every source file explicitly. Five
-  app-facing targets (app, widgets, three Live Activities). The
+- `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivityMonitor/` — the two
+  Live Activity extensions (fleet-wake progress, monitor). Each ends explicitly
+  on success or failure; a widget extension body allows only one Live Activity
+  per target, hence two bundles. The third one that used to sit here,
+  `HSCCLiveActivitySession`, was deleted with the session it mirrored
+  (t_3b15b8c9).
+- `project.yml` — XcodeGen spec, listing every source file explicitly. Four
+  app-facing targets (app, widgets, two Live Activities). The
   `HSCCUITests` UI-test bundle was retired with the console (t_0f3f70e6).
 - `scripts/` — verification helpers:
   - `build_check.sh` — full per-target **compile** of every target with its
@@ -243,7 +245,7 @@ Be plain about what the gates have and have not seen:
 - **Siri intents cannot be validated without a signed build on hardware.**
   The AppEnum, parameter summaries, and confirm dialogs are written but
   unrun; a real device build is required to know they resolve and fire.
-- **The widget and the three Live Activities are unverified at runtime.**
+- **The widget and the two Live Activities are unverified at runtime.**
   Their model shapes decode the live JSON and their targets compile, but the
   extension bundles have not been installed or run — widget refresh, Dynamic
   Island rendering, and Live Activity lifecycle are all untested.
@@ -303,9 +305,9 @@ open HSCC.xcodeproj
 # Run on your device.
 ```
 
-**Use `scripts/generate.sh`, not bare `xcodegen generate`.** There are FIVE
-app-facing targets — the app plus four app extensions (`HSCCWidgets`,
-`HSCCLiveActivity`, `HSCCLiveActivitySession`, `HSCCLiveActivityMonitor`) —
+**Use `scripts/generate.sh`, not bare `xcodegen generate`.** There are FOUR
+app-facing targets — the app plus three app extensions (`HSCCWidgets`,
+`HSCCLiveActivity`, `HSCCLiveActivityMonitor`) —
 and each needs its own `DEVELOPMENT_TEAM`. Setting the team on the app alone
 still fails with:
 

@@ -7,16 +7,17 @@
 # See README.md for both build paths (xcodegen, or manual Xcode project).
 #
 # This spec drives the main app plus THREE app-extension targets:
-#   * HSCCWidgets            — Home Screen cluster widget (systemSmall + systemMedium).
-#   * HSCCLiveActivity       — the fleet-wake Live Activity (ActivityKit).
-#   * HSCCLiveActivitySession— the session Live Activity (ActivityKit): a live
-#                              mirror of a project's streaming session.
+#   * HSCCWidgets              — Home Screen cluster widget (systemSmall + systemMedium).
+#   * HSCCLiveActivity         — the fleet-wake Live Activity (ActivityKit).
+#   * HSCCLiveActivityMonitor  — the HSCC Monitor Live Activity (ActivityKit).
 # All four targets share the App Group `group.com.hscc.ios` so the widget and
 # Live Activities see the operator's connection settings and the cluster state.
 #
 # Note on Live Activity targets: a widget extension body can only contain ONE
 # ActivityConfiguration, so each Live Activity attribute type gets its own
-# extension target (HSCCLiveActivity = wake, HSCCLiveActivitySession = session).
+# extension target (HSCCLiveActivity = wake, HSCCLiveActivityMonitor = monitor).
+# The session Live Activity that used to have its own target here was retired
+# together with the chat it mirrored (t_3b15b8c9, iOS pivot).
 #
 # Sources are listed explicitly (not via a folder glob) so a source added
 # without updating this file is easy to spot in review. The shared sources
@@ -76,7 +77,6 @@ schemes:
         HSCC: all
         HSCCWidgets: [run, archive]
         HSCCLiveActivity: [run, archive]
-        HSCCLiveActivitySession: [run, archive]
         HSCCLiveActivityMonitor: [run, archive]
     run:
       config: Debug
@@ -136,12 +136,13 @@ targets:
       - path: Sources/HSCC/StreamConnectionError.swift
       - path: Sources/HSCC/StreamHello.swift
       - path: Sources/HSCC/SessionEvent.swift
-      # StreamingTranscript.swift (the live-chat row-folding core) deleted by
-      # t_bd6e7c0a, iOS pivot. The pure vocabulary the session Live Activity
-      # still takes as input (ChatItem / ChatRow / ToolRender + the JSONValue
-      # rendering helpers) moved into SessionActivitySummary.swift.
-      - path: Sources/HSCC/SessionActivitySummary.swift
-      - path: Sources/HSCC/SessionActivityDriver.swift
+      # The session Live Activity's whole input path is gone (t_3b15b8c9):
+      # StreamingTranscript.swift went first (t_bd6e7c0a), then
+      # SessionActivitySummary.swift (ChatItem / ChatRow / ToolRender + the
+      # JSONValue rendering helpers — every one of them had exactly one
+      # consumer, the driver) and SessionActivityDriver.swift. `SessionEvent`
+      # stays: StreamReplyWatcher and HSCCClient's session-history read still
+      # decode it, and scripts/ws_decode_check.sh compiles it.
       # Unit->node attribution for "Nodes & serving" (t_65d791da): the ONE place
       # that reads the live `sparkrun status` text out of /v1/cluster/hosts.
       # Headless-gated by scripts/serving_placement_check.sh.
@@ -175,10 +176,10 @@ targets:
       - path: Sources/HSCC/Views/ChatStore.swift
       - path: Sources/HSCC/Views/ChatEntry.swift
       # StreamingChatStore.swift + StreamingChatView.swift deleted by t_bd6e7c0a
-      # (iOS pivot: no operator console, so no live-chat screen). `StreamPhase` /
-      # `ConnectionPhase` moved into SessionActivitySummary.swift with the rest of
-      # the Live Activity's input vocabulary; `TurnState` and `StreamSettings`
-      # were chat-only banners and went with the store.
+      # (iOS pivot: no operator console, so no live-chat screen); `TurnState` and
+      # `StreamSettings` were chat-only banners and went with the store.
+      # `StreamPhase` / `ConnectionPhase` outlived that slice as the session Live
+      # Activity's phase vocabulary and went with the activity (t_3b15b8c9).
       - path: Sources/HSCC/Views/ComposerText.swift
       - path: Sources/HSCC/Views/StreamReplyWatcher.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
@@ -219,7 +220,6 @@ targets:
       - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/ExtensionClient.swift
       - path: Sources/Shared/WakingActivity.swift
-      - path: Sources/Shared/SessionActivity.swift
     entitlements:
       path: Sources/HSCC.entitlements
       properties:
@@ -231,8 +231,6 @@ targets:
       - target: HSCCWidgets
         embed: true
       - target: HSCCLiveActivity
-        embed: true
-      - target: HSCCLiveActivitySession
         embed: true
       - target: HSCCLiveActivityMonitor
         embed: true
@@ -417,71 +415,15 @@ targets:
       - sdk: WidgetKit.framework
       - sdk: ActivityKit.framework
 
-  # Session Live Activity (ActivityKit) — the LIVE mirror of a project's
-  # streaming session on the Lock Screen / Dynamic Island. The app drives it
-  # via `SessionActivityDriver` (fed by StreamingTranscript/StreamingChatStore
-  # folding the session event stream); this extension renders the
-  # ActivityConfiguration for `SessionActivityAttributes`.
-  #
-  # SEPARATE target from HSCCLiveActivity: a widget extension body can only
-  # contain ONE ActivityConfiguration, so each Live Activity attribute type
-  # gets its own extension target.
-  HSCCLiveActivitySession:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: "26.0"
-    sources:
-      - path: Sources/HSCCLiveActivitySession/HSCCLiveActivitySession.swift
-      # Shared source files compiled into every target.
-      - path: Sources/Shared/SharedModels.swift
-      - path: Sources/Shared/SharedStore.swift
-      - path: Sources/Shared/SessionActivity.swift
-      # Theme tokens shared with the app (design-system, no raw hex here).
-      - path: Sources/HSCC/Views/Theme.swift
-    entitlements:
-      path: Sources/HSCCLiveActivitySession.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - group.com.hscc.ios
-        keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
-    info:
-      path: Sources/HSCCLiveActivitySession/Info.plist
-      properties:
-        # A display name so the session Live Activity / Lock Screen surfaces a
-        # friendly label instead of the raw target identifier "HSCCLiveActivitySession".
-        CFBundleDisplayName: HSCC Session
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity.session
-        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
-        # ("1,2") into each target's build settings, which silently overrode the
-        # project-level value and made every target iPad-capable. That is what
-        # triggers "All interface orientations must be supported unless the app
-        # requires full screen" — an iPad multitasking rule. This is an
-        # iPhone-only sideload, so declare it where it actually applies.
-        TARGETED_DEVICE_FAMILY: "1"
-        GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_STYLE: Automatic
-        CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivitySession.entitlements
-        SKIP_INSTALL: YES
-    dependencies:
-      - sdk: WidgetKit.framework
-      - sdk: ActivityKit.framework
-
   # Monitor Live Activity (ActivityKit) — the NEW "HSCC Monitor" Live Activity
   # (t_03d318cd). Live Activities are PUSH-ONLY: the app (`MonitorActivityDriver`)
   # polls GET /v1/cluster/monitor + GET /v1/daemon/host on the settings cadence
   # and pushes updates; this extension renders the ActivityConfiguration for
   # `MonitorActivityAttributes`.
   #
-  # SEPARATE target from HSCCLiveActivity / HSCCLiveActivitySession: a widget
-  # extension body can only contain ONE ActivityConfiguration, so each Live
-  # Activity attribute type gets its own extension target.
+  # SEPARATE target from HSCCLiveActivity: a widget extension body can only
+  # contain ONE ActivityConfiguration, so each Live Activity attribute type
+  # gets its own extension target.
   HSCCLiveActivityMonitor:
     type: app-extension
     platform: iOS
