@@ -47,6 +47,7 @@ trap 'rm -rf "$TMP"' EXIT
 # than silently test the wrong thing.
 for marker in \
   "Sources/Shared/SharedModels.swift" \
+  "Sources/Shared/SharedStore.swift" \
   "Sources/HSCC/KeychainStore.swift" \
   "Sources/HSCC/SettingsStore.swift" \
   "Sources/HSCC/StateCache.swift"; do
@@ -60,8 +61,10 @@ done
 # `TopologyNode.NodeState.color` extensions, which reference Theme.Semantic ->
 # UIColor (UIKit) and would break a macOS CLI. The colour helpers are
 # view-layer convenience, not part of the settings logic under test. Keep
-# everything else (SavedCluster, AppGroup, KeychainShared, APIConfig,
-# KeychainConstants, SnapshotStore, TopologyNode) intact.
+# everything else (TopologyNode, the wire payloads) intact — the settings types
+# this harness exercises (SavedCluster, AppGroup, KeychainShared, APIConfig,
+# KeychainConstants, SnapshotStore) live in SharedStore.swift, which is
+# Theme-free and compiles as-is.
 shared_src="Sources/Shared/SharedModels.swift"
 if ! grep -q 'enum ClusterState: String {' "$shared_src"; then
   echo "error: could not locate ClusterState in SharedModels (markers moved?)" >&2
@@ -96,6 +99,9 @@ PY
 
 real_sources=(
   "$TMP/SharedModels.swift"
+  "Sources/Shared/SharedStore.swift"   # the App Group stores (AppGroup, APIConfig,
+                                       # SavedCluster) SettingsStore depends on; no
+                                       # Theme/UIKit in it, so it needs no slice
   "Sources/HSCC/KeychainStore.swift"
   "Sources/HSCC/SettingsStore.swift"
   "Sources/HSCC/StateCache.swift"

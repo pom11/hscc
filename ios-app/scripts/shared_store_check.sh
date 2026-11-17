@@ -42,13 +42,24 @@ ok()   { echo "  ok: $1"; }
 fail() { echo "FAIL: $1"; rc=1; }
 
 SETTINGS=Sources/HSCC/SettingsStore.swift
-SHARED=Sources/Shared/SharedModels.swift
+# The shared stores live under Sources/Shared/ (SharedStore.swift holds the App
+# Group identifier + the typed stores, SharedModels.swift the wire payloads).
+# These two asserts are deliberately directory-scoped, not file-scoped: the rule
+# is about ANY shared/extension code, and a file-scoped grep silently stops
+# covering the rule the moment a type moves between files (it moved once, to
+# SharedStore.swift, on 2026-11-17).
+SHARED_DIR=Sources/Shared
 CONTENT=Sources/HSCC/ContentView.swift
 
-# 1. Unavailability is DETECTED.
-grep -q "containerURL(forSecurityApplicationGroupIdentifier:" "$SETTINGS" \
-  && ok "app detects a missing App Group container" \
-  || fail "no App Group container detection in $SETTINGS"
+# 1. Unavailability is DETECTED — by the real containerURL check, which now
+#    lives once in Sources/Shared/SharedStore.swift and is consumed by
+#    SettingsStore (a second inline copy is how the two drift apart).
+if grep -rq "containerURL(forSecurityApplicationGroupIdentifier:" \
+     "$SETTINGS" "$SHARED_DIR"; then
+  ok "app detects a missing App Group container"
+else
+  fail "no App Group container detection in $SETTINGS / $SHARED_DIR"
+fi
 
 # 2. It is SURFACED as observable state, not swallowed.
 grep -q "@Published private(set) var appGroupUnavailable" "$SETTINGS" \
@@ -62,14 +73,14 @@ grep -q "settings.appGroupUnavailable" "$CONTENT" \
 
 # 4. The EXTENSIONS must not fall back to .standard — they would silently read
 #    the app's private defaults and look configured while being wrong.
-if grep -n "UserDefaults(suiteName:" "$SHARED" | grep -q "?? .standard"; then
+if grep -rn "UserDefaults(suiteName:" "$SHARED_DIR" | grep -q "?? .standard"; then
   fail "shared/extension path falls back to .standard (would hide a broken group)"
 else
   ok "extension path reads the shared suite with NO fallback"
 fi
 
 # 5. The extension path must degrade to nil rather than fabricate defaults.
-grep -q "static func load() -> APIConfig?" "$SHARED" \
+grep -rq "static func load() -> APIConfig?" "$SHARED_DIR" \
   && ok "APIConfig.load is optional (honest nil when unconfigured)" \
   || fail "APIConfig.load does not return an optional"
 
