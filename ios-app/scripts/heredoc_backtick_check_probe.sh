@@ -126,6 +126,14 @@ mk_tree() {   # mk_tree <leg>: private ios-app dir; scripts/ and Sources/ symlin
 payload_for() { printf '%s pwn %stouch "%s"%s' "$1" "$BT" "$MARKER" "$BT"; }
 
 scan() {   # scan <tree>: run the meta-gate over a private tree; never runs the target
+  # A leg that lost its tree (mk_tree sets globals — calling it in a command
+  # substitution loses them, and $1 then arrives EMPTY) must not quietly scan the
+  # real repo instead: the real repo is clean by definition, so every leg would
+  # report green. Refuse loudly.
+  if [ -z "${1:-}" ] || [ ! -d "${1}/scripts" ]; then
+    printf 'FATAL: scan called with %s — that is not a private tree, and falling through to the real repo would fake a green leg\n' "\"${1:-<empty>}\"" >&2
+    exit 2
+  fi
   ( cd "$1" && bash "$GATE" "$1" >"$OUT" 2>"$ERR" )
   G_RC=$?
   BANNERS=$(grep -c 'CHECK PASSED' "$OUT" 2>/dev/null); BANNERS=${BANNERS:-0}
@@ -485,7 +493,7 @@ done
 # "executed" trains people to ignore its findings, so the wording itself is under test
 # here — the discriminator is the phrase only the honest message carries.
 tc="check_theme.sh"                 # a real gate that is NOT splice-capable
-TREE=$(mk_tree "shelltc-$tc")
+mk_tree "shelltc-$tc"               # bare: mk_tree publishes TREE/MARKER/OUT/ERR as globals
 rm -f "${TREE}/scripts/$tc"
 tcline="echo hello ${BT}in prose${BT}   # trailing comment carries the byte"
 { head -1 "${SCRIPTS}/${tc}"

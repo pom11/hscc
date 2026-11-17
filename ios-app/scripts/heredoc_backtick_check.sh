@@ -80,6 +80,14 @@
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# An EXPLICITLY passed empty argument is a caller bug, not a request for the default.
+# Falling back here would make `gate ""` scan this very repo and report green — measured,
+# not theoretical: the probe's scan() reached exactly that when a leg lost its tree.
+# Two independent guards (here and in scan) because the failure is a silent green.
+if [ "$#" -gt 0 ] && [ -z "$1" ]; then
+  echo "HEREDOC BACKTICK CHECK FAILED — empty ios-app-dir argument: pass nothing for the default, or a real path" >&2
+  exit 1
+fi
 IOSAPP="${1:-$(cd "${SELF_DIR}/.." && pwd)}"
 SCRIPTS="${IOSAPP}/scripts"
 
