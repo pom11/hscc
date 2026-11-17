@@ -93,10 +93,17 @@ struct ClusterFleet: Equatable {
     /// answer): "no data" must stay distinguishable from "four hosts, none up".
     init?(projecting response: MonitorResponse) {
         guard let payload = response.json else { return nil }
+        // The host tally is not derived here any more. `ClusterNodeTally` is the
+        // ONE projection of "hosts the route listed / hosts that answered", and
+        // the cluster-health Live Activity runs the same call (t_f2867fb3). Two
+        // hand-written loops over `hosts` is how one surface ends up calling a
+        // fleet degraded while the other calls it healthy, so there is now one
+        // loop, and this widget's nil-on-no-host-list rule is that file's rule.
+        let tally = ClusterNodeTally.project(response)
+        self.nodesTotal = tally.nodesTotal
+        self.nodesUp = tally.nodesUp
         let hosts = payload.hosts
         guard !hosts.isEmpty else {
-            self.nodesUp = nil
-            self.nodesTotal = nil
             self.modelsServed = nil
             self.gpuUtilPct = nil
             self.gpuTempC = nil
@@ -104,8 +111,6 @@ struct ClusterFleet: Equatable {
             self.load1m = nil
             return
         }
-        self.nodesTotal = hosts.count
-        self.nodesUp = hosts.filter { $0.isUp }.count
         let ids = Set(hosts.flatMap { $0.workloads ?? [] }.compactMap { $0.cluster_id })
         self.modelsServed = ids.count
         // MAX, not mean: one saturated node is the fact an operator acts on, and

@@ -289,3 +289,93 @@ enum ClusterHealthOrphanRule {
     }
 }
 // GATE-SLICE-END: cluster-health-orphan-decision
+
+// GATE-SLICE-BEGIN: cluster-health-projection-rules
+// ---------------------------------------------------------------------------
+// The projection — how the two sanctioned reads become `ClusterHealthSignals`.
+//
+// The driver (`ClusterHealthActivityDriver`, app target) owns WHEN to read and
+// WHETHER to push; it owns no rule about WHAT the reads mean. Everything the
+// poll-and-push loop could get wrong about a degraded fleet lives here instead,
+// in the same Foundation-only shape the other two blocks have, so
+// `live_activity_rehydration_check.sh` slices it out and executes it as a
+// decision table: a fleet that is down, a route that degraded to `{speak}`, a
+// read that timed out, a monitor whose host list has two errors in it, an
+// operator who turned the tally off.
+//
+// Two reads feed this, both already on the §3 allowlist and both reached through
+// `WidgetData.read(using:lastKnown:_:)` so stale-while-error is the shared rule
+// rather than a second one: `GET /v1/autodown/status` for the serving state and
+// `GET /v1/cluster/monitor` for the tally.
+//
+// The failure parameters are already-mapped `shortLabel` strings, not
+// `WidgetDataFailure`. That is deliberate, twice over: this file is compiled
+// into the Live Activity extension, which renders and must never carry the HTTP
+// client — and a sliced block whose inputs are `String?` needs nothing but
+// `SharedModels.swift` to compile, which the harness already provides.
+// ---------------------------------------------------------------------------
+
+enum ClusterHealthProjection {
+    /// The serving state word, from the autodown read's `state`.
+    ///
+    /// A nil `response` means that read produced NOTHING at all — neither a
+    /// live answer nor a last-known one — which is the only honest route to
+    /// `unreachable`. A response that carried no recognisable `state` is
+    /// `unknown` instead: the server answered, and guessing a state the server
+    /// did not state is how a surface starts lying about a fleet.
+    ///
+    /// Stale counts as answered: `WidgetData.read` hands back the last-known
+    /// payload with the failure as its `reason`, so a fleet that was serving
+    /// when we last reached it still reads `serving`, and the failure label the
+    /// driver passes beside it is what tells the operator it is not live news.
+    static func servingState(from autodown: AutodownStatusResponse?) -> String {
+        guard let autodown else { return "unreachable" }
+        switch autodown.state {
+        case "up": return "serving"
+        case "waking": return "waking"
+        case "down": return "down"
+        default: return "unknown"
+        }
+    }
+
+    /// The one label a blind read earns. The state read wins when both broke:
+    /// "is the fleet up" is the headline this surface exists to answer, so the
+    /// failure that took the headline away is the story, not the failure that
+    /// took the denominator.
+    ///
+    /// A nil monitor label when the operator turned the tally off is not a
+    /// courtesy — it is the reason the driver does not read the monitor at all
+    /// in that case. A failure of a read whose data this surface is not drawing
+    /// must not become the sentence the surface leads with.
+    static func failureLabel(autodownLabel: String?,
+                             monitorLabel: String?) -> String? {
+        autodownLabel ?? monitorLabel
+    }
+
+    /// Assemble the signals one push carries.
+    ///
+    ///   - `showNodeTally`: the "nodes" section. Off means the tally is NOT
+    ///     told — every count goes nil and `downNodes` empties — and the
+    ///     monitor's failure label goes with them. It is never `0`: a section
+    ///     the operator switched off is not a fleet with no nodes answering,
+    ///     and the reading rules above already draw a nil as `—`.
+    ///   - The tally itself comes from `ClusterNodeTally.project`, the same
+    ///     projection the cluster widget runs, so the two surfaces cannot
+    ///     disagree about how many nodes are up.
+    static func signals(autodown: AutodownStatusResponse?,
+                        autodownLabel: String?,
+                        monitor: MonitorResponse?,
+                        monitorLabel: String?,
+                        showNodeTally: Bool) -> ClusterHealthSignals {
+        let tally = showNodeTally ? ClusterNodeTally.project(monitor) : .noAnswer
+        return ClusterHealthSignals(
+            servingState: servingState(from: autodown),
+            nodesUp: tally.nodesUp,
+            nodesDown: tally.nodesDown,
+            nodesTotal: tally.nodesTotal,
+            failureLabel: failureLabel(autodownLabel: autodownLabel,
+                                       monitorLabel: showNodeTally ? monitorLabel : nil),
+            downNodes: tally.downLabels)
+    }
+}
+// GATE-SLICE-END: cluster-health-projection-rules

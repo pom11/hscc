@@ -181,8 +181,12 @@ enum AppGroup {
 // defaults to on (backward compatible — the Cluster widget predates this and
 // must keep rendering exactly as it does today until the operator edits it).
 
-/// The four surfaces the operator controls. The raw values are the registry
+/// The surfaces the operator controls. The raw values are the registry
 /// keys stored in the App Group — stable identifiers, not display names.
+///
+/// Not transcribed on purpose anywhere: `widget_settings_check.sh` iterates
+/// `allCases` rather than asserting a literal count, so adding a surface here
+/// cannot redden a healthy gate (it once did — `defaults.surfaces.count == 4`).
 enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// The existing Home Screen cluster widget (state / topology / models /
     /// board work).
@@ -193,6 +197,16 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
     case liveActivityMonitor = "liveActivity.monitor"
+    /// The cluster-health Live Activity (t_f2867fb3): "is the fleet up", the
+    /// Dynamic Island form of the cluster widget's state + nodes-up line.
+    ///
+    /// This case is what makes the surface controllable: the activity's launch
+    /// sweep is deliberately a PURE rule (`ClusterHealthOrphanRule`) with no
+    /// settings read, so it stays executable by
+    /// `live_activity_rehydration_check.sh`. The Active toggle and the cadence
+    /// belong to the DRIVER (`ClusterHealthActivityDriver`), which is the only
+    /// consumer of this entry — the sweep still consults nothing.
+    case liveActivityClusterHealth = "liveActivity.clusterHealth"
 }
 
 /// One surface's settings: enabled, refresh cadence, and which content
@@ -311,7 +325,7 @@ extension WidgetSurfaceKind {
     var isLiveActivity: Bool {
         switch self {
         case .widgetCluster, .widgetMonitor: return false
-        case .liveActivityWake, .liveActivityMonitor: return true
+        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth: return true
         }
     }
 
@@ -332,6 +346,15 @@ extension WidgetSurfaceKind {
         case .widgetMonitor:    return ["state", "nodes", "host"]
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
+        // Only the tally is optional here. The serving state is this
+        // activity's HEADLINE — every region of the Island and the Lock
+        // Screen row draws from it — and there is no honest rendering of a
+        // cluster-health bubble without one, so it is not offered as a
+        // toggle. It is also what keeps a settings change from ever making
+        // `ClusterHealthSignals.isEmpty` true: that is the state the launch
+        // sweep ENDS a bubble for, and an operator switching sections off
+        // must never be what deletes their surface.
+        case .liveActivityClusterHealth: return ["nodes"]
         }
     }
 }

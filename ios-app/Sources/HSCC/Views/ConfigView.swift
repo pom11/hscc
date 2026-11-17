@@ -1102,6 +1102,7 @@ extension WidgetSurfaceKind {
         case .widgetMonitor: return "Monitor Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
+        case .liveActivityClusterHealth: return "Cluster Health Live Activity"
         }
     }
 
@@ -1112,6 +1113,9 @@ extension WidgetSurfaceKind {
         case .widgetMonitor: return "gauge"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
+        // Health, not a gauge: this surface answers "is the fleet up", which is
+        // the question the monitor activity's ECG line does not ask.
+        case .liveActivityClusterHealth: return "heart.text.square"
         }
     }
 

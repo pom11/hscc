@@ -380,6 +380,140 @@ check("a state ClusterState does not have gets no word here",
       ClusterState(rawValue: "quantum") == nil
       && ClusterHealthReading.stateLabel("quantum") == "Unknown")
 
+// ---------------------------------------------------------------------------
+// PART 4 — the projection the driver pushes through (t_f2867fb3).
+//
+// `ClusterHealthActivityDriver` is ActivityKit + BackgroundTasks and cannot be
+// compiled here — nor should it need to be. Every decision it makes about WHAT
+// the two reads mean is the sliced `ClusterHealthProjection`; every decision
+// about WHEN to push is a scheduling one no macOS harness can exercise. This is
+// the table for the first kind, which is the kind that can lie about a degraded
+// fleet: a route that degraded to `{speak}`, a host list with errors in it, a
+// read that timed out, a section the operator switched off.
+//
+// `ClusterNodeTally` is compiled in rather than sliced: it is a Foundation-only
+// FILE (the one host tally the cluster widget also runs), and `cluster_widget_check.sh`
+// executes the same code from the widget's side. Asserting it here too is what
+// keeps the two surfaces from drifting apart without anything noticing.
+//
+// Host strings are 192.0.2.N — RFC 5737 TEST-NET-1, the same documentation range
+// the committed /v1/cluster/monitor fixture uses — so no real address can reach
+// this file, and the labels drawn below must be `.N` tails whatever the input.
+// ---------------------------------------------------------------------------
+print("\nCluster health — the projection the driver pushes (sliced)\n")
+
+func autodown(_ state: String?) -> AutodownStatusResponse? {
+    var body = "{\"speak\":\"ok\""
+    if let state { body += ",\"state\":\"\(state)\"" }
+    body += "}"
+    return try? JSONDecoder().decode(AutodownStatusResponse.self, from: Data(body.utf8))
+}
+
+/// nil hosts = the down-fleet shape §4.4 measured: the route answers, `json`
+/// is simply not in the body, and a required key here would decode-fail a fleet
+/// the server just told us is off.
+func monitor(_ hosts: [String]?) -> MonitorResponse? {
+    let body = hosts.map { hosts in
+        "{\"speak\":\"ok\",\"json\":{\"hosts\":[\(hosts.joined(separator: ","))]}}"
+    } ?? "{\"speak\":\"cluster monitor unavailable\"}"
+    return try? JSONDecoder().decode(MonitorResponse.self, from: Data(body.utf8))
+}
+
+func upHost(_ tail: String) -> String { "{\"host\":\"192.0.2.\(tail)\",\"error\":null}" }
+func badHost(_ tail: String) -> String { "{\"host\":\"192.0.2.\(tail)\",\"error\":\"ssh timeout\"}" }
+
+let fourHosts = [upHost("1"), upHost("2"), badHost("3"), badHost("4")]
+
+// -- the state word, from the state read alone --------------------------------
+check("autodown up -> serving",
+      ClusterHealthProjection.servingState(from: autodown("up")) == "serving")
+check("autodown waking -> waking",
+      ClusterHealthProjection.servingState(from: autodown("waking")) == "waking")
+check("autodown down -> down (the server's word, not our guess)",
+      ClusterHealthProjection.servingState(from: autodown("down")) == "down")
+check("a state the app does not model -> unknown",
+      ClusterHealthProjection.servingState(from: autodown("sideways")) == "unknown")
+check("an answer with no state key -> unknown",
+      ClusterHealthProjection.servingState(from: autodown(nil)) == "unknown")
+check("a state read that answered NOTHING -> unreachable",
+      ClusterHealthProjection.servingState(from: nil) == "unreachable")
+check("only a failed read can print unreachable — a live one never does",
+      ClusterHealthProjection.servingState(from: autodown("up")) != "unreachable")
+
+// -- the tally, shared with the cluster widget -------------------------------
+let noResponse = ClusterNodeTally.project(nil)
+check("no response at all -> no counts, not zeros",
+      noResponse.nodesUp == nil && noResponse.nodesDown == nil
+      && noResponse.nodesTotal == nil && noResponse.downLabels.isEmpty)
+let degraded = ClusterNodeTally.project(monitor(nil))
+check("a route that degraded to {speak} -> no counts",
+      degraded.nodesUp == nil && degraded.nodesTotal == nil)
+check("an empty host list -> no counts (ClusterFleet's rule, unchanged)",
+      ClusterNodeTally.project(monitor([])) == .noAnswer)
+let half = ClusterNodeTally.project(monitor(fourHosts))
+check("4 listed / 2 errored -> 2 up", half.nodesUp == 2)
+check("... and 2 down, counted rather than assumed", half.nodesDown == 2)
+check("... against the 4 the route listed", half.nodesTotal == 4)
+check("the two that failed are named, in the order listed", half.downLabels == [".3", ".4"])
+check("a down-node label is never an address (§7)",
+      !half.downLabels.contains { $0.contains("192.0.2") })
+let allUp = ClusterNodeTally.project(monitor([upHost("1"), upHost("2")]))
+check("a stated 0 down is a fact, not a gap",
+      allUp.nodesDown == 0 && allUp.downLabels.isEmpty)
+
+// -- the signals one push carries --------------------------------------------
+let live = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                           monitor: monitor(fourHosts), monitorLabel: nil,
+                                           showNodeTally: true)
+check("serving fleet, a node down: state, tally and the node named",
+      live.servingState == "serving" && live.nodesUp == 2
+      && live.nodesTotal == 4 && live.downNodes == [".3", ".4"] && live.failureLabel == nil)
+check("and the colour that earns — amber, because serving is not healthy",
+      ClusterHealthReading.tone(live) == .warn)
+
+let stateBlind = ClusterHealthProjection.signals(autodown: nil, autodownLabel: "No connection",
+                                                 monitor: monitor([upHost("1")]), monitorLabel: nil,
+                                                 showNodeTally: true)
+check("a failed state read gives the headline and its own label",
+      stateBlind.servingState == "unreachable" && stateBlind.failureLabel == "No connection")
+check("while the read that DID answer keeps its numbers",
+      stateBlind.nodesUp == 1 && stateBlind.nodesTotal == 1)
+
+let nodeBlind = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                monitor: nil, monitorLabel: "Timed out",
+                                                showNodeTally: true)
+check("a failed node read nils the counts — it never zeroes them (§6 rule 1)",
+      nodeBlind.nodesUp == nil && nodeBlind.nodesDown == nil && nodeBlind.nodesTotal == nil)
+check("and names which read went blind", nodeBlind.failureLabel == "Timed out")
+check("the headline is the gap, never 0/0 up",
+      ClusterHealthReading.headline(nodeBlind) == "Timed out"
+      && ClusterHealthReading.headline(nodeBlind) != "0/0 up")
+
+let bothBlind = ClusterHealthProjection.signals(autodown: nil, autodownLabel: "No connection",
+                                                monitor: nil, monitorLabel: "Timed out",
+                                                showNodeTally: true)
+check("both reads blind: the state read's label wins (it is the headline)",
+      bothBlind.failureLabel == "No connection")
+check("a blind push is NOT an empty bubble — the sweep must keep it",
+      !bothBlind.isEmpty
+      && !ClusterHealthOrphanRule.isOrphan(bothBlind, updatedAt: Date(), now: Date()))
+
+let tallyOff = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                               monitor: nil, monitorLabel: "Timed out",
+                                               showNodeTally: false)
+check("tally switched off: no counts, and not zeros",
+      tallyOff.nodesUp == nil && tallyOff.downNodes.isEmpty)
+check("tally off: a read this surface is not drawing cannot set its headline",
+      tallyOff.failureLabel == nil)
+check("tally off still renders the state it was told",
+      ClusterHealthReading.headline(tallyOff) == "Serving")
+check("and is never the empty bubble the launch sweep ends",
+      !ClusterHealthOrphanRule.isOrphan(tallyOff, updatedAt: Date(), now: Date()))
+
+check("a read that did not answer is — up; a stated zero is 0/4 up",
+      ClusterHealthReading.tallyText(up: nil, total: nil) == "— up"
+      && ClusterHealthReading.tallyText(up: 0, total: 4) == "0/4 up")
+
 print()
 if failures == 0 {
     print("ALL PASS — wake decider (transcribed) + running-cards and cluster-health orphan rules and reading rules (sliced from source) cover every documented case")

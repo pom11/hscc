@@ -74,8 +74,17 @@ struct HSCCApp: App {
                 // Re-hydrate leftover orphans + resume the foreground poll loop.
                 MonitorActivityDriver.sweepLeftoverMonitors()
                 MonitorActivityDriver.shared.sceneDidBecomeActive()
+                // Cluster-health (t_f2867fb3): resume the poll loop. Deliberately
+                // NO sweep call here — this surface's sweep is age-based (six
+                // hours of silence) rather than settings-based, and running it on
+                // every foreground entry would END a bubble the driver still
+                // holds a live handle to, after which every push would land on
+                // an activity that no longer exists. The sweep runs at launch,
+                // which is when a dead handle is actually a dead handle.
+                ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
             case .background, .inactive:
                 MonitorActivityDriver.shared.sceneDidEnterBackground()
+                ClusterHealthActivityDriver.shared.sceneDidEnterBackground()
             @unknown default:
                 break
             }

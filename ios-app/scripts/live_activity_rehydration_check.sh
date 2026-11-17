@@ -30,11 +30,22 @@
 # Every sliced block is Foundation-only on purpose (no ActivityKit, no Theme),
 # which is what lets it compile on the macOS SDK with this harness.
 #
+# PART 4 (t_f2867fb3, the driver) — the third cluster-health block,
+# `cluster-health-projection-rules`: the rule that turns the two sanctioned reads
+# (`/v1/autodown/status` + `/v1/cluster/monitor`) into the signals a push
+# carries. It is the half that can lie about a degraded fleet — a route that
+# degraded to `{speak}`, a host list with errors in it, a section the operator
+# switched off — so it is sliced and executed here too, rather than being left
+# to a driver that no gate can run. `Sources/Shared/ClusterNodeTally.swift`
+# compiles alongside because the projection calls it: that file is the ONE host
+# tally, and the cluster widget runs the same call (`cluster_widget_check.sh`
+# executes it from the widget's side).
+#
 # SharedModels.swift + model_decode_check/ThemeStub.swift are compiled in for
-# exactly one reason: PART 3 asserts this activity's state table against the
-# real `ClusterState` the app and the widget share — the one agreement a sliced
-# copy of a table cannot prove about itself. No other model is used here, and
-# nothing in this script decodes a fixture (that is model_decode_check's job).
+# exactly one reason: PART 3 asserts this activity's state table against the real
+# `ClusterState` the app and the widget share — the one agreement a sliced copy
+# of a table cannot prove about itself. No other model is used here, and nothing
+# in this script decodes a fixture (that is model_decode_check's job).
 #
 # Usage: scripts/live_activity_rehydration_check.sh
 set -uo pipefail
@@ -55,7 +66,8 @@ printf 'import Foundation\n' > "$OUT/SlicedRules.swift"
 for spec in "$CARDS_SRC|cards-reading-rules|displayCount" \
             "$CARDS_SRC|cards-orphan-decision|isOrphan" \
             "$CLUSTER_SRC|cluster-health-reading-rules|headline" \
-            "$CLUSTER_SRC|cluster-health-orphan-decision|isOrphan"; do
+            "$CLUSTER_SRC|cluster-health-orphan-decision|isOrphan" \
+            "$CLUSTER_SRC|cluster-health-projection-rules|signals"; do
   src="${spec%%|*}"; rest="${spec#*|}"; name="${rest%%|*}"; want="${rest##*|}"
   grep -q "^// GATE-SLICE-BEGIN: ${name}$" "$src" || {
     echo "FAIL: $src has no 'GATE-SLICE-BEGIN: ${name}' marker." >&2
@@ -79,6 +91,7 @@ cp scripts/live_activity_rehydration_check/main.swift "$OUT/main.swift"
 swiftc -o "$OUT/check" \
   "$OUT/main.swift" "$OUT/SlicedRules.swift" \
   Sources/Shared/SharedModels.swift \
+  Sources/Shared/ClusterNodeTally.swift \
   scripts/model_decode_check/ThemeStub.swift 2>&1 || {
   echo "compile failed" >&2; exit 1; }
 
