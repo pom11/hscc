@@ -19,5 +19,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
     var body: some Widget {
         ClusterWidget()
         MonitorWidget()
+        ProjectsWidget()
     }
 }

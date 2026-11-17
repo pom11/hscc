@@ -355,6 +355,9 @@ targets:
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
+      # Projects surface (small + medium + large), t_d739d163. Its configuration
+      # intent and entity query live in the same file as the widget they configure.
+      - path: Sources/HSCCWidgets/ProjectsWidget.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
