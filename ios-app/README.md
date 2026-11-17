@@ -53,16 +53,18 @@ mapped onto drawer destinations.
   - `Views/AppShell.swift` — the root shell: owns `AppDestination` (one enum,
     one stack; legacy aliases like `.boardHygiene` resolve to their merged
     destination instead of failing), the drawer state, the shared detail
-    stack, the approvals-badge poller, and the offline-queue banner. The
+    stack, the approvals-badge poller retired with the console (t_0f3f70e6),
+    and the offline-queue banner. The
     drawer is a slide-over the shell owns — **not** the compact column of a
     `NavigationSplitView`, which is a proven dead end on iPhone compact
     (t_5ed5d281, RED-first on the sim).
-  - `Views/Sidebar.swift` — the drawer's 17 rows:
-    - **Work**: Home · Chats · Projects · Cards · Approvals
-    - **Cluster**: Fleet · Nodes & serving · Ops & health · Autodown &
-      self-heal · Cron · Logs
-    - **Knowledge**: Memory · Templates · Sessions · Activity feed
+  - `Views/Sidebar.swift` — the drawer's rows:
+    - **Work**: Home · Chats · Projects · Cards
+    - **Cluster**: Fleet · Nodes & serving · Autodown & self-heal · Cron · Logs
+    - **Knowledge**: Templates · Activity feed
     - **App**: Search · Settings
+    Approvals, Ops & health and Memory retired with the console (t_0f3f70e6);
+    their destinations still resolve as mapped aliases onto the root.
     Its header shows the active cluster + a live connection dot (the
     ConnectionMonitor probe, t_e5d24c6d).
   - `ContentView.swift` — the legacy tab vocabulary + `ConnectionBanner`
@@ -83,8 +85,9 @@ mapped onto drawer destinations.
     token in the Keychain; legacy single-cluster configs import on first run.
   - `Views/` — all screens, grouped:
     - `AppShell` + `HomeView` (above) — Home is the launch screen with the
-      5-verb dock (Chat · Fleet · Cluster · Approvals · Settings; a
-      start-line, not a tab bar).
+      4-verb dock (Chat · Fleet · Cluster · Settings; a
+      start-line, not a tab bar; the Approvals verb retired with its screen,
+      t_0f3f70e6).
     - `Views/ChatsRootView.swift` — the global Chat destination: every
       project row pushes straight into its full-bleed chat with unread counts.
     - `Views/ProjectsView.swift` — the project list from `/v1/projects`
@@ -113,8 +116,6 @@ mapped onto drawer destinations.
       (unit→node attribution parses the verbatim `sparkrun status` text in
       `GET /v1/cluster/hosts` — see `ServingPlacement.swift`). The old Cluster
       hub was retired into this screen (t_65d791da).
-    - `Views/OpsView.swift` — Ops & health: verify / daemon / triggers /
-      escalations / profiles (+ profile editor).
     - `Views/FleetView.swift` — Fleet: health, stats, throughput, streams,
       autoscale, the applied-template read, and the confirm-gated fleet
       up/down (the old FleetControl screen folded in here, t_2a29a7ab).
@@ -125,28 +126,12 @@ mapped onto drawer destinations.
       Activity** (the fleet wake is ~9 minutes — never block the UI).
     - `Views/CronView.swift` · `Views/LogsView.swift` — cron jobs; daemon/log
       tail with redaction (`Views/LogRedactor.swift`).
-    - `Views/MemoryView.swift` — the memory provider list / delete.
-    - `Views/SessionsView.swift` + `Views/SessionHistoryView.swift` — live
-      sessions and per-session event history.
     - `Views/ActivityFeedView.swift` — the fleet activity feed.
     - `Views/TemplatesView.swift` + `Views/TemplateDetailView.swift` — the
       **Templates library**: browse (`/v1/template/list`), preview against the
       node topology (`/v1/template/preview/{name}`, read-only dry-run), and
       **confirm-gated apply** (`/v1/template/apply`), with post-apply reload
       polling of `/v1/template/status` + `/v1/verify`.
-    - `Views/ApprovalsView.swift` — the **approvals inbox + board hygiene**
-      (spec §8 merge: `BoardHygieneView` retired): ONE List whose sections are
-      the blocked cards genuinely waiting on a human decision — presented as a
-      decision surface ("worker wants to force-push X — allow?") — then the
-      auto-resume blocked cards (recoverable early), then the stale cards.
-      Uses `/v1/kanban/blocked` partitioned by
-      `BlockedCard.isPendingApproval` (human-decision kinds
-      `needs_input`/`capability`/unclassified; `dependency`/`transient`
-      auto-resume and drop to the "Other blocked" section) plus
-      `/v1/kanban/stale`. **Allow** / **Recover** recover the card so the
-      worker proceeds; leaving it blocked is the decline.
-      `Views/ApprovalBadge.swift` backs the drawer row's pending-approvals
-      badge (polls the same read, same classification).
     - `Views/CardsRootView.swift` — the drawer's cross-board card list (every
       open card, grouped by board).
     - `Views/SearchView.swift` — **cross-project search** over last-known
@@ -180,16 +165,9 @@ mapped onto drawer destinations.
     (`NeedsOperatorNotifier` computes alerts purely;
     `NotificationCoordinator` delivers them).
   - `Intents/` — Siri App Intents:
-    - `ProjectIntents.swift` — **per-project Siri shortcuts (job-based)**:
-      `HSCCProject` (a String `AppEnum` of the canned project list),
-      `AskOrchestratorIntent` (job-based chat — ack immediately, poll in a
-      detached task, speak the reply), `ProjectStatusIntent` (speak the
-      per-project `speak` summary verbatim).
-    - `ClusterStatusIntent` + `ReviewQueueIntent` — speak each endpoint's
-      `speak` one-liner.
-    - `ApprovalsIntent` — voices the pending approval count (read-only,
-      classified by `BlockedCard.isPendingApproval`, no confirm needed):
-      "3 pending approvals await your decision." / "No pending approvals."
+    - `ClusterStatusIntent` — speak the cluster-status `speak` one-liner.
+      (The project ask/status, review-queue and approvals intents retired with
+      the console — t_0f3f70e6.)
     - `CannedCard` + `DispatchCannedCardIntent` — voice-dispatch a KNOWN card
       via the confirm-gated client (never free-form dictation).
     - `AppShortcuts` — the `AppShortcutsProvider` with natural phrases.

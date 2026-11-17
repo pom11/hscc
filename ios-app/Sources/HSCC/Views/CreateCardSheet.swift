@@ -164,3 +164,133 @@ struct CreateCardSheet: View {
         }
     }
 }
+
+// MARK: - Relocated from MemoryView.swift (t_0f3f70e6, console retirement)
+//
+// The memory viewer screen is deleted with the console; this picker stays
+// because the card-creation assignee field above is its last consumer.
+//
+/// The searchable profile picker sheet.
+///
+/// Shows every profile the cluster serves in a searchable list (not a 40-row
+/// wheel) so the operator can find a profile by typing part of its slug. The
+/// currently-selected profile is marked with a checkmark. Tapping a row picks
+/// it, dismisses the sheet, and triggers the load of that profile's memories —
+/// there is no separate "Load" tap.
+///
+/// Reused by the Memory picker and the CreateCardSheet assignee field, so it
+/// is `internal` (not private) to the module.
+struct ProfilePickerSheet: View {
+    let options: LoadState<ProfileListResponse>
+    @Binding var selection: String
+    let onPick: () async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var profiles: [ProfileSummary] {
+        guard case .loaded(let state) = options else { return [] }
+        return state.profiles ?? []
+    }
+
+    private var filtered: [ProfileSummary] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return profiles }
+        return profiles.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+                || ($0.description ?? "").localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch options {
+                case .loading:
+                    HSLoading("Loading profiles…")
+                case .failed(let message):
+                    VStack(spacing: Theme.Spacing.md.rawValue) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(Theme.Semantic.bad)
+                        Text("Couldn't load profiles")
+                            .font(.headline)
+                        Text(message)
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .multilineTextAlignment(.center)
+                        Text("Close and pull to refresh to retry.")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                default:
+                    if filtered.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                    } else {
+                        List(filtered) { p in
+                            row(p)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Choose Profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search profiles…")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    @ViewBuilder
+    private func row(_ p: ProfileSummary) -> some View {
+        let isSelected = (p.name == selection)
+        Button {
+            selection = p.name
+            dismiss()
+            Task { await onPick() }
+        } label: {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                    Text(p.name)
+                        .font(.body)
+                        .foregroundColor(Theme.Semantic.onSurface)
+                    if let desc = p.description, !desc.isEmpty {
+                        Text(desc)
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .lineLimit(1)
+                    } else if let model = p.model, !model.isEmpty {
+                        Text(model)
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundColor(Theme.Semantic.accent)
+                        .fontWeight(.semibold)
+                }
+                if p.is_default == true {
+                    Text("default")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, Theme.Spacing.sm.rawValue)
+                        .padding(.vertical, Theme.Spacing.xxs.rawValue)
+                        .background(Capsule().fill(Theme.Semantic.onSurface.opacity(0.15)))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(p.name)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+}

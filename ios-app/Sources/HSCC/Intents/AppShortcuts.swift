@@ -4,19 +4,15 @@ import AppIntents
 /// natural invocation phrases so they're reachable hands-free from the car
 /// ("Hey Siri, ...").
 ///
-/// Every shortcut here maps to one of the AppIntents above:
+/// Every shortcut here maps to one of the AppIntents above (t_0f3f70e6: the
+/// review-queue, approvals, ask-orchestrator and project-status shortcuts
+/// retired with the console screens / intents they voiced):
 ///   * "cluster status"  → `ClusterStatusIntent`
-///   * "review queue"    → `ReviewQueueIntent`
-///   * "pending approvals" → `ApprovalsIntent` (read-only count)
 ///   * "dispatch a card" → `DispatchCannedCardIntent` (picks a known card)
-///   * "ask <project> <question>" → `AskOrchestratorIntent` (job-based, speaks
-///     the reply after a normal wait)
-///   * "how is <project> doing" → `ProjectStatusIntent` (read-only summary)
 ///
-/// The dispatch + ask-orchestrator shortcuts carry explicit confirmation
-/// before they run — a voice tap can never silently start real work. The
-/// read-only ones (cluster status, review queue, approvals, project status)
-/// need none.
+/// The dispatch shortcut carries explicit confirmation before it runs — a
+/// voice tap can never silently start real work. The read-only cluster-status
+/// one needs none.
 struct AppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -27,25 +23,6 @@ struct AppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Cluster status",
             systemImageName: "bolt"
-        )
-        AppShortcut(
-            intent: ReviewQueueIntent(),
-            phrases: [
-                "Get \(.applicationName) review queue",
-                "\(.applicationName) review queue",
-            ],
-            shortTitle: "Review queue",
-            systemImageName: "list.bullet"
-        )
-        AppShortcut(
-            intent: ApprovalsIntent(),
-            phrases: [
-                "Get \(.applicationName) approvals",
-                "\(.applicationName) pending approvals",
-                "Are there pending \(.applicationName) approvals",
-            ],
-            shortTitle: "Pending approvals",
-            systemImageName: "checkmark.seal"
         )
         AppShortcut(
             intent: DispatchCannedCardIntent(),
@@ -65,30 +42,6 @@ struct AppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Dispatch a card",
             systemImageName: "paperplane"
-        )
-        AppShortcut(
-            intent: AskOrchestratorIntent(),
-            // ONE parameter per phrase — App Intents rejects two
-            // ("Multiple parameters detected in phrase"). The project is the
-            // phrase parameter because it selects WHICH orchestrator answers;
-            // Siri then asks for the question via the prompt parameter's
-            // requestValueDialog, so nothing is lost.
-            phrases: [
-                "Ask \(.applicationName) \(\.$project)",
-                "Ask \(.applicationName) about \(\.$project)",
-            ],
-            shortTitle: "Ask an orchestrator",
-            systemImageName: "bubble.left.and.bubble.right"
-        )
-        AppShortcut(
-            intent: ProjectStatusIntent(),
-            phrases: [
-                "How is \(.applicationName) project \(\.$project) doing",
-                "Get \(.applicationName) \(\.$project) status",
-                "\(.applicationName) \(\.$project) status",
-            ],
-            shortTitle: "Project status",
-            systemImageName: "folder"
         )
     }
 }

@@ -249,8 +249,6 @@ c.check(TemplateApplyResponse.self, "template_apply.json", "TemplateApplyRespons
 c.check(StopClusterResponse.self, "stop_cluster.json", "StopClusterResponse")
 c.check(RecoverCardResponse.self, "recover_card.json", "RecoverCardResponse")
 c.check(SessionMutationResponse.self, "session_retire.json", "SessionMutationResponse (retire)")
-c.check(MemoryListResponse.self, "memory_list.json", "MemoryListResponse")
-c.check(MemoryMutationResponse.self, "memory_delete.json", "MemoryMutationResponse (delete)")
 c.check(AutodownEnableResponse.self, "autodown_enable.json", "AutodownEnableResponse")
 c.check(AutodownDisableResponse.self, "autodown_disable.json", "AutodownDisableResponse")
 c.check(AutodownWakeResponse.self, "autodown_wake.json", "AutodownWakeResponse")

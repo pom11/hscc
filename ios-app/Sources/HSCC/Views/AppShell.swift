@@ -75,7 +75,7 @@ enum AppDestination: String, Hashable, Identifiable {
         case .chats: "Chats"
         case .projects: "Projects"
         case .cards: "Cards"
-        case .approvals: "Approvals"
+        case .approvals: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
         case .fleet: "Fleet"
         // The retired screen's alias carries the MERGED destination's title
         // ("Fleet" — where its sections now live), exactly as `.clusterHub`
@@ -84,17 +84,17 @@ enum AppDestination: String, Hashable, Identifiable {
         case .fleetControl: "Fleet"
         case .clusterHub: "Nodes & serving"
         case .nodesServing: "Nodes & serving"
-        case .opsHealth: "Ops & health"
+        case .opsHealth: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
         case .autodown: "Autodown & self-heal"
         case .selfHeal: "Autodown & self-heal"   // legacy alias, §3.1 wording
         case .cron: "Cron"
         case .logs: "Logs"
-        case .boardHygiene: "Approvals"   // legacy alias — merged destination
-        case .memory: "Memory"
+        case .boardHygiene: "Home"   // legacy alias — its merged destination retired too (t_0f3f70e6)
+        case .memory: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
         case .templates: "Templates"
         // The retired session list's alias carries the ROOT destination's title
         // (where a stale `.sessions` caller now lands), never the name of a
-        // screen that no longer exists — same rule as `.boardHygiene: "Approvals"`.
+        // screen that no longer exists — same rule every t_0f3f70e6 retirement follows.
         case .sessions: "Home"
         case .activity: "Activity feed"
         case .search: "Search"
@@ -106,20 +106,20 @@ enum AppDestination: String, Hashable, Identifiable {
         switch self {
         case .home: "square.grid.2x2"
         case .projects: "folder"
-        case .approvals: "checkmark.circle"
+        case .approvals: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
         case .fleet: "chart.bar"
         case .clusterHub: "bolt"
         case .chats: "bubble.left.and.bubble.right"
         case .cards: "square.grid.2x2"
         case .fleetControl: "slider.horizontal.3"
         case .nodesServing: "server.rack"
-        case .opsHealth: "heart.text.square"
+        case .opsHealth: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
         case .autodown: "power"
         case .selfHeal: "power"   // legacy alias — same destination, same glyph
         case .cron: "clock"
         case .logs: "doc.text.magnifyingglass"
-        case .boardHygiene: "checkmark.circle"   // legacy alias — same destination, same glyph
-        case .memory: "brain"
+        case .boardHygiene: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
+        case .memory: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
         case .templates: "square.stack.3d.up"
         case .sessions: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
         case .activity: "waveform.path.ecg"
@@ -130,14 +130,13 @@ enum AppDestination: String, Hashable, Identifiable {
 }
 
 /// The root shell. Owns drawer selection, the shared detail stack, the
-/// approval badge poller, the offline-queue drop banner and every app-level
-/// lifecycle hook the old TabView root carried.
+/// offline-queue drop banner and every app-level lifecycle hook the old
+/// TabView root carried.
 struct AppShell: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @EnvironmentObject private var router: DeepLinkRouter
     @State private var selection: AppDestination? = AppShell.initialSelection()
-    @StateObject private var approvals = ApprovalPoller()
 
     /// The shell always launches on the app root (t_0f3f70e6: the capture
     /// seam that could open one named drawer destination is retired with the
@@ -224,7 +223,6 @@ struct AppShell: View {
             droppedBanner = dropped
         }
         .onAppear {
-            approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
             router.setClient(makeClient())
@@ -237,7 +235,6 @@ struct AppShell: View {
         }
         .onChange(of: settings.connectionIdentity) {
             ConnectionMonitor.shared.reset()
-            approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
             router.setClient(makeClient())
@@ -280,11 +277,11 @@ struct AppShell: View {
     private func destinationView(_ destination: AppDestination) -> some View {
         let client = makeClient()
         switch destination {
-        case .home: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
+        case .home: HomeView(selection: drawerBinding)
         case .chats: ChatsRootView(client: client)
         case .projects: ProjectsView(client: client)
         case .cards: CardsRootView(client: client)
-        case .approvals: ApprovalsView(client: client)
+        case .approvals: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         case .fleet: FleetView(client: client)
         // §8 merge (t_65d791da): the retired Cluster hub has no view of its own
         // any more; its destination lands on the SAME merged screen as
@@ -296,23 +293,22 @@ struct AppShell: View {
         // sections. Same recipe as `.clusterHub` → NodesServingView.
         case .fleetControl: FleetView(client: client)
         case .nodesServing: NodesServingView(client: client)
-        case .opsHealth: OpsView(client: client)
+        case .opsHealth: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         case .autodown: AutodownView(client: client)
         // §8 merge: the retired screen has no view of its own any more; its
         // destination lands on the SAME merged screen as `.autodown`.
         case .selfHeal: AutodownView(client: client)
         case .cron: CronView(client: client)
         case .logs: LogsView(client: client)
-        // §8 merge: same for BoardHygiene — blocked + stale are sections of
-        // the Approvals List, so its destination lands on ApprovalsView.
-        case .boardHygiene: ApprovalsView(client: client)
-        case .memory: MemoryView(client: client)
+        // The §8 BoardHygiene merge died with ApprovalsView itself
+        // (t_0f3f70e6): the retired destination lands on the app ROOT.
+        case .boardHygiene: HomeView(selection: drawerBinding)
+        case .memory: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         case .templates: TemplatesView(client: client)
         // t_3778b7bd (iOS pivot): `SessionsView` is deleted with the console, so
         // the retired destination lands on the app ROOT — the one destination that
         // is always present and from which every surviving screen is one tap away.
-        // Same recipe as `.selfHeal` → AutodownView, `.boardHygiene` → ApprovalsView.
-        case .sessions: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
+        case .sessions: HomeView(selection: drawerBinding)
         case .activity: ActivityFeedView(client: client)
         case .search: SearchView(client: client)
         case .settings: SettingsView()
@@ -396,7 +392,7 @@ struct AppShell: View {
                 .padding(.top, Theme.Spacing.md.rawValue)
                 .padding(.bottom, Theme.Spacing.xs.rawValue)
 
-                Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
+                Sidebar(selection: drawerBinding)
             }
             .frame(maxWidth: 320)
             .frame(maxHeight: .infinity)
@@ -422,7 +418,10 @@ struct AppShell: View {
     private func normalized(_ destination: AppDestination?) -> AppDestination? {
         switch destination {
         case .selfHeal: return .autodown
-        case .boardHygiene: return .approvals
+        // t_0f3f70e6: approvals, boardHygiene (merged into approvals), ops and
+        // memory retire with the console; their destinations normalise to the
+        // root the pivot keeps.
+        case .boardHygiene, .approvals, .opsHealth, .memory: return .home
         case .clusterHub: return .nodesServing
         case .fleetControl: return .fleet
         // t_3778b7bd: the session list is retired with the console, so its
@@ -445,7 +444,8 @@ struct AppShell: View {
     /// inside, so the selection identity — and the sidebar row's highlight — is
     /// the real row, never a phantom second one.
     ///   .selfHeal    -> Autodown & self-heal  (t_1a9bd7f8)
-    ///   .boardHygiene-> Approvals             (t_31d037ac)
+    ///   .boardHygiene/.approvals/.opsHealth/.memory -> Home (t_0f3f70e6,
+    ///     console retirement — the merged destination itself is gone)
     ///   .clusterHub  -> Nodes & serving       (t_65d791da)
     ///   .fleetControl-> Fleet                 (t_2a29a7ab)
     ///   .sessions    -> Home                  (t_3778b7bd, console retirement)
