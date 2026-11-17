@@ -1,0 +1,23 @@
+{
+ "generated_at": "2026-11-17T08:30:00Z",
+ "boards": [
+  {
+   "board": "hscc",
+   "counts": {
+    "todo": 17,
+    "ready": 2,
+    "running": 3,
+    "blocked": 0,
+    "done": 750,
+    "archived": 114
+   },
+   "total": 886
+  }
+ ],
+ "board_count": 1,
+ "total_boards": 23,
+ "truncated": true,
+ "omitted_boards": 22,
+ "unreadable_boards": 1,
+ "speak": "23 boards: 22 open, 3 running, 750 done. 22 boards omitted for size. 1 board unreadable."
+}

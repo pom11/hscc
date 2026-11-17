@@ -1,0 +1,19 @@
+{
+ "generated_at": "2026-11-17T08:30:00Z",
+ "board_count": 1,
+ "total_boards": 1,
+ "boards": [
+  {
+   "board": "hscc",
+   "total": 886,
+   "counts": {
+    "todo": 17,
+    "ready": 2,
+    "running": 3,
+    "blocked": 0,
+    "archived": 114
+   }
+  }
+ ],
+ "speak": "hscc: 22 open, 3 running, 0 done."
+}

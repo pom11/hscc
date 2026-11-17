@@ -1,0 +1,29 @@
+{
+ "hostname": "gateway-1",
+ "platform": "macOS",
+ "arch": "arm64",
+ "uptime_seconds": 962429,
+ "cpu": {
+  "count": 14,
+  "percent": 42.8,
+  "load_avg": [
+   7.2,
+   7.4,
+   11.7
+  ]
+ },
+ "memory": {
+  "total_gb": 36.0,
+  "used_gb": 12.2,
+  "percent": 50.8
+ },
+ "disk": {
+  "total_gb": 460.4,
+  "used_gb": 12.8,
+  "percent": 6.4
+ },
+ "processes": 1228,
+ "daemon_running": true,
+ "daemon_uptime_seconds": 340053,
+ "speak": "gateway-1 up 11d 3h, 42.8% CPU, 50.8% RAM."
+}
