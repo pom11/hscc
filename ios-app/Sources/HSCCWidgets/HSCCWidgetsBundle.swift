@@ -10,6 +10,9 @@ import WidgetKit
 ///   * systemMedium/systemLarge — HSCC Monitor: per-node `hscc cluster monitor`
 ///                     metrics (CPU/RAM/GPU) + the daemon-host machine data,
 ///                     refreshed on the operator's configured cadence.
+///   * small/medium/large + the three accessory families — Running Cards: the
+///                     cards being worked right now, each with its worker and
+///                     its run time (`hscc cards monitor --live`, narrowed).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -19,5 +22,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
     var body: some Widget {
         ClusterWidget()
         MonitorWidget()
+        CardsRunningWidget()
     }
 }

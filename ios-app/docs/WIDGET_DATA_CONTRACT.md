@@ -433,9 +433,10 @@ that fetched it. Rules:
   label beats it. In docs and tests, `100.64.0.1` is the placeholder.
 * `speak` strings are operator-facing text the server already sanitises — safe
   to render, still not a place to persist.
-* The token never enters the App Group store: `ExtensionClient`
-  (`Sources/Shared/ExtensionClient.swift`) reads it from the shared keychain per
-  request and the struct is `GET`-only by construction — keep it that way.
+* The token never enters the App Group store: `WidgetDataClient`
+  (`Sources/Shared/WidgetDataClient.swift`, which replaced `ExtensionClient`)
+  reads it from the shared keychain per client and the struct is `GET`-only by
+  construction, with a closed allowlist of read paths — keep it that way.
 
 ## 8. Consequences the next cards should not re-litigate
 

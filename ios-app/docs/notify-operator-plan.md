@@ -296,7 +296,7 @@ as a child task.
   `HSCCLiveActivitySession` (session); `LiveActivityManager.swift` cannot create
   one from background (only starts on a user tap, LiveActivityManager.swift:102).
 - All four targets share App Group `group.com.hscc.ios` (SharedModels.swift:127);
-  cluster config + token read by extensions via `KeychainShared`/`ExtensionClient`.
+  cluster config + token read by extensions via `KeychainShared`/`WidgetDataClient`.
 - Needed endpoints already exist on HSCCClient (no server work):
   `reviewQueue` (HSCCClient.swift:432), `kanbanBlocked` (688),
   `escalations` (526), `daemonStatus` (516), `health` (450).

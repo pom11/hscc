@@ -218,7 +218,7 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
-      - path: Sources/Shared/ExtensionClient.swift
+      - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/WakingActivity.swift
       - path: Sources/Shared/SessionActivity.swift
     entitlements:
@@ -327,10 +327,13 @@ targets:
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
+      # Running cards with worker and age (`hscc cards monitor --live` on the
+      # Home Screen), read through WidgetDataClient — see the file header.
+      - path: Sources/HSCCWidgets/CardsRunningWidget.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
-      - path: Sources/Shared/ExtensionClient.swift
+      - path: Sources/Shared/WidgetDataClient.swift
       # Theme tokens shared with the app (design-system palette, no raw hex).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
