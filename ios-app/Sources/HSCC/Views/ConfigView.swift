@@ -1,23 +1,135 @@
 import SwiftUI
 
-/// Settings screen: enter + persist host, port, and token.
+// MARK: - HSCC root (t_9664a1c8, iOS pivot slice S1)
+//
+// The app is a widget + Live Activity client. It has TWO screens: this one —
+// connection settings (daemon endpoint + auth, unchanged semantics) and the
+// Widgets & Live Activities configuration below it — and nothing else. The
+// operator console is gone: `AppShell`, `Sidebar`, `HomeView` and
+// `ContentView` are deleted with the drawer, the dock and the detail stack,
+// and every data surface the console rendered now lives in a widget or a Live
+// Activity (docs/CONSOLE_RETIREMENT.md §2.3).
+//
+// Everything here is a byte-for-byte move out of the files it replaces:
+//   * the connection + widget Sections, the cluster list, the QR flow, the
+//     notification toggles and `WidgetSurfaceEditor` from `SettingsView.swift`;
+//   * `ConnectionBanner` from `ContentView.swift`;
+//   * `makeClient()` and the lifecycle seeding from `AppShell.swift`.
+// Renaming the screen to `ConfigView` is the only content change.
+//
+// What the shell carried that this root deliberately does NOT:
+//   * the offline-send-queue `sendHandler` seeding and the cluster-switch drop
+//     banner — queueing an orchestrator message is a MUTATION, and the pivot
+//     keeps no actions (CONSOLE_RETIREMENT §1.2 rule 2). `OfflineSendQueue`
+//     fails safe with no handler seeded (`guard let sendHandler else { return }`
+//     leaves a message queued), so nothing is lost, only un-sendable.
+//   * `navigationDestination(for: ProjectRoute.self)`: a deep link can no
+//     longer land on a project, card or board, because those screens are being
+//     deleted by the cards that own them. `onOpenURL` still drives the router,
+//     so a malformed link still reports honestly through `lastError`; the
+//     router's dead destination cases are retired with S8.
+//   * the drawer (`Sidebar`), the dock (`DockItem`) and `AppDestination`.
+
+// MARK: - Connection banner (moved verbatim from ContentView.swift)
+
+/// Connection status banner — driven by the shared `ConnectionMonitor`, which
+/// `HSCCClient` updates on EVERY completed real request (not a one-shot launch
+/// probe). It reflects the MOST RECENT API OUTCOME, so a screenful of
+/// freshly-loaded data can never sit under a stale "\"Can't reach the cluster\""
+/// alarm (t_4889e978).
 ///
-/// Persistence:
-///   * host  — UserDefaults (via `SettingsStore`)
-///   * port  — UserDefaults (via `SettingsStore`)
-///   * token — Keychain ONLY (via `KeychainStore` / `SettingsStore.saveToken`).
-///     Never UserDefaults, never a plist, never hardcoded in source.
-///
-/// Includes a "Test connection" button that calls GET /v1/ping against the
-/// current settings and shows a clear success/failure result, and a "Scan QR"
-/// button that fills host/port/token from the setup code printed by
-/// `hscc api status`/`hscc api start`.
-struct SettingsView: View {
+/// Placement: rendered as the FIRST element inside a screen's content, BELOW
+/// the nav bar. It must never be attached with `.safeAreaInset(edge: .top)` on
+/// the stack root, which draws over the nav bar and toolbar items.
+struct ConnectionBanner: View {
+    @EnvironmentObject private var settings: SettingsStore
+    @ObservedObject private var monitor = ConnectionMonitor.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: bannerIcon)
+                    .foregroundColor(bannerColor)
+                Text(bannerText)
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if settings.appGroupUnavailable {
+                Label(
+                    "Sharing broken: the widget & Siri can't see this. Reinstall the app to fix the App Group.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.bad)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Theme.Semantic.tintOverlay(bannerColor))
+    }
+
+    private var bannerText: String {
+        // A broken App Group is more important than reachability: the app
+        // would report "Connected" while the widget/intents read nothing.
+        if settings.appGroupUnavailable {
+            return settings.isConfigured
+                ? "App Group unavailable — check the install."
+                : "Set host, port, and token in Settings to connect."
+        }
+        if !settings.isConfigured {
+            return "Set host, port, and token in Settings to connect."
+        }
+        // The MOST RECENT REAL API OUTCOME. `.unknown` = not yet known (neutral);
+        // `.reachable` = a real request reached the API (clears the alarm);
+        // `.unreachable` = a transport failure (the only state that alarms red).
+        switch monitor.status {
+        case .unknown:
+            return "Configured — waiting for the first request…"
+        case .reachable:
+            return "Connected to \(settings.host)."
+        case .unreachable(let message):
+            return message
+        }
+    }
+
+    private var bannerIcon: String {
+        if settings.appGroupUnavailable {
+            return "exclamationmark.triangle.fill"
+        }
+        switch monitor.status {
+        case .reachable: return "checkmark.circle.fill"
+        case .unreachable: return "exclamationmark.triangle.fill"
+        case .unknown: return "circle.dotted"
+        }
+    }
+
+    private var bannerColor: Color {
+        if settings.appGroupUnavailable {
+            return Theme.Semantic.bad
+        }
+        switch monitor.status {
+        case .reachable: return Theme.Semantic.ok
+        case .unreachable: return Theme.Semantic.bad
+        case .unknown: return Theme.Semantic.neutral
+        }
+    }
+}
+
+// MARK: - The two-screen root
+
+struct ConfigView: View {
     @EnvironmentObject private var settings: SettingsStore
     /// The shared Widgets & Live Activities settings store (t_dea36c48):
     /// read/write in the section below, read-only by the widget/Live Activity
     /// extensions via the App Group.
     @EnvironmentObject private var widgetSettings: WidgetSettingsStore
+    /// Deep-link router: the only entry point left that can navigate, and the
+    /// only thing that can still report a failed link (t_136762f3).
+    @EnvironmentObject private var router: DeepLinkRouter
+    /// Still injected while the chat views that read it are on disk; retired
+    /// with them (CONSOLE_RETIREMENT §5 S2).
+    @EnvironmentObject private var replyWatcher: StreamReplyWatcher
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -59,7 +171,13 @@ struct SettingsView: View {
     @State private var showingConfirm = false
 
     var body: some View {
+        NavigationStack {
             Form {
+                Section {
+                    // First element of the screen's content, below the nav bar
+                    // (never `.safeAreaInset(edge: .top)` — that draws over the bar).
+                    ConnectionBanner()
+                }
                 Section {
                     ForEach(settings.clusters) { cluster in
                         clusterRow(cluster)
@@ -213,7 +331,7 @@ struct SettingsView: View {
             // away. The two diagnostics stay as the form's last section.
             .safeAreaInset(edge: .bottom) { saveBar }
             .navigationTitle("Settings")
-            .onAppear(perform: loadFromStore)
+            .onAppear(perform: rootDidAppear)
             // MARK: QR-scan flow — camera sheet → confirm → apply → test.
             .sheet(isPresented: $showingScanner) {
                 QRScannerView(
@@ -267,6 +385,37 @@ struct SettingsView: View {
                     Text("Removes “\(cluster.name)” (\(cluster.host):\(cluster.port)) and its Keychain token from this device. The cluster itself is untouched; you can add it again later.")
                 }
             }
+        }
+        // A cluster switch is a clean rebuild: every @State the screens held
+        // (fields, scan flow, widget editor path) belongs to the previous
+        // endpoint and must not survive onto the new one.
+        .id(settings.activeClusterID)
+        .onChange(of: settings.connectionIdentity) {
+            // The most-recent-API-outcome pill goes neutral, not "connected",
+            // and every client is rebuilt against the new endpoint.
+            ConnectionMonitor.shared.reset()
+            seedClients()
+        }
+        .onOpenURL { url in router.handle(url) }
+        .onContinueUserActivity("com.hscc.ios.open") { activity in
+            if let url = activity.webpageURL {
+                router.handle(url)
+            } else if let urlString = activity.userInfo?["hscc_url"] as? String,
+                      let url = URL(string: urlString) {
+                router.handle(url)
+            }
+        }
+        // A link that cannot be resolved says so. With the console screens gone
+        // there is no destination to land on, so an honest alert is the only
+        // correct outcome — never a silent nothing.
+        .alert("Couldn't open that link", isPresented: Binding(
+            get: { router.lastError != nil },
+            set: { if !$0 { router.lastError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(router.lastError ?? "That link couldn't be opened.")
+        }
     }
 
     // MARK: - State helpers
@@ -602,7 +751,42 @@ struct SettingsView: View {
         save()
         await testConnection()
     }
+
+    // MARK: - Root lifecycle glue (moved from the deleted AppShell.swift)
+
+    private func makeClient() -> HSCCClient? {
+        // t_0f3f70e6 (iOS pivot): the fixture-mode client bypass is retired
+        // with the capture harness — no launch path builds a fake-token client.
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else { return nil }
+        return HSCCClient(host: settings.host, port: port, token: token)
+    }
+
+    /// One onAppear for the whole app: seed the surviving subsystems with a
+    /// client built from the CURRENT settings, then re-hydrate any Live Activity
+    /// orphan the last process kill left behind (a deinit does not run when the
+    /// process is killed, so these sweeps are what ends a stale bubble).
+    private func rootDidAppear() {
+        loadFromStore()
+        seedClients()
+        LiveActivityManager.sweepLeftoverWakes()
+        SessionActivityDriver.sweepLeftoverSessions()
+    }
+
+    /// The three subsystems that still reach the daemon all take the same
+    /// client: the operator-alert notifier (`Notify/`, which polls on its own
+    /// schedule), the deep-link router, and the reply watcher (still injected
+    /// until the chat family that reads it is retired).
+    private func seedClients() {
+        let client = makeClient()
+        NotificationCoordinator.shared.setClient(client)
+        router.setClient(client)
+        replyWatcher.setClient(client)
+    }
+
 }
+
 
 // ---------------------------------------------------------------------------
 // Generic per-surface editor (t_dea36c48)

@@ -17,7 +17,7 @@
 #   * a whitespace-only token is REJECTED (invalid payload, never applied);
 #   * an empty token is REJECTED;
 #   * a token with surrounding whitespace decodes (it is trimmed at the
-#     SettingsView.save choke point before it ever reaches the Keychain);
+#     ConfigView.save choke point before it ever reaches the Keychain);
 #   * wrong-schema / truncated / wrong-version payloads each fail with the
 #     right explanatory error, never a silent nothing.
 #

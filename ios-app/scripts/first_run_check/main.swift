@@ -49,7 +49,7 @@ final class Harness {
         }
 
         // ---- 4. Token with SURROUNDING whitespace decodes (trim happens at
-        // the SettingsView.save choke point before it reaches the Keychain) ----
+        // the ConfigView.save choke point before it reaches the Keychain) ----
         do {
             let code = try SetupQRCode.decode(#"{"v":1,"host":"dgx","port":8788,"token":"  Tok123  "}"#)
             check(code.token == "  Tok123  ", "4a surrounding-space token decodes (raw; trimmed on save)")

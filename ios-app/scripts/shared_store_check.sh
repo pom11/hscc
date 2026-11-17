@@ -49,7 +49,7 @@ SETTINGS=Sources/HSCC/SettingsStore.swift
 # covering the rule the moment a type moves between files (it moved once, to
 # SharedStore.swift, on 2026-11-17).
 SHARED_DIR=Sources/Shared
-CONTENT=Sources/HSCC/ContentView.swift
+CONTENT=Sources/HSCC/Views/ConfigView.swift
 
 # 1. Unavailability is DETECTED — by the real containerURL check, which now
 #    lives once in Sources/Shared/SharedStore.swift and is consumed by
@@ -69,7 +69,7 @@ grep -q "@Published private(set) var appGroupUnavailable" "$SETTINGS" \
 # 3. The UI actually reads that state (a flag nothing renders is not surfacing).
 grep -q "settings.appGroupUnavailable" "$CONTENT" \
   && ok "UI renders the unavailable state" \
-  || fail "nothing in ContentView reads appGroupUnavailable"
+  || fail "nothing in ConfigView reads appGroupUnavailable"
 
 # 4. The EXTENSIONS must not fall back to .standard — they would silently read
 #    the app's private defaults and look configured while being wrong.

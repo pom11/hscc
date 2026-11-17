@@ -88,6 +88,22 @@ enum DeepLinkParser {
 
 // MARK: - Navigation destination values
 
+// MARK: - Legacy root tabs (the router's public vocabulary)
+//
+// `ContentView.Tab` lived in `ContentView.swift` — the pre-drawer tab root that
+// `AppShell` replaced and that the two-screen collapse (t_9664a1c8) deleted.
+// The router is its only remaining consumer, so the declaration moved here
+// rather than dying with the file: `deeplink_check`, and every Siri /
+// notification-tap / Handoff target, still name these three cases. S8 retires
+// the ones whose destinations the pivot deletes.
+
+/// The legacy root tabs — still the router's public vocabulary.
+struct ContentView {
+    enum Tab: Hashable {
+        case projects, cluster, settings
+    }
+}
+
 /// A destination inside the shell's single app-wide NavigationStack, as a
 /// Hashable value that can ride a typed `NavigationPath`. The app's normal
 /// `NavigationLink` pushes and a deep link's router push both append here, so
