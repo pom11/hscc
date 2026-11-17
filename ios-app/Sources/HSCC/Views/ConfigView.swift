@@ -1108,6 +1108,7 @@ extension WidgetSurfaceKind {
         case .widgetBoardStatus: return "Board Status Widget"
         case .widgetCardsRunning: return "Running Cards Widget"
         case .widgetKanbanMonitor: return "Kanban Monitor Widget"
+        case .widgetProjects: return "Projects Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
@@ -1133,6 +1134,16 @@ extension WidgetSurfaceKind {
         // this commit the gate did not scan `displayIcon` at all.
         case .widgetCardsRunning: return "rectangle.stack.badge.play"
         case .widgetKanbanMonitor: return "list.bullet.rectangle"
+        // NOT the bare `folder` the widget draws — that glyph belongs to one
+        // project ROW (ProjectRowView draws it once per project), and this row
+        // is the surface, not one of its rows. The gear badge says "the list you
+        // control here", which is what this row is for since t_5f246177. Checked
+        // through the same NSImage(systemSymbolName:) call sf_symbol_check.sh
+        // uses: this name RESOLVES, and the tempting `folder.badge.list` does
+        // not exist at all — the row would have rendered blank and, before #341,
+        // nothing in the gate set looked at displayIcon. No neighbour row in this
+        // list uses a folder glyph.
+        case .widgetProjects: return "folder.badge.gearshape"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
         // Health, not a gauge: this surface answers "is the fleet up", which is
