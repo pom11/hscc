@@ -16,6 +16,9 @@ import WidgetKit
 ///   * accessory + small/medium/large — Kanban Monitor: `hscc kanban monitor
 ///                     --live`'s running / ready / blocked, from the kanban trio,
 ///                     with a visible error pane when a board read fails.
+///   * small/medium/large — Projects: the projects row of WIDGET_DATA_CONTRACT
+///                     §3, one `GET /v1/projects` read, each row with its board,
+///                     configured through the widget's own project picker.
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -27,5 +30,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         MonitorWidget()
         CardsRunningWidget()
         KanbanMonitorWidget()
+        ProjectsWidget()
     }
 }
