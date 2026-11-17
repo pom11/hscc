@@ -194,13 +194,21 @@ file-by-file disposition of the remaining console files is
   the last-known state and its age, never a blank or stale-looking-live
   widget) and the **HSCC Monitor** widget (per-node monitor data).
 - `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivityMonitor/` — the two
-  Live Activity extensions (fleet-wake progress, monitor). Each ends explicitly
-  on success or failure; a widget extension body allows only one Live Activity
-  per target, hence two bundles. The third one that used to sit here,
-  `HSCCLiveActivitySession`, was deleted with the session it mirrored
-  (t_3b15b8c9).
+  Live Activity extensions: fleet-wake progress, and the **monitor target**,
+  which carries TWO Live Activities — the cluster/daemon-host monitor and the
+  **running-cards** activity (board · card · worker · run time, the Island and
+  Lock Screen form of `hscc cards monitor --live`'s panel header). An
+  extension's `@main` is a `WidgetBundle`, and one bundle may declare one
+  `ActivityConfiguration` per attributes type — so the "one Live Activity per
+  target" rule this file used to state is false, and the two monitor-family
+  activities share a target. Each activity still ends explicitly on success or
+  failure, and the cards activity is re-hydrated at launch
+  (`CardsRunningActivitySweep`) like the wake one. The third extension that
+  used to sit here, `HSCCLiveActivitySession`, was deleted with the session it
+  mirrored (t_3b15b8c9).
 - `project.yml` — XcodeGen spec, listing every source file explicitly. Four
-  app-facing targets (app, widgets, two Live Activities). The
+  app-facing targets (app, widgets, two Live Activity extensions carrying
+  three Live Activities). The
   `HSCCUITests` UI-test bundle was retired with the console (t_0f3f70e6).
 - `scripts/` — verification helpers:
   - `build_check.sh` — full per-target **compile** of every target with its
@@ -231,6 +239,14 @@ file-by-file disposition of the remaining console files is
     `done` is `.decoding`, never a zero); and `WidgetData.read` yields
     `.live`/`.stale`/`.failed`, never falling back to a snapshot when the real
     problem is that nothing was configured (t_5c554c5b). No network is touched.
+  - `live_activity_rehydration_check.sh` — the launch sweeps' decision tables.
+    The wake half transcribes `LiveActivityManager`'s predicate; the
+    running-cards half **slices** `CardsRunningOrphanRule` +
+    `CardsRunningReading` out of
+    `Sources/Shared/CardsRunningActivity.swift` between `GATE-SLICE` markers
+    and compiles them with the harness, so the gate executes the rules the app
+    sweep calls and the Island views draw. A moved marker fails the script by
+    name rather than shrinking the table (t_f9cc34e0).
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
 
