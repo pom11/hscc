@@ -349,6 +349,9 @@ targets:
       # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
       # through WidgetDataClient — see the file header.
       - path: Sources/HSCCWidgets/BoardStatusWidget.swift
+      # The widget's count rules on Foundation only, so
+      # scripts/board_status_widget_check.sh can compile and execute them.
+      - path: Sources/HSCCWidgets/BoardStatusReading.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
