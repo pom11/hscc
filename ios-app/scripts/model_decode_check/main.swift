@@ -759,6 +759,15 @@ c.assertions("§7_monitor_snapshot", "the App Group holds the projection, never 
              "hostname held an address")
 }
 
+// The old stored shape (§7's violation): the bytes `MonitorSnapshotStore` wrote
+// before t_438aa6ce persisted the projection — a node object with `host`,
+// `error` and the full `sample`, `sparkrun_job_names` included. It MUST fail to
+// decode now: `MonitorNodeEntry` has no such fields, so a build that upgrades in
+// place refuses the legacy blob instead of reading an address back out of the
+// container. That is the migration behaviour, asserted here rather than argued.
+c.checkFails(MonitorSnapshotStore.Snapshot.self, "v1_monitor_snapshot_legacy.json",
+             "legacy snapshot blob (nodes carried `host` + raw sample) is rejected outright")
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. ----

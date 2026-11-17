@@ -119,9 +119,12 @@ From `ios-app/`:
 
     ./scripts/model_decode_check.sh       # exit 0 == every fixture decodes
 
-The script compiles the three real model files with the harness into a temporary
-macOS CLI and runs it, so it never falls out of sync with the models the app
-actually ships.
+The script compiles the real model files — `Models.swift`, `SharedModels.swift`,
+`APIError.swift`, `SessionEvent.swift`, and since t_438aa6ce also
+`SharedStore.swift`, because §7 binds the **stored** shape and the monitor
+snapshot's bytes are production types, not mirrors — with the harness into a
+temporary macOS CLI and runs it, so it never falls out of sync with the models the
+app actually ships.
 
 ## Widget / Live Activity payload additions (t_595a5fee, 2026-11-17)
 
@@ -162,3 +165,18 @@ fixture is a capture unless labelled otherwise:
     two-row capture whose rows are both `running` at `age_days: 0`, so the tile's
     queue-depth derivation (`ready` + `todo`) and §5.3's oldest-first row order
     were exercised by nothing at all.
+
+## Stored-shape additions (t_438aa6ce, 2026-11-17)
+
+§7 binds what the App Group container may hold, so the subject here is a *stored*
+blob rather than a route response.
+
+- `v1_monitor_snapshot_legacy.json` — a **negative** fixture: the exact shape
+  `MonitorSnapshotStore` wrote before this card, when `Snapshot.nodes` was
+  `[MonitorNode]` — a node object with `host` (RFC 5737 test-net `192.0.2.1`,
+  sanitized per the mapping above), `error`, and the full `sample` including
+  `sparkrun_job_names`. `main.swift` asserts it **fails** to decode into the real
+  `MonitorSnapshotStore.Snapshot`: `MonitorNodeEntry` declares no such fields, so
+  an upgraded build refuses the legacy blob outright (`load()` returns nil) instead
+  of reading an address back out of the container. That rejection *is* the migration
+  behaviour, so it is asserted rather than argued.

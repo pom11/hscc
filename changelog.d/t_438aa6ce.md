@@ -36,10 +36,10 @@ task: t_438aa6ce
 kind: Verified
 task: t_438aa6ce
 
-- `ios-app/scripts/model_decode_check.sh`: **ALL DECODE CHECKS PASSED — 97/97
+- `ios-app/scripts/model_decode_check.sh`: **ALL DECODE CHECKS PASSED — 98/98
   fixtures** (was 88/88). `Sources/Shared/SharedStore.swift` is in the compiled
   real-source list, so the new §7 block runs against the production store types —
-  never a mirror. Nine new assertions: the fixture's own `hosts[].host` values are
+  never a mirror. Ten new assertions: the fixture's own `hosts[].host` values are
   dotted quads (the control, so the scan cannot pass vacuously), `project()`
   yields one entry per node labelled by `displayLabel` and never by `host`, the
   six projected fields survive, `MonitorNodeEntry` round-trips through the real
@@ -47,9 +47,13 @@ task: t_438aa6ce
   a dotted-quad**, a stored node object declares no key outside the six projection
   fields (so `host` cannot be added back silently), and the stored daemon-host
   object holds exactly §5.5's eleven machine fields with a `hostname` that is a
-  name, not an address. Test-the-test: pointing `project()`'s label at `node.host`
-  turned the scan red and named the paths
-  (`$.nodes[0].label=192.0.2.1 (gx10-cad0)`), then was reverted.
+  name, not an address. Plus a **negative** fixture,
+  `v1_monitor_snapshot_legacy.json` — the bytes the old code wrote (`host`,
+  `error`, full `sample` with `sparkrun_job_names`) — asserted to **fail** decode,
+  which is the upgrade behaviour: a build that updates in place refuses the legacy
+  blob rather than reading an address back out of the container. Test-the-test:
+  pointing `project()`'s label at `node.host` turned the scan red and named the
+  paths (`$.nodes[0].label=192.0.2.1 (gx10-cad0)`), then was reverted.
 - `ios-app/scripts/build_check.sh`: HSCC **83** / HSCCWidgets **9** /
   HSCCLiveActivity **5** / HSCCLiveActivitySession **5** /
   HSCCLiveActivityMonitor **5** files, **0 error(s), 0 warning(s)** —
