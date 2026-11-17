@@ -734,6 +734,12 @@ struct ConfigView: View {
     /// "(fleet default)" when the surface has made no choice of its own, so
     /// the operator can tell an inherited value from one set here.
     private func scopeLine(_ kind: WidgetSurfaceKind) -> String {
+        // A surface whose route cannot be scoped says so out loud. Printing
+        // `scope(for:)` here would advertise a slice the surface ignores:
+        // `/v1/kanban/running` was measured to ignore `?board=` (§4.3), so
+        // "board radio" under that row would be a claim about a store value,
+        // not about what the bubble shows. See `WidgetSurfaceKind.supportsScope`.
+        guard kind.supportsScope else { return "Fleet-wide — this surface cannot be scoped" }
         let resolved = (widgetSettings.scope(for: kind) ?? WidgetScope()).summaryLine
         return widgetSettings.setting(for: kind).scope == nil
             ? "\(resolved) (fleet default)"
@@ -904,68 +910,85 @@ struct WidgetSurfaceEditor: View {
             }
 
             // MARK: Scope — what THIS widget points at (t_3dd38411)
-            Section {
-                LabeledContent("Shows") {
-                    Text((store.scope(for: kind) ?? WidgetScope()).summaryLine)
-                        .multilineTextAlignment(.trailing)
-                }
-                Picker("Board", selection: scopeSelection(.board)) {
-                    scopeRows(boardOptions ?? [], showSubtitle: false)
-                }
-                Picker("Project", selection: scopeSelection(.project)) {
-                    scopeRows(projectOptions ?? [], showSubtitle: true)
-                }
-                Picker("Node", selection: scopeSelection(.node)) {
-                    scopeRows(nodeOptions ?? [], showSubtitle: false)
-                }
+            // Scope is offered only where the route can honour it (t_71deac83):
+            // the pickers below write a `WidgetScope` this surface would
+            // ignore, and the fetch would spend three reads on lists it
+            // never uses.
+            if kind.supportsScope {
+                Section {
+                    LabeledContent("Shows") {
+                        Text((store.scope(for: kind) ?? WidgetScope()).summaryLine)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Picker("Board", selection: scopeSelection(.board)) {
+                        scopeRows(boardOptions ?? [], showSubtitle: false)
+                    }
+                    Picker("Project", selection: scopeSelection(.project)) {
+                        scopeRows(projectOptions ?? [], showSubtitle: true)
+                    }
+                    Picker("Node", selection: scopeSelection(.node)) {
+                        scopeRows(nodeOptions ?? [], showSubtitle: false)
+                    }
 
-                if loadingScopeOptions {
-                    HStack(spacing: Theme.Spacing.md.rawValue) {
-                        ProgressView()
-                        Text("Loading boards, projects and nodes…")
+                    if loadingScopeOptions {
+                        HStack(spacing: Theme.Spacing.md.rawValue) {
+                            ProgressView()
+                            Text("Loading boards, projects and nodes…")
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    } else if scopeListsAreEmpty {
+                        Text("No board, project or node came back from the cluster, so only All is offered here. Check the connection at the top of this screen, then reload.")
                             .font(.caption)
                             .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                } else if scopeListsAreEmpty {
-                    Text("No board, project or node came back from the cluster, so only All is offered here. Check the connection at the top of this screen, then reload.")
+
+                    Button {
+                        Task { await loadScopeOptions() }
+                    } label: {
+                        Label("Reload scope lists", systemImage: "arrow.clockwise")
+                    }
+
+                    if store.setting(for: kind).scope != nil {
+                        // The one way back to "follow the fleet default": writing
+                        // nil drops the surface's own entry rather than storing an
+                        // empty scope (which would mean "All, explicitly").
+                        Button("Use the fleet default for this widget") {
+                            store.setScope(nil, for: kind)
+                        }
+                    }
+                } header: {
+                    Text("Scope")
+                } footer: {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                        Text("Point this widget at one slice of the fleet. The picker you touch decides the whole scope: choosing a board drops a project or node, and choosing All in any of them clears it for this widget.")
+                        if store.setting(for: kind).scope == nil {
+                            Text("This widget has no choice of its own, so it follows the fleet-wide scope — currently \((store.settings.scope ?? WidgetScope()).summaryLine). That one is set in the widget's own configuration sheet, or by Siri.")
+                        } else {
+                            Text("This widget's own choice wins over the fleet-wide scope, currently \((store.settings.scope ?? WidgetScope()).summaryLine).")
+                        }
+                    }
+                }
+                // Fetching the lists is an OPERATOR action, not a timeline refresh,
+                // so it spends none of WIDGET_DATA_CONTRACT §2's requests-per-
+                // refresh budget — that rule governs what a widget does on each
+                // scheduled refresh, and this is not one. It runs when the surface
+                // editor appears and on Reload, and nothing here re-fetches on a
+                // timer.
+                .task(id: kind) { await loadScopeOptions() }
+            } else {
+                // The honest stand-in: what it shows, and why there is no
+                // picker here.
+                Section {
+                    Text("This surface always shows the whole fleet. Its route ignores a board, project or node, so there is nothing to pick here — choosing a scope and being shown everything anyway would be a control that lies.")
                         .font(.caption)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Button {
-                    Task { await loadScopeOptions() }
-                } label: {
-                    Label("Reload scope lists", systemImage: "arrow.clockwise")
-                }
-
-                if store.setting(for: kind).scope != nil {
-                    // The one way back to "follow the fleet default": writing
-                    // nil drops the surface's own entry rather than storing an
-                    // empty scope (which would mean "All, explicitly").
-                    Button("Use the fleet default for this widget") {
-                        store.setScope(nil, for: kind)
-                    }
-                }
-            } header: {
-                Text("Scope")
-            } footer: {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                    Text("Point this widget at one slice of the fleet. The picker you touch decides the whole scope: choosing a board drops a project or node, and choosing All in any of them clears it for this widget.")
-                    if store.setting(for: kind).scope == nil {
-                        Text("This widget has no choice of its own, so it follows the fleet-wide scope — currently \((store.settings.scope ?? WidgetScope()).summaryLine). That one is set in the widget's own configuration sheet, or by Siri.")
-                    } else {
-                        Text("This widget's own choice wins over the fleet-wide scope, currently \((store.settings.scope ?? WidgetScope()).summaryLine).")
-                    }
+                } header: {
+                    Text("Scope")
                 }
             }
-            // Fetching the lists is an OPERATOR action, not a timeline refresh,
-            // so it spends none of WIDGET_DATA_CONTRACT §2's requests-per-
-            // refresh budget — that rule governs what a widget does on each
-            // scheduled refresh, and this is not one. It runs when the surface
-            // editor appears and on Reload, and nothing here re-fetches on a
-            // timer.
-            .task(id: kind) { await loadScopeOptions() }
 
             // A surface whose widget has exactly one dataset declares an EMPTY
             // `availableSections` (t_09cd8abf for the board status tile,
@@ -973,7 +996,9 @@ struct WidgetSurfaceEditor: View {
             // Showing an empty "Show Content" group with a "choose which
             // sections" footer underneath would advertise a choice that does
             // not exist, so the group appears only when there is something to
-            // choose.
+            // choose — which is also why the running-cards Live Activity
+            // (t_71deac83, `availableSections: []`) gets no group here rather
+            // than a group that does nothing.
             if !sectionRows(kind).isEmpty {
                 Section {
                     ForEach(sectionRows(kind), id: \.self) { section in
@@ -1112,6 +1137,7 @@ extension WidgetSurfaceKind {
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
+        case .liveActivityCards: return "Running Cards Live Activity"
         }
     }
 
@@ -1149,6 +1175,13 @@ extension WidgetSurfaceKind {
         // Health, not a gauge: this surface answers "is the fleet up", which is
         // the question the monitor activity's ECG line does not ask.
         case .liveActivityClusterHealth: return "heart.text.square"
+        // The same glyph the running-cards surfaces lead with (§5.4's cards
+        // stack), so the settings row, the widget and the Island say the same
+        // thing. It is deliberately the Board Status row's glyph too: that row
+        // and this one are the two card-stack surfaces, and inventing a fourth
+        // stack glyph to make the list look tidier would put a symbol on screen
+        // that no rendering of either surface ever uses.
+        case .liveActivityCards: return "square.stack.3d.up"
         }
     }
 

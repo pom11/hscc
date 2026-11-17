@@ -249,6 +249,18 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// belong to the DRIVER (`ClusterHealthActivityDriver`), which is the only
     /// consumer of this entry — the sweep still consults nothing.
     case liveActivityClusterHealth = "liveActivity.clusterHealth"
+    /// The running-cards Live Activity — the Island / Lock Screen form of
+    /// `hscc cards monitor --live` (t_f9cc34e0 renders it, t_71deac83 feeds it).
+    ///
+    /// Same division as the case above: the launch sweep
+    /// (`CardsRunningActivitySweep` + `CardsRunningOrphanRule`) stays a pure
+    /// rule the rehydration gate can execute, and the Active toggle plus the
+    /// cadence belong to `CardsRunningActivityDriver`, the only consumer of
+    /// this entry. It gets its OWN entry rather than borrowing
+    /// `.liveActivityMonitor`'s: the two surfaces are pushed by different
+    /// drivers off different routes, and one shared toggle would let switching
+    /// off the cluster monitor silently stop the cards bubble too.
+    case liveActivityCards = "liveActivity.cards"
 }
 
 /// One surface's settings: enabled, refresh cadence, and which content
@@ -369,7 +381,38 @@ extension WidgetSurfaceKind {
         case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
             return false
-        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth: return true
+        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
+             .liveActivityCards: return true
+        }
+    }
+
+    /// Whether this surface can render a `WidgetScope` at all.
+    ///
+    /// Not every dataset can be scoped, and a scope picker that the network
+    /// ignores is a control that lies: the operator picks a board, the row
+    /// says "board radio", and the surface keeps showing the whole fleet.
+    /// `/v1/kanban/running` and `/v1/kanban/blocked` were measured to IGNORE
+    /// `?board=` (WIDGET_DATA_CONTRACT §4.3), so the running-cards surfaces are
+    /// fleet-wide whatever the store holds — and the app-side driver for this
+    /// surface therefore does not consult `scope(for:)` at all.
+    ///
+    /// Every other surface keeps `true` because that is what ships today: each
+    /// was measured by its own card against a route that honours a scope. A new
+    /// surface that turns out not to honour one opts out HERE, and the config
+    /// screen then hides the pickers rather than writing a value nothing reads.
+    var supportsScope: Bool {
+        switch self {
+        case .liveActivityCards: return false
+        // Every other surface keeps true: main grew this switch since this
+        // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
+        // widgetProjects all landed from main), and a new case has to be
+        // judged here deliberately rather than by an exhaustive-switch build
+        // error. Each of the three is fetched through a route its own card
+        // measured against a scope, so they keep what ships today.
+        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+             .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth:
+            return true
         }
     }
 
@@ -431,6 +474,11 @@ extension WidgetSurfaceKind {
         // sweep ENDS a bubble for, and an operator switching sections off
         // must never be what deletes their surface.
         case .liveActivityClusterHealth: return ["nodes"]
+        // Rows (board · card · worker · run time) and the two counts are ONE
+        // projection from ONE pair of routes: the blocked read is what tells an
+        // idle fleet apart from a jammed one (§5.4), so it is part of the
+        // dataset, not a section an operator can switch off.
+        case .liveActivityCards: return []
         }
     }
 }
