@@ -155,6 +155,9 @@ targets:
       - path: Sources/HSCC/SetupQRCode.swift
       - path: Sources/HSCC/LiveActivityManager.swift
       - path: Sources/HSCC/MonitorActivityDriver.swift
+      # The running-cards activity's launch sweep (t_f9cc34e0). The activity's
+      # rendering lives in the monitor extension target; this is the app half.
+      - path: Sources/HSCC/CardsRunningActivitySweep.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
@@ -218,6 +221,10 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
+      # Running-cards Live Activity attributes + its pure reading/orphan rules
+      # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
+      # and into the monitor extension (which renders the activity).
+      - path: Sources/Shared/CardsRunningActivity.swift
       - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/WakingActivity.swift
     entitlements:
@@ -421,25 +428,31 @@ targets:
       - sdk: WidgetKit.framework
       - sdk: ActivityKit.framework
 
-  # Monitor Live Activity (ActivityKit) — the NEW "HSCC Monitor" Live Activity
-  # (t_03d318cd). Live Activities are PUSH-ONLY: the app (`MonitorActivityDriver`)
-  # polls GET /v1/cluster/monitor + GET /v1/daemon/host on the settings cadence
-  # and pushes updates; this extension renders the ActivityConfiguration for
+  # Monitor Live Activity (ActivityKit) — the monitor-family Live Activities.
+  # Live Activities are PUSH-ONLY: the app (`MonitorActivityDriver`) polls
+  # GET /v1/cluster/monitor + GET /v1/daemon/host on the settings cadence and
+  # pushes updates; this extension renders the ActivityConfiguration for
   # `MonitorActivityAttributes`.
   #
-  # SEPARATE target from HSCCLiveActivity: a widget extension body can only
-  # contain ONE ActivityConfiguration, so each Live Activity attribute type
-  # gets its own extension target.
+  # It also renders the running-cards activity (t_f9cc34e0,
+  # `CardsRunningLiveActivity`): one extension CAN host several Live Activity
+  # types, one `ActivityConfiguration` each, which is why this target's `@main`
+  # is `HSCCLiveActivityMonitorBundle` (a `WidgetBundle`). The wake activity
+  # predates that finding and stays its own target.
   HSCCLiveActivityMonitor:
     type: app-extension
     platform: iOS
     deploymentTarget: "26.0"
     sources:
+      # The extension's @main: a WidgetBundle over the activities below.
+      - path: Sources/HSCCLiveActivityMonitor/HSCCLiveActivityMonitorBundle.swift
       - path: Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
+      - path: Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
+      - path: Sources/Shared/CardsRunningActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:

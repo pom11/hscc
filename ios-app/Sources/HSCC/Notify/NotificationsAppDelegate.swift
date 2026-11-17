@@ -65,6 +65,11 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
             // live.)
             MonitorActivityDriver.sweepLeftoverMonitors()
             MonitorActivityDriver.shared.sceneDidBecomeActive()
+            // Running-cards Live Activity (t_f9cc34e0): the same re-hydration
+            // treatment for the cards bubble. Idempotent, and a no-op while no
+            // cards activity exists — the launch sweep is the invariant the
+            // surface depends on, so it runs from the first launch onward.
+            CardsRunningActivitySweep.sweepLeftoverCards()
         }
         return true
     }

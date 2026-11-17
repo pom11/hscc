@@ -5,10 +5,11 @@ import ActivityKit
 /// HSCCLiveActivityMonitor — the ActivityKit configuration for the NEW HSCC
 /// Monitor Live Activity.
 ///
-/// Hosted by the `HSCCLiveActivityMonitor` app-extension target (a SEPARATE
-/// target from `HSCCLiveActivity` (wake) — one widget extension body can only
-/// contain ONE `ActivityConfiguration`, so each Live Activity attribute type
-/// gets its own extension target).
+/// Hosted by the `HSCCLiveActivityMonitor` app-extension target, beside the
+/// running-cards activity — see `HSCCLiveActivityMonitorBundle`, which is this
+/// target's `@main`: one extension can host several Live Activity types, each
+/// with its own `ActivityConfiguration`. (The wake activity keeps its own
+/// `HSCCLiveActivity` target; nothing here undoes that split.)
 ///
 /// This is the live cluster/daemon-host monitor: it renders the data the APP
 /// pushes (`MonitorActivityDriver` polls GET /v1/cluster/monitor +
@@ -24,7 +25,6 @@ import ActivityKit
 /// Lock Screen — the full monitor: state header, per-node CPU/RAM/GPU meters
 /// (ok/warn/bad colouring), and the daemon-host machine row. Sections honour
 /// the settings showSections (state / nodes / host).
-@main
 struct HSCCLiveActivityMonitor: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: MonitorActivityAttributes.self) { context in
