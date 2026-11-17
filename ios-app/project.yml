@@ -182,14 +182,13 @@ targets:
       # were chat-only banners and went with the store.
       - path: Sources/HSCC/Views/ComposerText.swift
       - path: Sources/HSCC/Views/StreamReplyWatcher.swift
-      - path: Sources/HSCC/Views/AutodownView.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
       - path: Sources/HSCC/Views/ProjectUnreadCenter.swift
       - path: Sources/HSCC/Views/ProfileEditorView.swift
       - path: Sources/HSCC/Views/LogsView.swift
       - path: Sources/HSCC/Views/LogRedactor.swift
-      # SelfHealHistoryView.swift retired (spec §8 merge): the timeline is now
-      # the trailing Section of AutodownView — one destination, one row dialect.
+      # SelfHealHistoryView.swift retired (spec §8 merge into AutodownView);
+      # AutodownView itself then retired with the console (t_0f3f70e6).
       - path: Sources/HSCC/Views/DisplayJSON.swift
       - path: Sources/HSCC/Views/AppliedTemplateStatus.swift
       - path: Sources/HSCC/Views/HealthCheckIndicator.swift
@@ -203,7 +202,6 @@ targets:
       # (t_65d791da) — listed above at ClusterView's old slot, since the new
       # screen is the union of both.
       - path: Sources/HSCC/Views/TemplatesView.swift
-      - path: Sources/HSCC/Views/TemplateDetailView.swift
       - path: Sources/HSCC/Views/TemplateTopologyView.swift
       - path: Sources/HSCC/Views/SearchView.swift
       - path: Sources/HSCC/Views/SlashCommandPalette.swift

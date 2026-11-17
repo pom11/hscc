@@ -51,10 +51,9 @@ struct Sidebar: View {
                 // AppShell.normalized, never as a second row.
                 // "Ops & health" retired with OpsView (t_0f3f70e6); `.opsHealth`
                 // still resolves — as a mapped alias onto the root, never as a row.
-                // spec §3.1: "Autodown & self-heal (was Autodown; history
-                // becomes a section)" — ONE row. The old `.selfHeal` row is
-                // gone; its destination still resolves (see AppShell.go).
-                row(.autodown)
+                // "Autodown & self-heal" retired with AutodownView
+                // (t_0f3f70e6); `.autodown` (and the merged `.selfHeal`)
+                // still resolve — as mapped aliases onto the root, never as rows.
                 row(.cron)
                 row(.logs)
                 // spec §8 merged BoardHygiene into Approvals; Approvals itself

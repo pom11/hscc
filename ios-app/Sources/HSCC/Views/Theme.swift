@@ -535,8 +535,9 @@ struct HSMetaLine: View {
 /// line, an optional muted reason line, and an optional trailing icon action,
 /// on the elevated surface fill.
 ///
-/// Spec §1.3 counted this recipe written twice — `StaleBanner` here and
-/// AutodownView's private `wakingBanner` — same shape, different meaning. They
+/// Spec §1.3 counted this recipe written twice — `StaleBanner` here and the
+/// Autodown screen's private `wakingBanner` (that screen retired with the
+/// console, t_0f3f70e6) — same shape, different meaning. They
 /// could NOT simply share `StaleBanner`'s copy: it prints "Offline — …", and a
 /// fleet that is *coming up* is not a fleet that is *unreachable*. Printing
 /// "Offline — waking the fleet…" is precisely the word/state disagreement spec

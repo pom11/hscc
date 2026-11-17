@@ -53,11 +53,10 @@ enum AppDestination: String, Hashable, Identifiable {
     /// silently failing. New code must route `.nodesServing`. (Same pattern as
     /// `.selfHeal` below.)
     case clusterHub
-    /// LEGACY alias, kept deliberately (spec §8 merge: SelfHealHistoryView is
-    /// now the trailing section of AutodownView). No drawer row and no screen
-    /// of its own — but any stale caller that still names `.selfHeal`
-    /// (rawValue "selfHeal") lands on the MERGED destination instead of
-    /// silently failing. New code must route `.autodown`.
+    /// LEGACY alias (spec §8 merged SelfHeal into Autodown; the Autodown
+    /// screen then retired with the console — t_0f3f70e6). No drawer row and
+    /// no screen of its own — `.selfHeal` (rawValue "selfHeal") normalises to
+    /// the app ROOT, like `.autodown` itself.
     case selfHeal
     /// LEGACY alias, kept deliberately (spec §8 merge: BoardHygieneView is
     /// merged into Approvals — blocked + stale are sections of that one
@@ -85,8 +84,8 @@ enum AppDestination: String, Hashable, Identifiable {
         case .clusterHub: "Nodes & serving"
         case .nodesServing: "Nodes & serving"
         case .opsHealth: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
-        case .autodown: "Autodown & self-heal"
-        case .selfHeal: "Autodown & self-heal"   // legacy alias, §3.1 wording
+        case .autodown: "Home"   // retired with the console (t_0f3f70e6) — lands on the root
+        case .selfHeal: "Home"   // legacy alias — same retired destination
         case .cron: "Cron"
         case .logs: "Logs"
         case .boardHygiene: "Home"   // legacy alias — its merged destination retired too (t_0f3f70e6)
@@ -114,8 +113,8 @@ enum AppDestination: String, Hashable, Identifiable {
         case .fleetControl: "slider.horizontal.3"
         case .nodesServing: "server.rack"
         case .opsHealth: "square.grid.2x2"   // retired alias — lands on Home, Home's glyph
-        case .autodown: "power"
-        case .selfHeal: "power"   // legacy alias — same destination, same glyph
+        case .autodown: "square.grid.2x2"   // retired alias — lands on Home, the Home glyph
+        case .selfHeal: "square.grid.2x2"   // legacy alias — same retired destination
         case .cron: "clock"
         case .logs: "doc.text.magnifyingglass"
         case .boardHygiene: "square.grid.2x2"   // legacy alias — lands on Home, Home's glyph
@@ -294,10 +293,10 @@ struct AppShell: View {
         case .fleetControl: FleetView(client: client)
         case .nodesServing: NodesServingView(client: client)
         case .opsHealth: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
-        case .autodown: AutodownView(client: client)
+        case .autodown: HomeView(selection: drawerBinding)   // retired with the console (t_0f3f70e6) — mapped alias onto the root
         // §8 merge: the retired screen has no view of its own any more; its
-        // destination lands on the SAME merged screen as `.autodown`.
-        case .selfHeal: AutodownView(client: client)
+        // destination lands on the app ROOT, like `.autodown` itself.
+        case .selfHeal: HomeView(selection: drawerBinding)
         case .cron: CronView(client: client)
         case .logs: LogsView(client: client)
         // The §8 BoardHygiene merge died with ApprovalsView itself
@@ -417,11 +416,10 @@ struct AppShell: View {
     /// with nothing marked.
     private func normalized(_ destination: AppDestination?) -> AppDestination? {
         switch destination {
-        case .selfHeal: return .autodown
-        // t_0f3f70e6: approvals, boardHygiene (merged into approvals), ops and
-        // memory retire with the console; their destinations normalise to the
-        // root the pivot keeps.
-        case .boardHygiene, .approvals, .opsHealth, .memory: return .home
+        // t_0f3f70e6: autodown (and its merged `.selfHeal` alias), approvals,
+        // boardHygiene (merged into approvals), ops and memory retire with the
+        // console; their destinations normalise to the root the pivot keeps.
+        case .selfHeal, .autodown, .boardHygiene, .approvals, .opsHealth, .memory: return .home
         case .clusterHub: return .nodesServing
         case .fleetControl: return .fleet
         // t_3778b7bd: the session list is retired with the console, so its
@@ -443,7 +441,7 @@ struct AppShell: View {
     /// retired screen's destination resolves to the merged screen it now lives
     /// inside, so the selection identity — and the sidebar row's highlight — is
     /// the real row, never a phantom second one.
-    ///   .selfHeal    -> Autodown & self-heal  (t_1a9bd7f8)
+    ///   .selfHeal/.autodown -> Home (t_0f3f70e6, console retirement)
     ///   .boardHygiene/.approvals/.opsHealth/.memory -> Home (t_0f3f70e6,
     ///     console retirement — the merged destination itself is gone)
     ///   .clusterHub  -> Nodes & serving       (t_65d791da)

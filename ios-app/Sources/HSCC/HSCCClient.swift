@@ -690,18 +690,8 @@ struct HSCCClient {
         try await get("/v1/template/status", as: TemplateStatusResponse.self)
     }
 
-    /// GET /v1/template/preview/{name} — dry-run of what applying a template
-    /// would change (READ-ONLY; never mutates).
-    ///
-    /// A template with no preview yet returns a minimal `{ speak }` body; one
-    /// with a preview returns the full changes + routing. Unknown template →
-    /// 404. This is the browse/preview step BEFORE any confirmed apply.
-    func templatePreview(name: String) async throws -> TemplatePreviewResponse {
-        // Inline the encoding expression (matches `cardDetail`/`reviewDetail`
-        // so a slash or space can't break the route).
-        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        return try await get("/v1/template/preview/\(encoded)", as: TemplatePreviewResponse.self)
-    }
+    // GET /v1/template/preview/{name} left with the template detail screen
+    // (t_0f3f70e6, console retirement): its only caller was that dry-run.
 
     // MARK: - Mutating endpoints (B4, ALL confirm-gated)
 
@@ -741,20 +731,8 @@ struct HSCCClient {
                               as: MergeCardResponse.self)
     }
 
-    /// POST /v1/template/apply — apply a cluster template.
-    ///
-    /// Body: `{ name, force_recreate?, confirm: true }`. A blocked or partially
-    /// applied template returns a non-2xx / `success: false`, which throws and
-    /// is surfaced as a failure (never a success checkmark). Never fires without
-    /// the confirm UI gate.
-    func applyTemplate(name: String,
-                       forceRecreate: Bool = false) async throws -> TemplateApplyResponse {
-        var payload: [String: Any] = ["name": name, "confirm": true]
-        if forceRecreate {
-            payload["force_recreate"] = true
-        }
-        return try await post("/v1/template/apply", body: payload, as: TemplateApplyResponse.self)
-    }
+    // POST /v1/template/apply left with the template detail screen
+    // (t_0f3f70e6, console retirement): a confirm-gated POST (rule 2).
 
     /// POST /v1/cluster/stop — stop a running workload.
     ///
@@ -823,36 +801,10 @@ struct HSCCClient {
 
     // MARK: - C6 mutations (confirm-gated)
 
-    /// POST /v1/autodown/enable — arm idle autodown.
-    ///
-    /// Body: `{ idle_minutes, force?, confirm: true }`. Non-2xx (409 for a
-    /// cron conflict unless force, 400 for a bad idle_minutes) always throws.
-    func autodownEnable(idleMinutes: Int, force: Bool = false) async throws -> AutodownEnableResponse {
-        var payload: [String: Any] = ["idle_minutes": idleMinutes, "confirm": true]
-        if force { payload["force"] = true }
-        return try await post("/v1/autodown/enable", body: payload, as: AutodownEnableResponse.self)
-    }
-
-    /// POST /v1/autodown/disable — disarm + release the intentional block.
-    /// Body: `{ confirm: true }`. Always confirms.
-    func autodownDisable() async throws -> AutodownDisableResponse {
-        try await post("/v1/autodown/disable", body: ["confirm": true], as: AutodownDisableResponse.self)
-    }
-
-    /// POST /v1/autodown/wake — force autoup (running in the background).
-    ///
-    /// Body: `{ confirm: true }`. Returns promptly with `state: waking`; autoup
-    /// can take ~9 minutes. The view polls /v1/autodown/status rather than
-    /// blocking. Always confirms.
-    func autodownWake() async throws -> AutodownWakeResponse {
-        try await post("/v1/autodown/wake", body: ["confirm": true], as: AutodownWakeResponse.self)
-    }
-
-    /// POST /v1/autodown/cancel — abort an in-progress teardown.
-    /// Body: `{ confirm: true }`. Always confirms.
-    func autodownCancel() async throws -> AutodownCancelResponse {
-        try await post("/v1/autodown/cancel", body: ["confirm": true], as: AutodownCancelResponse.self)
-    }
+    // POST /v1/autodown/{enable,disable,wake,cancel} left with the Autodown
+    // screen (t_0f3f70e6, console retirement): all four were confirm-gated
+    // POSTs (rule 2). The read (`GET /v1/autodown/status`) stays — the widget
+    // and the wake Live Activity still consume it.
 
     /// POST /v1/kanban/blocked/{id}/recover — recover ONE blocked card.
     ///

@@ -116,7 +116,6 @@ c.check(KanbanBlockedResponse.self, "kanban_blocked.json", "KanbanBlockedRespons
 c.check(KanbanStaleResponse.self, "kanban_stale.json", "KanbanStaleResponse")
 c.check(TemplateListResponse.self, "template_list.json", "TemplateListResponse")
 c.check(TemplateStatusResponse.self, "template_status.json", "TemplateStatusResponse")
-c.check(TemplatePreviewResponse.self, "template_preview_hscc-live.json", "TemplatePreviewResponse")
 c.check(ClusterStatusResponse.self, "v1_cluster_status.json", "ClusterStatusResponse (Shared)")
 c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResponse (Shared)")
 c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
@@ -245,14 +244,9 @@ do {
 c.check(ReviewDetailResponse.self, "review_detail.json", "ReviewDetailResponse")
 c.check(DispatchCardResponse.self, "dispatch_card.json", "DispatchCardResponse")
 c.check(MergeCardResponse.self, "merge_card.json", "MergeCardResponse")
-c.check(TemplateApplyResponse.self, "template_apply.json", "TemplateApplyResponse")
 c.check(StopClusterResponse.self, "stop_cluster.json", "StopClusterResponse")
 c.check(RecoverCardResponse.self, "recover_card.json", "RecoverCardResponse")
 c.check(SessionMutationResponse.self, "session_retire.json", "SessionMutationResponse (retire)")
-c.check(AutodownEnableResponse.self, "autodown_enable.json", "AutodownEnableResponse")
-c.check(AutodownDisableResponse.self, "autodown_disable.json", "AutodownDisableResponse")
-c.check(AutodownWakeResponse.self, "autodown_wake.json", "AutodownWakeResponse")
-c.check(AutodownCancelResponse.self, "autodown_cancel.json", "AutodownCancelResponse")
 c.check(ClusterUpResponse.self, "cluster_up.json", "ClusterUpResponse")
 c.check(ClusterDownResponse.self, "cluster_down.json", "ClusterDownResponse")
 c.check(OrchestratorChatJobResponse.self, "orchestrator_chat.json", "OrchestratorChatJobResponse")
@@ -399,35 +393,6 @@ do {
 } catch {
     c.failures.append(("v1_cluster_monitor.json", "ClusterMonitorResponse decode", "\(error)"))
     print("FAIL v1_cluster_monitor.json → ClusterMonitorResponse decode: \(error)")
-}
-
-// ---- serve_delta (t_acb19c01) — the concrete per-unit WHAT WILL CHANGE. The
-// preview must decode the new delta and expose start/stop/move/unchanged +
-// affected_nodes so the apply-preview section can render the honest delta. ----
-do {
-    let preview = try JSONDecoder().decode(
-        TemplatePreviewResponse.self,
-        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/template_preview_hscc-live.json")))
-    guard let delta = preview.serve_delta else {
-        throw NSError(domain: "decodecheck", code: 1,
-                      userInfo: [NSLocalizedDescriptionKey: "serve_delta missing on preview"])
-    }
-    let stopIds = (delta.stop ?? []).map { $0.id ?? "" }
-    if delta.isEmpty == false
-        && (delta.start ?? []).count == 1
-        && stopIds.contains("a1")
-        && (delta.move ?? []).isEmpty
-        && delta.affected_nodes?.contains("192.0.2.244") == true {
-        c.passed += 1
-        print("OK   template_preview_hscc-live.json  →  serve_delta decodes (start/stop/move + affected nodes)")
-    } else {
-        c.failures.append(("template_preview_hscc-live.json", "serve_delta decode",
-                           "expected 1 start, stop containing a1, empty move, affected nodes"))
-        print("FAIL template_preview_hscc-live.json → serve_delta decode")
-    }
-} catch {
-    c.failures.append(("template_preview_hscc-live.json", "serve_delta decode", "\(error)"))
-    print("FAIL template_preview_hscc-live.json → serve_delta decode: \(error)")
 }
 
 // ---- Widget / Live Activity payloads (t_595a5fee) -------------------------

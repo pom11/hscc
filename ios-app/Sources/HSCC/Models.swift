@@ -1,9 +1,9 @@
 import Foundation
 
-/// A cluster template doubles as a navigation value (Phase 2 cutover):
-/// `TemplatesView` pushes `TemplateDetailView` through the app-wide stack
-/// instead of presenting a sheet (spec §3.1: "TemplateDetail converts
-/// sheet→push"). All stored fields are Hashable, so conformance is free.
+/// A cluster template is still Hashable after the console retirement
+/// (t_0f3f70e6): the `TemplatesView` → `TemplateDetailView` push is gone,
+/// but `AppliedTemplateStatus` and `ForEach` identity keep relying on it.
+/// All stored fields are Hashable, so conformance is free.
 extension ClusterTemplate: Hashable {}
 
 // ---------------------------------------------------------------------------
@@ -760,16 +760,6 @@ struct MergeCardResponse: Decodable {
     let warning: String?
 }
 
-/// POST /v1/template/apply — template application result.
-///
-/// The API returns `{ success: true, ... }` on a clean apply and a non-2xx (or
-/// `success: false`) for a blocked/partial apply, which the client throws. This
-/// struct is only decoded from a 2xx success. `message` is the human summary.
-struct TemplateApplyResponse: Decodable {
-    let success: Bool?
-    let message: String?
-}
-
 /// POST /v1/cluster/stop — workload stop result.
 ///
 /// The API returns `{ message, container_id, success: true, ... }` on a clean
@@ -790,46 +780,6 @@ struct StopClusterResponse: Decodable {
 // hscc-cluster/hscc.py. Every server-optional field is Optional in Swift so a
 // single absent key can never blank the whole screen.
 // ---------------------------------------------------------------------------
-
-// MARK: - Autodown (attachment models; the shared `/v1/autodown/status`
-// `AutodownStatusResponse` lives in Sources/Shared/SharedModels.swift)
-
-/// POST /v1/autodown/enable (routes_autodown.py handle_autodown_enable).
-struct AutodownEnableResponse: Decodable {
-    let enabled: Bool?
-    let idle_minutes: Int?
-    let state: String?
-    let last_activity_iso: String?
-    let force_armed: Bool?
-    let force_armed_overrides: [String]?
-    let message: String?
-}
-
-/// POST /v1/autodown/disable (routes_autodown.py handle_autodown_disable).
-struct AutodownDisableResponse: Decodable {
-    let enabled: Bool?
-    let state: String?
-    let message: String?
-}
-
-/// POST /v1/autodown/wake (routes_autodown.py handle_autodown_wake).
-///
-/// The API returns promptly with `state: waking` and runs autoup() on a
-/// background thread (it can block ~9 minutes). The client surfaces this as a
-/// "waking" state and the view polls /v1/autodown/status rather than blocking.
-struct AutodownWakeResponse: Decodable {
-    let result: String?
-    let state: String?
-    let wake_source: String?
-    let message: String?
-    let speak: String?
-}
-
-/// POST /v1/autodown/cancel (routes_autodown.py handle_autodown_cancel).
-struct AutodownCancelResponse: Decodable {
-    let cancel_requested: Bool?
-    let message: String?
-}
 
 // MARK: - Projects
 
@@ -1180,123 +1130,6 @@ struct TemplateStatusResponse: Decodable, Speakable {
     let applied: TemplateApplied?
     let note: String?
     let speak: String
-}
-
-/// GET /v1/template/preview/{name} — one file change the apply would make.
-///
-/// Verified live shape: `{ file, action, summary, diff_summary?, details? }`.
-/// `action` is a short verb ("write" / "update" / "create" / "provision");
-/// `summary` is the one-line human description; `details` optional bullet list.
-struct TemplateChange: Decodable, Identifiable {
-    let file: String?
-    let action: String?
-    let summary: String?
-    let diff_summary: String?
-    let details: [String]?
-
-    var id: String { [file ?? "", summary ?? ""].joined(separator: "-") }
-}
-
-/// GET /v1/template/preview/{name} — one workload the apply would route.
-///
-/// Verified live shape: `{ consumer, target, base_url, model, keys }`. A
-/// `consumer` (delegation, compaction, …) routes to a `target` unit with a
-/// `model`; `keys` are the config paths it would set.
-struct TemplateRouting: Decodable, Identifiable {
-    let consumer: String?
-    let target: String?
-    let base_url: String?
-    let model: String?
-    let keys: [String]?
-
-    var id: String { [consumer ?? "", target ?? "", model ?? ""].joined(separator: "-") }
-}
-
-/// GET /v1/template/preview/{name} — dry-run of applying a template.
-///
-/// Verified live shapes: a FULL preview `{ template, description, changes[],
-/// routing[], routing_untouched[], speak }`, OR a minimal `{ speak }` when the
-/// template has no preview available yet. Every field is optional so a partial
-/// body never blanks the screen — the view falls back to `speak` and notes
-/// which details are missing.
-struct TemplatePreviewResponse: Decodable, Speakable {
-    let template: String?
-    let description: String?
-    let changes: [TemplateChange]?
-    let routing: [TemplateRouting]?
-    let routing_untouched: [TemplateRouting]?
-    let serve_delta: TemplateServeDelta?
-    let speak: String
-}
-
-/// GET /v1/template/preview/{name} — the concrete per-unit delta (`serve_delta`).
-///
-/// This is the honest "WHAT WILL CHANGE" the operator cannot see from file
-/// summaries alone. It diffs the LIVE serving.json units against the resolved
-/// NEW serving units and names which units START, STOP, MOVE (relocate or
-/// rescale) and which nodes are affected. The server always includes it (even
-/// for "no change", where every list is empty) so the app never guesses.
-struct TemplateServeDelta: Decodable {
-    /// Units present only in the NEW plan → brand-new serving units.
-    let start: [TemplateServeUnit]?
-    /// Units present only in the LIVE serving.json → would be torn down.
-    let stop: [TemplateServeUnit]?
-    /// Workloads present in both whose placement/scaling changes.
-    let move: [TemplateServeMove]?
-    /// Units identical in both → no action.
-    let unchanged: [TemplateServeUnit]?
-    /// Sorted union of every node across start/stop/move (where action happens).
-    let affected_nodes: [String]?
-
-    /// True when the delta is genuinely a no-op (nothing would change).
-    var isEmpty: Bool {
-        (start?.isEmpty ?? true) && (stop?.isEmpty ?? true)
-            && (move?.isEmpty ?? true)
-    }
-}
-
-/// One serving unit row within `serve_delta`. Shape mirrors the server's
-/// `_trim_serving_unit`: only the keys that identify a unit and matter to an
-/// operator. The wire `id` is decoded into `unitID` so this struct can also
-/// expose a non-optional `Identifiable.id` (an optional stored `id` plus a
-/// computed `id` would be an invalid redeclaration in Swift).
-struct TemplateServeUnit: Decodable, Identifiable {
-    let unitID: String?
-    let role: String?
-    let model: String?
-    let nodes: [String]?
-    let port: Int?
-    let tp: Int?
-    let pp: Int?
-    let family: String?
-
-    var id: String { unitID ?? [role ?? "", model ?? ""].joined(separator: "-") }
-
-    enum CodingKeys: String, CodingKey {
-        case unitID = "id"
-        case role, model, nodes, port, tp, pp, family
-    }
-}
-
-/// One relocation/rescale record within `serve_delta.move`. A workload in both
-/// CURRENT and NEW whose placement changed (nodes/port/tp/pp). Reported as ONE
-/// event — never a phantom stop + start.
-struct TemplateServeMove: Decodable, Identifiable {
-    let model: String?
-    let role: String?
-    let from_nodes: [String]?
-    let from_port: Int?
-    let from_tp: Int?
-    let from_pp: Int?
-    let to_nodes: [String]?
-    let to_port: Int?
-    let to_tp: Int?
-    let to_pp: Int?
-
-    var id: String { [model ?? "", role ?? "",
-                      (from_nodes ?? []).joined(separator: ","),
-                      (to_nodes ?? []).joined(separator: ",")]
-        .joined(separator: "-") }
 }
 
 /// POST /v1/cluster/up — fleet-up result (routes_ops.py + hscc.py:301).

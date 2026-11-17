@@ -60,11 +60,12 @@ mapped onto drawer destinations.
     (t_5ed5d281, RED-first on the sim).
   - `Views/Sidebar.swift` — the drawer's rows:
     - **Work**: Home · Chats · Projects · Cards
-    - **Cluster**: Fleet · Nodes & serving · Autodown & self-heal · Cron · Logs
+    - **Cluster**: Fleet · Nodes & serving · Cron · Logs
     - **Knowledge**: Templates · Activity feed
     - **App**: Search · Settings
-    Approvals, Ops & health and Memory retired with the console (t_0f3f70e6);
-    their destinations still resolve as mapped aliases onto the root.
+    Approvals, Ops & health, Autodown & self-heal and Memory retired with the
+    console (t_0f3f70e6); their destinations still resolve as mapped aliases
+    onto the root.
     Its header shows the active cluster + a live connection dot (the
     ConnectionMonitor probe, t_e5d24c6d).
   - `ContentView.swift` — the legacy tab vocabulary + `ConnectionBanner`
@@ -119,19 +120,19 @@ mapped onto drawer destinations.
     - `Views/FleetView.swift` — Fleet: health, stats, throughput, streams,
       autoscale, the applied-template read, and the confirm-gated fleet
       up/down (the old FleetControl screen folded in here, t_2a29a7ab).
-    - `Views/AutodownView.swift` — Autodown **& self-heal** (the old
-      SelfHeal screen is this screen's trailing section): the live
-      `/v1/autodown/status` report + confirm-gated enable / disable / wake /
-      cancel. Wake enters a polling "waking" state and starts the **Live
-      Activity** (the fleet wake is ~9 minutes — never block the UI).
+    - Autodown **& self-heal** retired with the console (t_0f3f70e6): the
+      screen and its confirm-gated enable / disable / wake / cancel are gone
+      (rule 2). The `/v1/autodown/status` read survives for the widget, and
+      the wake **Live Activity** sweep still ends orphaned wake bubbles
+      started before the pivot.
     - `Views/CronView.swift` · `Views/LogsView.swift` — cron jobs; daemon/log
       tail with redaction (`Views/LogRedactor.swift`).
     - `Views/ActivityFeedView.swift` — the fleet activity feed.
-    - `Views/TemplatesView.swift` + `Views/TemplateDetailView.swift` — the
-      **Templates library**: browse (`/v1/template/list`), preview against the
-      node topology (`/v1/template/preview/{name}`, read-only dry-run), and
-      **confirm-gated apply** (`/v1/template/apply`), with post-apply reload
-      polling of `/v1/template/status` + `/v1/verify`.
+    - `Views/TemplatesView.swift` — the **Templates library**, browse-only:
+      `/v1/template/list` + the applied-template status. The detail screen
+      (topology, dry-run preview, confirm-gated apply) retired with the
+      console (t_0f3f70e6); `Views/TemplateTopologyView.swift` +
+      `Views/AppliedTemplateStatus.swift` survive as shared read-only parts.
     - `Views/CardsRootView.swift` — the drawer's cross-board card list (every
       open card, grouped by board).
     - `Views/SearchView.swift` — **cross-project search** over last-known
