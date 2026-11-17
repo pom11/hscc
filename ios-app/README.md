@@ -41,35 +41,38 @@ In the app: Settings → **Scan QR** (or type host/port/token by hand) →
 
 ## What's here — the real shipped surface
 
-The information architecture is a **drawer over one app-wide
-`NavigationStack`** (`IOS_REDESIGN_2026-10-14` §3): `AppShell` owns a
-slide-over drawer with **17 rows in 4 groups**, plus a 5-verb start-line dock
-on Home only. The old three-tab layout (Projects · Cluster · Settings) is gone;
-`ContentView.Tab` survives only as the deep-link router's legacy vocabulary,
-mapped onto drawer destinations.
+The app is a **widget + Live Activity client** (`t_9664a1c8`, pivot slice S1):
+ONE screen — `Views/ConfigView.swift` — holding **connection settings** (daemon
+endpoint + auth) and the **Widgets & Live Activities** configuration. The
+operator console is retired: the drawer shell (`AppShell`), its rows
+(`Sidebar`), the home dock (`HomeView`) and the pre-drawer tab root
+(`ContentView`) are deleted, and every data surface they rendered now lives in
+a widget or a Live Activity. All data is read-only; the app performs no
+actions. `ContentView.Tab` survives only as the deep-link router's legacy
+vocabulary, declared in `DeepLink.swift`, and a `hscc://` link can no longer
+navigate anywhere — there is no console screen left to land on. The
+file-by-file disposition of the remaining console files is
+`docs/CONSOLE_RETIREMENT.md`.
 
 - `Sources/HSCC/` — Swift sources (SwiftUI, iOS 26+).
-  - `HSCCApp.swift` — app entry point; roots `AppShell`.
-  - `Views/AppShell.swift` — the root shell: owns `AppDestination` (one enum,
-    one stack; legacy aliases like `.boardHygiene` resolve to their merged
-    destination instead of failing), the drawer state, the shared detail
-    stack, the approvals-badge poller retired with the console (t_0f3f70e6),
-    and the offline-queue banner. The
-    drawer is a slide-over the shell owns — **not** the compact column of a
-    `NavigationSplitView`, which is a proven dead end on iPhone compact
-    (t_5ed5d281, RED-first on the sim).
-  - `Views/Sidebar.swift` — the drawer's rows:
-    - **Work**: Home · Chats · Projects · Cards
-    - **Cluster**: Fleet · Nodes & serving · Cron · Logs
-    - **Knowledge**: Templates · Activity feed
-    - **App**: Search · Settings
-    Approvals, Ops & health, Autodown & self-heal and Memory retired with the
-    console (t_0f3f70e6); their destinations still resolve as mapped aliases
-    onto the root.
-    Its header shows the active cluster + a live connection dot (the
-    ConnectionMonitor probe, t_e5d24c6d).
-  - `ContentView.swift` — the legacy tab vocabulary + `ConnectionBanner`
-    (most-recent-API-outcome banner, driven by `ConnectionMonitor`).
+  - `HSCCApp.swift` — app entry point; roots `ConfigView`.
+  - `Views/ConfigView.swift` — **the only screen** (t_9664a1c8). Its content is
+    the former `SettingsView` moved byte-for-byte, plus `ConnectionBanner`
+    (moved from the deleted `ContentView.swift`), the App-Group / token-save
+    diagnostics, and the app-lifecycle seeding `AppShell` used to own: client
+    seeding for the notifier / deep-link router / reply watcher,
+    `ConnectionMonitor.reset()` on a cluster switch, the cold-start Live
+    Activity sweeps, and the `onOpenURL` + Handoff intake with its honest
+    "Couldn't open that link" alert. `shared_store_check.sh` asserts THIS file
+    is what renders `settings.appGroupUnavailable` — renaming it means
+    re-pointing that check.
+  - `Views/AppShell.swift` · `Views/Sidebar.swift` · `Views/HomeView.swift` ·
+    `ContentView.swift` — **deleted by t_9664a1c8**: the drawer shell with its
+    `AppDestination` switch sites and `ProjectRoute` destination host, the 14
+    drawer rows, the hero + 4-verb dock, and the pre-drawer tab root. The
+    drawer was an app-owned slide-over, never a `NavigationSplitView` compact
+    column (that is a proven dead end on iPhone compact, t_5ed5d281) — the
+    whole surface is gone now, not replaced.
   - `HSCCClient.swift` — async/await URLSession API client; Bearer auth on
     every request (reads included); builds URLs from a configurable host +
     port over plain HTTP; decodes the unified error shape; surfaces the
@@ -84,11 +87,12 @@ mapped onto drawer destinations.
   - `SettingsStore.swift` — saved **clusters** (a named list of
     host/port/token sets, one active) in the shared App-Group defaults, each
     token in the Keychain; legacy single-cluster configs import on first run.
-  - `Views/` — all screens, grouped:
-    - `AppShell` + `HomeView` (above) — Home is the launch screen with the
-      4-verb dock (Chat · Fleet · Cluster · Settings; a
-      start-line, not a tab bar; the Approvals verb retired with its screen,
-      t_0f3f70e6).
+  - `Views/` — the screens still on disk. **None of the console screens below
+    is reachable any more:** the drawer and the dock that routed to them were
+    deleted by t_9664a1c8. Each is removed by its own card
+    (`docs/CONSOLE_RETIREMENT.md` §5) and they are listed because they still
+    compile and still gate (`build_check.sh`, `model_decode_check.sh`) until
+    then.
     - `Views/ChatsRootView.swift` — the global Chat destination: every
       project row pushes straight into its full-bleed chat with unread counts.
     - `Views/ProjectsView.swift` — the project list from `/v1/projects`
@@ -108,9 +112,12 @@ mapped onto drawer destinations.
       - **Settings** — project repo/board/topic + orchestrator profile/session
         presented **read-only** (they live on the cluster, not in the app — no
         fake editable controls).
-    - `Views/SettingsView.swift` — saved clusters: enter/persist host, port,
-      token; **Scan QR** (QR from `hscc api status`, see
-      `SetupQRCode.swift`); **Test connection** (`GET /v1/ping`).
+    - `Views/ConfigView.swift` — the root screen (above): saved clusters
+      (enter/persist host, port, token), **Scan QR** (QR from
+      `hscc api status`, see `SetupQRCode.swift`), **Test connection**
+      (`GET /v1/ping`), the notification toggles, and the per-surface
+      Widgets & Live Activities editor (`WidgetSurfaceEditor`). Reads and
+      writes only the App-Group stores and the Keychain.
     - `Views/NodesServingView.swift` — the machines + what runs on them:
       the node topology strip header (derived from `/v1/cluster/status`),
       hosts, and the serving units grouped under the node that runs them
@@ -133,7 +140,7 @@ mapped onto drawer destinations.
       (topology, dry-run preview, confirm-gated apply) retired with the
       console (t_0f3f70e6); `Views/TemplateTopologyView.swift` +
       `Views/AppliedTemplateStatus.swift` survive as shared read-only parts.
-    - `Views/CardsRootView.swift` — the drawer's cross-board card list (every
+    - `Views/CardsRootView.swift` — the cross-board card list (every
       open card, grouped by board).
     - `Views/SearchView.swift` — **cross-project search** over last-known
       projects + cards, so it works even when the cluster is unreachable.
