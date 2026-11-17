@@ -4,20 +4,26 @@ import Foundation
 // SessionActivitySummary — the pure derivation behind the session Live
 // Activity.
 //
-// The session Live Activity is a LIVING mirror of a project's streaming
-// session on the Lock Screen / Dynamic Island. The app drives it from the SAME
-// composed rows + live phase that feed the in-app streaming chat
-// (StreamingTranscript / StreamingChatStore) — so what the lock screen shows is
-// exactly what the operator would see if they looked at the chat. No invented
-// progress: this derives the phase, headline and detail from the actual last
-// folded row and the live connection state.
+// The session Live Activity is a LIVING mirror of a project's session on the
+// Lock Screen / Dynamic Island. No invented progress: this derives the phase,
+// headline and detail from the actual last folded row and the live connection
+// state handed in.
+//
+// t_bd6e7c0a (iOS pivot) deleted the producer. `StreamingChatView` used to call
+// `SessionActivityDriver.reflect(rows:phase:)` on every change to its composed
+// rows, and `StreamingTranscript` folded the wire into those rows; neither
+// survives, so nothing in the app starts this activity any more. What remains
+// here is the derivation plus the row vocabulary it consumes (moved below,
+// byte-for-byte), kept compiling and unchanged in behaviour so the decision
+// about the session Live Activity — retire it, or re-feed it from a read-only
+// poll — stays a decision instead of an accident.
 //
 // This file is deliberately pure Foundation (NO ActivityKit, NO SwiftUI, NO
-// network) so it can be proven headlessly against real rows — the same
-// "no iOS runtime on this host" rule as streaming_check.sh. The ActivityKit
-// wrapper (`SessionActivityDriver`) maps a `SessionActivitySummary` onto the
-// shared `SessionActivityAttributes.ContentState`; the derivation itself does
-// not need to know about ActivityKit at all.
+// network) so it can be reasoned about without an iOS runtime — the same rule
+// the deleted `streaming_check.sh` used to enforce. The ActivityKit wrapper
+// (`SessionActivityDriver`) maps a `SessionActivitySummary` onto the shared
+// `SessionActivityAttributes.ContentState`; the derivation itself does not need
+// to know about ActivityKit at all.
 // ===========================================================================
 
 /// A compact snapshot of a project's live session activity, ready to render on
