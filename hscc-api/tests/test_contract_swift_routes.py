@@ -285,7 +285,17 @@ def test_every_client_post_server_handler_is_confirm_gated():
 #   client route                      required query param   server handler (requires it)
 #   --------------------------------  ---------------------  --------------------------------------------
 #   GET /v1/sessions                  profile                routes_sessions.py:200-202 (400 without it)
-#   GET /v1/memory                    profile                routes_memory.py:252-255   (400 without it)
+#
+# PRUNED (client stopped calling the route; see
+# test_matrices_name_routes_the_client_still_calls):
+#   GET /v1/memory                    profile                routes_memory.py:252-255
+#     HSCCClient.swift lost `memories(profile:)` in be154aec ("delete the
+#     operator console screens — approvals, memory, ops, autodown, template
+#     detail, debug harness", t_0f3f70e6 console retirement), so there is no
+#     iOS call site left to hold this row. The SERVER route and its required
+#     `profile` param are unchanged and still gated by
+#     tests/test_routes_memory.py::test_list_missing_profile_400 — only the
+#     iOS-client half of the contract went away.
 #
 # Query params the server treats as OPTIONAL (days, older_than, limit, before)
 # are not listed here — the client transmitting them is a real behavior (the
@@ -293,7 +303,6 @@ def test_every_client_post_server_handler_is_confirm_gated():
 # by the derived-route register gate above.
 REQUIRED_QUERY_PARAMS = {
     ("GET", "/v1/sessions"): ["profile"],
-    ("GET", "/v1/memory"): ["profile"],
 }
 
 
@@ -358,13 +367,25 @@ def test_every_required_query_param_is_sent():
 #   client route                     required body fields   server handler (requires it)
 #   -------------------------------  ---------------------  --------------------------------------------------
 #   POST /v1/cards                   board, title           routes_actions.py:199  (_action_fields "board","title")
-#   POST /v1/template/apply          name                   routes_actions.py:281  (_action_fields "name")
 #   POST /v1/cluster/stop            container_id           routes_actions.py:303  (_action_fields "container_id")
 #   POST /v1/sessions/{id}/retire    profile                routes_sessions.py:252-254 (400 without it)
 #   POST /v1/sessions/{id}/compact   profile                routes_sessions.py:291-293 (400 without it)
-#   POST /v1/memory/{node}/delete    profile                routes_memory.py:280-282  (400 without it)
-#   POST /v1/memory/{node}/edit      profile, content       routes_memory.py:307-314  (400 w/o profile / content)
 #   POST /v1/orchestrator/chat       prompt                 routes_orchestrator.py:1304-1310 (400 without it)
+#
+# PRUNED (client stopped calling the route; see
+# test_matrices_name_routes_the_client_still_calls). All three left
+# HSCCClient.swift in be154aec ("delete the operator console screens —
+# approvals, memory, ops, autodown, template detail, debug harness",
+# t_0f3f70e6 console retirement). Cited by handler, not line number, since
+# line anchors in this file have already drifted once:
+#   POST /v1/template/apply          name                   routes_actions.handle_template_apply (_action_fields "name")
+#     -> still server-gated: test_routes_actions.py::test_template_missing_name_400
+#   POST /v1/memory/{node}/delete    profile                routes_memory.handle_memory_delete
+#     -> still server-gated: test_routes_memory.py::test_delete_requires_profile_in_body
+#   POST /v1/memory/{node}/edit      profile, content       routes_memory.handle_memory_edit
+#     -> still server-gated: test_routes_memory.py::test_edit_requires_content
+#        (the edit-without-`profile` 400 the handler also raises has no test
+#         of its own — follow-up card filed from t_f09436f1)
 #
 # (Path params like card_id / node_id / session_id are embedded in the URL the
 # client itself builds, so they are inherently transmitted — no gate needed.
@@ -376,12 +397,9 @@ def test_every_required_query_param_is_sent():
 # of many optional fields", not a fixed name.)
 REQUIRED_BODY_PARAMS = {
     ("POST", "/v1/cards"): ["board", "title"],
-    ("POST", "/v1/template/apply"): ["name"],
     ("POST", "/v1/cluster/stop"): ["container_id"],
     ("POST", "/v1/sessions/{param}/retire"): ["profile"],
     ("POST", "/v1/sessions/{param}/compact"): ["profile"],
-    ("POST", "/v1/memory/{param}/delete"): ["profile"],
-    ("POST", "/v1/memory/{param}/edit"): ["profile", "content"],
     ("POST", "/v1/orchestrator/chat"): ["prompt"],
 }
 
@@ -437,6 +455,45 @@ def test_every_required_body_field_is_sent():
             f"are {sorted(sent)}"
             for p, field, sent in failures
         )
+    )
+
+
+def test_matrices_name_routes_the_client_still_calls():
+    """Table-staleness guard — the half of the matrix contract neither gate
+    above can check, and the one that produced the two reds this card fixes.
+
+    Both matrices are hand-maintained while the route set they describe is
+    derived from HSCCClient.swift. So when the app STOPS calling a route, the
+    row does not disappear: `_client_query_params_for` /
+    `_client_body_params_for` find no call site, return an EMPTY set, and the
+    gates report "the client sends none of the required fields" — a real-looking
+    red whose actual cause is a dead row. That is exactly what happened after
+    be154aec deleted the memory viewer and the template detail screen: four
+    rows for routes the app no longer calls sat in both matrices and failed
+    the two gates above for a day.
+
+    Asserting the rows name live routes is a GATE, not a filter: the point is
+    to name the stale row precisely, and to forbid "fixing" such a red by
+    skipping routes the client no longer calls — which would silently shrink
+    the comparison these gates exist to perform. If this test fails, either
+    delete the row (and its line in the audit comment), or the client method
+    was dropped by mistake and must come back.
+    """
+    derived = set(SWIFT_ROUTES)
+    stale = []
+    for label, table in (("REQUIRED_QUERY_PARAMS", REQUIRED_QUERY_PARAMS),
+                         ("REQUIRED_BODY_PARAMS", REQUIRED_BODY_PARAMS)):
+        for (method, path) in table:
+            if (method, path) not in derived:
+                stale.append((label, method, path))
+    assert not stale, (
+        "Stale matrix row(s): the table names a route HSCCClient.swift no "
+        "longer calls, so the send-gates can only ever see an empty payload "
+        "for it (that is the 'client sends none of the required fields' red, "
+        "not a real client bug). Delete the row and its audit-comment line, "
+        "or restore the deleted client method if the app still needs the "
+        "call:\n"
+        + "\n".join(f"  {label}: {m} {p}" for label, m, p in stale)
     )
 
 
