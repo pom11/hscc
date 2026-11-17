@@ -11,7 +11,7 @@
 # documents this), so the container itself cannot be proven here. What CAN be
 # proven by execution is the EXACT part that breaks: the Codable serialization
 # contract + the named-suite store/load path. This harness extracts the
-# committed model verbatim from Sources/Shared/SharedModels.swift (no
+# committed model verbatim from Sources/Shared/SharedStore.swift (no
 # hand-copy -> no drift), re-homes it, and asserts the round-trip through a
 # real on-disk named suite. Device-only checks (App Group container presence,
 # extension host reads) remain in shared_store_check.sh + the on-device smoke
@@ -20,7 +20,7 @@
 # Usage: ios-app/scripts/widget_settings_check.sh
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-SRC="Sources/Shared/SharedModels.swift"
+SRC="Sources/Shared/SharedStore.swift"
 
 # Extract the model block verbatim (WidgetSurfaceKind .. end of the availableSections
 # extension). Line-anchored on stable markers; no hand-copy -> no drift.

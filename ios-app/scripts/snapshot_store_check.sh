@@ -1,7 +1,7 @@
 #!/bin/bash
 # snapshot_store_check.sh — prove the widget's last-known snapshot nodes
 # round-trip through the REAL SnapshotStore encode/decode logic committed in
-# Sources/Shared/SharedModels.swift.
+# Sources/Shared/SharedStore.swift.
 #
 # Why this exists (t_15a88458): the widget's SnapshotStore saved a last-known
 # topology to the App Group so an unreachable window could show yesterday's
@@ -19,7 +19,7 @@
 # Usage: scripts/snapshot_store_check.sh
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-SRC="Sources/Shared/SharedModels.swift"
+SRC="Sources/Shared/SharedStore.swift"
 
 # Extract the two functions verbatim from the source (no hand-copy -> no drift),
 # then drop the `private` so the harness main can call them (bodies unchanged).

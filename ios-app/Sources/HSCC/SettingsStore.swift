@@ -59,14 +59,14 @@ final class SettingsStore: ObservableObject {
         // is set on the very first launch even when nothing is saved yet. A
         // missing suite means the app is about to write to its own `.standard`
         // defaults while the extensions read the (absent) shared suite.
-        // `containerURL(forSecurityApplicationGroupIdentifier:)` is the
-        // canonical check: it returns nil on a REAL device when the App-Group
-        // entitlement is absent / the container isn't provisioned. (Note: on
-        // macOS it always returns a URL even for an unregistered group, so this
-        // flag cannot be exercised headlessly here — it is a device-only signal;
-        // the headless harness instead proves the identity/save logic.)
-        appGroupUnavailable = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: AppGroup.suiteName) == nil
+        // `SharedStore.containerAvailable` is the canonical check (it wraps
+        // `containerURL(forSecurityApplicationGroupIdentifier:)`, which returns
+        // nil on a REAL device when the App-Group entitlement is absent / the
+        // container isn't provisioned). (Note: on macOS it always returns a URL
+        // even for an unregistered group, so this flag cannot be exercised
+        // headlessly here — it is a device-only signal; the headless harness
+        // instead proves the identity/save logic.)
+        appGroupUnavailable = !SharedStore.containerAvailable
 
         // Decode the saved cluster list, tolerating a corrupt/missing value.
         if let raw = defaults.data(forKey: AppGroup.clustersKey),
