@@ -72,9 +72,17 @@ struct HSCCApp: App {
                 // an activity that no longer exists. The sweep runs at launch,
                 // which is when a dead handle is actually a dead handle.
                 ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
+                // The running-cards activity (t_71deac83): same seam, its own
+                // driver, so the two Live Activities never share a cadence, a
+                // toggle or a background task. Same rule as above about the
+                // sweep — `CardsRunningActivitySweep` runs at launch and not
+                // here, because the driver may be holding a handle the sweep
+                // would end from underneath it.
+                CardsRunningActivityDriver.shared.sceneDidBecomeActive()
             case .background, .inactive:
                 MonitorActivityDriver.shared.sceneDidEnterBackground()
                 ClusterHealthActivityDriver.shared.sceneDidEnterBackground()
+                CardsRunningActivityDriver.shared.sceneDidEnterBackground()
             @unknown default:
                 break
             }

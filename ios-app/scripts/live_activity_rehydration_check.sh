@@ -41,6 +41,14 @@
 # tally, and the cluster widget runs the same call (`cluster_widget_check.sh`
 # executes it from the widget's side).
 #
+# PART 5 — the running-cards FEED rule (t_71deac83). A THIRD block in the cards
+# file (`…: cards-feed-decision`) holds the driver's decision — push, end, or
+# leave alone — because the driver itself is ActivityKit code this host cannot
+# compile, and a rule the driver decided privately is a rule no gate can see.
+# Part 5 of the table also compiles `Sources/Shared/CardsRunningProjection.swift`
+# (the type the push is built from) rather than restating it, so "a blind read
+# cannot print 0 running" is asserted against the shipped projection.
+#
 # SharedModels.swift + model_decode_check/ThemeStub.swift are compiled in for
 # exactly one reason: PART 3 asserts this activity's state table against the real
 # `ClusterState` the app and the widget share — the one agreement a sliced copy
@@ -65,6 +73,7 @@ printf 'import Foundation\n' > "$OUT/SlicedRules.swift"
 # <file>|<marker name>|<the func that block must declare>
 for spec in "$CARDS_SRC|cards-reading-rules|displayCount" \
             "$CARDS_SRC|cards-orphan-decision|isOrphan" \
+            "$CARDS_SRC|cards-feed-decision|decide" \
             "$CLUSTER_SRC|cluster-health-reading-rules|headline" \
             "$CLUSTER_SRC|cluster-health-orphan-decision|isOrphan" \
             "$CLUSTER_SRC|cluster-health-projection-rules|signals"; do
@@ -88,10 +97,20 @@ done
 
 cp scripts/live_activity_rehydration_check/main.swift "$OUT/main.swift"
 
+# PART 4 (t_71deac83) executes the projection the driver pushes FROM, so the
+# real file is compiled rather than transcribed: `CardsRunningProjection`
+# decides whether a push says "0 running" or `—`, and that claim is only worth
+# anything if the table runs the shipped type. `SharedStore.swift` comes with it
+# because the snapshot store in the same file writes through `SharedStore.suite`
+# — both files are Foundation/Security-only, which is what lets them build on
+# the macOS SDK (model_decode_check.sh compiles the same pair).
 swiftc -o "$OUT/check" \
   "$OUT/main.swift" "$OUT/SlicedRules.swift" \
   Sources/Shared/SharedModels.swift \
   Sources/Shared/ClusterNodeTally.swift \
+  Sources/Shared/SharedStore.swift \
+  Sources/Shared/WidgetDataClient.swift \
+  Sources/Shared/CardsRunningProjection.swift \
   scripts/model_decode_check/ThemeStub.swift 2>&1 || {
   echo "compile failed" >&2; exit 1; }
 

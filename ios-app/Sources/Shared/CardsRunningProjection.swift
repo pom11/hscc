@@ -224,6 +224,53 @@ struct CardsRunningProjection: Codable, Equatable {
     var isStuck: Bool { (blockedCount ?? 0) > 0 }
 }
 
+// MARK: - The two reads, in parallel, into one projection
+
+/// The pair of routes this surface is built from, read once and projected.
+///
+/// TWO requests, which is WIDGET_DATA_CONTRACT §2's ceiling for one surface and
+/// exactly the pairing §5.4 names (`/v1/kanban/running` for the live workers,
+/// `/v1/kanban/blocked` for the failure rows). `/v1/kanban/stale` is NOT read:
+/// dataset 4's full open list is the board-status widget's job, and pulling it
+/// would buy rows this surface never draws. `/v1/cards` is §8.3's forbidden
+/// route — it has no field projection, so 8 rows cost 81,855 B of which 98.6 %
+/// is discarded, while these two answer the same question in ~2 KB.
+///
+/// This is the ONE implementation of that rule. The widget's timeline provider
+/// and the app's Live Activity driver both call it, because the guard below —
+/// a 2xx with no `tasks` array is a read this build cannot count, not an idle
+/// fleet — is the thing that stops a blind refresh becoming a false `0 running`,
+/// and a surface that grew its own copy of it could get it wrong alone.
+enum CardsRunningFeed {
+    static func read(client: WidgetDataClient) async -> Result<CardsRunningProjection, WidgetDataFailure> {
+        async let blockedRead = client.kanbanBlocked()
+        let running = await client.kanbanRunning()
+        let blocked = await blockedRead
+
+        switch running {
+        case .failure(let failure):
+            // The rows are the surface. No last-known substitution happens here
+            // — `WidgetData.read` owns that, and only for a failure whose
+            // staleness is honest to show.
+            return .failure(failure)
+
+        case .success(let value):
+            guard value.tasks != nil else {
+                // A 2xx with no `tasks` array is not "the fleet is idle". It is
+                // a payload this build cannot read a count out of, and drawing
+                // `0 running` for it is the one failure this surface exists to
+                // refuse. `decoding` keeps the snapshot and says so instead.
+                return .failure(.decoding(detail: "kanban/running carried no tasks array"))
+            }
+            // A blocked read that failed nulls one number; a blocked read that
+            // answered is never allowed to fail the surface the rows came from.
+            var blockedValue: KanbanBlockedLite?
+            if case .success(let resolved) = blocked { blockedValue = resolved }
+            return .success(CardsRunningProjection(running: value, blocked: blockedValue, now: Date()))
+        }
+    }
+}
+
 // MARK: - The last-known snapshot (the stale-while-error half)
 
 /// The projection + its age, in the App Group suite.
