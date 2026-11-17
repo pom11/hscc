@@ -12,11 +12,14 @@ import SwiftUI
 //
 //   * Nothing here is persisted. `SharedStore.swift` owns the App Group identifier
 //     and every value written to the container; this file names neither the group
-//     nor `UserDefaults` nor the keychain. Two monitor types are `Codable` only
-//     because `MonitorSnapshotStore` encodes them today — and §7 (a node's LAN
-//     `host` must never reach the container) is why they must become the
-//     projection entry struct there. Tracked from t_595a5fee; until then
-//     `displayLabel` is their only renderable form.
+//     nor `UserDefaults` nor the keychain. The monitor node type is `Codable` to
+//     DECODE only: §7 (a node's LAN `host` must never reach the container) is why
+//     `MonitorSnapshotStore` persists `MonitorNodeEntry` — its projection, declared
+//     in `SharedStore.swift` — and `project(_:)` there is the only path from this
+//     file's wire type to storage. `displayLabel` is the node's only renderable
+//     form. `MonitorDaemonHost` IS still encoded into the snapshot: it holds no
+//     address (its `hostname` is the daemon host's own name, §5.5) and
+//     `model_decode_check.sh` asserts that, key by key.
 //   * Nothing here acts: no request builder, no mutation type. `ExtensionClient`
 //     is GET-only by construction.
 //   * Redaction is STRUCTURAL, not a scrub (§7): a value that must never reach a

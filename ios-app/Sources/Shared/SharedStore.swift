@@ -453,14 +453,43 @@ enum SnapshotStore {
 }
 
 // ---------------------------------------------------------------------------
-// Last-known MONITOR snapshot (t_6d545375)
+// Last-known MONITOR snapshot (t_6d545375) — storage shape per §7 (t_438aa6ce)
 // ---------------------------------------------------------------------------
 
+/// The ONLY persisted form of a monitor node: §7's "persist the projection,
+/// never the response", typed as the §3 row-5 six-field node projection.
+///
+/// `MonitorNode` beside it (SharedModels.swift) carries `host` — the node's LAN
+/// address as the API reports it — plus `sample.sparkrun_job_names`. §7 names
+/// both as fields that must never enter shared storage or a view, and the App
+/// Group container is readable by every extension and outlives the app process,
+/// so writing the wire type there persists a LAN address indefinitely. This
+/// struct is what the container holds instead: no `host`, no job names, no raw
+/// sample. `scripts/model_decode_check/main.swift` encodes a real `Snapshot` and
+/// asserts no key or value in the stored JSON holds a dotted-quad.
+///
+/// `label` is `MonitorNode.displayLabel` — the single node-identity rule (sample
+/// hostname, else the last octet), so a stored label can name a node without
+/// ever naming where it lives.
+struct MonitorNodeEntry: Codable, Equatable {
+    /// The node's display label (`displayLabel`), never its address.
+    let label: String
+    let cpuUsagePct: Double?
+    let memUsedPct: Double?
+    let gpuUtilPct: Double?
+    let usedSlots: Int?
+    let freeSlots: Int?
+}
+
 /// Persists the last-known-good Monitor widget payload in the App Group suite
-/// so a later unreachable window can show yesterday's real node metrics +
-/// daemon-host machine data with its age — never a blank widget (mirrors
+/// so a later unreachable window can report yesterday's real node metrics +
+/// daemon-host machine data with their age — never a blank widget (mirrors
 /// `SnapshotStore`). The monitor's node samples and daemon-host data are richer
 /// than the topology `SnapshotStore` carries, so they live in their own blob.
+///
+/// What the blob holds is the PROJECTION (`MonitorNodeEntry`), not the decoded
+/// response: see the struct above for why the wire type may never be written
+/// here. `project(_:)` is the only path from one to the other.
 enum MonitorSnapshotStore {
     private static var suite: UserDefaults? { UserDefaults(suiteName: AppGroup.suiteName) }
     static let storageKey = "hscc.monitor.snapshot"
@@ -468,15 +497,36 @@ enum MonitorSnapshotStore {
     struct Snapshot: Codable {
         /// When this snapshot was recorded (epoch seconds).
         let date: Double
-        /// The per-node monitor snapshot, if one had been fetched.
-        let nodes: [MonitorNode]
-        /// The daemon-host machine data, if it had been fetched.
+        /// The per-node monitor projection, if one had been fetched. The
+        /// projected element type is the §7 guarantee — a `Snapshot` holding an
+        /// address does not type-check.
+        let nodes: [MonitorNodeEntry]
+        /// The daemon-host machine data, if it had been fetched. Carries no
+        /// address: `hostname` is the daemon host's own name, which §5.5 names
+        /// as renderable (and §7 does not list). Asserted address-free by
+        /// `scripts/model_decode_check/main.swift`.
         let daemonHost: MonitorDaemonHost?
     }
 
-    /// Save the last-known-good monitor payload. Optional-tolerant: if neither
-    /// source ever returned data, nothing meaningful is persisted.
-    static func save(nodes: [MonitorNode], daemonHost: MonitorDaemonHost?) {
+    /// The ONLY path from the wire type to storage. `Snapshot.nodes` is
+    /// `[MonitorNodeEntry]`, so a caller that wants to persist monitor nodes
+    /// must come through here, and the address is dropped on the way in — no
+    /// caller can persist the wire type by accident.
+    static func project(_ nodes: [MonitorNode]) -> [MonitorNodeEntry] {
+        nodes.map { node in
+            MonitorNodeEntry(label: node.displayLabel,
+                             cpuUsagePct: node.sample?.cpuUsagePct,
+                             memUsedPct: node.sample?.memUsedPct,
+                             gpuUtilPct: node.sample?.gpuUtilPct,
+                             usedSlots: node.used_slots,
+                             freeSlots: node.free_slots)
+        }
+    }
+
+    /// Save the last-known-good monitor projection. Optional-tolerant: if
+    /// neither source ever returned data, nothing meaningful is persisted.
+    /// Takes the projection, never `[MonitorNode]` — pass `project(nodes)`.
+    static func save(nodes: [MonitorNodeEntry], daemonHost: MonitorDaemonHost?) {
         guard let d = suite, !nodes.isEmpty || daemonHost != nil else { return }
         let snap = Snapshot(date: Date().timeIntervalSince1970, nodes: nodes, daemonHost: daemonHost)
         if let data = try? JSONEncoder().encode(snap) {

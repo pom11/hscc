@@ -602,6 +602,163 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
              "the daemon-host sidecar stopped decoding")
 }
 
+// ---- §7 storage shape: what the App Group may actually hold (t_438aa6ce) ----
+//
+// `MonitorSnapshotStore` writes the last-known monitor snapshot into
+// `group.com.hscc.ios`, which every extension can read and which outlives the
+// app process. So the shape §7 binds is the STORED JSON, not the decoded
+// response — and this is the one place that checks it. `SharedStore.swift` is in
+// `model_decode_check.sh`'s real-source list, so `MonitorNodeEntry`,
+// `MonitorSnapshotStore.project` and `Snapshot` here are the production types,
+// not mirrors.
+//
+// The control that gives the address scan teeth: the live capture's
+// `hosts[].host` values ARE dotted quads (192.0.2.1 / 192.0.2.2), so persisting
+// `MonitorNode` instead of the projection fails this check rather than passing
+// it vacuously.
+
+/// A JSON value, declared by the VALIDATOR (not a model — nothing in
+/// `Sources/` reads it) so the stored bytes can be walked key by key.
+private enum StoredJSON: Decodable {
+    case null, bool(Bool), number(Double), string(String)
+    case array([StoredJSON]), object([String: StoredJSON])
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null; return }
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let d = try? c.decode(Double.self) { self = .number(d); return }
+        if let s = try? c.decode(String.self) { self = .string(s); return }
+        if let a = try? c.decode([StoredJSON].self) { self = .array(a); return }
+        if let o = try? c.decode([String: StoredJSON].self) { self = .object(o); return }
+        throw DecodingError.dataCorruptedError(in: c, debugDescription: "unsupported JSON value")
+    }
+
+    /// Every string the stored bytes could be hiding an address in: each key
+    /// name and each string value, each with its JSON path so a failure says
+    /// WHERE the address was found.
+    func addressCandidates(_ path: String = "$") -> [(at: String, text: String)] {
+        switch self {
+        case .null, .bool, .number:
+            return []
+        case .string(let s):
+            let key = path.split(separator: ".").last.map(String.init) ?? path
+            return [(path, key), (path, s)]
+        case .array(let items):
+            return items.enumerated().flatMap { addressCandidates(at: "\(path)[\($0.offset)]", from: $0.element) }
+        case .object(let pairs):
+            return pairs.sorted { $0.key < $1.key }.flatMap { k, v in
+                [(path, k)] + addressCandidates(at: "\(path).\(k)", from: v)
+            }
+        }
+    }
+
+    private func addressCandidates(at path: String, from v: StoredJSON) -> [(at: String, text: String)] {
+        v.addressCandidates(path)
+    }
+
+    /// Every object in the document with its JSON path and key set, so a check
+    /// can name the exact field list a stored object is allowed to have.
+    func objects(_ path: String = "$") -> [(path: String, keys: Set<String>)] {
+        var out: [(path: String, keys: Set<String>)] = []
+        switch self {
+        case .object(let pairs):
+            out.append((path, Set(pairs.keys)))
+            for (k, v) in pairs.sorted(by: { $0.key < $1.key }) {
+                out.append(contentsOf: v.objects("\(path).\(k)"))
+            }
+        case .array(let items):
+            for (i, item) in items.enumerated() { out.append(contentsOf: item.objects("\(path)[\(i)]")) }
+        default:
+            break
+        }
+        return out
+    }
+}
+
+/// Four dot-separated groups of 1–3 digits — a dotted-quad IPv4 address, e.g.
+/// `100.64.0.1` (the docs/tests placeholder) or the LAN address §7 forbids.
+private let dottedQuadRE = try! NSRegularExpression(pattern: #"\d{1,3}(?:\.\d{1,3}){3}"#)
+
+private func holdsDottedQuad(_ s: String) -> Bool {
+    dottedQuadRE.firstMatch(in: s, range: NSRange(location: 0, length: s.utf16.count)) != nil
+}
+
+c.assertions("§7_monitor_snapshot", "the App Group holds the projection, never MonitorNode") {
+    let monitor = try JSONDecoder().decode(MonitorResponse.self,
+                                           from: try c.load("v1_cluster_monitor.json"))
+    let host = try JSONDecoder().decode(MonitorDaemonHost.self,
+                                        from: try c.load("v1_daemon_host.json"))
+
+    // (0) The control: the fixture's wire nodes really do carry addresses.
+    c.expect("§7_monitor_snapshot", "control — the fixture's MonitorNode.host is a dotted-quad",
+             !monitor.nodes.isEmpty && monitor.nodes.allSatisfy { holdsDottedQuad($0.host) },
+             "fixture hosts stopped being addresses, so the scan below proves nothing")
+
+    // (1) project() — the only wire→storage path — drops the address and keeps
+    //     the six §3 row-5 fields per node.
+    let entries = MonitorSnapshotStore.project(monitor.nodes)
+    let zipped = zip(entries, monitor.nodes)
+    c.expect("§7_monitor_snapshot", "project() yields one entry per node, labelled by displayLabel and never by host",
+             entries.count == monitor.nodes.count
+             && zipped.allSatisfy { e, n in
+                 e.label == n.displayLabel && e.label != n.host && !holdsDottedQuad(e.label)
+             }, "a projected label stopped being displayLabel, or an address reached a label")
+    c.expect("§7_monitor_snapshot", "project() carries the six §3 fields (cpu/mem/gpu util + used/free slots) unchanged",
+             zipped.allSatisfy { e, n in
+                 e.cpuUsagePct == n.sample?.cpuUsagePct && e.memUsedPct == n.sample?.memUsedPct
+                 && e.gpuUtilPct == n.sample?.gpuUtilPct
+                 && e.usedSlots == n.used_slots && e.freeSlots == n.free_slots
+             }, "the projection lost or renamed a field the widget/contract needs")
+
+    // (2) Round-trip through the REAL store encode/decode (same JSONEncoder /
+    //     JSONDecoder + Snapshot type the App Group sees).
+    let snap = MonitorSnapshotStore.Snapshot(date: 1_788_468_629.041858,
+                                             nodes: entries, daemonHost: host)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let storedData = try encoder.encode(snap)
+    let revived = try JSONDecoder().decode(MonitorSnapshotStore.Snapshot.self, from: storedData)
+    c.expect("§7_monitor_snapshot", "MonitorNodeEntry round-trips through the real Snapshot encode/decode",
+             revived.nodes == entries && revived.date == snap.date
+             && revived.daemonHost?.hostname == host.hostname
+             && revived.daemonHost?.cpuPercent == host.cpuPercent,
+             "the stored form no longer survives a write+read")
+
+    // (3) The stored bytes: no key and no string value may hold a dotted-quad.
+    let stored = try JSONDecoder().decode(StoredJSON.self, from: storedData)
+    let hits = stored.addressCandidates().filter { holdsDottedQuad($0.text) }
+    c.expect("§7_monitor_snapshot", "no key or value in the stored snapshot JSON holds a dotted-quad (§7)",
+             hits.isEmpty,
+             "address-shaped value at \(hits.prefix(3).map { "\($0.at)=\($0.text)" }.joined(separator: ", "))")
+
+    // (4) Structural: a stored node object's keys are EXACTLY the six
+    //     projection fields. `host` / `sparkrun_job_names` are not merely unset
+    //     — they are undeclared, so no future field can smuggle an address in.
+    let nodeKeys = stored.objects().filter { $0.path.hasPrefix("$.nodes[") }.flatMap { $0.keys }
+    let projectionKeys: Set<String> = ["label", "cpuUsagePct", "memUsedPct",
+                                       "gpuUtilPct", "usedSlots", "freeSlots"]
+    c.expect("§7_monitor_snapshot", "a stored node object declares no key outside the six projection fields (§7)",
+             Set(nodeKeys).isSubset(of: projectionKeys),
+             "stored node keys grew: \(Set(nodeKeys).subtracting(projectionKeys).sorted())")
+    let firstNodeKeys = stored.objects().first { $0.path == "$.nodes[0]" }?.keys
+    c.expect("§7_monitor_snapshot", "the first stored node object holds all six projection fields (Codable names intact)",
+             firstNodeKeys == projectionKeys,
+             "stored node keys: \(firstNodeKeys.map { $0.sorted().joined(separator: ",") } ?? "<no node object>")")
+
+    // (5) daemonHost STAYS in the snapshot (t_595a5fee's decision) because it
+    //     carries no address: its stored keys are exactly §5.5's machine fields,
+    //     and `hostname` is the daemon host's own name, not where it lives.
+    let daemonHostKeys = stored.objects().first { $0.path == "$.daemonHost" }?.keys ?? []
+    c.expect("§7_monitor_snapshot", "the stored daemon-host object holds exactly §5.5's machine fields — no address field",
+             daemonHostKeys == ["hostname", "platform", "arch", "uptime_seconds", "cpu", "memory",
+                                "disk", "processes", "daemon_running", "daemon_uptime_seconds", "speak"],
+             "daemon-host keys changed: \(daemonHostKeys.sorted())")
+    c.expect("§7_monitor_snapshot", "the daemon host's hostname is a name, not an address (§5.5/§7)",
+             host.hostname.map { !holdsDottedQuad($0) } ?? false,
+             "hostname held an address")
+}
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. ----

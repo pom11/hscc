@@ -44,8 +44,10 @@ struct MonitorWidgetView: View {
 
 /// Honest rendition of the gate states (unconfigured / paused / unreachable).
 /// `entry.isLive` distinguishes live content from a full-pane gate. The
-/// unreachable pane carries the last-known snapshot (if any) dimmed with its
-/// age — a stale read is never presented as live data.
+/// unreachable pane says whether a last-known snapshot exists and how old it is
+/// — a stale read is never presented as live data, and no stale node row is
+/// drawn at all, so the only thing the container hands back to a view is the
+/// projected node COUNT plus the daemon-host block (§7).
 extension MonitorEntry {
     var isLive: Bool { configured && !paused && state != .unreachable }
 
@@ -77,7 +79,7 @@ extension MonitorEntry {
                     .foregroundColor(Theme.Semantic.onSurface)
                 Spacer()
             }
-            if !nodes.isEmpty {
+            if lastKnownNodeCount > 0 {
                 Text("showing last-known data")
                     .font(.caption2)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
