@@ -194,19 +194,15 @@ struct CardsRunningProjection: Codable, Equatable {
     /// a family may say "nothing else"; false means a subset is shown and the
     /// footer has to say so.
     var rowsAreComplete: Bool
-    /// Whether the blocked number came from a row list or from that route's own
-    /// `count` — kept so the footer can be exact about what was counted.
-    var blockedFromRows: Bool
 
     /// The designated init, written out because the payload init below removes
     /// the implicit memberwise one — and the `placeholder(in:)` fixture needs it.
     init(rows: [CardsRunningRow], runningCount: Int?, blockedCount: Int?,
-         rowsAreComplete: Bool, blockedFromRows: Bool) {
+         rowsAreComplete: Bool) {
         self.rows = rows
         self.runningCount = runningCount
         self.blockedCount = blockedCount
         self.rowsAreComplete = rowsAreComplete
-        self.blockedFromRows = blockedFromRows
     }
 
     /// The most a `large` family draws, and so the most worth storing (§5.4's
@@ -232,13 +228,14 @@ struct CardsRunningProjection: Codable, Equatable {
         } else {
             rowsAreComplete = true
         }
+        // A blocked read that answered gives that route's own `count`, with its
+        // row list as the fallback; `nil` means the read did not answer at all,
+        // which draws `—` rather than a zero. Nothing here may be counted out of
+        // the running list — blocked cards are not in it by definition.
         if let blocked {
-            let sent = blocked.tasks?.count
-            blockedCount = blocked.count ?? sent
-            blockedFromRows = (blocked.count == nil) && (sent != nil)
+            blockedCount = blocked.count ?? blocked.tasks?.count
         } else {
             blockedCount = nil
-            blockedFromRows = false
         }
     }
 
@@ -256,7 +253,7 @@ struct CardsRunningProjection: Codable, Equatable {
                             title: "Heartbeat age in the panel header",
                             worker: "researcher", status: "claimed", ageMinutes: nil),
         ],
-        runningCount: 3, blockedCount: 1, rowsAreComplete: true, blockedFromRows: false
+        runningCount: 3, blockedCount: 1, rowsAreComplete: true
     )
 
     /// Whether any number at all is drawable. False means draw the failure.
