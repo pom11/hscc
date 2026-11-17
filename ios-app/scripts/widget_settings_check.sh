@@ -60,15 +60,27 @@ mkdir -p "$WORK"
 # Sources/HSCC/WidgetSettingsStore.swift compiled alongside it (case 16 drives
 # that store rather than a copy of it), with a second file in the module Swift
 # rejects top-level statements in a file that is not main.swift.
-cat > "$WORK/main.swift" <<SWIFT
+#
+# QUOTING (t_71deac83): the extracted model block goes in through `printf`, NOT
+# by interpolating `$model` into an unquoted heredoc. An unquoted heredoc
+# command-substitutes every backtick pair it sees in the EXPANDED text, and the
+# committed model's doc comments use backticks like the rest of this repo — so
+# the old shape silently DELETED whatever sat between two of them and compiled
+# the mangled source. Proof it was real: `origin/main @ 36c80041` runs this
+# script with one `command not found` on stderr and still exits 0 (see the
+# base-run log in the t_71deac83 handoff). Quoted heredocs + printf pass the
+# extracted source through verbatim, so a comment cannot alter the program.
+{
+cat <<'HDR'
 import Foundation
 
 // Minimal real shim: the suite name + storage key extracted verbatim from the
 // committed AppGroup enum (the model references these through it).
-$suite_container
-
-// The committed model, verbatim, no edits.
-$model
+HDR
+printf '%s\n' "$suite_container"
+# The committed model, verbatim, no edits.
+printf '%s\n' "$model"
+cat <<'BODY'
 
 // ---- assertions ---------------------------------------------------------
 var failures: [String] = []
@@ -76,8 +88,10 @@ func check(_ name: String, _ cond: Bool) {
     if cond { print("  ok: \(name)") } else { failures.append(name); print("FAIL: \(name)") }
 }
 
-// 1. defaulting is backward compatible: absent store -> every surface on, 5/15
-//    min, all sections.
+// 1. defaulting is backward compatible: absent store -> every surface on,
+//    min, all sections. The count reads allCases on purpose: a literal here
+//    reddened the gate the first time a 5th surface landed, and would do it
+//    again for the 6th (t_71deac83).
 let defaults = AppGroupWidgetSettings.defaults()
 // The count is READ, not remembered. This line used to be
 // `defaults.surfaces.count == 4`, which every new surface turned red — a
@@ -96,6 +110,31 @@ for kind in WidgetSurfaceKind.allCases {
     check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 5)",
           s.refreshMinutes == (kind.isLiveActivity ? 15 : 5))
 }
+
+// 1a. The registry's own invariants (t_71deac83 added a surface; these are the
+//     properties a new surface must not break, asserted over every case rather
+//     than over a transcription of one).
+var registryKeys: [String] = []
+for kind in WidgetSurfaceKind.allCases { registryKeys.append(kind.rawValue) }
+var namespacedCount = 0
+for key in registryKeys where key.hasPrefix("widget.") || key.hasPrefix("liveActivity.") {
+    namespacedCount += 1
+}
+let noEntries = AppGroupWidgetSettings(surfaces: [:])
+check("no two surfaces share a registry key (one toggle, one surface)",
+      Set(registryKeys).count == registryKeys.count)
+check("every registry key is namespaced by surface kind",
+      namespacedCount == registryKeys.count)
+// A surface with NO sections is a real answer (one dataset, nothing optional),
+// not a gap the editor has to paper over: the bounded read path must keep the
+// set empty rather than invent one.
+check("a surface with no sections stays section-less through the bounded path",
+      defaults.setting(for: .liveActivityCards).showSections.isEmpty)
+check("the running-cards surface is push-fed (15-min default)",
+      WidgetSurfaceKind.liveActivityCards.isLiveActivity
+        && noEntries.setting(for: .liveActivityCards).refreshMinutes == 15)
+check("the running-cards registry key is stable",
+      WidgetSurfaceKind.liveActivityCards.rawValue == "liveActivity.cards")
 
 // 2. empty store (no entry for a surface) -> setting(for:) still returns ON
 //    defaults (the pre-existing Cluster widget must render unchanged).
@@ -416,7 +455,8 @@ if failures.isEmpty {
     print("WIDGET SETTINGS CHECK FAILED — \(failures.count) assertion(s): \(failures.joined(separator: ", "))")
     exit(1)
 }
-SWIFT
+BODY
+} > "$WORK/main.swift"
 
 swiftc -o "$WORK/bin" "$WORK/main.swift" \
   Sources/HSCC/WidgetSettingsStore.swift 2>&1 || {
@@ -476,6 +516,14 @@ cok "the Node list comes from the sheet's own query" "WidgetScopeNodeQuery().sug
 # editor must then show no "Show Content" group at all — an empty group with a
 # "choose which sections" footer would advertise a choice that does not exist.
 cok "a surface with no sections shows no content group" "if !sectionRows(kind).isEmpty"
+# t_71deac83 added a surface whose routes cannot be scoped (`/v1/kanban/running`
+# and `/v1/kanban/blocked` were measured to ignore `?board=`, §4.3). Offering it
+# the scope pickers would write a value the surface ignores and print a board
+# name under a row that always shows the whole fleet. Both guards read the
+# surface's own metadata rather than naming a case, so a surface that later
+# gains a scopeable route still gets its pickers.
+cok "the scope pickers appear only where the route honours a scope" 'if kind.supportsScope {'
+cok "a surface that cannot be scoped says so instead of printing a scope" 'guard kind.supportsScope else'
 if [ "$grepfail" -gt 0 ]; then
   echo "WIDGET SETTINGS CHECK FAILED — $grepfail intent + config-screen delegation assertion(s)"
   exit 1
