@@ -53,7 +53,8 @@
 #                    is expected and REPORTED, never counted as a pass — an in-file
 #                    guard cannot see that high. The closure assertion is that the
 #                    meta-gate refuses the same bytes.
-#   integrity        the real scripts' combined digest, the repo's porcelain status,
+#   integrity        the real scripts' combined digest, any NEW porcelain path inside the
+#                    audited tree (a dirty path elsewhere is a note, not an accusation),
 #                    and a marker census must all be unchanged/empty at the end.
 #
 # NON-DESTRUCTIVE. The real tree is never edited. Every leg scans a private
@@ -99,10 +100,12 @@ pnote() { echo "  note: $1"; }
 baseline_list=$( (cd "$SCRIPTS" && shasum -a 256 ./*.sh 2>/dev/null) | shasum -a 256 | cut -d' ' -f1)
 real_scripts=$(ls -1 "$SCRIPTS"/*.sh 2>/dev/null | wc -l | tr -d ' ')
 REPO="$(cd "${IOSAPP}/.." && pwd)"
+have_worktree=0
 if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  baseline_status=$(git -C "$REPO" status --porcelain 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+  have_worktree=1
+  baseline_dirty=$(git -C "$REPO" status --porcelain 2>/dev/null)
 else
-  baseline_status=""
+  baseline_dirty=""
   pnote "$REPO is not a work tree — the porcelain-status integrity leg is skipped"
 fi
 
@@ -542,12 +545,24 @@ if [ "$baseline_list" = "$after_list" ]; then
 else
   pfail "the probe MUTATED the tree it was auditing — the combined digest moved"
 fi
-if [ -n "$baseline_status" ]; then
-  after_status=$(git -C "$REPO" status --porcelain 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
-  if [ "$baseline_status" = "$after_status" ]; then
-    pok "the repo's porcelain status is unchanged — no marker, log or stray copy landed inside the checkout"
+if [ "$have_worktree" = "1" ]; then
+  after_dirty=$(git -C "$REPO" status --porcelain 2>/dev/null)
+  # Scope the accusation to the probe's BLAST RADIUS. This leg exists to catch the probe
+  # writing into the tree it audits (scripts/, Sources/, the golden) — it is not a monitor
+  # for the rest of the checkout, and measuring one as the other produced a red run here
+  # for a concurrent build's transient artifacts (measured: the digest leg stayed green,
+  # porcelain went dirty, the tree was clean again afterwards). A false accusation on an
+  # integrity leg is worse than a missing one: people start ignoring the leg that matters.
+  new_paths=$(comm -13 <(printf '%s\n' "$baseline_dirty" | sed 's/^....//' | sort) \
+                       <(printf '%s\n' "$after_dirty"    | sed 's/^....//' | sort) \
+                      | grep -v '^$')
+  blast=$(printf '%s\n' "$new_paths" | grep -E '^ios-app/(scripts|Sources)/' || true)
+  if [ -n "$blast" ]; then
+    pfail "the probe wrote inside the audited tree: $(printf '%s' "$blast" | tr '\n' ' ')"
+  elif [ -n "$new_paths" ]; then
+    pnote "porcelain gained path(s) OUTSIDE the audited tree: $(printf '%s' "$new_paths" | tr '\n' ' ') — not this probe's blast radius (another writer was in the checkout). Reported so it is visible; not blamed here, because the digest leg above is what proves the audited files are unchanged."
   else
-    pfail "the probe wrote into the repo (porcelain status changed)"
+    pok "the repo's porcelain status is unchanged — no marker, log or stray copy landed inside the checkout"
   fi
 fi
 
