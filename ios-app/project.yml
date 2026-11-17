@@ -230,6 +230,10 @@ targets:
       # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
       # and into the monitor extension (which renders the activity).
       - path: Sources/Shared/CardsRunningActivity.swift
+      # The running-cards projection + its last-known snapshot (t_71deac83),
+      # shared with the widget because the driver's `lastKnown:` and the widget
+      # timeline read and write ONE App Group key — one blob, one decoder.
+      - path: Sources/Shared/CardsRunningProjection.swift
       # Cluster-health Live Activity attributes + its pure reading/orphan rules
       # (t_0120475a). Same arrangement as the cards file above: the rules are
       # sliced by live_activity_rehydration_check.sh and executed there, so the
@@ -375,6 +379,10 @@ targets:
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
       - path: Sources/Shared/ClusterNodeTally.swift
+      # The running-cards projection + last-known snapshot (t_71deac83): the
+      # provider saves through it and the app's Live Activity driver reads the
+      # same slot back, so it lives in Shared with one decoder.
+      - path: Sources/Shared/CardsRunningProjection.swift
       # Theme tokens shared with the app (design-system palette, no raw hex).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
