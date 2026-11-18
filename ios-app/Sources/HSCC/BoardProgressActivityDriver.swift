@@ -8,10 +8,12 @@ import BackgroundTasks
 //
 // This surface is OPERATOR-STARTED, not ambient: the button lives on the
 // project's Board screen, so there is exactly one board bubble at a time and
-// its lifetime is the operator's Stop tap. There is deliberately no
-// `WidgetSurfaceKind` entry: that registry exists to pause and cadence
-// self-starting surfaces, while this one is not running until someone asks for
-// it and has a visible Stop control.
+// its lifetime is the operator's Stop tap. It is still a Live Activity the
+// operator can see, so since t_2b3084bb it has a `WidgetSurfaceKind` entry
+// (`liveActivity.boardProgress`) and this driver consumes it: Active off
+// suppresses a start and ends a bubble already up, 0 means no scheduled
+// refresh, and the cadence replaces the old hard-coded 5 minutes. The board it
+// watches still comes from the Board screen's start action, never the store.
 //
 // WHAT IT READS: the same board-status projection the Board Status widget
 // draws. `GET /v1/mobile/summary?boards=<slug>` first, and only when that route
@@ -42,9 +44,21 @@ final class BoardProgressActivityDriver {
     /// in project.yml — a submit for an identifier that is not listed there fails).
     static let backgroundRefreshIdentifier = "com.hscc.ios.boardprogress.backgroundRefresh"
 
-    /// The board-status widget's cadence is 5 minutes; this surface reads the
-    /// same route and shows the same numbers, so it polls at the same pace.
-    static let refreshMinutes = 5
+    /// The cadence an install that never opened Settings gets: the board-status
+    /// widget's 5 minutes, because this surface reads the same route and shows
+    /// the same numbers. A stored `liveActivity.boardProgress` entry overrides
+    /// it through `setting()`.
+    static let defaultRefreshMinutes = 5
+
+    /// This surface's settings, with the Live Activity defaults when no entry
+    /// has ever been written. The same bounded read path every other driver
+    /// uses, so the row in Settings and this poll loop cannot disagree.
+    private func setting() -> WidgetSurfaceSettings {
+        AppGroupWidgetSettings.load()?.setting(for: .liveActivityBoardProgress)
+            ?? WidgetSurfaceSettings(isActive: true,
+                                     refreshMinutes: Self.defaultRefreshMinutes,
+                                     showSections: Set(WidgetSurfaceKind.liveActivityBoardProgress.availableSections))
+    }
 
     /// The in-flight activity, if this process started or adopted one.
     private(set) var current: Activity<BoardProgressActivityAttributes>?
@@ -81,17 +95,25 @@ final class BoardProgressActivityDriver {
         registered = true
     }
 
-    /// Ask the OS for one best-effort wake while an activity is up.
+    /// Ask the OS for one best-effort wake while an activity is up. A paused
+    /// surface, or Off (0) cadence, schedules nothing.
     func scheduleBackgroundRefresh() {
-        guard Self.registered, current != nil else { return }
+        let surface = setting()
+        guard Self.registered, current != nil,
+              surface.isActive, surface.refreshMinutes > 0 else { return }
         let request = BGAppRefreshTaskRequest(identifier: Self.backgroundRefreshIdentifier)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: Double(Self.refreshMinutes) * 60)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: Double(surface.refreshMinutes) * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
 
     /// Foreground: adopt a bubble left by a previous process, then poll it.
+    /// A paused surface ends the bubble instead of resuming it.
     func sceneDidBecomeActive() {
         adoptExistingIfNeeded()
+        guard setting().isActive else {
+            stop()
+            return
+        }
         guard current != nil else { return }
         startPolling()
         scheduleBackgroundRefresh()
@@ -121,6 +143,10 @@ final class BoardProgressActivityDriver {
     /// operator turned Live Activities off, or the device is at its limit), and
     /// the button must not then offer to stop something that does not exist.
     func start(board: String) async -> Bool {
+        guard setting().isActive else {
+            stop()
+            return false
+        }
         let others = Activity<BoardProgressActivityAttributes>.activities
         for activity in others where activity.attributes.board != board {
             await activity.end(nil, dismissalPolicy: .immediate)
@@ -161,10 +187,15 @@ final class BoardProgressActivityDriver {
 
     private func startPolling() {
         guard pollTask == nil, current != nil else { return }
+        let minutes = setting().refreshMinutes
+        // Off (0) is "shown but no scheduled refresh": keep the bubble that is
+        // already up, stop the loop. The Board screen's manual start still
+        // performs its one refresh before this point.
+        guard minutes > 0 else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshOnce()
-                try? await Task.sleep(nanoseconds: UInt64(Self.refreshMinutes) * 60_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(minutes) * 60_000_000_000)
             }
         }
     }
@@ -182,7 +213,7 @@ final class BoardProgressActivityDriver {
     /// and none can fabricate a count.
     func refreshOnce() async {
         adoptExistingIfNeeded()
-        guard let board else { return }
+        guard setting().isActive, let board else { return }
 
         guard let client = WidgetDataClient.makeIfConfigured() else {
             await push(Self.emptyState(label: WidgetDataFailure.notConfigured.shortLabel))
@@ -289,6 +320,9 @@ final class BoardProgressActivityDriver {
     /// instead of claiming the counts are current, while one slow network tick
     /// does not grey it out. Same formula as the sibling drivers.
     private func staleDate() -> Date {
-        Date().addingTimeInterval(Double(Self.refreshMinutes) * 60 * 3)
+        // Off (0) still needs a stale ceiling: three default cycles out rather
+        // than "never", so a bubble whose feeder died cannot claim it is live.
+        let minutes = max(1, setting().refreshMinutes)
+        return Date().addingTimeInterval(Double(minutes) * 60 * 3)
     }
 }

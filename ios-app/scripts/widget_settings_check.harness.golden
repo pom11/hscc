@@ -102,6 +102,26 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// drivers off different routes, and one shared toggle would let switching
     /// off the cluster monitor silently stop the cards bubble too.
     case liveActivityCards = "liveActivity.cards"
+    /// The per-board kanban-progress Live Activity — the Island / Lock Screen
+    /// form of the Board Status widget's four counts (t_451cbe25).
+    ///
+    /// The driver described this surface as OPERATOR-STARTED and therefore not
+    /// a registry surface; that reasoning stops where the card that owns the
+    /// settings screen begins. It is still a Live Activity an operator can see,
+    /// and a surface with no entry cannot be paused, paced or listed — the same
+    /// dead end the widgets above were in before their cases existed. So it
+    /// gets one, and `BoardProgressActivityDriver` is its only consumer: the
+    /// Active toggle suppresses the start button's effect and ends a bubble
+    /// already up, 0 means no scheduled refresh, and the cadence replaces the
+    /// driver's former hard-coded 5 minutes. The board it watches still comes
+    /// from the Board screen's own start action, never from this blob.
+    ///
+    /// The raw value is permanent the moment an installed device writes it, so
+    /// it is named once: after the surface's own attributes type
+    /// (`BoardProgressActivityAttributes`, rendered by
+    /// `BoardProgressLiveActivity`). Deliberately NOT a reuse of
+    /// `.liveActivityCards` — that bubble is fleet-wide, this one is one board.
+    case liveActivityBoardProgress = "liveActivity.boardProgress"
 }
 
 /// One surface's settings: enabled, refresh cadence, and which content
@@ -223,7 +243,7 @@ extension WidgetSurfaceKind {
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityCards: return true
+             .liveActivityCards, .liveActivityBoardProgress: return true
         }
     }
 
@@ -252,7 +272,8 @@ extension WidgetSurfaceKind {
         // measured against a scope, so they keep what ships today.
         case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
-             .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth:
+             .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
+             .liveActivityBoardProgress:
             return true
         }
     }
@@ -320,6 +341,10 @@ extension WidgetSurfaceKind {
         // idle fleet apart from a jammed one (§5.4), so it is part of the
         // dataset, not a section an operator can switch off.
         case .liveActivityCards: return []
+        // Four counts from ONE board projection, nothing optional: the board
+        // heading and the pushed age are part of the same row, so a section
+        // toggle here would either empty the bubble or do nothing.
+        case .liveActivityBoardProgress: return []
         }
     }
 }

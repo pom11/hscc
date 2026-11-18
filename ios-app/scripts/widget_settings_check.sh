@@ -838,6 +838,7 @@ la_case_for() {
     MonitorActivityAttributes) echo liveActivityMonitor ;;
     ClusterHealthActivityAttributes) echo liveActivityClusterHealth ;;
     CardsRunningActivityAttributes) echo liveActivityCards ;;
+    BoardProgressActivityAttributes) echo liveActivityBoardProgress ;;
     *) echo "" ;;
   esac
 }
@@ -867,6 +868,14 @@ if [ "$(norm_list "$used_la_kinds")" != "$(norm_list "$registered_la_kinds")" ];
 else
   sok "every Live Activity case has an activity and every activity has a Live Activity case"
 fi
+# A raw value IS the App Group key: pin the newest one to its literal for the
+# same reason every older surface is pinned in the executed harness.
+grep -q 'case liveActivityBoardProgress = "liveActivity.boardProgress"' "$SRC" \
+  && sok "liveActivity.boardProgress registry key" \
+  || sfail "liveActivity.boardProgress registry key"
+grep -q 'setting(for: .liveActivityBoardProgress)' Sources/HSCC/BoardProgressActivityDriver.swift \
+  && sok "the board-progress driver reads its registry entry" \
+  || sfail "the board-progress driver reads its registry entry"
 
 # Gate-integrity assertions (the generated harness): reported with the greps
 # because they are assertions about THIS gate rather than about the app, and
