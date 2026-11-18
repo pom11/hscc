@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- The team-wide container the iOS app and its extensions already use.
+	     The macOS widget extension (part 2) will read the same connection
+	     settings and last-known snapshots from this group. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.hscc.ios</string>
+	</array>
+	<!-- Empty in Swift on purpose (see KeychainConstants): when no access
+	     group is named, the first group below is used, which is the shared
+	     App Group rather than an app-private item. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)group.com.hscc.ios</string>
+	</array>
+</dict>
+</plist>

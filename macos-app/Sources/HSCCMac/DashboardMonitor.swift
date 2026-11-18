@@ -1,0 +1,185 @@
+import Foundation
+import SwiftUI
+
+// ---------------------------------------------------------------------------
+// The menu bar app's ONE data path. Every read goes through the shared
+// `WidgetDataClient` (GET-only, App Group config + shared Keychain token,
+// multi-address failover), and every displayed number is projected from the
+// shared payloads. There is no second HTTP client and no new backend route.
+//
+// `/v1/cluster/monitor` does not expose a tokens-per-second field in the shared
+// model (and the contract keeps unrendered keys undeclared), so the menu bar
+// shows the facts the API does expose: fleet state, nodes up, models served,
+// running cards, board totals and projects. No invented tok/s number.
+// ---------------------------------------------------------------------------
+
+/// The five board counts, summed across every board in `/v1/mobile/summary`.
+struct BoardTotals {
+    let todo: Int
+    let ready: Int
+    let running: Int
+    let blocked: Int
+    let done: Int
+
+    var total: Int { todo + ready + running + blocked + done }
+
+    /// nil when the route degraded (no `boards` key): "no counts" is never a
+    /// row of zeros.
+    init?(summary: MobileSummaryResponse) {
+        guard let boards = summary.boards else { return nil }
+        var todo = 0, ready = 0, running = 0, blocked = 0, done = 0
+        for board in boards {
+            guard let c = board.counts else { continue }
+            todo += c.todo
+            ready += c.ready
+            running += c.running
+            blocked += c.blocked
+            done += c.done
+        }
+        self.todo = todo
+        self.ready = ready
+        self.running = running
+        self.blocked = blocked
+        self.done = done
+    }
+}
+
+/// Everything the menu bar label and the dropdown draw from one refresh.
+struct DashboardSnapshot {
+    var configured = true
+    var clusterState: ClusterState = .unknown
+    var nodesUp: Int?
+    var nodesTotal: Int?
+    var modelCount: Int?
+    var running: CardsRunningProjection?
+    var boardTotals: BoardTotals?
+    var projectCount: Int?
+    var projects: [ProjectLite] = []
+    var lastRefresh: Date?
+    /// The first honest failure from this refresh, already reduced to the
+    /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
+    var failure: String?
+
+    /// The optional short stat next to the menu bar icon. nil draws the icon
+    /// alone — never a fabricated zero for a read that did not answer.
+    func menuBarText(for stat: MenuBarStat) -> String? {
+        switch stat {
+        case .off:
+            return nil
+        case .runningCards:
+            guard let running else { return nil }
+            let count = running.runningCount ?? (running.rows.isEmpty ? nil : running.rows.count)
+            guard let count else { return nil }
+            return "\(count) run"
+        case .clusterNodes:
+            guard let nodesUp, let nodesTotal else { return nil }
+            return "\(nodesUp)/\(nodesTotal)"
+        }
+    }
+}
+
+@MainActor
+final class DashboardMonitor: ObservableObject {
+    @Published private(set) var snapshot = DashboardSnapshot()
+    @Published private(set) var isRefreshing = false
+
+    init() {
+        // Refreshes immediately, then on the operator's cadence. The loop lives
+        // for the process lifetime; the menu bar label is always mounted, so
+        // the stat stays live even while the dropdown is closed.
+        Task { [weak self] in
+            await self?.runLoop()
+        }
+    }
+
+    private func runLoop() async {
+        while !Task.isCancelled {
+            await refresh()
+            let seconds = MacPreferences.storedRefreshSeconds()
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+        }
+    }
+
+    func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        guard let client = WidgetDataClient.makeIfConfigured() else {
+            var fresh = DashboardSnapshot()
+            fresh.configured = false
+            fresh.lastRefresh = Date()
+            snapshot = fresh
+            return
+        }
+
+        var next = snapshot
+        next.configured = true
+        var failures: [String] = []
+        var anySuccess = false
+
+        switch await client.autodownStatus() {
+        case .success(let auto):
+            next.clusterState = Self.clusterState(from: auto.state)
+            anySuccess = true
+        case .failure(let failure):
+            next.clusterState = .unreachable
+            failures.append(failure.shortLabel)
+        }
+
+        switch await client.clusterMonitor() {
+        case .success(let monitor):
+            let tally = ClusterNodeTally.project(monitor)
+            next.nodesUp = tally.nodesUp
+            next.nodesTotal = tally.nodesTotal
+            if let hosts = monitor.json?.hosts, !hosts.isEmpty {
+                let ids = Set(hosts.flatMap { $0.workloads ?? [] }.compactMap { $0.cluster_id })
+                next.modelCount = ids.count
+            } else {
+                next.modelCount = nil
+            }
+            anySuccess = true
+        case .failure(let failure):
+            failures.append(failure.shortLabel)
+        }
+
+        switch await client.kanbanRunning() {
+        case .success(let running):
+            next.running = CardsRunningProjection(running: running, blocked: nil, now: Date())
+            anySuccess = true
+        case .failure(let failure):
+            failures.append(failure.shortLabel)
+        }
+
+        switch await client.mobileSummary() {
+        case .success(let summary):
+            next.boardTotals = BoardTotals(summary: summary)
+            anySuccess = true
+        case .failure(let failure):
+            failures.append(failure.shortLabel)
+        }
+
+        switch await client.projects() {
+        case .success(let projects):
+            next.projectCount = projects.count ?? projects.projects.count
+            next.projects = projects.rows(limit: 6)
+            anySuccess = true
+        case .failure(let failure):
+            failures.append(failure.shortLabel)
+        }
+
+        if anySuccess { next.lastRefresh = Date() }
+        next.failure = failures.first
+        snapshot = next
+    }
+
+    /// The same `up` / `waking` / `down` vocabulary the cluster widget maps.
+    private static func clusterState(from raw: String?) -> ClusterState {
+        switch raw?.lowercased() {
+        case "up", "serving": return .serving
+        case "waking": return .waking
+        case "down": return .down
+        default: return .unknown
+        }
+    }
+}
