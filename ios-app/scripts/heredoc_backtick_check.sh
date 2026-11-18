@@ -71,6 +71,15 @@
 # transcribed from a card — all of them are measured on the tree being scanned, on
 # this run.
 #
+# WHAT EACH PER-FILE COLUMN IS (t_e89edf70). Every number a reader may check is named
+# for what it measures. lines-with-byte is how many LINES of that file carry the byte,
+# so grep -c on the same file reproduces it exactly. unquoted-openers-at and
+# quoted-openers-at are WHERE the heredoc openers sit — line numbers, with the
+# delimiter appended for the unquoted ones — and are NOT counts, however much the
+# shorter label they replaced read like one. here-strings and operator-mentions ARE
+# counts. The only true byte count this gate prints is the one for a .golden it skips,
+# and that one is measured with tr over the file, not derived from records.
+#
 # NON-DESTRUCTIVE: reads only, writes nothing into the tree, never executes a
 # script it scans. Run the mutated copies through it from a private tree; the
 # probe heredoc_backtick_check_probe.sh is that harness and its evidence.
@@ -247,14 +256,23 @@ AWK
 
 # ---- verdict machinery ------------------------------------------------------
 # A finding is a line that EXECUTES; a measured line is one that is inert today
-# and is printed with the reason. Both are counted in BYTES-OFFENDING-LINES, not
-# in messages, so collapsing the output cannot change a number a reader checks.
+# and is printed with the reason. Both are counted in OFFENDING-LINES, not in
+# messages, so collapsing the output cannot change a number a reader checks —
+# PROVIDED the number counts records. It must never count words of a joined
+# record string: a count then depends on how many fields a record has, not on the
+# file, and the reader checking it with grep gets a number that is not even a
+# line count. That is not hypothetical — the per-file column below printed
+# 4x the lines for exactly that reason (t_e89edf70), which is why it is named
+# lines-with-byte and is computed by counting HIT records.
 fail=0
 live_findings=0
 measured_total=0
 files_scanned=0
 splice_capable_files=0
 
+# Counts words, so it is correct ONLY for a string built as ONE WORD PER RECORD.
+# The inert list below satisfies that (line@region(why)); a record with several
+# fields does not, and counting those silently multiplies by the field count.
 nwords() { local n=0 w; for w in $1; do n=$((n + 1)); done; printf '%s' "$n"; }
 finding() { echo "  FINDING  $1"; live_findings=$((live_findings + ${2:-1})); fail=1; }
 measured() { echo "  measured $1"; measured_total=$((measured_total + ${2:-1})); }
@@ -311,7 +329,13 @@ for f in "${shfiles[@]}"; do
   mention=$(printf '%s\n' "$rec"  | awk -F'\t' '$1=="MENTION" {c++} END {print c + 0}')
   multi=$(printf '%s\n' "$rec"   | awk -F'\t' '$1=="MULTI"  {printf "%s ", $2}')
   hstring=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="HERESTRING" {c++} END{print c+0}')
-  hits=$(printf '%s\n' "$rec"     | awk -F'\t' '$1=="HIT"   {printf "%s ", $0}')
+  # How many LINES carry the byte, counted as RECORDS. This must never be rebuilt by
+  # counting words in a joined record string: a HIT record is four tab-separated
+  # fields, so a word count of it reports 4x the number of lines carrying the byte —
+  # exactly what this column used to print (t_e89edf70: build_check.sh, 3 such lines,
+  # printed 12). Counting the records is also the only number that can agree with the
+  # verdicts below, because the verdicts are per line.
+  hitlines=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="HIT" {c++} END {print c + 0}')
   # R1 candidates: the byte sits where bash expands (unquoted heredoc body or shell
   # position) AND is not escaped away. Everything else is inert-by-region or
   # inert-by-escaping, and is reported as one grouped line per file.
@@ -326,8 +350,14 @@ for f in "${shfiles[@]}"; do
     capable=1; splice_capable_files=$((splice_capable_files + 1))
   fi
 
-  printf 'scanned %-38s bytes=%s unquoted-heredoc=%s quoted-heredoc=%s here-strings=%s operator-mentions=%s\n' \
-    "$base" "$(nwords "$hits")" "${opens:-none}" "${qopens:-none}" "${hstring:-0}" "${mention:-0}"
+  # Column meanings, in the label, because two of these used to read as counts and
+  # were not: lines-with-byte is a COUNT of lines carrying the byte (a reader can
+  # reproduce it with grep -c on the same file); unquoted-openers-at and
+  # quoted-openers-at are the WHERE of the openers — a space-separated list of line
+  # numbers, with the delimiter appended for the unquoted ones — never counts;
+  # here-strings and operator-mentions ARE counts. A file with no openers prints none.
+  printf 'scanned %-38s lines-with-byte=%s unquoted-openers-at=%s quoted-openers-at=%s here-strings=%s operator-mentions=%s\n' \
+    "$base" "${hitlines:-0}" "${opens:-none}" "${qopens:-none}" "${hstring:-0}" "${mention:-0}"
 
   # A region that never closes cannot be bounded, so nothing about the rest of the
   # file is trustworthy: refuse rather than guess where the body ended.
