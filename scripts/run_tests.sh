@@ -32,13 +32,18 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 # ``hermes_state.SessionDB``, or drive ``hermes_cli.kanban_db`` / hermes' profile
 # predicates through the production resolvers, and hermes' own imports need
 # ruamel.yaml (hermes_yaml), which the thin env lacks. Those tests SKIP, with the
-# import error itself as the reason, through ONE capability probe per leg:
+# import error itself as the reason, through ONE probe module per leg — one
+# function per capability there, so two capabilities cannot drift to two
+# postures (t_02c98915, and t_2cc3d482 for the second hscc-api capability):
 #
 #   hscc_daemon   tests/real_hermes.py   require_real_hermes /
 #                                        real_predicate_or_skip
 #   hscc-project  tests/test_session_discovery.py::_require_hermes_state,
 #                 tests/test_mcp_server.py::_hermes_kanban_error
-#   hscc-api      tests/hermes_gap.py    require_hermes_state
+#   hscc-api      tests/hermes_gap.py    require_hermes_state (SessionDB) /
+#                                        require_hermes_profile_library
+#                                        (``hermes_cli.profiles``: resolver +
+#                                        writer, test_profile_root.py)
 #
 # THE STAMP RULE. Under a sibling interpreter a leg is GREEN when the only
 # non-passing lines are skips whose reason names the missing hermes import
