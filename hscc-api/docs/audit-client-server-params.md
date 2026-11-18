@@ -34,8 +34,7 @@ gates below.
 
 | client route | required query param | server handler |
 |---|---|---|
-| GET /v1/sessions | profile | routes_sessions.py:200-202 |
-| GET /v1/memory | profile | routes_memory.py:252-255 |
+| GET /v1/sessions | profile | routes_sessions.py:202 |
 
 Every other GET the client calls — ping, cluster/status|hosts|monitor|jobs|info,
 health, fleet/throughput|stats|streams, autoscale, standup, cards, card-detail,
@@ -50,30 +49,52 @@ satisfied or correctly optional-defaulted.
 
 | client route | required body fields | server handler |
 |---|---|---|
-| POST /v1/cards | board, title | routes_actions.py:199 |
-| POST /v1/template/apply | name | routes_actions.py:281 |
-| POST /v1/cluster/stop | container_id | routes_actions.py:303 |
-| POST /v1/cards/{id}/comment | body | routes_actions.py:374 |
-| POST /v1/cards/{id}/block | reason | routes_actions.py:402 |
-| POST /v1/cards/{id}/close | (confirm only) | routes_actions.py:435 |
-| PATCH /v1/cards/{id} | assignee | routes_actions.py:468 |
-| POST /v1/sessions/{id}/retire | profile | routes_sessions.py:252-254 |
-| POST /v1/sessions/{id}/compact | profile | routes_sessions.py:291-293 |
-| POST /v1/memory/{node}/delete | profile | routes_memory.py:280-282 |
-| POST /v1/memory/{node}/edit | profile, content | routes_memory.py:307-314 |
-| POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1304-1310 |
+| POST /v1/cards | board, title | routes_actions.py:230 |
+| POST /v1/cluster/stop | container_id | routes_actions.py:334 |
+| POST /v1/sessions/{id}/retire | profile | routes_sessions.py:254 |
+| POST /v1/sessions/{id}/compact | profile | routes_sessions.py:293 |
+| POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1970-1975 (`_validate_prompt`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
 kanban recover, cluster up/down, triggers run, escalate) are covered by the
 confirm gates. Profile-editor PUT requires "at least one of many" — excluded.
+
+### Rows retired with their client call site (t_80e185d2, 2026-11-18)
+
+`be154aec` (#318, the iOS operator-console retirement) deleted the memory
+viewer and the template detail screen together with their client methods
+(`memories()`, `deleteMemory`, `editMemory`, `applyTemplate`). The card-mutation
+rows below retired earlier or by another route and this card does not establish
+when — what is measured here is simply that they are gone: grep of
+`HSCCClient.swift` finds no `post("/v1/cards/(`, no `put(`/`patch(` (the client's
+only verbs are `get`/`post`/`read`, which is what the derivation regexes match),
+and no `/v1/memory` or `/v1/template/apply` call site outside the two
+explanatory comments at `HSCCClient.swift:630` and `:715`:
+
+| retired client route | was required | server requirement (STILL ENFORCED) |
+|---|---|---|
+| GET /v1/memory | profile | routes_memory.py:288 |
+| POST /v1/memory/{node}/delete | profile | routes_memory.py:315 |
+| POST /v1/memory/{node}/edit | profile, content | routes_memory.py:342, :346 |
+| POST /v1/template/apply | name | routes_actions.py:312 (`_action_fields`) |
+| POST /v1/cards/{id}/comment | body | routes_actions.py:368 `handle_card_comment`, 400 sites at :382/:385 |
+| POST /v1/cards/{id}/block | reason | routes_actions.py:400 `handle_card_block`, 400 site at :413 |
+| POST /v1/cards/{id}/close, PATCH /v1/cards/{id} | confirm / assignee | routes_actions.py:434 `handle_card_close`, :464 `handle_card_edit` |
+
+A retired row is not lost coverage: the server still 400s on the missing field
+for every caller, and the routes keep their own server-side tests (e.g.
+`test_routes_memory.py::test_list_missing_profile_400`). It only stops being a
+*client* contract, because there is no client call left to make it one.
+
 
 ## Client-sends-ignored (dead param) check
 
 For every POST, the client only transmits keys the handler reads
 (`board`,`title`,`assignee`,`body` on cards; `name`,`force_recreate` on
 template/apply; `container_id` on cluster/stop; `profile`,`content` on
-memory edit; `prompt`,`project` on orchestrator/chat — all read). No ignored
-params found.
+memory edit; `prompt`,`project` on orchestrator/chat — all read; the
+template/apply and memory-edit pairs are retired call sites, see the retirement
+note above). No ignored params found.
 
 ## Locking it in (the durable artifact)
 
@@ -82,9 +103,15 @@ The gate lives in `hscc-api/tests/test_contract_swift_routes.py`:
 * `test_every_swift_route_is_registered` — every client route is registered.
 * `test_every_mutating_post_carries_confirm` — client always sends confirm.
 * `test_every_client_post_server_handler_is_confirm_gated` — server always checks it.
-* `test_every_required_query_param_is_sent` — the query-param matrix (sessions/memory profile).
+* `test_every_required_query_param_is_sent` — the query-param matrix (sessions `profile`).
 * `test_every_required_body_field_is_sent` — the body-field matrix (this run).
+* `test_contract_matrix_rows_are_live_client_routes` — every matrix row still
+  names a route the client calls, so a retired screen fails as a STALE ROW
+  instead of posing as "the client omits a required param" (t_80e185d2).
 
 Any drift in either direction — client drops a required param, or the server
 starts requiring one the client doesn't send — fails the suite. Verified
-non-vacuous by inspecting the exact payload keys each client function produces.
+non-vacuous by inspecting the exact payload keys each client function produces,
+and (t_80e185d2) by mutation: adding a field the client does not send still fails
+`test_every_required_body_field_is_sent`, and adding a row for a route the client
+does not call fails the liveness gate.
