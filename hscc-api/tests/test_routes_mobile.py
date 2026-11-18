@@ -12,11 +12,15 @@ anti-regression core — if someone "optimises" the route back to the
 non-archived listing, they go red here.
 """
 
+import contextlib
 import http.client
 import json
 import re
+import sqlite3
+import sys
 import threading
 import types
+from pathlib import Path
 
 import pytest
 
@@ -498,3 +502,87 @@ def test_no_boards_at_all_says_so(running, token, fleet):
     assert payload["boards"] == []
     assert payload["board_count"] == 0
     assert payload["speak"] == "No boards."
+
+
+# --------------------------------------------------------------------------- #
+# CLI parity — the route and `hscc kanban monitor` on the SAME fixture state
+# --------------------------------------------------------------------------- #
+
+def test_counts_match_hscc_kanban_monitor_on_the_same_board(tmp_path, monkeypatch):
+    """One real board DB, two entry points: route counts == CLI board counts.
+
+    ``hscc kanban monitor --json`` is the CLI's board view and is served by
+    ``hscc_daemon.kanban_live.collect`` (``kanban_cli._cmd_monitor``). This
+    builds the SAME tiny board for both: the route reads it through its
+    flightdeck seam, the CLI through its own SQLite pass. Any future divergence
+    in status handling, archived inclusion, or the ``other`` bucket goes red.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from hscc_daemon import kanban_live
+
+    db = tmp_path / "kanban.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT, title TEXT, status TEXT, assignee TEXT, priority INTEGER,
+            created_at INTEGER, started_at INTEGER, completed_at INTEGER,
+            last_heartbeat_at INTEGER, current_run_id TEXT);
+        CREATE TABLE task_runs (
+            id TEXT, profile TEXT, started_at INTEGER,
+            last_heartbeat_at INTEGER);
+        CREATE TABLE task_events (
+            task_id TEXT, kind TEXT, created_at INTEGER);
+        """
+    )
+    statuses = ["todo", "todo", "ready", "running", "blocked", "done", "done",
+                "archived", "review"]
+    for i, status in enumerate(statuses):
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, assignee, priority, "
+            "created_at, started_at, completed_at, last_heartbeat_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"t_{i}", f"card {i}", status, "worker", 0, 1000 + i, None,
+             None, None),
+        )
+    conn.commit()
+    conn.close()
+
+    class FakeKdb:
+        """Single-board kanban lib shape: no ``list_boards`` => legacy board."""
+
+        def connect_closing(self, board=None):
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            return contextlib.closing(conn)
+
+    def list_cards(board=None, include_archived=False):
+        with sqlite3.connect(db) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute("SELECT * FROM tasks").fetchall()
+        return [{"id": r["id"], "board": "default", "status": r["status"],
+                 "title": r["title"], "created_at": r["created_at"],
+                 "started_at": r["started_at"],
+                 "completed_at": r["completed_at"],
+                 "last_heartbeat_at": r["last_heartbeat_at"]}
+                for r in rows]
+
+    monkeypatch.setattr(routes_mobile, "_backing_list_boards",
+                        lambda: ["default"])
+    monkeypatch.setattr(routes_mobile, "_backing_list_cards", list_cards)
+
+    status, payload = routes_mobile.handle_mobile_summary(None, None, {}, b"")
+    assert status == 200
+    route = payload["boards"][0]
+    route_counts = dict(route["counts"])
+    route_counts.update(route.get("other") or {})
+
+    cli = kanban_live.collect(kanban_db=FakeKdb(), read_caps=lambda: (None, None))
+    cli_counts = {b["name"]: b["counts"] for b in cli["boards"]}["default"]
+
+    assert route_counts == cli_counts
+    assert route["total"] == sum(cli_counts.values()) == len(statuses)
+    assert route["counts"]["done"] == 2
+    assert route["counts"]["archived"] == 1

@@ -40,7 +40,15 @@ for _candidate in (
 if _PROJECT_DIR is not None and str(_PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(_PROJECT_DIR))
 
+# ``hscc_daemon`` is a sibling of ``hscc-api``; put the repo root on sys.path
+# once so the orchestrator read below can import the SAME module the
+# ``hscc kanban monitor`` CLI uses. Mirrors routes_cluster.py.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from flightdeck.core import kanban as _kanban            # noqa: E402
+from flightdeck.core import project_lifecycle as _project_lifecycle  # noqa: E402
 from flightdeck.core import registry as _registry        # noqa: E402
 from flightdeck.core import review as _review_core       # noqa: E402
 from flightdeck.core import git_state as _git_state      # noqa: E402
@@ -512,22 +520,158 @@ def _project_detail(projects, proj):
     return {"board_counts": board_counts, "git": git}
 
 
+# --------------------------------------------------------------------------- #
+# Per-project truth — the SAME reads `hscc project list` + `hscc kanban
+# monitor` make, imported and called, never re-derived.
+# --------------------------------------------------------------------------- #
+
+#: Board timestamps that mean "something happened on this card". Used only to
+#: report the newest activity per project board; a value we cannot parse is
+#: skipped rather than guessed.
+_ACTIVITY_FIELDS = ("completed_at", "last_heartbeat_at", "started_at",
+                    "created_at")
+
+
+def _backing_orchestrators():
+    """The live-orchestrator rows ``hscc kanban monitor`` attaches.
+
+    Lazy import so the API server does not drag Hermes profile stores in at
+    module import time, and defensive so a host without the daemon package
+    degrades to "no orchestrator rows" instead of failing the project list.
+    Tests monkeypatch this seam; the live path is the CLI's own function.
+    """
+    try:
+        from hscc_daemon import kanban_live
+        data = kanban_live.attach_orchestrators({})
+        return list(data.get("orchestrators") or [])
+    except Exception:
+        return []
+
+
+def _activity_ts(value):
+    """Epoch seconds for one card timestamp, or None when it is not readable."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        pass
+    try:  # ISO-8601 from an older producer
+        import datetime
+        return int(datetime.datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_activity(cards):
+    """Newest parseable timestamp on a board's cards, or None.
+
+    A board with no timestamped cards has an UNKNOWN last activity — None is
+    that fact. Returning 0 here would render as 1970 and claim activity that
+    never happened.
+    """
+    newest = None
+    for card in cards or []:
+        for field in _ACTIVITY_FIELDS:
+            ts = _activity_ts((card or {}).get(field))
+            if ts is not None and (newest is None or ts > newest):
+                newest = ts
+    return newest
+
+
+def _project_counts(cards):
+    """The board histogram, through ``/v1/mobile/summary``'s own projection.
+
+    Imported lazily from ``routes_mobile`` so the two surfaces cannot disagree
+    about what a status count means (including the ``other`` bucket and the
+    ``total`` that makes the sum checkable).
+    """
+    from routes_mobile import count_cards
+    entry = count_cards(cards)
+    counts = dict(entry.get("counts") or {})
+    counts.update(entry.get("other") or {})
+    counts["total"] = int(entry.get("total") or 0)
+    return counts
+
+
+def _orchestrator_for(name, rows):
+    """The live orchestrator row for a project, or None when it is idle.
+
+    The orchestrator identity convention is the CLI's: project ``foo`` lives on
+    profile ``foo-orch`` with session ``foo`` (``hscc project chat`` resolves it
+    through hscc-roles). An idle orchestrator has no live turn lease and is
+    therefore absent from ``attach_orchestrators`` — None is "not in a turn",
+    not "unknown".
+    """
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        profile = str(row.get("profile") or "")
+        session = str(row.get("session") or "")
+        if profile == f"{name}-orch" or session == name:
+            return {key: row.get(key)
+                    for key in ("profile", "session", "state", "turn_s",
+                                "tok_in", "tok_out")
+                    if key in row}
+    return None
+
+
+def _cards_by_board():
+    """One archived-inclusive read, grouped by board — the mobile-summary read.
+
+    Returns ``(groups, degraded)``. ``degraded`` is True when the whole board
+    read failed; callers then omit counts rather than fabricate zeros.
+    """
+    try:
+        cards = _kanban.list_cards(board=None, include_archived=True)
+    except Exception:
+        return {}, True
+    groups = {}
+    for card in cards or []:
+        board = str((card or {}).get("board") or "")
+        groups.setdefault(board, []).append(card)
+    return groups, False
+
+
 def handle_projects(server, ctx, query, body):
-    """GET /v1/projects — the registry list (name, repo, board, topic)."""
+    """GET /v1/projects — registry truth plus each project's board truth.
+
+    ``hscc project list`` supplies name/repo/board/topic/health through the SAME
+    ``registry.load_registry`` + ``project_lifecycle.project_health`` calls the
+    CLI makes. The board half comes from ONE archived-inclusive card read (the
+    same projection ``/v1/mobile/summary`` uses) and the live-orchestrator rows
+    ``hscc kanban monitor`` attaches. ``repo`` stays on the wire for the console
+    and is deliberately not decoded by the widget (§7).
+    """
     registry_path = _registry_path(ctx)
     try:
         projects = _registry.load_registry(registry_path)
     except Exception:
         return 200, {"speak": "Project list unavailable."}
-    rows = [
-        {
-            "name": getattr(p, "name", None),
+    cards_by_board, degraded = _cards_by_board()
+    orchestrators = _backing_orchestrators()
+    rows = []
+    for p in projects:
+        name = getattr(p, "name", None)
+        board = getattr(p, "board", None) or "unknown"
+        try:
+            health = _project_lifecycle.project_health(p, _kanban=_kanban)
+        except Exception:
+            health = "unknown"
+        cards = cards_by_board.get(board, [])
+        rows.append({
+            "name": name,
             "repo": getattr(p, "repo", None),
-            "board": getattr(p, "board", None) or "unknown",
+            "board": board,
             "topic": getattr(p, "topic", None) if getattr(p, "topic", None) is not None else "unknown",
-        }
-        for p in projects
-    ]
+            "health": health,
+            "counts": None if degraded else _project_counts(cards),
+            "last_activity": None if degraded else _last_activity(cards),
+            "orchestrator": _orchestrator_for(str(name), orchestrators),
+        })
     payload = {"projects": rows, "count": len(rows)}
     payload["speak"] = _speak_projects_list(payload)
     return 200, payload

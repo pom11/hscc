@@ -160,6 +160,7 @@ def fakes(monkeypatch):
     fd = {
         "_kanban": _fake_module(
             list_cards=lambda board=None, include_archived=False: [_card()],
+            board_exists=lambda board: True,
             find_card=lambda cid: _card(cid=cid) if cid == "t_abc123" else None,
             project_for_card=lambda card, projects: _project(),
             UNATTRIBUTED=object(),
@@ -290,6 +291,9 @@ def fakes(monkeypatch):
     }
     for name, fake in fd.items():
         monkeypatch.setattr(routes_project, name, fake)
+    # The orchestrator read scans real Hermes profile stores in production; a
+    # unit test must never do that. The seam is the same one the handler calls.
+    monkeypatch.setattr(routes_project, "_backing_orchestrators", lambda: [])
     return fd
 
 
@@ -701,7 +705,62 @@ def test_projects_list_200(running, token, fakes):
     assert row["repo"] == "/tmp/repo"
     assert row["board"] == "default"
     assert row["topic"] == "unknown"
+    # The widget's per-project truth (CARD A3): health, board histogram, the
+    # newest activity stamp and the live orchestrator row (none in this fake).
+    assert row["health"] in ("ok", "partial", "absent")
+    assert row["counts"]["running"] == 1
+    assert row["counts"]["total"] == 1
+    assert row["last_activity"] == 1000
+    assert row["orchestrator"] is None
     assert "1 project registered." in payload["speak"]
+
+
+def test_projects_list_matches_hscc_project_list_json(running, token, fakes,
+                                                      monkeypatch, tmp_path):
+    """Parity: the route and `hscc project list --json` share one fixture state.
+
+    Both sides are driven through their real entry points — the HTTP handler and
+    ``flightdeck.commands.project.cmd_list`` — with the SAME registry and board
+    fake, so a future change that re-implements the list in the API (or stops
+    reading the registry the CLI reads) fails here instead of shipping two
+    different project lists to the operator.
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from flightdeck.commands import project as project_cmd
+    from flightdeck.core import registry as real_registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = types.SimpleNamespace(name="hscc", repo=str(repo),
+                                    board="default", topic=None)
+    monkeypatch.setattr(real_registry, "load_registry",
+                        lambda path=None: [project])
+    monkeypatch.setattr(fakes["_registry"], "load_registry",
+                        lambda path=None: [project])
+
+    status, payload = _request(running, token, path="/v1/projects")
+    assert status == 200
+
+    args = argparse.Namespace(json=True, registry=None, run=None, client=None,
+                              kanban=fakes["_kanban"])
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = project_cmd.cmd_list(args)
+    assert rc == 0
+    cli_rows = json.loads(out.getvalue())
+
+    route_rows = payload["projects"]
+    assert [(r["name"], r["board"], r["health"]) for r in route_rows] == [
+        (r["name"], r["board"], r["health"]) for r in cli_rows
+    ]
+    # The board half is the same archived-inclusive projection the board-status
+    # route uses; one running card is the fixture's measured total.
+    assert route_rows[0]["counts"] == routes_project._project_counts(
+        fakes["_kanban"].list_cards(board=None, include_archived=True))
+    assert route_rows[0]["counts"]["running"] == 1
 
 
 def test_projects_list_auth_401(running):
