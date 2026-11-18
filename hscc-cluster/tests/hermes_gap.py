@@ -296,19 +296,18 @@ def require_child_ran_hermes(returncode, stderr):
     runs ``_pvb_sim.py`` with ``sys.executable`` and an env that only drops
     ``HERMES_DELEGATED_CHILD_CONTEXT``. So this process's ``sys.path`` says nothing
     about the child's: the child gets ``sys.executable`` plus its own script dir,
-    never the parent's path. That conclusion does not depend on what this process's
-    path holds, and when this probe was written it held something that made the
-    difference loud — ``workflow._active_profile_name()`` used to insert
-    ``~/.hermes/hermes-agent`` into *this* process's ``sys.path`` the first time it
-    ran and leave it there (production's hand-rolled import fence, until
-    t_847ab03b / PR #364 made the fence restore it;
-    ``test_hermes_fence_sys_path.py`` is what pins that now). Either way the child
-    started afterwards did not inherit it. Measured on the thin sibling when this
-    probe was written (t_b884497b): the in-process gate passed after that fence and
-    the child still could not import hermes — which is why the case has to ask the
-    child, and why asking it from the child's own stderr is stronger than a second
-    probe here: the answer comes from the run that happened, not from a guess about
-    the env.
+    never the parent's path. That was worth saying out loud when this probe was
+    written, because the two paths used to disagree loudly —
+    ``workflow._active_profile_name()`` inserted ``~/.hermes/hermes-agent`` into
+    *this* process's ``sys.path`` the first time it ran and left it there
+    (production's hand-rolled import fence, until t_847ab03b / PR #364 made the
+    fence restore it; ``test_hermes_fence_sys_path.py`` is what pins that now). The
+    child never inherited the entry, so nothing here turns on which of the two the
+    fence does. Measured on the thin sibling when this probe was written
+    (t_b884497b): the in-process gate passed after that fence and the child still
+    could not import hermes — which is why the case has to ask the child, and why
+    asking it from the child's own stderr is stronger than a second probe here: the
+    answer comes from the run that happened, not from a guess about the env.
     """
     error = child_import_error(returncode, stderr)
     if error is not None:
