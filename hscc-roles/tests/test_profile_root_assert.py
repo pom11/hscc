@@ -29,6 +29,7 @@ import sys
 
 import pytest
 
+import hermes_gap
 import rolelib
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -129,7 +130,18 @@ def test_requested_home_inside_the_native_root_resolves_back_to_live(tmp_path):
     test goes red and the flag's refusal becomes redundant — a good outcome, but
     one a human should learn about deliberately rather than by a silently weaker
     guard.
+
+    GATED by ``hermes_gap.require_hermes_cli_profiles()`` (t_74141b24). This file
+    used to decide that for itself: it spawned the child and, if the child
+    returned non-zero, skipped with ``"hermes_cli not importable on this
+    interpreter"``. That answer was wrong in both directions — a child that died
+    for ANY reason (a real ``rolelib`` bug, a bad path, an exception in
+    ``get_profile_dir``) reported itself as an environment skip, and the reason
+    named a capability where the stamp rule reads a module. So the capability is
+    asked first, in the parent, with the import error as the skip reason; once it
+    IS available here, a failing child is a finding and stays one.
     """
+    hermes_gap.require_hermes_cli_profiles()
     home = tmp_path / "fakehome"
     (home / ".hermes").mkdir(parents=True)
     inside = home / ".hermes" / "scratch" / "throwaway"
@@ -146,7 +158,10 @@ def test_requested_home_inside_the_native_root_resolves_back_to_live(tmp_path):
     res = subprocess.run([sys.executable, "-B", "-c", code],
                          capture_output=True, text=True, env=env, cwd=PLUGIN_DIR)
     if res.returncode != 0:
-        pytest.skip("hermes_cli not importable on this interpreter")
+        pytest.fail(
+            "this interpreter imports hermes_cli.profiles (the gate above "
+            f"answered), so the child had no right to fail: rc={res.returncode}"
+            f"\nOUT:{res.stdout}\nERR:{res.stderr}")
     native, rolelib_dir = res.stdout.strip().splitlines()[:2]
     live = str(home / ".hermes" / "profiles")
     assert native.startswith(live), f"native resolver moved to {native}"
@@ -175,7 +190,21 @@ def test_assert_profile_refuses_a_home_inside_the_live_root(tmp_path, monkeypatc
 
     Before the fix this pair (apply + write) reported success. Now the assert
     fires and nothing has been written when it does.
+
+    GATED by ``hermes_gap.require_hermes_cli_profiles()`` (t_74141b24), because
+    the arm under test is hermes' own: the divergence only exists because
+    ``hermes_constants._hermes_root_of`` maps a home under ``~/.hermes`` back to
+    the live root, and ``rolelib.native_profiles_dir()`` is what reports that
+    root. Without hermes it returns ``None``, the native arm has nothing to
+    compare against, and the case reported ``DID NOT RAISE`` on the thin sibling
+    — an unsatisfiable assertion, not a regression. Nothing is lost by skipping
+    it here: where hermes is absent the redirect that made the incident silent
+    cannot happen either (``PROFILES_DIR`` follows ``HERMES_HOME`` literally), and
+    BOTH arms of the guard are still exercised in-process on every interpreter by
+    ``test_assert_profile_pins_both_roots_in_play``, which injects the native
+    answer instead of importing it.
     """
+    hermes_gap.require_hermes_cli_profiles()
     home, live = _fake_live_home(tmp_path)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes" / "profiles" / "worker"))
@@ -239,7 +268,14 @@ def test_refused_intent_writes_nothing_for_either_profile_step(
 
     This is the check that would have caught the incident: the command is refused
     and the live fingerprint is byte-identical afterwards.
+
+    GATED by ``hermes_gap.require_hermes_cli_profiles()`` (t_74141b24) for the
+    same reason as its in-process sibling above: the child CLI refuses only when
+    hermes' resolver reports a divergent root, and it runs on ``sys.executable``,
+    so on the thin sibling it exited ``0`` having written the throwaway — which is
+    where a red leg and an unsatisfiable case look identical from the summary line.
     """
+    hermes_gap.require_hermes_cli_profiles()
     home, live = _fake_live_home(tmp_path)
     before = _file_state(live)
     throwaway = home / ".hermes" / "scratch" / "throwaway"

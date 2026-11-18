@@ -6,6 +6,7 @@ import yaml
 import pytest
 import rolelib
 import generator
+import hermes_gap
 
 
 def test_compose_soul_has_all_three_layers():
@@ -1614,16 +1615,17 @@ def test_fallback_writer_preserves_foreign_keys_without_hermes(tmp_path, monkeyp
     _assert_survives(cur, cfg, label="fallback writer: ")
 
 
-def _hermes_writer_available():
-    return generator._hermes_atomic_config_write() is not None
-
-
-@pytest.mark.skipif(not _hermes_writer_available(),
-                    reason="hermes' round-trip writer is not importable here")
 def test_operator_comments_survive_a_real_change(tmp_path, monkeypatch):
     """Where hermes writes, its round-trip writer keeps what PyYAML cannot: the
     operator's own comments. This is the reason the write is delegated instead
-    of hand-rolled, so it is pinned rather than assumed."""
+    of hand-rolled, so it is pinned rather than assumed.
+
+    Gated by ``hermes_gap.require_hermes_cli_config_writer()`` (t_74141b24),
+    which replaces this file's ``_hermes_writer_available()`` and its
+    ``@pytest.mark.skipif``. Same four cases as before, same posture, better
+    reason — see ``hermes_gap`` for why a mark was the wrong shape here.
+    """
+    hermes_gap.require_hermes_cli_config_writer()
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": [], "model_tier": "fast"}
     _gen_config(tmp_path, monkeypatch, spec)
@@ -1638,8 +1640,6 @@ def test_operator_comments_survive_a_real_change(tmp_path, monkeypatch):
         "the writer destroyed an operator comment"
 
 
-@pytest.mark.skipif(not _hermes_writer_available(),
-                    reason="hermes' round-trip writer is not importable here")
 def test_a_write_that_would_lose_keys_fails_loudly(tmp_path, monkeypatch):
     """Fail CLOSED, and check the payload at the writer boundary.
 
@@ -1648,7 +1648,10 @@ def test_a_write_that_would_lose_keys_fails_loudly(tmp_path, monkeypatch):
     escape `generate_profile` and leave the file alone. The same probe also
     asserts what the writer is actually handed: the merged document, foreign keys
     included — that is the fix, seen at the seam rather than through the file.
+
+    Gated by the same capability probe as its two siblings (t_74141b24).
     """
+    hermes_gap.require_hermes_cli_config_writer()
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": [], "model_tier": "fast"}
     _gen_config(tmp_path, monkeypatch, spec)
@@ -1683,13 +1686,15 @@ def test_a_write_that_would_lose_keys_fails_loudly(tmp_path, monkeypatch):
     assert payload["compression"]["threshold_tokens"] == 5  # operator's lower cap
 
 
-@pytest.mark.skipif(not _hermes_writer_available(),
-                    reason="hermes' round-trip writer is not importable here")
 def test_no_op_regeneration_never_reaches_the_writer(tmp_path, monkeypatch):
     """Nothing to change = no write at all, so nothing can be lost even in
     principle. Measured here rather than assumed, because a writer that is only
     reached on a real change is exactly what makes the fail-closed refusal safe
-    to leave un-caught."""
+    to leave un-caught.
+
+    Gated by the same capability probe as its two siblings (t_74141b24).
+    """
+    hermes_gap.require_hermes_cli_config_writer()
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": [], "model_tier": "fast"}
     _gen_config(tmp_path, monkeypatch, spec)
@@ -1704,9 +1709,14 @@ def test_unparseable_config_is_not_silently_replaced(tmp_path, monkeypatch):
     """A corrupt config.yaml is recoverable operator data. The per-block readers
     all yield None for it (so the generator would rebuild from defaults), and the
     old hand-written dump happily overwrote the file. The delegated writer reads
-    it first and refuses, so the operator keeps what they had."""
-    if not _hermes_writer_available():
-        pytest.skip("the refusal lives in hermes' writer")
+    it first and refuses, so the operator keeps what they had.
+
+    Gated by the same capability probe (t_74141b24). This was the fourth site and
+    the sloppiest: it skipped with ``"the refusal lives in hermes' writer"``,
+    which names a capability and no module, so ``-rs`` could not tell a thin
+    sibling from a writer that is present and still overwriting operator data.
+    """
+    hermes_gap.require_hermes_cli_config_writer()
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": [], "model_tier": "fast"}
     _gen_config(tmp_path, monkeypatch, spec)

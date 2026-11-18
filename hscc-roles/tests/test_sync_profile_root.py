@@ -31,6 +31,7 @@ import sys
 
 import pytest
 
+import hermes_gap
 import orch_sync
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -183,7 +184,17 @@ def test_refused_intent_writes_nothing(tmp_path, cmd):
     This is the check that was missing for the sync pair: the throwaway home is
     the placement the incident used, the live seed has real sync work queued,
     and nothing may be written.
+
+    GATED by ``hermes_gap.require_hermes_cli_profiles()`` (t_74141b24): the
+    refusal this case asserts comes from hermes' resolver reporting a root that
+    differs from the requested one, and the child runs on ``sys.executable`` — on
+    the thin sibling ``native_profiles_dir()`` answers ``None``, nothing diverges,
+    and the pair exited ``0`` where ``2`` is the contract. Its non-vacuity partner
+    ``test_the_refused_seed_is_a_real_write_target`` is deliberately NOT gated: it
+    needs no hermes, and it is the case that keeps running on the thin sibling to
+    prove the seed is still a real write target.
     """
+    hermes_gap.require_hermes_cli_profiles()
     home, live = _fake_live_home(tmp_path)
     before = _tree_state(live)
     throwaway = home / ".hermes" / "scratch" / "throwaway"
