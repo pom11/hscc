@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import WidgetKit
 
 /// App-side store for the shared Widgets & Live Activities settings
 /// (t_dea36c48) — a published `ObservableObject` the Settings UI reads/writes,
@@ -49,6 +50,23 @@ final class WidgetSettingsStore: ObservableObject {
         settings.scope(for: kind)
     }
 
+    /// The GLOBAL appearance (t_444519ae), or the app Theme default when the
+    /// operator never edited one.
+    var globalStyle: WidgetStyle {
+        settings.style ?? WidgetStyle()
+    }
+
+    /// This surface's own override, or nil when it follows the global style —
+    /// the "Use global" state the editor's toggle reads.
+    func style(for kind: WidgetSurfaceKind) -> WidgetStyle? {
+        settings.style(for: kind)
+    }
+
+    /// What this surface actually renders: own override → global → default.
+    func resolvedStyle(for kind: WidgetSurfaceKind) -> WidgetStyle {
+        settings.resolvedStyle(for: kind)
+    }
+
     // MARK: - Mutation (each persists immediately to the shared suite)
 
     /// Toggle whether a surface is active/enabled.
@@ -85,6 +103,27 @@ final class WidgetSettingsStore: ObservableObject {
         update(kind) { $0.scope = scope }
     }
 
+    /// Replace the GLOBAL appearance every surface inherits (t_444519ae).
+    /// Re-reads first for the same reason `update` does: a configuration
+    /// intent may have written the blob while Settings was open.
+    func setGlobalStyle(_ style: WidgetStyle) {
+        if let fresh = AppGroupWidgetSettings.load() { settings = fresh }
+        settings.style = style.normalized
+        persist()
+    }
+
+    /// Give ONE surface its own appearance, or pass nil for "Use global" so it
+    /// inherits again. The nil/empty distinction is the whole toggle: storing
+    /// a copy of the global style would pin it and silently stop inheriting.
+    func setStyle(_ style: WidgetStyle?, for kind: WidgetSurfaceKind) {
+        update(kind) { $0.style = style?.normalized }
+    }
+
+    /// "Use global" in one call, for the editor's toggle.
+    func useGlobalStyle(for kind: WidgetSurfaceKind) {
+        setStyle(nil, for: kind)
+    }
+
     /// Apply a closure to one surface's settings and persist the whole blob.
     private func update(_ kind: WidgetSurfaceKind, _ mutate: (inout WidgetSurfaceSettings) -> Void) {
         // Re-read the blob before mutating. The widget's configuration intent
@@ -105,5 +144,12 @@ final class WidgetSettingsStore: ObservableObject {
     private func persist() {
         guard let data = try? JSONEncoder().encode(settings) else { return }
         Self.suite.set(data, forKey: AppGroupWidgetSettings.storageKey)
+        // Every saved change repaints one or more surfaces: ask WidgetKit to
+        // rebuild the Home Screen timelines now rather than at the next
+        // scheduled refresh (t_444519ae). The Live Activity drivers have no
+        // push-only hook — their `refreshOnce()` also starts an activity — so
+        // an already-running bubble picks the style up on its next scheduled
+        // push instead of having this store launch network work for it.
+        WidgetCenter.shared.reloadAllTimelines()
     }
 }
