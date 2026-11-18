@@ -293,6 +293,11 @@ targets:
       # activity project through (t_f2867fb3), so one surface cannot call a
       # fleet degraded while the other calls it healthy. Foundation-only.
       - path: Sources/Shared/ClusterNodeTally.swift
+      # Every column `hscc cluster monitor` prints, formatted the way the CLI
+      # formats it (t_61ed3f5e), so a widget card draws strings instead of
+      # re-deriving units and rounding. Foundation-only, which is what lets
+      # `model_decode_check.sh` execute the parity check on macOS.
+      - path: Sources/Shared/ClusterMonitorViewModel.swift
       - path: Sources/Shared/WidgetDataClient.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
@@ -449,6 +454,11 @@ targets:
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
       - path: Sources/Shared/ClusterNodeTally.swift
+      # Every column `hscc cluster monitor` prints, formatted the way the CLI
+      # formats it (t_61ed3f5e), so a widget card draws strings instead of
+      # re-deriving units and rounding. Foundation-only, which is what lets
+      # `model_decode_check.sh` execute the parity check on macOS.
+      - path: Sources/Shared/ClusterMonitorViewModel.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
@@ -590,6 +600,11 @@ targets:
       # renders the state the app pushed and never projects a payload itself,
       # but the attributes file now names this one. t_f2867fb3.
       - path: Sources/Shared/ClusterNodeTally.swift
+      # Every column `hscc cluster monitor` prints, formatted the way the CLI
+      # formats it (t_61ed3f5e), so a widget card draws strings instead of
+      # re-deriving units and rounding. Foundation-only, which is what lets
+      # `model_decode_check.sh` execute the parity check on macOS.
+      - path: Sources/Shared/ClusterMonitorViewModel.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:

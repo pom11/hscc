@@ -1,0 +1,316 @@
+{
+ "success": true,
+ "json": {
+  "timestamp": 1795031479.396588,
+  "hosts": [
+   {
+    "host": "192.0.2.11",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T19:51:18Z",
+     "hostname": "node-1",
+     "uptime_sec": "1908996",
+     "cpu_load_1m": "1.41",
+     "cpu_load_5m": "1.45",
+     "cpu_load_15m": "1.60",
+     "cpu_usage_pct": "10.7",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "52.6",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "105742",
+     "mem_available_mb": "18803",
+     "mem_used_pct": "84.9",
+     "swap_total_mb": "16383",
+     "swap_used_mb": "0",
+     "gpu_name": "NVIDIA GB10",
+     "gpu_util_pct": "93",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "49",
+     "gpu_power_w": "9.49",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "806",
+     "gpu_mem_clock_mhz": "",
+     "sparkrun_jobs": "1",
+     "sparkrun_job_names": "workload-a_solo",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "gpu_count": "1",
+     "net_send_bytes_s": "14185",
+     "net_recv_bytes_s": "2407",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "mem_bufcache_mb": ""
+    },
+    "workloads": [
+     {
+      "workload_id": "workload-a",
+      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "runtime": "vllm-distributed",
+      "ranks_on_host": 1,
+      "containers": [
+       {
+        "name": "workload-a_solo",
+        "role": "solo",
+        "status": "Up 9 days",
+        "image": "ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:latest"
+       }
+      ]
+     }
+    ],
+    "used_slots": 1,
+    "free_slots": 0
+   },
+   {
+    "host": "192.0.2.12",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T19:51:17Z",
+     "hostname": "node-2",
+     "uptime_sec": "3067371",
+     "cpu_load_1m": "1.14",
+     "cpu_load_5m": "1.23",
+     "cpu_load_15m": "1.10",
+     "cpu_usage_pct": "7.9",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "61.9",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "105391",
+     "mem_available_mb": "19154",
+     "mem_used_pct": "84.6",
+     "swap_total_mb": "16383",
+     "swap_used_mb": "0",
+     "gpu_name": "NVIDIA GB10",
+     "gpu_util_pct": "92",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "56",
+     "gpu_power_w": "23.15",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "2177",
+     "gpu_mem_clock_mhz": "",
+     "sparkrun_jobs": "1",
+     "sparkrun_job_names": "workload-b_solo",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "gpu_count": "1",
+     "net_send_bytes_s": "23724",
+     "net_recv_bytes_s": "5352",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "mem_bufcache_mb": ""
+    },
+    "workloads": [
+     {
+      "workload_id": "workload-b",
+      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "runtime": "vllm-distributed",
+      "ranks_on_host": 1,
+      "containers": [
+       {
+        "name": "workload-b_solo",
+        "role": "solo",
+        "status": "Up 10 days",
+        "image": "ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:latest"
+       }
+      ]
+     }
+    ],
+    "used_slots": 1,
+    "free_slots": 0
+   },
+   {
+    "host": "192.0.2.13",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T19:51:17Z",
+     "hostname": "node-3",
+     "uptime_sec": "3573465",
+     "cpu_load_1m": "1.13",
+     "cpu_load_5m": "1.17",
+     "cpu_load_15m": "1.02",
+     "cpu_usage_pct": "7.6",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "69.8",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "106175",
+     "mem_available_mb": "18370",
+     "mem_used_pct": "85.2",
+     "swap_total_mb": "16383",
+     "swap_used_mb": "0",
+     "gpu_name": "NVIDIA GB10",
+     "gpu_util_pct": "91",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "62",
+     "gpu_power_w": "22.80",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "2177",
+     "gpu_mem_clock_mhz": "",
+     "sparkrun_jobs": "1",
+     "sparkrun_job_names": "workload-c_solo",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "gpu_count": "1",
+     "net_send_bytes_s": "16581",
+     "net_recv_bytes_s": "2724",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "mem_bufcache_mb": ""
+    },
+    "workloads": [
+     {
+      "workload_id": "workload-c",
+      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "runtime": "vllm-distributed",
+      "ranks_on_host": 1,
+      "containers": [
+       {
+        "name": "workload-c_solo",
+        "role": "solo",
+        "status": "Up 10 days",
+        "image": "ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:latest"
+       }
+      ]
+     }
+    ],
+    "used_slots": 1,
+    "free_slots": 0
+   },
+   {
+    "host": "192.0.2.14",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T19:51:17Z",
+     "hostname": "node-4",
+     "uptime_sec": "3573317",
+     "cpu_load_1m": "1.27",
+     "cpu_load_5m": "1.05",
+     "cpu_load_15m": "0.99",
+     "cpu_usage_pct": "7.8",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "64.0",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "106787",
+     "mem_available_mb": "17758",
+     "mem_used_pct": "85.7",
+     "swap_total_mb": "16383",
+     "swap_used_mb": "57",
+     "gpu_name": "NVIDIA GB10",
+     "gpu_util_pct": "94",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "60",
+     "gpu_power_w": "24.19",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "2177",
+     "gpu_mem_clock_mhz": "",
+     "sparkrun_jobs": "1",
+     "sparkrun_job_names": "workload-d_solo",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "gpu_count": "1",
+     "net_send_bytes_s": "11476",
+     "net_recv_bytes_s": "1981",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "mem_bufcache_mb": ""
+    },
+    "workloads": [
+     {
+      "workload_id": "workload-d",
+      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "runtime": "vllm-distributed",
+      "ranks_on_host": 1,
+      "containers": [
+       {
+        "name": "workload-d_solo",
+        "role": "solo",
+        "status": "Up 10 days",
+        "image": "ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:latest"
+       }
+      ]
+     }
+    ],
+    "used_slots": 1,
+    "free_slots": 0
+   }
+  ]
+ },
+ "speak": "Fleet snapshot: 4 hosts sampled.",
+ "serving": [
+  {
+   "node": "192.0.2.11",
+   "port": "8000",
+   "routes": [
+    "local-inference-lab/Model-A",
+    "orchestrator-model",
+    "worker-model"
+   ],
+   "model": "local-inference-lab/Model-A",
+   "running": 1,
+   "waiting": 0,
+   "kv": 0.15981224854716136,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 811218399.0,
+   "gen_total": 7071094.0
+  },
+  {
+   "node": "192.0.2.14",
+   "port": "8003",
+   "routes": [
+    "local-inference-lab/Model-A",
+    "orchestrator-model",
+    "worker-model"
+   ],
+   "model": "local-inference-lab/Model-A",
+   "running": 1,
+   "waiting": 0,
+   "kv": 0.22877666521549844,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 1033625591.0,
+   "gen_total": 9288100.0
+  },
+  {
+   "node": "192.0.2.12",
+   "port": "8001",
+   "routes": [
+    "local-inference-lab/Model-A",
+    "orchestrator-model",
+    "worker-model"
+   ],
+   "model": "local-inference-lab/Model-A",
+   "running": 1,
+   "waiting": 0,
+   "kv": 0.24109710241097104,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 1135211131.0,
+   "gen_total": 9115881.0
+  },
+  {
+   "node": "192.0.2.13",
+   "port": "8002",
+   "routes": [
+    "local-inference-lab/Model-A",
+    "orchestrator-model",
+    "worker-model"
+   ],
+   "model": "local-inference-lab/Model-A",
+   "running": 3,
+   "waiting": 0,
+   "kv": 0.5309871624612661,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 1027257706.0,
+   "gen_total": 8902542.0
+  }
+ ],
+ "serving_proxy_error": null
+}

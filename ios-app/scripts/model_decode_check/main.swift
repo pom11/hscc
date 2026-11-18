@@ -776,6 +776,22 @@ c.assertions("§7_monitor_snapshot", "the App Group holds the projection, never 
 c.checkFails(MonitorSnapshotStore.Snapshot.self, "v1_monitor_snapshot_legacy.json",
              "legacy snapshot blob (nodes carried `host` + raw sample) is rejected outright")
 
+// ---- Cluster-monitor CLI parity (t_61ed3f5e). The checks themselves are in
+// monitor_parity.swift next to this file — Swift forbids top-level statements
+// outside main.swift, so only the calls are here. They compare the shared
+// view-model's formatted cells against goldens that were NOT transcribed:
+// scripts/cluster_monitor_cli_parity.py generated them by running
+// hscc_daemon/cluster_live.py's own host_table() / serving_table() / render()
+// over the same fixture bytes. Read that file's docstring before trusting a
+// green run of these.
+monitorParity(c, fixture: "v1_cluster_monitor_live.json",
+              golden: "v1_cluster_monitor_live.cli.json",
+              text: "v1_cluster_monitor_live.cli.txt")
+monitorParity(c, fixture: "v1_cluster_monitor_edge.json",
+              golden: "v1_cluster_monitor_edge.cli.json",
+              text: "v1_cluster_monitor_edge.cli.txt")
+monitorSampleDecodeShape(c)
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. The exit code is the guard; the words below only
