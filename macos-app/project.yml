@@ -82,6 +82,9 @@ targets:
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      # "Test connection" here runs the same per-address probe as iOS: one row
+      # per saved address, one overall line, one last-working update.
+      - path: ../ios-app/Sources/Shared/ConnectionAddressProbe.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system, so the menu bar app and the iOS widgets share

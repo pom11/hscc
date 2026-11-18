@@ -280,6 +280,9 @@ targets:
       # fleet degraded while the other calls it healthy. Foundation-only.
       - path: Sources/Shared/ClusterNodeTally.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # "Test connection" probes EVERY saved address (one row each) through
+      # this shared implementation, so iOS and macOS report identically.
+      - path: Sources/Shared/ConnectionAddressProbe.swift
       - path: Sources/Shared/WakingActivity.swift
     entitlements:
       path: Sources/HSCC.entitlements

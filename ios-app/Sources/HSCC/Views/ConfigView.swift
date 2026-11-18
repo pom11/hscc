@@ -150,9 +150,12 @@ struct ConfigView: View {
     /// cluster instead of editing the active one. Reset to false on load.
     @State private var addingCluster = false
 
-    // Test-connection state.
+    // Test-connection state. `testReport` holds one row per address (primary +
+    // every fallback, in the operator's order); `testResult` is the overall
+    // line. Both are produced by the one shared `ClusterConnectionTest`.
     @State private var testResult: String?
     @State private var testIsSuccess: Bool?
+    @State private var testReport: ConnectionTestReport?
     @State private var isTesting = false
 
     // Notification toggles — backed by the shared App-Group suite so the
@@ -334,6 +337,28 @@ struct ConfigView: View {
                             Image(systemName: testIsSuccess == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                         }
                         .foregroundColor(testIsSuccess == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                    }
+                    // EVERY address gets a row — not just the first one that
+                    // answered. A dead fallback must be visible here, not on
+                    // the day failover needs it.
+                    if let report = testReport {
+                        ForEach(report.results) { row in
+                            HStack(spacing: Theme.Spacing.sm.rawValue) {
+                                Image(systemName: row.isOK ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundColor(row.isOK ? Theme.Semantic.ok : Theme.Semantic.bad)
+                                Text(row.host)
+                                    .foregroundColor(Theme.Semantic.onSurface)
+                                if report.willUse(row.host) {
+                                    Text("will use")
+                                        .font(.caption2)
+                                        .foregroundColor(Theme.Semantic.accent)
+                                }
+                                Spacer(minLength: 0)
+                                Text(row.detail)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
+                        }
                     }
                 }
 
@@ -652,6 +677,7 @@ struct ConfigView: View {
         fallbackFields = []
         testResult = nil
         testIsSuccess = nil
+        testReport = nil
     }
 
     /// Move one extra address one slot up/down. The list order is the failover
@@ -677,6 +703,11 @@ struct ConfigView: View {
         fallbackFields = settings.fallbackHosts
         portField = settings.port
         tokenField = settings.token ?? ""
+        // A report describes the cluster that was tested. Switching or deleting
+        // clusters must not leave the previous cluster's rows on screen.
+        testResult = nil
+        testIsSuccess = nil
+        testReport = nil
     }
 
     // MARK: - Actions
@@ -722,6 +753,7 @@ struct ConfigView: View {
         isTesting = true
         testResult = nil
         testIsSuccess = nil
+        testReport = nil
         defer { isTesting = false }
 
         // Persist first so the test uses the same settings the app will use.
@@ -749,21 +781,17 @@ struct ConfigView: View {
             return
         }
 
-        // Connect through the shared pairing step so a failed scan is told WHY
-        // (unreachable host vs rejected token vs wrong app version) instead of a
-        // generic transport message. `QRPairingOutcome` is the same surface the
-        // onboarding flow uses, so both paths report identically.
-        let outcome = await QRPairing.test(host: settings.host,
-                                           port: port, token: token,
-                                           fallbacks: settings.fallbackHosts)
-        if case .success = outcome {
-            testResult = outcome.message   // "Connected to <service> v<version>."
-            testIsSuccess = true
-        } else {
-            // Headline + actionable explanation for every non-paired outcome.
-            testResult = "\(outcome.title): \(outcome.message)"
-            testIsSuccess = false
-        }
+        // Probe EVERY address (primary + fallbacks), not just the first one
+        // that answers. The shared implementation returns one row per address
+        // in the operator's order, an overall success line when at least one
+        // address works, and remembers the fastest working address so widgets
+        // and the next request start with it.
+        let report = await ClusterConnectionTest.test(
+            hosts: [settings.host] + settings.fallbackHosts,
+            port: port, token: token)
+        testReport = report
+        testResult = report.overallLine
+        testIsSuccess = report.overallSuccess
     }
 
     // MARK: - Widgets & Live Activities
