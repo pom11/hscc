@@ -444,12 +444,30 @@ cd ios-app
 scripts/merge_base_check.sh     # branch base not too far behind origin/main — run BEFORE review
 scripts/build_check.sh          # full per-target compile
 scripts/model_decode_check.sh   # real models vs the committed live fixtures
+scripts/probes_check.sh         # every *_probe.sh — the gates' own negative proofs
 ```
 
 `merge_base_check.sh` gates the **branch**, not the app: it needs no Xcode and no
 simulator, and it is the one to run first, because every other gate in this repo
 passes happily on a branch whose base is so far behind `main` that the PR is
 already superseded content.
+
+`probes_check.sh` gates the **gates**. Every `scripts/*_probe.sh` is an injection
+probe — it plants a payload that writes a marker file and requires the gate under
+test to refuse it — and a probe nothing references is a negative proof nobody
+runs, which is how `merge_base_check.sh`'s trip-wire ended up untested for four
+orchestrator attempts (t_cedc5f9e). This gate discovers them by **glob**, so a new
+probe needs no wiring and no edit here; the runner refusing a zero-probe set is
+what makes that guarantee worth something. It runs each probe in name order, prints
+one line per probe with its real exit code and its own final verdict line, kills any
+probe that hangs (`PROBES_CHECK_TIMEOUT`, default 900 s — the seconds it prints per
+probe are the number to judge the budget with), and keeps its logs outside the
+checkout. Two conventions keep it honest: a probe must END with an uppercase `PASSED`
+or `FAILED` banner, because an exit 0 with no verdict is indistinguishable from a probe
+that ran nothing; and a probe keeps the `*_probe.sh` leaf rather than the `*_check.sh`
+gate convention — the runner refuses if `build_check.sh` ever starts naming a probe and
+flags a `*_check.sh` file that carries a probe's marker-file signature, so neither
+decision survives only as a comment.
 
 ## Sideloading onto your own device
 
