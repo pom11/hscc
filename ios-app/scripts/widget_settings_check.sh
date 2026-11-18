@@ -622,7 +622,99 @@ screen.setScope(nil, for: .widgetMonitor)
 check("dropping the surface choice re-inherits the fleet default",
       AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "intent-late"))
 
-// 18. restore the host's prior state — the gate must leave nothing behind.
+// 18. APPEARANCE (t_444519ae): the stored style model. Old blobs must decode
+//     to the app Theme default with no migration prompt; a per-surface
+//     override must beat the global style; dropping the override must
+//     re-inherit; and a hex colour must survive its canonical round-trip.
+let themeDefault = WidgetStyle()
+let legacyStyleBlob = AppGroupWidgetSettings(surfaces: [
+    .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+                                          showSections: ["state"]),
+])
+if let oldStyleData = try? JSONEncoder().encode(legacyStyleBlob) {
+    check("an old blob carries no style key",
+          oldStyleData.firstRange(of: Data("\"style\"".utf8)) == nil)
+    if let oldStyle = try? JSONDecoder().decode(AppGroupWidgetSettings.self, from: oldStyleData) {
+        check("old data decodes with no global style (Theme default)",
+              oldStyle.style == nil && oldStyle.resolvedStyle(for: .widgetCluster) == themeDefault)
+        check("old data's untouched surface also resolves to the Theme default",
+              oldStyle.resolvedStyle(for: .widgetMonitor) == themeDefault)
+    } else {
+        check("old data decodes with no global style (Theme default)", false)
+        check("old data's untouched surface also resolves to the Theme default", false)
+    }
+} else {
+    check("an old blob carries no style key", false)
+    check("old data decodes with no global style (Theme default)", false)
+    check("old data's untouched surface also resolves to the Theme default", false)
+}
+
+if let orange = WidgetColor(hex: "#ff5722") {
+    check("6-digit hex gains an opaque alpha", orange.hex == "#FF5722FF")
+    check("hex round-trips through its canonical form", WidgetColor(hex: orange.hex) == orange)
+    check("hex colour round-trips through Codable",
+          (try? JSONDecoder().decode(WidgetColor.self, from: JSONEncoder().encode(orange))) == orange)
+} else {
+    check("6-digit hex gains an opaque alpha", false)
+    check("hex round-trips through its canonical form", false)
+    check("hex colour round-trips through Codable", false)
+}
+if let translucent = WidgetColor(hex: "#11223380") {
+    check("8-digit hex keeps its alpha", translucent.hex == "#11223380"
+          && abs(translucent.alpha - 128.0 / 255.0) < 0.0001)
+    check("transparent is a real stored colour", WidgetColor.transparent.hex == "#00000000")
+} else {
+    check("8-digit hex keeps its alpha", false)
+    check("transparent is a real stored colour", false)
+}
+check("invalid hex is rejected", WidgetColor(hex: "#GGGGGG") == nil)
+check("a partial style decodes missing fields to the Theme default",
+      (try? JSONDecoder().decode(WidgetStyle.self, from: Data("{}".utf8))) == themeDefault)
+
+let globalStyle = WidgetStyle.presets.first(where: { preset in preset.id == "highContrast" })!.style
+let surfaceStyle = WidgetStyle.presets.first(where: { preset in preset.id == "monoTerminal" })!.style
+let styled = AppGroupWidgetSettings(surfaces: [
+    .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+                                          showSections: ["state"], style: surfaceStyle),
+    .widgetMonitor: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+                                          showSections: ["state"]),
+], style: globalStyle)
+check("per-surface override beats the global style",
+      styled.resolvedStyle(for: .widgetCluster) == surfaceStyle)
+check("a surface with no override inherits the global style",
+      styled.resolvedStyle(for: .widgetMonitor) == globalStyle)
+check("style(for:) reports only a real override",
+      styled.style(for: .widgetCluster) == surfaceStyle
+      && styled.style(for: .widgetMonitor) == nil)
+var droppedOverride = styled
+droppedOverride.surfaces[.widgetCluster] = WidgetSurfaceSettings(
+    isActive: true, refreshMinutes: 5, showSections: ["state"])
+check("Use global (no override) falls back to the global style",
+      droppedOverride.resolvedStyle(for: .widgetCluster) == globalStyle
+      && droppedOverride.style(for: .widgetCluster) == nil)
+check("no global style at all resolves to the Theme default",
+      AppGroupWidgetSettings(surfaces: [:]).resolvedStyle(for: .widgetMonitor) == themeDefault)
+
+// The app-side write path the editor drives, against the REAL suite domain.
+let appearanceSeed = AppGroupWidgetSettings(surfaces: [:], style: globalStyle)
+if let appearanceData = try? JSONEncoder().encode(appearanceSeed) {
+    realSuite.set(appearanceData, forKey: AppGroupWidgetSettings.storageKey)
+}
+let appearanceScreen = WidgetSettingsStore()
+check("the store reads the global style", appearanceScreen.globalStyle == globalStyle)
+appearanceScreen.setStyle(surfaceStyle, for: .widgetMonitor)
+check("a per-surface style write lands where the widgets read",
+      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == surfaceStyle)
+check("the store resolves the override", appearanceScreen.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
+appearanceScreen.useGlobalStyle(for: .widgetMonitor)
+check("Use global drops the override and re-inherits",
+      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == nil
+      && appearanceScreen.resolvedStyle(for: .widgetMonitor) == globalStyle)
+appearanceScreen.setGlobalStyle(surfaceStyle)
+check("a global style write persists to the shared blob",
+      AppGroupWidgetSettings.load()?.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
+
+// 19. restore the host's prior state — the gate must leave nothing behind.
 if let priorBlob { realSuite.set(priorBlob, forKey: AppGroupWidgetSettings.storageKey) }
 else { realSuite.removeObject(forKey: AppGroupWidgetSettings.storageKey) }
 let restoredEqual = UserDefaults(suiteName: AppGroup.suiteName)!
@@ -743,6 +835,27 @@ cok "the screen renders one row per registry surface" "ForEach(WidgetSurfaceKind
 cok "every surface row opens the one shared editor" "WidgetSurfaceEditor(kind: kind, store: widgetSettings)"
 cok "the shared editor offers the pause toggle" 'Toggle("Active", isOn: Binding('
 cok "the shared editor offers the refresh cadence picker" 'Picker("Refresh", selection: Binding('
+# t_444519ae: the Appearance editor is a real row on the settings screen, and
+# its writes go through the shared store (not a second App Group key).
+cok "the settings screen links to the appearance editor" "WidgetAppearanceView()"
+cok "the settings screen has an Appearance section" 'Text("Appearance")'
+
+APPEARANCE="Sources/HSCC/Views/WidgetAppearanceView.swift"
+[ -f "$APPEARANCE" ] || { echo "appearance editor missing: $APPEARANCE" >&2; exit 1; }
+aok() { grep -q -- "$2" "$APPEARANCE" && echo "  ok: $1" || gfail "$1"; }
+aok "the appearance editor writes the global style through the store" "store.setGlobalStyle("
+aok "the per-surface editor offers Use global" 'Toggle("Use global style"'
+aok "Use global drops the override instead of copying the style" "store.useGlobalStyle(for: kind)"
+aok "the editor offers ColorPickers" "ColorPicker("
+aok "the editor offers the model's presets" "WidgetStyle.presets"
+aok "the editor has a live preview" "WidgetStylePreview("
+aok "the preview draws a small, medium and lock-screen shape" "lockScreen"
+grep -q "WidgetCenter.shared.reloadAllTimelines()" Sources/HSCC/WidgetSettingsStore.swift \
+  && echo "  ok: every style write reloads WidgetKit timelines" \
+  || gfail "every style write reloads WidgetKit timelines"
+grep -q "func widgetStyle(_ style: WidgetStyle)" Sources/HSCC/Views/Theme.swift \
+  && echo "  ok: the shared SwiftUI style modifier part 2 applies exists" \
+  || gfail "the shared SwiftUI style modifier part 2 applies exists"
 
 # ---- surface coverage (t_2b3084bb) -----------------------------------------
 # The rows above are driven by WidgetSurfaceKind.allCases, so a surface whose

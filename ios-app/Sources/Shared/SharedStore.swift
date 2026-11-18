@@ -468,6 +468,13 @@ struct WidgetSurfaceSettings: Codable, Equatable {
     /// existed decodes to nil (an absent key is not a decode failure), so an
     /// old install inherits instead of breaking.
     var scope: WidgetScope? = nil
+    /// Optional appearance override for THIS surface (t_444519ae). nil means
+    /// "Use global": the operator never made a choice of its own, so
+    /// `resolvedStyle(for:)` falls back to `AppGroupWidgetSettings.style`.
+    /// Optional on purpose: a blob written before this field existed decodes
+    /// to nil, and old installs keep rendering the default Theme with no
+    /// migration prompt.
+    var style: WidgetStyle? = nil
 }
 
 /// The full registry: one entry per surface kind. Stored as one JSON blob.
@@ -486,6 +493,12 @@ struct AppGroupWidgetSettings: Codable, Equatable {
     /// `WidgetSurfaceSettings.scope`), and `scope(for:)` is the one call that
     /// resolves the two. Nothing about the intent's write path changes.
     var scope: WidgetScope? = nil
+    /// The GLOBAL widget appearance every surface uses unless it has its own
+    /// override (t_444519ae). nil means the app Theme default — so a blob
+    /// written before this field existed needs no migration and renders
+    /// exactly as it did. Stored in the same blob (not a second key) so the
+    /// app's write and every extension's read stay one path.
+    var style: WidgetStyle? = nil
 
     /// The key used to store/read this blob in the App Group suite.
     static let storageKey = AppGroup.widgetSettingsKey
@@ -528,7 +541,28 @@ struct AppGroupWidgetSettings: Codable, Equatable {
                                      // the operator's per-widget choice on
                                      // every read (widget_settings_check.sh
                                      // pins this line with an executed case).
-                                     scope: s.scope)
+                                     scope: s.scope,
+                                     // The appearance override rides the same
+                                     // bounding pass: an unbounded read that
+                                     // dropped it would silently repaint the
+                                     // surface back to the global style.
+                                     style: s.style)
+    }
+
+    /// The style THIS surface stores for itself, or nil when it follows the
+    /// global style (t_444519ae). The nil/empty distinction is the "Use
+    /// global" switch: absence means inherit, never "the default style".
+    func style(for kind: WidgetSurfaceKind) -> WidgetStyle? {
+        surfaces[kind]?.style
+    }
+
+    /// What one surface actually renders: its own override when set, the
+    /// global style otherwise, and the app Theme default when neither exists.
+    /// ONE read path for the settings preview, the widget extensions (part 2)
+    /// and the Live Activity views, so no surface can disagree with the
+    /// preview the operator just saw.
+    func resolvedStyle(for kind: WidgetSurfaceKind) -> WidgetStyle {
+        (surfaces[kind]?.style ?? style ?? WidgetStyle()).normalized
     }
 
     /// The scope ONE surface renders (t_3dd38411). Its own choice when the
@@ -763,6 +797,268 @@ extension WidgetScope {
         suite.set(data, forKey: AppGroupWidgetSettings.storageKey)
         return true
     }
+}
+
+// ---------------------------------------------------------------------------
+// Widget appearance — one style model for every widget / Live Activity
+// (card t_444519ae, part 1: model + storage + editor)
+// ---------------------------------------------------------------------------
+//
+// The operator asked for widgets "fully customisable, colour wise, fonts and
+// all". This is the stored model and the resolution rule; part 2 applies the
+// SwiftUI bridge to the widget bodies themselves. Colours are hex strings
+// (RGBA) so the value is stable in JSON and the App Group — a `Color` is a UI
+// type and does not belong in the shared store.
+//
+// Resolution is two levels, matching scope: a surface's own override wins,
+// otherwise the GLOBAL style, otherwise the app Theme default. Absence of the
+// stored style key is the "Use global" state, never a decode failure.
+
+/// One colour as canonical `#RRGGBBAA` — opaque by default when the operator
+/// (or an older preset) supplies only six digits.
+struct WidgetColor: Codable, Equatable, Hashable {
+    /// Canonical uppercase `#RRGGBBAA`, the only shape ever encoded.
+    let hex: String
+
+    /// Parse `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA` (leading `#` optional)
+    /// and store the canonical RGBA form. Invalid input is nil, so a corrupt
+    /// blob falls back rather than rendering a random colour.
+    init?(hex raw: String) {
+        guard let canonical = WidgetColor.canonical(raw) else { return nil }
+        self.hex = canonical
+    }
+
+    /// Components in 0...1; clamped so a slider can never store an out-of-range
+    /// channel.
+    init(r: Double, g: Double, b: Double, a: Double = 1) {
+        self.hex = WidgetColor.formatted(red: r, green: g, blue: b, alpha: a)
+    }
+
+    /// Opaque black — the default widget background.
+    static let ink = WidgetColor(r: 0, g: 0, b: 0)
+    /// Opaque white — the default primary text.
+    static let paper = WidgetColor(r: 1, g: 1, b: 1)
+    /// Fully transparent background (alpha 0).
+    static let transparent = WidgetColor(r: 0, g: 0, b: 0, a: 0)
+
+    var red: Double { WidgetColor.components(hex).0 }
+    var green: Double { WidgetColor.components(hex).1 }
+    var blue: Double { WidgetColor.components(hex).2 }
+    var alpha: Double { WidgetColor.components(hex).3 }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let colour = WidgetColor(hex: raw) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Expected an #RRGGBBAA colour, got \(raw)")
+        }
+        self = colour
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(hex)
+    }
+
+    private static func canonical(_ raw: String) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("#") { value.removeFirst() }
+        guard !value.isEmpty, value.allSatisfy({ $0.isHexDigit }) else { return nil }
+        switch value.count {
+        case 3:
+            // RGB -> RRGGBB, then opaque.
+            value = value.map { "\($0)\($0)" }.joined() + "FF"
+        case 4:
+            // RGBA -> RRGGBBAA.
+            value = value.map { "\($0)\($0)" }.joined()
+        case 6:
+            value += "FF"
+        case 8:
+            break
+        default:
+            return nil
+        }
+        return "#" + value.uppercased()
+    }
+
+    private static func formatted(red: Double, green: Double, blue: Double,
+                                  alpha: Double) -> String {
+        func channel(_ value: Double) -> Int {
+            Int((min(max(value, 0), 1) * 255).rounded())
+        }
+        return String(format: "#%02X%02X%02X%02X",
+                      channel(red), channel(green), channel(blue), channel(alpha))
+    }
+
+    private static func components(_ hex: String) -> (Double, Double, Double, Double) {
+        let digits = Array(hex.dropFirst())
+        func channel(_ offset: Int) -> Double {
+            guard offset + 2 <= digits.count else { return 0 }
+            let pair = String(digits[offset..<(offset + 2)])
+            return Double(UInt8(pair, radix: 16) ?? 0) / 255
+        }
+        return (channel(0), channel(2), channel(4), channel(6))
+    }
+}
+
+/// The appearance of one widget / Live Activity surface. Every field has a
+/// default equal to the app Theme (black + #FF5722), and partial/old data
+/// decodes field-by-field to that default rather than throwing.
+struct WidgetStyle: Codable, Equatable {
+    enum FontDesign: String, Codable, CaseIterable {
+        case standard = "default"
+        case rounded
+        case monospaced
+        case serif
+
+        var displayName: String {
+            switch self {
+            case .standard: return "Default"
+            case .rounded: return "Rounded"
+            case .monospaced: return "Monospaced"
+            case .serif: return "Serif"
+            }
+        }
+    }
+
+    enum FontWeight: String, Codable, CaseIterable {
+        case regular
+        case medium
+        case semibold
+        case bold
+
+        var displayName: String {
+            switch self {
+            case .regular: return "Regular"
+            case .medium: return "Medium"
+            case .semibold: return "Semibold"
+            case .bold: return "Bold"
+            }
+        }
+    }
+
+    enum Density: String, Codable, CaseIterable {
+        case compact
+        case regular
+
+        var displayName: String {
+            switch self {
+            case .compact: return "Compact"
+            case .regular: return "Regular"
+            }
+        }
+    }
+
+    var background: WidgetColor
+    var primaryText: WidgetColor
+    var secondaryText: WidgetColor
+    var accent: WidgetColor
+    var statusOk: WidgetColor
+    var statusWarn: WidgetColor
+    var statusBad: WidgetColor
+    var fontDesign: FontDesign
+    var fontWeight: FontWeight
+    /// Multiplier applied to every text size, clamped to 0.8...1.4.
+    var textScale: Double
+    var density: Density
+    var showHeader: Bool
+    var showIcons: Bool
+
+    init(background: WidgetColor = .ink,
+         primaryText: WidgetColor = .paper,
+         secondaryText: WidgetColor = WidgetColor(hex: "#9A9A9AFF")!,
+         accent: WidgetColor = WidgetColor(hex: "#FF5722FF")!,
+         statusOk: WidgetColor = WidgetColor(hex: "#4ADE80FF")!,
+         statusWarn: WidgetColor = WidgetColor(hex: "#FFC857FF")!,
+         statusBad: WidgetColor = WidgetColor(hex: "#FF6B6BFF")!,
+         fontDesign: FontDesign = .standard,
+         fontWeight: FontWeight = .regular,
+         textScale: Double = 1.0,
+         density: Density = .regular,
+         showHeader: Bool = true,
+         showIcons: Bool = true) {
+        self.background = background
+        self.primaryText = primaryText
+        self.secondaryText = secondaryText
+        self.accent = accent
+        self.statusOk = statusOk
+        self.statusWarn = statusWarn
+        self.statusBad = statusBad
+        self.fontDesign = fontDesign
+        self.fontWeight = fontWeight
+        self.textScale = textScale
+        self.density = density
+        self.showHeader = showHeader
+        self.showIcons = showIcons
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let base = WidgetStyle()
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? container.decode(T.self, forKey: key)) ?? fallback
+        }
+        background = value(.background, base.background)
+        primaryText = value(.primaryText, base.primaryText)
+        secondaryText = value(.secondaryText, base.secondaryText)
+        accent = value(.accent, base.accent)
+        statusOk = value(.statusOk, base.statusOk)
+        statusWarn = value(.statusWarn, base.statusWarn)
+        statusBad = value(.statusBad, base.statusBad)
+        fontDesign = value(.fontDesign, base.fontDesign)
+        fontWeight = value(.fontWeight, base.fontWeight)
+        textScale = min(max(value(.textScale, base.textScale), 0.8), 1.4)
+        density = value(.density, base.density)
+        showHeader = value(.showHeader, base.showHeader)
+        showIcons = value(.showIcons, base.showIcons)
+    }
+
+    /// Clamp a style that reached the model from outside the editor (a hand-
+    /// written blob, a future migration) before any surface renders it.
+    var normalized: WidgetStyle {
+        var copy = self
+        copy.textScale = min(max(textScale, 0.8), 1.4)
+        return copy
+    }
+
+    /// What one surface renders, resolved through the shared store: its own
+    /// override, then the global style, then the app Theme default. The ONE
+    /// helper part 2's rendering applies.
+    static func resolved(for kind: WidgetSurfaceKind,
+                         in settings: AppGroupWidgetSettings? = AppGroupWidgetSettings.load())
+        -> WidgetStyle {
+        (settings ?? AppGroupWidgetSettings.defaults()).resolvedStyle(for: kind)
+    }
+
+    /// The named presets the editor offers. Kept on the model (not the view) so
+    /// every preset is testable data, and "Default" is literally `WidgetStyle()`.
+    struct Preset: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let style: WidgetStyle
+    }
+
+    static let presets: [Preset] = [
+        Preset(id: "default", name: "Default black/orange", style: WidgetStyle()),
+        Preset(id: "highContrast", name: "High contrast",
+               style: WidgetStyle(primaryText: .paper,
+                                  secondaryText: WidgetColor(hex: "#D7D7D7FF")!,
+                                  statusOk: WidgetColor(hex: "#00FF66FF")!,
+                                  statusWarn: WidgetColor(hex: "#FFD400FF")!,
+                                  statusBad: WidgetColor(hex: "#FF3B30FF")!,
+                                  fontWeight: .semibold,
+                                  textScale: 1.05)),
+        Preset(id: "transparent", name: "Transparent",
+               style: WidgetStyle(background: .transparent)),
+        Preset(id: "monoTerminal", name: "Mono terminal",
+               style: WidgetStyle(secondaryText: WidgetColor(hex: "#7CFFB2FF")!,
+                                  fontDesign: .monospaced,
+                                  textScale: 0.95,
+                                  density: .compact,
+                                  showIcons: false)),
+    ]
 }
 
 /// A lightweight read of the token from the SHARED Keychain access group.

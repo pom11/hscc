@@ -370,6 +370,18 @@ struct ConfigView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        WidgetAppearanceView()
+                    } label: {
+                        Label("Appearance", systemImage: "paintpalette")
+                    }
+                } header: {
+                    Text("Appearance")
+                } footer: {
+                    Text("Customise the colour, fonts, size, density and visible chrome of every widget and Live Activity — one global style, with an optional override per surface.")
+                }
+
+                Section {
                     if let tokenSaveFailure = settings.tokenSaveFailure {
                         Label(tokenSaveFailure, systemImage: "exclamationmark.triangle.fill")
                             .font(.footnote)

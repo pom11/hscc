@@ -582,6 +582,100 @@ struct HSBanner: View {
     }
 }
 
+// MARK: - Widget appearance bridge (card t_444519ae)
+//
+// The stored model is Foundation-only (`WidgetStyle` in SharedStore.swift) so
+// the App Group blob is UI-free. This is the ONE SwiftUI bridge part 2's
+// widget bodies and the Settings preview share: resolve a style, hand it down
+// through the environment, then read colours/fonts from it. No widget body
+// changes in part 1 beyond the preview this file powers.
+
+extension WidgetColor {
+    /// The SwiftUI colour for this stored RGBA value.
+    var color: Color {
+        Color(red: red, green: green, blue: blue, opacity: alpha)
+    }
+}
+
+extension WidgetStyle {
+    var backgroundColor: Color { background.color }
+    var primaryTextColor: Color { primaryText.color }
+    var secondaryTextColor: Color { secondaryText.color }
+    var accentColor: Color { accent.color }
+    var okColor: Color { statusOk.color }
+    var warnColor: Color { statusWarn.color }
+    var badColor: Color { statusBad.color }
+
+    var swiftUIFontDesign: Font.Design {
+        switch fontDesign {
+        case .standard: return .default
+        case .rounded: return .rounded
+        case .monospaced: return .monospaced
+        case .serif: return .serif
+        }
+    }
+
+    var swiftUIFontWeight: Font.Weight {
+        switch fontWeight {
+        case .regular: return .regular
+        case .medium: return .medium
+        case .semibold: return .semibold
+        case .bold: return .bold
+        }
+    }
+
+    /// Apply the operator's text-size scale to a point size. One call site per
+    /// text role, so every surface scales by the same amount.
+    func scaled(_ size: CGFloat) -> CGFloat {
+        max(1, size * CGFloat(textScale))
+    }
+
+    /// A font in the operator's chosen design/weight, scaled by `textScale`.
+    func font(size: CGFloat, weight: Font.Weight? = nil) -> Font {
+        Font.system(size: scaled(size),
+                    weight: weight ?? swiftUIFontWeight,
+                    design: swiftUIFontDesign)
+    }
+
+    /// Density as real geometry: compact trims the padding and the corner.
+    var contentPadding: CGFloat { density == .compact ? 8 : 12 }
+    var cornerRadius: CGFloat { density == .compact ? 10 : 14 }
+}
+
+private struct WidgetStyleEnvironmentKey: EnvironmentKey {
+    static let defaultValue = WidgetStyle()
+}
+
+extension EnvironmentValues {
+    /// The resolved appearance for a widget surface. Part 2 applies
+    /// `.widgetStyle(WidgetStyle.resolved(for: kind))` at the surface root and
+    /// its body reads this instead of hardcoded Theme colours.
+    var widgetStyle: WidgetStyle {
+        get { self[WidgetStyleEnvironmentKey.self] }
+        set { self[WidgetStyleEnvironmentKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Hand the resolved appearance to a widget / Live Activity body.
+    func widgetStyle(_ style: WidgetStyle) -> some View {
+        environment(\.widgetStyle, style)
+    }
+
+    /// The shared widget chrome: resolved background, corner and padding. Part
+    /// 2's bodies apply this once at the root; the preview uses the same
+    /// modifier so what the operator sees is what ships.
+    func widgetSurfaceChrome(_ style: WidgetStyle) -> some View {
+        self
+            .padding(style.contentPadding)
+            .background(
+                RoundedRectangle(cornerRadius: style.cornerRadius, style: .continuous)
+                    .fill(style.backgroundColor)
+            )
+            .foregroundColor(style.primaryTextColor)
+    }
+}
+
 /// A small reusable banner a view overlays when rendering stale last-known
 /// data: the age ("showing state from 6m ago") + the real reason the fetch
 /// failed. Tapping refetches. This is `HSBanner`'s offline shape — one

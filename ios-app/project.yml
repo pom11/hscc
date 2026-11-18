@@ -174,6 +174,10 @@ targets:
       - path: Sources/HSCC/BoardProgressActivityDriver.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
+      # Widget / Live Activity appearance editor (t_444519ae): the global style
+      # plus a per-surface override, with the live small/medium/lock-screen
+      # preview. The shared model lives in SharedStore.swift.
+      - path: Sources/HSCC/Views/WidgetAppearanceView.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       # ClusterView.swift retired as a screen (t_65d791da, spec §5 + §8): its
