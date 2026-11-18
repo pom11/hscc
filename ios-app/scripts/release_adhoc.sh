@@ -237,7 +237,7 @@ execute "${archive_cmd[@]}"
 step "Export the Ad Hoc IPA"
 if [ "$DRY_RUN" = "1" ]; then
   note "[dry-run] would write $EXPORT_OPTIONS:"
-  note "  method=release-testing signingStyle=automatic teamID=$TEAM_FOR_PRINT compileBitcode=NO thinning=none"
+  note "  method=release-testing signingStyle=automatic teamID=$TEAM_FOR_PRINT compileBitcode=NO thinning=<none>"
 else
   cat > "$EXPORT_OPTIONS" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -253,7 +253,7 @@ else
 	<key>compileBitcode</key>
 	<false/>
 	<key>thinning</key>
-	<string>none</string>
+	<string>&lt;none&gt;</string>
 </dict>
 </plist>
 PLIST

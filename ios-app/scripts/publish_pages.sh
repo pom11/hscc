@@ -141,9 +141,17 @@ if gh api "$PAGES_API" >/dev/null 2>&1; then
   printf '%s' "$PAGES_BODY" | gh api --method PUT "$PAGES_API" --input - >/dev/null
   echo "    Pages already enabled; source set to gh-pages"
 else
-  printf '%s' '{"source":{"branch":"gh-pages","path":"/"}}' \
-    | gh api --method POST "$PAGES_API" --input - >/dev/null
-  echo "    Pages enabled from gh-pages"
+  # A first push to gh-pages can enable Pages on its own a moment later, so
+  # the POST may answer 409 "already enabled"; re-read before calling it fatal.
+  if printf '%s' '{"source":{"branch":"gh-pages","path":"/"}}' \
+      | gh api --method POST "$PAGES_API" --input - >/dev/null 2>&1; then
+    echo "    Pages enabled from gh-pages"
+  elif gh api "$PAGES_API" >/dev/null 2>&1; then
+    echo "    Pages was enabled meanwhile (push-triggered); source is gh-pages"
+  else
+    echo "error: could not enable GitHub Pages on $REPO" >&2
+    exit 1
+  fi
 fi
 
 step "Published"
