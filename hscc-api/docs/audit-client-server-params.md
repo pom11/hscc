@@ -105,9 +105,9 @@ The gate lives in `hscc-api/tests/test_contract_swift_routes.py`:
 * `test_every_client_post_server_handler_is_confirm_gated` — server always checks it.
 * `test_every_required_query_param_is_sent` — the query-param matrix (sessions `profile`).
 * `test_every_required_body_field_is_sent` — the body-field matrix (this run).
-* `test_contract_matrix_rows_are_live_client_routes` — every matrix row still
+* `test_matrices_name_routes_the_client_still_calls` — every matrix row still
   names a route the client calls, so a retired screen fails as a STALE ROW
-  instead of posing as "the client omits a required param" (t_80e185d2).
+  instead of posing as "the client omits a required param" (t_f09436f1, PR #351).
 
 Any drift in either direction — client drops a required param, or the server
 starts requiring one the client doesn't send — fails the suite. Verified
