@@ -549,21 +549,15 @@ def _canonical_route(method, path):
     return (method.upper(), _PLACEHOLDER_SEG.sub("{param}", path))
 
 
-def _doc_table_rows(doc_lines, heading_prefix):
-    """Parse the markdown table under `heading_prefix` into
-    ``{canonical_route: frozenset(required_fields)}``.
+def _doc_table_cells(doc_lines, heading_prefix):
+    """Yield the stripped cell list of each DATA row of the markdown table under
+    ``heading_prefix``.
 
-    Pipe-split, not prose-matched: cell 0 is ``METHOD /path``, cell 1 is the
-    comma-separated required fields. The header and ``|---|`` separator rows are
-    skipped, and the scan STOPS at the next heading — that is what keeps the
-    retired-rows table (an intentional superset) out of the comparison.
-
-    A row whose first cell is not a single ``METHOD /path`` pair is kept under a
-    sentinel key so it surfaces as a doc-only row rather than being skipped: the
-    doc is evidence, and a row this parser cannot read is a row the gate cannot
-    clear.
+    Pipe-split, not prose-matched. The header row and the ``|---|`` separator row
+    are skipped, and the scan STOPS at the next heading — that is what keeps the
+    doc's retired-rows table (an intentional superset) out of every comparison
+    built on this.
     """
-    rows = {}
     in_section = False
     for raw in doc_lines:
         line = raw.strip()
@@ -571,7 +565,7 @@ def _doc_table_rows(doc_lines, heading_prefix):
             in_section = line.startswith(heading_prefix)
             continue
         if line.startswith("#"):
-            break
+            return
         if not line.startswith("|"):
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
@@ -579,6 +573,21 @@ def _doc_table_rows(doc_lines, heading_prefix):
             continue
         if cells[0].lower() == "client route":
             continue
+        yield cells
+
+
+def _doc_table_rows(doc_lines, heading_prefix):
+    """``{canonical_route: frozenset(required_fields)}`` for that table, using
+    the pipe-split contract: cell 0 is ``METHOD /path``, cell 1 is the
+    comma-separated required fields.
+
+    A row whose first cell is not a single ``METHOD /path`` pair is kept under a
+    sentinel key so it surfaces as a doc-only row rather than being skipped: the
+    doc is evidence, and a row this parser cannot read is a row the gate cannot
+    clear.
+    """
+    rows = {}
+    for cells in _doc_table_cells(doc_lines, heading_prefix):
         parts = cells[0].split()
         if len(parts) != 2:
             route = ("?", cells[0])
@@ -643,6 +652,98 @@ def test_audit_doc_live_tables_mirror_the_matrices():
         f"{AUDIT_DOC_PATH} no longer mirrors the contract matrices. The "
         f"matrices in this file are the source of truth; the doc mirrors them.\n"
         + "\n".join(report)
+    )
+
+
+# The optional half the card named: the citation anchors themselves.
+#
+# `file.py:<line> (handler)` is the required citation form here, and it is the
+# form because the anchors had ALREADY drifted once by the time t_80e185d2 read
+# them (`:199`/`:303`/`1304-1310` were all pre-drift) — a wrong anchor is worse
+# than no anchor, because it sends the next reader to the wrong code carrying the
+# authority of a citation. The mirror gate above proves the ROWS agree; it says
+# nothing about whether the line numbers in them still point anywhere.
+#
+# Asserting "the cited line contains the handler NAME" — the card's wording —
+# would be wrong and would fail a correct doc: the name sits on the `def`, not on
+# the 400 site. `routes_actions.py:230` reads `data = _action_fields(...)` while
+# `handle_create_card` starts at :228. What "this anchor still points into that
+# handler" actually means is that the cited line/range falls inside the named
+# handler's def..end span, and `ast` gives that span exactly, with no
+# line-number guessing.
+#
+# Live tables only. The retired table's anchors rot identically but its cells are
+# compound (`routes_memory.py:342, :346`; `routes_actions.py:434
+# handle_card_close, :464 handle_card_edit`) — parsing those is its own change
+# with its own false-positive risk, deliberately not taken here.
+
+_CITATION_RE = re.compile(r"\b([A-Za-z0-9_]+\.py):(\d+)(?:-(\d+))?")
+# The handler a citation names: ``(`_validate_prompt`)`` / ``(handle_create_card)``.
+_CITED_HANDLER_RE = re.compile(r"\(\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*\)")
+
+
+def _def_span(path, name):
+    """``(first_line, last_line)`` of the def named ``name`` in ``path``, else None."""
+    tree = ast.parse(open(path).read())
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name):
+            if node.lineno is None or node.end_lineno is None:
+                return None
+            return node.lineno, node.end_lineno
+    return None
+
+
+def test_audit_doc_citations_still_point_inside_their_handler():
+    """Every ``file.py:<line> (`handler`)`` in the doc's two LIVE tables must
+    still resolve: the file exists, the cited line(s) are inside it, the handler
+    it names still exists, and the cited range falls inside that handler's
+    def..end span.
+
+    A citation with no handler name fails too — the parenthesised handler is part
+    of the required citation form, and without it the anchor is unverifiable
+    (which is exactly how the pre-#355 anchors stayed quietly wrong).
+    """
+    doc_lines = open(f"{_REPO_ROOT}/{AUDIT_DOC_PATH}").read().split("\n")
+    problems = []
+    for heading, _matrix in _LIVE_DOC_TABLES:
+        for cells in _doc_table_cells(doc_lines, heading):
+            route, cite = cells[0], (cells[2] if len(cells) > 2 else "")
+            found = _CITATION_RE.search(cite)
+            if not found:
+                problems.append((route, f"no `file.py:<line>` citation in {cite!r}"))
+                continue
+            fname, first = found.group(1), int(found.group(2))
+            last = int(found.group(3)) if found.group(3) else first
+            modpath = f"{_REPO_ROOT}/hscc-api/{fname}"
+            if not os.path.exists(modpath):
+                problems.append((route, f"{fname} does not exist"))
+                continue
+            total = len(open(modpath).read().split("\n"))
+            if last > total:
+                problems.append((route, f"{fname}:{last} is past EOF "
+                                         f"({total} lines)"))
+                continue
+            named = _CITED_HANDLER_RE.search(cite)
+            if not named:
+                problems.append((route, f"{fname}:{first} names no handler — "
+                                         f"required form is "
+                                         f"`file.py:LINE (`handler`)`"))
+                continue
+            handler = named.group(1)
+            span = _def_span(modpath, handler)
+            if span is None:
+                problems.append((route, f"no def named {handler!r} in {fname}"))
+                continue
+            if not (span[0] <= first and last <= span[1]):
+                problems.append((route, f"{fname}:{first}-{last} falls OUTSIDE "
+                                         f"{handler}() (def at {span[0]}-"
+                                         f"{span[1]}) — the anchor drifted"))
+    assert not problems, (
+        f"{AUDIT_DOC_PATH} has citation anchor(s) that no longer point into the "
+        f"handler they name. Re-point the line (through api_server.ROUTES, not "
+        f"by guessing) — do not delete the citation to make this pass:\n"
+        + "\n".join(f"  {route}: {why}" for route, why in problems)
     )
 
 

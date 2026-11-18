@@ -34,7 +34,7 @@ gates below.
 
 | client route | required query param | server handler |
 |---|---|---|
-| GET /v1/sessions | profile | routes_sessions.py:202 |
+| GET /v1/sessions | profile | routes_sessions.py:202 (`handle_sessions_list`) |
 
 Every other GET the client calls — ping, cluster/status|hosts|monitor|jobs|info,
 health, fleet/throughput|stats|streams, autoscale, standup, cards, card-detail,
@@ -49,10 +49,10 @@ satisfied or correctly optional-defaulted.
 
 | client route | required body fields | server handler |
 |---|---|---|
-| POST /v1/cards | board, title | routes_actions.py:230 |
-| POST /v1/cluster/stop | container_id | routes_actions.py:334 |
-| POST /v1/sessions/{id}/retire | profile | routes_sessions.py:254 |
-| POST /v1/sessions/{id}/compact | profile | routes_sessions.py:293 |
+| POST /v1/cards | board, title | routes_actions.py:230 (`handle_create_card`) |
+| POST /v1/cluster/stop | container_id | routes_actions.py:334 (`handle_cluster_stop`) |
+| POST /v1/sessions/{id}/retire | profile | routes_sessions.py:254 (`handle_sessions_retire`) |
+| POST /v1/sessions/{id}/compact | profile | routes_sessions.py:293 (`handle_sessions_compact`) |
 | POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1970-1975 (`_validate_prompt`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
@@ -108,10 +108,21 @@ The gate lives in `hscc-api/tests/test_contract_swift_routes.py`:
 * `test_matrices_name_routes_the_client_still_calls` — every matrix row still
   names a route the client calls, so a retired screen fails as a STALE ROW
   instead of posing as "the client omits a required param" (t_f09436f1, PR #351).
+* `test_audit_doc_live_tables_mirror_the_matrices` — **this document's two live
+  tables equal the matrices**, in both directions: every matrix row present with
+  the same required set, and no row here naming a route absent from a matrix. The
+  retired-rows section above is out of scope (the parser stops at the next
+  heading), so it stays the intentional superset it is (t_5f33be1d).
+* `test_audit_doc_citations_still_point_inside_their_handler` — every
+  `file.py:<line> (`handler`)` in those two tables still resolves: the file
+  exists, the line is inside it, the named handler still exists, and the cited
+  range falls inside that handler's `def`..`end` span (t_5f33be1d).
 
 Any drift in either direction — client drops a required param, or the server
 starts requiring one the client doesn't send — fails the suite. Verified
 non-vacuous by inspecting the exact payload keys each client function produces,
 and (t_80e185d2) by mutation: adding a field the client does not send still fails
 `test_every_required_body_field_is_sent`, and adding a row for a route the client
-does not call fails the liveness gate.
+does not call fails the liveness gate. The two doc gates above were likewise
+mutation-probed (t_5f33be1d, 9/9 as expected), including the negative case that a
+row added to the retired-rows section must NOT fail anything.
