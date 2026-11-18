@@ -2,19 +2,21 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// Cluster widget views — small, medium, and the three Lock Screen accessories.
+// Cluster widget views — small, medium, large, and the three Lock Screen
+// accessories.
 //
-// One `ClusterEntry`, five layouts. The families differ only in how much of the
+// One `ClusterEntry`, six layouts. The families differ only in how much of the
 // entry fits: the accessories get the node gauge, the models count and one line
 // of metrics; the small tile adds the topology glyph and the board row; the
-// medium adds the metric strip and the idle countdown. Nothing here invents a
-// number — every token renders an entry field or the em dash.
+// medium adds the metric strip and the idle countdown; the large tile gives
+// every one of those a row of its own instead of a strip. Nothing here invents
+// a number — every token renders an entry field or the em dash.
 //
 // The text rules are in `ClusterMetricText` (pure Foundation, no `Color`) so
 // `scripts/cluster_widget_check.sh` can execute them against the committed
 // monitor fixture and assert what a Lock Screen line actually says. The heat
-// bands are `ClusterMetricHeat`'s (in `ClusterWidget.swift`), mapped to
-// `Theme.Semantic` here and nowhere else.
+// bands are `ClusterMetricHeat`'s (in `ClusterWidgetMetrics.swift`, where they
+// moved with the projection), mapped to `Theme.Semantic` here and nowhere else.
 // ---------------------------------------------------------------------------
 
 /// The Home Screen cluster widget.
@@ -30,10 +32,14 @@ struct ClusterWidget: Widget {
         }
         .configurationDisplayName("Cluster")
         .description("Nodes up, models served, GPU, temperature and load.")
-        // t_56b910c8 added the Lock Screen families. `accessoryCorner` is not
-        // offered: it is the Smart Stack glance surface, and a 4-node topology
-        // glyph plus a gauge does not survive that renderer's constraints.
-        .supportedFamilies([.systemSmall, .systemMedium,
+        // Every size this entry can fill. t_56b910c8 added the Lock Screen
+        // families; t_b3ae3809 adds `systemLarge`, which the dispatch below had
+        // been swallowing in its `default:` arm (so a large tile, had it ever
+        // been offered, would have drawn the medium layout). `accessoryCorner`
+        // is not offered: it is the Smart Stack glance surface, and a 4-node
+        // topology glyph plus a gauge does not survive that renderer's
+        // constraints.
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryCircular, .accessoryRectangular,
                             .accessoryInline])
     }
@@ -48,6 +54,10 @@ struct ClusterWidgetView: View {
         switch family {
         case .systemSmall:
             SmallClusterWidget(entry: entry)
+        case .systemMedium:
+            MediumClusterWidget(entry: entry)
+        case .systemLarge:
+            LargeClusterWidget(entry: entry)
         case .accessoryInline:
             InlineClusterWidget(entry: entry)
         case .accessoryCircular:
@@ -55,6 +65,10 @@ struct ClusterWidgetView: View {
         case .accessoryRectangular:
             RectangularClusterWidget(entry: entry)
         default:
+            // A size the widget does not offer (`systemExtraLarge`, and anything
+            // WidgetKit adds later) gets the medium layout. Every declared
+            // family above has its own arm now: `default:` reaching a family
+            // because it happens to be last is how `systemLarge` went unwritten.
             MediumClusterWidget(entry: entry)
         }
     }
@@ -96,7 +110,7 @@ struct SmallClusterWidget: View {
     @ViewBuilder
     var body: some View {
         if !entry.configured || entry.paused {
-            gateView
+            ClusterGatePane(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 stateLine
@@ -210,16 +224,6 @@ struct SmallClusterWidget: View {
         }
     }
 
-    private var gateView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.title3)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +236,7 @@ struct MediumClusterWidget: View {
     @ViewBuilder
     var body: some View {
         if !entry.configured || entry.paused {
-            gateView
+            ClusterGatePane(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 // State + the counts that matter at a glance.
@@ -386,8 +390,227 @@ struct MediumClusterWidget: View {
         }
     }
 
-    private var gateView: some View {
-        VStack(alignment: .leading, spacing: 6) {
+}
+
+// ---------------------------------------------------------------------------
+// Large — every line the entry carries, each with a row of its own
+// ---------------------------------------------------------------------------
+
+/// The Home Screen large tile. It draws the SAME entry as the other five
+/// families — no third read, no per-node table. WIDGET_DATA_CONTRACT §5.5's
+/// `large` row asks for four nodes × three metrics plus the daemon-host line,
+/// and this surface cannot serve that row: its projection aggregates the fleet
+/// to the WORST host and keeps no per-host numbers (§7 redacts `hosts[].host`,
+/// a LAN address), `/v1/cluster/status` is refused by name in
+/// `scripts/cluster_widget_check.sh`, and that gate also pins the surface at two
+/// reads — so a large-only `/v1/daemon/host` strip would tax every family's
+/// refresh for one size. The extra rows therefore go to the fleet-level facts
+/// the entry really carries, each drawn with its own label instead of folded
+/// into one strip. Nil renders nothing or the em dash, never `0` (§6 rule 1).
+struct LargeClusterWidget: View {
+    let entry: ClusterEntry
+
+    @ViewBuilder
+    var body: some View {
+        if !entry.configured || entry.paused {
+            ClusterGatePane(entry: entry)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                stateLine
+                countsLine
+                metricGrid
+                topologyRows
+                boardLine
+                if let failure = entry.failure {
+                    Text(failure.operatorLine)
+                        .font(.footnote)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .lineLimit(2)
+                        .accessibilityLabel(failure.operatorLine)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// The headline state, the autodown countdown and the age of anything
+    /// last-known. The countdown is the reason this size exists: at 15 pt it is
+    /// readable from across the room, at 9 pt in the medium strip it is not.
+    private var stateLine: some View {
+        HStack(spacing: Theme.Spacing.xs.rawValue) {
+            Circle()
+                .fill(entry.state.color)
+                .frame(width: 10, height: 10)
+            Text(entry.state.label)
+                .font(.title3.weight(.semibold))
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Spacer(minLength: 0)
+            if let idle = entry.idleMinutesRemaining {
+                Text("autodown in \(idle)m")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            if let age = entry.lastKnownAgeMinutes {
+                Text("last known \(age)m")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Nodes up over nodes listed, and models served. A count its read did not
+    /// report drops out of the line rather than rendering a dash: with room for
+    /// both, an absent number reads as an absent measurement, which is the truth.
+    @ViewBuilder
+    private var countsLine: some View {
+        let parts = countsParts
+        if !parts.isEmpty {
+            Text(parts.joined(separator: "  ·  "))
+                .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .accessibilityLabel(parts.joined(separator: ", "))
+        }
+    }
+
+    private var countsParts: [String] {
+        var parts: [String] = []
+        if entry.showSections.contains("nodes"),
+           let up = entry.nodesUp, let total = entry.nodesTotal {
+            parts.append("\(up)/\(total) up")
+        }
+        if entry.showSections.contains("models"), let models = entry.modelCount {
+            parts.append(ClusterMetricText.models(models))
+        }
+        return parts
+    }
+
+    /// The GPU / temperature / load metrics as tiles. `ClusterMetricText.tokens`
+    /// already drops a metric no host reported, so an unmeasured number is an
+    /// absent tile — never a dash next to the live ones and never a zero.
+    @ViewBuilder
+    private var metricGrid: some View {
+        let tokens = ClusterMetricText.tokens(gpuUtilPct: entry.gpuUtilPct,
+                                              gpuTempC: entry.gpuTempC,
+                                              cpuTempC: entry.cpuTempC,
+                                              load1m: entry.load1m)
+        if entry.showSections.contains("nodes"), !tokens.isEmpty {
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                GridItem(.flexible(), alignment: .leading)],
+                      alignment: .leading,
+                      spacing: Theme.Spacing.xs.rawValue) {
+                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+                    Text(token.label)
+                        .font(.hsccMono(13, weight: .semibold))
+                        .foregroundColor(entry.isStale ? Theme.Semantic.onSurfaceMuted : token.heat.color)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel(token.label)
+                }
+            }
+        }
+    }
+
+    /// The two TP pairs with their roles named — the room the small tile's glyph
+    /// does not have. Dimmed only when the strip came out of the last-known
+    /// snapshot rather than this refresh (`pairsAreStale`), because these dots are
+    /// otherwise a state glyph, not stored data.
+    @ViewBuilder
+    private var topologyRows: some View {
+        if entry.showSections.contains("topology"), !entry.pairs.isEmpty {
+            HStack(alignment: .top, spacing: Theme.Spacing.lg.rawValue) {
+                ForEach(entry.pairs) { pair in
+                    pairColumn(pair)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func pairColumn(_ pair: TopologyPair) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            HStack(spacing: Theme.Spacing.sm.rawValue) {
+                ForEach(Array(pair.nodes.enumerated()), id: \.offset) { _, node in
+                    HStack(spacing: 3) {
+                        Circle()
+                            .fill(entry.pairsAreStale ? Theme.Palette.mist.opacity(0.55) : node.state.color)
+                            .frame(width: 9, height: 9)
+                        Text(node.label)
+                            .font(.hsccMono(11, weight: .semibold))
+                            .foregroundColor(entry.pairsAreStale ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                    }
+                }
+            }
+            Text(pair.role)
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The board row (dataset 3). Only the system families draw it — and only
+    /// the system families pay the three kanban reads for it
+    /// (`WidgetFamily.showsBoardWork`), so the size that has the room is the size
+    /// that shows all three counts. A count whose read failed is absent.
+    @ViewBuilder
+    private var boardLine: some View {
+        if entry.showSections.contains("board"),
+           entry.runningCards != nil || entry.queueDepth != nil || (entry.blockedCards ?? 0) > 0 {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
+                if let running = entry.runningCards {
+                    boardToken(symbol: "play.circle.fill",
+                               color: Theme.Semantic.ok,
+                               value: running,
+                               label: "running")
+                }
+                if let queue = entry.queueDepth {
+                    boardToken(symbol: "square.stack.3d.up",
+                               color: Theme.Semantic.neutral,
+                               value: queue,
+                               label: "queued")
+                }
+                if let blocked = entry.blockedCards, blocked > 0 {
+                    boardToken(symbol: "exclamationmark.triangle.fill",
+                               color: Theme.Semantic.bad,
+                               value: blocked,
+                               label: "blocked")
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func boardToken(symbol: String, color: Color, value: Int, label: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .foregroundColor(color)
+            Text("\(value)")
+                .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                .foregroundColor(Theme.Semantic.onSurface)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+        .accessibilityLabel("\(value) \(label)")
+    }
+}
+
+/// The one gate pane the three Home Screen sizes share: an unconfigured device is
+/// invited to set the app up, a paused one says it is paused, and neither draws a
+/// number. Small, medium and large each carried their own copy until t_b3ae3809
+/// gave the surface a third size — three owners of one sentence is how three
+/// sizes end up saying three different things.
+private struct ClusterGatePane: View {
+    let entry: ClusterEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             Image(systemName: entry.paused ? "pause.circle" : "gearshape")
                 .font(.title3)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -395,6 +618,7 @@ struct MediumClusterWidget: View {
                 .font(.caption2)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

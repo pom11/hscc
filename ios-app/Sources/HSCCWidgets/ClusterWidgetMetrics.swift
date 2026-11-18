@@ -20,12 +20,12 @@ import WidgetKit
 // Cluster widget — the projection, the entry and the text rules.
 //
 // The provider and the WidgetKit configuration live in `ClusterWidget.swift`,
-// the layout in `ClusterWidgetViews.swift` (the same file set): five families
-// from one entry — systemSmall, systemMedium and the three Lock Screen
-// accessories. This layer owns how a fetched payload becomes the handful of
-// numbers a widget is allowed to draw (WIDGET_DATA_CONTRACT §2's budget, §5.5's
-// field list, §7's redaction), and it is deliberately free of view types so
-// `scripts/cluster_widget_check.sh` can execute it.
+// the layout in `ClusterWidgetViews.swift` (the same file set): six families
+// from one entry — systemSmall, systemMedium, systemLarge and the three Lock
+// Screen accessories. This layer owns how a fetched payload becomes the
+// handful of numbers a widget is allowed to draw (WIDGET_DATA_CONTRACT §2's
+// budget, §5.5's field list, §7's redaction), and it is deliberately free of
+// view types so `scripts/cluster_widget_check.sh` can execute it.
 //
 // Reads (t_56b910c8): dataset 5 is served by two routes, and this surface uses
 // exactly those two per refresh — §2's "≤ 2 requests per surface per refresh":
