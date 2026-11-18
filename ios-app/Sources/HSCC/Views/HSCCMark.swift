@@ -1,41 +1,35 @@
 import SwiftUI
 
-// MARK: - HSCCMark (IOS_REDESIGN 2026-10-14 section 7)
+// MARK: - HSCCMark
 //
-// The "Orbit" motif drawn live in SwiftUI so the drawer header and the home
-// dock carry the same mark as the app icon: three nodes on a circle, two
-// accent and one neutral. Coordinates are unit-square, so it scales with `size`.
+// The block-H motif drawn live in SwiftUI, so any in-app brand surface carries
+// the same mark as the app icon (operator-selected design, 2026-11-18): a flat
+// accent-orange H built from three rectangles on a black field. Coordinates are
+// unit-square fractions of the 1024pt icon canvas, so the mark scales with
+// `size` and stays geometrically identical to assets-master/*.svg.
 
 struct HSCCMark: View {
     var size: CGFloat = 28
 
-    // Unit-square node centers + whether each is accent-colored, matching the
-    // AppIcon: top + right are accent, bottom-left is neutral.
-    private static let nodes: [(CGPoint, Bool)] = [
-        (CGPoint(x: 0.50, y: 0.20), true),
-        (CGPoint(x: 0.74, y: 0.66), true),
-        (CGPoint(x: 0.26, y: 0.66), false),
+    /// Left bar, right bar and crossbar, in unit-square coordinates. These are
+    /// the icon's measured rectangles normalised by 1024: left bar x 254–346,
+    /// right bar x 676–768, both y 241–745; crossbar x 346–676, y 447–539.
+    private static let bars: [CGRect] = [
+        CGRect(x: 0.2480, y: 0.2354, width: 0.0898, height: 0.4922),
+        CGRect(x: 0.6602, y: 0.2354, width: 0.0898, height: 0.4922),
+        CGRect(x: 0.3379, y: 0.4365, width: 0.3223, height: 0.0898),
     ]
 
     var body: some View {
-        ZStack {
-            Path { p in
-                for i in 0..<Self.nodes.count {
-                    let a = Self.nodes[i].0
-                    let b = Self.nodes[(i + 1) % Self.nodes.count].0
-                    p.move(to: CGPoint(x: a.x * size, y: a.y * size))
-                    p.addLine(to: CGPoint(x: b.x * size, y: b.y * size))
-                }
-            }
-            .stroke(Theme.Semantic.onSurfaceMuted, style: StrokeStyle(lineWidth: size * 0.07, lineCap: .round))
-
-            ForEach(0..<Self.nodes.count, id: \.self) { i in
-                Circle()
-                    .fill(Self.nodes[i].1 ? Theme.Semantic.accent : Theme.Semantic.neutral)
-                    .frame(width: size * 0.30, height: size * 0.30)
-                    .position(x: Self.nodes[i].0.x * size, y: Self.nodes[i].0.y * size)
+        Path { path in
+            for bar in Self.bars {
+                path.addRect(CGRect(x: bar.minX * size,
+                                    y: bar.minY * size,
+                                    width: bar.width * size,
+                                    height: bar.height * size))
             }
         }
+        .fill(Theme.Semantic.accent)
         .frame(width: size, height: size)
         .accessibilityHidden(true)
     }

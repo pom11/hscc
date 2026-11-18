@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- HSCC app icon, candidate A "Orbit" — TINTED appearance master.
-       Monochrome: every shape in one value, so iOS can recolour the field
-       with the user's chosen tint while the mark stays legible. -->
-  <rect width="1024" height="1024" fill="#1D2129"/>
-  <g stroke="#FFFFFF" stroke-opacity="0.92" stroke-width="34" stroke-linecap="round" fill="none">
-    <path d="M512 262 L300 682"/>
-    <path d="M512 262 L724 682"/>
-    <path d="M330 700 L694 700"/>
+  <!-- HSCC app icon — TINTED appearance master.
+       Monochrome: the H is one white value on a black field, so iOS can
+       recolour the mark with the user's chosen tint while it stays legible.
+       No orange here — a tinted icon must not carry its own hue.
+       Measured geometry on the 1024 canvas: left bar x 254–346, right bar
+       x 676–768, both y 241–745; crossbar x 346–676, y 447–539. -->
+  <rect width="1024" height="1024" fill="#000000"/>
+  <g fill="#FFFFFF">
+    <rect x="254" y="241" width="92" height="504"/>
+    <rect x="676" y="241" width="92" height="504"/>
+    <rect x="346" y="447" width="330" height="92"/>
   </g>
-  <circle cx="512" cy="262" r="118" fill="#FFFFFF"/>
-  <circle cx="280" cy="712" r="118" fill="#FFFFFF" fill-opacity="0.72"/>
-  <circle cx="744" cy="712" r="118" fill="#FFFFFF" fill-opacity="0.72"/>
 </svg>

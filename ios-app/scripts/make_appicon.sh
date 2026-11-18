@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # make_appicon.sh — render AppIcon.appiconset PNGs from assets-master/*.svg.
 #
-# The icon is designed as SVG (assets-master/appicon-{dark,light,tinted}.svg),
-# approved as candidate A "Orbit" in the IOS_REDESIGN_2026-10-14 pass. Xcode
-# needs rasterised PNGs in the asset catalog, and hand-dropping them is not
-# reproducible — this script is the ONLY sanctioned way the PNGs are made.
+# The icon is designed as SVG (assets-master/appicon-{dark,light,tinted}.svg).
+# Operator-selected design (2026-11-18): a solid black square with a flat
+# #FF5722 block letter H. Xcode needs rasterised PNGs in the asset catalog, and
+# hand-dropping them is not reproducible — this script is the ONLY sanctioned
+# way the PNGs are made.
 #
 # Format: the single-size (Xcode 15+/iOS 17+) THREE-appearance form that ships
 # in Xcode 27's own iOS app template (verified against
 #   .../Templates/Project Templates/MultiPlatform/Application/
 #      iOS Foveated Streaming App.xctemplate/Assets.xcassets/AppIcon.appiconset
 # ): one 1024px universal image per appearance —
-#   AppIcon.png          default   (what a light home screen shows)
+#   AppIcon.png          default   (the light appearance entry; same black+H art)
 #   AppIcon-dark.png     dark      (appearance: luminosity=dark)
-#   AppIcon-tinted.png   tinted    (appearance: luminosity=tinted)
+#   AppIcon-tinted.png   tinted    (appearance: luminosity=tinted, monochrome)
 # iOS derives every device size itself; there is no 2x/3x lottery to keep
 # in sync.
 #
@@ -48,7 +49,10 @@ render() {  # render <master-svg> <out-png>
   local dim; dim=$(sips -g pixelWidth -g pixelHeight "$out" | awk '/pixelWidth/{w=$2}/pixelHeight/{h=$2}END{print w"x"h}')
   [ "$dim" = "1024x1024" ] || { echo "error: $out is $dim, expected 1024x1024" >&2; exit 1; }
   local sz; sz=$(stat -f%z "$out")
-  [ "$sz" -gt 5000 ] || { echo "error: $out suspiciously small ($sz bytes)" >&2; exit 1; }
+  # The flat block-H design is deliberately simple and compresses far smaller
+  # than the old node-and-links master (~4 KB vs ~20 KB). The floor still
+  # rejects an empty/blank render.
+  [ "$sz" -gt 2000 ] || { echo "error: $out suspiciously small ($sz bytes)" >&2; exit 1; }
   echo "wrote $out ($sz bytes)"
 }
 
