@@ -65,17 +65,24 @@ def stable_working_directory(path: str) -> str:
     return stable
 
 
-def serve_args(bind: str | None = None,
-               port: int | str | None = None) -> list[str]:
+def serve_args(bind: str | list[str] | None = None,
+               port: int | str | None = None,
+               *,
+               binds: list[str] | None = None,
+               tailscale: bool = False) -> list[str]:
     """ProgramArguments tail carrying the operator's bind choice into the unit.
 
     Same flags `hscc api start` takes (api_cli._parse_start_flags), minus
     ``--no-qr`` which is display-only and meaningless without a terminal.
-    ``bind`` is the *pre-resolution* value — ``"tailscale"``/``"loopback"`` or
-    an explicit IP — so the unit records the operator's intent and
-    ``api_server.resolve_bind()`` still does the resolution (and the refusing)
-    at every boot: a unit written while Tailscale was down fails at boot with
-    the server's own error rather than baking a stale IP into the plist.
+    ``binds`` is the repeated ``--bind`` list (first = primary); ``tailscale``
+    adds ``--tailscale`` after them, matching the runtime order. The legacy
+    single ``bind`` argument is still accepted (a list is treated as ``binds``).
+
+    Values are the *pre-resolution* intent — ``"tailscale"``/``"loopback"`` or
+    an explicit IP — so the unit records the operator's choice and
+    ``api_server`` still does the resolution (and the refusing) at every boot:
+    a unit written while Tailscale was down fails at boot with the server's own
+    error rather than baking a stale IP into the plist.
 
     Validation mirrors what `api_cli` accepts for `start` (an address-shaped
     --bind, a numeric --port) so a nonsense combination is refused here, at
@@ -89,29 +96,45 @@ def serve_args(bind: str | None = None,
     """
     import ipaddress
 
+    if binds is not None:
+        values = list(binds)
+    elif bind is None:
+        values = []
+    elif isinstance(bind, (list, tuple)):
+        values = list(bind)
+    else:
+        values = [bind]
+
     args: list[str] = []
-    if bind is not None:
-        if bind == "tailscale":
-            args.append("--tailscale")
-        elif bind == "loopback":
+    seen: set[str] = set()
+    for value in values:
+        if value == "tailscale":
+            tailscale = True
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        if value == "loopback":
             args += ["--bind", "loopback"]
-        else:
-            try:
-                addr = ipaddress.ip_address(bind)
-            except ValueError as exc:
-                raise ValueError(
-                    f"invalid --bind value {bind!r} — expected 'loopback', "
-                    "'tailscale', or an explicit IP address"
-                ) from exc
-            if addr.is_unspecified:
-                # ip_address('0.0.0.0').is_unspecified / same for '::' — the
-                # same two literals api_server.resolve_bind always refuses,
-                # expressed as a property instead of a duplicated literal set.
-                raise ValueError(
-                    f"refusing to bind {bind!r} — the HSCC API must never be "
-                    "reachable from an untrusted network."
-                )
-            args += ["--bind", bind]
+            continue
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid --bind value {value!r} — expected 'loopback', "
+                "'tailscale', or an explicit IP address"
+            ) from exc
+        if addr.is_unspecified:
+            # ip_address('0.0.0.0').is_unspecified / same for '::' — the
+            # same two literals api_server.resolve_bind always refuses,
+            # expressed as a property instead of a duplicated literal set.
+            raise ValueError(
+                f"refusing to bind {value!r} — the HSCC API must never be "
+                "reachable from an untrusted network."
+            )
+        args += ["--bind", value]
+    if tailscale:
+        args.append("--tailscale")
     if port is not None:
         try:
             port = int(port)

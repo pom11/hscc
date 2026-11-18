@@ -197,15 +197,19 @@ def test_config_refuses_zero(hscc_dir):
 
 def test_resolve_config_defaults(hscc_dir):
     cfg = api_server.resolve_config(hscc_dir=hscc_dir)
-    assert cfg == {"host": "127.0.0.1", "port": DEFAULT_PORT}
+    assert cfg == {"host": "127.0.0.1", "hosts": ["127.0.0.1"],
+                   "port": DEFAULT_PORT, "unavailable": []}
 
 
-def test_config_file_overrides(hscc_dir):
+def test_config_file_overrides(hscc_dir, monkeypatch):
+    monkeypatch.setattr(api_server, "local_interface_addresses",
+                        lambda: {"127.0.0.1", "::1", "192.0.2.5"})
     os.makedirs(hscc_dir, exist_ok=True)
     with open(os.path.join(hscc_dir, "api.json"), "w") as fh:
         json.dump({"bind": "192.0.2.5", "port": 9999}, fh)
     cfg = api_server.resolve_config(hscc_dir=hscc_dir)
-    assert cfg == {"host": "192.0.2.5", "port": 9999}
+    assert cfg == {"host": "192.0.2.5", "hosts": ["192.0.2.5"],
+                   "port": 9999, "unavailable": []}
 
 
 def test_override_beats_config(hscc_dir):
@@ -215,11 +219,19 @@ def test_override_beats_config(hscc_dir):
     cfg = api_server.resolve_config(
         hscc_dir=hscc_dir, bind_override="loopback", port_override=1234
     )
-    assert cfg == {"host": "127.0.0.1", "port": 1234}
+    assert cfg == {"host": "127.0.0.1", "hosts": ["127.0.0.1"],
+                   "port": 1234, "unavailable": []}
 
 
-def test_explicit_ip_bind():
-    assert api_server.resolve_bind("192.168.1.10") == "192.168.1.10"
+def test_explicit_ip_bind(monkeypatch):
+    monkeypatch.setattr(api_server, "local_interface_addresses",
+                        lambda: {"127.0.0.1", "::1", "192.0.2.10"})
+    assert api_server.resolve_bind("192.0.2.10") == "192.0.2.10"
+
+
+def test_explicit_non_local_ip_bind_is_refused():
+    with pytest.raises(RuntimeError, match="not an address on this host"):
+        api_server.resolve_bind("192.0.2.5")
 
 
 def test_bind_rejects_garbage(hscc_dir):
