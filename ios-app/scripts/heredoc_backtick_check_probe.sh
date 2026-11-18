@@ -17,12 +17,23 @@
 # same marker. A refusal of a position that was never live proves nothing.
 #
 # LEGS
-#   control          the unmutated symlinked tree must PASS, must scan the same
+#   control          the unmutated mirrored tree must PASS, must scan the same
 #                    NUMBER of scripts as the real tree, and must report at least
 #                    as many splice-capable scripts as this probe independently
 #                    enumerates. Three anti-vacuity checks: a harness that scans an
 #                    empty or misparsed population makes every leg below
 #                    meaningless, and looks exactly like success.
+#   scope            the gate's per-file population and this probe's own recursive
+#                    enumeration must agree PATH FOR PATH (t_d8f34c60). A count would
+#                    not catch the failure this card is about: if the walk ever stopped
+#                    at the top level again, both sides could still print the same
+#                    number while a whole subtree went unaudited. Also asserts the
+#                    limits block no longer disclaims directories the walk enters.
+#   depth-live       payload in an unquoted heredoc body of a script BELOW scripts/,
+#                    EXECUTED: marker required. A refusal at that depth is worth
+#                    nothing until the same position is shown to be live there.
+#   depth-scan       the identical fixture, SCANNED: refused by path and listed in the
+#                    scanned population by path.
 #   live-body        payload in an unquoted heredoc body, EXECUTED: marker required.
 #   live-shell       payload in shell position, EXECUTED: marker required.
 #   live-comment     payload inside a real '#' comment, EXECUTED: marker FORBIDDEN.
@@ -96,9 +107,23 @@ pok()   { echo "  ok: $1"; }
 pfail() { echo "  FAIL: $1"; probe_fail=$((probe_fail + 1)); }
 pnote() { echo "  note: $1"; }
 
+# The population, enumerated the SAME way the gate does it (t_d8f34c60: the gate went
+# recursive because subject files moved into scripts/<name>/; a probe that still globs
+# one directory would then keep agreeing with a gate that had silently lost a subtree,
+# which is the opposite of a cross-check). '! -type f' would be wrong here too — see
+# the gate's comment — so non-directories of every kind are listed, sorted, NUL-safe.
+all_sh() {
+  find "$SCRIPTS" ! -type d -name '*.sh' -print0 | LC_ALL=C sort -z
+}
+rel() { printf '%s' "${1#"$SCRIPTS"/}"; }      # scripts-relative path, as the gate names it
+legid() { printf '%s' "${1//\//_}"; }          # a path is not a valid leg DIRECTORY name
+
 # ---- baseline, measured before any leg runs --------------------------------
-baseline_list=$( (cd "$SCRIPTS" && shasum -a 256 ./*.sh 2>/dev/null) | shasum -a 256 | cut -d' ' -f1)
-real_scripts=$(ls -1 "$SCRIPTS"/*.sh 2>/dev/null | wc -l | tr -d ' ')
+# Recursive, and digesting the WHOLE population the gate now walks: a digest of the
+# top level only would stay green while a leg wrote into scripts/widget_view_dispatch/.
+baseline_list=$(all_sh | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+real_scripts=0
+while IFS= read -r -d '' _; do real_scripts=$((real_scripts + 1)); done < <(all_sh)
 REPO="$(cd "${IOSAPP}/.." && pwd)"
 have_worktree=0
 if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -112,18 +137,26 @@ fi
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/hbcprobe.XXXXXX")"
 
 # ---- harness ---------------------------------------------------------------
-mk_tree() {   # mk_tree <leg>: private ios-app dir; scripts/ and Sources/ symlinked
-  TREE="${WORKROOT}/$1/ios-app"
+mk_tree() {   # mk_tree <leg>: private ios-app dir; scripts/ mirrored, Sources/ symlinked
+  local leg; leg="$(legid "$1")"
+  TREE="${WORKROOT}/${leg}/ios-app"
   mkdir -p "${TREE}/scripts"
   ln -s "${IOSAPP}/Sources" "${TREE}/Sources" 2>/dev/null
-  local f b
-  for f in "${SCRIPTS}"/*; do
-    b="$(basename "$f")"
-    ln -s "$f" "${TREE}/scripts/${b}" 2>/dev/null
-  done
-  MARKER="${WORKROOT}/$1/MARKER_$1"
-  OUT="${WORKROOT}/$1/out.txt"
-  ERR="${WORKROOT}/$1/err.txt"
+  local d f
+  # Real DIRECTORIES, symlinked files. Symlinking a whole directory — which is exactly
+  # what a one-level mirror of scripts/* does — hides the subtree from a recursive walk,
+  # because find does not descend a symlink it was not told to follow. A private tree
+  # built that way would let every leg below report green on files it never entered,
+  # which is the silent-green shape this harness exists to avoid.
+  while IFS= read -r -d '' d; do
+    mkdir -p "${TREE}/${d#"$IOSAPP"/}"
+  done < <(find "$SCRIPTS" -type d -print0)
+  while IFS= read -r -d '' f; do
+    ln -s "$f" "${TREE}/${f#"$IOSAPP"/}" 2>/dev/null
+  done < <(find "$SCRIPTS" ! -type d -print0)
+  MARKER="${WORKROOT}/${leg}/MARKER_${leg}"
+  OUT="${WORKROOT}/${leg}/out.txt"
+  ERR="${WORKROOT}/${leg}/err.txt"
 }
 
 payload_for() { printf '%s pwn %stouch "%s"%s' "$1" "$BT" "$MARKER" "$BT"; }
@@ -229,6 +262,9 @@ plant() {   # plant <file> <after-line> <lead>: real mutated copy inside current
   local dest="${TREE}/scripts/${name}"
   local p; p="$(payload_for "$lead")"
   rm -f "$dest"
+  # The name is a path relative to scripts/ now (t_d8f34c60), so its directory has to
+  # exist before the mutated copy can replace the mirrored symlink inside it.
+  mkdir -p "$(dirname "$dest")"
   awk -v n="$after" -v p="$p" '{ print; if (NR == n) print p }' \
       "${SCRIPTS}/${name}" > "$dest"
   chmod +x "$dest"
@@ -238,11 +274,11 @@ plant() {   # plant <file> <after-line> <lead>: real mutated copy inside current
 # the scanner under test must not be its own subject.
 subject_capable() {
   local f b
-  for f in "${SCRIPTS}"/*.sh; do
-    b="$(basename "$f")"
+  while IFS= read -r -d '' f; do
+    b="$(rel "$f")"
     case "$b" in heredoc_backtick_check*) continue ;; esac
     [ -n "$(openers_of "$f")" ] && { printf '%s' "$b"; return 0; }
-  done
+  done < <(all_sh)
   return 1
 }
 
@@ -260,7 +296,9 @@ scan "$TREE"
 control_scanned=$(grep -oE '[0-9]+ shell script\(s\) scanned' "$OUT" | head -1 | cut -d' ' -f1)
 control_capable=$(grep -oE '[0-9]+ splice-capable' "$OUT" | head -1 | cut -d' ' -f1)
 probe_capable=0
-for f in "${SCRIPTS}"/*.sh; do [ -n "$(openers_of "$f")" ] && probe_capable=$((probe_capable + 1)); done
+while IFS= read -r -d '' f; do
+  [ -n "$(openers_of "$f")" ] && probe_capable=$((probe_capable + 1))
+done < <(all_sh)
 if [ "$G_RC" -eq 0 ] && [ "$BANNERS" -eq 1 ]; then
   pok "control: the unmutated tree passes (RC 0, 1 banner) — the gate is not refusing everything"
 else
@@ -275,6 +313,65 @@ if [ "$probe_capable" -gt 0 ] && [ "${control_capable:-0}" -ge "$probe_capable" 
   pok "control: the gate calls $control_capable scripts splice-capable while this probe independently enumerates $probe_capable with unquoted openers — the opener grammar is not silently missing them"
 else
   pfail "control: the gate reports ${control_capable:-0} splice-capable but the probe enumerates $probe_capable — the opener parser is blind and every body leg would be worthless"
+fi
+
+# ---- scope: the gate and this probe must see the SAME population -------------
+# A count check alone would not do: if the gate's walk ever stopped at the top level
+# again while this harness globbed the top level too, both numbers would agree and the
+# whole subtree would be un-audited and unreported. So the comparison is path-exact.
+echo "scope: gate population vs probe population, path for path"
+gate_pop=$(awk -F'bytes=' '/^scanned /{ s = $1; sub(/^scanned +/, "", s); sub(/[ ]+$/, "", s); print s }' "$OUT" | LC_ALL=C sort)
+probe_pop=$(all_sh | while IFS= read -r -d '' p; do printf '%s\n' "${p#"$SCRIPTS"/}"; done | LC_ALL=C sort)
+depth_n=$(printf '%s\n' "$probe_pop" | grep -c '/' || true)
+if [ "$gate_pop" = "$probe_pop" ]; then
+  pok "scope: the gate scanned exactly the $(printf '%s\n' "$probe_pop" | grep -c . | tr -d ' ') scripts this probe enumerates recursively, path for path ($depth_n of them below scripts/)"
+else
+  pfail "scope: gate and probe disagree — gate-only:[$(comm -23 <(printf '%s\n' "$gate_pop") <(printf '%s\n' "$probe_pop") | tr '\n' ' ')] probe-only:[$(comm -13 <(printf '%s\n' "$gate_pop") <(printf '%s\n' "$probe_pop") | tr '\n' ' ')]. A file one of the two can see and the other cannot is an un-audited file, whatever the summary line says"
+fi
+# The limits block used to disclaim subdirectories. If that sentence ever comes back
+# while the walk is still recursive, the gate's prose and its behaviour disagree and a
+# reader would rightly ignore the whole limits section.
+if grep -q 'are NOT scanned by this gate' "$OUT"; then
+  pfail "scope: the gate disclaims scripts/ subdirectories in its own limits block while the population above includes them — prose and walk disagree"
+else
+  pok "scope: the limits block no longer disclaims the subdirectories the walk enters"
+fi
+if [ "$depth_n" = "0" ]; then
+  pnote "scope: no shell script sits below scripts/ on this tree, so the recursive walk is not yet load-bearing here — the depth legs below are what prove it can bite"
+fi
+
+# ---- depth: a heredoc below scripts/ must be both LIVE and REFUSED -----------
+# The gate went recursive (t_d8f34c60) because the widget-surface checks moved into
+# scripts/<name>/. A widened scan is only proven by the same two halves every other leg
+# here uses: the payload has to RUN at that depth (or a refusal there scores nothing),
+# and the identical bytes have to be REFUSED by the scan (or the widened walk is a
+# claim rather than a gate). Both legs plant inside a real subdirectory of the private
+# tree — one symlinked as a directory would hide the whole subtree from the walk.
+echo "depth: an unquoted heredoc below scripts/ — executed, then refused"
+d2dir="zz_depth_check"; d2file="${d2dir}/zz_depth_gate.sh"
+mk_tree depth2-live
+mkdir -p "${TREE}/scripts/${d2dir}"
+{ printf '%s\n' '#!/bin/bash' 'cat > "${1:-out.txt}" <<BODY' "$(payload_for '//')" 'BODY'
+  printf '%s\n' 'echo fixture done'; } > "${TREE}/scripts/${d2file}"
+chmod +x "${TREE}/scripts/${d2file}"
+( cd "$TREE" && bash "${TREE}/scripts/${d2file}" >"$OUT" 2>"$ERR" )
+D2_RC=$?
+if [ -e "$MARKER" ]; then
+  pok "depth-live: the payload inside an unquoted heredoc BELOW scripts/ EXECUTED (fixture rc $D2_RC) — so refusing that depth refuses something real"
+else
+  pfail "depth-live: the below-scripts/ payload did NOT execute (rc $D2_RC, stderr: $(head -c 200 "$ERR" 2>/dev/null)) — the depth refusal below would prove nothing; fix the fixture before trusting it"
+fi
+mk_tree depth2-scan
+mkdir -p "${TREE}/scripts/${d2dir}"
+{ printf '%s\n' '#!/bin/bash' 'cat > "${1:-out.txt}" <<BODY' "$(payload_for '//')" 'BODY'
+  printf '%s\n' 'echo fixture done'; } > "${TREE}/scripts/${d2file}"
+chmod +x "${TREE}/scripts/${d2file}"
+scan "$TREE"
+expect_refused "depth-scan (unquoted heredoc with a live byte at $d2file — the region a one-level glob never entered)" "$d2file"
+if grep -q "scanned ${d2file}" "$OUT" || grep -qE "^scanned +${d2file}" "$OUT"; then
+  pok "depth-scan: the file appears in the scanned population by PATH, so a future surface file cannot hide one directory down"
+else
+  pfail "depth-scan: rc was $G_RC but $d2file never reached a scanned line — the walk did not enter the directory it claims to cover"
 fi
 
 # ---- liveness --------------------------------------------------------------
@@ -384,8 +481,8 @@ fi
 # ---- body legs: every unquoted heredoc of every real script ----------------
 echo "planting inside every unquoted heredoc body of every real script"
 body_legs=0
-for f in "${SCRIPTS}"/*.sh; do
-  name="$(basename "$f")"
+while IFS= read -r -d '' f; do
+  name="$(rel "$f")"
   while IFS="$(printf '\t')" read -r oline delim; do
     [ -n "${oline:-}" ] || continue
     tline=$(awk -v s="$oline" -v d="$delim" 'NR > s && $0 == d { print NR; exit }' "$f")
@@ -394,14 +491,14 @@ for f in "${SCRIPTS}"/*.sh; do
       continue
     fi
     body_legs=$((body_legs + 1))
-    mk_tree "body-$name-$oline"
+    mk_tree "body-$(legid "$name")-$oline"
     plant "$name" "$oline" "//"
     scan "$TREE"
     expect_refused "body-$name:$oline (inside unquoted <<$delim, region $oline..$tline)" "$name"
   done <<EOF
 $(openers_of "$f")
 EOF
-done
+done < <(all_sh)
 if [ "$body_legs" -eq 0 ]; then
   pfail "no unquoted heredoc in the whole tree — the body legs pass vacuously; if that ever becomes true, delete this gate rather than keep a green that means nothing"
 else
@@ -411,16 +508,16 @@ fi
 # ---- shell legs: every real script ------------------------------------------
 echo "planting in shell position of every real script"
 shell_legs=0
-for f in "${SCRIPTS}"/*.sh; do
-  name="$(basename "$f")"
+while IFS= read -r -d '' f; do
+  name="$(rel "$f")"
   lline=$(first_exec "$f")
   [ -n "$lline" ] || { pfail "$name: no executable line to plant in — the shell-position class is unproven here"; continue; }
   shell_legs=$((shell_legs + 1))
-  mk_tree "shell-$name"
+  mk_tree "shell-$(legid "$name")"
   plant "$name" "$lline" "//"
   scan "$TREE"
   expect_refused "shell-$name (comment-shaped line in shell position at line $lline)" "$name"
-done
+done < <(all_sh)
 pok "shell: $shell_legs script(s) planted and scanned"
 
 # ---- rename: content, not filename -----------------------------------------
@@ -429,7 +526,7 @@ src=$(subject_capable || true)
 if [ -z "$src" ]; then
   pfail "no splice-capable script to rename — the rename leg has no subject"
 else
-  rename_as="zz_renamed_${src}"
+  rename_as="zz_renamed_$(printf '%s' "$src" | tr '/' '_')"   # a path is not a leaf name
   mk_tree rename
   plant "$src" "$(first_exec "${SCRIPTS}/${src}")" "//"
   mv "${TREE}/scripts/${src}" "${TREE}/scripts/${rename_as}"
@@ -515,11 +612,11 @@ fi
 # ---- the residual this gate exists to close --------------------------------
 echo "window above the guard: an in-file guard cannot see this high — REPORTED, closed by refusal"
 wsrc=""
-for f in "${SCRIPTS}"/*.sh; do
-  b="$(basename "$f")"
+while IFS= read -r -d '' f; do
+  b="$(rel "$f")"
   case "$b" in *probe*|heredoc_backtick_check*) continue ;; esac
   if grep -q '^# GUARD-SENTINEL' "$f" 2>/dev/null; then wsrc="$b"; break; fi
-done
+done < <(all_sh)
 if [ -z "$wsrc" ]; then
   pnote "no script here carries an in-file guard sentinel — the window-above leg has no subject on this tree. It is the reason this meta-gate exists, so re-run it where the guard is (PR #345, merged as bc3c1674)."
 else
@@ -551,9 +648,9 @@ fi
 
 # ---- integrity --------------------------------------------------------------
 echo "integrity: the real tree, untouched"
-after_list=$( (cd "$SCRIPTS" && shasum -a 256 ./*.sh 2>/dev/null) | shasum -a 256 | cut -d' ' -f1)
+after_list=$(all_sh | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
 if [ "$baseline_list" = "$after_list" ]; then
-  pok "every real script in scripts/ is byte-identical after the run ($after_list)"
+  pok "every real script under scripts/ is byte-identical after the run ($after_list)"
 else
   pfail "the probe MUTATED the tree it was auditing — the combined digest moved"
 fi
@@ -579,7 +676,7 @@ if [ "$have_worktree" = "1" ]; then
 fi
 
 echo "marker census"
-allowed='live-body live-shell live-comment window-above'
+allowed='live-body live-shell live-comment window-above depth2-live'
 strays=""
 for d in "$WORKROOT"/*/; do
   leg="$(basename "$d")"
@@ -599,8 +696,9 @@ if [ "$probe_fail" -gt 0 ]; then
   echo "HEREDOC BACKTICK PROBE FAILED — $probe_fail leg(s) red. Work kept at $WORKROOT"
   exit 1
 fi
-echo "HEREDOC BACKTICK PROBE PASSED — control green and anti-vacuous, liveness proven," \
-     "$body_legs heredoc body leg(s) + $shell_legs shell leg(s) + rename + both fixture" \
-     "tables + the above-guard window all behaved, no marker file, real tree byte-identical" \
-     "(work: $WORKROOT)"
+echo "HEREDOC BACKTICK PROBE PASSED — control green and anti-vacuous, gate and probe" \
+     "enumerate the same population path for path, the below-scripts/ heredoc executed" \
+     "and was refused by path, $body_legs heredoc body leg(s) + $shell_legs shell leg(s)" \
+     "+ rename + both fixture tables + the above-guard window all behaved, no marker" \
+     "file, real tree byte-identical (work: $WORKROOT)"
 exit 0
