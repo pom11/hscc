@@ -31,6 +31,12 @@
 #                    at the top level again, both sides could still print the same
 #                    number while a whole subtree went unaudited. Also asserts the
 #                    limits block no longer disclaims directories the walk enters.
+#   measure          the per-file lines-with-byte column must equal grep -c on the SAME
+#                    file, for EVERY scanned file, with a 0-line / 1-line / many-line
+#                    sample printed (t_e89edf70). It had been a word count of the joined
+#                    HIT records — four fields per record, so 4x the lines on every file,
+#                    green summary and all. Every other leg reads the records, so only a
+#                    measurement taken from outside them could see it.
 #   depth-live       payload in an unquoted heredoc body of a script BELOW scripts/,
 #                    EXECUTED: marker required. A refusal at that depth is worth
 #                    nothing until the same position is shown to be live there.
@@ -347,7 +353,12 @@ fi
 # again while this harness globbed the top level too, both numbers would agree and the
 # whole subtree would be un-audited and unreported. So the comparison is path-exact.
 echo "scope: gate population vs probe population, path for path"
-gate_pop=$(awk -F'bytes=' '/^scanned /{ s = $1; sub(/^scanned +/, "", s); sub(/[ ]+$/, "", s); print s }' "$OUT" | LC_ALL=C sort)
+# Label-INDEPENDENT, deliberately (t_e89edf70 renamed two columns on the very line this
+# parses, and the old parse keyed on one of them). The path is the second
+# whitespace-separated field of a scanned line, so this population check can be neither
+# reddened nor — the worse failure — silently vacuified by a future rename. The measure
+# leg below is the one that binds itself to a label, because what it audits IS a label.
+gate_pop=$(awk '/^scanned /{print $2}' "$OUT" | LC_ALL=C sort)
 probe_pop=$(all_sh | while IFS= read -r -d '' p; do printf '%s\n' "${p#"$SCRIPTS"/}"; done | LC_ALL=C sort)
 depth_n=$(printf '%s\n' "$probe_pop" | grep -c '/' || true)
 if [ "$gate_pop" = "$probe_pop" ]; then
@@ -365,6 +376,87 @@ else
 fi
 if [ "$depth_n" = "0" ]; then
   pnote "scope: no shell script sits below scripts/ on this tree, so the recursive walk is not yet load-bearing here — the depth legs below are what prove it can bite"
+fi
+
+# ---- measure: the printed per-file count, checked from OUTSIDE the records ---------
+# (t_e89edf70). The column this leg checks was computed as a WORD COUNT of the
+# concatenated HIT records. A HIT record is four tab-separated fields, so the column
+# printed 4x the number of lines carrying the byte — on every file, on main and after the
+# recursion change alike, with rc=0 and a green summary. No other leg here can see it: the
+# verdict legs read the records, the control leg reads the summary line, and a constant
+# factor is exactly the kind of wrong number that leaves both of them green. So this check
+# comes from outside the record machinery — grep -c counts the LINES that carry the byte,
+# tr counts the BYTES — and the gate's printed value is compared against grep -c for EVERY
+# scanned file, not for a hand-picked few. The tr number is printed next to it so that a
+# reader can see for themselves that the column is lines and not bytes instead of trusting
+# the label: only a file where the two differ can tell those meanings apart, and such files
+# are in the sample on purpose.
+echo "measure: the printed lines-with-byte vs grep -c, for every scanned file"
+mk_tree measure
+scan "$TREE"
+m_printed="${WORKROOT}/measure/printed.tsv"
+# Label-bound ON PURPOSE: what this leg audits IS the label, so it must break if the label
+# moves (the scope leg above is deliberately the opposite way round).
+awk '$1 == "scanned" { v = "<absent>"; for (i = 3; i <= NF; i++) { t = $i; if (sub(/^lines-with-byte=/, "", t)) v = t } print $2 "\t" v }' "$OUT" > "$m_printed"
+
+m_checked=0; m_bad=0; m_absent=0; m_diff_tree=0
+m_zero=""; m_one=""; m_many=""
+while IFS= read -r -d '' f; do
+  b="$(rel "$f")"
+  printed=$(awk -F'\t' -v p="$b" '$1 == p { print $2; exit }' "$m_printed")
+  if [ -z "$printed" ] || [ "$printed" = "<absent>" ]; then
+    m_absent=$((m_absent + 1))
+    pfail "measure: $b has a scanned line but no lines-with-byte= column on it — a leg that parses nothing compares nothing, which is a green, not a result"
+    continue
+  fi
+  case "$printed" in
+    ''|*[!0-9]*) m_bad=$((m_bad + 1)); pfail "measure: $b printed lines-with-byte='$printed', which is not a count of anything"; continue ;;
+  esac
+  # Same file, both sides. The gate scanned the private mirror; this leg measures the real
+  # tree, so prove they are the same bytes rather than assuming a symlink kept its word.
+  cmp -s "$f" "${TREE}/scripts/${b}" || m_diff_tree=$((m_diff_tree + 1))
+  lines=$(grep -c "$BT" "$f" 2>/dev/null); g_rc=$?
+  if [ "$g_rc" -gt 1 ]; then
+    pfail "measure: grep could not read $f (rc $g_rc) — the comparison for this file is not a result"
+    continue
+  fi
+  if [ "$printed" != "$lines" ]; then
+    m_bad=$((m_bad + 1))
+    pfail "measure: $b printed lines-with-byte=$printed but grep -c counts $lines line(s) carrying the byte — the label and the number disagree (if the number is a multiple of $lines, a record's FIELD count has leaked into it again)"
+  fi
+  m_checked=$((m_checked + 1))
+  [ "$printed" = "0" ] && [ -z "$m_zero" ] && m_zero="$b"
+  [ "$printed" = "1" ] && [ -z "$m_one" ] && m_one="$b"
+  [ "$printed" -ge 3 ] && [ -z "$m_many" ] && m_many="$b"
+done < <(all_sh)
+
+if [ "$m_checked" -gt 0 ] && [ "$m_bad" -eq 0 ] && [ "$m_absent" -eq 0 ]; then
+  pok "measure: every one of the $m_checked scanned files carries a lines-with-byte= column and every value equals grep -c on the same file — measured outside the record machinery, so a field-count factor cannot hide here"
+else
+  pfail "measure: $m_bad mismatch(es) and $m_absent missing column(s) out of $m_checked checked — the per-file column does not say what it is labelled"
+fi
+if [ "$m_diff_tree" -ne 0 ]; then
+  pfail "measure: $m_diff_tree file(s) differ in CONTENT between the real tree and the private tree the gate scanned — the equality above would be comparing two different files"
+else
+  pok "measure: every compared file is byte-identical between the real tree and the private mirror the gate scanned (cmp), so the pair printed below is one file measured two ways"
+fi
+
+m_sample() {   # m_sample <path>: print the gate's column beside the two independent measures
+  local b="$1" printed lines bytes
+  printed=$(awk -F'\t' -v p="$b" '$1 == p { print $2; exit }' "$m_printed")
+  lines=$(grep -c "$BT" "${SCRIPTS}/${b}")
+  bytes=$(tr -dc "$BT" < "${SCRIPTS}/${b}" | wc -c | tr -d ' ')
+  if [ "$bytes" != "$lines" ]; then
+    pok "measure sample: $b — gate prints lines-with-byte=$printed, grep -c finds $lines line(s) carrying the byte, tr finds $bytes byte(s): the column is LINES. The defect this leg kills printed $((lines * 4)) here (4 lines-worth of fields per line)"
+  else
+    pok "measure sample: $b — gate prints lines-with-byte=$printed, grep -c finds $lines line(s) carrying the byte, tr finds $bytes byte(s): equal on this file, so it cannot tell the two meanings apart alone — the differing samples and the all-file equality above carry that"
+  fi
+}
+[ -n "$m_zero" ] && m_sample "$m_zero"
+[ -n "$m_one" ]  && m_sample "$m_one"
+[ -n "$m_many" ] && m_sample "$m_many"
+if [ -z "$m_zero" ] || [ -z "$m_one" ] || [ -z "$m_many" ]; then
+  pnote "measure: no scanned file on this tree falls in $( [ -z "$m_zero" ] && printf 'zero-line ' )$( [ -z "$m_one" ] && printf 'one-line ' )$( [ -z "$m_many" ] && printf 'many-line ' )— the per-file equality above still covers every file that does exist"
 fi
 
 # ---- depth: a heredoc below scripts/ must be both LIVE and REFUSED -----------
@@ -763,7 +855,8 @@ if [ "$probe_fail" -gt 0 ]; then
   exit 1
 fi
 echo "HEREDOC BACKTICK PROBE PASSED — control green and anti-vacuous, gate and probe" \
-     "enumerate the same population path for path, the below-scripts/ heredoc executed" \
+     "enumerate the same population path for path, every printed per-file count equals an" \
+     "independent grep/tr measurement, the below-scripts/ heredoc executed" \
      "and was refused by path, $body_legs heredoc body leg(s) + $shell_legs shell leg(s)" \
      "+ rename + both fixture tables + the above-guard window all behaved, no marker" \
      "file, real tree byte-identical (work: $WORKROOT)"
