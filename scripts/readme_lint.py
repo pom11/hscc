@@ -223,6 +223,13 @@ EXTERNAL = frozenset({
     "sparkrun", "hermes", "hf",
     # VCS / forge / packaging
     "git", "gh", "pip", "pip3", "uv", "pipx", "brew",
+    # ruby: the tap's formula and cask files ARE Ruby, and `ruby -c` is the
+    # syntax gate both release bumpers run before the tap is touched
+    # (`ruby_check` in scripts/bump_formula.py and scripts/bump_cask.py, each
+    # of which exits 2 when ruby is absent rather than pass silently).
+    # scripts/README.md quotes `ruby -c` to document that gate, so the quote
+    # names a genuinely external CLI — not a typo for a repo script.
+    "ruby",
     # python test/doc tooling usable as a bare verb
     "pytest",
     # iOS / macOS
