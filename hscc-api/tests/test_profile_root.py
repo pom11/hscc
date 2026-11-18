@@ -60,6 +60,14 @@ import routes_orchestrator
 import routes_profile
 import routes_profiles
 
+# THE gate for the cases whose child resolves or writes through the real
+# ``hermes_cli.profiles`` (A1/A3/A4/C1/C2/C3). It is the suite's existing
+# ``hermes_gap`` capability probe — the same mechanism and posture the gateway
+# family uses for ``hermes_state`` — and it is called per test, never at module
+# scope, so it can never silence the B*/D*/E* cases (t_2cc3d482).
+from hermes_gap import (hermes_profile_library_import_error,
+                        require_hermes_profile_library)
+
 REPO = Path(__file__).resolve().parents[2]
 API_DIR = REPO / "hscc-api"
 INTENT = profile_root.INTENT_ENV
@@ -440,6 +448,7 @@ def test_a1_no_intent_boots_permits_and_uses_relocated_ambient_root(tmp_path):
     The "today's behaviour is unchanged" case: the guard stays a no-op and the
     writers resolve exactly where an unguarded server resolves today.
     """
+    require_hermes_profile_library()
     home, live = _seed_fake_home(tmp_path / "home")
     env = _child_env(home)
     proc = _run_child(tmp_path, "boot_a1.py", _CHILD_BOOT, env)
@@ -487,6 +496,7 @@ def test_a3_profile_mode_hermes_home_boots_permits_and_writes(tmp_path):
     resolver-level guard was ruled out (option 3): these bytes mean "profile
     mode" and "throwaway sandbox" equally, and only the caller knows which.
     """
+    require_hermes_profile_library()
     home, live = _seed_fake_home(tmp_path / "home")
     env = _child_env(home, HERMES_HOME=str(live / "seed"))
     proc = _run_child(tmp_path, "boot_a3.py", _CHILD_BOOT, env)
@@ -508,6 +518,7 @@ def test_a4_scratch_home_inside_live_root_default_path_unchanged(tmp_path):
 
     This pins the hazard as *intended* behaviour when no intent is asked for.
     """
+    require_hermes_profile_library()
     home, live = _seed_fake_home(tmp_path / "home")
     scratch = live / "scratch" / ".hermes"
     scratch.mkdir(parents=True)
@@ -593,6 +604,7 @@ def test_c1_child_boot_refusal_exit2_nothing_bound_written(tmp_path):
     """C1: divergent intent at boot ⇒ exit exactly 2, the port is never bound,
     the fake live tree is byte-identical, and stderr names every root plus the
     env, in the contractual order."""
+    require_hermes_profile_library()
     home, live = _seed_fake_home(tmp_path / "home")
     port = _free_port()
     before = _fingerprint(home)
@@ -627,6 +639,7 @@ def test_c2_daemon_serve_refusal_exit2_marks_pid_stopped_and_logs(tmp_path):
     """C2: the daemon entry path (``api_cli._serve``) refuses too — exit 2, the
     PID file is marked stopped, the API log carries the whole divergence report
     (and, on a successful boot, the same startup line A2 pins)."""
+    require_hermes_profile_library()
     home, _live = _seed_fake_home(tmp_path / "home")
     hscc = home / ".hscc"
     pid_file = hscc / "api.pid"
@@ -667,6 +680,7 @@ def test_c3_control_without_intent_the_same_write_lands(tmp_path):
     This pairing is what makes every "nothing written" assertion above
     non-vacuous: same input, only the intent differs.
     """
+    require_hermes_profile_library()
     home, live = _seed_fake_home(tmp_path / "home")
     env = _child_env(home)
     before = _fingerprint(home)
@@ -1158,3 +1172,103 @@ def test_e1_generated_launchd_unit_gains_neither_var():
     blob = plistlib.dumps(plist).decode("utf-8") + Path(
         api_launchd.__file__).read_text()
     assert "HSCC_API_PROFILES_ROOT" not in blob
+
+
+# --------------------------------------------------------------------------- #
+# F — the interpreter gate itself (t_2cc3d482)
+# --------------------------------------------------------------------------- #
+
+# The six cases a thin interpreter cannot run, pinned by NAME. This is the
+# measured set — `6 failed, 1030 passed, 25 skipped` at `72f65838` with zero
+# diff under the thin `python3` — and F2 asserts it in BOTH directions, so the
+# gate can neither lose one of them nor creep over the rest of this file. A gate
+# that quietly spread to every test here is exactly how the profiles-root intent
+# gate would start passing vacuously.
+_HERMES_LIBRARY_CASES = frozenset({
+    "test_a1_no_intent_boots_permits_and_uses_relocated_ambient_root",
+    "test_a3_profile_mode_hermes_home_boots_permits_and_writes",
+    "test_a4_scratch_home_inside_live_root_default_path_unchanged",
+    "test_c1_child_boot_refusal_exit2_nothing_bound_written",
+    "test_c2_daemon_serve_refusal_exit2_marks_pid_stopped_and_logs",
+    "test_c3_control_without_intent_the_same_write_lands",
+})
+
+
+def test_f1_hermes_gate_agrees_with_the_resolver_it_guards():
+    """F1: the gate skips if and only if the resolver it guards is blind, and it
+    is asserted in both directions on every interpreter.
+
+    The constraint this file was written under (t_2cc3d482): a guard that
+    silenced the six wherever hermes IS importable would turn a red leg into a
+    blind spot — the worse outcome. So the equivalence is executed, not argued:
+
+    * ``hermes_cli.profiles`` imports here ⇒ ``require_hermes_profile_library``
+      must NOT skip. A skip in that direction fails THIS test, so the six can
+      never be silenced without the leg going red;
+    * it does not import here ⇒ the gate must skip, must carry the import error
+      itself as the reason, and ``profile_root``'s own resolver must answer
+      ``None`` — one predicate, so the gate can only fire when the assertion it
+      guards is unsatisfiable for that same reason.
+
+    Deliberately NOT gated by the thing it tests: it has to run on both sides.
+    """
+    error = hermes_profile_library_import_error()
+    resolved = profile_root.writer_roots()[profile_root.KEY_HERMES]
+    assert (error is None) == (resolved is not None), (
+        f"gate and resolver disagree: the probe says "
+        f"{'it imports' if error is None else error!r} while "
+        f"profile_root._native_profiles_dir() -> {resolved!r}")
+    if error is None:
+        try:
+            require_hermes_profile_library()
+        except pytest.skip.Exception as exc:
+            pytest.fail(
+                "the gate skipped although hermes_cli.profiles imports on "
+                "this interpreter — the profiles-root intent gate would pass "
+                f"vacuously ({exc})")
+    else:
+        with pytest.raises(pytest.skip.Exception) as exc:
+            require_hermes_profile_library()
+        assert error in str(exc.value), (
+            f"the skip must carry the import error itself, got: {exc.value}")
+
+
+def test_f2_the_gate_covers_exactly_the_six_cases_that_need_it():
+    """F2: an AST scan of this file — the gated set is exactly the pinned six,
+    where GATED means "the gate is the test's first statement".
+
+    A source pin (the D7 idiom) because the drift risk is two-sided: dropping a
+    gate puts a case back to red on a thin interpreter, and adding one to a case
+    that never resolves through hermes' library stops that case being checked
+    anywhere. Both are caught here rather than in a leg nobody re-runs.
+
+    First-statement, not any-occurrence, on purpose: a gate that runs after the
+    test has already written something is not a gate (the whole point is that a
+    skipped case touches nothing), and it is what keeps this pin from counting
+    ``test_f1_...``, which calls the gate as the thing it tests.
+    """
+    import ast
+
+    tree = ast.parse(Path(__file__).read_text())
+    gated, present = set(), set()
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef)
+                and node.name.startswith("test_")):
+            continue
+        present.add(node.name)
+        body = list(node.body)
+        if body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            body.pop(0)                              # the docstring
+        first = body[0] if body else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Call) \
+                and isinstance(first.value.func, ast.Name) \
+                and first.value.func.id == "require_hermes_profile_library":
+            gated.add(node.name)
+    assert present >= _HERMES_LIBRARY_CASES, (
+        f"pinned case(s) no longer in this file: "
+        f"{sorted(_HERMES_LIBRARY_CASES - present)}")
+    assert gated == set(_HERMES_LIBRARY_CASES), (
+        f"gated but not pinned: {sorted(gated - _HERMES_LIBRARY_CASES)}; "
+        f"pinned but not gated: {sorted(_HERMES_LIBRARY_CASES - gated)}")
