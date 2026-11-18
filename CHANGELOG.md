@@ -11,6 +11,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.13] - 2026-11-18
+
+### Added
+- **The app publishers now take `HSCC_PAGES_REMOTE`, like the root publisher.**
+  `ios-app/scripts/publish_pages.sh` and `macos-app/scripts/publish_macos.sh`
+  hardcoded `origin` on all three of their remote-touching git calls —
+  `ls-remote`, `fetch`, `push` — while `scripts/publish_site.sh` has long read
+  `HSCC_PAGES_REMOTE` (default `origin`) and pointed every call at it. So a CI
+  run or a mirror release could redirect the root publish but not the /ios/ and
+  /macos/ publishes: those needed the remote of the checkout rewritten first.
+  Both scripts now resolve `REMOTE="${HSCC_PAGES_REMOTE:-origin}"` once and use
+  it for all three calls. The default is unchanged, so `release_adhoc.sh`,
+  `release.sh` and `RELEASING.md` work exactly as before with no env set.
+- **The two mechanisms are now one mechanism in the tests too.** The release
+  legs of `scripts/tests/test_site_landing.py` used to name their fixture remote
+  `origin` purely so the publisher could find it, while the root-publish leg got
+  to pass `HSCC_PAGES_REMOTE`. They pass `HSCC_PAGES_REMOTE=<throwaway bare>`
+  now and the fixture has no `origin` at all — which also makes the legs catch a
+  regression that used to be invisible: a hardcoded `origin` no longer resolves
+  to the throwaway remote, it resolves either to nothing or to the decoy repo
+  the leg runs from, and both are fatal. The static guard pins `"$REMOTE"` on
+  every `ls-remote`/`fetch`/`push` line, next to the `-C "$REPO_ROOT"` pins that
+  keep each call inside its own repository.
+- **`site/index.html` + `site/site.css` — the hscc landing page, at the
+  gh-pages root.** One static html file, one css file and one png: no
+  frameworks, no web fonts, no remote reference of any kind. It renders the
+  seven sections of `site/COPY.md` in the contracted order and keeps the card's
+  wording (the page is checked against the card by a test, not by eye). Look
+  matches the apps: black field, `#FF5722` accent, the orange "H" mark copied
+  byte-for-byte from `ios-app/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
+  Phone-first: the feature cards and the template table reflow at 360px, and
+  the template table becomes a stacked list below 620px.
+- **`scripts/gen_site_commands.py` — the commands section cannot drift from the
+  CLI.** The command list, its order and its grouping come from `hscc --help`;
+  the prose comes from `site/COPY.md`, which stays the source of truth for
+  wording — the generator refuses to invent an explanation for a command nobody
+  has described. `--write` regenerates the marked region of `site/index.html`,
+  and a plain run exits 1 on any drift, which is what the test gates on.
+- **`scripts/publish_site.sh` — publishing the root cannot take the install
+  pages down.** It stages only `index.html`, `site.css`, `assets/` and
+  `.nojekyll`, never `-A`, never `git rm`/`git clean`; it snapshots every path
+  and content hash under `/ios/` and `/macos/` before writing and aborts with no
+  commit if either changed; and it only empties the tree on the orphan path,
+  which runs when the branch does not exist at all. `HSCC_PAGES_REMOTE` points
+  it at a throwaway remote, which is how the test drives the real script.
+- **`scripts/tests/test_site_landing.py` — the guarantee is executed, not
+  described.** Plant a marker under `/ios/` and `/macos/`, publish, and the
+  markers plus the root page must all be there. The two release legs
+  (`ios-app/scripts/publish_pages.sh`, `macos-app/scripts/publish_macos.sh`) are
+  run for real against a throwaway remote with `gh` stubbed, and each must keep
+  the root page — they already did, and now a regression cannot slip in. Plus
+  the copy-verbatim checks (every card bullet, all 23 template rows, the install
+  lines, the Ad Hoc gate), the command-drift gate, and self-containment /
+  phone-width checks (no CDN, no web font, no JS, no private address).
+
+### Changed
+- **Cluster widget + ClusterHealth Live Activity + Monitor widget/Live Activity
+  now render the CLI rows instead of derived aggregates.** The cluster tile
+  reads `GET /v1/cluster/monitor` (host table + serving table) and
+  `GET /v1/cluster/status` (workload/host counts), and draws: the answered/listed
+  host tally, each node's serving-table model and up/down state, the CLI total
+  `Gen t/s` (sum of `serving[].gen_tps`), and the sample's GPU%/CPU/GPU
+  temperatures. The hard-coded `.244/.246/.247/.248` topology glyph, the load
+  average the host table does not print, and the kanban board row are removed.
+  The monitor tile reads the same monitor route plus `/v1/daemon/host`, and adds
+  the daemon-health line from `hscc status`. Both Live Activities carry the
+  tally, model and throughput in their pushed content state; the Lock Screen and
+  Dynamic Island compact forms show the tally as the headline number.
+- **Every family is one text model.** `FleetProjection` / `FleetText` in
+  `Sources/Shared/ClusterNodeTally.swift` project the contract fields once; the
+  six iOS families and four macOS families render the same lines, so a family
+  cannot re-round or invent a number. `ios-app/scripts/cluster_widget_check.sh`
+  executes the projection and asserts each family's exact lines against the
+  committed scrubbed live capture.
+- **Fixture scrubbed to the current wire shape.** `v1_cluster_monitor.json`
+  now carries `serving[]` and `workloads[].workload_id` (no private recipe path,
+  hostname or job id), and the cluster widget gate decodes it plus the degraded
+  `{speak}` body. `ios-app/docs/WIDGET_COVERAGE.md` records the new sources and
+  gate counts.
+
+### Fixed
+- **The two app publishers read their OWN repository, not whoever called them.**
+  `ios-app/scripts/publish_pages.sh` and `macos-app/scripts/publish_macos.sh`
+  ran `git ls-remote origin` / `git fetch origin` with no `-C "$REPO_ROOT"`, so
+  the branch check and the `FETCH_HEAD` the worktree is built from belonged to
+  whichever repo owned the *current working directory*. Run from inside the repo
+  it worked; run from anywhere else and it died with `fatal: invalid reference
+  'FETCH_HEAD'` — or, worse, the caller's repo had a `FETCH_HEAD` lying around
+  from an unrelated fetch, and the wrong commit got pushed onto the branch that
+  serves the app install pages. Every git call in both scripts is pinned to
+  `$REPO_ROOT` now, the way `scripts/publish_site.sh` always did it.
+- **The branch-missing path survives a local branch named `gh-pages`.** Both
+  scripts created the orphan branch as `gh-pages` itself, which is fatal
+  (`a branch named 'gh-pages' already exists`) whenever any local branch of that
+  name lingers; the reuse path's `checkout -B gh-pages` silently *reset* such a
+  branch, or failed on it when another worktree had it checked out — and the
+  release runs in a repo full of worktrees. The orphan now gets a unique
+  throwaway name that cleanup deletes, the worktree stays detached, and the push
+  is `HEAD:gh-pages`, so no local branch is needed and none gets touched.
+- **`scripts/tests/test_site_landing.py` drives the release legs from a decoy
+  repository.** They used to pass `cwd=<the repo>` — the workaround for the bug
+  above. They now run from an unrelated repo that has its own fetched `gh-pages`
+  and fail if any of its content reaches the published tree; all three legs were
+  red before the fix (`fatal: invalid reference: FETCH_HEAD`). Plus a new leg for
+  the branch-missing path, which the happy path can never reach, and static pins
+  so an unpinned `git fetch` cannot come back.
+The `scripts` test leg stalled at test ~233 of 468 and never resumed: every
+test in `scripts/tests/test_cli_help_surface.py` hung, including the trivial
+first one. The leg was not hung — the module `report` fixture was crawling.
+`hscc_cli_help_audit.Prober` binds the api ports without `listen()` as a
+defensive hold and asked that port "is a server listening?" once per probe. A
+port bound without `listen()` does not answer a SYN on macOS, so each question
+returned EAGAIN only after burning its full 0.25 s socket timeout instead of an
+instant ECONNREFUSED: 0.232 s x 961 probes = 223.05 s of a 307.64 s audit wall.
+`_port_busy()` now reads the answer off the hold when the Prober holds the port
+(a stray server cannot bind it then, so the probe could never have told us
+anything) and still probes for real when the bind failed. Same report — 169
+surface paths, 331 probes, 20 findings — measured 59.69 s, 5.2x faster. Pinned
+by three tests, one of which pins the kernel behaviour itself so the
+assumption is tested rather than commented.
+- **Cards widget + CardsRunning Live Activity now mirror `hscc cards monitor
+  --short`.** The headline is one number — the running-card count from
+  `GET /v1/kanban/running`'s own `count` (the CLI's `slots` count) — and each
+  row is title, board, worker and run time from the same route. The row now
+  prefers the CLI's `worker` field (`collect()`'s profile-or-assignee) over
+  `assignee`, and `run_s` over a locally reparsed `started_at`, so a card
+  cannot name a different worker or age on the phone than in the terminal.
+  Blocked stays a secondary `hscc kanban blocked` warning and never replaces
+  the running headline; no current-step field exists on the route, so none is
+  invented. Small and circular families lead with the count alone; medium and
+  large use two-line rows. The footer renders a self-updating
+  "updated 3m ago", and a stale snapshot shows its age plus the reason instead
+  of looking fresh. macOS gains `systemExtraLarge` (the large renderer).
+  `ios-app/Sources/Shared/CardsRunningProjection.swift` owns the numeric copy,
+  sliced Live Activity rules keep the Island/Lock Screen identical, and
+  `ios-app/scripts/cards_running_widget_check.sh` executes the real projection
+  against two fixtures (a scrubbed live capture and the fixed
+  `CARD_VIEW_FIELDS` shape) with one assertion section per family.
+- **Kanban Monitor, Board Status, Projects and Board Progress now draw the
+  CLI's board truth.** The Kanban Monitor widget is the `hscc kanban monitor`
+  board table, not a card list: one `GET /v1/mobile/summary` read gives
+  registered project boards only, with `Running`, `Ready`, `Todo`, `Blocked` and
+  `Done 24h` taken directly from `boards[].counts`. Board rows sort exactly like
+  `kanban_live.boards_table` (most running first, then name) and idle boards are
+  skipped. The Board Status widget labels the fifth number **Done 24h** — the
+  route's `done` is `kanban_live.board_status_counts`'s `done_24h`, never an
+  all-time archive count — and leads with one headline (blocked, else running,
+  else done today) instead of five identical tiles. The Projects widget now
+  shows `hscc project list`'s HEALTH token beside the board's own live counts.
+  The Board Progress Live Activity carries the same five columns (todo included)
+  and its Lock Screen shows the operator-facing failure reason, not just a short
+  label.
+- **Freshness and failure are explicit.** Every reworked surface stores only its
+  projection plus the fetch date; a kept snapshot renders `updated 3m ago ·
+  <reason>`, and a failed read renders the reason plus an operator line. A
+  degraded, truncated or wholly unreadable summary is refused rather than drawn
+  as a board with zero cards. Paused and unconfigured still decide before any
+  client is built, so a paused surface sends zero requests.
+- **`GET /v1/projects` counts now fold `other_statuses`.** `routes_mobile`
+  reports non-standard statuses as an integer `other` plus a detail map; the
+  projects route was trying to `dict.update()` that integer, so a board with
+  `scheduled`/`review` cards could fail the whole project list. It folds the
+  detail map now, keeping the same counts the CLI's board table shows.
+- **Checks:** the existing board-status (104 assertions) and projects checks
+  stay green; the new `ios-app/scripts/kanban_monitor_widget_check.sh` decodes a
+  scrubbed live capture of `/v1/mobile/summary` and asserts every drawn number
+  equals its fixture field (27 assertions). No widget was launched, installed or
+  run on a device.
+- **`hscc kanban blocked` / `hscc kanban stale` failed every board under the brew install** (`No module named 'hermes_state'`). The listings opened each board through the write-capable `connect_closing()` door, whose preflight imports `hermes_state`, which the brew venv does not ship. They now use a read-only door (`board_pin.open_board_ro`: the path hermes resolves, opened `mode=ro`), the same shape the kanban monitor already used; blocked-card comments are read before that connection closes.
 ## [2.15.12] - 2026-11-18
 
 ### Added
