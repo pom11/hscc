@@ -365,7 +365,7 @@ if [ "$DRY_RUN" = "1" ]; then
 else
   rm -f "$ZIP" "$ZIP.sha256"
   run ditto -c -k --keepParent "$APP" "$ZIP"
-  unzip -l "$ZIP" | grep -q "^.*$APP_NAME.app/Contents/MacOS/" \
+  unzip -l "$ZIP" | grep "^.*$APP_NAME.app/Contents/MacOS/" >/dev/null \
     || fail "$ZIP does not carry $APP_NAME.app at its root"
   digest="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
   printf '%s  %s\n' "$digest" "$ASSET" > "$ZIP.sha256"
@@ -399,7 +399,7 @@ else
       --latest=false
   fi
   run gh release view "$TAG" --repo "$REPO" --json assets \
-    --jq '.assets[].name' | grep -qx "$ASSET" \
+    --jq '.assets[].name' | grep -x "$ASSET" >/dev/null \
     || fail "release $TAG does not list $ASSET after upload"
   note "asset: https://github.com/$REPO/releases/download/$TAG/$ASSET"
 fi
