@@ -1234,28 +1234,44 @@ def test_f1_hermes_gate_agrees_with_the_resolver_it_guards():
 
 
 def test_f2_the_gate_covers_exactly_the_six_cases_that_need_it():
-    """F2: an AST scan of this file — the gated set is exactly the pinned six,
-    where GATED means "the gate is the test's first statement".
+    """F2: an AST scan of this file — the gate is on exactly the pinned six,
+    gated meaning "the gate is the test's first statement", and no other test in
+    this file calls the gate at all.
 
     A source pin (the D7 idiom) because the drift risk is two-sided: dropping a
     gate puts a case back to red on a thin interpreter, and adding one to a case
     that never resolves through hermes' library stops that case being checked
     anywhere. Both are caught here rather than in a leg nobody re-runs.
 
-    First-statement, not any-occurrence, on purpose: a gate that runs after the
-    test has already written something is not a gate (the whole point is that a
-    skipped case touches nothing), and it is what keeps this pin from counting
-    ``test_f1_...``, which calls the gate as the thing it tests.
+    Two assertions, because they catch different mutants:
+
+    * ``first_stmt == the six`` — every pinned case is gated, and gated means
+      FIRST statement. A gate that runs after the test has already seeded a tmp
+      tree is not a gate (the point of skipping is that the case touches
+      nothing), and this is what refuses a reordered one;
+    * ``any_call − the subject == the six`` — no other test calls the gate
+      anywhere in its body, in any position. Catches creep that the first
+      assertion alone would wave through: a stray call mid-body in a case that
+      does not need it, which on a thin interpreter would make that case skip
+      and stop being checked, silently.
+
+    ``test_f1_...`` is the exempted SUBJECT: it calls the gate because the gate
+    IS its subject, and it is not one of the six.
     """
     import ast
 
+    subject = {"test_f1_hermes_gate_agrees_with_the_resolver_it_guards"}
     tree = ast.parse(Path(__file__).read_text())
-    gated, present = set(), set()
+    first_stmt, any_call, present = set(), set(), set()
     for node in tree.body:
         if not (isinstance(node, ast.FunctionDef)
                 and node.name.startswith("test_")):
             continue
         present.add(node.name)
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "require_hermes_profile_library"
+               for n in ast.walk(node)):
+            any_call.add(node.name)
         body = list(node.body)
         if body and isinstance(body[0], ast.Expr) \
                 and isinstance(body[0].value, ast.Constant) \
@@ -1265,10 +1281,16 @@ def test_f2_the_gate_covers_exactly_the_six_cases_that_need_it():
         if isinstance(first, ast.Expr) and isinstance(first.value, ast.Call) \
                 and isinstance(first.value.func, ast.Name) \
                 and first.value.func.id == "require_hermes_profile_library":
-            gated.add(node.name)
+            first_stmt.add(node.name)
     assert present >= _HERMES_LIBRARY_CASES, (
         f"pinned case(s) no longer in this file: "
         f"{sorted(_HERMES_LIBRARY_CASES - present)}")
-    assert gated == set(_HERMES_LIBRARY_CASES), (
-        f"gated but not pinned: {sorted(gated - _HERMES_LIBRARY_CASES)}; "
-        f"pinned but not gated: {sorted(_HERMES_LIBRARY_CASES - gated)}")
+    assert first_stmt == set(_HERMES_LIBRARY_CASES), (
+        f"gated-first but not pinned: "
+        f"{sorted(first_stmt - _HERMES_LIBRARY_CASES)}; pinned but not "
+        f"gated-first: {sorted(_HERMES_LIBRARY_CASES - first_stmt)}")
+    assert any_call - subject == set(_HERMES_LIBRARY_CASES), (
+        f"gate call outside the pinned six — a case that would quietly stop "
+        f"running on the thin interpreter: "
+        f"{sorted((any_call - subject) - _HERMES_LIBRARY_CASES)}; missing: "
+        f"{sorted(_HERMES_LIBRARY_CASES - (any_call - subject))}")
