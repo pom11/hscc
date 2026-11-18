@@ -156,6 +156,49 @@
     "workloads": [],
     "used_slots": 0,
     "free_slots": 4
+   },
+   {
+    "host": "192.0.2.26",
+    "error": "gpu: nvidia-smi exited 1",
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-17",
+     "uptime_sec": "90061",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "cpu_load_1m": "0.5",
+     "cpu_load_5m": "1.5",
+     "cpu_load_15m": "2.5",
+     "cpu_usage_pct": "99.5",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "87.25",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "118319",
+     "mem_available_mb": "6227",
+     "mem_bufcache_mb": "1806",
+     "mem_used_pct": "95.0",
+     "swap_total_mb": "1000",
+     "swap_used_mb": "375",
+     "gpu_name": "",
+     "gpu_count": "",
+     "gpu_util_pct": "",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "",
+     "gpu_power_w": "",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "",
+     "gpu_mem_clock_mhz": "",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "net_recv_bytes_s": "999",
+     "net_send_bytes_s": "1000",
+     "sparkrun_jobs": "3"
+    },
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
    }
   ]
  },
@@ -192,6 +235,23 @@
    "prompt_tps": 0.0,
    "prompt_total": 1234567.0,
    "gen_total": 1230000000.0,
+   "error": null
+  },
+  {
+   "node": "100.64.0.1",
+   "port": "8006",
+   "model": "org/Qwen3-30B-A3B[GPTQ]",
+   "routes": [
+    "org/Qwen3-30B-A3B[GPTQ]",
+    "worker-model"
+   ],
+   "running": 0,
+   "waiting": 1,
+   "kv": 0.0,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 1000000.0,
+   "gen_total": 999.0,
    "error": null
   },
   {

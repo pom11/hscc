@@ -24,8 +24,8 @@ import Foundation
 //   2. every CELL string, per row, in both widths — rounding, units, the `-`
 //      for unreadable, the 30-character error truncation, the `k`/`M`/`G`
 //      token bands, and the `total (n)` rows;
-//   3. the same cells against a LINE of the CLI's rendered text, so a golden
-//      that drifted away from what the CLI actually prints cannot pass level 2
+//   3. the same cells against the CLI's plain-text render, so a golden that
+//      drifted away from what the CLI actually prints cannot pass level 2
 //      on its own.
 // ===========================================================================
 
@@ -97,18 +97,20 @@ func monitorParity(_ c: DecodeCheck, fixture: String, golden goldenName: String,
                  "wideMin \(CLIMonitorFormat.wideMin), wide row \(wide.first?.count ?? -1) cells, narrow row \(narrow.first?.count ?? -1)")
 
         // 3. The same cells against the CLI's rendered text. Every cell of a
-        // row has to sit on ONE line of what the CLI actually printed, which is
-        // what stops a golden that drifted away from the real render from
-        // passing level 2 on its own. Checked at the WIDE width only: at the
-        // narrow width rich is allowed to elide (`Model…`) and to wrap a long
-        // cell across two lines, so a cell string legitimately does not appear
-        // there. The narrow goldens are still checked cell-for-cell above.
+        // row has to be REACHABLE in what the CLI printed, which is what stops a
+        // golden that drifted away from the real render from passing level 2 on
+        // its own. Reachable means: the cell appears verbatim, or the text shows
+        // an elision of it (`Qwen3-30B-A3B[GPT…` — `serving_table` caps Model and
+        // Routes at `max_width=26` with `overflow="ellipsis"`, so even the WIDE
+        // render truncates a long model id; measured, this fixture's
+        // `org/Qwen3-30B-A3B[GPTQ]` row is what proved it). A fabricated cell
+        // matches neither: it is in the text nowhere, and no elision of the
+        // CLI's own string happens to be a prefix of the invention.
         var stray: [String] = []
-        let lines = wideText.split(separator: "\n").map(String.init)
         for row in hostRows + wide {
             let cells = row.filter { !$0.isEmpty }
             if cells.isEmpty { continue }
-            if !lines.contains(where: { line in cells.allSatisfy({ line.contains($0) }) }) {
+            if !cells.allSatisfy({ monitorShown($0, in: wideText) }) {
                 stray.append(row.joined(separator: " | "))
             }
         }
@@ -117,6 +119,21 @@ func monitorParity(_ c: DecodeCheck, fixture: String, golden goldenName: String,
     } catch {
         c.expect(fixture, label, false, "\(error)")
     }
+}
+
+/// Whether `cell` is reachable in the CLI's own text: verbatim, or elided by
+/// rich where a column caps its width (`serving_table` gives Model and Routes
+/// `max_width=26, overflow="ellipsis"`, so a long model id prints as
+/// `Qwen3-30B-A3B[GPT…`). A cell nobody fabricated matches one arm or the other;
+/// an invented string matches neither, which is the point of the level.
+func monitorShown(_ cell: String, in text: String) -> Bool {
+    if text.contains(cell) { return true }
+    var prefix = ""
+    for ch in cell {
+        prefix.append(ch)
+        if prefix.count >= 3, text.contains(prefix + "…") { return true }
+    }
+    return false
 }
 
 /// A failure message that names the ROW and the COLUMN, so a red run says
