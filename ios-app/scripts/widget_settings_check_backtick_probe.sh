@@ -49,7 +49,15 @@
 #
 # This probe contains NO backtick character of its own — the payload is built
 # with printf '\140'. Deliberate: a probe carrying the banned byte would be
-# disqualified by the rule it tests.
+# disqualified by the rule it tests, and because this file writes a file with an
+# interpolating heredoc, R2 of heredoc_backtick_check.sh holds even its COMMENTS to
+# that rule — a byte in a comment here is a refusal, not a measured-inert note.
+#
+# CHECK THE MEASUREMENT, not the claim. That sentence was prose for three cards and
+# the first edit to this file since put two bytes of the byte in a comment while a
+# check that looked like the one below passed: piping tr -dc into "wc -l" counts LINES,
+# and tr's output has no newline in it, so it reports 0 for any number of bytes. The
+# count below is BYTES, printed on every run and load-bearing before a single leg runs.
 #
 # Usage: ios-app/scripts/widget_settings_check_backtick_probe.sh
 set -uo pipefail
@@ -77,6 +85,19 @@ probe_fail=0
 pok()   { echo "  ok: $1"; }
 pfail() { echo "  FAIL: $1"; probe_fail=$((probe_fail + 1)); }
 pnote() { echo "  note: $1"; }
+
+# The zero-byte claim, as a measurement with teeth rather than a sentence. BYTES, via
+# wc -c — wc -l on the same output reports 0 for any count, which is exactly how two
+# bytes in a comment once passed this file's own check (t_b62678cc). Refused before a
+# single leg runs: a probe carrying the byte cannot certify its absence in anyone else,
+# and R2 of heredoc_backtick_check.sh refuses this file for it anyway.
+SELF_PATH="${SELF_DIR}/$(basename "${BASH_SOURCE[0]}")"
+self_bytes=$(tr -dc "$BT" < "$SELF_PATH" | wc -c | tr -d '[:space:]')
+echo "self-bytes: $self_bytes byte(s) of the banned character in $SELF_PATH"
+if [ "$self_bytes" != "0" ]; then
+  echo "PROBE FAILED — this probe carries $self_bytes byte(s) of the character it exists to ban, so every verdict it prints would be worthless. Quote prose with double quotes: this file may carry the byte in NO context, comment included." >&2
+  exit 1
+fi
 
 sentinel_line=$(awk -v s="$SENTINEL" 'index($0, s) { print NR; exit }' "$GATE")
 if [ -z "$sentinel_line" ]; then
@@ -143,9 +164,12 @@ fi
 # byte-identical to the canonical gate, exited 0, printed all four banners and zero
 # FAIL lines — a PASS — and was reported as "the guard is refusing legitimate runs".
 # The copy mechanism was never the problem; a number was written down. That is the
-# transcribed-count trap this repo already documents for `defaults.surfaces.count
-# == 4` inside this very gate: any claim about HOW MANY of something a thing has
-# must be read out of the thing, or it reddens the day the thing grows.
+# transcribed-count trap this repo already documents for the
+# defaults.surfaces.count == 4 assertion inside this very gate: any claim about HOW
+# MANY of something a thing has must be read out of the thing, or it reddens the day
+# the thing grows. (Written without the banned byte on purpose — this file carries an
+# unquoted heredoc, so R2 of heredoc_backtick_check.sh holds its COMMENTS to the
+# zero-byte rule too; see the check-the-measurement note in the header.)
 #
 # Derived by NAME rather than counted: a run that stops half-way can match a count
 # by accident and cannot match a set. A banner statement is a line whose first
