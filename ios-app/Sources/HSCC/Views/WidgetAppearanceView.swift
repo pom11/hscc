@@ -239,7 +239,7 @@ struct WidgetStyleControls: View {
         } header: {
             Text("Layout")
         } footer: {
-            Text("Compact trims padding and corner radius. Turning the header or icons off hides them everywhere on the surface.")
+            Text("Compact trims padding and corner radius. Turning the header or icons off hides them everywhere on the surface. Lock Screen accessory families are system-tinted: only font design, weight, size and the header/icon switches apply there — their colours stay the system's.")
         }
 
         Section {

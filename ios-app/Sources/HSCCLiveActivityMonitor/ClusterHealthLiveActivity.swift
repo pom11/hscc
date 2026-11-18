@@ -32,10 +32,12 @@ import ActivityKit
 /// read renders its failure label, never `0/0 up` and never a mint "Serving".
 struct ClusterHealthLiveActivity: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: ClusterHealthActivityAttributes.self) { context in
+        let style = WidgetStyle.resolved(for: .liveActivityClusterHealth)
+        return ActivityConfiguration(for: ClusterHealthActivityAttributes.self) { context in
             LockScreenClusterHealthView(context: context)
-                .activityBackgroundTint(Theme.Palette.graphite)
-                .activitySystemActionForegroundColor(Theme.Semantic.onSurface)
+                .widgetStyle(style)
+                .activityBackgroundTint(style.backgroundColor)
+                .activitySystemActionForegroundColor(style.primaryTextColor)
         } dynamicIsland: { context in
             // The reading is decided once, then handed to every region, so the
             // compact and expanded forms of one state can never disagree.
@@ -43,43 +45,44 @@ struct ClusterHealthLiveActivity: Widget {
             let tone = ClusterHealthReading.tone(signals)
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    ClusterHealthGlyph(tone: tone)
+                    ClusterHealthGlyph(tone: tone).widgetStyle(style)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(ClusterHealthReading.headline(signals))
-                            .font(.headline)
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.headline))
+                            .foregroundColor(style.primaryTextColor)
                             .lineLimit(1)
                         if let failureLabel = signals.failureLabel, !failureLabel.isEmpty {
                             // Stale is not quiet: the tally below may be
                             // last-known, and this says why it is not new.
                             Text("stale · \(failureLabel)")
-                                .font(.caption2)
-                                .foregroundColor(Theme.Semantic.warn)
+                                .font(style.font(.caption2))
+                                .foregroundColor(style.warnColor)
                                 .lineLimit(1)
                         }
                     }
+                    .widgetStyle(style)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text(ClusterHealthReading.pushedAgeText(updatedAt: context.state.updatedAt,
                                                             now: Date()))
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     ClusterHealthDetail(signals: signals,
                                         limit: ClusterHealthActivityAttributes.downNodeLimit,
-                                        labelFont: .hsccMono(10, weight: .semibold))
+                                        labelFont: style.font(size: 10, weight: .semibold)).widgetStyle(style)
                 }
             } compactLeading: {
-                ClusterHealthGlyph(tone: tone)
+                ClusterHealthGlyph(tone: tone).widgetStyle(style)
             } compactTrailing: {
                 Text(ClusterHealthReading.compactTrailing(signals))
-                    .font(.hsccMono(11, weight: .semibold))
-                    .foregroundColor(ClusterHealthToneColour.color(tone))
+                    .font(style.font(size: 11, weight: .semibold))
+                    .foregroundColor(ClusterHealthToneColour.color(tone, style: style))
             } minimal: {
-                ClusterHealthGlyph(tone: tone)
+                ClusterHealthGlyph(tone: tone).widgetStyle(style)
             }
         }
     }
@@ -90,11 +93,12 @@ struct ClusterHealthLiveActivity: Widget {
 /// The activity's glyph: the fleet symbol, coloured by what the last read was.
 /// Colour carries the state here so the compact regions stay text free.
 struct ClusterHealthGlyph: View {
+    @Environment(\.widgetStyle) private var style
     let tone: ClusterHealthTone
 
     var body: some View {
-        Image(systemName: "square.stack.3d.up")
-            .foregroundColor(ClusterHealthToneColour.color(tone))
+        Image(systemName: "square.stack.3d.up").widgetIcon(style)
+            .foregroundColor(ClusterHealthToneColour.color(tone, style: style))
     }
 }
 
@@ -103,12 +107,12 @@ struct ClusterHealthGlyph: View {
 /// compiled by the macOS gate); mapping it once here is what keeps the Island's
 /// compact regions and the Lock Screen header from inventing their own green.
 enum ClusterHealthToneColour {
-    static func color(_ tone: ClusterHealthTone) -> Color {
+    static func color(_ tone: ClusterHealthTone, style: WidgetStyle) -> Color {
         switch tone {
-        case .ok: return Theme.Semantic.ok
-        case .warn: return Theme.Semantic.warn
-        case .bad: return Theme.Semantic.bad
-        case .neutral: return Theme.Semantic.neutral
+        case .ok: return style.okColor
+        case .warn: return style.warnColor
+        case .bad: return style.badColor
+        case .neutral: return style.secondaryTextColor
         }
     }
 }
@@ -117,6 +121,7 @@ enum ClusterHealthToneColour {
 /// in for them. Names come from the pushed state and are clipped to `limit`,
 /// because a pushed ContentState is untrusted input to a fixed-height region.
 struct ClusterHealthDetail: View {
+    @Environment(\.widgetStyle) private var style
     let signals: ClusterHealthSignals
     let limit: Int
     let labelFont: Font
@@ -127,10 +132,10 @@ struct ClusterHealthDetail: View {
             HStack(spacing: 6) {
                 Text(ClusterHealthReading.tallyText(up: signals.nodesUp, total: signals.nodesTotal))
                     .font(labelFont)
-                    .foregroundColor(ClusterHealthToneColour.color(ClusterHealthReading.tone(signals)))
+                    .foregroundColor(ClusterHealthToneColour.color(ClusterHealthReading.tone(signals), style: style))
                 Text(ClusterHealthReading.downText(down: signals.nodesDown))
                     .font(labelFont)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .foregroundColor(style.secondaryTextColor)
                 Spacer(minLength: 4)
             }
             if !names.isEmpty {
@@ -141,19 +146,19 @@ struct ClusterHealthDetail: View {
                     ForEach(names, id: \.self) { name in
                         HStack(spacing: 3) {
                             Circle()
-                                .fill(Theme.Semantic.bad)
+                                .fill(style.badColor)
                                 .frame(width: 6, height: 6)
                             Text(name)
                                 .font(labelFont)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .foregroundColor(style.secondaryTextColor)
                                 .lineLimit(1)
                         }
                     }
                     if let more = ClusterHealthReading.moreText(shown: names.count,
                                                                 down: signals.nodesDown) {
                         Text(more)
-                            .font(.caption2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2))
+                            .foregroundColor(style.secondaryTextColor)
                     }
                     Spacer(minLength: 4)
                 }
@@ -166,6 +171,7 @@ struct ClusterHealthDetail: View {
 
 /// The Lock Screen (and banner) presentation of the cluster-health activity.
 struct LockScreenClusterHealthView: View {
+    @Environment(\.widgetStyle) private var style
     let context: ActivityViewContext<ClusterHealthActivityAttributes>
 
     var body: some View {
@@ -175,24 +181,25 @@ struct LockScreenClusterHealthView: View {
             HStack(spacing: 8) {
                 ClusterHealthGlyph(tone: ClusterHealthReading.tone(signals))
                 Text(ClusterHealthReading.headline(signals))
-                    .font(.headline)
-                    .foregroundColor(Theme.Semantic.onSurface)
+                    .font(style.font(.headline))
+                    .foregroundColor(style.primaryTextColor)
                     .lineLimit(1)
                 Spacer()
                 Text(ClusterHealthReading.pushedAgeText(updatedAt: context.state.updatedAt,
                                                         now: Date()))
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(style.secondaryTextColor)
             }
+            .widgetHeader(style)
 
             ClusterHealthDetail(signals: signals,
                                 limit: ClusterHealthActivityAttributes.downNodeLimit,
-                                labelFont: .hsccMono(11, weight: .semibold))
+                                labelFont: style.font(size: 11, weight: .semibold))
 
             if let downLine = emptyLine(signals) {
                 Text(downLine)
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
             }
         }
         .padding()

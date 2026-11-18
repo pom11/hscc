@@ -640,6 +640,77 @@ extension WidgetStyle {
     /// Density as real geometry: compact trims the padding and the corner.
     var contentPadding: CGFloat { density == .compact ? 8 : 12 }
     var cornerRadius: CGFloat { density == .compact ? 10 : 14 }
+
+    /// A raised surface tint derived from the operator's own text colour, so a
+    /// custom palette never leaves a hard-coded grey card behind.
+    var raisedColor: Color { primaryTextColor.opacity(0.07) }
+    /// Hairline separators, derived the same way.
+    var hairlineColor: Color { secondaryTextColor.opacity(0.25) }
+
+    /// Density applied to a spacing token. Compact trims every gap by a
+    /// quarter; regular leaves the design system untouched.
+    func spacing(_ value: CGFloat) -> CGFloat {
+        density == .compact ? max(1, value * 0.75) : value
+    }
+
+    /// Density applied to a corner token. Compact badges tighten, never invert.
+    func corner(_ value: CGFloat) -> CGFloat {
+        density == .compact ? max(4, value * 0.8) : value
+    }
+
+    /// A font in the operator's design/weight at a Dynamic-Type text style's
+    /// base point size, scaled by `textScale`. The text-style overload keeps
+    /// every call site naming a role rather than a magic number.
+    func font(_ textStyle: Font.TextStyle, weight: Font.Weight? = nil) -> Font {
+        let size: CGFloat
+        switch textStyle {
+        case .largeTitle: size = 34
+        case .title: size = 28
+        case .title2: size = 22
+        case .title3: size = 20
+        case .headline: size = 17
+        case .body: size = 17
+        case .callout: size = 16
+        case .subheadline: size = 15
+        case .footnote: size = 13
+        case .caption: size = 12
+        case .caption2: size = 11
+        @unknown default: size = 17
+        }
+        return font(size: size, weight: weight)
+    }
+
+    /// The kanban card-status tone, resolved from the operator's status
+    /// colours. One rule, shared by every widget/activity that draws a dot.
+    func cardStatusColor(_ status: String) -> Color {
+        switch status {
+        case "running", "claimed", "in_progress": return okColor
+        case "review", "blocked": return warnColor
+        case "done", "merged", "closed": return okColor
+        case "failed", "failing": return badColor
+        default: return secondaryTextColor
+        }
+    }
+
+    /// The cluster headline state, resolved from the style's status roles.
+    func clusterStateColor(_ state: ClusterState) -> Color {
+        switch state {
+        case .serving: return okColor
+        case .waking: return warnColor
+        case .down: return badColor
+        case .unreachable, .unknown: return secondaryTextColor
+        }
+    }
+
+    /// A topology node dot, resolved from the style's status roles.
+    func nodeStateColor(_ state: TopologyNode.NodeState) -> Color {
+        switch state {
+        case .up: return okColor
+        case .busy, .warn: return warnColor
+        case .down: return badColor
+        case .unknown: return secondaryTextColor
+        }
+    }
 }
 
 private struct WidgetStyleEnvironmentKey: EnvironmentKey {
@@ -674,6 +745,36 @@ extension View {
             )
             .foregroundColor(style.primaryTextColor)
     }
+
+    /// The operator's "show icons" switch, applied at every glyph. Kept as a
+    /// modifier (not a body branch) so a row's layout does not jump when icons
+    /// are hidden — the glyph simply stops being drawn.
+    func widgetIcon(_ style: WidgetStyle) -> some View {
+        opacity(style.showIcons ? 1 : 0)
+    }
+
+    /// The operator's "show header" switch, applied at each family's header.
+    func widgetHeader(_ style: WidgetStyle) -> some View {
+        opacity(style.showHeader ? 1 : 0)
+    }
+}
+
+/// A Label whose icon obeys the widget style's "show icons" switch. Used by
+/// the families that draw a Label rather than an Image, so one setting owns
+/// every glyph on the surface.
+struct WidgetLabelStyle: LabelStyle {
+    @Environment(\.widgetStyle) private var style
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            if style.showIcons { configuration.icon }
+            configuration.title
+        }
+    }
+}
+
+extension LabelStyle where Self == WidgetLabelStyle {
+    static var widget: WidgetLabelStyle { WidgetLabelStyle() }
 }
 
 /// A small reusable banner a view overlays when rendering stale last-known

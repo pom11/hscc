@@ -19,60 +19,63 @@ import ActivityKit
 @main
 struct HSCCLiveActivity: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: WakingActivityAttributes.self) { context in
+        let style = WidgetStyle.resolved(for: .liveActivityWake)
+        return ActivityConfiguration(for: WakingActivityAttributes.self) { context in
             // Lock Screen / banner view.
             LockScreenWakeView(context: context)
-                .activityBackgroundTint(Theme.Palette.graphite)
-                .activitySystemActionForegroundColor(Theme.Semantic.onSurface)
+                .widgetStyle(style)
+                .activityBackgroundTint(style.backgroundColor)
+                .activitySystemActionForegroundColor(style.primaryTextColor)
         } dynamicIsland: { context in
             DynamicIsland {
                 // Expanded UI.
                 DynamicIslandExpandedRegion(.leading) {
-                    stateDot(context.state.state)
+                    stateDot(context.state.state, style: style)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(headline(state: context.state.state))
-                            .font(.headline)
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.headline))
+                            .foregroundColor(style.primaryTextColor)
                         if context.state.failed, let message = context.state.message {
                             Text(message)
-                                .font(.caption)
-                                .foregroundColor(Theme.Semantic.bad)
+                                .font(style.font(.caption))
+                                .foregroundColor(style.badColor)
                         }
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     TopologyComingOnlineView(upNodes: context.state.upNodes)
                         .padding(.top, 2)
+                        .widgetStyle(style)
                 }
             } compactLeading: {
-                Image(systemName: "bolt")
-                    .foregroundColor(Theme.Semantic.warn)
+                Image(systemName: "bolt").widgetIcon(style)
+                    .foregroundColor(style.warnColor)
             } compactTrailing: {
                 // Elapsed time + a state dot.
                 HStack(spacing: 4) {
-                    stateDot(context.state.state)
+                    stateDot(context.state.state, style: style)
                     TextTimerView(context: context)
                 }
             } minimal: {
-                stateDot(context.state.state)
+                stateDot(context.state.state, style: style)
             }
         }
     }
 
-    private func stateDot(_ state: String) -> some View {
+    private func stateDot(_ state: String, style: WidgetStyle) -> some View {
         Circle()
-            .fill(color(for: state))
+            .fill(color(for: state, style: style))
             .frame(width: 10, height: 10)
     }
 
-    private func color(for state: String) -> Color {
+    private func color(for state: String, style: WidgetStyle) -> Color {
         switch state {
-        case "up": return Theme.Semantic.ok
-        case "waking": return Theme.Semantic.warn
-        case "down": return Theme.Semantic.bad
-        default: return Theme.Semantic.neutral
+        case "up": return style.okColor
+        case "waking": return style.warnColor
+        case "down": return style.badColor
+        default: return style.secondaryTextColor
         }
     }
 
@@ -90,34 +93,36 @@ struct HSCCLiveActivity: Widget {
 
 /// The Lock Screen (and banner) presentation of the wake activity.
 struct LockScreenWakeView: View {
+    @Environment(\.widgetStyle) private var style
     let context: ActivityViewContext<WakingActivityAttributes>
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 if context.state.failed {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(Theme.Semantic.bad)
+                    Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                        .foregroundColor(style.badColor)
                 } else {
                     ProgressView()
-                        .tint(Theme.Semantic.warn)
+                        .tint(style.warnColor)
                 }
                 Text(headline(state: context.state.state))
-                    .font(.headline)
-                    .foregroundColor(Theme.Semantic.onSurface)
+                    .font(style.font(.headline))
+                    .foregroundColor(style.primaryTextColor)
                 Spacer()
                 if !context.state.failed {
                     TextTimerView(context: context)
                 }
             }
+            .widgetHeader(style)
             if context.state.failed, let message = context.state.message {
                 Text(message)
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.bad)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.badColor)
             } else {
                 Text("Waking \(context.state.upNodes.count) of 4 units")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
             }
         }
         .padding()
@@ -146,24 +151,25 @@ struct LockScreenWakeView: View {
 /// settle anyway). When the wake has settled (failed/up) the view shows a
 /// static elapsed readout instead of a live ticker.
 struct TextTimerView: View {
+    @Environment(\.widgetStyle) private var style
     let context: ActivityViewContext<WakingActivityAttributes>
 
     var body: some View {
         if context.state.failed {
             // Settled — render a static total elapsed, no live ticker.
             Text(elapsedString(context.state.startedAt))
-                .font(.hsccMono(13, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(size: 13, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
                 .monospacedDigit()
         } else if let start = context.state.startedAt {
             Text(timerInterval: start...Date.distantFuture, countsDown: false)
-                .font(.hsccMono(13, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(size: 13, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
                 .monospacedDigit()
         } else {
             Text("—")
-                .font(.hsccMono(13, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(size: 13, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
         }
     }
 
@@ -182,6 +188,7 @@ struct TextTimerView: View {
 /// node dot glowing mint once the API reports it serving, amber while waking.
 /// Honest per-node readiness — only nodes the API says are up are mint.
 struct TopologyComingOnlineView: View {
+    @Environment(\.widgetStyle) private var style
     let upNodes: [String]
 
     private let pairs: [TopologyPair] = [
@@ -201,7 +208,7 @@ struct TopologyComingOnlineView: View {
                 HStack(spacing: 4) {
                     dot(pair.nodes[0])
                     Rectangle()
-                        .fill(Theme.Palette.mist.opacity(0.5))
+                        .fill(style.secondaryTextColor.opacity(0.5))
                         .frame(width: 10, height: 2)
                     dot(pair.nodes[1])
                 }
@@ -213,7 +220,7 @@ struct TopologyComingOnlineView: View {
     private func dot(_ node: TopologyNode) -> some View {
         let up = upNodes.contains(node.label)
         return Circle()
-            .fill(up ? Theme.Semantic.ok : Theme.Semantic.warn.opacity(0.8))
+            .fill(up ? style.okColor : style.warnColor.opacity(0.8))
             .frame(width: 9, height: 9)
     }
 }

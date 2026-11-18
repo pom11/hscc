@@ -67,3 +67,98 @@ enum Theme {
         static var hairline: Color { Palette.hairline }
     }
 }
+
+// MARK: - WidgetStyle SwiftUI bridge (mirrors Sources/HSCC/Views/Theme.swift)
+
+extension WidgetColor {
+    var color: Color { Color(red: red, green: green, blue: blue, opacity: alpha) }
+}
+
+extension WidgetStyle {
+    var backgroundColor: Color { background.color }
+    var primaryTextColor: Color { primaryText.color }
+    var secondaryTextColor: Color { secondaryText.color }
+    var accentColor: Color { accent.color }
+    var okColor: Color { statusOk.color }
+    var warnColor: Color { statusWarn.color }
+    var badColor: Color { statusBad.color }
+    var raisedColor: Color { primaryTextColor.opacity(0.07) }
+    var hairlineColor: Color { secondaryTextColor.opacity(0.25) }
+
+    var swiftUIFontDesign: Font.Design {
+        switch fontDesign {
+        case .standard: return .default
+        case .rounded: return .rounded
+        case .monospaced: return .monospaced
+        case .serif: return .serif
+        }
+    }
+    var swiftUIFontWeight: Font.Weight {
+        switch fontWeight {
+        case .regular: return .regular
+        case .medium: return .medium
+        case .semibold: return .semibold
+        case .bold: return .bold
+        }
+    }
+    func scaled(_ size: CGFloat) -> CGFloat { max(1, size * CGFloat(textScale)) }
+    func font(size: CGFloat, weight: Font.Weight? = nil) -> Font {
+        Font.system(size: scaled(size), weight: weight ?? swiftUIFontWeight, design: swiftUIFontDesign)
+    }
+    func font(_ textStyle: Font.TextStyle, weight: Font.Weight? = nil) -> Font {
+        let size: CGFloat
+        switch textStyle {
+        case .largeTitle: size = 34
+        case .title: size = 28
+        case .title2: size = 22
+        case .title3: size = 20
+        case .headline: size = 17
+        case .body: size = 17
+        case .callout: size = 16
+        case .subheadline: size = 15
+        case .footnote: size = 13
+        case .caption: size = 12
+        case .caption2: size = 11
+        @unknown default: size = 17
+        }
+        return font(size: size, weight: weight)
+    }
+    func spacing(_ value: CGFloat) -> CGFloat { density == .compact ? max(1, value * 0.75) : value }
+    func corner(_ value: CGFloat) -> CGFloat { density == .compact ? max(4, value * 0.8) : value }
+    func cardStatusColor(_ status: String) -> Color {
+        switch status {
+        case "running", "claimed", "in_progress": return okColor
+        case "review", "blocked": return warnColor
+        case "done", "merged", "closed": return okColor
+        case "failed", "failing": return badColor
+        default: return secondaryTextColor
+        }
+    }
+}
+
+private struct WidgetStyleEnvironmentKey: EnvironmentKey {
+    static let defaultValue = WidgetStyle()
+}
+extension EnvironmentValues {
+    var widgetStyle: WidgetStyle {
+        get { self[WidgetStyleEnvironmentKey.self] }
+        set { self[WidgetStyleEnvironmentKey.self] = newValue }
+    }
+}
+extension View {
+    func widgetStyle(_ style: WidgetStyle) -> some View { environment(\.widgetStyle, style) }
+    func widgetIcon(_ style: WidgetStyle) -> some View { opacity(style.showIcons ? 1 : 0) }
+    func widgetHeader(_ style: WidgetStyle) -> some View { opacity(style.showHeader ? 1 : 0) }
+}
+struct WidgetLabelStyle: LabelStyle {
+    @Environment(\.widgetStyle) private var style
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            if style.showIcons { configuration.icon }
+            configuration.title
+        }
+    }
+}
+extension LabelStyle where Self == WidgetLabelStyle {
+    static var widget: WidgetLabelStyle { WidgetLabelStyle() }
+}

@@ -64,11 +64,11 @@ struct KanbanMonitorRow: Identifiable {
         case stuck
         case waiting
 
-        var color: Color {
+        func color(_ style: WidgetStyle) -> Color {
             switch self {
-            case .liveWork: return Theme.Semantic.ok
-            case .stuck: return Theme.Semantic.bad
-            case .waiting: return Theme.Semantic.neutral
+            case .liveWork: return style.okColor
+            case .stuck: return style.badColor
+            case .waiting: return style.secondaryTextColor
             }
         }
 
@@ -555,10 +555,12 @@ struct KanbanMonitorWidget: Widget {
     let kind = "KanbanMonitorWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
+        let style = WidgetStyle.resolved(for: .widgetKanbanMonitor)
+        return StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
             KanbanMonitorWidgetView(entry: entry)
+                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    Theme.Semantic.surface
+                    style.backgroundColor
                 }
         }
         .configurationDisplayName("Kanban Monitor")
@@ -570,6 +572,7 @@ struct KanbanMonitorWidget: Widget {
 
 /// The single view rendered for every family, choosing the layout by size.
 struct KanbanMonitorWidgetView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
     @Environment(\.widgetFamily) private var family
 
@@ -613,21 +616,29 @@ struct KanbanMonitorWidgetView: View {
 /// has no room for three lines, and a paused gauge that still drew the running
 /// count would be the false number §6 rule 1 refuses.
 struct KanbanMonitorGateView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
+    /// Accessory families are system-tinted: fonts still follow the style,
+    /// colours stay the system's.
+    var systemTinted = false
+    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
+    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
+    private var statusText: Color { systemTinted ? .primary : style.badColor }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(.subheadline))
+                .foregroundColor(secondaryText)
             Text(entry.gateLine)
-                .font(.caption2.weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.caption2, weight: .semibold))
+                .foregroundColor(primaryText)
             Text(entry.paused
                  ? "Turn it back on under Widgets & Live Activities in the HSCC app."
                  : WidgetDataFailure.notConfigured.operatorLine)
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(secondaryText)
                 .lineLimit(3)
         }
     }
@@ -638,27 +649,28 @@ struct KanbanMonitorGateView: View {
 /// the same thing in the same words. No count on this pane is `0`: nothing was
 /// read, and a zero would claim a quiet board.
 struct KanbanMonitorErrorPane: View {
+    @Environment(\.widgetStyle) private var style
     let failure: WidgetDataFailure
     /// `large` has room for the sentence; the tighter families take the label.
     var detailed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-            HStack(spacing: Theme.Spacing.xs.rawValue) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.subheadline)
-                    .foregroundColor(Theme.Semantic.bad)
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                    .font(style.font(.subheadline))
+                    .foregroundColor(style.badColor)
                 Text("board read failed")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(Theme.Semantic.onSurface)
+                    .font(style.font(.caption, weight: .semibold))
+                    .foregroundColor(style.primaryTextColor)
             }
             Text(detailed ? failure.operatorLine : failure.shortLabel)
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
                 .lineLimit(detailed ? 3 : 1)
             Text("counts unknown")
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.neutral)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -667,30 +679,32 @@ struct KanbanMonitorErrorPane: View {
 /// `compact` is the single-line spelling the small family and the rectangular
 /// accessory can afford.
 struct KanbanMonitorCountsLine: View {
+    @Environment(\.widgetStyle) private var style
     let counts: KanbanMonitorCounts
     var compact = false
 
     var body: some View {
-        HStack(spacing: compact ? Theme.Spacing.sm.rawValue : Theme.Spacing.lg.rawValue) {
-            chip("play.fill", "run", counts.running, Theme.Semantic.ok)
-            chip("square.stack.3d.up", "ready", counts.ready, Theme.Semantic.neutral)
+        HStack(spacing: compact ? style.spacing(Theme.Spacing.sm.rawValue) : style.spacing(Theme.Spacing.lg.rawValue)) {
+            chip("play.fill", "run", counts.running, style.okColor)
+            chip("square.stack.3d.up", "ready", counts.ready, style.secondaryTextColor)
             chip("exclamationmark.triangle.fill", "blocked", counts.blocked,
-                 (counts.blocked ?? 0) > 0 ? Theme.Semantic.bad : Theme.Semantic.neutral)
+                 (counts.blocked ?? 0) > 0 ? style.badColor : style.secondaryTextColor)
             Spacer(minLength: 0)
         }
+    .widgetHeader(style)
     }
 
     private func chip(_ symbol: String, _ name: String, _ value: Int?, _ color: Color) -> some View {
-        HStack(spacing: Theme.Spacing.xxs.rawValue) {
-            Image(systemName: symbol)
-                .font(.system(size: compact ? 7 : 9))
+        HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+            Image(systemName: symbol).widgetIcon(style)
+                .font(style.font(size: compact ? 7 : 9))
                 .foregroundColor(color)
             Text(kanbanCountText(value))
-                .font((compact ? Font.caption2 : Font.subheadline).weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(compact ? .caption2 : .subheadline, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
             Text(name)
-                .font(.system(size: compact ? 7 : 9))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: compact ? 7 : 9))
+                .foregroundColor(style.secondaryTextColor)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(name) \(kanbanCountText(value))")
@@ -701,6 +715,7 @@ struct KanbanMonitorCountsLine: View {
 /// `showWorker` / `showBoard` / `showTime` / `showBlockKind` are the family
 /// budgets §5.3 binds (`medium` = title + board, `large` adds age + `block_kind`).
 struct KanbanMonitorRowView: View {
+    @Environment(\.widgetStyle) private var style
     let row: KanbanMonitorRow
     var titleLimit = KanbanMonitorEntry.titleCap
     var showWorker = false
@@ -709,40 +724,40 @@ struct KanbanMonitorRowView: View {
     var showBlockKind = false
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: row.source.symbol)
-                .font(.system(size: 7))
-                .foregroundColor(row.source.color)
+        HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: row.source.symbol).widgetIcon(style)
+                .font(style.font(size: 7))
+                .foregroundColor(row.source.color(style))
             VStack(alignment: .leading, spacing: 0) {
                 Text(kanbanClip(row.label, titleLimit))
-                    .font(.caption2.weight(.medium))
-                    .foregroundColor(Theme.Semantic.onSurface)
+                    .font(style.font(.caption2, weight: .medium))
+                    .foregroundColor(style.primaryTextColor)
                     .lineLimit(1)
                 if showWorker, let worker = row.worker, !worker.isEmpty {
                     // The CLI's `Worker` column — which profile holds the card.
                     Text(worker)
-                        .font(.system(size: 7))
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(size: 7))
+                        .foregroundColor(style.secondaryTextColor)
                         .lineLimit(1)
                 }
             }
-            Spacer(minLength: Theme.Spacing.xxs.rawValue)
+            Spacer(minLength: style.spacing(Theme.Spacing.xxs.rawValue))
             if showBlockKind, let kind = row.blockKind, !kind.isEmpty {
                 Text(kind)
-                    .font(.system(size: 7))
-                    .foregroundColor(Theme.Semantic.bad)
+                    .font(style.font(size: 7))
+                    .foregroundColor(style.badColor)
                     .lineLimit(1)
             }
             if showBoard, let board = row.board, !board.isEmpty {
                 Text(board)
-                    .font(.system(size: 7))
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 7))
+                    .foregroundColor(style.secondaryTextColor)
                     .lineLimit(1)
             }
             if showTime {
                 Text(row.timeText)
-                    .font(.system(size: 7).monospacedDigit())
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 7).monospacedDigit())
+                    .foregroundColor(style.secondaryTextColor)
             }
         }
         .accessibilityElement(children: .combine)
@@ -765,17 +780,18 @@ struct KanbanMonitorRowView: View {
 
 /// The age line: shown only when something on screen is kept through an error.
 struct KanbanMonitorAgeLine: View {
+    @Environment(\.widgetStyle) private var style
     let ageMinutes: Int?
 
     var body: some View {
         if let ageMinutes {
-            HStack(spacing: Theme.Spacing.xxs.rawValue) {
-                Image(systemName: "calendar.badge.clock")
-                    .font(.system(size: 7))
+            HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+                Image(systemName: "calendar.badge.clock").widgetIcon(style)
+                    .font(style.font(size: 7))
                 Text("last known · \(ageMinutes) min ago")
-                    .font(.system(size: 7))
+                    .font(style.font(size: 7))
             }
-            .foregroundColor(Theme.Semantic.warn)
+            .foregroundColor(style.warnColor)
         }
     }
 }
@@ -784,18 +800,19 @@ struct KanbanMonitorAgeLine: View {
 /// read failed, and this is why. Without it a missing count reads as a quiet
 /// board, which is the failure this panel exists to avoid.
 struct KanbanMonitorPartialStrip: View {
+    @Environment(\.widgetStyle) private var style
     let failure: WidgetDataFailure
     var detailed = false
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xxs.rawValue) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 7))
+        HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+            Image(systemName: "exclamationmark.triangle").widgetIcon(style)
+                .font(style.font(size: 7))
             Text(detailed ? "partial · \(failure.operatorLine)" : "partial · \(failure.shortLabel)")
-                .font(.system(size: 7))
+                .font(style.font(size: 7))
                 .lineLimit(detailed ? 2 : 1)
         }
-        .foregroundColor(Theme.Semantic.warn)
+        .foregroundColor(style.warnColor)
     }
 }
 
@@ -804,6 +821,7 @@ struct KanbanMonitorPartialStrip: View {
 /// §5.3: `"6 running · 15 blocked"` from the two counts the accessory can afford.
 /// An unread count is an em dash here too — the inline glyph never guesses.
 struct KanbanMonitorInline: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
@@ -811,17 +829,19 @@ struct KanbanMonitorInline: View {
             // Both gate states through ONE copy rule, and that rule itself puts
             // the setup invite first — an unconfigured device can never read as
             // "paused" (audit-3, t_5c554c5b).
-            Text(entry.shortGateLabel)
+            Text(entry.shortGateLabel).font(style.font(.caption2))
         } else if let failure = entry.failure {
-            Text(failure.shortLabel)
+            Text(failure.shortLabel).font(style.font(.caption2))
         } else {
             Text("\(kanbanCountText(entry.counts.running)) run · \(kanbanCountText(entry.counts.blocked)) blocked")
+                .font(style.font(.caption2))
         }
     }
 }
 
 /// §5.3: the running count, red when anything is blocked.
 struct KanbanMonitorCircular: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
@@ -829,10 +849,10 @@ struct KanbanMonitorCircular: View {
             // A LABEL, not a gauge: a paused ring that still drew the running
             // count would be the false number §6 rule 1 refuses, and the same
             // copy rule as the inline family puts setup first.
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
             Text(entry.shortGateLabel)
         } else if let failure = entry.failure {
-            Image(systemName: "exclamationmark.triangle.fill")
+            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
             Text(failure.shortLabel)
         } else {
             Gauge(value: gaugeValue, in: 0...1) {
@@ -848,9 +868,9 @@ struct KanbanMonitorCircular: View {
     /// A blocked board is the alarming case, so it wins the colour even when the
     /// running count is healthy. An unknown count gauges at zero and shows `—`.
     private var tint: Color {
-        if (entry.counts.blocked ?? 0) > 0 { return Theme.Semantic.bad }
-        if entry.counts.running == nil { return Theme.Semantic.neutral }
-        return Theme.Semantic.ok
+        if (entry.counts.blocked ?? 0) > 0 { return .primary }
+        if entry.counts.running == nil { return .secondary }
+        return .primary
     }
 
     private var gaugeValue: Double {
@@ -864,32 +884,34 @@ struct KanbanMonitorCircular: View {
 
 /// §5.3: running / blocked on two lines, plus the top row's title.
 struct KanbanMonitorRectangular: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
             if !entry.configured || entry.paused {
                 Text(entry.gateLine)
-                    .font(.caption2.weight(.semibold))
+                    .font(style.font(.caption2, weight: .semibold))
             } else if let failure = entry.failure {
                 Text("board read failed")
-                    .font(.caption2.weight(.semibold))
+                    .font(style.font(.caption2, weight: .semibold))
                 Text(failure.shortLabel)
-                    .font(.caption2)
+                    .font(style.font(.caption2))
             } else {
-                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                     Text("\(kanbanCountText(entry.counts.running)) run")
-                        .font(.caption.weight(.semibold))
+                        .font(style.font(.caption, weight: .semibold))
                     Text("\(kanbanCountText(entry.counts.blocked)) blocked")
-                        .font(.caption.weight(.semibold))
+                        .font(style.font(.caption, weight: .semibold))
                         .foregroundColor((entry.counts.blocked ?? 0) > 0
-                                         ? Theme.Semantic.bad
-                                         : Theme.Semantic.onSurface)
+                                         ? .primary
+                                         : .primary)
                 }
+                .widgetHeader(style)
                 if let row = entry.rows.first {
                     Text(kanbanClip(row.label, 20))
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
                 KanbanMonitorAgeLine(ageMinutes: entry.ageMinutes)
@@ -902,6 +924,7 @@ struct KanbanMonitorRectangular: View {
 
 /// §5.3 small: 3 counts + 1 title (≤40).
 struct SmallKanbanMonitor: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
@@ -911,7 +934,7 @@ struct SmallKanbanMonitor: View {
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                     KanbanMonitorCountsLine(counts: entry.counts, compact: true)
                     if let row = entry.rows.first {
                         KanbanMonitorRowView(row: row, showWorker: true, showBoard: false, showTime: true)
@@ -919,10 +942,10 @@ struct SmallKanbanMonitor: View {
                         // No rows is a fact the payload sent (nothing open), not a
                         // failure — so it says so instead of leaving the tile empty.
                         Text("no open cards")
-                            .font(.caption2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2))
+                            .foregroundColor(style.secondaryTextColor)
                     }
-                    Spacer(minLength: Theme.Spacing.xs.rawValue)
+                    Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
                     if let failure = entry.partialFailure {
                         KanbanMonitorPartialStrip(failure: failure)
                     }
@@ -935,6 +958,7 @@ struct SmallKanbanMonitor: View {
 
 /// §5.3 medium: 3 counts + up to 4 rows `{title≤40, board}`.
 struct MediumKanbanMonitor: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
@@ -944,15 +968,15 @@ struct MediumKanbanMonitor: View {
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                     KanbanMonitorCountsLine(counts: entry.counts)
                     ForEach(entry.rows.prefix(4)) { row in
                         KanbanMonitorRowView(row: row)
                     }
                     if entry.rows.isEmpty {
                         Text("no open cards")
-                            .font(.caption2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2))
+                            .foregroundColor(style.secondaryTextColor)
                     }
                     Spacer(minLength: 0)
                     if let failure = entry.partialFailure {
@@ -968,6 +992,7 @@ struct MediumKanbanMonitor: View {
 /// §5.3 large: 3 counts + up to 7 rows `{title≤60, board, age_days}`, blocked
 /// rows also carrying `block_kind` — the category, never the prose behind it.
 struct LargeKanbanMonitor: View {
+    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
@@ -977,7 +1002,7 @@ struct LargeKanbanMonitor: View {
             } else if let failure = entry.failure {
                 KanbanMonitorErrorPane(failure: failure, detailed: true)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                     KanbanMonitorCountsLine(counts: entry.counts)
                     ForEach(entry.rows) { row in
                         KanbanMonitorRowView(row: row,
@@ -988,8 +1013,8 @@ struct LargeKanbanMonitor: View {
                     }
                     if entry.rows.isEmpty {
                         Text("no open cards")
-                            .font(.caption2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2))
+                            .foregroundColor(style.secondaryTextColor)
                     }
                     Spacer(minLength: 0)
                     if let failure = entry.partialFailure {

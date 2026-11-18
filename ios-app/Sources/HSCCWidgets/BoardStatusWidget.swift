@@ -192,7 +192,7 @@ struct BoardStatusEntry: TimelineEntry {
     var circularNumber: Int? { BoardStatusReading.circularNumber(projection) }
 
     /// The ring's colour is the one question a circular complication answers:
-    /// does this board need me? (The five TILES use `Theme.cardStatusColor`,
+    /// does this board need me? (The five TILES use `style.cardStatusColor`,
     /// where a blocked card is amber — that is a status among many, and Theme
     /// documents the difference on purpose.)
     var circularIsUrgent: Bool { BoardStatusReading.circularIsUrgent(projection) }
@@ -220,7 +220,7 @@ struct BoardStatusEntry: TimelineEntry {
         return BoardStatusTile.statuses.map { status in
             BoardStatusTile(status: status.label,
                             value: projection.value(for: status.key),
-                            color: Theme.cardStatusColor(status.key))
+                            statusKey: status.key)
         }
     }
 }
@@ -229,9 +229,14 @@ struct BoardStatusEntry: TimelineEntry {
 struct BoardStatusTile: Identifiable {
     let status: String
     let value: Int?
-    let color: Color
+    /// The payload/status key (todo, ready, running, blocked, done) — the view
+    /// resolves it through the operator's status palette.
+    let statusKey: String
 
     var id: String { status }
+
+    /// The tile's dot/value tone, from the operator's style.
+    func color(_ style: WidgetStyle) -> Color { style.cardStatusColor(statusKey) }
 
     /// The five statuses, in board order. One list so no family can quietly
     /// drop one (a widget that shows four of five is a widget that lies). The
@@ -243,7 +248,7 @@ struct BoardStatusTile: Identifiable {
     /// footer/header's job (it carries `WidgetDataFailure.shortLabel`), so a
     /// tile never invents its own copy.
     static func empty() -> [BoardStatusTile] {
-        statuses.map { item in BoardStatusTile(status: item.label, value: nil, color: Theme.Semantic.neutral) }
+        statuses.map { item in BoardStatusTile(status: item.label, value: nil, statusKey: item.key) }
     }
 }
 
@@ -454,11 +459,13 @@ struct BoardStatusWidget: Widget {
     let kind = "BoardStatusWidget"
 
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: kind, intent: BoardStatusConfigurationIntent.self,
+        let style = WidgetStyle.resolved(for: .widgetBoardStatus)
+        return AppIntentConfiguration(kind: kind, intent: BoardStatusConfigurationIntent.self,
                                provider: BoardStatusTimelineProvider()) { entry in
             BoardStatusWidgetView(entry: entry)
+                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    Theme.Semantic.surface
+                    style.backgroundColor
                 }
         }
         .configurationDisplayName("Board Status")
@@ -476,6 +483,7 @@ struct BoardStatusWidget: Widget {
 /// gate copy itself puts the setup invite first, so an unconfigured app cannot
 /// read as "paused" either.
 struct BoardStatusWidgetView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
     @Environment(\.widgetFamily) private var family
 
@@ -483,6 +491,7 @@ struct BoardStatusWidgetView: View {
         switch family {
         case .accessoryInline:
             Text(entry.inlineLine)
+                .font(style.font(.caption2))
         case .accessoryCircular:
             BoardStatusCircularView(entry: entry)
         case .accessoryRectangular:
@@ -500,6 +509,7 @@ struct BoardStatusWidgetView: View {
 // MARK: Accessory families
 
 struct BoardStatusCircularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
@@ -508,41 +518,42 @@ struct BoardStatusCircularView: View {
             // a label, not a number. A paused ring that still drew a count
             // would be exactly the false zero §6 rule 1 refuses.
             Text(entry.shortGateLabel)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
                 .accessibilityLabel(entry.shortGateLabel)
         } else {
-            let color = entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.ok
+            let color: Color = .primary
             VStack(spacing: 0) {
                 Text(BoardStatusReading.numberText(entry.circularNumber))
-                    .font(.system(.body, design: .monospaced))
+                    .font(style.font(.body))
                     .fontWeight(.semibold)
                     .foregroundStyle(color)
-                Text(entry.circularIsUrgent ? "blocked" : "open")
-                    .font(.system(size: 8))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                Text(entry.circularIsUrgent ? "blocked" : "open").widgetHeader(style)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(.secondary)
             }
         }
     }
 }
 
 struct BoardStatusRectangularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
-            BoardStatusGateView(entry: entry)
+            BoardStatusGateView(entry: entry, systemTinted: true)
         } else {
             VStack(alignment: .leading, spacing: 1) {
-                Text(entry.titleText)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Theme.Semantic.onSurface)
+                Text(entry.titleText).widgetHeader(style)
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(entry.countsShortLine)
-                    .font(.hsccMono(.caption2, weight: .medium))
-                    .foregroundStyle(entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2, weight: .medium))
+                    .foregroundStyle(entry.circularIsUrgent ? .primary : .secondary)
                     .lineLimit(1)
             }
         }
@@ -552,13 +563,14 @@ struct BoardStatusRectangularView: View {
 // MARK: Home Screen families
 
 struct BoardStatusSmallView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
                 BoardStatusTileGrid(tiles: entry.tiles, columns: 3)
                 Spacer(minLength: 0)
@@ -568,18 +580,19 @@ struct BoardStatusSmallView: View {
 }
 
 struct BoardStatusMediumView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
                 BoardStatusTileGrid(tiles: entry.tiles, columns: 5)
                 Text(entry.footerLine)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundStyle(style.secondaryTextColor)
                     .lineLimit(2)
             }
         }
@@ -587,13 +600,14 @@ struct BoardStatusMediumView: View {
 }
 
 struct BoardStatusLargeView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.md.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
                 // `large` has room for the five numbers read as rows, so each
                 // one gets its own line and its own share of the open total.
@@ -601,23 +615,23 @@ struct BoardStatusLargeView: View {
                 // second read on every refresh (§2's budget), and the kanban
                 // monitor widget is already the surface that lists cards.
                 ForEach(entry.tiles) { tile in
-                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                         Circle()
-                            .fill(tile.color)
+                            .fill(tile.color(style))
                             .frame(width: 7, height: 7)
                         Text(tile.status)
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.Semantic.onSurface)
-                        Spacer(minLength: Theme.Spacing.xs.rawValue)
+                            .font(style.font(.subheadline))
+                            .foregroundStyle(style.primaryTextColor)
+                        Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
                         Text(BoardStatusReading.numberText(tile.value))
-                            .font(.hsccMono(.title3, weight: .semibold))
-                            .foregroundStyle(tile.value == nil ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                            .font(style.font(.title3, weight: .semibold))
+                            .foregroundStyle(tile.value == nil ? style.secondaryTextColor : style.primaryTextColor)
                     }
                 }
                 Spacer(minLength: 0)
                 Text(entry.footerLine)
-                    .font(.caption)
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption))
+                    .foregroundStyle(style.secondaryTextColor)
             }
         }
     }
@@ -626,50 +640,53 @@ struct BoardStatusLargeView: View {
 // MARK: Shared pieces
 
 private struct BoardStatusHeaderView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: entry.circularIsUrgent ? "exclamationmark.triangle.fill" : "square.stack.3d.up")
-                .font(.system(size: 10))
-                .foregroundStyle(entry.circularIsUrgent ? Theme.Semantic.bad : Theme.Semantic.neutral)
+        HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: entry.circularIsUrgent ? "exclamationmark.triangle.fill" : "square.stack.3d.up").widgetIcon(style)
+                .font(style.font(size: 10))
+                .foregroundStyle(entry.circularIsUrgent ? style.badColor : style.secondaryTextColor)
             Text(entry.titleText)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.Semantic.onSurface)
+                .font(style.font(.subheadline, weight: .semibold))
+                .foregroundStyle(style.primaryTextColor)
                 .lineLimit(1)
             Spacer(minLength: 0)
             if let age = entry.ageMinutes {
                 Text("\(age) min")
-                    .font(.hsccMono(.caption2, weight: .medium))
-                    .foregroundStyle(Theme.Semantic.warn)
+                    .font(style.font(.caption2, weight: .medium))
+                    .foregroundStyle(style.warnColor)
             }
         }
+    .widgetHeader(style)
     }
 }
 
 private struct BoardStatusTileGrid: View {
+    @Environment(\.widgetStyle) private var style
     let tiles: [BoardStatusTile]
     let columns: Int
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Theme.Spacing.xs.rawValue), count: columns),
-                  spacing: Theme.Spacing.xs.rawValue) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: style.spacing(Theme.Spacing.xs.rawValue)), count: columns),
+                  spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
             ForEach(tiles) { tile in
                 VStack(spacing: 1) {
                     Text(BoardStatusReading.numberText(tile.value))
-                        .font(.hsccMono(.headline, weight: .semibold))
-                        .foregroundStyle(tile.value == nil ? Theme.Semantic.onSurfaceMuted : tile.color)
+                        .font(style.font(.headline, weight: .semibold))
+                        .foregroundStyle(tile.value == nil ? style.secondaryTextColor : tile.color(style))
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                     Text(tile.status)
-                        .font(.system(size: 8))
-                        .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(size: 8))
+                        .foregroundStyle(style.secondaryTextColor)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
-                    .fill(Theme.Semantic.tintOverlay(tile.color)))
+                .background(RoundedRectangle(cornerRadius: style.corner(Theme.Corner.badge.rawValue), style: .continuous)
+                    .fill(tile.color(style).opacity(0.16)))
             }
         }
     }
@@ -683,16 +700,24 @@ private struct BoardStatusTileGrid: View {
 /// circular draws `shortGateLabel` as text instead — there is no room for an
 /// icon in a ring.
 private struct BoardStatusGateView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: BoardStatusEntry
 
+    /// Accessory families are system-tinted: fonts still follow the style,
+    /// colours stay the system's.
+    var systemTinted = false
+    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
+    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
+    private var statusText: Color { systemTinted ? .primary : style.badColor }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.title3)
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(.title3))
+                .foregroundStyle(secondaryText)
             Text(entry.gateLine)
-                .font(.caption2)
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundStyle(secondaryText)
         }
     }
 }

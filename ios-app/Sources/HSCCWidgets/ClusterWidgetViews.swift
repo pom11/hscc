@@ -16,7 +16,7 @@ import WidgetKit
 // `scripts/cluster_widget_check.sh` can execute them against the committed
 // monitor fixture and assert what a Lock Screen line actually says. The heat
 // bands are `ClusterMetricHeat`'s (in `ClusterWidget.swift`), mapped to
-// `Theme.Semantic` here and nowhere else.
+// `WidgetStyle` here and nowhere else.
 // ---------------------------------------------------------------------------
 
 /// The Home Screen cluster widget.
@@ -24,10 +24,12 @@ struct ClusterWidget: Widget {
     let kind = "ClusterWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: ClusterTimelineProvider()) { entry in
+        let style = WidgetStyle.resolved(for: .widgetCluster)
+        return StaticConfiguration(kind: kind, provider: ClusterTimelineProvider()) { entry in
             ClusterWidgetView(entry: entry)
+                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    Theme.Semantic.surface
+                    style.backgroundColor
                 }
         }
         .configurationDisplayName("Cluster")
@@ -44,6 +46,7 @@ struct ClusterWidget: Widget {
 
 /// The single view rendered for every widget family, choosing layout by size.
 struct ClusterWidgetView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
     @Environment(\.widgetFamily) private var family
 
@@ -68,26 +71,27 @@ struct ClusterWidgetView: View {
 
 extension ClusterMetricHeat {
     /// The one place a heat band becomes a colour.
-    var color: Color {
+    func color(_ style: WidgetStyle) -> Color {
         switch self {
-        case .calm: return Theme.Semantic.ok
-        case .warm: return Theme.Semantic.warn
-        case .hot: return Theme.Semantic.bad
-        case .unknown: return Theme.Semantic.onSurfaceMuted
+        case .calm: return style.okColor
+        case .warm: return style.warnColor
+        case .hot: return style.badColor
+        case .unknown: return style.secondaryTextColor
         }
     }
 }
 
 /// One labelled metric token: "GPU 88%", coloured by its own heat band.
 private struct MetricToken: View {
+    @Environment(\.widgetStyle) private var style
     let text: String
     let heat: ClusterMetricHeat
     var dimmed = false
 
     var body: some View {
         Text(text)
-            .font(.hsccMono(10, weight: .semibold))
-            .foregroundColor(dimmed ? Theme.Semantic.onSurfaceMuted : heat.color)
+            .font(style.font(size: 10, weight: .semibold))
+            .foregroundColor(dimmed ? style.secondaryTextColor : heat.color(style))
     }
 }
 
@@ -96,6 +100,7 @@ private struct MetricToken: View {
 // ---------------------------------------------------------------------------
 
 struct SmallClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     @ViewBuilder
@@ -120,20 +125,21 @@ struct SmallClusterWidget: View {
     private var stateLine: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(entry.state.color)
+                .fill(style.clusterStateColor(entry.state))
                 .frame(width: 8, height: 8)
             Text(entry.state.label)
-                .font(.subheadline.weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.subheadline, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
             if let age = entry.lastKnownAgeMinutes {
                 Text("\(age)m")
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(style.secondaryTextColor)
             }
         }
+    .widgetHeader(style)
     }
 
     /// The nodes-up / models-served line (t_56b910c8). Each side is nil-able and
@@ -145,13 +151,13 @@ struct SmallClusterWidget: View {
             HStack(spacing: 6) {
                 if entry.showSections.contains("nodes"), let up = entry.nodesUp, let total = entry.nodesTotal {
                     Text("\(up)/\(total) up")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundColor(Theme.Semantic.onSurface)
+                        .font(style.font(.caption2, weight: .semibold))
+                        .foregroundColor(style.primaryTextColor)
                 }
                 if entry.showSections.contains("models"), let models = entry.modelCount {
                     Text(ClusterMetricText.models(models))
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
                 }
                 Spacer(minLength: 0)
             }
@@ -169,8 +175,8 @@ struct SmallClusterWidget: View {
                                                   load1m: entry.load1m)
         if entry.showSections.contains("nodes"), !parts.isEmpty {
             Text(parts.joined(separator: " · "))
-                .font(.hsccMono(9, weight: .medium))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(size: 9, weight: .medium))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
@@ -187,29 +193,29 @@ struct SmallClusterWidget: View {
             HStack(spacing: 10) {
                 if let running = entry.runningCards {
                     HStack(spacing: 3) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 7))
-                            .foregroundColor(Theme.Semantic.ok)
+                        Image(systemName: "play.fill").widgetIcon(style)
+                            .font(style.font(size: 7))
+                            .foregroundColor(style.okColor)
                         Text("\(running)")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.caption2, weight: .semibold))
+                            .foregroundColor(style.primaryTextColor)
                     }
                 }
                 if let queue = entry.queueDepth {
                     HStack(spacing: 3) {
-                        Image(systemName: "square.stack.3d.up")
-                            .font(.system(size: 7))
-                            .foregroundColor(Theme.Semantic.neutral)
+                        Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                            .font(style.font(size: 7))
+                            .foregroundColor(style.secondaryTextColor)
                         Text("\(queue)")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.caption2, weight: .semibold))
+                            .foregroundColor(style.primaryTextColor)
                     }
                 }
                 Spacer(minLength: 0)
                 if let blocked = entry.blockedCards, blocked > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 8))
-                        .foregroundColor(Theme.Semantic.bad)
+                    Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                        .font(style.font(size: 8))
+                        .foregroundColor(style.badColor)
                 }
             }
         }
@@ -217,12 +223,12 @@ struct SmallClusterWidget: View {
 
     private var gateView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.title3)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(.title3))
+                .foregroundColor(style.secondaryTextColor)
             Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -232,6 +238,7 @@ struct SmallClusterWidget: View {
 // ---------------------------------------------------------------------------
 
 struct MediumClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     @ViewBuilder
@@ -243,11 +250,11 @@ struct MediumClusterWidget: View {
                 // State + the counts that matter at a glance.
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(entry.state.color)
+                        .fill(style.clusterStateColor(entry.state))
                         .frame(width: 8, height: 8)
                     Text(entry.state.label)
-                        .font(.headline)
-                        .foregroundColor(Theme.Semantic.onSurface)
+                        .font(style.font(.headline))
+                        .foregroundColor(style.primaryTextColor)
                     Spacer()
                     if entry.showSections.contains("nodes"),
                        let up = entry.nodesUp, let total = entry.nodesTotal {
@@ -260,6 +267,7 @@ struct MediumClusterWidget: View {
                         metricLabel(value: "\(idle)m", label: "to autodown")
                     }
                 }
+                .widgetHeader(style)
                 // GPU / temperature / load, each in its own heat band.
                 metricStrip
                 // The topology pairs with per-node colour.
@@ -277,8 +285,8 @@ struct MediumClusterWidget: View {
                 // The one honest sentence about a failed read, when there is one.
                 if let failure = entry.failure {
                     Text(failure.operatorLine)
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
                         .lineLimit(2)
                 }
             }
@@ -313,17 +321,17 @@ struct MediumClusterWidget: View {
             HStack(spacing: 12) {
                 if let running = entry.runningCards {
                     HStack(spacing: 4) {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(Theme.Semantic.ok)
+                        Image(systemName: "play.circle.fill").widgetIcon(style)
+                            .font(style.font(size: 10))
+                            .foregroundColor(style.okColor)
                         metricLabel(value: "\(running)", label: "running")
                     }
                 }
                 if let queue = entry.queueDepth {
                     HStack(spacing: 4) {
-                        Image(systemName: "square.stack.3d.up")
-                            .font(.system(size: 10))
-                            .foregroundColor(Theme.Semantic.neutral)
+                        Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                            .font(style.font(size: 10))
+                            .foregroundColor(style.secondaryTextColor)
                         metricLabel(value: "\(queue)", label: "queued")
                     }
                 }
@@ -338,30 +346,30 @@ struct MediumClusterWidget: View {
     /// The failure indicator — a red badge the operator can see at a glance.
     private func failureBadge(count: Int) -> some View {
         HStack(spacing: 3) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.Semantic.bad)
+            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                .font(style.font(size: 10))
+                .foregroundColor(style.badColor)
             Text("\(count)")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(Theme.Semantic.bad)
+                .font(style.font(.caption, weight: .semibold))
+                .foregroundColor(style.badColor)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(Capsule().fill(Theme.Semantic.bad.opacity(0.14)))
+        .background(Capsule().fill(style.badColor.opacity(0.14)))
     }
 
     private func miniPair(_ pair: TopologyPair, dimmed: Bool = false) -> some View {
         HStack(spacing: 4) {
             dot(pair.nodes[0], dimmed: dimmed)
             Rectangle()
-                .fill(Theme.Palette.mist.opacity(0.5))
+                .fill(style.secondaryTextColor.opacity(0.5))
                 .frame(width: 12, height: 2)
             dot(pair.nodes[1], dimmed: dimmed)
         }
         .overlay(alignment: .bottom) {
             Text(pair.role)
-                .font(.system(size: 9))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9))
+                .foregroundColor(style.secondaryTextColor)
                 .offset(y: 12)
         }
         .padding(.bottom, 6)
@@ -370,35 +378,35 @@ struct MediumClusterWidget: View {
     private func dot(_ node: TopologyNode, dimmed: Bool = false) -> some View {
         HStack(spacing: 3) {
             Circle()
-                .fill(dimmed ? Theme.Palette.mist.opacity(0.55) : node.state.color)
+                .fill(dimmed ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
                 .frame(width: 8, height: 8)
             Text(node.label)
-                .font(.hsccMono(10, weight: .semibold))
-                .foregroundColor(dimmed ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                .font(style.font(size: 10, weight: .semibold))
+                .foregroundColor(dimmed ? style.secondaryTextColor : style.primaryTextColor)
         }
     }
 
     private func metricLabel(value: String, label: String) -> some View {
         VStack(spacing: 0) {
             Text(value)
-                .font(.caption.weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.caption, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(label)
-                .font(.system(size: 9))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 
     private var gateView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.title3)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(.title3))
+                .foregroundColor(style.secondaryTextColor)
             Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -408,6 +416,7 @@ struct MediumClusterWidget: View {
 // ---------------------------------------------------------------------------
 
 struct LargeClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     @ViewBuilder
@@ -423,8 +432,8 @@ struct LargeClusterWidget: View {
                 workRow
                 if let failure = entry.failure {
                     Text(failure.operatorLine)
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 0)
@@ -440,20 +449,21 @@ struct LargeClusterWidget: View {
     private var stateLine: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(entry.state.color)
+                .fill(style.clusterStateColor(entry.state))
                 .frame(width: 10, height: 10)
             Text(entry.state.label)
-                .font(.title3.weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.title3, weight: .semibold))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
             if let age = entry.lastKnownAgeMinutes {
                 Text("last known \(age)m ago")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
             }
         }
+    .widgetHeader(style)
     }
 
     /// Nodes / models / idle, each present only when the entry actually carries
@@ -487,15 +497,15 @@ struct LargeClusterWidget: View {
             HStack(spacing: 8) {
                 ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
                     Text(token.label)
-                        .font(.hsccMono(13, weight: .semibold))
-                        .foregroundColor(entry.isStale ? Theme.Semantic.onSurfaceMuted : token.heat.color)
+                        .font(style.font(size: 13, weight: .semibold))
+                        .foregroundColor(entry.isStale ? style.secondaryTextColor : token.heat.color(style))
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(RoundedRectangle(cornerRadius: 8)
-                            .fill(Theme.Semantic.surfaceRaised))
+                            .fill(style.raisedColor))
                 }
             }
         }
@@ -510,8 +520,8 @@ struct LargeClusterWidget: View {
                 ForEach(entry.pairs) { pair in
                     HStack(spacing: 8) {
                         Text(pair.role)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(size: 11, weight: .medium))
+                            .foregroundColor(style.secondaryTextColor)
                             .frame(width: 88, alignment: .leading)
                         ForEach(pair.nodes) { node in
                             nodeChip(node)
@@ -526,15 +536,15 @@ struct LargeClusterWidget: View {
     private func nodeChip(_ node: TopologyNode) -> some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(entry.pairsAreStale ? Theme.Palette.mist.opacity(0.55) : node.state.color)
+                .fill(entry.pairsAreStale ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
                 .frame(width: 8, height: 8)
             Text(node.label)
-                .font(.hsccMono(12, weight: .semibold))
-                .foregroundColor(entry.pairsAreStale ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                .font(style.font(size: 12, weight: .semibold))
+                .foregroundColor(entry.pairsAreStale ? style.secondaryTextColor : style.primaryTextColor)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Semantic.surfaceRaised))
+        .background(RoundedRectangle(cornerRadius: 6).fill(style.raisedColor))
     }
 
     /// Running / queued / blocked, each optional independently.
@@ -544,15 +554,15 @@ struct LargeClusterWidget: View {
         if showBoard && hasWork {
             HStack(spacing: 20) {
                 if let running = entry.runningCards {
-                    workMetric(icon: "play.fill", tint: Theme.Semantic.ok,
+                    workMetric(icon: "play.fill", tint: style.okColor,
                                value: running, label: "running")
                 }
                 if let queue = entry.queueDepth {
-                    workMetric(icon: "square.stack.3d.up", tint: Theme.Semantic.neutral,
+                    workMetric(icon: "square.stack.3d.up", tint: style.secondaryTextColor,
                                value: queue, label: "queued")
                 }
                 if let blocked = entry.blockedCards, blocked > 0 {
-                    workMetric(icon: "exclamationmark.triangle.fill", tint: Theme.Semantic.bad,
+                    workMetric(icon: "exclamationmark.triangle.fill", tint: style.badColor,
                                value: blocked, label: "blocked")
                 }
                 Spacer(minLength: 0)
@@ -562,8 +572,8 @@ struct LargeClusterWidget: View {
 
     private func workMetric(icon: String, tint: Color, value: Int, label: String) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 11))
+            Image(systemName: icon).widgetIcon(style)
+                .font(style.font(size: 11))
                 .foregroundColor(tint)
             metricLabel(value: "\(value)", label: label)
         }
@@ -572,24 +582,24 @@ struct LargeClusterWidget: View {
     private func metricLabel(value: String, label: String) -> some View {
         VStack(spacing: 1) {
             Text(value)
-                .font(.headline)
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.headline))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 10))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 
     private var gateView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.title3)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(.title3))
+                .foregroundColor(style.secondaryTextColor)
             Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -607,13 +617,14 @@ struct LargeClusterWidget: View {
 /// The gauge is chosen over a plain number because the denominator is the point
 /// — "3/4" reads as a degraded fleet, "3" does not.
 struct CircularClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             Text(entry.shortGateLabel)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9, weight: .semibold))
+                .foregroundColor(.secondary)
                 .minimumScaleFactor(0.6)
                 .accessibilityLabel(entry.shortGateLabel)
         } else if let up = entry.nodesUp, let total = entry.nodesTotal, total > 0 {
@@ -621,24 +632,24 @@ struct CircularClusterWidget: View {
                 Text("up")
             } currentValueLabel: {
                 Text("\(up)/\(total)")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(style.font(size: 11, weight: .semibold))
             }
             .gaugeStyle(.accessoryCircularCapacity)
-            .tint(entry.state.color)
+            .tint(.primary)
             .accessibilityLabel("\(up) of \(total) nodes up, \(entry.state.label)")
         } else if entry.state != .unknown {
             // No host list (the monitor degraded or the fleet is off) but the
             // state read answered: say the state, which IS the fact.
             Text(entry.state.label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(entry.state.color)
+                .font(style.font(size: 10, weight: .semibold))
+                .foregroundColor(.primary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
                 .accessibilityLabel(entry.state.label)
         } else {
             Text(entry.shortGateLabel)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9, weight: .semibold))
+                .foregroundColor(.secondary)
                 .minimumScaleFactor(0.6)
                 .accessibilityLabel(entry.shortGateLabel)
         }
@@ -648,33 +659,34 @@ struct CircularClusterWidget: View {
 /// The Lock Screen rectangular: state + nodes + models on line one, the GPU /
 /// temperature / load strip on line two.
 struct RectangularClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if !entry.configured || entry.paused {
                 Text(entry.shortGateLabel)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
                     .lineLimit(1)
                 Text("Open HSCC to configure the cluster")
-                    .font(.system(size: 9))
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 9))
+                    .foregroundColor(.secondary)
                     .lineLimit(1)
             } else {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(entry.state.color)
+                        .fill(.primary)
                         .frame(width: 6, height: 6)
-                    Text(lineOne)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(Theme.Semantic.onSurface)
+                    Text(lineOne).widgetHeader(style)
+                        .font(style.font(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
                 .accessibilityLabel(lineOne)
                 Text(lineTwo)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(style.font(size: 10, weight: .medium))
                     .foregroundColor(lineTwoColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -710,12 +722,13 @@ struct RectangularClusterWidget: View {
     }
 
     private var lineTwoColor: Color {
-        ClusterMetricHeat.percent(entry.gpuUtilPct).color
+        ClusterMetricHeat.percent(entry.gpuUtilPct).color(style)
     }
 }
 
 /// The Lock Screen inline: one line, text only — nodes up, models served, GPU.
 struct InlineClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
@@ -729,6 +742,7 @@ struct InlineClusterWidget: View {
                                                             models: entry.modelCount,
                                                             gpuUtilPct: entry.gpuUtilPct,
                                                             gateLabel: entry.shortGateLabel))
+            .font(style.font(.caption))
     }
 }
 
@@ -740,6 +754,7 @@ struct InlineClusterWidget: View {
 /// the small widget and (with `dimmed`) the unreachable small widget so a
 /// stale topology is clearly not-live.
 struct MiniTopologyView: View {
+    @Environment(\.widgetStyle) private var style
     let pairs: [TopologyPair]
     /// When true, render the topology in a muted state (the data is stale —
     /// these dots came out of the last-known snapshot, not this refresh).
@@ -751,7 +766,7 @@ struct MiniTopologyView: View {
                 HStack(spacing: 4) {
                     dot(pair.nodes[0])
                     Rectangle()
-                        .fill(Theme.Palette.mist.opacity(0.4))
+                        .fill(style.secondaryTextColor.opacity(0.4))
                         .frame(width: 8, height: 2)
                     dot(pair.nodes[1])
                 }
@@ -762,7 +777,7 @@ struct MiniTopologyView: View {
 
     private func dot(_ node: TopologyNode) -> some View {
         Circle()
-            .fill(dimmed ? Theme.Palette.mist.opacity(0.55) : node.state.color)
+            .fill(dimmed ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
             .frame(width: 7, height: 7)
     }
 }
