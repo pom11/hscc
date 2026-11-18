@@ -85,6 +85,35 @@ for check in "$CHECK_DIR"/*.sh; do
   fi
 done
 
+# macOS desktop target (t_1143c19b). The extension does not own a second copy
+# of any surface: `../macos-app/project.yml` lists these exact files by path,
+# so every structural check above governs the desktop widget too. This block
+# proves the reuse is real rather than a claim in a comment — every widget
+# source on disk must be in the macOS target's source list, and the target must
+# compile the one shared App Group store + client + style bridge.
+MAC_SPEC="../macos-app/project.yml"
+if [ -f "$MAC_SPEC" ] && grep -q '^  HSCCMacWidgets:' "$MAC_SPEC"; then
+  mac_missing=0
+  for f in Sources/HSCCWidgets/*.swift; do
+    if ! grep -qF -- "- path: ../ios-app/$f" "$MAC_SPEC"; then
+      echo "  FAIL: macOS target does not compile $f — a desktop surface would be a second copy"
+      mac_missing=1
+    fi
+  done
+  for shared in Sources/Shared/SharedStore.swift Sources/Shared/WidgetDataClient.swift \
+                Sources/HSCC/Views/Theme.swift; do
+    if ! grep -qF -- "- path: ../ios-app/$shared" "$MAC_SPEC"; then
+      echo "  FAIL: macOS target does not compile $shared — the desktop widget would have a second data path"
+      mac_missing=1
+    fi
+  done
+  [ "$mac_missing" -eq 0 ] && echo "  ok: HSCCMacWidgets reuses all six widget surfaces + the shared store/client/style by path"
+  [ "$mac_missing" -eq 0 ] || overall=1
+else
+  echo "  FAIL: $MAC_SPEC has no HSCCMacWidgets target — the macOS desktop widgets are missing"
+  overall=1
+fi
+
 if [ "$overall" -ne 0 ]; then
   # Pre-split, this banner was driven by the widget-surface counter alone, so a
   # board-status FAIL still printed PASSED and only then exited 1 — a red check

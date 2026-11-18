@@ -135,6 +135,7 @@ echo ""
 echo "compiling the real widget source + shared sources + harness into a macOS CLI..."
 real_sources=(
   "$SUBJECT"
+  Sources/HSCCWidgets/WidgetRendering.swift
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift

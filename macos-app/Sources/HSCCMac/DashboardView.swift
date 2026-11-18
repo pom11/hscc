@@ -38,6 +38,12 @@ struct DashboardView: View {
         .frame(width: 360)
         .background(Theme.Semantic.surface)
         .preferredColorScheme(.dark)
+        // The dropdown is rebuilt every time it opens, so a Settings write
+        // (cluster switch, cadence, appearance) is visible on the next open
+        // instead of waiting for the menu bar loop's next tick.
+        .onAppear {
+            Task { await dashboard.refresh() }
+        }
     }
 
     // MARK: - Header

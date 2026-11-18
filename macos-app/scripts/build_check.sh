@@ -42,7 +42,7 @@ PY
 
 rc=0
 warnings=0
-for t in HSCCMac; do
+for t in HSCCMac HSCCMacWidgets; do
   files=()
   while IFS= read -r line; do
     [ -n "$line" ] && files+=("$line")

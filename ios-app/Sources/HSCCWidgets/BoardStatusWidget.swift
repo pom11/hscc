@@ -463,15 +463,21 @@ struct BoardStatusWidget: Widget {
         return AppIntentConfiguration(kind: kind, intent: BoardStatusConfigurationIntent.self,
                                provider: BoardStatusTimelineProvider()) { entry in
             BoardStatusWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Board Status")
         .description("Todo, ready, running, blocked and done for one board you pick.")
+        // The accessory families are iOS-only; the macOS desktop tile offers
+        // the three system sizes (t_1143c19b).
+        #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        #endif
     }
 }
 
@@ -489,6 +495,7 @@ struct BoardStatusWidgetView: View {
 
     var body: some View {
         switch family {
+        #if os(iOS)
         case .accessoryInline:
             Text(entry.inlineLine)
                 .font(style.font(.caption2))
@@ -496,7 +503,10 @@ struct BoardStatusWidgetView: View {
             BoardStatusCircularView(entry: entry)
         case .accessoryRectangular:
             BoardStatusRectangularView(entry: entry)
+        #endif
         case .systemLarge:
+            BoardStatusLargeView(entry: entry)
+        case .systemExtraLarge:
             BoardStatusLargeView(entry: entry)
         case .systemMedium:
             BoardStatusMediumView(entry: entry)

@@ -558,15 +558,21 @@ struct KanbanMonitorWidget: Widget {
         let style = WidgetStyle.resolved(for: .widgetKanbanMonitor)
         return StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
             KanbanMonitorWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Kanban Monitor")
         .description("What the board workers are doing — running, waiting, blocked. Read-only.")
+        // The accessory families are iOS-only; the macOS desktop tile offers
+        // the three system sizes (t_1143c19b).
+        #if os(iOS)
         .supportedFamilies([.accessoryInline, .accessoryCircular, .accessoryRectangular,
                             .systemSmall, .systemMedium, .systemLarge])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        #endif
     }
 }
 
@@ -578,13 +584,17 @@ struct KanbanMonitorWidgetView: View {
 
     var body: some View {
         switch family {
+        #if os(iOS)
         case .accessoryInline:
             KanbanMonitorInline(entry: entry)
         case .accessoryCircular:
             KanbanMonitorCircular(entry: entry)
         case .accessoryRectangular:
             KanbanMonitorRectangular(entry: entry)
+        #endif
         case .systemLarge:
+            LargeKanbanMonitor(entry: entry)
+        case .systemExtraLarge:
             LargeKanbanMonitor(entry: entry)
         case .systemMedium:
             MediumKanbanMonitor(entry: entry)

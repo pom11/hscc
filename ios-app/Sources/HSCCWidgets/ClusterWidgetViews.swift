@@ -27,10 +27,10 @@ struct ClusterWidget: Widget {
         let style = WidgetStyle.resolved(for: .widgetCluster)
         return StaticConfiguration(kind: kind, provider: ClusterTimelineProvider()) { entry in
             ClusterWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Cluster")
         .description("Nodes up, models served, GPU, temperature and load.")
@@ -38,9 +38,18 @@ struct ClusterWidget: Widget {
         // full-size layout of the same entry. `accessoryCorner` is not offered:
         // it is the Smart Stack glance surface, and a 4-node topology glyph plus
         // a gauge does not survive that renderer's constraints.
+        //
+        // The macOS desktop widget (t_1143c19b) offers systemExtraLarge as
+        // well: the topology + metric card layout is the one that benefits from
+        // the extra width, and the accessory families do not exist there.
+        #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryCircular, .accessoryRectangular,
                             .accessoryInline])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .systemExtraLarge])
+        #endif
     }
 }
 
@@ -54,13 +63,17 @@ struct ClusterWidgetView: View {
         switch family {
         case .systemSmall:
             SmallClusterWidget(entry: entry)
+        #if os(iOS)
         case .accessoryInline:
             InlineClusterWidget(entry: entry)
         case .accessoryCircular:
             CircularClusterWidget(entry: entry)
         case .accessoryRectangular:
             RectangularClusterWidget(entry: entry)
+        #endif
         case .systemLarge:
+            LargeClusterWidget(entry: entry)
+        case .systemExtraLarge:
             LargeClusterWidget(entry: entry)
         default:
             MediumClusterWidget(entry: entry)

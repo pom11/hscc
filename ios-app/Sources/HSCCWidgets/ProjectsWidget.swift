@@ -507,10 +507,10 @@ struct ProjectsWidget: Widget {
                               intent: ProjectFilterIntent.self,
                               provider: ProjectsTimelineProvider()) { entry in
             ProjectsWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Projects")
         .description("The cluster's projects and the board each one is on. Read-only.")
@@ -518,9 +518,8 @@ struct ProjectsWidget: Widget {
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
         #else
-        // The macOS compile is the headless harness in
-        // scripts/projects_widget_check.sh; WidgetKit marks the accessory
-        // families unavailable there, and this widget only ships for iOS.
+        // The macOS desktop widget (t_1143c19b) offers the three system
+        // sizes; WidgetKit marks the accessory families unavailable there.
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
         #endif
     }
@@ -550,6 +549,8 @@ struct ProjectsWidgetView: View {
         case .systemSmall:
             SmallProjectsWidget(entry: entry)
         case .systemLarge:
+            LargeProjectsWidget(entry: entry)
+        case .systemExtraLarge:
             LargeProjectsWidget(entry: entry)
         default:
             MediumProjectsWidget(entry: entry)

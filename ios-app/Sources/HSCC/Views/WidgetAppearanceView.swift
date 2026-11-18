@@ -1,5 +1,9 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 // ---------------------------------------------------------------------------
 // Appearance editor (card t_444519ae, part 1)
@@ -15,7 +19,63 @@ import UIKit
 struct WidgetAppearanceView: View {
     @EnvironmentObject private var store: WidgetSettingsStore
 
+#if os(macOS)
+    /// Which editor the macOS master-detail pane is showing. `WidgetSurfaceKind`
+    /// is Hashable (String raw value), so the selection survives a store update.
+    private enum Selection: Hashable {
+        case global
+        case surface(WidgetSurfaceKind)
+    }
+
+    @State private var selection: Selection = .global
+#endif
+
     var body: some View {
+#if os(macOS)
+        // The iOS screen is a pushed Form; a Settings window has no navigation
+        // stack, so the SAME editors are laid out as a sidebar + detail pane.
+        // Everything below the shell — the global binding, the per-surface
+        // "Use global" toggle, the presets, controls and live preview — is the
+        // iOS editor code compiled into this target unchanged.
+        HSplitView {
+            List(selection: $selection) {
+                Section("Global Style") {
+                    HStack(spacing: Theme.Spacing.md.rawValue) {
+                        Image(systemName: "paintpalette")
+                            .foregroundColor(Theme.Semantic.accent)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                            Text("Global style")
+                            Text(WidgetAppearanceView.summary(store.globalStyle))
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                    .tag(Selection.global)
+                }
+                Section("Per-Widget Style") {
+                    ForEach(WidgetSurfaceKind.allCases, id: \.self) { kind in
+                        HStack(spacing: Theme.Spacing.md.rawValue) {
+                            Image(systemName: kind.displayIcon)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                                Text(kind.displayName)
+                                Text(styleLine(kind))
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
+                        }
+                        .tag(Selection.surface(kind))
+                    }
+                }
+            }
+            .frame(minWidth: 260, maxWidth: 320, maxHeight: .infinity)
+
+            detail
+                .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+        }
+#else
         Form {
             Section {
                 NavigationLink {
@@ -71,7 +131,27 @@ struct WidgetAppearanceView: View {
             }
         }
         .navigationTitle("Appearance")
+#endif
     }
+
+#if os(macOS)
+    /// The same two editors the iOS screen pushes: the global binding writes the
+    /// fleet-wide style, the surface editor owns its "Use global" toggle.
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .global:
+            WidgetStyleEditor(
+                title: "Global Style",
+                style: Binding(
+                    get: { store.globalStyle },
+                    set: { store.setGlobalStyle($0) }
+                ))
+        case .surface(let kind):
+            WidgetSurfaceStyleEditor(kind: kind, store: store)
+        }
+    }
+#endif
 
     private func styleLine(_ kind: WidgetSurfaceKind) -> String {
         if store.style(for: kind) == nil {
@@ -278,8 +358,10 @@ struct WidgetStyleControls: View {
     }
 
     /// SwiftUI ColorPicker works in `Color`; the store is hex. This is the one
-    /// conversion point, so every colour row round-trips identically.
+    /// conversion point, so every colour row round-trips identically. UIKit on
+    /// iOS, AppKit on macOS (the same editor is compiled into both apps).
     private static func widgetColor(from color: Color) -> WidgetColor {
+#if canImport(UIKit)
         let uiColor = UIColor(color)
         var red: CGFloat = 0
         var green: CGFloat = 0
@@ -289,6 +371,14 @@ struct WidgetStyleControls: View {
             return WidgetColor(r: Double(red), g: Double(green),
                                b: Double(blue), a: Double(alpha))
         }
+#else
+        if let srgb = NSColor(color).usingColorSpace(.sRGB) {
+            return WidgetColor(r: Double(srgb.redComponent),
+                               g: Double(srgb.greenComponent),
+                               b: Double(srgb.blueComponent),
+                               a: Double(srgb.alphaComponent))
+        }
+#endif
         return .ink
     }
 }

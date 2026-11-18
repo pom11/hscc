@@ -120,16 +120,31 @@ done
 
 nbg=0
 bgok=1
+nadapt=0
 for f in Sources/HSCCWidgets/*.swift; do
   c=$(grep -c 'containerBackground(for: .widget)' "$f" || true)
   [ "$c" -eq 0 ] && continue
   nbg=$((nbg + c))
-  grep -A1 'containerBackground(for: .widget)' "$f" | grep -q 'style.backgroundColor' || bgok=0
+  # The background moved behind the shared rendering-mode adapter
+  # (t_1143c19b): fullColor draws style.backgroundColor, accented/vibrant
+  # leaves the system material visible. A root that paints a raw colour
+  # again would make a desktop widget an opaque black rectangle on the
+  # wallpaper, so the wrapper is what is asserted here.
+  grep -A1 'containerBackground(for: .widget)' "$f" | grep -q 'WidgetSurfaceBackground(style: style)' || bgok=0
+  nadapt=$((nadapt + $(grep -c '\.widgetRenderingAdaptation(style: style)' "$f" || true)))
 done
-if [ "$nbg" -eq 6 ] && [ "$bgok" -eq 1 ]; then
-  ok "all 6 widget roots paint containerBackground from style.backgroundColor"
+ADAPTER=Sources/HSCCWidgets/WidgetRendering.swift
+adapter_ok=1
+[ -f "$ADAPTER" ] \
+  && grep -q 'renderingMode == .fullColor' "$ADAPTER" \
+  && grep -q 'style.backgroundColor' "$ADAPTER" \
+  && grep -q 'Color.clear' "$ADAPTER" \
+  && grep -q 'systemTinted(for:' "$ADAPTER" \
+  || adapter_ok=0
+if [ "$nbg" -eq 6 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq 6 ] && [ "$adapter_ok" -eq 1 ]; then
+  ok "all 6 widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
 else
-  bad "a widget root does not paint containerBackground from style.backgroundColor ($nbg roots)"
+  bad "a widget root does not paint containerBackground through the rendering-mode adapter (roots=$nbg wrapped=$nadapt bg=$bgok adapter=$adapter_ok)"
 fi
 nla=$(grep -l 'activityBackgroundTint(style.backgroundColor)' Sources/HSCCLiveActivityMonitor/*.swift Sources/HSCCLiveActivity/*.swift | wc -l | tr -d ' ')
 if [ "$nla" -eq 5 ]; then
