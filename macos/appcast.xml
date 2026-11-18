@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>HSCC Widgets</title>
+    <link>https://pom11.github.io/hscc/macos/appcast.xml</link>
+    <description>HSCC Widgets releases for the in-app Sparkle 2 updater.</description>
+    <language>en</language>
+    <item>
+      <title>HSCC Widgets 1.1.0</title>
+      <pubDate>Wed, 18 Nov 2026 12:59:22 GMT</pubDate>
+      <description>Release notes: https://pom11.github.io/hscc/macos/notes/1.1.0.html</description>
+      <link>https://pom11.github.io/hscc/macos/notes/1.1.0.html</link>
+      <sparkle:version>2</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/pom11/hscc/releases/download/apps-v1.1.0/HSCC-Widgets-1.1.0.zip" length="2507060" type="application/octet-stream" sparkle:edSignature="TDm8x532qNS9milCiIzjF9G5xS2vkpMO1G1WfFKqZcKeagmBGyOc4iodGFWnDxd+PpeHeDG8zLRwNt6WyO0dCQ==" />
+    </item>
+  </channel>
+</rss>
