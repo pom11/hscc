@@ -2,13 +2,15 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// Cluster widget views — small, medium, and the three Lock Screen accessories.
+// Cluster widget views — small, medium, large, and the three Lock Screen
+// accessories.
 //
-// One `ClusterEntry`, five layouts. The families differ only in how much of the
+// One `ClusterEntry`, six layouts. The families differ only in how much of the
 // entry fits: the accessories get the node gauge, the models count and one line
 // of metrics; the small tile adds the topology glyph and the board row; the
-// medium adds the metric strip and the idle countdown. Nothing here invents a
-// number — every token renders an entry field or the em dash.
+// medium adds the metric strip and the idle countdown; the large adds labelled
+// topology pairs and a metric card per token. Nothing here invents a number —
+// every token renders an entry field or the em dash.
 //
 // The text rules are in `ClusterMetricText` (pure Foundation, no `Color`) so
 // `scripts/cluster_widget_check.sh` can execute them against the committed
@@ -30,10 +32,11 @@ struct ClusterWidget: Widget {
         }
         .configurationDisplayName("Cluster")
         .description("Nodes up, models served, GPU, temperature and load.")
-        // t_56b910c8 added the Lock Screen families. `accessoryCorner` is not
-        // offered: it is the Smart Stack glance surface, and a 4-node topology
-        // glyph plus a gauge does not survive that renderer's constraints.
-        .supportedFamilies([.systemSmall, .systemMedium,
+        // t_56b910c8 added the Lock Screen families; the large tile is the
+        // full-size layout of the same entry. `accessoryCorner` is not offered:
+        // it is the Smart Stack glance surface, and a 4-node topology glyph plus
+        // a gauge does not survive that renderer's constraints.
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryCircular, .accessoryRectangular,
                             .accessoryInline])
     }
@@ -54,6 +57,8 @@ struct ClusterWidgetView: View {
             CircularClusterWidget(entry: entry)
         case .accessoryRectangular:
             RectangularClusterWidget(entry: entry)
+        case .systemLarge:
+            LargeClusterWidget(entry: entry)
         default:
             MediumClusterWidget(entry: entry)
         }
@@ -382,6 +387,197 @@ struct MediumClusterWidget: View {
                 .minimumScaleFactor(0.7)
             Text(label)
                 .font(.system(size: 9))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+
+    private var gateView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
+                .font(.title3)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Large — state + counts, every metric, labelled topology pairs, board work
+// ---------------------------------------------------------------------------
+
+struct LargeClusterWidget: View {
+    let entry: ClusterEntry
+
+    @ViewBuilder
+    var body: some View {
+        if !entry.configured || entry.paused {
+            gateView
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                stateLine
+                summaryRow
+                metricStrip
+                topologySection
+                workRow
+                if let failure = entry.failure {
+                    Text(failure.operatorLine)
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var showNodes: Bool { entry.showSections.contains("nodes") }
+    private var showModels: Bool { entry.showSections.contains("models") }
+    private var showTopology: Bool { entry.showSections.contains("topology") }
+    private var showBoard: Bool { entry.showSections.contains("board") }
+
+    private var stateLine: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(entry.state.color)
+                .frame(width: 10, height: 10)
+            Text(entry.state.label)
+                .font(.title3.weight(.semibold))
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+            if let age = entry.lastKnownAgeMinutes {
+                Text("last known \(age)m ago")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+
+    /// Nodes / models / idle, each present only when the entry actually carries
+    /// it and the operator left the section on — an absent count is not a dash.
+    @ViewBuilder
+    private var summaryRow: some View {
+        HStack(spacing: 20) {
+            if showNodes, let up = entry.nodesUp, let total = entry.nodesTotal {
+                metricLabel(value: "\(up)/\(total)", label: "nodes up")
+            }
+            if showModels, let models = entry.modelCount {
+                metricLabel(value: ClusterMetricText.models(models), label: "served")
+            }
+            if let idle = entry.idleMinutesRemaining {
+                metricLabel(value: "\(idle)m", label: "to autodown")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The GPU / temperature / load strip, one card per reported token. A nil
+    /// metric drops its whole card (never a dash), and a stale tile dims them
+    /// so old numbers cannot read as live.
+    @ViewBuilder
+    private var metricStrip: some View {
+        let tokens = ClusterMetricText.tokens(gpuUtilPct: entry.gpuUtilPct,
+                                              gpuTempC: entry.gpuTempC,
+                                              cpuTempC: entry.cpuTempC,
+                                              load1m: entry.load1m)
+        if showNodes, !tokens.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
+                    Text(token.label)
+                        .font(.hsccMono(13, weight: .semibold))
+                        .foregroundColor(entry.isStale ? Theme.Semantic.onSurfaceMuted : token.heat.color)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8)
+                            .fill(Theme.Semantic.surfaceRaised))
+                }
+            }
+        }
+    }
+
+    /// Each TP pair on its own row with the role named and both node labels —
+    /// the extra width the large family buys over the small glyph.
+    @ViewBuilder
+    private var topologySection: some View {
+        if showTopology, !entry.pairs.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(entry.pairs) { pair in
+                    HStack(spacing: 8) {
+                        Text(pair.role)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(width: 88, alignment: .leading)
+                        ForEach(pair.nodes) { node in
+                            nodeChip(node)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func nodeChip(_ node: TopologyNode) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(entry.pairsAreStale ? Theme.Palette.mist.opacity(0.55) : node.state.color)
+                .frame(width: 8, height: 8)
+            Text(node.label)
+                .font(.hsccMono(12, weight: .semibold))
+                .foregroundColor(entry.pairsAreStale ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Semantic.surfaceRaised))
+    }
+
+    /// Running / queued / blocked, each optional independently.
+    @ViewBuilder
+    private var workRow: some View {
+        let hasWork = entry.runningCards != nil || entry.queueDepth != nil || (entry.blockedCards ?? 0) > 0
+        if showBoard && hasWork {
+            HStack(spacing: 20) {
+                if let running = entry.runningCards {
+                    workMetric(icon: "play.fill", tint: Theme.Semantic.ok,
+                               value: running, label: "running")
+                }
+                if let queue = entry.queueDepth {
+                    workMetric(icon: "square.stack.3d.up", tint: Theme.Semantic.neutral,
+                               value: queue, label: "queued")
+                }
+                if let blocked = entry.blockedCards, blocked > 0 {
+                    workMetric(icon: "exclamationmark.triangle.fill", tint: Theme.Semantic.bad,
+                               value: blocked, label: "blocked")
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func workMetric(icon: String, tint: Color, value: Int, label: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundColor(tint)
+            metricLabel(value: "\(value)", label: label)
+        }
+    }
+
+    private func metricLabel(value: String, label: String) -> some View {
+        VStack(spacing: 1) {
+            Text(value)
+                .font(.headline)
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(.system(size: 10))
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }

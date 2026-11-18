@@ -128,12 +128,15 @@ report "the system views do read them (the proof above would pass on a stripped 
   "$(grep -n 'runningCards' "$VIEWS" | sed -n '1p' | grep -v '^$' >/dev/null || echo x)"
 
 # Families registered, and dispatched.
+fail_when_absent "supportedFamilies offers systemLarge" "$VIEWS" '.systemLarge'
 fail_when_absent "supportedFamilies offers accessoryCircular" "$VIEWS" '.accessoryCircular'
 fail_when_absent "supportedFamilies offers accessoryRectangular" "$VIEWS" '.accessoryRectangular'
 fail_when_absent "supportedFamilies offers accessoryInline" "$VIEWS" '.accessoryInline'
-for fam in accessoryInline accessoryCircular accessoryRectangular; do
+for fam in systemLarge accessoryInline accessoryCircular accessoryRectangular; do
   fail_when_absent "the view dispatches .$fam" "$VIEWS" "case .$fam:"
 done
+fail_when_absent "the large family has a real layout (not the medium fallthrough)" "$VIEWS" \
+  'struct LargeClusterWidget'
 
 # The setup-invite-first invariant (audit-3 / t_5c554c5b), now across the
 # families that were added. `accessoryInline` is exempt by construction: it
