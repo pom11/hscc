@@ -230,6 +230,29 @@ def test_edit_requires_content(memory, running, token):
     assert memory.read("MEMORY.md") == ["Note A"]
 
 
+def test_edit_requires_profile(memory, running, token):
+    """The other required-field half of the edit contract (t_7430b28a).
+
+    ``handle_memory_edit`` checks ``profile`` BEFORE ``content``, and
+    ``test_edit_requires_content`` always sends a profile, so nothing else in
+    this file omits it. Without the check the handler does NOT 404: the
+    ``memory`` fixture patches ``_memory_dir`` to ignore its argument, so
+    ``_backing_cards("")`` still finds the store and the handler answers 200
+    having written the card against an empty profile — the mutation probe on
+    ``handle_memory_edit`` fails here with ``assert 200 == 400``. Mirrors
+    ``test_delete_requires_profile_in_body`` for the delete handler.
+    """
+    memory.write("MEMORY.md", ["Note A"])
+    status, payload = _request(running, token, "POST",
+                               "/v1/memory/memory:memory:0/edit",
+                               body={"content": "Changed", "confirm": True})
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "profile" in payload["error"]["message"]
+    # The 400 must happen BEFORE any write: the card is untouched.
+    assert memory.read("MEMORY.md") == ["Note A"]
+
+
 def test_edit_corrects_right_card(memory, running, token):
     memory.write("MEMORY.md", ["Note A", "Wrong gateway IP", "Note C"])
     status, payload = _request(running, token, "POST",
