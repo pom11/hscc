@@ -1,43 +1,64 @@
-"""The metrics history recorder: the on-disk ring, the fold, the restart.
+"""The metrics history recorder: the 2 s sampler, the three tiers, the roll-ups.
 
-The two gates the card names explicitly live here:
+The gates this card names, and what each one is really guarding:
 
-  * ``test_restart_round_trip_survives_a_new_recorder_object`` — write, throw
-    the recorder away, construct a fresh one, read back (the card's
-    "prove it: write, restart the recorder, read back").
-  * ``test_downsample_folds_sixty_seconds_into_five_minute_buckets`` — the
-    60 s -> 5 min bucket correctness: boundary alignment, count, average, and
-    the peak/floor the average would erase.
+  * ``test_tier1_and_tier2_survive_a_restart`` — the card's "write, restart the
+    recorder, read back". Tiers 1 and 2 are the durable ones.
+  * ``test_tier0_is_empty_right_after_a_restart`` — the half of that the
+    amendment asks to be STATED rather than hidden: the 2 s ring is memory-only,
+    so a restarted recorder starts empty and fills as samples arrive.
+  * ``test_the_2s_to_1min_rollup_keeps_the_peak_it_averaged_away`` — the
+    2 s -> 1 min fold, including the reason the ``*_max`` columns exist: an
+    average alone reports a 500 W spike as a calm 113 W.
+  * ``test_the_1min_to_5min_rollup_rolls_up_from_tier1_rows`` — the
+    1 min -> 5 min fold reads the TIER BELOW's rows (never the raw samples) and
+    its peak is exact, because the largest sample in a minute is that minute's
+    stored max.
 
-Everything else here is the part a chart silently depends on: the ring bounds
-(size by COUNT and by BYTES, newest wins), the one-directional fold (a bucket
-is final once folded), and a corrupt line that must degrade to "skipped and
-counted" instead of crashing the daemon's reader.
+Everything else here is the part a chart depends on and never says out loud:
+a missing reading must stay None and never become a zero (an average of zeros
+looks like an idle fleet), an engine's identity must be its port (two GPUs on
+one host are not one imaginary backend), the ring must be bounded in COUNT, the
+disk must see one transaction a minute rather than one every 2 s, and the
+sampler must be ``cluster_live``'s own — pinned by class identity plus an AST
+sweep, because "it reuses the monitor" is the requirement most likely to be
+quietly unmet by a second poller that works fine until it doubles the SSH fan-out.
 
-The store's paths are reached only through ``hscc_dir=`` / the autouse
-``~/.hscc`` redirect in conftest, so no test here can touch the operator's
-real ``~/.hscc/metrics``.
+Nothing here spawns anything: the sampler is always handed fakes, and the store
+is reached only through ``hscc_dir=`` (plus conftest's autouse ``~/.hscc``
+redirect), so no test can touch the operator's real ``~/.hscc/metrics``.
 """
 
-import json
+import ast
 import os
+import sqlite3
 
 import pytest
 
+from hscc_daemon import cluster_live
+from hscc_daemon import daemon_ops
 from hscc_daemon import metrics_history as mh
+from hscc_daemon import state
 
-T0 = 1_795_000_000          # a fixed epoch so bucket maths is exact
-# 300-aligned base point: T0 % 300 == 100, so use an aligned base for the
-# downsampling tests and keep the unaligned one for the rest.
-BASE = T0 - (T0 % 300)
+BASE = 1_795_000_000 - (1_795_000_000 % 300)   # aligned to 2 s, 1 min and 5 min
+HOST = "192.0.2.246"                            # TEST-NET-1, never a real node
 
 
-def sample(**over):
-    """A sparkrun-shaped host sample: every field a CSV string, or empty."""
-    s = {"timestamp": "1795000000",
+# ── fixtures + builders ────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_live_sampler():
+    """Never let a test leave a sampler holding a real stream behind."""
+    yield
+    mh.close_sampler()
+
+
+def sample(ts, **over):
+    """A sparkrun-shaped host sample: every field a CSV string, as it arrives."""
+    s = {"timestamp": str(int(ts)),
          "cpu_usage_pct": "6.2", "cpu_temp_c": "87.2",
          "gpu_util_pct": "94", "gpu_temp_c": "71", "gpu_power_w": "37.88",
-         "mem_used_pct": "85.1", "swap_used_mb": "0", "swap_total_mb": "16383",
+         "mem_used_pct": "85.1", "swap_used_mb": "128", "swap_total_mb": "16383",
          "gpu_mem_used_mb": "47104", "gpu_clock_mhz": "1965",
          "net_recv_bytes_s": "120000", "net_send_bytes_s": "340000",
          "sparkrun_jobs": "1"}
@@ -45,632 +66,734 @@ def sample(**over):
     return s
 
 
-def frame(*hosts, ts="1795000000"):
-    """A ``sparkrun cluster monitor --json`` frame from host names."""
-    return {"hosts": [{"host": h, "error": None, "sample": sample(timestamp=ts)}
+def frame(ts, *hosts, **over):
+    """A ``sparkrun cluster monitor --json`` frame for these host names."""
+    hosts = hosts or (HOST,)
+    return {"hosts": [{"host": h, "error": None, "sample": sample(ts, **over)}
                       for h in hosts]}
 
 
-def rows(**over):
-    """A ``ServingPoller.poll()`` row list, one backend by default."""
-    r = {"node": "192.0.2.246", "port": "8001", "model": "org/Model-A",
-         "routes": ["orchestrator-model"], "running": 3, "waiting": 1,
-         "kv": 0.5, "gen_tps": 10.0, "prompt_tps": 200.0,
-         "prompt_total": 900000.0, "gen_total": 250000.0}
+def engines(node=HOST, port="8001", model: str | None = "org/Model-A", **over):
+    """A ``ServingPoller.poll()`` row list — one backend by default."""
+    r = {"node": node, "port": port, "model": model, "routes": ["orchestrator"],
+         "running": 3, "waiting": 1, "kv": 12.5, "gen_tps": 40.0,
+         "prompt_tps": 200.0, "prompt_total": 900000.0, "gen_total": 250000.0}
     r.update(over)
     return [r]
 
 
-def rec(ts, host="dgx-246", power="10.0", util="10", **over):
-    """One 60 s record built through the production mapper."""
-    f = {"hosts": [{"host": host, "error": None,
-                    "sample": sample(gpu_power_w=power, gpu_util_pct=util,
-                                     timestamp=str(ts))}]}
-    r = mh.record_from_monitor(f, rows(), ts)
-    assert r is not None                       # a frame with a host always maps
-    r.update(over)
-    return r
+class FakeStream:
+    """Stands in for ``cluster_live.HostStream`` without spawning anything."""
+
+    instances = []
+
+    def __init__(self, interval, cluster=None):
+        self.interval, self.cluster = interval, cluster
+        self.frame: dict | None = None
+        self.error: str | None = None
+        self.closed = False
+        FakeStream.instances.append(self)
+
+    def close(self):
+        self.closed = True
 
 
-# ── the record: what the monitor reads is what gets stored ────────────────
+class FakePoller:
+    """Stands in for ``cluster_live.ServingPoller``."""
 
-def test_record_carries_every_field_the_monitor_reads():
-    """The card's list, verbatim, under sparkrun's own field names.
+    def __init__(self, rows=None, raises=None):
+        self.rows, self.raises = rows if rows is not None else engines(), raises
+        self.calls = 0
 
-    Names matter: a reader that has to translate keys is a reader that drifts,
-    and a rename upstream should surface as a MISSING key, not a silently wrong
-    one. Values are floats because history is averaged — sparkrun's CSV strings
-    are parsed exactly once, here.
+    def poll(self):
+        self.calls += 1
+        if self.raises:
+            raise self.raises
+        return self.rows
+
+    def close(self):
+        pass
+
+
+def sampler(stream=None, poller=None, rec=None, tmp=None, **over):
+    return mh.Sampler(host_stream=stream if stream is not None else FakeStream(2),
+                      serving=poller if poller is not None else FakePoller(),
+                      recorder=rec if rec is not None else mh.MetricsRecorder(
+                          hscc_dir=str(tmp)),
+                      clock=lambda: BASE, **over)
+
+
+def feed(rec, minutes, start=BASE, per_minute=30, hosts=(HOST,), **over):
+    """Tick ``minutes`` whole minutes through ``rec``; returns the next ts.
+
+    Each minute is 30 samples at 2 s from its own aligned start, and the LAST
+    minute stays open (nothing ticks in the minute after it), which is the point:
+    a roll-up only happens once a bucket's span has passed.
     """
-    r = mh.record_from_monitor(frame("dgx-246"), rows(), T0)
-    h = r["hosts"]["dgx-246"]
-    for k in ("cpu_usage_pct", "cpu_temp_c", "gpu_util_pct", "gpu_temp_c",
-              "gpu_power_w", "mem_used_pct", "swap_used_mb", "gpu_mem_used_mb",
-              "gpu_clock_mhz", "net_recv_bytes_s", "net_send_bytes_s"):
-        assert k in h, k
-        assert isinstance(h[k], float), k
-    assert h["cpu_usage_pct"] == 6.2 and h["gpu_power_w"] == 37.88
-    assert h["gpu_clock_mhz"] == 1965.0
-    assert h["net_recv_bytes_s"] == 120000.0 and h["net_send_bytes_s"] == 340000.0
-    # "swap" is a percentage on the monitor, but a percentage needs a total:
-    # both raw values plus the derived pct are stored.
-    assert h["swap_used_mb"] == 0.0 and h["swap_total_mb"] == 16383.0
-    assert h["swap_used_pct"] == 0.0
-    assert r["ts"] == T0 and r["res"] == "60s" and r["n"] == 1
+    for m in range(minutes):
+        minute = start + m * 60
+        for i in range(per_minute):
+            t = minute + i * 2
+            rec.tick(frame(t, *hosts), engines(), t, **over)
+    return start + minutes * 60
 
 
-def test_missing_reading_stays_none_never_zero():
-    """An unavailable reading is the EMPTY string upstream.
+# ── what a point carries ───────────────────────────────────────────────────
 
-    Coercing it to 0.0 would write a fake "GPU idle, 0 W" into history for a
-    node that never answered, and the average of a bucket full of those reads
-    as a calm fleet. None is stored and the downsampler averages around it.
+def test_every_field_the_card_asks_for_is_stored():
+    rec = mh.record_from_monitor(frame(BASE, "dgx-a", "dgx-b"), engines(), BASE)
+    for host in ("dgx-a", "dgx-b"):
+        m = rec["hosts"][host]
+        for f in ("cpu_usage_pct", "cpu_temp_c", "gpu_util_pct", "gpu_temp_c",
+                  "gpu_power_w", "mem_used_pct", "swap_used_mb",
+                  "swap_used_pct", "gpu_mem_used_mb", "gpu_clock_mhz",
+                  "net_recv_bytes_s", "net_send_bytes_s"):
+            assert m[f] is not None, f
+    assert rec["hosts"]["dgx-a"]["gpu_power_w"] == 37.88     # parsed, not a string
+    assert rec["hosts"]["dgx-a"]["swap_used_pct"] == 0.78    # 128 / 16383
+    e = rec["engines"][0]
+    assert (e["run"], e["wait"], e["kv"], e["gen_tps"]) == (3, 1, 12.5, 40.0)
+
+
+def test_run_and_wait_use_the_monitors_names_not_the_pollers():
+    """The poller returns ``running``/``waiting``; the stored row (and the
+    monitor's own table) calls them ``run``/``wait``. A shared name would store
+    None for every engine on a healthy fleet — the worst possible default."""
+    e = mh.engine_metrics(engines(running=7, waiting=2))[0]
+    assert (e["run"], e["wait"]) == (7, 2)
+    assert "running" not in e and "waiting" not in e
+
+
+def test_a_missing_reading_is_none_never_zero():
+    """`""` -> 0.0 is the silent lie this whole module is built to avoid."""
+    m = mh.host_metrics(sample(BASE, gpu_power_w="", gpu_temp_c=None,
+                               cpu_usage_pct="n/a"))
+    assert m["gpu_power_w"] is None and m["gpu_temp_c"] is None
+    assert m["cpu_usage_pct"] is None
+
+
+def test_nan_and_inf_never_enter_history():
+    """One NaN poisons every mean it joins, and no widget can plot it."""
+    m = mh.host_metrics(sample(BASE, gpu_util_pct="nan", gpu_power_w="inf"))
+    assert m["gpu_util_pct"] is None and m["gpu_power_w"] is None
+
+
+def test_swap_pct_is_derived_and_left_alone_when_unknown():
+    assert mh.host_metrics(sample(BASE))["swap_used_pct"] == 0.78
+    # A zero total (no swap configured) must not become a division or a zero-pct
+    # reading — it is unknown.
+    assert mh.host_metrics(sample(BASE, swap_total_mb="0"))["swap_used_pct"] is None
+
+
+def test_a_failed_host_is_stored_with_its_error():
+    """A host that did not answer is a DATA POINT, not a hole: dropping it would
+    leave a gap indistinguishable from 'the daemon was not running'."""
+    f = {"hosts": [{"host": "dgx-a", "error": "ssh timeout", "sample": None}]}
+    rec = mh.record_from_monitor(f, [], BASE)
+    assert rec["hosts"]["dgx-a"]["error"] == "ssh timeout"
+    assert rec["hosts"]["dgx-a"]["gpu_util_pct"] is None
+
+
+def test_an_unattributable_engine_row_is_dropped():
+    """(node, port) is the primary key; a NULL there is an IntegrityError that
+    would take the whole minute's roll-up down for one malformed row."""
+    out = mh.engine_metrics([{"node": None, "port": "8001", "model": "m"},
+                             {"node": HOST, "port": "", "model": "m"},
+                             engines()[0]])
+    assert len(out) == 1 and out[0]["node"] == HOST
+
+
+def test_a_down_backend_is_recorded_as_down_not_idle():
+    out = mh.engine_metrics([{"node": HOST, "port": "8001", "model": "m",
+                              "error": "connect refused"}])[0]
+    assert out["error"] == "connect refused"
+    assert "run" not in out          # no load numbers to average
+
+
+def test_the_stream_error_is_stamped_on_the_point():
+    rec = mh.record_from_monitor(frame(BASE), engines(), BASE,
+                                 host_error="sparkrun monitor exited")
+    assert rec["error"] == "sparkrun monitor exited"
+
+
+def test_a_tick_that_learned_nothing_is_not_recorded():
+    """The ring is bounded: a row of nulls must not push a real sample out."""
+    assert mh.record_from_monitor(None, None, BASE) is None
+    assert mh.record_from_monitor({"hosts": []}, [], BASE) is None
+    # ... but the same empty frame WITH a stream error IS the record we want.
+    assert mh.record_from_monitor({"hosts": []}, [], BASE,
+                                  host_error="exited") is not None
+
+
+def test_a_stale_frame_is_fingerprinted_as_the_same_reading():
+    f = frame(BASE)
+    assert mh.frame_identity(f) == mh.frame_identity(frame(BASE))
+    assert mh.frame_identity(f) != mh.frame_identity(frame(BASE + 2))
+
+
+def test_freshness_is_declared_unknown_when_it_cannot_be_known():
+    """No stamps -> None, so the caller records every tick instead of
+    'detecting' staleness it has no way to detect."""
+    assert mh.frame_identity(None) is None
+    assert mh.frame_identity({"hosts": [{"host": "a", "sample": {}}]}) is None
+
+
+# ── roll-up: 2 s -> 1 min (named gate) ─────────────────────────────────────
+
+def test_the_2s_to_1min_rollup_keeps_the_peak_it_averaged_away():
+    """Thirty 2 s samples: gpu_power sits at 100 W and spikes to 500 W once.
+
+    The average MUST be 113.33 and the max MUST be 500. A fold that computed the
+    max from averaged input — or dropped the peak column — reports this minute
+    as a calm 113 W and the throttle event is invisible forever.
     """
-    f = {"hosts": [{"host": "dgx-247", "error": None,
-                    "sample": sample(gpu_power_w="", gpu_util_pct="",
-                                     gpu_clock_mhz="n/a", swap_total_mb="")}]}
-    h = mh.record_from_monitor(f, [], T0)["hosts"]["dgx-247"]
-    assert h["gpu_power_w"] is None and h["gpu_util_pct"] is None
-    assert h["gpu_clock_mhz"] is None
-    assert h["cpu_usage_pct"] == 6.2          # the readings that exist survive
-    assert h["swap_used_pct"] is None          # no total, no percentage
-    # ...and the total that DOES exist produces the percentage the monitor shows
-    assert mh.host_metrics(sample())["swap_used_pct"] == 0.0
-    assert mh.host_metrics(sample(swap_used_mb="4096",
-                                 swap_total_mb="16383"))["swap_used_pct"] == 25.0
+    points = []
+    for i in range(30):
+        ts = BASE + i * 2
+        over = {"gpu_power_w": "500"} if i == 17 else {"gpu_power_w": "100"}
+        points.append(mh.record_from_monitor(frame(ts, **over), engines(), ts))
+    host_rows, _eng = mh.rollup(points, 1, 60)
+    assert len(host_rows) == 1
+    r = host_rows[0]
+    assert r["ts"] == BASE                       # aligned to the minute
+    assert r["n"] == 30                          # every 2 s sample is counted
+    assert r["gpu_power_w"] == pytest.approx(113.333333, abs=1e-4)
+    assert r["gpu_power_w_max"] == 500.0
+    assert r["gpu_temp_c_max"] == 71.0           # flat series: max == the value
 
 
-def test_nan_and_inf_never_enter_a_sample():
-    """One NaN would poison every average of the field it lands in."""
-    h = mh.host_metrics({"gpu_power_w": "nan", "gpu_util_pct": "inf"})
-    assert h["gpu_power_w"] is None and h["gpu_util_pct"] is None
-
-
-def test_host_failure_is_recorded_as_a_failure():
-    """A host whose ssh collection failed keeps its error string.
-
-    Dropping the row would leave a gap indistinguishable from "the daemon was
-    not running"; the point exists, its numbers are None, and it says why.
-    """
-    f = {"hosts": [{"host": "dgx-248", "error": "ssh: connection refused",
-                    "sample": None}]}
-    r = mh.record_from_monitor(f, None, T0)
-    assert r["hosts"]["dgx-248"]["error"] == "ssh: connection refused"
-    assert r["hosts"]["dgx-248"]["gpu_util_pct"] is None
-
-
-def test_stream_level_error_is_stamped_on_the_record():
-    """``HostStream.error`` ("sparkrun monitor exited") rides in the data.
-
-    Otherwise a three-hour gap in the ring is only explainable from a daemon
-    log that rotates.
-    """
-    r = mh.record_from_monitor(None, None, T0, host_error="sparkrun monitor exited")
-    assert r["error"] == "sparkrun monitor exited" and r["hosts"] == {}
-
-
-def test_no_hosts_and_no_error_records_nothing():
-    """A tick that learned nothing must not occupy a ring slot.
-
-    Writing it would push a real sample out of a bounded ring to store a row of
-    nulls.
-    """
-    assert mh.record_from_monitor(None, None, T0) is None
-    assert mh.record_from_monitor({"hosts": []}, [], T0) is None
-
-
-def test_serving_row_maps_run_wait_kv_and_generated_tokens_per_second():
-    """Per-engine serving, including the card's "generated tok/s".
-
-    ``gen_tps`` is cluster_live's delta of vLLM's cumulative Out counter — the
-    recorder stores it, it does not re-derive it. The cumulative In/Out totals
-    are deliberately NOT stored: they reset when an engine restarts, so a
-    history of them is a history of two baselines.
-    """
-    e = mh.record_from_monitor(frame("dgx-246"), rows(), T0)["engines"][0]
-    assert e["run"] == 3 and isinstance(e["run"], int)
-    assert e["wait"] == 1 and e["kv"] == 0.5
-    assert e["gen_tps"] == 10.0 and e["prompt_tps"] == 200.0
-    assert e["node"] == "192.0.2.246" and e["port"] == "8001"
-    assert e["model"] == "org/Model-A"
-    for dropped in ("prompt_total", "gen_total", "routes"):
-        assert dropped not in e, dropped
-
-
-def test_down_backend_is_stored_as_down_not_as_zero_load():
-    rows_ = [{"node": "192.0.2.247", "port": "8002", "model": "-",
-              "routes": ["worker-model"], "error": "timed out"}]
-    e = mh.record_from_monitor(frame("dgx-246"), rows_, T0)["engines"][0]
-    assert e["error"] == "timed out"
-    assert "run" not in e and "kv" not in e     # no invented zeros
-
-
-# ── downsampling: the 60 s -> 5 min correctness gate ──────────────────────
-
-def test_downsample_folds_sixty_seconds_into_five_minute_buckets():
-    """Five 60 s points make ONE bucket: aligned start, exact n, mean, peaks.
-
-    Five, not six: a 300 s bucket holds offsets 0/60/120/180/240 and the point
-    at +300 opens the next one (pinned by the test after this), so a fold that
-    assumed six would quietly leave the fifth minute out of every bucket.
-
-    The three things a fold can get wrong are all pinned here: WHERE the bucket
-    starts (an off-by-one boundary silently re-labels every point on a chart),
-    WHAT the average is over (non-None samples only — a None must not dilute
-    the mean toward zero), and what the average HIDES (the peak and floor,
-    which is the difference between "average 30 W" and "peaked at 140 W").
-    """
-    pts = [rec(BASE + i * 60, power=str(10.0 + i)) for i in range(5)]
-    out = mh.downsample(pts)
-    assert len(out) == 1
-    b = out[0]
-    assert b["ts"] == BASE and b["res"] == "5m" and b["n"] == 5
-    h = b["hosts"]["dgx-246"]
-    assert h["gpu_power_w"] == pytest.approx(12.0)     # mean of 10..14
-    assert h["_max"]["gpu_power_w"] == 14.0
-    assert h["_min"]["gpu_power_w"] == 10.0
-    assert h["gpu_util_pct"] == 10.0                    # constant -> mean == value
-
-
-def test_bucket_boundaries_split_at_three_hundred_seconds():
-    """A point at +299 s and a point at +300 s are different buckets.
-
-    This is the boundary the card's "bucket correctness" turns on: floor-to-300
-    means the sample landing ON the boundary opens the next bucket.
-    """
-    pts = [rec(BASE + 299), rec(BASE + 300), rec(BASE + 301)]
-    out = mh.downsample(pts)
-    assert [b["ts"] for b in out] == [BASE, BASE + 300]
-    assert [b["n"] for b in out] == [1, 2]
-
-
-def test_partial_bucket_folds_what_exists_and_says_so():
-    """A daemon that was down for four of five minutes must not invent them.
-
-    ``n`` is the contract a reader uses to decide whether to trust the point,
-    so it is the count of samples that EXIST, never the bucket's capacity.
-    """
-    out = mh.downsample([rec(BASE), rec(BASE + 300), rec(BASE + 360)])
-    assert [(b["ts"], b["n"]) for b in out] == [(BASE, 1), (BASE + 300, 2)]
-
-
-def test_unreported_field_stays_none_in_a_bucket():
-    """A field no sample reported has no average — 0.0 would be a lie."""
-    pts = [rec(BASE, power=""), rec(BASE + 60, power="")]
-    h = mh.downsample(pts)[0]["hosts"]["dgx-246"]
-    assert h["gpu_power_w"] is None
-    assert "gpu_power_w" not in h["_max"] and "gpu_power_w" not in h["_min"]
-
-
-def test_bucket_reports_a_host_that_failed_inside_the_window():
-    pts = [rec(BASE), rec(BASE + 60)]
-    pts[1]["hosts"]["dgx-246"]["error"] = "ssh: timeout"
-    b = mh.downsample(pts)[0]
-    assert b["hosts"]["dgx-246"]["error"] == "ssh: timeout"
-
-
-def test_engines_are_folded_per_engine_not_per_host():
-    """Two engines on one node stay two rows.
-
-    Keying by node:port|model is what keeps a 2-GPU node's two vLLM backends
-    from being averaged into one imaginary backend that serves twice the load.
-    """
-    f = frame("dgx-246")
-    two = [dict(rows()[0]), dict(rows()[0], port="8002", gen_tps=20.0)]
-    pts = [mh.record_from_monitor(f, two, BASE + i * 60) for i in range(2)]
-    eng = mh.downsample(pts)[0]["engines"]
-    assert sorted(eng) == ["192.0.2.246:8001|org/Model-A",
-                           "192.0.2.246:8002|org/Model-A"]
-    a = eng["192.0.2.246:8001|org/Model-A"]
-    assert a["gen_tps"] == 10.0 and a["_max"]["gen_tps"] == 10.0
-    assert eng["192.0.2.246:8002|org/Model-A"]["gen_tps"] == 20.0
-    assert a["node"] == "192.0.2.246" and a["model"] == "org/Model-A"
-
-
-def test_downsample_never_folds_its_own_output():
-    """Idempotence: feeding buckets back in must not produce buckets of buckets.
-
-    Without the resolution guard a retry of a half-finished fold would average
-    averages and silently halve the sample count.
-    """
-    pts = [rec(BASE + i * 60) for i in range(5)]
-    once = mh.downsample(pts)
-    assert mh.downsample(once) == []
-    assert mh.downsample(pts + once)[0]["n"] == 5
-
-
-def test_record_without_a_timestamp_is_dropped_not_misfiled():
-    """A point with no ts cannot be placed on a timeline; dropping is honest."""
-    bad = rec(BASE)
-    del bad["ts"]
-    assert mh.downsample([bad, rec(BASE + 60)])[0]["n"] == 1
-
-
-# ── the store: restart, bounds, fold, prune ───────────────────────────────
-
-def test_restart_round_trip_survives_a_new_recorder_object(tmp_path):
-    """THE restart gate: write, restart the recorder, read back.
-
-    Two separate objects, one directory — the same shape as a daemon restart,
-    where the new process has no memory of the old one's caches.
-    """
-    a = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    written = [rec(BASE + i * 60, power=str(10.0 + i)) for i in range(5)]
-    for r in written:
-        a.append(r)
-    del a                                     # the "restart"
-
-    b = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    assert b.raw_points() == written          # byte-identical read-back
-    # And the restarted recorder KEEPS APPENDING to what it found: a ring that
-    # truncated on open would look fine right up to the moment it ate a day.
-    nxt = rec(BASE + 5 * 60, power="15.0")
-    b.append(nxt)
-    assert [r["ts"] for r in b.raw_points()] == [r["ts"] for r in written + [nxt]]
-    c = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    assert len(c.raw_points()) == 6
-
-
-def test_store_is_one_json_line_per_record(tmp_path):
-    """JSONL, newest last — the shape a reader can tail and a human can grep."""
-    a = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(3):
-        a.append(rec(BASE + i * 60))
-    lines = open(a.raw_path, encoding="utf-8").read().splitlines()
-    assert len(lines) == 3
-    assert [json.loads(l)["ts"] for l in lines] == [BASE, BASE + 60, BASE + 120]
-    assert os.path.basename(a.raw_path) == mh.RAW_FILE
-    assert not [f for f in os.listdir(a.dir) if f.endswith(".tmp")]  # no litter
-
-
-def test_a_torn_or_corrupt_line_is_skipped_and_counted(tmp_path):
-    """kill -9 mid-append leaves a half line; it must not break the reader.
-
-    The count is surfaced (``corrupt_lines``) rather than swallowed: a store
-    that silently eats damaged lines reports "240 points, all good" for a
-    directory that is quietly losing data.
-    """
-    a = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    a.append(rec(BASE))
-    a.append(rec(BASE + 60))
-    with open(a.raw_path, "a", encoding="utf-8") as fh:
-        fh.write('{"ts": 123, "broken\n')      # torn line
-        fh.write("[not, a, record]\n")         # decodable but the wrong shape
-    b = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    assert [r["ts"] for r in b.raw_points()] == [BASE, BASE + 60]
-    assert b.stats()["corrupt_lines"] == 2
-
-
-def test_missing_store_reads_as_empty_not_an_error(tmp_path):
-    """A fresh install has no store yet: an empty timeline, never an exception."""
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path / "never-created"))
-    assert h.raw_points() == [] and h.buckets() == [] and h.series(BASE - 3600) == []
-    assert h.stats()["raw_points"] == 0
-
-
-def test_ring_keeps_the_newest_and_drops_the_oldest(tmp_path):
-    """The ring bound, by COUNT. Newest wins — the 24 h window is the product.
-
-    A capacity-4 ring fed 20 points keeps exactly 4 (with ``trim_slack=0`` the
-    trim runs on every append past capacity, so the count itself is the
-    assertion; the slack's cheaper path is the next test). The oldest are gone,
-    the newest survive, and the file on disk agrees with the in-memory cache —
-    a ring whose file and cache disagree loses records on the next restart.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path), raw_capacity=4, trim_slack=0)
-    for i in range(20):
-        h.append(rec(BASE + i * 60))
-    pts = h.raw_points()
-    assert len(pts) == 4
-    assert [p["ts"] for p in pts] == [BASE + 16 * 60, BASE + 17 * 60,
-                                      BASE + 18 * 60, BASE + 19 * 60]
-    on_disk = [json.loads(l)["ts"] for l in
-               open(h.raw_path, encoding="utf-8").read().splitlines()]
-    assert on_disk == [p["ts"] for p in pts]
-
-
-def test_ring_trims_only_past_the_slack(tmp_path):
-    """The cheap path is the point of the slack: below it, append only.
-
-    A rewrite on every tick would rewrite a ~2 MB file every minute for a ring
-    that changed by one line; trimming at capacity+slack makes it one rewrite
-    per ~144 ticks and the bound only moves by the slack.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path), raw_capacity=4, trim_slack=3)
-    for i in range(7):                        # 7 == capacity + slack: no trim yet
-        h.append(rec(BASE + i * 60))
-    assert len(h.raw_points()) == 7
-    h.append(rec(BASE + 7 * 60))              # one past -> trim to capacity
-    assert [p["ts"] for p in h.raw_points()] == [BASE + i * 60 for i in (4, 5, 6, 7)]
-
-
-def test_byte_cap_bounds_a_fat_record(tmp_path):
-    """The second bound, by BYTES: capacity alone cannot bound a record.
-
-    A node may expose any number of engines and model names are arbitrary text,
-    so 1440 records is not a size. With a tiny cap the trim keeps the newest
-    records that fit, which is what makes ``size_bound_bytes()`` a promise.
-    """
-    fat = [{**rec(BASE + i * 60),
-            "engines": [{"node": "n", "port": str(i), "model": "m" * 400,
-                         "run": 1, "wait": 0, "kv": 0.1, "gen_tps": 1.0,
-                         "prompt_tps": 2.0} for _ in range(20)]}
+def test_a_bucket_starts_on_the_minute_and_only_after_its_last_sample():
+    """Samples at :01..:59 belong to the bucket starting at :00."""
+    pts = [mh.record_from_monitor(frame(BASE + 1 + i * 2), engines(), BASE + 1 + i * 2)
            for i in range(30)]
-    cap = 20_000
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path), raw_capacity=1000,
-                          raw_max_bytes=cap, trim_slack=100)
-    for r in fat:
-        h.append(r)
-    assert os.path.getsize(h.raw_path) <= cap
-    assert h.raw_points()[-1]["ts"] == fat[-1]["ts"]     # newest survived
-    assert len(h.raw_points()) < len(fat)                # oldest gave way
+    rows, _e = mh.rollup(pts, 1, 60)
+    assert rows[0]["ts"] == BASE
 
 
-def test_size_bound_is_what_the_pr_body_quotes():
-    """The bound in the prose is the bound in the code, computed not typed."""
-    assert mh.size_bound_bytes() == mh.RAW_MAX_BYTES + mh.DOWN_MAX_BYTES
-    # The rings are what the card fixed; the caps are what we chose. If anyone
-    # retires the 24 h / 7 d numbers, this fails and the PR text gets re-derived.
-    assert mh.RAW_CAPACITY == 1440 and mh.DOWN_CAPACITY == 2016
+def test_a_partial_minute_reports_its_count_and_invents_nothing():
+    """A daemon down for 40 of 60 s rolls up the 10 samples it has, says n=10,
+    and does not pad the minute with zeros."""
+    pts = [mh.record_from_monitor(frame(BASE + i * 2), engines(), BASE + i * 2)
+           for i in range(10)]
+    rows, _e = mh.rollup(pts, 1, 60)
+    assert rows[0]["n"] == 10
+    assert rows[0]["gpu_power_w"] == 37.88
 
 
-def test_measured_record_size_fits_the_stated_caps(tmp_path):
-    """The caps are derived from a MEASURED record, not from a guess.
+def test_a_bucket_of_nothing_rolls_up_to_nothing():
+    assert mh.rollup([], 1, 60) == ([], [])
 
-    8 MiB for 1440 raw points and 24 MiB for 2016 buckets are only a bound if a
-    realistic record actually fits. This builds one the size of a real fleet
-    (4 nodes, 6 engines with long model names), serialises it the way the store
-    does (2.3 KB raw, 5.4 KB per bucket — 3.2 MiB and 10.5 MiB at capacity), and
-    proves each ring needs less than half its cap. If records grow, this fails
-    before the store silently starts trimming history early.
+
+def test_no_number_is_invented_when_nothing_reported():
+    """A minute where every host failed rolls up to None fields + the error —
+    never to zeros, which a widget would draw as a perfectly idle fleet."""
+    pts = [mh.record_from_monitor(
+        {"hosts": [{"host": "dgx-a", "error": "unreachable", "sample": None}]},
+        [], BASE + i * 2) for i in range(30)]
+    rows, _e = mh.rollup(pts, 1, 60)
+    assert rows[0]["gpu_util_pct"] is None and rows[0]["gpu_power_w_max"] is None
+    assert rows[0]["error"] == "unreachable"
+    assert rows[0]["n"] == 30          # the samples arrived; they said nothing
+
+
+# ── roll-up: 1 min -> 5 min (named gate) ───────────────────────────────────
+
+def _minute_row(ts, n, gpu_util, gpu_power_max, gpu_temp_max):
+    """A tier-1 row as it comes back out of the store (flat, with n + peaks)."""
+    return {"tier": 1, "ts": ts, "host": HOST, "n": n,
+            "gpu_util_pct": gpu_util,
+            "gpu_power_w": (gpu_util * 0.5) if gpu_util is not None else None,
+            "gpu_util_pct_max": gpu_util,
+            "gpu_power_w_max": gpu_power_max, "gpu_temp_c_max": gpu_temp_max,
+            "cpu_temp_c_max": 40.0}
+
+
+def test_the_1min_to_5min_rollup_rolls_up_from_tier1_rows():
+    """Five 1-minute rows -> one 5-minute row, keyed on the minute's own peak."""
+    rows_in = [_minute_row(BASE + i * 60, 30, 10.0 * (i + 1), 100.0 + i, 60.0 + i)
+               for i in range(5)]
+    rows, _e = mh.rollup(rows_in, 2, 300)
+    assert len(rows) == 1 and rows[0]["ts"] == BASE
+    assert rows[0]["tier"] == 2
+    assert rows[0]["n"] == 150                   # 5 full minutes of 2 s samples
+    assert rows[0]["gpu_util_pct"] == pytest.approx(30.0)
+    # The peak is EXACT: the biggest 2 s reading inside a minute is that
+    # minute's stored max, so the 5-minute max is the max of the minute maxes.
+    assert rows[0]["gpu_power_w_max"] == 104.0
+    assert rows[0]["gpu_temp_c_max"] == 64.0
+
+
+def test_the_coarser_mean_is_weighted_by_the_finer_tiers_sample_counts():
+    """One minute answered 30 times at 100% GPU, the next 3 times at 0%.
+
+    The true 5-minute average is 90.9%, not 50%. An unweighted mean of minute
+    averages is the plausible-looking wrong answer here, and it is the one a
+    quick fold produces by default.
     """
-    hosts = {f"dgx-24{i}": mh.host_metrics(sample()) for i in (6, 7, 8)}
-    hosts["nas"] = mh.host_metrics(None, "ssh: timeout")
-    eng = mh.engine_metrics([
-        {"node": f"192.0.2.24{i}", "port": str(8000 + i),
-         "model": "organization/Very-Long-Model-Name-235B-A22B-Instruct",
-         "running": 3, "waiting": 1, "kv": 0.42, "gen_tps": 18.5,
-         "prompt_tps": 210.0} for i in range(6)])
-    fat_raw = {"ts": BASE, "res": "60s", "n": 1, "hosts": hosts, "engines": eng}
-    raw_bytes = len(json.dumps(fat_raw, separators=(",", ":"))) + 1
-    fat_bucket = mh.downsample([dict(fat_raw, ts=BASE + i * 60)
-                                for i in range(6)])[0]
-    down_bytes = len(json.dumps(fat_bucket, separators=(",", ":"))) + 1
-
-    assert raw_bytes * mh.RAW_CAPACITY <= mh.RAW_MAX_BYTES, raw_bytes
-    assert down_bytes * mh.DOWN_CAPACITY <= mh.DOWN_MAX_BYTES, down_bytes
-    # Headroom is bounded the other way too: a cap 4x the need is not a bound,
-    # it is an apology. The measured margin is ~2.5x on the raw ring.
-    assert raw_bytes * mh.RAW_CAPACITY * 4 > mh.RAW_MAX_BYTES
-    assert down_bytes * mh.DOWN_CAPACITY * 4 > mh.DOWN_MAX_BYTES
+    rows_in = [_minute_row(BASE, 30, 100.0, 300.0, 80.0),
+               _minute_row(BASE + 60, 3, 0.0, 10.0, 40.0)]
+    rows, _e = mh.rollup(rows_in, 2, 300)
+    assert rows[0]["gpu_util_pct"] == pytest.approx(90.909091, abs=1e-4)
+    assert rows[0]["n"] == 33
 
 
-def test_compact_folds_buckets_wholly_past_the_raw_window(tmp_path):
-    """The fold rule, one direction: whole buckets move, and they leave raw.
+def test_a_model_with_no_samples_contributes_no_zero():
+    rows_in = [_minute_row(BASE, 30, 100.0, 300.0, 80.0),
+               {**_minute_row(BASE + 60, 30, None, None, None), "host": HOST}]
+    rows, _e = mh.rollup(rows_in, 2, 300)
+    assert rows[0]["gpu_util_pct"] == 100.0      # the silent minute is skipped
 
-    A bucket whose whole span is older than 24 h moves to the 5-minute ring and
-    disappears from raw — a ring is bounded, not tiered, so "both copies exist"
-    would eat the 24 h window in a day.
+
+# ── per-engine roll-up ─────────────────────────────────────────────────────
+
+def test_two_backends_on_one_host_stay_two_series():
+    """Averaging a node's two vLLM ports into one imaginary backend would show
+    twice the load on a model that is not serving it."""
+    pts = [mh.record_from_monitor(
+        frame(BASE + i * 2),
+        engines(port="8001", model="org/Model-A", running=1)
+        + engines(port="8002", model="org/Model-B", running=9), BASE + i * 2)
+        for i in range(30)]
+    _hosts, eng = mh.rollup(pts, 1, 60)
+    assert len(eng) == 2
+    by_port = {e["port"]: e for e in eng}
+    assert by_port["8001"]["run"] == 1 and by_port["8002"]["run"] == 9
+    assert by_port["8002"]["model"] == "org/Model-B"
+
+
+def test_a_port_serving_nothing_yet_is_still_a_row():
+    """The route map may not have resolved a model yet; the port is still the
+    identity and its load is still real, so the row keeps a None model."""
+    pts = [mh.record_from_monitor(frame(BASE),
+                                  [engines(model=None)[0]], BASE)]
+    _h, eng = mh.rollup(pts, 1, 60)
+    assert eng[0]["model"] is None and eng[0]["run"] == 3
+
+
+# ── the store ──────────────────────────────────────────────────────────────
+
+def test_store_round_trip_preserves_types_and_nulls(tmp_path):
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    pts = [mh.record_from_monitor(frame(BASE, "dgx-a"), engines(), BASE)]
+    host_rows, eng_rows = mh.rollup(pts, 1, 60)
+    store.write_rollup(host_rows, eng_rows)
+    back = store.host_rows(1)
+    assert len(back) == 1 and back[0]["host"] == "dgx-a"
+    assert back[0]["gpu_power_w"] == 37.88 and back[0]["tier"] == 1
+    assert store.engine_rows(1)[0]["node"] == HOST
+    # A host filter and a time window both have to work for the widget routes.
+    assert store.host_rows(1, host="nobody") == []
+    assert store.host_rows(1, since=BASE + 60) == []
+    assert store.host_rows(1, since=BASE, until=BASE)[0]["host"] == "dgx-a"
+    store.close()
+
+
+def test_tier1_and_tier2_survive_a_restart(tmp_path):
+    """The card's gate: write, throw the recorder away, build a fresh one, read
+    it back — and keep appending from where the old one stopped."""
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    feed(rec, 7)                                  # 7 minutes of 2 s samples
+    before = (store.count(1), store.count(2))
+    assert before[0] == 6                         # the 7th minute is still open
+    assert before[1] == 1                         # one full 5-minute bucket
+    store.close()
+
+    again = mh.MetricsRecorder(hscc_dir=str(tmp_path))   # fresh object, same file
+    assert again.store.count(1) == before[0]
+    assert again.store.count(2) == before[1]
+    assert again.tier0_points() == []              # the lost minute is tier 0's
+    # ... and it goes on rolling up from where it stopped: the watermark is in
+    # the file, so a new process continues instead of re-writing or skipping
+    # buckets. (The minute that was OPEN when the daemon died is gone with tier
+    # 0 — that is the documented, accepted cost of a memory-only 2 s tier.)
+    feed(again, 2, start=BASE + 7 * 60)
+    assert again.store.count(1) == before[0] + 1   # the next CLOSED minute landed
+    assert again.store.watermark("tier1_closed_through") == BASE + 8 * 60
+
+
+def test_tier0_is_empty_right_after_a_restart(tmp_path):
+    """Stated, not hidden: tier 0 is memory-only by spec, so a restarted
+    recorder has no 2 s points until the samples arrive again."""
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    feed(rec, 3)
+    assert len(rec.tier0) == 90                    # 3 minutes of 2 s ticks
+    store.close()
+
+    again = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    assert again.tier0_points() == []              # empty, as documented
+    assert again.stats()["tier0_points"] == 0
+    again.tick(frame(BASE), engines(), BASE)       # ... and it fills immediately
+    assert len(again.tier0) == 1
+
+
+def test_the_tier0_ring_is_bounded_and_keeps_the_newest(tmp_path):
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path), tier0_points=5)
+    for i in range(20):
+        rec.tick(frame(BASE + i * 2), engines(), BASE + i * 2)
+    assert len(rec.tier0) == 5
+    assert [p["ts"] for p in rec.tier0] == [BASE + i * 2 for i in range(15, 20)]
+
+
+def test_the_disk_sees_one_transaction_per_closed_minute(tmp_path):
+    """30 ticks a minute must not mean 30 sqlite passes a minute.
+
+    Counted at the store boundary: one minute of ticks writes nothing at all
+    (the minute has not closed), the next minute writes exactly once.
     """
-    cutoff = BASE + 600                       # bucket-aligned, on purpose
-    now = cutoff + mh.RAW_RETENTION_S
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(15):                       # three full buckets of 5 points
-        h.append(rec(BASE + i * 60))
-    assert [mh._bucket_start(BASE + i * 60) for i in (0, 4, 5, 9, 10, 14)] == \
-        [BASE, BASE, BASE + 300, BASE + 300, BASE + 600, BASE + 600]
+    class CountingStore(mh.MetricsStore):
+        passes = 0
 
-    did = h.compact(now=now)
-    # Buckets BASE and BASE+300 end at or before the cutoff; BASE+600 does not.
-    assert did["folded_buckets"] == 2
-    assert [b["ts"] for b in h.buckets()] == [BASE, BASE + 300]
-    assert all(b["n"] == 5 for b in h.buckets())
-    assert [p["ts"] for p in h.raw_points()] == [BASE + 600 + i * 60
-                                                 for i in range(5)]
+        def write_rollup(self, host_rows, engine_rows):
+            CountingStore.passes += 1
+            return super().write_rollup(host_rows, engine_rows)
+
+    store = CountingStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    feed(rec, 1, per_minute=30)
+    assert CountingStore.passes == 0               # still inside the open minute
+    feed(rec, 1, start=BASE + 60, per_minute=30)
+    assert CountingStore.passes == 1               # the closed minute, once
+    feed(rec, 2, start=BASE + 120, per_minute=30)
+    assert CountingStore.passes == 3               # one per closed minute after
 
 
-def test_a_bucket_straddling_the_cutoff_is_never_folded_early(tmp_path):
-    """The load-bearing direction: a fold only ever runs on FINAL buckets.
+def test_a_replayed_minute_is_not_written_twice(tmp_path):
+    """Re-running a roll-up must be a no-op, not a duplicate — that is what lets
+    a roll-up that died half-way simply be retried. And each closed bucket must
+    land exactly once, not once per tick."""
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    feed(rec, 2)
+    assert store.count(1) == 1
+    rec.rollups(BASE + 60)                          # same minute, replayed
+    rec.rollups(BASE + 60)
+    assert store.count(1) == 1
+    rec.rollups(BASE + 120)                         # the next minute closes: once
+    rec.rollups(BASE + 120)
+    assert store.count(1) == 2
 
-    With the cutoff falling mid-bucket, nothing may be folded — because the
-    minutes still to come belong to that bucket, and a bucket written to the
-    5-minute store is final (there is no merge path back). Once the last minute
-    ages out, the SAME bucket folds whole, with all five of its points.
 
-    Getting this wrong is the quiet data-loss bug: fold early and the bucket's
-    later minutes are dropped forever; fold late and raw overflows its window.
+def test_each_tier_prunes_by_its_own_window(tmp_path):
+    """24 h for tier 1, 7 d for tier 2 — a tier that prunes by the wrong window
+    either fills the disk or throws away a week the widgets still read."""
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    now = BASE
+    old1 = now - mh.TIER1_WINDOW_S - 60            # 24 h + 1 min old
+    old2 = now - mh.TIER2_WINDOW_S - 300           # 7 d + 5 min old
+    store.write_rollup([{"tier": 1, "ts": old1, "host": HOST, "n": 30},
+                        {"tier": 1, "ts": now - 120, "host": HOST, "n": 30},
+                        {"tier": 2, "ts": old2, "host": HOST, "n": 150},
+                        {"tier": 2, "ts": now - 600, "host": HOST, "n": 150}], [])
+    # Tier 2 starts caught up, so this test measures PRUNING and not the
+    # catch-up roll-up (which would legitimately synthesise a tier-2 row out of
+    # the tier-1 row above — see test_the_1min_to_5min_rollup_...).
+    store.set_watermark("tier2_closed_through", now)
+    mh.MetricsRecorder(store=store).rollups(now)
+    assert [r["ts"] for r in store.host_rows(1)] == [now - 120]
+    assert [r["ts"] for r in store.host_rows(2)] == [now - 600]
+    store.close()
+
+
+def test_watermarks_are_durable(tmp_path):
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    assert store.watermark("tier1_closed_through", 0) == 0
+    store.set_watermark("tier1_closed_through", BASE + 120)
+    store.close()
+    assert mh.MetricsStore(hscc_dir=str(tmp_path)).watermark(
+        "tier1_closed_through") == BASE + 120
+
+
+def test_earliest_is_the_oldest_bucket_or_none(tmp_path):
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    assert store.earliest(1) is None
+    store.write_rollup([{"tier": 1, "ts": BASE + 120, "host": HOST, "n": 30}], [])
+    assert store.earliest(1) == BASE + 120
+    store.close()
+
+
+def test_a_store_failure_does_not_stop_the_recorder(tmp_path):
+    """A sqlite error is reported and the sampler keeps going; tier 0 keeps
+    filling so the next tick can retry the roll-up. Losing history is survivable,
+    losing the sampler is not."""
+    blocked = tmp_path / "blocked"
+    (blocked / "metrics" / "history.db").mkdir(parents=True)   # the db path IS a dir
+    store = mh.MetricsStore(hscc_dir=str(blocked))
+    rec = mh.MetricsRecorder(store=store)
+    rec.tick(frame(BASE), engines(), BASE)         # must not raise
+    assert rec.last_error and "OperationalError" in rec.last_error
+    assert len(rec.tier0) == 1                     # still recording in memory
+    rec.tick(frame(BASE + 2), engines(), BASE + 2)
+    assert len(rec.tier0) == 2
+
+
+def test_the_store_stays_inside_the_stated_bound(tmp_path):
+    """The bound the PR body quotes, measured — in both directions.
+
+    A full week at the fleet's shape (4 nodes, 6 backends, 51-character model
+    names) has to fit inside the stated 10 MiB target, and the bound must not be
+    so loose that "bounded" means nothing: the same order of magnitude is the
+    test.
     """
-    cutoff = BASE + 60                        # mid-bucket: BASE .. BASE+300
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(5):
-        h.append(rec(BASE + i * 60))
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    hosts = [f"dgx-{i}" for i in range(4)]
+    ports = [(f"dgx-{i % 4}", str(8001 + i),
+              f"org/Model-{i}-235B-A22B-Instruct") for i in range(6)]
+    for tier, buckets, step in ((1, 1440, 60), (2, 2016, 300)):
+        host_rows = [{"tier": tier, "ts": BASE + b * step, "host": h, "n": 30,
+                      "cpu_usage_pct": 6.2, "cpu_temp_c": 87.2,
+                      "gpu_util_pct": 94.0, "gpu_temp_c": 71.0,
+                      "gpu_power_w": 37.88, "mem_used_pct": 85.1,
+                      "swap_used_mb": 128.0, "swap_total_mb": 16383.0,
+                      "swap_used_pct": 0.78, "gpu_mem_used_mb": 47104.0,
+                      "gpu_clock_mhz": 1965.0, "net_recv_bytes_s": 120000.0,
+                      "net_send_bytes_s": 340000.0, "sparkrun_jobs": 1.0,
+                      "cpu_temp_c_max": 90.0, "gpu_temp_c_max": 74.0,
+                      "gpu_power_w_max": 400.0}
+                     for b in range(buckets) for h in hosts]
+        eng_rows = [{"tier": tier, "ts": BASE + b * step, "node": n, "port": p,
+                     "model": m, "n": 30, "run": 3.0, "wait": 1.0, "kv": 12.5,
+                     "gen_tps": 40.0, "prompt_tps": 200.0}
+                    for b in range(buckets) for (n, p, m) in ports]
+        store.write_rollup(host_rows, eng_rows)
+    measured = store.size_bytes()
+    assert measured > 0
+    assert measured < mh.size_bound_bytes(), (
+        f"4-node store is {measured / 1e6:.1f} MB, bound is "
+        f"{mh.size_bound_bytes() / 1e6:.1f} MB")
+    assert mh.size_bound_bytes() <= 8 * measured, (
+        "the stated bound is orders of magnitude looser than the data — "
+        "'bounded' would be decorative")
+    store.close()
 
-    early = h.compact(now=cutoff + mh.RAW_RETENTION_S)
-    assert early["folded_buckets"] == 0 and len(h.raw_points()) == 5
-    assert h.buckets() == []
 
-    # One more minute of clock: the bucket is now wholly older than the cutoff.
-    later = h.compact(now=cutoff + 300 + mh.RAW_RETENTION_S)
-    assert later["folded_buckets"] == 1
-    assert [(b["ts"], b["n"]) for b in h.buckets()] == [(BASE, 5)]
-    assert h.raw_points() == []
+def test_the_store_is_one_file_and_not_json_per_sample(tmp_path):
+    """The amendment's shape requirement, checked where it is claimed: one file,
+    sqlite's own header, and no -wal sidecar to grow next to it."""
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    store.write_rollup([{"tier": 1, "ts": BASE, "host": HOST, "n": 30}], [])
+    assert os.path.basename(store.path) == mh.DB_FILE
+    with open(store.path, "rb") as fh:
+        assert fh.read(16) == b"SQLite format 3\x00"
+    assert not [f for f in os.listdir(os.path.dirname(store.path))
+                if f.endswith(("-wal", "-shm"))]
+    assert mh.db_path(hscc_dir=str(tmp_path)) == store.path
+    store.close()
 
 
-def test_a_folded_bucket_is_final_and_never_rewritten(tmp_path):
-    """After a fold the point is gone from raw, so a re-fold is a no-op.
+# ── the sampler: ONE, and the monitor's own ────────────────────────────────
 
-    This is why the two files can be append-only between trims: nothing ever
-    merges into a bucket that is already on disk, so a half-written merge cannot
-    leave a bucket whose ``n`` disagrees with its contents.
+def test_the_sampler_reuses_the_monitors_own_classes():
+    """The requirement most likely to be quietly unmet.
+
+    Identity, not a duck-type: the sampler's sources must literally be
+    ``cluster_live``'s classes, because "reuse the monitor's sampling path" is
+    what keeps the fleet from being polled twice per tick over two sets of ssh
+    channels that can disagree.
     """
-    cutoff = BASE + 300
-    now = cutoff + mh.RAW_RETENTION_S
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(5):
-        h.append(rec(BASE + i * 60))
-    assert h.compact(now=now)["folded_buckets"] == 1
-    again = h.compact(now=now + 60)
-    assert again["folded_buckets"] == 0
-    assert [(b["ts"], b["n"]) for b in h.buckets()] == [(BASE, 5)]
+    assert mh.host_stream_cls() is cluster_live.HostStream
+    assert mh.serving_poller_cls() is cluster_live.ServingPoller
 
 
-def test_compact_is_cheap_and_empty_when_nothing_has_aged_out(tmp_path):
-    """The common tick: a call every minute that folds nothing.
+def test_the_module_opens_no_second_sampling_path():
+    """No subprocess, no socket, no exec — the AST is the proof, not the prose.
 
-    If compaction rewrote both files every tick the store would take ~1.4 GB of
-    rewrites a day for a ring that changes one line at a time.
+    A second poller here would not fail a functional test; it would double the
+    ssh fan-out per node per tick on the live cluster. So the ban is structural.
     """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(10):
-        h.append(rec(BASE + i * 60))
-    before = {f: os.stat(os.path.join(h.dir, f)).st_mtime_ns for f in
-              (mh.RAW_FILE, mh.DOWN_FILE) if os.path.exists(os.path.join(h.dir, f))}
-    did = h.compact(now=BASE + 600)
-    assert did == {"folded_buckets": 0, "raw_points": 10, "buckets": 0,
-                   "dropped_buckets": 0}
-    for f, ns in before.items():
-        assert os.stat(os.path.join(h.dir, f)).st_mtime_ns == ns, f
+    tree = ast.parse(open(mh.__file__).read())
+    imports = set()
+    attrs = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            imports.update(a.name.split(".")[0] for a in n.names)
+        elif isinstance(n, ast.ImportFrom):
+            if n.module:
+                imports.add(n.module.split(".")[0])
+        elif isinstance(n, ast.Attribute):
+            attrs.add(n.attr)
+    assert not imports & {"subprocess", "socket", "paramiko", "pexpect"}, imports
+    banned = {"Popen", "system", "popen", "check_output", "check_call",
+              "spawn", "execv", "execve", "fork", "ssh"}
+    assert not attrs & banned, attrs & banned
 
 
-def test_compact_prunes_buckets_past_seven_days(tmp_path):
-    """7 d is the outer bound: an 8-day-old bucket is dropped, not averaged."""
-    now = BASE + 8 * 24 * 3600
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    h.append(rec(now - 8 * 24 * 3600))        # far outside both windows
-    h.append(rec(now - 2 * 3600))
-    did = h.compact(now=now)
-    assert did["folded_buckets"] == 1
-    assert did["dropped_buckets"] == 1
-    assert h.buckets() == []
-    assert [p["ts"] for p in h.raw_points()] == [now - 2 * 3600]
+def test_the_sampler_ticks_at_the_monitors_own_cadence():
+    """2 s here is cluster_live's DEFAULT_INTERVAL, not a number invented to
+    look responsive — and the daemon's SOT entry points at the same value."""
+    assert mh.TIER0_INTERVAL_S == cluster_live.DEFAULT_INTERVAL == 2
+    assert daemon_ops.PERIODIC_INTERVALS[mh.STREAM_NAME] == mh.TIER0_INTERVAL_S
 
 
-def test_buckets_survive_a_restart_with_their_sidecars(tmp_path):
-    """Restart-proof for the downsampled ring too, peaks included.
-
-    A ``_max`` that is lost on restart is a peak nobody can see again, and the
-    average on its own is the number that hides an 85 degreeC spike.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    h.append(rec(BASE, power="10.0"))
-    h.append(rec(BASE + 60, power="140.0"))
-    assert h.compact(now=BASE + mh.RAW_RETENTION_S + 300)["folded_buckets"] == 1
-    fresh = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    b = fresh.buckets()[0]
-    assert b["hosts"]["dgx-246"]["gpu_power_w"] == pytest.approx(75.0)
-    assert b["hosts"]["dgx-246"]["_max"]["gpu_power_w"] == 140.0
+def test_the_tier0_window_is_fifteen_minutes_at_450_points_per_node():
+    assert mh.TIER0_POINTS == 450 == mh.TIER0_WINDOW_S // mh.TIER0_INTERVAL_S
+    assert mh.TIER1_WINDOW_S == 86400 and mh.TIER1_BUCKET_S == 60
+    assert mh.TIER2_WINDOW_S == 7 * 86400 and mh.TIER2_BUCKET_S == 300
 
 
-def test_series_spans_both_resolutions_without_repeating_a_sample(tmp_path):
-    """A 30-hour read gets 24 h of raw plus the older hours as buckets.
-
-    Without the mix, a widget asking for a week hits the 24 h raw wall and
-    either shows a day (reading raw only) or double-draws the same samples
-    (reading both). ``res`` on every record is what lets a reader label what it
-    is plotting.
-    """
-    now = BASE + 30 * 3600
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(30 * 60):                  # 30 h of points, one per minute
-        h.append(rec(BASE + i * 60))
-    h.compact(now=now)
-    pts = h.series(since=now - 30 * 3600, until=now)
-    res = [p["res"] for p in pts]
-    assert set(res) == {"5m", "60s"}
-    assert res == ["5m"] * res.count("5m") + ["60s"] * res.count("60s")
-    assert pts[-1]["res"] == "60s"                      # newest minute is raw
-    # The seam is a hard non-overlap, asserted from the two definitions rather
-    # than from a count: a bucket that ends after the raw window starts would
-    # draw the same five minutes twice, once as a mean and once as themselves.
-    raw_start = now - mh.RAW_RETENTION_S
-    assert all(p["ts"] >= raw_start for p in pts if p["res"] == "60s")
-    assert all(p["ts"] + mh.DOWN_BUCKET_S <= raw_start
-               for p in pts if p["res"] == "5m")
-    assert len({p["ts"] for p in pts}) == len(pts)      # nothing counted twice
+def test_a_stale_frame_is_not_a_new_sample(tmp_path):
+    """sparkrun wedged, the last frame is still readable. Recording it every 2 s
+    would draw a flat, healthy-looking line for a dead poller."""
+    stream = FakeStream(2)
+    stream.frame = frame(BASE)
+    poller = FakePoller()
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    s = mh.Sampler(host_stream=stream, serving=poller, recorder=rec,
+                   clock=lambda: BASE)
+    assert s.tick() is not None
+    assert s.tick() is None and s.tick() is None
+    assert len(rec.tier0) == 1
+    assert poller.calls == 1                       # not even re-polled
 
 
-def test_reads_filter_by_window_and_host(tmp_path):
-    """Window bounds are inclusive on both ends, and ``host`` narrows to one node.
-
-    A reader that asked for "the last hour of dgx-247" must not get the fleet's
-    records that happen to also mention it, and an exclusive end would silently
-    drop the most recent sample — the one a widget draws first.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(4):
-        h.append(rec(BASE + i * 60))
-        h.append(rec(BASE + i * 60, host="dgx-247"))
-    # +60 and +180 are both inside the window: 3 minutes x 2 hosts = 6 records.
-    assert len(h.raw_points(since=BASE + 60, until=BASE + 180)) == 6
-    assert len(h.raw_points(since=BASE, until=BASE + 180)) == 8
-    only = h.raw_points(host="dgx-247")
-    assert len(only) == 4
-    assert all(p["hosts"].keys() == {"dgx-247"} for p in only)
+def test_a_lost_stream_is_recorded_once_then_gaps(tmp_path):
+    """The tail of the history says "the sampler lost the fleet here" — once,
+    not every tick, and never as a frozen copy of the last good reading."""
+    stream = FakeStream(2)
+    stream.frame = frame(BASE)
+    stream.error = "sparkrun monitor exited"
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    s = mh.Sampler(host_stream=stream, serving=FakePoller(), recorder=rec,
+                   clock=lambda: BASE, restart_min_s=10_000)
+    first = s.tick()
+    assert first is not None and first.get("error") == "sparkrun monitor exited"
+    assert first["hosts"] == {}                    # no stale numbers laundered in
+    assert s.tick() is None and s.tick() is None
+    assert len(rec.tier0) == 1
 
 
-def test_out_of_order_append_keeps_both_files_sorted(tmp_path):
-    """A replay or a clock step back must not put the ring out of order.
-
-    The ring is bounded and read as a timeline: if position and ts ever
-    disagree, the newest-wins trim starts deleting the wrong end.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for ts in (BASE, BASE + 120, BASE + 60):
-        h.append(rec(ts))
-    assert [p["ts"] for p in h.raw_points()] == [BASE, BASE + 60, BASE + 120]
-    on_disk = [json.loads(l)["ts"] for l in
-               open(h.raw_path, encoding="utf-8").read().splitlines()]
-    assert on_disk == [BASE, BASE + 60, BASE + 120]
-
-
-def test_stats_describe_the_store_for_the_state_stamp(tmp_path):
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    for i in range(3):
-        h.append(rec(BASE + i * 60))
-    s = h.stats()
-    assert s["raw_points"] == 3 and s["buckets"] == 0
-    assert s["raw_capacity"] == mh.RAW_CAPACITY
-    assert s["newest_ts"] == BASE + 120 and s["oldest_ts"] == BASE
-    assert s["bound_bytes"] == mh.size_bound_bytes()
-    assert s["raw_bytes"] == os.path.getsize(h.raw_path)
+def test_stream_restart_is_bounded(tmp_path):
+    """A permanent sparkrun failure must not fork a child every 2 s."""
+    FakeStream.instances.clear()
+    orig = mh.host_stream_cls
+    mh.set_sampler(None)
+    try:
+        mh.host_stream_cls = lambda: FakeStream        # the CLASS, not an instance
+        stream = FakeStream(2)
+        stream.error = "sparkrun monitor exited"
+        s = mh.Sampler(host_stream=stream, serving=FakePoller(),
+                       recorder=mh.MetricsRecorder(hscc_dir=str(tmp_path)),
+                       clock=lambda: BASE, restart_min_s=60)
+        FakeStream.instances.clear()
+        s.tick(now=BASE + 61)                      # due: a new stream is built
+        assert len(FakeStream.instances) == 1
+        assert stream.closed is True               # and the old one was closed
+        s.tick(now=BASE + 62)                      # not due: no second child
+        assert len(FakeStream.instances) == 1
+    finally:
+        mh.host_stream_cls = orig
 
 
-# ── the store lives under ~/.hscc, nowhere else ───────────────────────────
-
-def test_store_dir_is_under_hscc_metrics(tmp_path):
-    """~/.hscc/metrics by default; ``hscc_dir=`` overrides it wholesale.
-
-    The second half is the one that matters for the suite: the default resolves
-    through ``expanduser`` at CALL time, which is what lets conftest's autouse
-    ``~/.hscc`` redirect cover this store with no module constant to register.
-    Under the redirect the default lands in this test's tmp dir, and it must
-    never land under the real $HOME — that is the no-live-leak property.
-    """
-    assert mh.store_dir(str(tmp_path)) == os.path.join(str(tmp_path), "metrics")
-    assert mh.store_dir() == os.path.join(os.path.expanduser("~/.hscc"), "metrics")
-    assert not mh.store_dir().startswith(os.environ["HOME"] + os.sep)
-    h = mh.MetricsHistory()                               # no hscc_dir at all
-    assert h.raw_path == os.path.join(mh.store_dir(), mh.RAW_FILE)
-    h.append(rec(BASE))                                   # writes...
-    assert os.path.exists(h.raw_path)
-    assert h.raw_path.startswith(str(tmp_path))        # ...into this test only
+def test_a_serving_failure_does_not_blank_the_host_numbers(tmp_path):
+    """The two sources are independent: if /metrics is down, the node telemetry
+    is still real telemetry."""
+    stream = FakeStream(2)
+    stream.frame = frame(BASE)
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    s = mh.Sampler(host_stream=stream, serving=FakePoller(raises=OSError("nope")),
+                   recorder=rec, clock=lambda: BASE)
+    out = s.tick()
+    assert out is not None and out["hosts"][HOST]["gpu_power_w"] == 37.88
+    assert out["engines"] == []
+    assert "serving poll failed" in s.error
 
 
-def test_a_full_tick_of_ticks_stays_inside_the_two_rings(tmp_path):
-    """End-to-end bound: 25 h of ticks, folded as it aged, inside both caps.
+def test_get_sampler_builds_one_sampler_from_the_monitors_classes(tmp_path):
+    """The singleton is the "ONE sampler" requirement; built from cluster_live,
+    at the monitor's cadence, with the cluster passed through."""
+    FakeStream.instances.clear()
+    orig_stream, orig_poller = mh.host_stream_cls, mh.serving_poller_cls
+    try:
+        mh.host_stream_cls = lambda: FakeStream          # the CLASS
+        mh.serving_poller_cls = lambda: FakePoller       # the CLASS
+        a = mh.get_sampler(hscc_dir=str(tmp_path), cluster="prod")
+        b = mh.get_sampler(hscc_dir=str(tmp_path))
+        assert a is b
+        assert a.interval == mh.TIER0_INTERVAL_S and a.cluster == "prod"
+        assert len(FakeStream.instances) == 1      # one child, not two
+    finally:
+        mh.host_stream_cls, mh.serving_poller_cls = orig_stream, orig_poller
 
-    The store's promise is that it never grows, so the check is the whole
-    scenario: a day and an hour of 60 s samples, compacted as a live daemon
-    would, then a restart, then the numbers.
-    """
-    h = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    now = BASE + 25 * 3600
-    for i in range(25 * 60):
-        h.append(rec(BASE + i * 60, power=str(10 + (i % 7))))
-        h.compact(now=BASE + (i + 1) * 60)
-    s = h.stats()
-    assert s["raw_points"] <= mh.RAW_CAPACITY
-    assert s["buckets"] <= mh.DOWN_CAPACITY
-    assert s["raw_bytes"] + s["down_bytes"] <= mh.size_bound_bytes()
-    fresh = mh.MetricsHistory(hscc_dir=str(tmp_path))
-    assert fresh.stats()["raw_points"] == s["raw_points"]
+
+def test_close_sampler_terminates_the_child_it_owns(tmp_path):
+    """Daemon threads die with the process; a SUBPROCESS does not. Without this
+    every daemon restart orphans a sparkrun child holding ssh channels open."""
+    stream = FakeStream(2)
+    mh.set_sampler(mh.Sampler(host_stream=stream, serving=FakePoller(),
+                              recorder=mh.MetricsRecorder(hscc_dir=str(tmp_path))))
+    mh.close_sampler()
+    assert stream.closed is True
+    assert mh._sampler is None                     # released, not left installed
+    mh.close_sampler()                             # a second close is a no-op
+
+
+# ── the daemon stream ──────────────────────────────────────────────────────
+
+class BrokenSampler:
+    def tick(self, now=None):
+        raise RuntimeError("boom")
+
+    def close(self):
+        pass
+
+
+def test_the_stream_is_registered_in_the_single_source_of_truth():
+    """Cadence in PERIODIC_INTERVALS (what `hscc verify` staleness maths uses)
+    AND a row in the loop's CHECKS table (what actually starts the thread) — a
+    cadence without a check body is a stream that never runs, and a body without
+    a cadence falls through to the flat staleness window."""
+    assert daemon_ops.PERIODIC_INTERVALS[mh.STREAM_NAME] == 2
+    src = open(daemon_ops.__file__).read()
+    assert f'"{mh.STREAM_NAME}": check_metrics_history' in src
+
+
+def test_the_tick_stamps_state_on_every_path(tmp_path):
+    """A stream that goes dark is indistinguishable from one that died, so both
+    paths stamp — including the one where the sampler raised."""
+    mh.set_sampler(mh.Sampler(host_stream=FakeStream(2), serving=FakePoller(),
+                              recorder=mh.MetricsRecorder(hscc_dir=str(tmp_path))))
+    out = mh.check_metrics_history(now=BASE)
+    assert out["ok"] is True and out["error"] is None
+    assert state.read_state(mh.STREAM_NAME)["ok"] is True
+
+    mh.set_sampler(BrokenSampler())
+    bad = mh.check_metrics_history(now=BASE)
+    assert bad["ok"] is False and "boom" in bad["error"]
+    stamped = state.read_state(mh.STREAM_NAME)
+    assert stamped["ok"] is False and "boom" in stamped["error"]
+
+
+def test_the_tick_reports_the_store_it_wrote(tmp_path):
+    """The state file is the only surface that shows whether history is being
+    written at all, so it carries depth, row counts and the file's real size."""
+    stream = FakeStream(2)
+    mh.set_sampler(mh.Sampler(host_stream=stream, serving=FakePoller(),
+                              recorder=mh.MetricsRecorder(hscc_dir=str(tmp_path))))
+    # The frame must ADVANCE: an identical frame is the same reading, and the
+    # recorder is correct to refuse it (see test_a_stale_frame_is_not_a_new_sample).
+    for i in range(31):
+        stream.frame = frame(BASE + i * 2)
+        mh.check_metrics_history(now=BASE + i * 2)
+    stream.frame = frame(BASE + 62)
+    out = mh.check_metrics_history(now=BASE + 62)        # closes the first minute
+    assert out["tier0_points"] == 32
+    assert out["tier1_rows"] == 1 and out["tier2_rows"] == 0
+    assert out["db_bytes"] > 0 and out["bound_bytes"] == mh.size_bound_bytes()
+    assert os.path.exists(mh.db_path(hscc_dir=str(tmp_path)))
+
+
+def test_a_broken_store_reports_itself_in_the_state(tmp_path):
+    blocked = tmp_path / "blocked"
+    (blocked / "metrics" / "history.db").mkdir(parents=True)   # the db path IS a dir
+    stream = FakeStream(2)
+    mh.set_sampler(mh.Sampler(host_stream=stream, serving=FakePoller(),
+                              recorder=mh.MetricsRecorder(
+                                  store=mh.MetricsStore(hscc_dir=str(blocked)))))
+    for i in range(31):
+        stream.frame = frame(BASE + i * 2)
+        mh.check_metrics_history(now=BASE + i * 2)
+    stream.frame = frame(BASE + 62)
+    out = mh.check_metrics_history(now=BASE + 62)
+    assert out["ok"] is False and "OperationalError" in out["error"]
+    assert state.read_state(mh.STREAM_NAME)["error"]
