@@ -67,6 +67,22 @@ GATE="${SELF_DIR}/widget_settings_check.sh"
 [ -f "$GATE" ] || { echo "PROBE FAILED — gate not found at $GATE" >&2; exit 1; }
 GATE_BEFORE="$(shasum -a 256 "$GATE" | cut -d' ' -f1)"
 IOSAPP="$(cd "${SELF_DIR}/.." && pwd)"
+REPO="$(cd "${IOSAPP}/.." && pwd)"
+
+# Sibling projects the gate reads by relative path, read out of the gate itself.
+# widget_settings_check.sh greps MAC_APP="../macos-app" for the desktop-widget wiring
+# (t_1143c19b), and a copy that cannot see a sibling prints FAIL where the real gate
+# prints ok — the control leg then accuses a healthy guard of refusing legitimate runs.
+# Derived rather than listed here for the same reason the banner set is derived: the
+# copy tree being written down by hand is exactly what made project.yml (t_d1a9eeb6) and
+# then macos-app (t_b62678cc) each redden the runner in turn. Only the double-quoted
+# "../name" literal form counts, and any name starting with '.' is dropped so no value
+# can point a link above the repo.
+gate_siblings=$(grep -o '"\.\./[A-Za-z0-9_.-]*"' "$GATE" 2>/dev/null \
+                | tr -d '"' | sed -e 's|^\.\./||' | grep -v '^\.' | sort -u || true)
+if [ -n "$gate_siblings" ]; then
+  echo "gate siblings to expose to each copy (derived from $GATE): $(printf '%s ' $gate_siblings)"
+fi
 
 # The byte under discussion, without writing it into this file.
 BT="$(printf '\140')"
@@ -225,6 +241,22 @@ run_leg() {
   # HSCC_BUNDLE_PREFIX. Without this link the unmodified control copy fails to
   # find it, so the probe would be refusing a legitimate gate (t_d1a9eeb6).
   ln -s "${IOSAPP}/project.yml" "${root}/project.yml" 2>/dev/null
+  # Sibling projects the gate reads as "../name" (macos-app today) have to exist
+  # relative to the copy's PARENT, because the gate cds into the copy root and then
+  # resolves MAC_APP="../macos-app" from there. Without this the control copy prints
+  # FAIL where the same gate passes in place (macOS app/settings or project spec is
+  # missing) — a false accusation against the guard, caused by the harness. The list
+  # comes from the gate, so the next sibling it starts reading is followed automatically.
+  local sib
+  for sib in ${gate_siblings}; do
+    [ "$sib" = "$(basename "$IOSAPP")" ] && continue
+    if [ -d "${REPO}/${sib}" ]; then
+      ln -s "${REPO}/${sib}" "${WORKROOT}/${sib}" 2>/dev/null
+      [ -e "${WORKROOT}/${sib}" ] || pfail "run_leg ${name}: could not expose sibling ${sib} to the copy — the control leg would then judge a tree the real gate never runs in, which is a harness fault, not a finding"
+    else
+      pnote "run_leg ${name}: the gate names ../${sib} but ${REPO}/${sib} is not a directory — the copy cannot see it, and neither can the real gate"
+    fi
+  done
   ln -s "${IOSAPP}/scripts/widget_settings_check.harness.golden" \
         "${root}/scripts/widget_settings_check.harness.golden" 2>/dev/null
   # The canonical, unmodified gate sits beside the copy ON PURPOSE: that is the
