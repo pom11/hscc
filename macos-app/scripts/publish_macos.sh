@@ -3,6 +3,8 @@
 #
 # Inputs: <version> <build> <zip> <edSignature> [<release-notes.md>]
 # Env:    HSCC_REPO (default pom11/hscc), HSCC_RELEASE_TAG (default apps-v<v>)
+#         HSCC_PAGES_REMOTE (default origin — where gh-pages is pushed; a path
+#                 works, the same knob scripts/publish_site.sh already honours)
 #
 # What lands where (branch gh-pages, only under /macos/):
 #   macos/index.html        brew command + What's new
@@ -30,6 +32,11 @@ fi
 
 REPO="${HSCC_REPO:-pom11/hscc}"
 TAG="${HSCC_RELEASE_TAG:-apps-v${VERSION}}"
+# Where gh-pages lives — the same knob scripts/publish_site.sh reads, so one
+# variable redirects the root page and both app subtrees. A path is legal, which
+# is how a CI run or a mirror release publishes without rewriting the remote of
+# the checkout. Default keeps today's behaviour: push to origin.
+REMOTE="${HSCC_PAGES_REMOTE:-origin}"
 ASSET="HSCC-Widgets-${VERSION}.zip"
 ZIP_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 ZIP_LENGTH="$(wc -c < "$ZIP" | tr -d ' ')"
@@ -55,16 +62,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Both git calls are pinned to $REPO_ROOT with -C, and they must stay that way.
-# A bare `git ls-remote origin` / `git fetch origin` resolves the remote and
-# writes FETCH_HEAD in whichever repo owns the CURRENT WORKING DIRECTORY, which
-# is this repo only when the release happened to be run from inside it. From
-# anywhere else the branch check answers about someone else's remote and the
-# worktree below either cannot resolve FETCH_HEAD at all or, worse, resolves an
-# unrelated FETCH_HEAD and pushes the wrong commit onto the branch that serves
-# the install page.
-if git -C "$REPO_ROOT" ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
-  git -C "$REPO_ROOT" fetch --quiet origin gh-pages
+# Both git calls name $REMOTE and are pinned to $REPO_ROOT with -C, and they
+# must stay that way. A bare `git ls-remote origin` / `git fetch origin` resolves
+# the remote and writes FETCH_HEAD in whichever repo owns the CURRENT WORKING
+# DIRECTORY, which is this repo only when the release happened to be run from
+# inside it. From anywhere else the branch check answers about someone else's
+# remote and the worktree below either cannot resolve FETCH_HEAD at all or,
+# worse, resolves an unrelated FETCH_HEAD and pushes the wrong commit onto the
+# branch that serves the install page. Naming $REMOTE rather than `origin` is the
+# other half: which remote gets read is then the operator's choice, not a fact
+# about the checkout.
+if git -C "$REPO_ROOT" ls-remote --exit-code --heads "$REMOTE" gh-pages >/dev/null 2>&1; then
+  git -C "$REPO_ROOT" fetch --quiet "$REMOTE" gh-pages
   # Detached on purpose: the push below is HEAD:gh-pages, so no local branch
   # named gh-pages is needed — and a `checkout -B gh-pages` would reset, or
   # fail on, a gh-pages branch that another worktree already has checked out.
@@ -105,7 +114,7 @@ else
   git -C "$PAGES_DIR" -c user.name="HSCC release" \
     -c user.email="release@users.noreply.github.com" \
     commit --quiet -m "macos: publish HSCC ${VERSION}"
-  git -C "$PAGES_DIR" push --quiet origin HEAD:gh-pages
+  git -C "$PAGES_DIR" push --quiet "$REMOTE" HEAD:gh-pages
   echo "    pushed $(git -C "$PAGES_DIR" rev-parse --short HEAD) to gh-pages"
 fi
 
