@@ -21,6 +21,9 @@ struct HSCCMacApp: App {
     @StateObject private var settings = SettingsStore()
     @StateObject private var preferences = MacPreferences()
     @StateObject private var dashboard = DashboardMonitor()
+    /// The shared widget/Live Activity registry and Appearance store. Same
+    /// App Group blob the widget extension reads; writes reload timelines.
+    @StateObject private var widgetSettings = WidgetSettingsStore()
 
     var body: some Scene {
         MenuBarExtra {
@@ -36,6 +39,8 @@ struct HSCCMacApp: App {
             MacSettingsView()
                 .environmentObject(settings)
                 .environmentObject(preferences)
+                .environmentObject(widgetSettings)
+                .environmentObject(dashboard)
         }
     }
 }

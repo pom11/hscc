@@ -370,15 +370,21 @@ struct CardsRunningWidget: Widget {
         let style = WidgetStyle.resolved(for: .widgetCardsRunning)
         return StaticConfiguration(kind: kind, provider: CardsRunningTimelineProvider()) { entry in
             CardsRunningWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Running Cards")
         .description("Cards being worked right now, with the worker running each and how long it has been going.")
+        // The accessory families are iOS-only; the macOS desktop tile offers
+        // the three system sizes (t_1143c19b).
+        #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        #endif
     }
 }
 
@@ -393,6 +399,7 @@ struct CardsRunningWidgetView: View {
 
     var body: some View {
         switch family {
+        #if os(iOS)
         case .accessoryInline:
             Text(entry.inlineLine)
                 .font(style.font(.caption2))
@@ -400,7 +407,10 @@ struct CardsRunningWidgetView: View {
             CardsRunningCircularView(entry: entry)
         case .accessoryRectangular:
             CardsRunningRectangularView(entry: entry)
+        #endif
         case .systemLarge:
+            CardsRunningLargeView(entry: entry)
+        case .systemExtraLarge:
             CardsRunningLargeView(entry: entry)
         case .systemMedium:
             CardsRunningMediumView(entry: entry)

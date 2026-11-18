@@ -857,6 +857,37 @@ grep -q "func widgetStyle(_ style: WidgetStyle)" Sources/HSCC/Views/Theme.swift 
   && echo "  ok: the shared SwiftUI style modifier part 2 applies exists" \
   || gfail "the shared SwiftUI style modifier part 2 applies exists"
 
+# ---- macOS Settings + desktop target (t_1143c19b) --------------------------
+# The Appearance editor and the registry store are compiled into the macOS app
+# BY PATH (not copied), and every settings write asks WidgetKit to rebuild the
+# desktop timelines. The widget extension itself is covered by the surface
+# checks above; these two blocks prove the macOS app is wired to the same code
+# and that the target exists with the shared widgets in it.
+MAC_APP="../macos-app"
+MAC_SETTINGS="$MAC_APP/Sources/HSCCMac/MacSettingsView.swift"
+MAC_SPEC="$MAC_APP/project.yml"
+if [ -f "$MAC_SETTINGS" ] && [ -f "$MAC_SPEC" ]; then
+  grep -q "WidgetAppearanceView()" "$MAC_SETTINGS" \
+    && echo "  ok: the macOS Settings window embeds the shared Appearance editor" \
+    || gfail "the macOS Settings window embeds the shared Appearance editor"
+  grep -q "WidgetCenter.shared.reloadAllTimelines()" "$MAC_SETTINGS" \
+    && echo "  ok: macOS settings writes reload desktop widget timelines" \
+    || gfail "macOS settings writes reload desktop widget timelines"
+  for reused in WidgetSettingsStore.swift Views/WidgetAppearanceView.swift Views/WidgetSurfaceLabels.swift; do
+    grep -qF -- "- path: ../ios-app/Sources/HSCC/$reused" "$MAC_SPEC" \
+      && echo "  ok: macOS app compiles $reused by path" \
+      || gfail "macOS app does not compile $reused by path"
+  done
+  if grep -q '^  HSCCMacWidgets:' "$MAC_SPEC" \
+     && grep -qF -- "- path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift" "$MAC_SPEC"; then
+    echo "  ok: HSCCMacWidgets target exists and compiles the shared rendering adapter"
+  else
+    gfail "HSCCMacWidgets target or its shared rendering adapter is missing"
+  fi
+else
+  gfail "macOS app/settings or project spec is missing — desktop widget Settings cannot be covered"
+fi
+
 # ---- surface coverage (t_2b3084bb) -----------------------------------------
 # The rows above are driven by WidgetSurfaceKind.allCases, so a surface whose
 # kind never reaches that enum is the one way a shipped widget / Live Activity
@@ -879,10 +910,14 @@ fi
 
 # One row per case is not enough if the row has no name or icon: the shared
 # editor title and the list row both read displayName/displayIcon, and each
-# case must be present in both switches (two arms in ConfigView).
+# case must be present in both switches. The switches moved out of ConfigView
+# into WidgetSurfaceLabels.swift (t_1143c19b) so the macOS Settings window
+# compiles the same metadata instead of a second copy.
+META="Sources/HSCC/Views/WidgetSurfaceLabels.swift"
+[ -f "$META" ] || { echo "surface display metadata missing: $META" >&2; exit 1; }
 meta_bad=0
 for c in $surface_cases; do
-  arms=$(grep -c "case \.$c:" "$CONFIG")
+  arms=$(grep -c "case \.$c:" "$META")
   if [ "$arms" -lt 2 ]; then
     sfail "surface $c has $arms displayName/displayIcon arm(s), expected 2"
     meta_bad=$((meta_bad + 1))

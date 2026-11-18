@@ -7,8 +7,9 @@
 # The app is a MENU-BAR-ONLY client of the existing HSCC API (LSUIElement = YES,
 # no Dock icon). It reuses the iOS app's Sources/Shared files by path — there
 # are no copied models, no second HTTP client, and no new backend endpoints.
-# Part 2 (a desktop-widget extension) will join the same App Group; this card
-# ships the project scaffold + the menu bar app.
+# Part 2 (t_1143c19b) adds HSCCMacWidgets, a desktop WidgetKit extension that
+# reuses the iOS widget views/providers by path too; both targets join the same
+# App Group.
 #
 # The App Group is deliberately the SAME `group.com.hscc.ios` the iOS app and
 # its widget use. It is a team-wide container, not an iOS-only one, and keeping
@@ -39,6 +40,9 @@ schemes:
     build:
       targets:
         HSCCMac: all
+        # The widget extension is embedded in the app; building it here keeps a
+        # fresh checkout compiling both targets from the shared scheme.
+        HSCCMacWidgets: [run, archive]
     run:
       config: Debug
     test:
@@ -84,6 +88,12 @@ targets:
       # tokens keep exactly the behaviour the iOS app already ships.
       - path: ../ios-app/Sources/HSCC/SettingsStore.swift
       - path: ../ios-app/Sources/HSCC/KeychainStore.swift
+      # The appearance registry (t_444519ae) and its editor, reused BY PATH:
+      # one App Group blob and one set of controls for the iOS Settings screen,
+      # the macOS Settings window and every widget.
+      - path: ../ios-app/Sources/HSCC/WidgetSettingsStore.swift
+      - path: ../ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift
+      - path: ../ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.swift
       # SettingsStore clears the shared last-known read cache on a cluster
       # switch. Foundation-only.
       - path: ../ios-app/Sources/HSCC/StateCache.swift
@@ -93,11 +103,19 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         # Same team-wide container as the iOS app + its extensions. The desktop
-        # widget extension (part 2) will read the same connection settings.
+        # widget extension reads the same connection settings.
         com.apple.security.application-groups:
           - group.com.hscc.ios
         keychain-access-groups:
           - $(AppIdentifierPrefix)group.com.hscc.ios
+    dependencies:
+      # The desktop widgets ship inside the app bundle; WidgetKit discovers
+      # them from the embedded extension.
+      - target: HSCCMacWidgets
+        embed: true
+      # Settings writes call WidgetCenter, and WidgetSettingsStore reloads
+      # timelines from the app process.
+      - sdk: WidgetKit.framework
     info:
       path: Sources/Info.plist
       properties:
@@ -119,3 +137,76 @@ targets:
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
         ENABLE_HARDENED_RUNTIME: YES
+
+  # Desktop / Notification Center widgets (t_1143c19b, part 2).
+  #
+  # Every widget file is the iOS extension's own source, referenced BY PATH.
+  # There is no duplicated view, provider, entity query or configuration
+  # intent: the same six widgets ship on both platforms, and the few places
+  # where WidgetKit differs (the accessory families do not exist on macOS)
+  # are `#if os(iOS)` inside those files, not a second copy here.
+  #
+  # The App Group, keychain access group and Shared client are identical to
+  # the app target, so the desktop tile reads the same saved clusters, the same
+  # failover loop and the same last-known snapshots as the menu bar dropdown.
+  HSCCMacWidgets:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      # The shared @main WidgetBundle: Cluster, Monitor, Cards Running,
+      # Kanban Monitor, Projects and Board Status.
+      - path: ../ios-app/Sources/HSCCWidgets/HSCCWidgetsBundle.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetMetrics.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift
+      - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusReading.swift
+      # The one rendering-mode adapter (fullColor / accented / vibrant), shared
+      # with the iOS extension rather than reimplemented for macOS.
+      - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
+      # One data path: the same App Group store and WidgetDataClient (GET-only,
+      # multi-address failover) the iOS widget and the menu bar app use.
+      - path: ../ios-app/Sources/Shared/SharedModels.swift
+      - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
+      - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
+      # The one design system + WidgetStyle SwiftUI bridge.
+      - path: ../ios-app/Sources/HSCC/Views/Theme.swift
+    entitlements:
+      path: Sources/HSCCMacWidgets.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/HSCCMacWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: HSCC Widgets
+        LSMinimumSystemVersion: "14.0"
+        # WidgetKit discovers the extension through this point identifier.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        # Same plain-HTTP-over-Tailscale transport as the app and the iOS
+        # widget; without this every read from the extension is blocked.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.mac.widgets
+        # Per-TARGET entitlement path, matching every other target.
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCMacWidgets.entitlements
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework

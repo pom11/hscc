@@ -178,6 +178,9 @@ targets:
       # plus a per-surface override, with the live small/medium/lock-screen
       # preview. The shared model lives in SharedStore.swift.
       - path: Sources/HSCC/Views/WidgetAppearanceView.swift
+      # Surface names + row glyphs, shared with the macOS Settings window
+      # (t_1143c19b) instead of a second copy of the same switches.
+      - path: Sources/HSCC/Views/WidgetSurfaceLabels.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       # ClusterView.swift retired as a screen (t_65d791da, spec §5 + §8): its
@@ -398,6 +401,10 @@ targets:
       # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
       # through WidgetDataClient — see the file header.
       - path: Sources/HSCCWidgets/BoardStatusWidget.swift
+      # Rendering-mode adaptation (t_1143c19b): one shared palette swap for
+      # WidgetKit's fullColor / accented / vibrant modes, used by the iOS
+      # widgets and the macOS desktop extension alike.
+      - path: Sources/HSCCWidgets/WidgetRendering.swift
       # The widget's count rules on Foundation only, so
       # scripts/board_status_widget_check.sh can compile and execute them.
       - path: Sources/HSCCWidgets/BoardStatusReading.swift

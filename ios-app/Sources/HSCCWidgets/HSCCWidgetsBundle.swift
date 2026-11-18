@@ -1,9 +1,15 @@
 import SwiftUI
 import WidgetKit
 
-/// HSCC Home Screen widgets — cluster state at a glance.
+/// HSCC widgets — cluster state at a glance, on the iOS Home Screen and the
+/// macOS desktop / Notification Center.
 ///
-/// Hosted by the `HSCCWidgets` app-extension target. Three families:
+/// Hosted by the `HSCCWidgets` app-extension target on iOS and the
+/// `HSCCMacWidgets` target on macOS. Both targets compile THIS file and the
+/// six widgets below by path; only the family lists and the rendering-mode
+/// adapter differ, under `#if os(...)` in those files.
+///
+/// Families:
 ///   * systemSmall  — state (serving / waking / down) + a compact topology glyph
 ///   * systemMedium — topology pairs with per-node colour + model count +
 ///                     idle-minutes remaining before autodown fires.

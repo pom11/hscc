@@ -15,15 +15,22 @@ struct MonitorWidget: Widget {
         let style = WidgetStyle.resolved(for: .widgetMonitor)
         return StaticConfiguration(kind: kind, provider: MonitorTimelineProvider()) { entry in
             MonitorWidgetView(entry: entry)
-                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    style.backgroundColor
+                    WidgetSurfaceBackground(style: style)
                 }
+                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("HSCC Monitor")
         .description("Cluster monitor metrics and the machine HSCC runs on.")
+        // The macOS desktop widget (t_1143c19b) also offers systemExtraLarge:
+        // the per-node metric rows are what gains from the extra width.
+        #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .systemExtraLarge])
+        #endif
     }
 }
 
@@ -37,13 +44,17 @@ struct MonitorWidgetView: View {
         switch family {
         case .systemSmall:
             SmallMonitorWidget(entry: entry)
+        #if os(iOS)
         case .accessoryInline:
             InlineMonitorWidget(entry: entry)
         case .accessoryCircular:
             CircularMonitorWidget(entry: entry)
         case .accessoryRectangular:
             RectangularMonitorWidget(entry: entry)
+        #endif
         case .systemLarge:
+            LargeMonitorWidget(entry: entry)
+        case .systemExtraLarge:
             LargeMonitorWidget(entry: entry)
         default:
             MediumMonitorWidget(entry: entry)

@@ -1,12 +1,16 @@
 import SwiftUI
+import WidgetKit
 
 /// The Settings window (`Settings` scene). It edits the SAME saved-cluster store
 /// the iOS app and every widget read — multiple addresses with automatic
 /// failover, per-cluster Keychain tokens — plus the macOS-only menu bar choices
-/// and launch-at-login.
+/// and launch-at-login. The Appearance tab is the shared iOS editor, and every
+/// change repaints the desktop widgets.
 struct MacSettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var preferences: MacPreferences
+    @EnvironmentObject private var widgetSettings: WidgetSettingsStore
+    @EnvironmentObject private var dashboard: DashboardMonitor
 
     // The cluster currently in the editor. nil + adding == a new cluster.
     @State private var editingID: UUID?
@@ -24,6 +28,49 @@ struct MacSettingsView: View {
     @State private var didLoad = false
 
     var body: some View {
+        TabView {
+            menuBarTab
+                .tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }
+            clustersTab
+                .tabItem { Label("Clusters", systemImage: "server.rack") }
+            // The SAME Appearance editor the iOS app ships (t_444519ae), reused
+            // by path. Its macOS shell supplies a sidebar + detail pane because
+            // a Settings window has no navigation stack; the controls, presets
+            // and live preview are the shared ones.
+            WidgetAppearanceView()
+                .environmentObject(widgetSettings)
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+        }
+        .frame(width: 780, height: 700)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            guard !didLoad else { return }
+            didLoad = true
+            loadActive()
+        }
+        .onChange(of: settings.activeClusterID) { _, _ in
+            if !adding { loadActive() }
+            reloadSurfaces()
+        }
+        .onChange(of: settings.clusters) { _, _ in
+            // A saved host/token change does not move activeClusterID, so the
+            // cluster list is the second trigger. Both edges repaint the
+            // widgets and the menu bar stat from the one shared store.
+            reloadSurfaces()
+        }
+        .onChange(of: widgetSettings.settings) { _, _ in
+            // Appearance edits are persisted by WidgetSettingsStore (which also
+            // reloads timelines); this refresh makes the open dropdown reflect
+            // any accompanying cadence/active change immediately.
+            reloadSurfaces()
+        }
+    }
+
+    // MARK: - Tabs
+
+    /// The macOS-only preferences. Everything here is about the menu bar
+    /// surface, not the shared widget registry.
+    private var menuBarTab: some View {
         Form {
             Section {
                 Picker("Menu bar stat", selection: $preferences.menuBarStat) {
@@ -51,7 +98,14 @@ struct MacSettingsView: View {
             } footer: {
                 Text("The stat rides next to the H in the menu bar. Refresh uses the shared read-only client; the system may coalesce it while the Mac sleeps.")
             }
+        }
+        .formStyle(.grouped)
+    }
 
+    /// The saved clusters + connection editor. Same `SettingsStore` and
+    /// `KeychainStore` the iOS app and every widget read.
+    private var clustersTab: some View {
+        Form {
             Section {
                 ForEach(settings.clusters) { cluster in
                     clusterRow(cluster)
@@ -172,27 +226,17 @@ struct MacSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            Section {
-                Text("Appearance and customisation arrive in a later update. The menu bar stat is the only layout choice for now.")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            } header: {
-                Text("Appearance")
-            }
         }
         .formStyle(.grouped)
-        .frame(width: 620, height: 640)
-        .preferredColorScheme(.dark)
-        .onAppear {
-            guard !didLoad else { return }
-            didLoad = true
-            loadActive()
-        }
-        .onChange(of: settings.activeClusterID) { _, _ in
-            if !adding { loadActive() }
-        }
+    }
+
+    /// Repaint every desktop widget and refresh the always-mounted menu bar
+    /// dropdown after a settings write. `WidgetSettingsStore` already reloads
+    /// timelines on an appearance edit; the cluster list and active cluster
+    /// live in `SettingsStore`, which knows nothing about WidgetKit.
+    private func reloadSurfaces() {
+        WidgetCenter.shared.reloadAllTimelines()
+        Task { await dashboard.refresh() }
     }
 
     // MARK: - Rows
