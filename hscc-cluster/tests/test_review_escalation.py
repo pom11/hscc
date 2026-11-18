@@ -7,26 +7,46 @@ escalation signal the orchestrator/operator acts on). This proves the wiring we
 shipped (enable_plugins seeds failure_limit=3) actually escalates, rather than
 retrying forever.
 
-Skipped where hermes_cli isn't installed (the breaker lives in hermes core, on
-the fork). Where it is, it runs against a real temp board.
+The breaker lives in hermes core, on the fork, so every case asks
+``hermes_gap.require_hermes_kanban_board()`` first and then runs against a real
+temp board (t_b884497b). This file used to answer that question with a
+module-level ``pytest.importorskip("hermes_cli…")``, and both halves of that shape
+are why:
+
+  * it decided at COLLECTION, before anything in the leg could change the answer —
+    and here it does change: ``workflow._active_profile_name`` puts
+    ``~/.hermes/hermes-agent`` on ``sys.path`` the first time it runs
+    (workflow.py:523, production's documented import fence), and everything
+    after that sees a different interpreter state than the one collection asked
+    about; and
+  * it reported a three-case module as ONE skipped item, so ``-rs`` read
+    ``[1] test_review_escalation.py:19: hermes_cli not installed in this env`` —
+    a capability, no module, no import error, three cases indistinguishable from
+    one.
 """
 
 import tempfile
 from pathlib import Path
 
-import pytest
+import hermes_gap
 
-kb = pytest.importorskip("hermes_cli.kanban_db",
-                         reason="hermes_cli not installed in this env")
-# ``connect`` moved to ``hermes_cli.kanban_db_connect`` (2026-09-14) and
-# ``_record_task_failure`` moved to ``hermes_cli.kanban_db_dispatch``; the old
-# ``kanban_db`` paths are removal-scheduled compat shims (or removed, in the
-# case of ``_record_task_failure``) and must not be used here.
-from hermes_cli import kanban_db_connect as _kbc    # noqa: E402
-from hermes_cli import kanban_db_dispatch as _kbd   # noqa: E402
+# ``connect`` lives in ``hermes_cli.kanban_db_connect`` and ``_record_task_failure``
+# in ``hermes_cli.kanban_db_dispatch``; the old ``kanban_db`` paths are
+# removal-scheduled compat shims (or removed, in the case of
+# ``_record_task_failure``) and must not be used here. Imported per call rather
+# than at module scope — a module-scope import is the collection-time event above.
+
+
+def _hermes():
+    """``(kanban_db, kanban_db_connect, kanban_db_dispatch)``, imported now."""
+    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli import kanban_db_dispatch as _kbd
+    return kb, _kbc, _kbd
 
 
 def _board():
+    kb, _kbc, _ = _hermes()
     d = tempfile.mkdtemp()
     dbp = Path(d) / "kanban.db"
     kb.init_db(dbp)
@@ -34,6 +54,7 @@ def _board():
 
 
 def _new_running_task(conn, title="C3 escalation task"):
+    kb, _, _ = _hermes()
     t = kb.create_task(conn, title=title, assignee="coder", initial_status="running")
     return t.id if hasattr(t, "id") else t
 
@@ -41,6 +62,8 @@ def _new_running_task(conn, title="C3 escalation task"):
 def test_escalates_after_three_failures():
     """failure_limit=3: 1st/2nd failure retry (stay ready), 3rd trips the
     breaker → blocked + gave_up."""
+    hermes_gap.require_hermes_kanban_board()
+    kb, _, _kbd = _hermes()
     conn = _board()
     tid = _new_running_task(conn)
 
@@ -62,6 +85,8 @@ def test_escalates_after_three_failures():
 
 def test_does_not_escalate_before_limit():
     """Two failures under a limit of 3 must NOT block — the work still retries."""
+    hermes_gap.require_hermes_kanban_board()
+    kb, _, _kbd = _hermes()
     conn = _board()
     tid = _new_running_task(conn)
     for i in (1, 2):
@@ -74,6 +99,8 @@ def test_does_not_escalate_before_limit():
 def test_stricter_per_task_limit_escalates_sooner():
     """A per-task max_retries=1 escalates on the FIRST failure (operator can be
     stricter than the board default)."""
+    hermes_gap.require_hermes_kanban_board()
+    kb, _, _kbd = _hermes()
     conn = _board()
     t = kb.create_task(conn, title="strict", assignee="coder",
                        initial_status="running", max_retries=1)

@@ -265,7 +265,13 @@ def test_the_live_roster_in_the_runner_names_exactly_the_probes_that_exist():
               # as "a gate no probe owner defines". Its own guard
               # (hscc-roles/tests/test_hermes_gap_single_posture.py) carries the
               # same list and pins ITS owner's exports back against the block.
-              "hscc-roles/tests/hermes_gap.py")
+              "hscc-roles/tests/hermes_gap.py",
+              # Same reason, one rung further: hscc-cluster grew its own probe
+              # module and its own guard in t_b884497b, so its five gates are
+              # advertised by the block and defined by ITS owner, not here. This
+              # test stays a roster-vs-owners pin, not a cross-leg sweep —
+              # t_0fd2c149 declined that folding and t_74141b24 kept the rule.
+              "hscc-cluster/tests/hermes_gap.py")
     texts = {rel: (REPO / rel).read_text() for rel in owners}
     for rel in owners:
         assert (REPO / rel).exists(), f"probe owner {rel} is gone"

@@ -93,10 +93,13 @@ import pytest
 #: of copying it (a second copy of the wording is a second place to drift).
 NOT_IMPORTABLE = "not importable on this interpreter"
 
+#: The kanban capability's label, used as the key into CAPABILITY_WHY.
+_KANBAN = "hermes' kanban board"
+
 #: Capability name -> the imports it probes, in the order they are tried. The
 #: kanban trio is one entry because the table above shows it fails as a unit.
 CAPABILITY_MODULES = (
-    ("hermes' kanban board",
+    (_KANBAN,
      ("hermes_cli.kanban_db",
       "hermes_cli.kanban_db_connect",
       "hermes_cli.kanban_db_dispatch")),
@@ -108,7 +111,7 @@ CAPABILITY_MODULES = (
 #: What each capability is FOR on this leg, in the skip reason. Read by the
 #: guard so the wording lives in exactly one file.
 CAPABILITY_WHY = {
-    "hermes' kanban board":
+    _KANBAN:
         "these cases build a real temp board (init_db/connect) and drive "
         "hermes' own dispatcher writes against it",
     "hermes' plugin/hook registry":
@@ -179,7 +182,7 @@ def require_hermes_kanban_board():
     """
     module, error = _first_import_error(CAPABILITY_MODULES[0][1])
     if module is not None:
-        _skip("hermes' kanban board", module, error)
+        _skip(_KANBAN, module, error)
 
 
 # --------------------------------------------------------------------------- #
@@ -258,6 +261,54 @@ def require_hermes_cli_profiles():
 
 
 # --------------------------------------------------------------------------- #
+# the same capability, asked of a CHILD process
+# --------------------------------------------------------------------------- #
+
+#: The traceback lines that mean "hermes, or a dependency hermes needs, is not
+#: importable in that interpreter" — i.e. environment, not a bug.
+_IMPORT_ERROR_MARKERS = ("ModuleNotFoundError", "ImportError")
+
+
+def child_import_error(returncode, stderr):
+    """The child's import failure line, or ``None`` when that is not why it died.
+
+    ``None`` means "do NOT skip": a child that died of a ``sqlite3`` error, a
+    missing file or an assertion is a finding, and reading it as environment is
+    the failure this leg keeps hitting.
+    """
+    if returncode == 0:
+        return None
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    last = lines[-1]
+    return last if any(m in last for m in _IMPORT_ERROR_MARKERS) else None
+
+
+def require_child_ran_hermes(returncode, stderr):
+    """Skip when the CHILD this case spawned could not import hermes' board.
+
+    ``test_protocol_violation_bound.py`` never uses hermes in this process — it
+    runs ``_pvb_sim.py`` with ``sys.executable`` and an env that only drops
+    ``HERMES_DELEGATED_CHILD_CONTEXT``. So this process's ``sys.path`` says nothing
+    about the child's: ``workflow._active_profile_name()`` inserts
+    ``~/.hermes/hermes-agent`` into *this* process's ``sys.path`` the first time it
+    runs (workflow.py:523, production's documented import fence), and a child
+    started afterwards does not inherit it. Measured on the thin sibling: the
+    in-process gate passes after that fence and the child still cannot import
+    hermes — which is why the case has to ask the child, and why asking it from
+    the child's own stderr is stronger than a second probe here: the answer comes
+    from the run that happened, not from a guess about the env.
+    """
+    error = child_import_error(returncode, stderr)
+    if error is not None:
+        pytest.skip(f"hermes_cli.kanban_db {NOT_IMPORTABLE} in the child this case "
+                    f"spawns with sys.executable ({error}) — "
+                    f"{CAPABILITY_WHY[_KANBAN]}; the child gets sys.executable plus "
+                    "its own script dir, not this process's sys.path (t_b884497b)")
+
+
+# --------------------------------------------------------------------------- #
 # the posture, stated once so the guard can pin it
 # --------------------------------------------------------------------------- #
 
@@ -273,6 +324,8 @@ PROBES = (
     "require_hermes_cli_plugin_dispatcher",
     "hermes_cli_profiles_import_error",
     "require_hermes_cli_profiles",
+    "child_import_error",
+    "require_child_ran_hermes",
 )
 
 #: One entry per capability: ``(capability label, the modules it probes,
@@ -284,7 +337,7 @@ PROBES = (
 #: modules, so the reason is DERIVED from the failing module rather than typed
 #: once per capability.)
 CAPABILITIES = (
-    ("hermes' kanban board",
+    (_KANBAN,
      ("hermes_cli.kanban_db",
       "hermes_cli.kanban_db_connect",
       "hermes_cli.kanban_db_dispatch"),
