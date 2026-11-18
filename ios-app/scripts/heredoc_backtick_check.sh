@@ -8,9 +8,13 @@
 # executable line, and it only audits the one file it lives in. So the property
 # "no shell script in this tree splices a backtick into an interpolating heredoc"
 # depended on each audited file cooperating with its own audit. This gate is the
-# external scanner that removes that dependency: it judges EVERY shell script in
-# ios-app/scripts/ from outside, whole-file, with no in-file sentinel to plant
-# above and no leaf filename to rename around.
+# external scanner that removes that dependency: it judges EVERY shell script under
+# ios-app/scripts/, at ANY DEPTH, from outside, whole-file, with no in-file sentinel
+# to plant above and no leaf filename to rename around. The recursion is t_d8f34c60:
+# harnesses now live one file per subject under scripts/<name>/ (widget_view_dispatch/
+# since PR #350), and a one-level glob let a subject escape this gate simply by moving
+# down one directory — the same "cannot audit it" defect, expressed as a path rather
+# than as a line number.
 #
 # THE CLASS. A shell expands an unquoted (interpolating) heredoc — cat > f <<SWIFT —
 # the same way it expands a double-quoted string: a dollar-VAR reference substitutes and a
@@ -59,11 +63,13 @@
 # operator) are not heredocs — their content is on the same line, so R1 already
 # covers them.
 #
-# HONEST ABOUT EVERYTHING IT DOES NOT SCAN. Every file in scripts/ that is not a
-# shell script is reported with its reason (python never expands backticks; a
-# .golden file is generated output that no shell ever re-reads, and it legitimately
-# carries backticks). No count in this file's output is transcribed from a card —
-# all of them are measured on the tree being scanned, on this run.
+# HONEST ABOUT EVERYTHING IT DOES NOT SCAN. Every non-shell file DIRECTLY under
+# scripts/ is reported with its reason (python never expands backticks; a .golden
+# file is generated output that no shell ever re-reads, and it legitimately carries
+# backticks), and the non-shell kinds sitting in the harness subdirs below it are
+# reported by kind and count rather than itemised. No count in this file's output is
+# transcribed from a card — all of them are measured on the tree being scanned, on
+# this run.
 #
 # NON-DESTRUCTIVE: reads only, writes nothing into the tree, never executes a
 # script it scans. Run the mutated copies through it from a private tree; the
@@ -255,24 +261,47 @@ measured() { echo "  measured $1"; measured_total=$((measured_total + ${2:-1}));
 
 echo "heredoc backtick meta-check (t_4558fd32)"
 echo "  tree:    $IOSAPP"
-echo "  scanning: every *.sh directly under scripts/ (whole file, from outside)"
+echo "  scanning: every *.sh under scripts/, recursively (whole file, from outside)"
 echo "  the byte: obtained with printf octal — this gate carries none"
 echo
 
 # Collect the population first, so the skip list and the scanned list are both
 # printed from the same measurement and cannot disagree.
+#
+# RECURSIVE (t_d8f34c60). The subjects of this gate no longer sit only at the top
+# level: the widget-surface checks live one file per surface under
+# scripts/widget_view_dispatch/ and each carries heredocs of its own, so a one-level
+# glob audited a tree while a subtree of it was simply not in the population. Sort is
+# for stable output — the scan is per file and order-independent, but a reader
+# comparing two runs must be able to diff them.
+#
+# '! -type d' and NOT '-type f', on purpose: the glob this replaces matched symlinks,
+# and a symlinked .sh is exactly as executable as a real one, so restricting the walk
+# to regular files would have quietly handed an exemption to anyone able to create a
+# link. A symlink is followed by the reader (awk), which is what we want; what must
+# not happen is a listed entry producing no records at all, so the unreadable case is
+# refused below rather than counted as clean.
 shfiles=()
-for f in "$SCRIPTS"/*.sh; do
-  [ -e "$f" ] && shfiles+=("$f")
-done
+while IFS= read -r -d '' f; do
+  shfiles+=("$f")
+done < <(find "$SCRIPTS" ! -type d -name '*.sh' -print0 | LC_ALL=C sort -z)
 if [ "${#shfiles[@]}" -eq 0 ]; then
-  echo "HEREDOC BACKTICK CHECK FAILED — no *.sh found in $SCRIPTS: the scan would" >&2
+  echo "HEREDOC BACKTICK CHECK FAILED — no *.sh found anywhere under $SCRIPTS: the scan would" >&2
   echo "pass vacuously, which is the worst kind of green this class can produce." >&2
   exit 1
 fi
 
 for f in "${shfiles[@]}"; do
-  base="$(basename "$f")"
+  # Path relative to scripts/, so a file below scripts/ is named UNAMBIGUOUSLY in a
+  # finding. basename would print two different widget_view_dispatch/common.sh files
+  # identically and a reader could not tell which one the gate refused.
+  base="${f#"$SCRIPTS"/}"
+  # Fail closed on an entry this scan cannot actually read: an unreadable file or a
+  # dangling symlink yields ZERO records, and "saw nothing" must never be reportable
+  # as "found nothing".
+  if [ ! -r "$f" ]; then
+    finding "$base: listed as a shell script under scripts/ but not readable — the scan saw nothing here, and nothing-seen is not the same as nothing-there" 0
+  fi
   rec="$(awk -v BT="$BT" -v QT="$QT" -v DQ="$DQ" "$AWKPROG" "$f")"
 
   opens=$(printf '%s\n' "$rec" | awk -F'\t' '$1=="OPEN"     {printf "%s ", $2 ":" $3}')
@@ -352,15 +381,22 @@ for f in "$SCRIPTS"/*.md; do
   [ -e "$f" ] || continue
   echo "  skip  $(basename "$f") — prose; not executable by any shell"
 done
-subsh=$(find "$SCRIPTS" -mindepth 2 -name '*.sh' 2>/dev/null | wc -c)
-if [ "$subsh" -gt 1 ]; then
-  echo "  NOTE  shell scripts exist in scripts/ SUBDIRS and are NOT scanned by this gate:"
-  find "$SCRIPTS" -mindepth 2 -name '*.sh' 2>/dev/null | sed "s|$SCRIPTS/|        |"
-  echo "        (this gate scans the top level, where every executed gate lives — a subdir"
-  echo "         script is harness support code; extend the glob rather than trusting it)"
+sub_n=$(find "$SCRIPTS" -mindepth 2 ! -type d -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$sub_n" -gt 0 ]; then
+  echo "  cover scripts/ is scanned RECURSIVELY: $sub_n of the $files_scanned shell scripts"
+  echo "        live in a harness subdir and are audited here exactly as a top-level one is:"
+  find "$SCRIPTS" -mindepth 2 ! -type d -name '*.sh' 2>/dev/null | LC_ALL=C sort | sed "s|$SCRIPTS/|        |"
 else
-  echo "  cover scripts/*/ harness subdirs contain no *.sh at all, so the top-level glob is the whole population"
+  echo "  cover scripts/ is scanned RECURSIVELY, and today no harness subdir holds a *.sh — so"
+  echo "        the $files_scanned files above are the whole population at EVERY depth. Measured"
+  echo "        on this run by the same walk that fed the scan, not assumed from the layout."
 fi
+nons=$(find "$SCRIPTS" -mindepth 2 ! -type d ! -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
+echo "  limit $nons non-shell file(s) sit in the harness subdirs below scripts/ (swift sources,"
+echo "        json fixtures, python, goldens). They are reported by count rather than itemised:"
+echo "        none of them is ever read BY a shell as shell, so this class cannot live in them —"
+echo "        it lives in the *.sh that heredocs them, and every one of those is in the"
+echo "        population above, whichever directory it is in."
 echo "  limit quoted-delimiter bodies are skipped by R1 (bash cannot expand them) but"
 echo "        are still reported under R3, and are findings inside a splice-capable file"
 echo "  limit a <<X is an opener only when X is a well-formed delimiter word ending the"
