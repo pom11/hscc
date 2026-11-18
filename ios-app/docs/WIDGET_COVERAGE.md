@@ -113,8 +113,15 @@ full compile clean, 0 warnings (compile only — never built or run)
 
 ```text
 $ bash ios-app/scripts/model_decode_check.sh
-ALL DECODE CHECKS PASSED — 97/97 checks (over 58 committed fixtures) decoded against the real models
+ALL DECODE CHECKS PASSED — N/N checks (over F committed fixtures) decoded against the real models
 ```
+
+The run prints its own `N` (checks) and `F` (distinct fixture files it opened);
+neither is transcribed here, because both move with every fixture added or
+removed and a stale figure in a doc gates nothing. What the section claims is
+structural: every committed fixture decodes against the REAL models, some
+fixtures carry several checks (so `N` exceeds `F`), and a negative fixture passes
+by *failing* to decode.
 
 The two B2 fixtures add 4 checks and 2 files (`v1_kanban_running_cards.json`
 and `v1_kanban_running_contract.json`). The live-capture fixture is scrubbed at

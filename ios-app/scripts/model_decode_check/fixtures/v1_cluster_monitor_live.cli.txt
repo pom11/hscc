@@ -1,0 +1,14 @@
+hscc cluster monitor — 4 host(s) — snapshot (use --live to refresh)
+Host        Jobs  CPU%  RAM%  Swap%  GPU%  CPU Temp  GPU Temp  GPU Power
+192.0.2.11     1  10.7  84.9     0%    93    52.6 C      49 C     9.49 W
+192.0.2.12     1   7.9  84.6     0%    92    61.9 C      56 C    23.15 W
+192.0.2.13     1   7.6  85.2     0%    91    69.8 C      62 C    22.80 W
+192.0.2.14     1   7.8  85.7     0%    94    64.0 C      60 C    24.19 W
+
+serving — proxy :4000   In/Out = tokens since each engine started
+Node             Port  Model    Routes                Run  Wait    KV%      In     Out  Gen t/s  Prompt t/s
+192.0.2.11       8000  Model-A  orchestrator, worker    1     0   16.0  811.2M    7.1M        -           -
+192.0.2.14       8003  Model-A  orchestrator, worker    1     0   22.9   1.03G    9.3M        -           -
+192.0.2.12       8001  Model-A  orchestrator, worker    1     0   24.1   1.14G    9.1M        -           -
+192.0.2.13       8002  Model-A  orchestrator, worker    3     0   53.1   1.03G    8.9M        -           -
+total (4)              Model-A                          6     0          4.01G   34.4M        -            

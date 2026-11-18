@@ -510,39 +510,174 @@ struct MonitorWorkload: Codable {
 /// The per-node `sample` dict — all numeric metrics are STRINGS (may be empty
 /// `""` when a metric is unreadable). Parsed via the computed `Double?`
 /// accessors.
+///
+/// EVERY key the route sends on a live host is declared here except ONE:
+/// `sparkrun_job_names` (a sparkrun container name — §7's redaction list, and
+/// no surface reads it). Measured against the live `/v1/cluster/monitor` on
+/// API 2.15.13: 35 keys per sample, 34 declared. The
+/// monitor view-model (`ClusterMonitorViewModel.swift`) prints the CLI's host
+/// table, and a column whose key is undeclared renders as `-` forever while
+/// every gate stays green — the one failure mode this struct cannot tolerate,
+/// so the field list is exhaustive rather than "what a surface happens to read".
+/// `scripts/cluster_monitor_cli_parity.py` regenerates the wire keys from a
+/// live capture and `model_decode_check` fails if a key arrives undeclared.
 struct MonitorSample: Codable {
+    let timestamp: String?
     let hostname: String?
     let uptime_sec: String?
+    let cpu_name: String?
     let cpu_usage_pct: String?
-    let mem_used_pct: String?
+    let cpu_load_1m: String?
+    let cpu_load_5m: String?
+    let cpu_load_15m: String?
+    let cpu_freq_mhz: String?
+    let cpu_temp_c: String?
     let mem_total_mb: String?
     let mem_used_mb: String?
+    let mem_available_mb: String?
+    let mem_bufcache_mb: String?
+    let mem_used_pct: String?
+    let swap_total_mb: String?
+    let swap_used_mb: String?
     let gpu_name: String?
+    let gpu_count: String?
     let gpu_util_pct: String?
+    let gpu_mem_used_mb: String?
+    let gpu_mem_total_mb: String?
     let gpu_mem_used_pct: String?
-    /// Thermal + load reads the cluster widget renders (t_56b910c8). Declared
-    /// WITHOUT a default for the same reason as `MonitorNode.workloads`: a
-    /// stored property with an initial value is not decoded, it just compiles.
-    /// `cpu_load_5m`/`_15m`, `gpu_power_w` and the rest of the 31 sample keys
-    /// stay undeclared on purpose: no surface here renders them, and an
-    /// undeclared key is never decoded (§7's structural redaction).
-    let cpu_temp_c: String?
     let gpu_temp_c: String?
-    let cpu_load_1m: String?
+    let gpu_power_w: String?
+    let gpu_power_limit_w: String?
+    let gpu_clock_mhz: String?
+    let gpu_mem_clock_mhz: String?
+    let gpu_encoder_pct: String?
+    let gpu_decoder_pct: String?
+    let gpu_fan_pct: String?
+    let net_recv_bytes_s: String?
+    let net_send_bytes_s: String?
+    /// The CLI's `Jobs` column. Declared WITHOUT a default for the same reason
+    /// as `MonitorNode.workloads`: a stored property with an initial value is
+    /// silently NOT decoded — it just compiles and reads nil, which here would
+    /// have made the Jobs column a permanent `-`.
+    let sparkrun_jobs: String?
+
+    /// Explicit memberwise init, every parameter defaulted to nil, because the
+    /// struct went from 12 keys to 34 and the synthesized one now demands all of
+    /// them. The 12 keys a caller could already pass keep their RELATIVE order
+    /// (the new keys append), so the two placeholder sites —
+    /// `ClusterWidgetMetrics.sampleFleet` and `cluster_widget_check/main.swift`'s
+    /// `sample()` — compile without being touched.
+    ///
+    /// The defaults are on the INIT PARAMETERS, not on the stored properties.
+    /// That distinction is the whole §7 trap: a property written
+    /// `let gpu_temp_c: String? = nil` is dropped from the synthesized
+    /// `CodingKeys` and is then silently never decoded, so the column prints `-`
+    /// forever with every gate green. A defaulted init parameter decodes
+    /// normally — the key is still in `CodingKeys` — and only says "a hand-built
+    /// sample need not mention it".
+    init(hostname: String? = nil,
+         uptime_sec: String? = nil,
+         cpu_usage_pct: String? = nil,
+         mem_used_pct: String? = nil,
+         mem_total_mb: String? = nil,
+         mem_used_mb: String? = nil,
+         gpu_name: String? = nil,
+         gpu_util_pct: String? = nil,
+         gpu_mem_used_pct: String? = nil,
+         cpu_temp_c: String? = nil,
+         gpu_temp_c: String? = nil,
+         cpu_load_1m: String? = nil,
+         timestamp: String? = nil,
+         cpu_name: String? = nil,
+         cpu_load_5m: String? = nil,
+         cpu_load_15m: String? = nil,
+         cpu_freq_mhz: String? = nil,
+         mem_available_mb: String? = nil,
+         mem_bufcache_mb: String? = nil,
+         swap_total_mb: String? = nil,
+         swap_used_mb: String? = nil,
+         gpu_count: String? = nil,
+         gpu_mem_used_mb: String? = nil,
+         gpu_mem_total_mb: String? = nil,
+         gpu_power_w: String? = nil,
+         gpu_power_limit_w: String? = nil,
+         gpu_clock_mhz: String? = nil,
+         gpu_mem_clock_mhz: String? = nil,
+         gpu_encoder_pct: String? = nil,
+         gpu_decoder_pct: String? = nil,
+         gpu_fan_pct: String? = nil,
+         net_recv_bytes_s: String? = nil,
+         net_send_bytes_s: String? = nil,
+         sparkrun_jobs: String? = nil) {
+        self.timestamp = timestamp
+        self.hostname = hostname
+        self.uptime_sec = uptime_sec
+        self.cpu_name = cpu_name
+        self.cpu_usage_pct = cpu_usage_pct
+        self.cpu_load_1m = cpu_load_1m
+        self.cpu_load_5m = cpu_load_5m
+        self.cpu_load_15m = cpu_load_15m
+        self.cpu_freq_mhz = cpu_freq_mhz
+        self.cpu_temp_c = cpu_temp_c
+        self.mem_total_mb = mem_total_mb
+        self.mem_used_mb = mem_used_mb
+        self.mem_available_mb = mem_available_mb
+        self.mem_bufcache_mb = mem_bufcache_mb
+        self.mem_used_pct = mem_used_pct
+        self.swap_total_mb = swap_total_mb
+        self.swap_used_mb = swap_used_mb
+        self.gpu_name = gpu_name
+        self.gpu_count = gpu_count
+        self.gpu_util_pct = gpu_util_pct
+        self.gpu_mem_used_mb = gpu_mem_used_mb
+        self.gpu_mem_total_mb = gpu_mem_total_mb
+        self.gpu_mem_used_pct = gpu_mem_used_pct
+        self.gpu_temp_c = gpu_temp_c
+        self.gpu_power_w = gpu_power_w
+        self.gpu_power_limit_w = gpu_power_limit_w
+        self.gpu_clock_mhz = gpu_clock_mhz
+        self.gpu_mem_clock_mhz = gpu_mem_clock_mhz
+        self.gpu_encoder_pct = gpu_encoder_pct
+        self.gpu_decoder_pct = gpu_decoder_pct
+        self.gpu_fan_pct = gpu_fan_pct
+        self.net_recv_bytes_s = net_recv_bytes_s
+        self.net_send_bytes_s = net_send_bytes_s
+        self.sparkrun_jobs = sparkrun_jobs
+    }
 
     // MARK: Parsed numeric accessors (nil when unreadable/empty)
 
     var uptimeSeconds: Double? { Self.num(uptime_sec) }
     var cpuUsagePct: Double? { Self.num(cpu_usage_pct) }
-    var memUsedPct: Double? { Self.num(mem_used_pct) }
+    var cpuLoad1m: Double? { Self.num(cpu_load_1m) }
+    var cpuLoad5m: Double? { Self.num(cpu_load_5m) }
+    var cpuLoad15m: Double? { Self.num(cpu_load_15m) }
+    var cpuFreqMHz: Double? { Self.num(cpu_freq_mhz) }
+    var cpuTempC: Double? { Self.num(cpu_temp_c) }
     var memTotalMB: Double? { Self.num(mem_total_mb) }
     var memUsedMB: Double? { Self.num(mem_used_mb) }
+    var memAvailableMB: Double? { Self.num(mem_available_mb) }
+    var memBufcacheMB: Double? { Self.num(mem_bufcache_mb) }
+    var memUsedPct: Double? { Self.num(mem_used_pct) }
+    var swapTotalMB: Double? { Self.num(swap_total_mb) }
+    var swapUsedMB: Double? { Self.num(swap_used_mb) }
+    var gpuCount: Int? { Self.num(gpu_count).map { Int($0) } }
     var gpuUtilPct: Double? { Self.num(gpu_util_pct) }
+    var gpuMemUsedMB: Double? { Self.num(gpu_mem_used_mb) }
+    var gpuMemTotalMB: Double? { Self.num(gpu_mem_total_mb) }
     var gpuMemUsedPct: Double? { Self.num(gpu_mem_used_pct) }
-    var cpuTempC: Double? { Self.num(cpu_temp_c) }
     var gpuTempC: Double? { Self.num(gpu_temp_c) }
-    var cpuLoad1m: Double? { Self.num(cpu_load_1m) }
-
+    var gpuPowerW: Double? { Self.num(gpu_power_w) }
+    var gpuPowerLimitW: Double? { Self.num(gpu_power_limit_w) }
+    var gpuClockMHz: Double? { Self.num(gpu_clock_mhz) }
+    var gpuMemClockMHz: Double? { Self.num(gpu_mem_clock_mhz) }
+    var gpuEncoderPct: Double? { Self.num(gpu_encoder_pct) }
+    var gpuDecoderPct: Double? { Self.num(gpu_decoder_pct) }
+    var gpuFanPct: Double? { Self.num(gpu_fan_pct) }
+    var netRecvBytesS: Double? { Self.num(net_recv_bytes_s) }
+    var netSendBytesS: Double? { Self.num(net_send_bytes_s) }
+    /// `Jobs` in the CLI's host table: an integer count on the wire.
+    var sparkrunJobCount: Int? { Self.num(sparkrun_jobs).map { Int($0) } }
     /// A human uptime ("2d 11h") from `uptime_sec`, or nil when unreadable.
     var uptimeText: String? {
         guard let s = uptimeSeconds, s >= 0 else { return nil }
