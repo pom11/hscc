@@ -52,11 +52,19 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 
-# `render()` at two widths: 140 keeps every column, 90 is below
-# `cluster_live.WIDE_MIN` (110), which is the only thing that drops `Routes`
-# and `Prompt t/s`. Both are recorded so the Swift side's width rule is pinned
-# against the CLI's, not against a reading of it.
-WIDE_WIDTH = 140
+# `render()` at two widths: 200 keeps EVERY column, 90 is below
+# `cluster_live.WIDE_MIN` (110), which is the only thing that drops `Routes` and
+# `Prompt t/s`. Both are recorded so the Swift side's width rule is pinned against
+# the CLI's, not against a reading of it.
+#
+# 200 and not 140 because 140 silently CLIPS: the table's natural width is the sum
+# of its columns, and `org/Qwen3-30B-A3B[GPTQ]` in the edge fixture pushes it past
+# 140 — at which point rich drops the last column's values entirely (the header
+# came out `Prompt`, the cells empty). A level-3 anchor that quietly loses a column
+# would then fail on a correct golden, so the wide render gets room. Measured, not
+# guessed: `scripts/cluster_monitor_cli_parity.py` on the edge fixture at either
+# width shows the difference.
+WIDE_WIDTH = 200
 NARROW_WIDTH = 90
 
 
@@ -76,8 +84,29 @@ def leaked_addresses(text: str) -> list[str]:
 
 
 def plain(cell) -> str:
-    """A rich renderable as the characters the terminal showed."""
-    return cell.plain if hasattr(cell, "plain") else str(cell)
+    """A rich renderable as the characters the terminal actually showed.
+
+    Two branches because the CLI passes both kinds into `Table.add_row`, and rich
+    treats them differently:
+
+    * a `Text` (e.g. `Text("down", style="error")`) renders literally — `.plain`
+      is what the terminal shows.
+    * a `str` goes through rich's markup parser at render time, and
+      `host_table`/`serving_table` hand it `esc(value)` first. `Text(x).plain` of
+      THAT string is the escaped text (`Qwen3-30B-A3B\\[GPTQ]`) — a vLLM id with
+      brackets is common enough that this is not hypothetical — while the terminal
+      shows the unescaped `Qwen3-30B-A3B[GPTQ]`. So a str cell is measured
+      through `Text.from_markup`, which is the same parse the console applies.
+
+    Getting this wrong is invisible on markup-free names (every other cell in
+    these fixtures) and would have the golden disagree with the CLI's own text
+    output for a bracketed model — level 3 of the parity check is what catches it,
+    because that compares against the rendered text.
+    """
+    if hasattr(cell, "plain"):
+        return cell.plain
+    from rich.text import Text
+    return Text.from_markup(str(cell)).plain
 
 
 def table_cells(table) -> tuple[list[str], list[list[str]]]:

@@ -1,4 +1,4 @@
-hscc cluster monitor — 6 host(s) — snapshot (use --live to refresh)
+hscc cluster monitor — 7 host(s) — snapshot (use --live to refresh)
 Host        Jobs                     CPU%  RAM%  Swap%  GPU%  CPU Temp  GPU Temp  GPU Power
 192.0.2.21     3                    100.0  95.0    38%    95    87.2 C      72 C    37.88 W
 192.0.2.22     -  ssh: connection refused     -      -     -         -         -          -
@@ -6,12 +6,15 @@ Host        Jobs                     CPU%  RAM%  Swap%  GPU%  CPU Temp  GPU Temp
 192.0.2.24     -                        -     -      -     -         -         -          -
 192.0.2.25     0                      n/a   0.0      -     0         -       0 C     0.00 W
 100.64.0.1     1                      0.1   0.1    12%     0         -       0 C     0.01 W
+192.0.2.26     3                     99.5  95.0    38%     -    87.2 C         -          -
 
 serving — proxy :4000   In/Out = tokens since each engine started
-Node             Port  Model    Routes                                           Run  Wait    KV%      In     Out  Gen t/s  Prompt t/s
-192.0.2.21       8000  Model-A  -                                                  1     0    0.1     999      1k     12.3         200
-192.0.2.25       8003  Model-A  orchestrator, worker                               2     3   53.1    1.2M   1.23G      0.0           0
-192.0.2.24       8004  Model-B  -                                                  0     0      -       -       -        -           -
-192.0.2.23       8005  down     orchestrator          read timed out after 3 seconds                                                  
-total (2)              Model-A                                                     3     3           1.2M   1.23G     12.3            
-total (1)              Model-B                                                     0     0              -       -        -            
+Node             Port  Model                Routes                                           Run  Wait    KV%      In     Out  Gen t/s  Prompt t/s
+192.0.2.21       8000  Model-A              -                                                  1     0    0.1     999      1k     12.3         200
+192.0.2.25       8003  Model-A              orchestrator, worker                               2     3   53.1    1.2M   1.23G      0.0           0
+100.64.0.1       8006  Qwen3-30B-A3B[GPTQ]  worker                                             0     1    0.0    1.0M     999        -           -
+192.0.2.24       8004  Model-B              -                                                  0     0      -       -       -        -           -
+192.0.2.23       8005  down                 orchestrator          read timed out after 3 seconds                                                  
+total (2)              Model-A                                                                 3     3           1.2M   1.23G     12.3            
+total (1)              Model-B                                                                 0     0              -       -        -            
+total (1)              Qwen3-30B-A3B[GPTQ]                                                     0     1           1.0M     999        -            
