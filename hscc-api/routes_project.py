@@ -195,24 +195,44 @@ def handle_standup(server, ctx, query, body):
     return 200, payload
 
 
+def _backing_cards_collect(board=None):
+    """The collection ``hscc cards monitor`` renders (one code path)."""
+    from hscc_daemon import kanban_live
+    return kanban_live.collect(board=board, registered_only=True)
+
+
 def handle_cards(server, ctx, query, body):
-    """GET /v1/cards?board=...&status=... — cards across one/all boards."""
+    """GET /v1/cards?board=... — the cards `hscc cards monitor` shows.
+
+    Running cards first, then waiting (ready) cards, projected by
+    ``kanban_live.card_rows`` from the SAME ``collect()`` pass the CLI monitor
+    renders. Only ``?board=`` is accepted because that is the only filter
+    ``hscc cards monitor`` has; a status/archive filter would invent a set the
+    CLI never shows (the old route did exactly that and returned stale blocked
+    cards as if they were active).
+    """
     board = query.get("board")
-    include_archived = query.get("include_archived", "").lower() in ("1", "true", "yes")
+    for unsupported in ("status", "include_archived"):
+        if query.get(unsupported) is not None:
+            raise ApiError(
+                400, "bad_request",
+                f"'{unsupported}' is not supported by /v1/cards: the route "
+                f"serves exactly the cards `hscc cards monitor` shows "
+                f"(only 'board' narrows it)",
+                f"{unsupported} is not supported by the cards route.",
+            )
     try:
-        cards = _kanban.list_cards(board=board, include_archived=include_archived)
+        data = _backing_cards_collect(board=board)
     except Exception:
-        cards = []
-        degraded = True
-    else:
-        degraded = False
-    status = query.get("status")
-    if not degraded and status:
-        cards = [c for c in cards if str(c.get("status")) == status]
-    payload = {"cards": cards or [], "count": len(cards or [])}
-    payload["speak"] = (
-        "Card list unavailable." if degraded else _speak_cards(payload)
-    )
+        data = None
+    if not isinstance(data, dict):
+        return 200, {"cards": [], "count": 0,
+                     "speak": "Card list unavailable."}
+    from hscc_daemon import kanban_live
+    cards = kanban_live.card_rows(data)
+    payload = {"cards": cards, "count": len(cards),
+               "errors": data.get("errors", [])}
+    payload["speak"] = _speak_cards(payload)
     return 200, payload
 
 

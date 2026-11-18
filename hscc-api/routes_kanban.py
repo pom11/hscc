@@ -13,9 +13,15 @@ contract:
     safe to re-run.
 
 Backing (libraries, never CLI text-parsing):
-  * ``GET  /v1/kanban/blocked``           -> ``kanban_blocked.list_blocked_tasks()``
+  * ``GET  /v1/kanban/blocked``           -> ``kanban_blocked.list_blocked_tasks(registered_only=True)``
   * ``POST /v1/kanban/blocked/{id}/recover`` -> ``kanban_blocked.recover_blocked_task(id, reason)``
-  * ``GET  /v1/kanban/stale?older_than=N`` -> ``autodown.list_stale_tasks(older_than=N)``
+  * ``GET  /v1/kanban/stale?older_than=N`` -> ``autodown.list_stale_tasks(older_than=N, registered_only=True)``
+  * ``GET  /v1/kanban/running``           -> ``kanban_live.collect(registered_only=True).running``
+
+Board scope is the registered projects' boards (``hscc project list``), the
+same scope the ``hscc kanban`` verbs use. Route/CLI parity is covered by
+``tests/test_widget_route_parity.py``; the route map lives in
+``docs/WIDGET_ROUTES.md``.
 
 Test seam: every backing call goes through a ``_backing_*`` module function so
 tests can monkeypatch them without scanning the live kanban DB or mutating a
@@ -35,7 +41,7 @@ from api_server import ApiError, ROUTES
 
 def _backing_list_blocked():
     from hscc_daemon import kanban_blocked
-    return kanban_blocked.list_blocked_tasks()
+    return kanban_blocked.list_blocked_tasks(registered_only=True)
 
 
 def _backing_recover_blocked(task_id, reason=None):
@@ -45,10 +51,19 @@ def _backing_recover_blocked(task_id, reason=None):
 
 def _backing_list_stale(older_than=None, board=None):
     from hscc_daemon import autodown
-    return autodown.list_stale_tasks(older_than=older_than, board=board)
+    return autodown.list_stale_tasks(older_than=older_than, board=board,
+                                     registered_only=True)
+
+
+def _backing_collect(board=None):
+    """The same one-pass collection ``hscc cards/kanban monitor`` renders."""
+    from hscc_daemon import kanban_live
+    return kanban_live.collect(board=board, registered_only=True)
 
 
 def _backing_list_running():
+    # Kept for the kill path's by-id lookup; the LISTING route now reads the
+    # same collect() rows as `hscc cards monitor` / `hscc kanban monitor`.
     from hscc_daemon import kill_switch
     return kill_switch.list_running_tasks()
 
@@ -235,30 +250,48 @@ def handle_kanban_stale(server, ctx, query, body):
 
 
 def handle_kanban_running(server, ctx, query, body):
-    """GET /v1/kanban/running — running tasks across ALL boards + kill detail.
+    """GET /v1/kanban/running — the running cards `hscc cards monitor` draws.
 
-    Names exactly what a kill would stop: each running task with its board,
-    id, title, assignee, PID, and whether it is host-local (can we even signal
-    it from this node). ``host_local`` False means its worker runs on another
-    node and a kill from here is a no-op — surfaced up front, not learned
-    after the fact.
+    Same ``kanban_live.collect()`` pass, same registered-project board scope,
+    same row projection — so a widget and the CLI cannot disagree. ``?board=``
+    is honored because ``hscc cards monitor --board`` and
+    ``hscc kanban monitor --board`` both have it.
     """
+    board = query.get("board")
     try:
-        data = _backing_list_running()
+        data = _backing_collect(board=board)
     except Exception:
         return 200, {"speak": "Running-task list unavailable."}
     if not isinstance(data, dict):
         return 200, {"speak": "Running-task list unavailable."}
+    from hscc_daemon import kanban_live
+    tasks = kanban_live.card_rows(
+        {"running": data.get("running", []), "ready": []})
+    # Optional kill detail (pid/host_local and the board-pin refusal) is merged
+    # onto the SAME collect rows. The row set, order and ages stay the CLI's;
+    # only a kill panel's extra columns are added, and only for rows collect
+    # actually returned.
+    pin_conflicts = []
+    try:
+        detail = _backing_list_running()
+    except Exception:
+        detail = {}
+    if isinstance(detail, dict):
+        pin_conflicts = detail.get("pin_conflicts", [])
+        by_key = {(t.get("board"), t.get("id")): t
+                  for t in detail.get("tasks", [])}
+        for row in tasks:
+            extra = by_key.get((row.get("board"), row.get("id")))
+            if extra:
+                for name in ("pid", "host_local", "killable", "pin_conflict"):
+                    if name in extra:
+                        row[name] = extra[name]
     payload = {
-        "boards": data.get("boards", []),
-        "tasks": data.get("tasks", []),
+        "boards": [b.get("name") for b in data.get("boards", [])],
+        "tasks": tasks,
         "errors": data.get("errors", []),
-        # t_147201fa: which boards were read DESPITE a worker
-        # ``HERMES_KANBAN_DB`` outranking them. The rows they contributed carry
-        # ``killable: false`` + the same sentence, because the verb refuses them
-        # — a panel that lists cards it cannot stop must say so.
-        "pin_conflicts": data.get("pin_conflicts", []),
-        "count": data.get("count", len(data.get("tasks", []))),
+        "pin_conflicts": pin_conflicts,
+        "count": len(tasks),
     }
     payload["speak"] = _speak_running(payload)
     return 200, payload

@@ -107,7 +107,7 @@ List every BLOCKED task across ALL boards, with why it's blocked
 }
 
 
-def _board_names(kanban_db):
+def _board_names(kanban_db, registered_only: bool = False):
     """Enumerate board slugs via the SAME seam autodown._has_active_work uses.
 
     One line, on purpose: this forwards to ``autodown._enum_board_names``
@@ -123,7 +123,8 @@ def _board_names(kanban_db):
     divergence this module's CRITICAL reuse note forbids. Guarded by
     ``tests/test_kanban_blocked.py::TestBoardEnumerationSeam``.)
     """
-    return autodown._enum_board_names(kanban_db)
+    return autodown._enum_board_names(
+        kanban_db, registered_only=registered_only)
 
 
 def _age_days(created_at, now):
@@ -184,7 +185,7 @@ def _block_comments(conn, task_id, cap=5):
     return out
 
 
-def list_blocked_tasks(kanban_db=None):
+def list_blocked_tasks(kanban_db=None, registered_only: bool = False):
     """List every BLOCKED task across all boards, with why, oldest first.
 
     Reuses autodown's enumeration: ``_load_kanban_db_or_default`` for the
@@ -199,7 +200,7 @@ def list_blocked_tasks(kanban_db=None):
     if kanban_db is None:
         return {"boards": 0, "tasks": [], "errors": ["kanban lib unreachable"]}
 
-    boards, multi = _board_names(kanban_db)
+    boards, multi = _board_names(kanban_db, registered_only=registered_only)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     tasks = []
     errors = []
@@ -432,8 +433,8 @@ def cmd_blocked(rest, json_mode, theme_name=None):
                 msg, status="ok", title="kanban"))
         return 0
 
-    # Otherwise: list blocked tasks.
-    result = list_blocked_tasks()
+    # Otherwise: list blocked tasks on REGISTERED project boards only.
+    result = list_blocked_tasks(registered_only=True)
     tasks = result["tasks"]
 
     if json_mode:

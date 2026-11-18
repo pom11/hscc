@@ -249,7 +249,8 @@ def _cmd_stale(rest, json_mode, theme_name=None):
     if older_than is None:
         older_than = DEFAULT_STALE_DAYS
 
-    result = autodown.list_stale_tasks(older_than=older_than)
+    result = autodown.list_stale_tasks(
+        older_than=older_than, registered_only=True)
     tasks = result["tasks"]
 
     if json_mode:
@@ -331,14 +332,17 @@ def _cmd_monitor(rest, json_mode, theme_name=None):
         return _error("--json is a single snapshot; drop --live", json_mode)
     if json_mode:
         print(json.dumps(kanban_live.attach_orchestrators(
-            kanban_live.attach_tokens(kanban_live.collect(board=opts["board"]))),
+            kanban_live.attach_tokens(kanban_live.collect(
+                board=opts["board"], registered_only=True))),
                          default=list))
         return 0
     console = _console(theme_name)
     if opts["live"]:
-        return kanban_live.run_live(console, interval=opts["interval"], board=opts["board"])
+        return kanban_live.run_live(console, interval=opts["interval"],
+                                    board=opts["board"])
     data = kanban_live.attach_orchestrators(
-        kanban_live.attach_tokens(kanban_live.collect(board=opts["board"])))
+        kanban_live.attach_tokens(kanban_live.collect(
+            board=opts["board"], registered_only=True)))
     console.print(kanban_live.render(data, snapshot=True, width=console.width))
     return 1 if data["errors"] and not data["boards"] else 0
 

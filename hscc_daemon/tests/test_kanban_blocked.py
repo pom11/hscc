@@ -276,6 +276,8 @@ class TestCmdBlocked:
                                    "title": "Ship feature"}]})
         monkeypatch.setattr(autodown, "_load_kanban_db_or_default",
                             lambda: kb, raising=False)
+        monkeypatch.setattr(autodown, "registered_board_names",
+                            lambda registry_path=None: ({"default"}, None))
         rc = kbx.cmd_blocked([], True)
         out = capsys.readouterr().out
         data = json.loads(out)
@@ -339,6 +341,8 @@ class TestCmdKanban:
         kb = _FakeKb({"default": [{"id": "c1", "status": "blocked"}]})
         monkeypatch.setattr(autodown, "_load_kanban_db_or_default",
                             lambda: kb, raising=False)
+        monkeypatch.setattr(autodown, "registered_board_names",
+                            lambda registry_path=None: ({"default"}, None))
         rc = kbx.cmd_kanban(["blocked"])
         out = capsys.readouterr().out
         assert rc == 0 and "c1" in out and "no block reason" in out
@@ -380,7 +384,7 @@ class TestBoardEnumerationSeam:
         # and the source guard below fire.
         kb = object()
 
-        def _sentinel(kanban_db):
+        def _sentinel(kanban_db, registered_only=False):
             calls.append(kanban_db)
             return (["alpha", "beta"], True)
 

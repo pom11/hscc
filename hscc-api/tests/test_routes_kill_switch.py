@@ -42,6 +42,17 @@ def _kill_result(task_id="t_run1", pid=4242, host_local=True, terminated=True,
 def fakes(monkeypatch):
     state = {"kill_calls": []}
     b = {
+        "collect": lambda board=None: {
+            "boards": [{"name": "default", "counts": {"running": 1},
+                        "done_24h": 0}],
+            "running": [
+                {"board": "default", "id": "t_run1", "title": "Runaway train",
+                 "assignee": "worker", "worker": "worker",
+                 "status": "running", "age_s": 60, "run_s": 60,
+                 "started_at": 1000},
+            ],
+            "ready": [], "errors": [],
+        },
         "list_running": lambda: {
             "boards": ["default"],
             "tasks": [
@@ -121,8 +132,12 @@ def test_running_200(running, token):
 
 
 def test_running_none_200(running, token, fakes, monkeypatch):
-    _install(monkeypatch, {"list_running": lambda: {
-        "boards": [], "tasks": [], "errors": [], "count": 0}})
+    empty = {"boards": [], "running": [], "ready": [], "errors": []}
+    _install(monkeypatch, {
+        "collect": lambda board=None: empty,
+        "list_running": lambda: {
+            "boards": [], "tasks": [], "errors": [], "count": 0},
+    })
     status, payload = _req(running, token, "/v1/kanban/running")
     assert status == 200
     assert payload["count"] == 0
@@ -214,19 +229,31 @@ def test_running_surfaces_pin_conflicts(running, token, fakes, monkeypatch):
     A row shown as un-killable without a reason is the trap the card names; the
     panel now carries the sentence the verb will raise.
     """
-    _install(monkeypatch, {"list_running": lambda: {
-        "boards": ["alpha", "beta"],
-        "tasks": [
-            {"board": "alpha", "id": "t_a", "title": "mine", "assignee": "worker",
-             "status": "running", "pid": 1, "host_local": True,
-             "started_at": None, "killable": True, "pin_conflict": None},
-            {"board": "beta", "id": "t_b", "title": "not mine",
-             "assignee": "worker", "status": "running", "pid": 2,
-             "host_local": True, "started_at": None, "killable": False,
-             "pin_conflict": _PIN_MSG},
-        ],
-        "errors": [], "pin_conflicts": [_PIN_MSG], "count": 2,
-    }})
+    rows = [
+        {"board": "alpha", "id": "t_a", "title": "mine", "assignee": "worker",
+         "status": "running", "pid": 1, "host_local": True,
+         "started_at": None, "killable": True, "pin_conflict": None},
+        {"board": "beta", "id": "t_b", "title": "not mine",
+         "assignee": "worker", "status": "running", "pid": 2,
+         "host_local": True, "started_at": None, "killable": False,
+         "pin_conflict": _PIN_MSG},
+    ]
+    _install(monkeypatch, {
+        "collect": lambda board=None: {
+            "boards": [{"name": r["board"], "counts": {"running": 1},
+                        "done_24h": 0} for r in rows],
+            "running": [{"board": r["board"], "id": r["id"],
+                         "title": r["title"], "assignee": r["assignee"],
+                         "worker": r["assignee"], "status": "running",
+                         "age_s": 60, "run_s": 60, "started_at": 1000}
+                        for r in rows],
+            "ready": [], "errors": [],
+        },
+        "list_running": lambda: {
+            "boards": ["alpha", "beta"], "tasks": rows,
+            "errors": [], "pin_conflicts": [_PIN_MSG], "count": 2,
+        },
+    })
     status, payload = _req(running, token, "/v1/kanban/running")
     assert status == 200
     assert payload["count"] == 2
