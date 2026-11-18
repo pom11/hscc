@@ -125,42 +125,59 @@ struct ActivityFeedView: View {
         let tint = entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok
         return HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
             HSStatusDot(tint)
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                Text(entry.profile ?? "unknown profile")
-                    .font(.headline)
-                    .foregroundColor(Theme.Semantic.onSurface)
-                    .lineLimit(1)
-                Text(entry.isRunning
-                     ? "running " + (entry.card_title ?? "a card") + cardRef(entry.card_id)
-                     : (entry.tool ?? "tool")
-                        + (entry.card_title.map { " on " + $0 } ?? "")
-                        + cardRef(entry.card_id))
-                    .font(.hsccMono(.footnote))
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .lineLimit(1)
-            }
+            leadingCell(entry)
             Spacer(minLength: Theme.Spacing.sm.rawValue)
-            VStack(alignment: .trailing, spacing: Theme.Spacing.xxs.rawValue) {
-                if let at = entry.at {
-                    // Spec §5: the relative time is TICKED, not computed once.
-                    // `Text(timeLabel(at))` rendered "3 minutes ago" and then
-                    // sat there for the rest of the session — a feed you keep
-                    // open drifts into lying about how old its events are.
-                    // TimelineView re-evaluates the label every 30 s while the
-                    // feed is on screen (30 s because the smallest bucket the
-                    // phrasing shows is a minute; a faster tick would repaint
-                    // nothing).
-                    TimelineView(.periodic(from: .now, by: 30)) { context in
-                        Text(timeLabel(at, now: context.date))
-                            .font(.hsccMono(.caption2))
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                }
-                kindBadge(entry)
-            }
+            trailingCell(entry)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLine(for: entry))
+    }
+
+    /// Split out of `feedRow` so the type checker never has to infer the whole
+    /// row in one expression. CI's older Xcode hit "unable to type-check this
+    /// expression in reasonable time" on the combined body even though newer
+    /// local toolchains accepted it.
+    private func leadingCell(_ entry: ActivityEntry) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+            Text(entry.profile ?? "unknown profile")
+                .font(.headline)
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+            Text(captionText(entry))
+                .font(.hsccMono(.footnote))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .lineLimit(1)
+        }
+    }
+
+    private func captionText(_ entry: ActivityEntry) -> String {
+        if entry.isRunning {
+            return "running " + (entry.card_title ?? "a card") + cardRef(entry.card_id)
+        }
+        return (entry.tool ?? "tool")
+            + (entry.card_title.map { " on " + $0 } ?? "")
+            + cardRef(entry.card_id)
+    }
+
+    private func trailingCell(_ entry: ActivityEntry) -> some View {
+        VStack(alignment: .trailing, spacing: Theme.Spacing.xxs.rawValue) {
+            if let at = entry.at {
+                // Spec §5: the relative time is TICKED, not computed once.
+                // `Text(timeLabel(at))` rendered "3 minutes ago" and then
+                // sat there for the rest of the session — a feed you keep
+                // open drifts into lying about how old its events are.
+                // TimelineView re-evaluates the label every 30 s while the
+                // feed is on screen (30 s because the smallest bucket the
+                // phrasing shows is a minute; a faster tick would repaint
+                // nothing).
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Text(timeLabel(at, now: context.date))
+                        .font(.hsccMono(.caption2))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            kindBadge(entry)
+        }
     }
 
     private func accessibilityLine(for entry: ActivityEntry) -> String {
