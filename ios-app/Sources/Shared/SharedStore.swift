@@ -93,9 +93,20 @@ struct SavedCluster: Identifiable, Codable, Equatable {
     var id: UUID
     /// Human-friendly name the operator picks ("Production", "Test DGX", …).
     var name: String
-    /// Hostname or IP (tailnet name, e.g. `dgx-tailscale`). Never a default.
+    /// Primary hostname or IP (tailnet name, e.g. `dgx-tailscale`). Never a
+    /// default. Kept as the FIRST address for compatibility with every older
+    /// reader (`hscc.host`, the settings form's Host field).
     var host: String
-    /// The HSCC API port (8778 usually; default 8788).
+    /// Extra addresses for the SAME daemon, tried in order after `host` when a
+    /// transport attempt fails (automatic failover). Same port and token.
+    ///
+    /// Optional-by-absence on decode: saved data written before this field
+    /// existed has no key, and must keep decoding as an empty list rather than
+    /// failing (no data loss, no migration prompt). The explicit `init(from:)`
+    /// below is what gives the absent key its `[]` default — a synthesized
+    /// decoder would throw `keyNotFound` instead.
+    var fallbackHosts: [String]
+    /// The HSCC API port (8778 usually; default 8788). Shared by every address.
     var port: Int
     /// When the cluster last answered a ping successfully. nil = never.
     var lastConnected: Date?
@@ -104,14 +115,41 @@ struct SavedCluster: Identifiable, Codable, Equatable {
     /// cluster also sets this to true.
     var lastTestSuccess: Bool?
 
-    init(id: UUID = UUID(), name: String, host: String, port: Int,
-         lastConnected: Date? = nil, lastTestSuccess: Bool? = nil) {
+    init(id: UUID = UUID(), name: String, host: String, fallbackHosts: [String] = [],
+         port: Int, lastConnected: Date? = nil, lastTestSuccess: Bool? = nil) {
         self.id = id
         self.name = name
         self.host = host
+        self.fallbackHosts = fallbackHosts
         self.port = port
         self.lastConnected = lastConnected
         self.lastTestSuccess = lastTestSuccess
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, host, fallbackHosts, port, lastConnected, lastTestSuccess
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        host = try c.decode(String.self, forKey: .host)
+        // The whole backward-compatibility promise: old saved blobs have no
+        // `fallbackHosts` key, so this is [] and the cluster keeps working with
+        // its one address exactly as before.
+        fallbackHosts = try c.decodeIfPresent([String].self, forKey: .fallbackHosts) ?? []
+        port = try c.decode(Int.self, forKey: .port)
+        lastConnected = try c.decodeIfPresent(Date.self, forKey: .lastConnected)
+        lastTestSuccess = try c.decodeIfPresent(Bool.self, forKey: .lastTestSuccess)
+    }
+
+    /// The full ordered address list: primary first, then the fallbacks, with
+    /// blanks and duplicates folded away. This is the shape mirrored to the
+    /// App Group and exposed by `APIConfig`; the last-working reordering is
+    /// `HostFailover.orderedHosts`'s job at request time.
+    var hosts: [String] {
+        HostFailover.orderedHosts(primary: host, fallbacks: fallbackHosts)
     }
 
     /// The connection health derived from `lastTestSuccess` — the color shown
@@ -145,6 +183,13 @@ enum AppGroup {
     // Preference keys stored in the shared suite.
     static let hostKey = "hscc.host"
     static let portKey = "hscc.port"
+    /// The ACTIVE cluster's full ordered address list (primary first), mirrored
+    /// next to `hscc.host` so every extension sees every address. `hscc.host`
+    /// stays the primary for older readers.
+    static let fallbackHostsKey = "hscc.fallbackHosts"
+    /// The address that most recently answered ANY HTTP response, so widgets
+    /// and the next app request start with the link that actually works.
+    static let lastWorkingHostKey = "hscc.lastWorkingHost"
     // Multi-cluster list + which cluster is currently active.
     static let clustersKey = "hscc.clusters"
     static let activeClusterIDKey = "hscc.activeClusterID"
@@ -164,6 +209,123 @@ enum AppGroup {
     // Widgets & Live Activities shared settings (t_dea36c48): one JSON blob
     // keyed by surface kind, read by every widget / Live Activity extension.
     static let widgetSettingsKey = "hscc.widgetSettings"
+}
+
+// ---------------------------------------------------------------------------
+// Automatic host failover — the ONE try-order every client shares
+// ---------------------------------------------------------------------------
+//
+// A saved cluster may be reachable over several addresses (LAN IP, tailnet
+// name, …). Every client walks the SAME ordered list through this helper:
+// HSCCClient (app / intents / Live Activity drivers) and WidgetDataClient
+// (widgets and the app-side widget drivers) both call `HostFailover.run`.
+//
+// The rules, in one place so they cannot drift:
+//   * Start with the address that last answered (App Group), then the primary,
+//     then the remaining fallbacks in their saved order.
+//   * Fail over ONLY when the transport failed (timeout, cannot connect, DNS,
+//     TLS/connection lost). An HTTP answer — even 401/403/404/5xx — proves the
+//     daemon is reachable, so it is returned immediately and never retried.
+//   * All addresses down produces ONE failure (the last transport error), not
+//     one error per address.
+//   * In a multi-address cluster every attempt gets a short ceiling, so a dead
+//     first address cannot consume a widget's whole time budget.
+enum HostFailover {
+    /// Per-attempt ceiling when there is more than one address to try.
+    static let perAttemptTimeout: TimeInterval = 4
+
+    /// One address's result. `.answered` means the daemon answered over HTTP
+    /// (any status) or produced a non-connectivity outcome that must be shown
+    /// as-is; `.transport` means try the next address.
+    enum Attempt<Value> {
+        case answered(Value)
+        case transport(Error?)
+    }
+
+    /// The loop's aggregate: one value + the host that produced it, or one
+    /// failure after every address was tried.
+    enum Outcome<Value> {
+        case success(Value, host: String)
+        case failed(lastError: Error?)
+    }
+
+    /// Primary → fallbacks, blanks removed, duplicates folded case-insensitively.
+    static func orderedHosts(primary: String, fallbacks: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in [primary] + fallbacks {
+            let host = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty else { continue }
+            let key = host.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            out.append(host)
+        }
+        return out
+    }
+
+    /// The addresses in TRY order: the last-working one first (when it belongs
+    /// to this list), then primary → fallbacks exactly as saved.
+    static func orderedHosts(_ hosts: [String]) -> [String] {
+        let normalized = orderedHosts(primary: hosts.first ?? "",
+                                      fallbacks: Array(hosts.dropFirst()))
+        guard let remembered = lastWorkingHost(),
+              let match = normalized.first(where: {
+                  $0.caseInsensitiveCompare(remembered) == .orderedSame
+              }) else {
+            return normalized
+        }
+        return [match] + normalized.filter {
+            $0.caseInsensitiveCompare(match) != .orderedSame
+        }
+    }
+
+    /// The address that last answered a request, or nil when none has yet.
+    static func lastWorkingHost() -> String? {
+        let host = UserDefaults(suiteName: AppGroup.suiteName)?
+            .string(forKey: AppGroup.lastWorkingHostKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let host, !host.isEmpty else { return nil }
+        return host
+    }
+
+    /// Remember the address that just answered, for the next client/process.
+    static func remember(_ host: String) {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let defaults = UserDefaults(suiteName: AppGroup.suiteName)
+        defaults?.set(trimmed, forKey: AppGroup.lastWorkingHostKey)
+        // A widget can read this moments after the app wrote it; flush the
+        // suite so the next process starts on the address that just worked.
+        defaults?.synchronize()
+    }
+
+    /// A multi-address attempt's ceiling. With one address the caller's own
+    /// deadline is unchanged; with several, cap EACH attempt so a dead first
+    /// address leaves time for the rest.
+    static func attemptTimeout(base: TimeInterval, hostCount: Int) -> TimeInterval {
+        guard hostCount > 1 else { return base }
+        return min(base, perAttemptTimeout)
+    }
+
+    /// Try the ordered hosts until one ANSWERS. Transport failures continue;
+    /// anything the attempt classifies as `.answered` stops the loop. Records
+    /// the working host in the App Group before returning it.
+    static func run<Value>(
+        hosts: [String],
+        attempt: (String) async -> Attempt<Value>
+    ) async -> Outcome<Value> {
+        var lastError: Error?
+        for host in orderedHosts(hosts) {
+            switch await attempt(host) {
+            case .answered(let value):
+                remember(host)
+                return .success(value, host: host)
+            case .transport(let error):
+                lastError = error
+            }
+        }
+        return .failed(lastError: lastError)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -646,17 +808,36 @@ enum KeychainShared {
 /// group (which the app's `KeychainStore` writes). Returns nil when not fully
 /// configured.
 struct APIConfig {
+    /// The primary address (`hscc.host`, kept for every older reader).
     let host: String
     let port: Int
     let token: String
+    /// Extra addresses for the same daemon, mirrored from the active cluster.
+    let fallbackHosts: [String]
+
+    /// The full ordered list every client walks: primary → fallbacks. The
+    /// last-working address is moved to the front at request time by
+    /// `HostFailover.orderedHosts(_:)`, not stored in this order.
+    var hosts: [String] {
+        HostFailover.orderedHosts(primary: host, fallbacks: fallbackHosts)
+    }
+
+    init(host: String, port: Int, token: String, fallbackHosts: [String] = []) {
+        self.host = host
+        self.port = port
+        self.token = token
+        self.fallbackHosts = fallbackHosts
+    }
 
     static func load() -> APIConfig? {
         let suite = UserDefaults(suiteName: AppGroup.suiteName)
         guard let host = suite?.string(forKey: AppGroup.hostKey),
               !host.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         let port = Int(suite?.string(forKey: AppGroup.portKey) ?? "8788") ?? 8788
+        let fallbacks = suite?.stringArray(forKey: AppGroup.fallbackHostsKey) ?? []
         guard let token = KeychainShared.readToken(), !token.isEmpty else { return nil }
-        return APIConfig(host: host, port: port, token: token)
+        return APIConfig(host: host, port: port, token: token,
+                         fallbackHosts: fallbacks)
     }
 }
 

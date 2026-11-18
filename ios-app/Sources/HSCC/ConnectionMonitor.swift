@@ -80,6 +80,11 @@ final class ConnectionMonitor: ObservableObject {
     /// The current status. Views bind to this and redraw when it changes.
     @Published private(set) var status: Status = .unknown
 
+    /// The address that produced the most recent successful HTTP answer.
+    /// Multi-address clusters fail over through `HostFailover`, which reports
+    /// the winning host here so the banner can say WHICH address is in use.
+    @Published private(set) var activeHost: String?
+
     /// The reason string for "we never got an HTTP answer". One constant so
     /// the passive path and the probe path can never drift apart (the banner
     /// text is asserted on this exact wording by connection_banner_check).
@@ -106,7 +111,10 @@ final class ConnectionMonitor: ObservableObject {
     /// credential honestly; see `ConnectionProbe.classify`. The no-pin
     /// guarantee is what actually matters and holds on both paths: any later
     /// success clears the alarm.)
-    func requestSucceeded() {
+    func requestSucceeded(host: String? = nil) {
+        if let host, !host.trimmingCharacters(in: .whitespaces).isEmpty {
+            activeHost = host
+        }
         status = .reachable
     }
 
@@ -133,6 +141,7 @@ final class ConnectionMonitor: ObservableObject {
     /// `connectionIdentity` change, so the new cluster gets observed too.
     func reset() {
         status = .unknown
+        activeHost = nil
     }
 }
 

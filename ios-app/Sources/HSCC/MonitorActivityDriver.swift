@@ -271,7 +271,9 @@ final class MonitorActivityDriver {
             endAndStopPolling()
             return
         }
-        let client = HSCCClient(host: config.host, port: config.port, token: config.token)
+        // One shared client walks every saved address; transport failures
+        // advance to the next one before this tick is treated as unreachable.
+        let client = HSCCClient(config: config)
 
         // Concurrent poll; each failure degrades to nil independently (one
         // route being down must never blank the other section).

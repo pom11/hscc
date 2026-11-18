@@ -536,6 +536,51 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
              "the daemon-host sidecar stopped decoding")
 }
 
+// ---- SavedCluster: old blobs keep working, new blobs keep the order ----
+//
+// The multi-address model added `fallbackHosts` AFTER operators already had
+// saved clusters on disk. A blob written before that key existed must decode
+// with [] (no migration prompt, no lost cluster), while a multi-address blob
+// must preserve primary → fallbacks and put the last-working address first at
+// request time.
+let failoverDefaults = UserDefaults(suiteName: AppGroup.suiteName)
+failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+
+c.assertions("saved_cluster_legacy.json", "old saved data decodes with no fallbacks") {
+    let legacy = try JSONDecoder().decode(SavedCluster.self,
+                                          from: try c.load("saved_cluster_legacy.json"))
+    c.expect("saved_cluster_legacy.json", "legacy blob has an empty fallback list",
+             legacy.fallbackHosts.isEmpty,
+             "missing fallbackHosts decoded as \(legacy.fallbackHosts)")
+    c.expect("saved_cluster_legacy.json", "legacy blob still exposes its one primary address",
+             legacy.hosts == ["host-a.example"],
+             "hosts = \(legacy.hosts)")
+    let roundTripped = try JSONDecoder().decode(
+        SavedCluster.self, from: try JSONEncoder().encode(legacy))
+    c.expect("saved_cluster_legacy.json", "a re-save of a legacy cluster invents no address",
+             roundTripped.fallbackHosts.isEmpty && roundTripped.host == "host-a.example",
+             "round-trip = \(roundTripped.host) + \(roundTripped.fallbackHosts)")
+}
+
+c.assertions("saved_cluster_multi_address.json", "order is primary -> fallbacks, last-working first") {
+    let multi = try JSONDecoder().decode(SavedCluster.self,
+                                         from: try c.load("saved_cluster_multi_address.json"))
+    c.expect("saved_cluster_multi_address.json", "saved order is primary, then fallbacks in operator order",
+             multi.hosts == ["host-a.example", "host-b.example", "host-c.example"],
+             "hosts = \(multi.hosts)")
+    c.expect("saved_cluster_multi_address.json", "with no remembered host the try order is the saved order",
+             HostFailover.orderedHosts(multi.hosts) == multi.hosts,
+             "try order = \(HostFailover.orderedHosts(multi.hosts))")
+    HostFailover.remember("host-b.example")
+    c.expect("saved_cluster_multi_address.json", "the last-working address is tried first, then the rest in order",
+             HostFailover.orderedHosts(multi.hosts)
+                == ["host-b.example", "host-a.example", "host-c.example"],
+             "try order = \(HostFailover.orderedHosts(multi.hosts))")
+    failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+}
+
 // ---- §7 storage shape: what the App Group may actually hold (t_438aa6ce) ----
 //
 // `MonitorSnapshotStore` writes the last-known monitor snapshot into

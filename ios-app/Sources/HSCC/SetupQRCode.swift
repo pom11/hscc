@@ -158,8 +158,10 @@ enum QRPairingOutcome: Equatable {
 /// (the confirm-gate contract) and then calls this to learn the outcome.
 enum QRPairing {
     @MainActor
-    static func test(host: String, port: Int, token: String) async -> QRPairingOutcome {
-        let client = HSCCClient(host: host, port: port, token: token)
+    static func test(host: String, port: Int, token: String,
+                     fallbacks: [String] = []) async -> QRPairingOutcome {
+        let client = HSCCClient(host: host, fallbacks: fallbacks,
+                                port: port, token: token)
         do {
             let pong = try await client.ping()
             if pong.ok {

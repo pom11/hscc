@@ -149,6 +149,72 @@ let urlReport = await ConnectionProbe.runReachabilityProbe(on: m) {
 }
 assert(urlReport == .transportFailure, "an unbuildable URL classifies as transport failure (no HTTP answer)")
 
+// 3i) The SAME multi-address loop the clients use: transport failures advance
+//     to the next address, an HTTP ANSWER stops the walk, and all-down yields
+//     exactly one failure. A probe against a dead first address therefore ends
+//     with one honest report after trying the rest, never a per-address alarm.
+let failoverDefaults = UserDefaults(suiteName: AppGroup.suiteName)
+failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+assert(HostFailover.orderedHosts(primary: "host-a.example",
+                                 fallbacks: ["host-b.example", "host-c.example"])
+       == ["host-a.example", "host-b.example", "host-c.example"],
+       "saved failover order is primary -> fallbacks")
+
+var attempted: [String] = []
+let advanced = await HostFailover.run(hosts: ["host-a.example", "host-b.example"]) { host in
+    attempted.append(host)
+    if host == "host-b.example" { return .answered("answered") }
+    return .transport(URLError(.cannotConnectToHost))
+}
+if case .success(let value, let host) = advanced {
+    assert(value == "answered" && host == "host-b.example",
+           "a transport failure advances to the next address and returns its answer")
+} else {
+    assert(false, "the second address should have answered")
+}
+assert(attempted == ["host-a.example", "host-b.example"],
+       "failover tried the primary then the fallback, in order")
+assert(HostFailover.lastWorkingHost() == "host-b.example",
+       "the answering address is remembered in the App Group")
+
+failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+attempted = []
+let answered = await HostFailover.run(hosts: ["host-c.example", "host-d.example"]) { host in
+    attempted.append(host)
+    return .answered("HTTP 401")
+}
+if case .success(_, let host) = answered {
+    assert(host == "host-c.example", "an HTTP answer is accepted from the first address")
+} else {
+    assert(false, "an HTTP answer must stop the failover walk")
+}
+assert(attempted == ["host-c.example"],
+       "an HTTP answer (even 401) is NOT a transport failure and never fails over")
+
+failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+attempted = []
+let allDown = await HostFailover.run(hosts: ["host-a.example", "host-b.example"]) { host -> HostFailover.Attempt<String> in
+    attempted.append(host)
+    return .transport(URLError(.cannotConnectToHost))
+}
+if case .failed(let lastError) = allDown {
+    assert((lastError as? URLError)?.code == .cannotConnectToHost,
+           "all addresses down returns ONE failure carrying the last transport error")
+} else {
+    assert(false, "all addresses down must fail")
+}
+assert(attempted == ["host-a.example", "host-b.example"],
+       "all addresses were tried exactly once each")
+HostFailover.remember("host-b.example")
+assert(HostFailover.orderedHosts(["host-a.example", "host-b.example", "host-c.example"])
+       == ["host-b.example", "host-a.example", "host-c.example"],
+       "the last-working address leads, then the rest keep their saved order")
+failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+failoverDefaults?.synchronize()
+
 // 4) Cluster switch: ConfigView's reset() puts .unknown again — the probe loop
 //     restarts on connectionIdentity and re-resolves it. The monitor itself
 //     must not spontaneously "remember" the old cluster's reachability.

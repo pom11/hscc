@@ -53,6 +53,7 @@ real_sources=(
                                     # went stale and the harness stopped compiling
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
+  Sources/Shared/SharedStore.swift  # APIConfig + the shared HostFailover loop
   Sources/HSCC/APIError.swift
 )
 harness=(

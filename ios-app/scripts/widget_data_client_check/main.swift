@@ -35,13 +35,22 @@ final class StubTransport: URLProtocol {
         case error(Error)
     }
 
-    /// The next request's fate. Sequential tests, so one slot is enough.
+    /// The next request's fate. Sequential tests, so one slot is enough; the
+    /// failover cases arm a SEQUENCE so host 1 can fail and host 2 answer.
     static var outcome: Outcome = .error(URLError(.cannotConnectToHost))
+    static var queued: [Outcome] = []
     private(set) static var requests: [URLRequest] = []
 
     static func arm(_ outcome: Outcome) {
         requests = []
+        queued = []
         Self.outcome = outcome
+    }
+
+    static func armSequence(_ outcomes: [Outcome]) {
+        requests = []
+        queued = outcomes
+        outcome = outcomes.last ?? .error(URLError(.cannotConnectToHost))
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -49,7 +58,13 @@ final class StubTransport: URLProtocol {
 
     override func startLoading() {
         StubTransport.requests.append(request)
-        switch StubTransport.outcome {
+        let next: Outcome
+        if StubTransport.queued.count > 1 {
+            next = StubTransport.queued.removeFirst()
+        } else {
+            next = StubTransport.queued.first ?? StubTransport.outcome
+        }
+        switch next {
         case .error(let error):
             client?.urlProtocol(self, didFailWithError: error)
         case .http(let status, let body):
@@ -132,6 +147,20 @@ func stubbedClient(timeout: TimeInterval = WidgetDataClient.defaultTimeout) -> W
     WidgetDataClient(config: testConfig, timeout: timeout, session: stubSession())
 }
 
+/// A client for ONE cluster with several addresses, all through the same
+/// stubbed transport. Used by the failover cases below.
+func multiClient(host: String = "host-a.example",
+                 fallbacks: [String] = ["host-b.example"],
+                 timeout: TimeInterval = WidgetDataClient.defaultTimeout) -> WidgetDataClient {
+    let config = APIConfig(host: host, port: 8788, token: token,
+                           fallbackHosts: fallbacks)
+    return WidgetDataClient(config: config, timeout: timeout, session: stubSession())
+}
+
+func requestedHosts() -> [String] {
+    StubTransport.requests.compactMap { $0.url?.host }
+}
+
 struct Opaque: Decodable { let anything: Int }
 
 /// The payload types are `Decodable`, not `Equatable`, so a whole `Result` cannot
@@ -140,6 +169,14 @@ struct Opaque: Decodable { let anything: Int }
 func failureOf<T>(_ result: Result<T, WidgetDataFailure>) -> WidgetDataFailure? {
     if case .failure(let failure) = result { return failure }
     return nil
+}
+
+/// Clear the App Group's failover memory between cases, and flush it so the
+/// next `HostFailover` read cannot see a stale value.
+func forgetLastWorkingHost() {
+    let defaults = UserDefaults(suiteName: AppGroup.suiteName)
+    defaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+    defaults?.synchronize()
 }
 
 func runAll() async {
@@ -361,7 +398,73 @@ func runAll() async {
     let clientWasUsed = !StubTransport.requests.isEmpty
     check("an unconfigured read makes no request", !clientWasUsed)
 
-    // 13. Every failure case is renderable and safe: short, no token, no host.
+    // 13. Multi-address failover: transport advances, ANY HTTP answer does not.
+    forgetLastWorkingHost()
+    check("saved order is primary -> fallbacks",
+          HostFailover.orderedHosts(primary: "host-a.example",
+                                    fallbacks: ["host-b.example", "host-c.example"])
+            == ["host-a.example", "host-b.example", "host-c.example"])
+    HostFailover.remember("host-b.example")
+    check("last-working address is tried first",
+          HostFailover.orderedHosts(["host-a.example", "host-b.example", "host-c.example"])
+            == ["host-b.example", "host-a.example", "host-c.example"])
+    forgetLastWorkingHost()
+
+    StubTransport.armSequence([.error(URLError(.cannotConnectToHost)),
+                               .http(status: 200, body: projectsBody)])
+    let failedOver = await multiClient().projects()
+    check("a transport failure advances to the next address",
+          requestedHosts() == ["host-a.example", "host-b.example"])
+    if case .success(let payload) = failedOver {
+        check("the second address's payload is the one returned", payload.projects.count == 2)
+    } else {
+        check("failover should succeed on the second address, got \(String(reflecting: failedOver))", false)
+    }
+    check("the answering address is remembered for next time",
+          HostFailover.lastWorkingHost() == "host-b.example")
+
+    StubTransport.arm(.http(status: 401, body: errorBody))
+    let authRefusedResult = await multiClient(host: "host-c.example",
+                                              fallbacks: ["host-d.example"]).projects()
+    check("HTTP 401 does NOT fail over to another address",
+          requestedHosts() == ["host-c.example"])
+    check("HTTP 401 is still surfaced as .unauthorized",
+          failureOf(authRefusedResult) == .unauthorized)
+
+    StubTransport.arm(.error(URLError(.cannotConnectToHost)))
+    let allDown = await multiClient(host: "host-e.example",
+                                    fallbacks: ["host-f.example"]).projects()
+    check("all addresses are tried exactly once each",
+          requestedHosts() == ["host-e.example", "host-f.example"])
+    check("all addresses down yields ONE unreachable failure",
+          failureOf(allDown) == .unreachable(code: URLError.Code.cannotConnectToHost.rawValue))
+
+    StubTransport.armSequence([.error(URLError(.timedOut)),
+                               .http(status: 200, body: projectsBody)])
+    let shortFirst = await multiClient(host: "host-g.example",
+                                       fallbacks: ["host-h.example"]).projects()
+    check("a multi-address attempt carries the short per-host deadline",
+          StubTransport.requests.first?.timeoutInterval == HostFailover.perAttemptTimeout)
+    if case .success = shortFirst {
+        check("a timed-out first address still lets the second answer", true)
+    } else {
+        check("a timed-out first address should let the second answer, got \(String(reflecting: shortFirst))", false)
+    }
+
+    StubTransport.arm(.error(URLError(.timedOut)))
+    let allTimedOut = await multiClient(host: "host-i.example",
+                                        fallbacks: ["host-j.example"]).projects()
+    check("all timed out yields ONE failure naming the per-attempt ceiling",
+          failureOf(allTimedOut) == .timeout(seconds: HostFailover.perAttemptTimeout))
+
+    HostFailover.remember("host-l.example")
+    StubTransport.arm(.http(status: 200, body: projectsBody))
+    _ = await multiClient(host: "host-k.example", fallbacks: ["host-l.example"]).projects()
+    check("the remembered address is the first one requested",
+          requestedHosts() == ["host-l.example"])
+    forgetLastWorkingHost()
+
+    // 14. Every failure case is renderable and safe: short, no token, no host.
     for failure in [WidgetDataFailure.notConfigured, .invalidURL,
                     .pathNotAllowed(path: "/v1/cards"), .timeout(seconds: 8),
                     .unreachable(code: 1), .unauthorized,
