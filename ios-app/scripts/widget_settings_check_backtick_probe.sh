@@ -226,6 +226,11 @@ missing_banners() {
 
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/wscprobe.XXXXXX")"
 
+# Baseline for the stray-artifact leg: what the checkout already looked like dirty.
+# Compared again at the end, so a copy that writes into the tree it audits becomes a
+# finding naming the path instead of an untracked file someone finds next week.
+repo_dirty_before="$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort)"
+
 # run_leg <name> <insert-payload-after-this-line> <slash|hash> [above]
 # "above" is for the boundary leg ONLY: it re-puts the payload directly after the
 # shebang so the payload really sits above the guard. Without it a leg that
@@ -251,7 +256,16 @@ run_leg() {
   for sib in ${gate_siblings}; do
     [ "$sib" = "$(basename "$IOSAPP")" ] && continue
     if [ -d "${REPO}/${sib}" ]; then
-      ln -s "${REPO}/${sib}" "${WORKROOT}/${sib}" 2>/dev/null
+      # ONLY when the destination is absent. ln -s onto an existing symlink that
+      # resolves to a directory follows the link and creates the new link INSIDE the
+      # target — which is the real sibling project in the checkout. Measured: the second
+      # leg of one run left macos-app/macos-app -> <repo>/macos-app in the work tree, and
+      # both legs still printed green because ../macos-app resolved either way. Same
+      # family as cp onto a symlinked mirror: a link that lands somewhere else changes
+      # nothing and looks like a pass.
+      if [ ! -e "${WORKROOT}/${sib}" ] && [ ! -L "${WORKROOT}/${sib}" ]; then
+        ln -s "${REPO}/${sib}" "${WORKROOT}/${sib}"
+      fi
       [ -e "${WORKROOT}/${sib}" ] || pfail "run_leg ${name}: could not expose sibling ${sib} to the copy — the control leg would then judge a tree the real gate never runs in, which is a harness fault, not a finding"
     else
       pnote "run_leg ${name}: the gate names ../${sib} but ${REPO}/${sib} is not a directory — the copy cannot see it, and neither can the real gate"
@@ -428,6 +442,31 @@ classify "boundary (payload at line 2, above the ban's first executable statemen
 echo "control: the same copy mechanism, nothing mutated"
 run_leg "control" "-" slash
 classify "control (unmodified copy)" "passing"
+
+# Did anything land INSIDE the checkout? Exposing a sibling project to a copy is a new
+# way to write into it (ln -s onto an existing symlink follows the link and lands the new
+# link inside the real project — measured: macos-app/macos-app after a second leg), and
+# the whole point of the private work dir is that the audited tree is never the scratch.
+# Scoped to the blast radius: a new path under the audited project or under a sibling the
+# copies read fails by name; a dirty path elsewhere is disclosed, not blamed on this probe.
+repo_dirty_after="$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort)"
+stray="$(comm -13 <(printf '%s\n' "$repo_dirty_before") <(printf '%s\n' "$repo_dirty_after"))"
+if [ -n "$stray" ]; then
+  while IFS= read -r spath; do
+    [ -n "$spath" ] || continue
+    stop="${spath%%/*}"
+    shit=0
+    [ "$stop" = "$(basename "$IOSAPP")" ] && shit=1
+    for sib in ${gate_siblings}; do [ "$stop" = "$sib" ] && shit=1; done
+    if [ "$shit" = 1 ]; then
+      pfail "stray-artifact: this probe left $spath inside the checkout (under $stop/, a tree the copies read) — a copy writes to its own work dir, never to the tree it audits"
+    else
+      pnote "stray-artifact: $spath appeared in git status during the run, outside the audited tree — not this probe's subject, disclosed rather than ignored"
+    fi
+  done < <(printf '%s\n' "$stray")
+else
+  pok "stray-artifact: nothing new appeared inside the checkout (porcelain identical before and after every leg)"
+fi
 
 GATE_AFTER="$(shasum -a 256 "$GATE" | cut -d' ' -f1)"
 if [ "$GATE_BEFORE" = "$GATE_AFTER" ]; then
