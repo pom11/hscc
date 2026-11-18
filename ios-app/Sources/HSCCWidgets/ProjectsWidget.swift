@@ -82,8 +82,10 @@ struct ProjectRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     /// pieces are omitted — never rendered as a zero or an invented age.
     var detailLine: String? {
         var parts: [String] = []
+        // `hscc project list`'s HEALTH column: ok | partial | absent.
+        if let health, !health.isEmpty { parts.append(health) }
         if let status = counts?.statusLine { parts.append(status) }
-        if let age = activityAge { parts.append(age) }
+        if let age = activityAge { parts.append("active \(age)") }
         if let state = orchestrator?.display { parts.append("orch: \(state)") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -609,6 +611,7 @@ private struct ProjectRowView: View {
     let row: ProjectRow
     var showsBoard = false
     var showsDetail = true
+    var showsHealth = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -625,6 +628,13 @@ private struct ProjectRowView: View {
                     Text(board)
                         .font(style.font(.caption2))
                         .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(1)
+                }
+                if showsHealth, let health = row.health, !health.isEmpty {
+                    Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
+                    Text(health)
+                        .font(style.font(size: 8, weight: .semibold))
+                        .foregroundColor(health == "ok" ? style.okColor : style.warnColor)
                         .lineLimit(1)
                 }
             }
@@ -752,7 +762,7 @@ private struct ProjectsAgeLine: View {
             HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
                 Image(systemName: "clock.arrow.circlepath").widgetIcon(style)
                     .font(style.font(size: 8))
-                Text("\(minutes)m ago · \(entry.status.staleReason?.shortLabel ?? "stale")")
+                Text("updated \(minutes)m ago · \(entry.status.staleReason?.shortLabel ?? "stale")")
             }
             .font(font)
             .foregroundColor(style.warnColor)
@@ -877,7 +887,9 @@ private struct SmallProjectsWidget: View {
                     }
                     .widgetHeader(style)
                     ForEach(entry.rows.prefix(ProjectsEntry.rowLimit(for: .systemSmall))) { row in
-                        ProjectRowView(row: row)
+                        // Name + CLI health token only: the small family has
+                        // room for a list, not a paragraph per project.
+                        ProjectRowView(row: row, showsDetail: false, showsHealth: true)
                     }
                     Spacer(minLength: 0)
                     ProjectsAgeLine(entry: entry)

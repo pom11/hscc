@@ -612,7 +612,10 @@ def _project_counts(cards):
     from routes_mobile import count_cards
     entry = count_cards(cards)
     counts = dict(entry.get("counts") or {})
-    counts.update(entry.get("other") or {})
+    # ``other`` is an integer on the wire (the Swift model declares it Int);
+    # the per-status detail lives under ``other_statuses``. Fold the detail, not
+    # the integer, or a board with ``scheduled``/``review`` cards raises here.
+    counts.update(entry.get("other_statuses") or {})
     counts["total"] = int(entry.get("total") or 0)
     return counts
 

@@ -229,15 +229,27 @@ for missing in ["todo", "ready", "running", "blocked"] {
     }
     check("openCount is nil when " + missing + " is missing (no partial sum)", p.openCount == nil, text(p.openCount))
     if missing == "blocked" {
-        // The ring's own scalar is gone AND the fallback sum needs blocked, so
-        // there is nothing honest to draw.
-        check("with blocked unknown the ring has nothing to draw either",
-              BoardStatusReading.circularNumber(p) == nil, text(BoardStatusReading.circularNumber(p)))
+        // blocked is unknown, but running is still a real CLI field, so the
+        // ring falls through to it instead of inventing a blocked zero.
+        check("with blocked unknown the ring falls through to running",
+              BoardStatusReading.circularNumber(p) == 3
+              && BoardStatusReading.circularLabel(p) == "running"
+              && !BoardStatusReading.circularIsUrgent(p),
+              text(BoardStatusReading.circularNumber(p)))
+    } else if missing == "running" {
+        // No blocked alarm and no running count: done-today is the next real
+        // field the ring may show.
+        check("with running unknown the ring falls through to done 24h",
+              BoardStatusReading.circularNumber(p) == 750
+              && BoardStatusReading.circularLabel(p) == "done 24h",
+              text(BoardStatusReading.circularNumber(p)))
     } else {
-        // blocked IS known to be zero here, so the ring legitimately shows a zero
-        // — a fact from the route, not a missing value dressed up as one.
-        check("an unknown OPEN operand does not stop the ring saying blocked is 0",
-              BoardStatusReading.circularNumber(p) == 0 && !BoardStatusReading.circularIsUrgent(p),
+        // blocked IS known to be zero here and running is known, so the ring
+        // shows the running count — never a zero dressed up as the headline.
+        check("a zero blocked does not suppress the running headline",
+              BoardStatusReading.circularNumber(p) == 3
+              && BoardStatusReading.circularLabel(p) == "running"
+              && !BoardStatusReading.circularIsUrgent(p),
               text(BoardStatusReading.circularNumber(p)))
     }
 }
@@ -251,8 +263,8 @@ section("6. the five tiles and the projection cannot drift apart")
 check("the tile list is exactly the five statuses in board order",
       BoardStatusReading.statuses.map { $0.key } == ["todo", "ready", "running", "blocked", "done"],
       BoardStatusReading.statuses.map { $0.key }.joined(separator: ","))
-check("and the copy the families draw",
-      BoardStatusReading.statuses.map { $0.label } == ["todo", "ready", "run", "blocked", "done"])
+check("and the copy the families draw (done is the CLI's Done 24h column)",
+      BoardStatusReading.statuses.map { $0.label } == ["todo", "ready", "run", "blocked", "done 24h"])
 let expected: [String: Int] = ["todo": 17, "ready": 2, "running": 3, "blocked": 0, "done": 750]
 for item in BoardStatusReading.statuses {
     check("value(for: " + item.key + ") reads its own field",
@@ -276,8 +288,9 @@ check("with nothing blocked the run line leads",
       BoardStatusReading.countsShortLine(full))
 check("the line never carries more than two operands",
       !BoardStatusReading.countsShortLine(full).contains("ready"))
-check("a zero blocked is not urgent and is not the headline",
-      !BoardStatusReading.circularIsUrgent(full) && BoardStatusReading.circularNumber(full) == 0)
+check("a zero blocked is not urgent; running is the ring's headline",
+      !BoardStatusReading.circularIsUrgent(full) && BoardStatusReading.circularNumber(full) == 3
+      && BoardStatusReading.circularLabel(full) == "running")
 check("one blocked card makes the ring urgent — the number that means 'waiting on you'",
       BoardStatusReading.circularIsUrgent(interimBoard) && BoardStatusReading.circularNumber(interimBoard) == 3)
 check("with no numbers at all the ring draws nothing rather than 0",
