@@ -4,11 +4,12 @@ import WidgetKit
 // ---------------------------------------------------------------------------
 // Cluster widget views.
 //
-// Six families, one entry, and one text model (`ClusterEntry.text(for:)`).
-// The layout only decides how much of that text fits:
+// Six families, one entry, and one text model (`ClusterEntry.text(for:)`),
+// plus the CLI's own host table on the one size that shows it
+// (`CLIMonitorHostTableView`). The layout decides how much of that text fits:
 //
 //   small      — one headline tally + the models/throughput line
-//   medium     — the same line plus up to four node rows
+//   medium     — the CLI's host table: nine columns, one row per host
 //   large      — every node row with CPU/GPU temps and run/wait
 //   inline     — the headline + detail on one Lock Screen line
 //   circular   — the up/total gauge
@@ -189,7 +190,11 @@ struct SmallClusterWidget: View {
 }
 
 // ---------------------------------------------------------------------------
-// Medium — headline + up to four node rows.
+// Medium — the CLI's own host table: `host_table`'s nine columns, one row per
+// host, under the CLI's own header. This is the "looks like the CLI" size
+// (t_2d1c12dc): no abbreviations, no re-rounding, no invented units — the
+// strings are `CLIMonitorHostRow.cells` and the titles are
+// `CLIMonitorHostRow.columns`, both from the shared view-model.
 // ---------------------------------------------------------------------------
 
 struct MediumClusterWidget: View {
@@ -197,30 +202,31 @@ struct MediumClusterWidget: View {
     let entry: ClusterEntry
 
     var body: some View {
-        let text = entry.text(for: .medium)
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "square.stack.3d.up").widgetIcon(style)
-                ClusterHeadline(entry: entry, size: 26)
+                    .font(style.font(size: 9))
+                    .foregroundColor(style.secondaryTextColor)
+                // A table needs the vertical room the 26 pt numeral used to
+                // take; the tally is still the loudest thing on the tile, it is
+                // just no longer taller than the rows under it.
+                ClusterHeadline(entry: entry, size: 15)
                 Spacer(minLength: 0)
                 ClusterDetail(entry: entry, surface: .medium)
             }
             .widgetHeader(style)
-            if !text.rows.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
-                        ClusterNodeRowView(row: row, node: node(at: index), compact: true)
-                    }
-                }
+            // `cliHostRows` is nil for every state that must NOT draw numbers —
+            // unconfigured, paused, the "nodes" section off, no host list — and
+            // the headline plus footer carry those instead. There is no
+            // fallback row list here on purpose: the glance rows and this table
+            // are two projections of one response, so drawing them when the
+            // table is switched off would make the toggle a lie.
+            if let rows = entry.cliHostRows {
+                CLIMonitorHostTableView(rows: rows)
             }
             Spacer(minLength: 0)
             ClusterFooter(entry: entry, surface: .medium)
         }
-    }
-
-    private func node(at index: Int) -> FleetNodeLine? {
-        guard let nodes = entry.fleet?.nodes, nodes.indices.contains(index) else { return nil }
-        return nodes[index]
     }
 }
 

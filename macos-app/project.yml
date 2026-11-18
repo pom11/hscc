@@ -207,6 +207,11 @@ targets:
       - path: ../ios-app/Sources/HSCCWidgets/ClusterWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetMetrics.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift
+      # The `systemMedium` CLI host table (t_2d1c12dc), reused BY PATH exactly
+      # like the widget that draws it: the desktop's medium tile is the same
+      # nine CLI columns, not a macOS re-implementation of them.
+      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorTableReading.swift
+      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorHostTableView.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
       - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift
