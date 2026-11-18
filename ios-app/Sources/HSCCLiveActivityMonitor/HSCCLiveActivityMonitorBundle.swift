@@ -19,5 +19,6 @@ struct HSCCLiveActivityMonitorBundle: WidgetBundle {
         HSCCLiveActivityMonitor()
         CardsRunningLiveActivity()
         ClusterHealthLiveActivity()
+        BoardProgressLiveActivity()
     }
 }

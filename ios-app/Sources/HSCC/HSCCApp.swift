@@ -79,10 +79,16 @@ struct HSCCApp: App {
                 // here, because the driver may be holding a handle the sweep
                 // would end from underneath it.
                 CardsRunningActivityDriver.shared.sceneDidBecomeActive()
+                // The per-board progress activity (t_451cbe25) is
+                // operator-started, so there is nothing to sweep: adopting a
+                // bubble left by a previous process and resuming its poll is
+                // all this hook does. No activity up → no reads.
+                BoardProgressActivityDriver.shared.sceneDidBecomeActive()
             case .background, .inactive:
                 MonitorActivityDriver.shared.sceneDidEnterBackground()
                 ClusterHealthActivityDriver.shared.sceneDidEnterBackground()
                 CardsRunningActivityDriver.shared.sceneDidEnterBackground()
+                BoardProgressActivityDriver.shared.sceneDidEnterBackground()
             @unknown default:
                 break
             }
