@@ -7,9 +7,14 @@ cask "hscc-widgets" do
   desc "Menu bar client and desktop widgets for an HSCC cluster"
   homepage "https://github.com/pom11/hscc"
 
+  # The app updates itself through Sparkle 2; the cask still pins every
+  # release's version and sha256 so a fresh Homebrew install gets the same
+  # notarized bytes as an in-app update.
+  auto_updates true
+
   livecheck do
     url "https://github.com/pom11/hscc/releases"
-    regex(/^macos-widgets-v?(\d+(?:\.\d+)+)$/i)
+    regex(/^apps-v?(\d+(?:\.\d+)+)$/i)
     strategy :github_releases
   end
 

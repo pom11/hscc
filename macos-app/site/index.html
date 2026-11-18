@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>HSCC Widgets __HSCC_VERSION__ — install on macOS</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px 20px 56px;
+    background: #000;
+    color: #fff;
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { margin: 0 0 2px; font-size: 2rem; letter-spacing: -0.02em; }
+  .version { margin: 0 0 28px; color: #9a9a9a; font-variant-numeric: tabular-nums; }
+  h2 { margin: 38px 0 12px; font-size: 1.15rem; color: #FF5722; }
+  code { font: .93em ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; }
+  pre {
+    margin: 0; padding: 14px 16px; overflow-x: auto;
+    border: 1px solid #2a2a2a; border-radius: 12px; background: #0b0b0b;
+  }
+  a { color: #FF5722; }
+  ul { padding-left: 1.35em; }
+  li { margin: 0 0 10px; }
+  .card {
+    margin: 18px 0 0; padding: 16px;
+    border: 1px solid #2a2a2a; border-radius: 12px; background: #0b0b0b;
+  }
+  .card p { margin: 0 0 10px; }
+  .card p:last-child { margin-bottom: 0; }
+  .foot { margin-top: 40px; color: #777; font-size: .86rem; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HSCC Widgets</h1>
+  <p class="version">Version __HSCC_VERSION__ (build __HSCC_BUILD__)</p>
+
+  <h2>Install with Homebrew</h2>
+  <pre><code>brew install --cask pom11/hscc/hscc-widgets</code></pre>
+  <p>The app updates itself with Sparkle; Homebrew installs and upgrades the
+  signed, notarized bundle. New releases appear in the
+  <a href="__HSCC_APPCAST__">update feed</a>.</p>
+
+  <h2>What's new</h2>
+  <div class="card">
+    __HSCC_NOTES__
+  </div>
+  <p><a href="__HSCC_NOTES_URL__">Permanent link to these notes</a></p>
+
+  <h2>Requirements</h2>
+  <ul>
+    <li>macOS 14 (Sonoma) or later on Apple silicon or Intel.</li>
+    <li>The HSCC menu bar app and desktop widgets share the same App Group as
+      the iPhone app, so clusters you saved there are already available.</li>
+  </ul>
+
+  <p class="foot">HSCC · Developer ID-signed and notarized ·
+  <a href="https://github.com/pom11/hscc">github.com/pom11/hscc</a></p>
+</main>
+</body>
+</html>
