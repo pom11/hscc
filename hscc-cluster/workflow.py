@@ -19,8 +19,10 @@ augments build_worker_context via a comment — it never patches kanban core.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
@@ -495,43 +497,105 @@ _TOOL_EVENT_LOG = os.path.join(os.path.expanduser("~/.hscc"), "tool_events.jsonl
 # What a ledger row says when NO identity source resolves at all.
 _UNKNOWN_PROFILE = "unknown"
 
+#: Default location of the Hermes runtime tree. The same value as
+#: ``hscc_daemon.hermes_import.DEFAULT_AGENT_PATH`` and the sibling callers'
+#: ``_HERMES_AGENT_PATH`` constants; ``HERMES_AGENT_PATH`` overrides it and
+#: ``HOME`` is honoured through ``expanduser``.
+_HERMES_AGENT_TREE_DEFAULT = "~/.hermes/hermes-agent"
+
+
+def _hermes_import_module():
+    """The ``hscc_daemon.hermes_import`` module — the one owner of this window.
+
+    Reached through this plugin's own path-robust sibling loader, ``fleet._daemon_mod``
+    (which inserts the plugins dir for the import and pops it in its ``finally``, the
+    same discipline this module now applies to the Hermes dir), because the plugin's
+    directory name has a hyphen and the test suite imports this file flat as
+    ``workflow``. Raises when the peer plugin is not installed;
+    :func:`_agent_tree_window` then falls back to the local equivalent.
+    """
+    try:
+        from .fleet import _daemon_mod          # package context (runtime)
+    except ImportError:
+        from fleet import _daemon_mod           # direct import context (tests)
+    return _daemon_mod("hermes_import")
+
+
+@contextlib.contextmanager
+def _local_agent_tree_window(path):
+    """Hold ``path`` on ``sys.path`` for this block only, then put it back.
+
+    The same contract as ``hscc_daemon.hermes_import.agent_tree_on_path``, kept here
+    for the one case that module cannot serve: an install that ships hscc-cluster
+    WITHOUT hscc_daemon (the "peer optional" doctrine of ``_theme._cli_theme``). It is
+    deliberately not refcounted — the windows that overlap on other threads are the
+    daemon's — so it only ever takes back an entry it added itself, and a path that was
+    already on ``sys.path`` stays there.
+    """
+    added = os.path.isdir(path) and path not in sys.path
+    if added:
+        sys.path.insert(0, path)
+    try:
+        yield path
+    finally:
+        if added:
+            try:
+                sys.path.remove(path)
+            except ValueError:
+                pass  # somebody else removed it; taking theirs back is a second leak
+
+
+@contextlib.contextmanager
+def _agent_tree_window(path):
+    """Put the Hermes runtime dir on ``sys.path`` for this block only.
+
+    Uses the sanctioned context manager — ``hermes_import.agent_tree_on_path`` —
+    whenever the peer plugin is importable, so this plugin and the daemon share ONE
+    refcounted registry of open windows over the same directory. Two registries would
+    reproduce the flake that module's docstring names: two overlapping windows on one
+    dir let the first to close pull the path out from under the other. Falls back to
+    :func:`_local_agent_tree_window` (same ``finally`` contract) only when
+    ``hscc_daemon`` is genuinely unimportable, and NEVER leaks the entry either way.
+    """
+    try:
+        window = _hermes_import_module().agent_tree_on_path(path)
+    except Exception:
+        window = _local_agent_tree_window(path)
+    with window:
+        yield
+
 
 def _active_profile_name():
     """Hermes' active profile name, or None when ``hermes_cli`` cannot load.
 
-    Fence discipline is the repo's established one for Hermes lookups
+    Fence discipline is the repo's sanctioned one for Hermes lookups
     (``hscc_daemon.profile_roster._hermes_gate``, ``autodown`` for
     ``hermes_cli.kanban_db``): ``hermes_cli`` lives under ``~/.hermes/hermes-agent``
     and is not always on the plugin's ``sys.path``, so a failed import retries once
-    with the runtime dir on the path, and ANY remaining failure returns None rather
-    than raising. This runs on the ``pre_tool_call`` hot path of every tool call in
-    every profile — observability must never be the thing that breaks a tool call.
+    inside :func:`_agent_tree_window`, which holds the runtime dir on the path only for
+    the duration of the block and restores ``sys.path`` in its ``finally`` — including
+    the call, because a Hermes function can itself trigger a fresh top-level import
+    (``hermes_import``'s "wrap the call too", t_8eafef82). The hand-rolled insert this
+    replaces (t_847ab03b) documented that promise and kept the entry for the life of the
+    process, which silently changed the hermes posture of every case that ran after the
+    first lifecycle case in a process. ANY remaining failure returns None rather than
+    raising: this runs on the ``pre_tool_call`` hot path of every tool call in every
+    profile — observability must never be the thing that breaks a tool call.
     """
-    import sys
-
-    def _load():
+    def _resolve():
         from hermes_cli.profiles import get_active_profile_name
-        return get_active_profile_name
+        return get_active_profile_name()
 
     try:
-        loader = _load()
+        name = _resolve()
     except Exception:
-        loader = None
-    if loader is None:
-        hermes_path = os.path.expanduser(
-            os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent"))
-        if os.path.isdir(hermes_path) and hermes_path not in sys.path:
-            sys.path.insert(0, hermes_path)
-            try:
-                loader = _load()
-            except Exception:
-                loader = None
-    if loader is None:
-        return None
-    try:
-        name = loader()
-    except Exception:
-        return None
+        try:
+            with _agent_tree_window(os.path.expanduser(
+                    os.environ.get("HERMES_AGENT_PATH",
+                                   _HERMES_AGENT_TREE_DEFAULT))):
+                name = _resolve()
+        except Exception:
+            return None
     if isinstance(name, str) and name.strip():
         return name.strip()
     return None
