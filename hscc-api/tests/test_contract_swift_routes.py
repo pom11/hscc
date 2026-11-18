@@ -284,7 +284,7 @@ def test_every_client_post_server_handler_is_confirm_gated():
 #
 #   client route                      required query param   server handler (requires it)
 #   --------------------------------  ---------------------  --------------------------------------------
-#   GET /v1/sessions                  profile                routes_sessions.py:200-202 (400 without it)
+#   GET /v1/sessions                  profile                routes_sessions.py:202 (400 without it)
 #
 # PRUNED (client stopped calling the route; see
 # test_matrices_name_routes_the_client_still_calls):
@@ -366,11 +366,16 @@ def test_every_required_query_param_is_sent():
 #
 #   client route                     required body fields   server handler (requires it)
 #   -------------------------------  ---------------------  --------------------------------------------------
-#   POST /v1/cards                   board, title           routes_actions.py:199  (_action_fields "board","title")
-#   POST /v1/cluster/stop            container_id           routes_actions.py:303  (_action_fields "container_id")
-#   POST /v1/sessions/{id}/retire    profile                routes_sessions.py:252-254 (400 without it)
-#   POST /v1/sessions/{id}/compact   profile                routes_sessions.py:291-293 (400 without it)
-#   POST /v1/orchestrator/chat       prompt                 routes_orchestrator.py:1304-1310 (400 without it)
+#   POST /v1/cards                   board, title           routes_actions.py:230  (handle_create_card -> _action_fields "board","title")
+#   POST /v1/cluster/stop            container_id           routes_actions.py:334  (handle_cluster_stop -> _action_fields "container_id")
+#   POST /v1/sessions/{id}/retire    profile                routes_sessions.py:254 (handle_sessions_retire)
+#   POST /v1/sessions/{id}/compact   profile                routes_sessions.py:293 (handle_sessions_compact)
+#   POST /v1/orchestrator/chat       prompt                 routes_orchestrator.py:1970-1975 (handle_orchestrator_chat -> _validate_prompt)
+#
+#   (Line anchors in the kept rows re-verified against these handlers on
+#   2026-11-18 (t_80e185d2); handler names carry the citation if they drift
+#   again. The audit doc `hscc-api/docs/audit-client-server-params.md` mirrors
+#   both matrices — keep the two in step when a row changes.)
 #
 # PRUNED (client stopped calling the route; see
 # test_matrices_name_routes_the_client_still_calls). All three left
