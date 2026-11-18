@@ -15,12 +15,17 @@ t_74141b24):
 
   * ONE probe module per leg, one function per capability, called at RUNTIME.
     A collection-time answer is wrong on this leg for a reason that is measured,
-    not theoretical: ``workflow._active_profile_name`` inserts
-    ``~/.hermes/hermes-agent`` into ``sys.path`` the first time it runs
-    (workflow.py:523, production's own import fence), so the answer at
-    import time and the answer after the first lifecycle case are different
-    answers. ``test_the_probes_answer_at_call_time_not_at_import`` below is the
-    pin.
+    not theoretical. The measurement that found the rule was production's own
+    import fence: ``workflow._active_profile_name`` used to insert
+    ``~/.hermes/hermes-agent`` into ``sys.path`` the first time it ran and leave it
+    there, so the answer at import time and the answer after the first lifecycle
+    case were two different answers. t_847ab03b / PR #364 closed that leak and
+    ``test_hermes_fence_sys_path.py`` is what pins it shut. The rule outlived the
+    incident: the tree can still reach ``sys.path`` later than collection from
+    outside this leg, measured inside one thin-leg process by t_0fd2c149 and
+    recorded in ``hermes_gap.py`` ("Every probe re-checks at CALL time"), and a
+    cached answer cannot see that either.
+    ``test_the_probes_answer_at_call_time_not_at_import`` below is the pin.
   * The skip carries the IMPORT ERROR and names the MODULE — the runner's stamp
     rule reads ``-rs`` and has to be able to tell "the sibling env is thin"
     (correct) from "hermes is there and still broken" (a finding).
@@ -263,11 +268,17 @@ def test_the_probe_vocabulary_has_one_definition_per_fact():
 def test_the_probes_answer_at_call_time_not_at_import():
     """No module-level hermes import and no module-level cached answer.
 
-    This is the pin the whole card is about. On this leg the answer provably
-    changes mid-run — ``workflow._active_profile_name`` puts
-    ``~/.hermes/hermes-agent`` on ``sys.path`` (workflow.py:523) the first
-    time it runs — so a flag computed at import is not a conservative answer, it
-    is a wrong one that nothing reports.
+    This is the pin the whole card is about. The measurement that earned it was
+    made while the answer on this leg provably changed mid-run:
+    ``workflow._active_profile_name`` put ``~/.hermes/hermes-agent`` on
+    ``sys.path`` the first time it ran and left it there, so a flag computed at
+    import was not a conservative answer, it was a wrong one that nothing
+    reported. t_847ab03b / PR #364 ended that mid-run change and
+    ``test_hermes_fence_sys_path.py`` keeps it ended. What this case pins is the
+    SHAPE, which has to survive the incident that found it: no hermes import and
+    no frozen answer at module or class scope, so whenever the tree next reaches
+    ``sys.path`` later than collection from anywhere else (t_0fd2c149, recorded in
+    ``hermes_gap.py``) the probes still answer for the interpreter as it is now.
     """
     for path, tree in _trees().items():
         if path.name == CHILD_PAYLOAD:
@@ -588,11 +599,15 @@ def _imports_here(module):
     """Can THIS process import *module*? Restores ``sys.modules`` afterwards.
 
     The oracle has to be in-process, because that is the question the probe asks:
-    a gated case imports hermes in this process, on this ``sys.path``, which by
-    now may hold ``~/.hermes/hermes-agent`` from ``workflow``'s fence
-    (workflow.py:523). A child interpreter would answer a different question —
-    it does not inherit ``sys.path`` — and that is why the child capability has its
-    OWN probe (``require_child_ran_hermes``) instead of reusing these four.
+    a gated case imports hermes in this process, on this ``sys.path``. When this
+    was written the fence had usually already added ``~/.hermes/hermes-agent`` to
+    that path by the time a later case asked; t_847ab03b / PR #364 took the entry
+    back and ``test_hermes_fence_sys_path.py`` keeps it taken, which only sharpens
+    the point rather than softening it — the in-process path is the path the gated
+    cases get, whatever it holds. A child interpreter would answer a different
+    question — it does not inherit ``sys.path`` — and that is why the child
+    capability has its OWN probe (``require_child_ran_hermes``) instead of reusing
+    these four.
 
     Restoring ``sys.modules`` is not tidiness: this guard sorts before
     ``test_lifecycle_hooks.py``, so a successful import left here would hand every

@@ -14,11 +14,14 @@ module-level ``pytest.importorskip("hermes_cli…")``, and both halves of that s
 are why:
 
   * it decided at COLLECTION, before anything in the leg could change the answer —
-    and here it does change: ``workflow._active_profile_name`` puts
-    ``~/.hermes/hermes-agent`` on ``sys.path`` the first time it runs
-    (workflow.py:523, production's documented import fence), and everything
-    after that sees a different interpreter state than the one collection asked
-    about; and
+    and on this leg the answer once did change: ``workflow._active_profile_name``
+    put ``~/.hermes/hermes-agent`` on ``sys.path`` the first time it ran and left it
+    there (production's hand-rolled import fence, until t_847ab03b / PR #364 made
+    the fence restore it — ``test_hermes_fence_sys_path.py`` pins that), so
+    everything after the first lifecycle case saw a different interpreter state
+    than the one collection had asked about. The rule outlived the incident: a
+    collection-time answer stays wrong whenever the tree reaches ``sys.path`` later
+    than collection (t_0fd2c149, recorded in ``hermes_gap.py``); and
   * it reported a three-case module as ONE skipped item, so ``-rs`` read
     ``[1] test_review_escalation.py:19: hermes_cli not installed in this env`` —
     a capability, no module, no import error, three cases indistinguishable from

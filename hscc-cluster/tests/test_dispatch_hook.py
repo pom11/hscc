@@ -14,12 +14,14 @@ while ``kanban_db`` drags in the dispatcher and the state schema.
 
 This file used to answer both with one module-level
 ``pytest.importorskip("hermes_cli.kanban_db", reason="hermes_cli not installed in
-this env")``: a collection-time answer (the thin sibling's importable-hermes state
-changes mid-run — ``workflow._active_profile_name`` puts ``~/.hermes/hermes-agent``
-on ``sys.path`` the first time it runs, workflow.py:523), a reason naming a
-capability but neither module nor import error, and one skip item for a whole
-module of cases. The hermes imports now happen inside ``_hermes()`` per case, so
-there is nothing at import time to freeze an answer into.
+this env")``: a collection-time answer (on the thin sibling the importable-hermes
+state used to change mid-run — ``workflow._active_profile_name`` put
+``~/.hermes/hermes-agent`` on ``sys.path`` the first time it ran and left it there,
+until t_847ab03b / PR #364 made the fence restore it, which
+``test_hermes_fence_sys_path.py`` now pins), a reason naming a capability but
+neither module nor import error, and one skip item for a whole module of cases. The
+hermes imports now happen inside ``_hermes()`` per case, so there is nothing at
+import time to freeze an answer into.
 """
 
 import tempfile

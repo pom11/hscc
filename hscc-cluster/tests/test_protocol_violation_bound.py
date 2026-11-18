@@ -31,9 +31,12 @@ say ``pytest.importorskip("hermes_cli")`` at module scope — a collection-time
 answer, naming a capability and no import error. Now the case asks this process
 first (cheap: no subprocess needed when hermes is simply absent) and then asks
 the CHILD, whose answer is a different fact: the child gets ``sys.executable``
-plus its own script dir, and this process's ``sys.path`` — which
-``workflow._active_profile_name`` extends with ``~/.hermes/hermes-agent`` the
-first time it runs (workflow.py:523) — is not inherited. A child that died
+plus its own script dir, and this process's ``sys.path`` is not inherited — not
+even the ``~/.hermes/hermes-agent`` entry that ``workflow._active_profile_name``
+used to add there and never remove. That entry is gone since t_847ab03b / PR #364
+(``test_hermes_fence_sys_path.py`` pins its absence), and the child never saw it
+either way, so the two-question shape stands on the non-inheritance alone. A child
+that died
 for any reason OTHER than a missing import is not environment: the case runs on
 and fails, which is the whole point.
 """
