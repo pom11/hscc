@@ -163,7 +163,11 @@ check("the configuration folds the All sentinel to nil before any view sees it",
 // ---------------------------------------------------------------------------
 print("\n[6] the App Group projection (§7)")
 let wireBody = """
-{"projects":[{"name":"hscc","board":"hscc","repo":"/Users/someone/dev/hscc","topic":3},
+{"projects":[{"name":"hscc","board":"hscc","repo":"/Users/someone/dev/hscc","topic":3,
+              "health":"ok","counts":{"todo":4,"ready":2,"running":3,"blocked":1,
+              "done":5,"archived":0,"total":15},"last_activity":1795000000,
+              "orchestrator":{"profile":"hscc-orch","session":"hscc",
+              "state":"thinking","turn_s":12}},
              {"name":"radio","board":null,"repo":"/Users/someone/dev/Radio","topic":7}],
  "count":2,"speak":"2 projects registered"}
 """
@@ -173,6 +177,15 @@ check("the real payload shape decodes with repo present on the wire",
 let projected = ProjectsSnapshotStore.project(from: payload)
 check("the projection keeps name + board only",
       projected.map { "\($0.name):\($0.board ?? "–")" } == ["hscc:hscc", "radio:–"])
+check("the board truth survives the projection (counts, activity, orchestrator)",
+      projected[0].counts?.running == 3 && projected[0].counts?.blocked == 1
+        && projected[0].counts?.ready == 2 && projected[0].lastActivity == 1795000000
+        && projected[0].orchestrator?.display == "thinking")
+check("the row's detail line is the CLI's three counts + orchestrator state",
+      projected[0].detailLine?.contains("3 run · 1 blocked · 2 ready") == true
+        && projected[0].detailLine?.contains("orch: thinking") == true)
+check("an old row without the new fields renders no invented detail",
+      projected[1].detailLine == nil)
 let blob = String(data: try JSONEncoder().encode(
     ProjectsSnapshotStore.Snapshot(date: twelveMinutesAgo, rows: projected)), encoding: .utf8)!
 check("the stored bytes carry no repo key", !blob.contains("repo"))

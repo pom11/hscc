@@ -72,14 +72,82 @@ struct ProjectsLite: Decodable {
     func rows(limit: Int) -> [ProjectLite] { Array(projects.prefix(limit)) }
 }
 
-/// One project — the two keys every §5.1 family can render. `board` is optional
-/// because the console's `Project` treats it that way: no board renders as the
-/// name alone instead of failing the decode and blanking the surface.
+/// One project — the registry row plus the board truth the Projects widget
+/// draws. `board` and every status field are optional because an older server
+/// (the live 2.15.11 today) sends only `{name, board, repo, topic}`; a missing
+/// count renders as "—", never as a fabricated zero.
 struct ProjectLite: Decodable, Identifiable {
     let name: String
     let board: String?
+    /// `hscc project list`'s health token: ok | partial | absent.
+    let health: String?
+    /// The project board's status histogram, the same projection
+    /// `/v1/mobile/summary` serves. nil when the board read failed.
+    let counts: ProjectCounts?
+    /// Newest parseable card timestamp on the board, epoch seconds.
+    let lastActivity: Int?
+    /// A live orchestrator turn, nil when the orchestrator is idle.
+    let orchestrator: ProjectOrchestrator?
+
+    enum CodingKeys: String, CodingKey {
+        case name, board, health, counts, orchestrator
+        case lastActivity = "last_activity"
+    }
+
+    init(name: String, board: String?, health: String? = nil,
+         counts: ProjectCounts? = nil, lastActivity: Int? = nil,
+         orchestrator: ProjectOrchestrator? = nil) {
+        self.name = name
+        self.board = board
+        self.health = health
+        self.counts = counts
+        self.lastActivity = lastActivity
+        self.orchestrator = orchestrator
+    }
 
     var id: String { name }
+}
+
+/// A project board's status counts. Every field is optional so a partial
+/// payload cannot blank the row; the view omits what the server did not send.
+struct ProjectCounts: Codable, Equatable, Hashable, Sendable {
+    let todo: Int?
+    let ready: Int?
+    let running: Int?
+    let blocked: Int?
+    let done: Int?
+    let archived: Int?
+    let total: Int?
+
+    /// The three numbers the Projects widget promises (CARD A3). Missing keys
+    /// are omitted, not printed as zero.
+    var statusLine: String? {
+        var parts: [String] = []
+        if let running { parts.append("\(running) run") }
+        if let blocked { parts.append("\(blocked) blocked") }
+        if let ready { parts.append("\(ready) ready") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// One live orchestrator turn from `hscc kanban monitor`'s own row shape.
+struct ProjectOrchestrator: Codable, Equatable, Hashable, Sendable {
+    let profile: String?
+    let session: String?
+    let state: String?
+    let turnSeconds: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case profile, session, state
+        case turnSeconds = "turn_s"
+    }
+
+    /// The state the CLI shows, or the profile when the store had no prose.
+    var display: String? {
+        if let state, !state.isEmpty { return state }
+        if let profile, !profile.isEmpty { return profile }
+        return nil
+    }
 }
 
 

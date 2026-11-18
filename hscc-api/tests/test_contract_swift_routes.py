@@ -28,6 +28,7 @@ import inspect
 import json
 import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +100,91 @@ def _swift_routes():
 SWIFT_ROUTES = _swift_routes()
 
 
+# --------------------------------------------------------------------------- #
+# Extension surfaces — widgets + Live Activities
+# --------------------------------------------------------------------------- #
+#
+# HSCCClient.swift is the APP's route list. Widgets and Live Activities read
+# through WidgetDataClient.swift (its closed `WidgetDataPath.all` allowlist)
+# plus two direct `client.get` calls in MonitorWidget.swift. Those were never
+# in the derived set, so a widget route could 404 on the live server while this
+# gate stayed green — exactly the class this contract test exists to stop.
+#
+# The extension client is GET-only by construction, so every route found in
+# these sources is asserted as GET. String literals are extracted with a real
+# scanner (line/block comments skipped), not a bare regex over the file, so a
+# route quoted in prose cannot invent a requirement either.
+
+WIDGET_CLIENT_PATH = "ios-app/Sources/Shared/WidgetDataClient.swift"
+EXTENSION_SOURCE_DIRS = (
+    "ios-app/Sources/HSCCWidgets",
+    "ios-app/Sources/HSCCLiveActivityMonitor",
+)
+EXTENSION_SOURCE_FILES = (WIDGET_CLIENT_PATH,)
+
+
+def _swift_string_literals(src):
+    """Every Swift string literal in ``src``, comments excluded."""
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        if src.startswith("//", i):
+            end = src.find("\n", i + 2)
+            if end == -1:
+                break
+            i = end + 1
+            continue
+        if src.startswith("/*", i):
+            end = src.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if src[i] == '"':
+            j = i + 1
+            buf = []
+            while j < n:
+                if src[j] == "\\" and j + 1 < n:
+                    buf.append(src[j:j + 2])
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    break
+                buf.append(src[j])
+                j += 1
+            out.append("".join(buf))
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def _extension_routes():
+    """Every ``/v1/...`` literal the widget/Live-Activity sources can fetch."""
+    paths = [Path(_REPO_ROOT) / rel for rel in EXTENSION_SOURCE_FILES]
+    for rel_dir in EXTENSION_SOURCE_DIRS:
+        paths.extend(sorted((Path(_REPO_ROOT) / rel_dir).glob("*.swift")))
+    routes = []
+    seen = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        for lit in _swift_string_literals(path.read_text()):
+            route = _normalize_swift_path(lit)
+            if not route.startswith("/v1/"):
+                continue
+            key = ("GET", route)       # the extension client is GET-only
+            if key not in seen:
+                seen.add(key)
+                routes.append(key)
+    return routes
+
+
+EXTENSION_ROUTES = _extension_routes()
+for _route in EXTENSION_ROUTES:
+    if _route not in SWIFT_ROUTES:
+        SWIFT_ROUTES.append(_route)
+
+
 def _instantiate(path):
     """Fill ``{param}`` placeholders with a concrete, safe value so the path
     can be matched against a compiled route regex and issued over HTTP."""
@@ -139,6 +225,45 @@ def test_every_swift_route_is_registered():
     assert not unresolved, (
         "Route(s) the iOS app calls are NOT registered on the server:\n"
         + "\n".join(f"  {m} {p}  (concrete: {c})" for m, p, c in unresolved)
+    )
+
+
+#: The extension client's audited read set (WIDGET_DATA_CONTRACT §3 + the
+#: daemon-host sidecar). Kept explicit so deleting a path from the Swift source
+#: is a visible change here, and adding one without registering it fails the
+#: register gate above.
+EXPECTED_EXTENSION_ROUTES = {
+    ("GET", "/v1/projects"),
+    ("GET", "/v1/mobile/summary"),
+    ("GET", "/v1/kanban/running"),
+    ("GET", "/v1/kanban/blocked"),
+    ("GET", "/v1/kanban/stale"),
+    ("GET", "/v1/cluster/monitor"),
+    ("GET", "/v1/cluster/status"),
+    ("GET", "/v1/daemon/host"),
+    ("GET", "/v1/autodown/status"),
+}
+
+
+def test_extension_route_set_is_the_audited_widget_reads():
+    """The widget/Live-Activity route list is parsed from their own sources.
+
+    If this fails because a path was added, register it on the server and add
+    it to ``WIDGET_ROUTES.md`` (and the contract set if it is a new dataset);
+    if it fails because a path disappeared, the surface lost a read it needs.
+    """
+    assert set(EXTENSION_ROUTES) == EXPECTED_EXTENSION_ROUTES
+
+
+def test_widget_routes_doc_names_every_extension_route():
+    """The human route map must not fall behind the derived widget set."""
+    doc_path = Path(_REPO_ROOT) / "hscc-api/docs/WIDGET_ROUTES.md"
+    assert doc_path.exists(), "hscc-api/docs/WIDGET_ROUTES.md is missing"
+    doc = doc_path.read_text()
+    missing = [path for _method, path in EXTENSION_ROUTES if path not in doc]
+    assert not missing, (
+        "Widget/Live-Activity route(s) absent from hscc-api/docs/WIDGET_ROUTES.md:\n"
+        + "\n".join(f"  {p}" for p in missing)
     )
 
 

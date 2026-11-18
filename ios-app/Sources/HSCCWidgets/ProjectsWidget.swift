@@ -48,15 +48,54 @@ import WidgetKit
 
 // MARK: - The stored projection (§7)
 
-/// The two keys §5.1 allows this surface to keep, and the only shape that can
-/// be written to the App Group. A separate type from `ProjectLite` on purpose:
-/// the response is decodable-only, so the encode path has nowhere to pick up a
-/// third field even if the payload grows one.
+/// The projection this surface keeps, and the only shape that can be written to
+/// the App Group. It carries the registry identity plus the board truth the
+/// widget draws; `repo`/`topic`/`speak` are deliberately absent, so the response
+/// is decodable-only and the encode path can never pick them up.
 struct ProjectRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     let name: String
     let board: String?
+    /// The CLI's health token for the registry row (ok | partial | absent).
+    let health: String?
+    /// The board histogram, last activity and orchestrator turn — the same
+    /// values `hscc project list` + `hscc kanban monitor` report. Optional so a
+    /// snapshot written by an older build (or an older server) still decodes.
+    let counts: ProjectCounts?
+    let lastActivity: Int?
+    let orchestrator: ProjectOrchestrator?
 
     var id: String { name }
+
+    init(name: String, board: String?, health: String? = nil,
+         counts: ProjectCounts? = nil, lastActivity: Int? = nil,
+         orchestrator: ProjectOrchestrator? = nil) {
+        self.name = name
+        self.board = board
+        self.health = health
+        self.counts = counts
+        self.lastActivity = lastActivity
+        self.orchestrator = orchestrator
+    }
+
+    /// What the row says under its name: running/blocked/ready, then how long
+    /// ago the board last moved, then the live orchestrator state. Missing
+    /// pieces are omitted — never rendered as a zero or an invented age.
+    var detailLine: String? {
+        var parts: [String] = []
+        if let status = counts?.statusLine { parts.append(status) }
+        if let age = activityAge { parts.append(age) }
+        if let state = orchestrator?.display { parts.append("orch: \(state)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var activityAge: String? {
+        guard let lastActivity else { return nil }
+        let seconds = max(0, Int(Date().timeIntervalSince1970) - lastActivity)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(seconds / 60)m ago" }
+        if seconds < 86400 { return "\(seconds / 3600)h ago" }
+        return "\(seconds / 86400)d ago"
+    }
 }
 
 /// The last-known projection: the rows of the last read that worked, plus when
@@ -96,7 +135,11 @@ enum ProjectsSnapshotStore {
     /// The response → the rows. The one place the projection happens, so §7 is
     /// auditable in one line: `name` and `board`, nothing else.
     static func project(from payload: ProjectsLite) -> [ProjectRow] {
-        payload.projects.prefix(rowLimit).map { ProjectRow(name: $0.name, board: $0.board) }
+        payload.projects.prefix(rowLimit).map {
+            ProjectRow(name: $0.name, board: $0.board, health: $0.health,
+                       counts: $0.counts, lastActivity: $0.lastActivity,
+                       orchestrator: $0.orchestrator)
+        }
     }
 }
 
@@ -565,20 +608,29 @@ private struct ProjectRowView: View {
     @Environment(\.widgetStyle) private var style
     let row: ProjectRow
     var showsBoard = false
+    var showsDetail = true
 
     var body: some View {
-        HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
-            Image(systemName: "folder").widgetIcon(style)
-                .font(style.font(size: 9))
-                .foregroundColor(style.secondaryTextColor)
-            Text(row.name)
-                .font(style.font(.caption))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-            if showsBoard, let board = row.board, !board.isEmpty {
-                Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
-                Text(board)
-                    .font(style.font(.caption2))
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
+                Image(systemName: "folder").widgetIcon(style)
+                    .font(style.font(size: 9))
+                    .foregroundColor(style.secondaryTextColor)
+                Text(row.name)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.primaryTextColor)
+                    .lineLimit(1)
+                if showsBoard, let board = row.board, !board.isEmpty {
+                    Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
+                    Text(board)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(1)
+                }
+            }
+            if showsDetail, let detail = row.detailLine {
+                Text(detail)
+                    .font(style.font(size: 8))
                     .foregroundColor(style.secondaryTextColor)
                     .lineLimit(1)
             }

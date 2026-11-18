@@ -208,6 +208,16 @@ def _count_by_status(cards) -> dict:
     return entry
 
 
+def count_cards(cards) -> dict:
+    """Public alias for :func:`_count_by_status` — the ONE board projection.
+
+    ``/v1/projects`` enriches each project row from this same function so the
+    projects widget and the board-status tile can never disagree about what
+    ``running``/``blocked``/``done`` mean (including ``other`` and ``total``).
+    """
+    return _count_by_status(cards)
+
+
 def _open_total(entry: dict) -> int:
     """Everything that is not ``done``/``archived`` (contract §6 speak example).
 

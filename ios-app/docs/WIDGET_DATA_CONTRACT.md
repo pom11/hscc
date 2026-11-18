@@ -228,6 +228,13 @@ absolute path and must not be copied into the App Group store or rendered
 (`t_6d8731ab`) should pair this payload with §6's counts block rather than
 invent a third read.
 
+**Amendment (CARD A3, 2026-11-18).** The operator's ground truth is the CLI
+(`hscc project list` + `hscc kanban monitor`), so `GET /v1/projects` now adds
+`health`, the board's status `counts` (including `done`/`archived`), the newest
+board activity and the live orchestrator turn. Those fields are optional on the
+wire: an older server still sends `{name, board}` and the widget renders `—`
+rather than a fabricated zero. `repo` remains undecoded and unstored.
+
 ### 5.2 board status counts — verdict **`needs compact server endpoint`** (the one that authorises `t_8580f9a3`)
 
 The widget is five numbers for one board (`t_6d8731ab`: todo/ready/running/

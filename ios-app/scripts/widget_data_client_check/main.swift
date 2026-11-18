@@ -217,7 +217,12 @@ func runAll() async {
     case .success(let payload):
         check("projects decoded", payload.count == 2 && payload.projects.count == 2)
         let fields = Mirror(reflecting: payload.projects[0]).children.map { $0.label ?? "" }
-        check("ProjectLite carries only {name, board}", fields == ["name", "board"])
+        check("ProjectLite carries identity + board truth, never repo",
+              fields == ["name", "board", "health", "counts", "lastActivity",
+                         "orchestrator"])
+        check("an old {name, board} row still decodes (counts nil, not zero)",
+              payload.projects[0].counts == nil
+                && payload.projects[0].lastActivity == nil)
         let rendered = String(describing: payload.projects)
         check("repo is not decoded anywhere in the value", !rendered.contains("/srv/hscc"))
     case .failure(let failure):
