@@ -45,12 +45,17 @@ def _request(running, token, path):
 def stub_cluster(monkeypatch):
     """Stub all five cluster-engine backing calls with plain dicts."""
 
-    def install(status=None, hosts=None, monitor=None, jobs=None, info=None):
+    def install(status=None, hosts=None, monitor=None, jobs=None, info=None,
+                serving=None):
         monkeypatch.setattr(routes_cluster, "_backing_cluster_status", lambda: status)
         monkeypatch.setattr(routes_cluster, "_backing_cluster_hosts", lambda: hosts)
         monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", lambda: monitor)
         monkeypatch.setattr(routes_cluster, "_backing_cluster_jobs", lambda: jobs)
         monkeypatch.setattr(routes_cluster, "_backing_cluster_info", lambda: info)
+        monkeypatch.setattr(
+            routes_cluster, "_backing_serving_snapshot",
+            lambda: serving if serving is not None
+            else {"rows": [], "proxy_error": None})
 
     return install
 
@@ -126,21 +131,26 @@ def test_cluster_status_nodes_absent_still_decodes(running, token, stub_cluster)
                                        "container_id": "abc"}
 
 
-def test_cluster_status_unavailable(running, token, stub_cluster):
-    stub_cluster(status={"error": "boom"})
+def test_cluster_status_failure_names_the_cause(running, token, stub_cluster):
+    stub_cluster(status={"error": "sparkrun status exited 1: ssh unreachable"})
     status, payload = _request(running, token, "/v1/cluster/status")
     assert status == 200
-    assert payload["speak"] == "cluster status unavailable"
+    assert payload["error"] == "sparkrun status exited 1: ssh unreachable"
+    assert payload["speak"] == \
+        "Cluster status failed: sparkrun status exited 1: ssh unreachable"
+    # Degraded payload keeps the widget-safe shape.
+    assert payload["workloads"] == []
+    assert payload["total_hosts"] == 0
 
 
-def test_cluster_status_unavailable_on_exception(running, token, stub_cluster, monkeypatch):
+def test_cluster_status_failure_on_exception(running, token, stub_cluster, monkeypatch):
     stub_cluster(status={"error": "x"})
     monkeypatch.setattr(routes_cluster, "_backing_cluster_status", lambda: (_ for _ in ()).throw(RuntimeError("secret ssh failure")))
     status, payload = _request(running, token, "/v1/cluster/status")
     assert status == 200
-    assert payload["speak"] == "cluster status unavailable"
+    assert payload["error"] == "RuntimeError: secret ssh failure"
+    assert payload["speak"].startswith("Cluster status failed: RuntimeError:")
     assert "traceback" not in json.dumps(payload).lower()
-    assert "secret" not in json.dumps(payload)
 
 
 def test_cluster_hosts_shape(running, token, stub_cluster):
@@ -160,34 +170,42 @@ def test_cluster_hosts_unavailable(running, token, stub_cluster):
     stub_cluster(hosts=None)
     status, payload = _request(running, token, "/v1/cluster/hosts")
     assert status == 200
-    assert payload["speak"] == "host list unavailable"
+    assert payload["speak"].startswith("Host list failed:")
+    assert payload["error"]
 
 
 def test_cluster_monitor_shape(running, token, stub_cluster):
-    stub_cluster(monitor={"success": True, "output": "{}", "json": {"nodes": [1, 2, 3]}})
+    stub_cluster(
+        monitor={"success": True, "output": "{}", "json": {"nodes": [1, 2, 3]}},
+        serving={"rows": [{"node": "192.0.2.10", "port": "8000",
+                           "model": "m", "running": 1}],
+                 "proxy_error": None},
+    )
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
     assert payload["success"] is True
     assert payload["speak"] == "Fleet snapshot: 3 hosts sampled."
+    # The serving section is the same one `hscc cluster monitor` renders.
+    assert payload["serving"][0]["model"] == "m"
+    assert payload["serving_proxy_error"] is None
 
 
-def test_cluster_monitor_unavailable(running, token, stub_cluster):
+def test_cluster_monitor_failure_names_the_cause(running, token, stub_cluster):
     stub_cluster(monitor={"success": False, "error": "no monitor output"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
-    assert payload["speak"] == "fleet monitor unavailable"
-    # The raw backing error dict must NOT be forwarded into a 200 body.
-    assert "error" not in payload
-    assert "no monitor output" not in str(payload)
+    assert payload["error"] == "no monitor output"
+    assert payload["speak"] == "Fleet monitor failed: no monitor output"
 
 
 def test_cluster_monitor_run_cmd_error_dict_degrades(running, token, stub_cluster):
-    """A plain {"error": "..."} (not the run_cmd shape) also must not leak."""
+    """A plain {"error": "..."} (not the run_cmd shape) reports the cause."""
     stub_cluster(monitor={"error": "cluster engine command failed"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
-    assert "error" not in payload
-    assert payload["speak"] == "fleet monitor unavailable"
+    assert payload["error"] == "cluster engine command failed"
+    assert payload["speak"] == \
+        "Fleet monitor failed: cluster engine command failed"
 
 
 def test_cluster_jobs_shape(running, token, stub_cluster):
@@ -202,19 +220,18 @@ def test_cluster_jobs_unavailable(running, token, stub_cluster):
     stub_cluster(jobs={"error": "cluster engine command failed"})
     status, payload = _request(running, token, "/v1/cluster/jobs")
     assert status == 200
-    assert payload["speak"] == "job list unavailable"
-    # The raw backing error dict must NOT be forwarded into a 200 body.
-    assert "error" not in payload
-    assert "cluster engine command failed" not in str(payload)
+    assert payload["error"] == "cluster engine command failed"
+    assert payload["speak"] == \
+        "Job list failed: cluster engine command failed"
 
 
 def test_cluster_jobs_run_cmd_error_dict_degrades(running, token, stub_cluster):
-    """A run_cmd-shaped error (success False, no json) also must not leak."""
+    """A run_cmd-shaped error (success False, no json) reports the cause."""
     stub_cluster(jobs={"success": False, "error": "no job output"})
     status, payload = _request(running, token, "/v1/cluster/jobs")
     assert status == 200
-    assert "error" not in payload
-    assert payload["speak"] == "job list unavailable"
+    assert payload["error"] == "no job output"
+    assert payload["speak"] == "Job list failed: no job output"
 
 
 def test_cluster_info_shape(running, token, stub_cluster):
@@ -229,7 +246,8 @@ def test_cluster_info_unavailable(running, token, stub_cluster):
     stub_cluster(info={"error": "boom"})
     status, payload = _request(running, token, "/v1/cluster/info")
     assert status == 200
-    assert payload["speak"] == "cluster info unavailable"
+    assert payload["error"] == "boom"
+    assert payload["speak"] == "Cluster info failed: boom"
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +354,40 @@ def test_fleet_throughput_shape(running, token, stub_fleet):
     assert payload["speak"] == "3 of 4 nodes healthy."
 
 
+def test_engine_loader_falls_back_after_cellar_disappears(
+        tmp_path, monkeypatch):
+    """2026-11-18 root cause: the API process was launched from a Homebrew
+    Cellar dir that an upgrade deleted. The sibling-only lookup then returned
+    None forever. HSCC_CLUSTER_DIR (and the deployed-plugin/opt-link
+    fallbacks) must still find an engine."""
+    cluster_dir = tmp_path / "hscc-cluster"
+    cluster_dir.mkdir()
+    (cluster_dir / "hscc.py").write_text(
+        "def cmd_cluster_status():\n"
+        "    return {'workloads': [], 'idle_hosts': [], 'total_hosts': 1}\n")
+    monkeypatch.setenv("HSCC_CLUSTER_DIR", str(cluster_dir))
+    monkeypatch.setattr(routes_cluster, "_REPO_ROOT", tmp_path / "gone")
+    eng = routes_cluster._load_cluster_engine()
+    assert eng is not None
+    assert eng.cmd_cluster_status()["total_hosts"] == 1
+
+
+def test_engine_loader_failure_names_where_it_looked(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes_cluster, "_REPO_ROOT", tmp_path / "gone")
+    monkeypatch.setattr(routes_cluster, "_cluster_engine_candidates",
+                        lambda: [tmp_path / "gone" / "hscc-cluster"])
+    assert routes_cluster._load_cluster_engine() is None
+    assert "hscc-cluster engine not found" in routes_cluster._LAST_ENGINE_ERROR
+    assert str(tmp_path / "gone" / "hscc-cluster") in \
+        routes_cluster._LAST_ENGINE_ERROR
+
+
 def test_fleet_throughput_unavailable(running, token, stub_fleet):
     stub_fleet(throughput=None)
     status, payload = _request(running, token, "/v1/fleet/throughput")
     assert status == 200
-    assert payload["speak"] == "fleet throughput unavailable"
+    assert payload["speak"].startswith("Fleet throughput failed:")
+    assert payload["error"]
 
 
 def test_fleet_streams_shape(running, token, stub_fleet):

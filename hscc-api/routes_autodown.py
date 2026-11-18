@@ -8,9 +8,10 @@ carry a top-level ``speak`` (design §B), and every MUTATING endpoint requires
 gate as ``routes_actions.py``).
 
 Backing (libraries, never CLI text-parsing):
-  * ``GET  /v1/autodown/status``  -> ``autodown.load_config()`` +
-      ``lifecycle.load_watchdog_block()`` + the kanban/cron classifiers the
-      CLI's ``_cmd_status`` uses (blocked_by, kanban interlock, cron split).
+  * ``GET  /v1/autodown/status``  -> ``autodown.status_snapshot()`` — the
+      exact builder ``autodown_cli._cmd_status`` uses (config, watchdog block,
+      blocked_by/kanban/PR-CI classifiers, and the read-only state reconcile),
+      plus ``speak``. No handler-local copy of the status logic.
   * ``POST /v1/autodown/enable``  -> the same ``record_activity`` +
       ``load_config``/``save_config`` writes as ``_cmd_enable`` (incl. the
       cron-guard split + force_armed bookkeeping).
@@ -77,62 +78,16 @@ def _backing_clear_intentional_block(reason=None):
     autodown._clear_intentional_block(reason=reason)
 
 
-def _backing_status_context():
-    """The read-only "why" context for a status payload.
+def _backing_status_snapshot():
+    """The SAME status payload ``hscc autodown status --json`` builds.
 
-    Aggregates every classifier the CLI's ``_cmd_status`` uses, so the API
-    status payload carries the same ground truth (blocked_by, kanban
-    interlock, active cron split) without re-implementing any of it.
+    Imports ``hscc_daemon.autodown.status_snapshot`` — one builder for the
+    CLI and this route, including the read-only reconcile of a stale
+    ``state: down`` against the live serving layer (t_8743f98c). No copied
+    classifier logic lives here.
     """
     from hscc_daemon import autodown
-    blocking = None
-    if autodown._has_active_work():
-        blocking_board = autodown.kanban_blocking_board()
-        if blocking_board and blocking_board != autodown._UNREADABLE_BOARD:
-            tasks = autodown.list_stale_tasks(
-                board=blocking_board, older_than=None)["tasks"]
-            if tasks:
-                names = ", ".join(
-                    f"{t['id']} ({t['title']})" for t in tasks[:3])
-                if len(tasks) > 3:
-                    names += f", … and {len(tasks) - 3} more"
-                blocking = f"kanban work on board '{blocking_board}': {names}"
-            else:
-                blocking = f"kanban work on board '{blocking_board}'"
-        else:
-            blocking = "kanban work (board unknown)"
-    kc = autodown.kanban_check_state()
-    active_crons = autodown.list_active_cron_jobs()
-    if isinstance(active_crons, list):
-        cpu_only_crons = [j for j in active_crons if j.get("cpu_only")]
-        model_crons = [j for j in active_crons if not j.get("cpu_only")]
-    else:
-        cpu_only_crons, model_crons = [], []
-    # PR/CI interlock — same read-only evaluation + folding as the CLI status,
-    # so the API payload carries the PR/CI signal alongside kanban work.
-    prci_active = autodown._has_active_pr_ci()
-    prci = autodown.prci_blocking_signal()
-    if prci_active:
-        if prci == autodown._PRCI_UNREACHABLE:
-            prci_blocking = "PR/CI source unreachable — treating as active "\
-                "(fail-safe)"
-        else:
-            prci_blocking = "open PR / active CI run on a tracked repo"
-        blocking = f"{prci_blocking}, and {blocking}" if blocking \
-            else prci_blocking
-    pci = autodown.prci_check_state()
-    return {
-        "blocked_by": blocking,
-        "kanban_ok": kc["ok"] if kc else None,
-        "kanban_reason": kc["reason"] if kc else "",
-        "prci_active": bool(prci_active),
-        "prci_ok": (pci or {}).get("ok"),
-        "prci_reason": (pci or {}).get("reason") or "",
-        "active_cron_cpu_only": [j.get("name") or j.get("id")
-                                 for j in cpu_only_crons],
-        "active_cron_model": [j.get("name") or j.get("id")
-                              for j in model_crons],
-    }
+    return autodown.status_snapshot()
 
 
 def _backing_list_active_cron_jobs():
@@ -212,32 +167,13 @@ def _speak_wake_started(result: dict) -> str:
 def handle_autodown_status(server, ctx, query, body):
     """GET /v1/autodown/status — read-only report (mirrors `hscc autodown status`)."""
     try:
-        cfg = _backing_load_config()
-    except Exception:
-        return 200, {"speak": "Autodown status unavailable."}
-    try:
-        block = _backing_load_watchdog_block()
-        context = _backing_status_context()
-    except Exception:
-        block, context = {}, {}
-    payload = {
-        "enabled": bool(cfg.get("enabled")),
-        "state": cfg.get("state"),
-        "idle_minutes": cfg.get("idle_minutes"),
-        "last_activity_iso": cfg.get("last_activity_iso"),
-        "down_since": cfg.get("down_since"),
-        "wake_source": cfg.get("wake_source"),
-        "reason": cfg.get("reason"),
-        "watchdog_blocked": bool(block.get("blocked")),
-        "watchdog_intentional": block.get("intentional"),
-        "kanban_ok": context.get("kanban_ok"),
-        "kanban_reason": context.get("kanban_reason"),
-        "blocked_by": context.get("blocked_by"),
-        "force_armed": bool(cfg.get("force_armed")),
-        "force_armed_overrides": cfg.get("force_armed_overrides") or [],
-        "active_cron_cpu_only": context.get("active_cron_cpu_only") or [],
-        "active_cron_model": context.get("active_cron_model") or [],
-    }
+        payload = dict(_backing_status_snapshot())
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return 200, {
+            "error": detail,
+            "speak": f"Autodown status failed: {detail}",
+        }
     payload["speak"] = _speak_status(payload)
     return 200, payload
 

@@ -26,6 +26,7 @@ nodes or a live cluster.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -33,38 +34,105 @@ from pathlib import Path
 # Resolve the repo root: hscc-api is a sibling of hscc-cluster and hscc_daemon.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Why the last engine load failed. The handlers include this in their error
+# payload/speak instead of the old bare "unavailable", which hid the real
+# failure (t_8743f98c). Kept module-level so a handler can report it without
+# re-running the load.
+_LAST_ENGINE_ERROR = ""
+
 
 # ---------------------------------------------------------------------------
 # Backing library loading (mirrors hscc_daemon/hscc.py:_load_cluster_engine)
 # ---------------------------------------------------------------------------
 
 def _ensure_repo_root_on_path():
-    """Put the repo root on sys.path once so ``hscc_daemon`` imports."""
+    """Put a root that can import ``hscc_daemon`` on sys.path.
+
+    The repo root is first (worktree/tests). If this API was launched from a
+    Homebrew Cellar directory that an upgrade deleted, that root is gone; the
+    deployed Hermes plugins directory still contains ``hscc_daemon`` and is
+    the same fallback the cluster-engine loader uses.
+    """
     root = str(_REPO_ROOT)
     if root not in sys.path:
         sys.path.insert(0, root)
+    plugins = str(Path.home() / ".hermes" / "plugins")
+    if plugins not in sys.path:
+        sys.path.append(plugins)
     return root
+
+
+def _cluster_engine_candidates():
+    """Ordered hscc-cluster locations, independent of this module's path.
+
+    The live 2026-11-18 failure was a Homebrew upgrade: the API process had
+    been launched from ``/opt/homebrew/Cellar/hscc/2.15.4/...`` and Homebrew
+    deleted that Cellar directory while the process kept running. Resolving
+    the engine only as ``Path(__file__).parent.parent / "hscc-cluster"`` then
+    returned None forever, and every cluster route answered "unavailable".
+
+    A shipped API can therefore be started from a directory that no longer
+    exists. Keep the sibling lookup first (repo/worktree tests), then fall
+    back to locations that survive an upgrade: the package next to an
+    already-imported ``hscc_daemon``, the deployed Hermes plugin, the stable
+    Homebrew opt link, and an explicit ``HSCC_CLUSTER_DIR`` override.
+    """
+    candidates = []
+    override = os.environ.get("HSCC_CLUSTER_DIR")
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.append(_REPO_ROOT / "hscc-cluster")
+    try:
+        import hscc_daemon
+        daemon_root = Path(hscc_daemon.__file__).resolve().parent.parent
+        candidates.append(daemon_root / "hscc-cluster")
+    except Exception:
+        pass
+    candidates.append(Path.home() / ".hermes" / "plugins" / "hscc-cluster")
+    candidates.append(Path("/opt/homebrew/opt/hscc/libexec/hscc/hscc-cluster"))
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(candidate)
+    return ordered
 
 
 def _load_cluster_engine():
     """Load hscc-cluster/hscc.py as a module (mirrors _load_cluster_engine).
 
-    Returns the loaded module, or None if the plugin is missing. The engine's
-    own submodules import each other by bare name, so hscc-cluster/ must be on
-    sys.path while we call into it.
+    Returns the loaded module, or None if the plugin cannot be found/loaded.
+    The engine's own submodules import each other by bare name, so the
+    containing directory must be on sys.path while we call into it.
     """
-    cluster_dir = _REPO_ROOT / "hscc-cluster"
-    cluster_hscc = cluster_dir / "hscc.py"
-    if not cluster_hscc.is_file():
-        return None
-    if str(cluster_dir) not in sys.path:
-        sys.path.insert(0, str(cluster_dir))
-    spec = importlib.util.spec_from_file_location("hscc_cluster_engine", str(cluster_hscc))
-    if spec is None or spec.loader is None:
-        return None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    global _LAST_ENGINE_ERROR
+    candidates = _cluster_engine_candidates()
+    load_errors = []
+    for cluster_dir in candidates:
+        cluster_hscc = cluster_dir / "hscc.py"
+        if not cluster_hscc.is_file():
+            continue
+        if str(cluster_dir) not in sys.path:
+            sys.path.insert(0, str(cluster_dir))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "hscc_cluster_engine", str(cluster_hscc))
+            if spec is None or spec.loader is None:
+                load_errors.append(f"{cluster_hscc}: no import spec")
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _LAST_ENGINE_ERROR = ""
+            return mod
+        except Exception as exc:  # report the real cause, try the next path
+            load_errors.append(f"{cluster_hscc}: {type(exc).__name__}: {exc}")
+    looked = ", ".join(str(p) for p in candidates)
+    _LAST_ENGINE_ERROR = (
+        "hscc-cluster engine not found (looked in: "
+        f"{looked}); load errors: {'; '.join(load_errors) or 'none'}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +172,25 @@ def _backing_cluster_info():
     if eng is None:
         return None
     return eng.cmd_info()
+
+
+def _backing_serving_snapshot():
+    """The CLI monitor's serving section: one ``ServingPoller`` sample.
+
+    ``cluster_render.render_monitor`` builds exactly this object for
+    ``hscc cluster monitor`` (hscc_daemon/cluster_render.py:140-151). Returning
+    the rows alongside the sparkrun frame is what gives a widget the model
+    served per node, running/waiting, KV, and token totals/rates — the parts of
+    the CLI view that the raw sparkrun frame does not carry.
+    """
+    _ensure_repo_root_on_path()
+    from hscc_daemon import cluster_live
+    poller = cluster_live.ServingPoller()
+    try:
+        rows = poller.poll()
+    finally:
+        poller.close()
+    return {"rows": rows, "proxy_error": poller.proxy_error}
 
 
 def _backing_verify():
@@ -148,6 +235,48 @@ def _is_error_dict(data) -> bool:
     if data.get("success") is False and not data.get("json"):
         return True
     return False
+
+
+def _one_line(value, limit=500) -> str:
+    """Collapse a multi-line command error into one readable sentence."""
+    text = " ".join(str(value).split())
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _failure_detail(data=None, exc=None) -> str:
+    """A specific reason for a degraded route — never the word "unavailable".
+
+    The old handlers swallowed every cause into "… unavailable", which is why
+    the live 2026-11-18 outage (a Homebrew upgrade deleted the directory the
+    API process was launched from) was undiagnosable from the wire. The detail
+    is the backing function's own ``error``/exit status, the engine-load
+    reason, or the exception class + message. It is command/stderr text, never
+    the auth token.
+    """
+    if exc is not None:
+        return f"{type(exc).__name__}: {_one_line(exc)}"
+    if isinstance(data, dict):
+        if data.get("error"):
+            return _one_line(data["error"])
+        rc = data.get("returncode")
+        output = data.get("output")
+        if rc is not None:
+            detail = f"command exited {rc}"
+            if output:
+                detail += f": {_one_line(output)}"
+            return detail
+        if output:
+            return _one_line(output)
+    if data is None and _LAST_ENGINE_ERROR:
+        return _one_line(_LAST_ENGINE_ERROR)
+    return "backing command returned no data"
+
+
+def _degraded(lead, data=None, exc=None):
+    detail = _failure_detail(data, exc)
+    return {"error": detail, "speak": f"{lead}: {detail}"}
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +461,16 @@ def _speak_autoscale(data):
 def handle_cluster_status(server, ctx, query, body):
     try:
         data = _backing_cluster_status()
-    except Exception:
-        return 200, {"speak": "cluster status unavailable"}
+    except Exception as exc:
+        return 200, {
+            "workloads": [], "idle_hosts": [], "total_hosts": 0,
+            **_degraded("Cluster status failed", exc=exc),
+        }
     if data is None or _is_error_dict(data):
-        return 200, {"speak": "cluster status unavailable"}
+        return 200, {
+            "workloads": [], "idle_hosts": [], "total_hosts": 0,
+            **_degraded("Cluster status failed", data),
+        }
     return 200, {
         "workloads": data.get("workloads", []),
         "idle_hosts": data.get("idle_hosts", []),
@@ -347,10 +482,10 @@ def handle_cluster_status(server, ctx, query, body):
 def handle_cluster_hosts(server, ctx, query, body):
     try:
         data = _backing_cluster_hosts()
-    except Exception:
-        return 200, {"speak": "host list unavailable"}
+    except Exception as exc:
+        return 200, _degraded("Host list failed", exc=exc)
     if data is None or _is_error_dict(data):
-        return 200, {"speak": "host list unavailable"}
+        return 200, _degraded("Host list failed", data)
     payload = {
         "hosts": data.get("hosts", []),
         "saved_clusters": data.get("saved_clusters", {}),
@@ -363,30 +498,42 @@ def handle_cluster_hosts(server, ctx, query, body):
 def handle_cluster_monitor(server, ctx, query, body):
     try:
         data = _backing_cluster_monitor()
-    except Exception:
-        return 200, {"speak": "fleet monitor unavailable"}
+    except Exception as exc:
+        return 200, _degraded("Fleet monitor failed", exc=exc)
     if data is None or _is_error_dict(data):
-        return 200, {"speak": "fleet monitor unavailable"}
-    return 200, {**data, "speak": _speak_cluster_monitor(data)}
+        return 200, _degraded("Fleet monitor failed", data)
+    payload = {**data, "speak": _speak_cluster_monitor(data)}
+    # Add the same serving rows `hscc cluster monitor` prints beside the host
+    # table (model per node, run/wait, KV, token totals and rates). Additive:
+    # older clients decode only `json`, new ones may read `serving`.
+    try:
+        serving = _backing_serving_snapshot()
+    except Exception as exc:
+        payload["serving"] = []
+        payload["serving_error"] = _failure_detail(exc=exc)
+    else:
+        payload["serving"] = serving.get("rows", [])
+        payload["serving_proxy_error"] = serving.get("proxy_error")
+    return 200, payload
 
 
 def handle_cluster_jobs(server, ctx, query, body):
     try:
         data = _backing_cluster_jobs()
-    except Exception:
-        return 200, {"speak": "job list unavailable"}
+    except Exception as exc:
+        return 200, _degraded("Job list failed", exc=exc)
     if data is None or _is_error_dict(data):
-        return 200, {"speak": "job list unavailable"}
+        return 200, _degraded("Job list failed", data)
     return 200, {**data, "speak": _speak_cluster_jobs(data)}
 
 
 def handle_cluster_info(server, ctx, query, body):
     try:
         data = _backing_cluster_info()
-    except Exception:
-        return 200, {"speak": "cluster info unavailable"}
+    except Exception as exc:
+        return 200, _degraded("Cluster info failed", exc=exc)
     if data is None or _is_error_dict(data):
-        return 200, {"speak": "cluster info unavailable"}
+        return 200, _degraded("Cluster info failed", data)
     return 200, {**data, "speak": _speak_cluster_info(data)}
 
 
@@ -430,10 +577,10 @@ def handle_fleet_stats(server, ctx, query, body):
 def handle_fleet_throughput(server, ctx, query, body):
     try:
         data = _backing_throughput()
-    except Exception:
-        return 200, {"speak": "fleet throughput unavailable"}
+    except Exception as exc:
+        return 200, _degraded("Fleet throughput failed", exc=exc)
     if not isinstance(data, dict) or data.get("fleet") is None:
-        return 200, {"speak": "fleet throughput unavailable"}
+        return 200, _degraded("Fleet throughput failed", data)
     return 200, {**data, "speak": _speak_throughput(data)}
 
 

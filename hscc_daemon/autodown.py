@@ -1577,6 +1577,140 @@ def _serving_actually_up(serving_path=None, http_check_fn=None):
         return False
 
 
+def _status_interlock_context():
+    """The read-only "why" context for a status payload.
+
+    Aggregates every classifier ``hscc autodown status`` shows (blocked_by,
+    kanban interlock, PR/CI interlock, active-cron split). This used to live in
+    ``autodown_cli._cmd_status``; it moved here so the API's
+    /v1/autodown/status imports the same function instead of copying it
+    (t_8743f98c).
+    """
+    blocking = None
+    if _has_active_work():
+        blocking_board = kanban_blocking_board()
+        if blocking_board and blocking_board != _UNREADABLE_BOARD:
+            tasks = list_stale_tasks(
+                board=blocking_board, older_than=None)["tasks"]
+            if tasks:
+                names = ", ".join(
+                    f"{t['id']} ({t['title']})" for t in tasks[:3])
+                if len(tasks) > 3:
+                    names += f", … and {len(tasks) - 3} more"
+                blocking = f"kanban work on board '{blocking_board}': {names}"
+            else:
+                blocking = f"kanban work on board '{blocking_board}'"
+        else:
+            blocking = "kanban work (board unknown)"
+    kc = kanban_check_state()
+    active_crons = list_active_cron_jobs()
+    if isinstance(active_crons, list):
+        cpu_only_crons = [j for j in active_crons if j.get("cpu_only")]
+        model_crons = [j for j in active_crons if not j.get("cpu_only")]
+    else:
+        cpu_only_crons, model_crons = [], []
+    prci_active = _has_active_pr_ci()
+    prci = prci_blocking_signal()
+    if prci_active:
+        if prci == _PRCI_UNREACHABLE:
+            prci_blocking = "PR/CI source unreachable — treating as active "\
+                "(fail-safe)"
+        else:
+            prci_blocking = "open PR / active CI run on a tracked repo"
+        blocking = f"{prci_blocking}, and {blocking}" if blocking \
+            else prci_blocking
+    pci = prci_check_state()
+    return {
+        "blocked_by": blocking,
+        "kanban_ok": kc["ok"] if kc else None,
+        "kanban_reason": kc["reason"] if kc else "",
+        "prci_active": bool(prci_active),
+        "prci_ok": (pci or {}).get("ok"),
+        "prci_reason": (pci or {}).get("reason") or "",
+        "prci_signal": prci if prci_active else None,
+        "active_cron_cpu_only": [j.get("name") or j.get("id")
+                                 for j in cpu_only_crons],
+        "active_cron_model": [j.get("name") or j.get("id")
+                              for j in model_crons],
+    }
+
+
+def status_snapshot(cfg=None, block=None, serving_probe=None):
+    """Build the ONE status payload shared by the CLI and the API.
+
+    Read-only: never writes autodown.json or the watchdog block. The recorded
+    ``state`` is reconciled against the serving layer when it says "down":
+    the live 2026-11-18 report showed ``down since 2026-11-05`` for a fleet
+    that had been up for days, because ``cycle()`` returns early while
+    autodown is disabled and therefore never reached its §8 reconcile. A
+    status read must describe reality even when the daemon is disabled, so a
+    down record contradicted by a healthy orchestrator is reported as
+    ``state: "up"`` with ``state_recorded: "down"`` (and no stale
+    ``down_since``); the recorded file stays untouched.
+
+    ``serving_probe`` is injectable for tests; production uses the same
+    ``_serving_actually_up`` predicate as cycle()'s reconcile path.
+    """
+    from . import lifecycle
+
+    cfg = cfg if cfg is not None else load_config()
+    block = block if block is not None else lifecycle.load_watchdog_block()
+    context = _status_interlock_context()
+
+    recorded_state = cfg.get("state")
+    state = recorded_state
+    layer_up = None
+    state_note = None
+    if recorded_state == "down":
+        probe = serving_probe or _serving_actually_up
+        try:
+            layer_up = bool(probe())
+        except Exception:
+            layer_up = None
+        if layer_up is True:
+            state = "up"
+            state_note = (
+                "autodown.json says down but the serving layer is actually "
+                "up — reporting the live state (read-only; the file was not "
+                "changed)")
+
+    down_since = cfg.get("down_since")
+    if state == "up" and recorded_state == "down":
+        down_since = None
+
+    status = {
+        "enabled": bool(cfg.get("enabled")),
+        "state": state,
+        # Additive honesty fields: what the file says, where the reported
+        # state came from, and the probe result when one was taken.
+        "state_recorded": recorded_state,
+        "state_source": ("live probe" if state != recorded_state
+                         else "autodown.json"),
+        "fleet_up": layer_up,
+        "idle_minutes": cfg.get("idle_minutes"),
+        "last_activity_iso": cfg.get("last_activity_iso"),
+        "down_since": down_since,
+        "wake_source": cfg.get("wake_source"),
+        "reason": cfg.get("reason"),
+        "watchdog_blocked": bool(block.get("blocked")),
+        "watchdog_intentional": block.get("intentional"),
+        "kanban_ok": context.get("kanban_ok"),
+        "kanban_reason": context.get("kanban_reason"),
+        "blocked_by": context.get("blocked_by"),
+        "force_armed": bool(cfg.get("force_armed")),
+        "force_armed_overrides": cfg.get("force_armed_overrides") or [],
+        "active_cron_cpu_only": context.get("active_cron_cpu_only") or [],
+        "active_cron_model": context.get("active_cron_model") or [],
+        "prci_active": context.get("prci_active"),
+        "prci_ok": context.get("prci_ok"),
+        "prci_reason": context.get("prci_reason"),
+        "prci_signal": context.get("prci_signal"),
+    }
+    if state_note:
+        status["state_note"] = state_note
+    return status
+
+
 def _reconcile_if_actually_up(serving_path=None, http_check_fn=None):
     """§8 reconcile-to-reality: if state is down but the layer is actually up,
     stop lying and reconcile to the truth. Returns True iff it reconciled.
@@ -1769,6 +1903,17 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     cfg = load_config()
     if not cfg.get("enabled"):
         # §7 C5: OFF by default. Do nothing, never touch the serving layer.
+        # EXCEPT the honesty reconcile: a disabled autodown can still carry a
+        # stale ``state: down`` from a teardown that happened before it was
+        # disabled. The live 2026-11-18 report showed "down since 2026-11-05"
+        # for a fleet that had been up for days, because this early return
+        # skipped the §8 reconcile. If the layer probes up (debounced), record
+        # state up so the file stops lying; nothing is started or stopped.
+        if cfg.get("state") == "down":
+            try:
+                _reconcile_if_actually_up()
+            except Exception as e:
+                log(f"Autodown disabled-state reconcile error: {e}", "ERROR")
         return
 
     # Phase 6 activity probes — run after the disabled guard so fresh inbound
