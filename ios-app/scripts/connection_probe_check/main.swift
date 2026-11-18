@@ -221,4 +221,173 @@ failoverDefaults?.synchronize()
 m.reset()
 assert(m.status == .unknown, "reset() returns to .unknown for the new cluster")
 
+// 5) "Test connection" probes EVERY address (operator 2026-11-18). The shared
+//    implementation is compiled from Sources/Shared/ConnectionAddressProbe.swift
+//    — never redeclared here — and the transport is injected, so this gate
+//    opens no socket.
+
+// 5a) The request is the same GET /v1/ping + bearer token + timeout the
+//     QRPairing test uses (the probe endpoint is fixed, not caller-supplied).
+let probeRequest = ClusterConnectionTest.pingRequest(
+    host: "host-a.example", port: 8788, token: "token-a", timeout: 4)
+assert(probeRequest?.url?.path == "/v1/ping",
+       "the per-address probe is GET /v1/ping (the confirmed route)")
+assert(probeRequest?.httpMethod == "GET", "the probe request is a GET")
+assert(probeRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer token-a",
+       "the probe carries the same bearer token every client uses")
+assert(probeRequest?.timeoutInterval == 4,
+       "the probe uses the per-attempt connect ceiling")
+
+// 5b) Classification keeps QRPairing's token/version checks: 401/403 (or the
+//     machine slug) is a token rejection, a 404/decode drift is a version
+//     mismatch, and a good ping is OK with service/version/latency.
+assert(ClusterConnectionTest.classify(status: 401, data: Data(), latencyMs: 9)
+       == .rejected(.token), "401 is a token rejection, never 'unreachable'")
+assert(ClusterConnectionTest.classify(status: 403, data: Data(), latencyMs: 9)
+       == .rejected(.token), "403 is a token rejection")
+assert(ClusterConnectionTest.classify(
+           status: 400,
+           data: Data(#"{"error":{"code":"invalid_token"}}"#.utf8),
+           latencyMs: 9) == .rejected(.token),
+       "the invalid_token machine slug is a token rejection on any status")
+assert(ClusterConnectionTest.classify(status: 404, data: Data(), latencyMs: 9)
+       == .rejected(.version),
+       "a missing /v1/ping route is a version mismatch, not unreachable")
+assert(ClusterConnectionTest.classify(
+           status: 200,
+           data: Data(#"{"ok":true,"service":"hscc-api","version":"3.0.0"}"#.utf8),
+           latencyMs: 42)
+       == .ok(service: "hscc-api", version: "3.0.0", latencyMs: 42),
+       "a good ping reports service + version + latency")
+assert(ClusterConnectionTest.classify(
+           status: 200, data: Data(#"{"ok":true}"#.utf8), latencyMs: 1)
+       == .rejected(.version),
+       "a 2xx body that isn't /v1/ping is a version mismatch")
+assert(ClusterConnectionTest.classify(error: URLError(.timedOut))
+       == .unreachable(.timeout), "a timeout is unreachable(timeout)")
+assert(ClusterConnectionTest.classify(error: URLError(.cannotConnectToHost))
+       == .unreachable(.refused), "a refusal is unreachable(refused)")
+assert(ClusterConnectionTest.classify(error: URLError(.cannotFindHost))
+       == .unreachable(.dns), "a bad name is unreachable(dns)")
+assert(ClusterConnectionTest.classify(error: URLError(.serverCertificateUntrusted))
+       == .unreachable(.tls), "a certificate failure is unreachable(tls)")
+
+// Helper: clear the remembered address so each case starts honestly.
+func clearLastWorking() {
+    failoverDefaults?.removeObject(forKey: AppGroup.lastWorkingHostKey)
+    failoverDefaults?.synchronize()
+}
+
+// 5c) All addresses OK: one row each, overall success, fastest remembered.
+clearLastWorking()
+let allOK = await ClusterConnectionTest.run(
+    hosts: ["host-a.example", "host-b.example", "host-c.example"]
+) { host in
+    switch host {
+    case "host-a.example": return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 40)
+    case "host-b.example": return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 12)
+    default: return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 25)
+    }
+}
+let allOKReport = ClusterConnectionTest.report(from: allOK)
+assert(allOKReport.total == 3 && allOKReport.okCount == 3,
+       "all-OK: three addresses produce three OK rows")
+assert(allOKReport.overallSuccess, "all-OK: overall test succeeds")
+assert(allOKReport.overallLine == "Connected — 3 of 3 addresses reachable",
+       "all-OK: the overall line names n of m reachable")
+assert(allOKReport.selectedHost == "host-b.example",
+       "all-OK: the fastest OK address is the one the app will use")
+assert(HostFailover.lastWorkingHost() == "host-b.example",
+       "all-OK: the fastest OK address is remembered for widgets")
+
+// 5d) First down + second OK: BOTH rows are reported, overall still succeeds.
+clearLastWorking()
+let firstDown = await ClusterConnectionTest.run(
+    hosts: ["host-a.example", "host-b.example"]
+) { host in
+    if host == "host-a.example" { return .unreachable(.timeout) }
+    return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 18)
+}
+let firstDownReport = ClusterConnectionTest.report(from: firstDown)
+assert(firstDownReport.total == 2,
+       "first down: both the down and the working address are reported")
+assert(firstDownReport.results[0].outcome == .unreachable(.timeout),
+       "first down: the dead primary is reported as unreachable(timeout)")
+assert(firstDownReport.results[1].isOK,
+       "first down: the fallback is reported as OK")
+assert(firstDownReport.overallSuccess
+       && firstDownReport.overallLine == "Connected — 1 of 2 addresses reachable",
+       "first down + second OK is an overall success naming 1 of 2")
+assert(firstDownReport.selectedHost == "host-b.example",
+       "first down + second OK selects the only working address")
+
+// 5e) One 401 among OKs: the refusal is a row, never a reason to stop probing,
+//     and the overall test still succeeds on the working addresses.
+clearLastWorking()
+let oneRejected = await ClusterConnectionTest.run(
+    hosts: ["host-a.example", "host-b.example", "host-c.example"]
+) { host in
+    switch host {
+    case "host-a.example": return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 30)
+    case "host-b.example": return .rejected(.token)
+    default: return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 8)
+    }
+}
+let oneRejectedReport = ClusterConnectionTest.report(from: oneRejected)
+assert(oneRejectedReport.total == 3 && oneRejectedReport.okCount == 2,
+       "one 401 among OKs: the rejected row does not hide the working ones")
+assert(oneRejectedReport.results[1].outcome == .rejected(.token),
+       "one 401 among OKs: the address is reported as token-rejected")
+assert(oneRejectedReport.results[1].detail == "token rejected",
+       "one 401 among OKs: the row shows a short reason, not a latency")
+assert(oneRejectedReport.overallSuccess
+       && oneRejectedReport.overallLine == "Connected — 2 of 3 addresses reachable",
+       "one 401 among OKs is still overall success naming 2 of 3")
+assert(oneRejectedReport.selectedHost == "host-c.example",
+       "one 401 among OKs: the fastest working address is selected")
+
+// 5f) All down: every address gets a row, the overall test fails with the
+//     existing failure copy, and the remembered address is NOT overwritten.
+clearLastWorking()
+HostFailover.remember("host-b.example")
+let allDownReport = ClusterConnectionTest.report(
+    from: await ClusterConnectionTest.run(
+        hosts: ["host-a.example", "host-b.example", "host-c.example"]
+    ) { host in
+        switch host {
+        case "host-a.example": return .unreachable(.refused)
+        case "host-b.example": return .unreachable(.dns)
+        default: return .unreachable(.timeout)
+        }
+    })
+assert(allDownReport.total == 3 && allDownReport.okCount == 0,
+       "all down: one row per address, zero OK")
+assert(!allDownReport.overallSuccess,
+       "all down: the overall test is a failure")
+assert(!allDownReport.overallLine.contains("Connected"),
+       "all down: the overall line never claims a connection")
+assert(allDownReport.selectedHost == nil,
+       "all down: no address is marked as the one the app will use")
+assert(HostFailover.lastWorkingHost() == "host-b.example",
+       "all down: a failed test does not overwrite the remembered address")
+clearLastWorking()
+
+// 5g) Order preservation under out-of-order completion: the slow first probe
+//     finishes after the others, but the rows stay in the operator's order.
+let outOfOrder = await ClusterConnectionTest.run(
+    hosts: ["host-a.example", "host-b.example", "host-c.example"]
+) { host in
+    if host == "host-a.example" {
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        return .ok(service: "hscc-api", version: "3.0.0", latencyMs: 3)
+    }
+    return .unreachable(.refused)
+}
+assert(outOfOrder.map(\.host)
+       == ["host-a.example", "host-b.example", "host-c.example"],
+       "report rows keep the operator's primary -> fallback order")
+assert(outOfOrder[0].isOK && !outOfOrder[1].isOK && !outOfOrder[2].isOK,
+       "order preservation: each row keeps its own outcome")
+clearLastWorking()
+
 print("ALL connection-probe assertions passed.")

@@ -24,6 +24,8 @@ struct MacSettingsView: View {
 
     @State private var statusLine: String?
     @State private var statusOK: Bool?
+    /// One row per saved address from the shared all-address test.
+    @State private var testReport: ConnectionTestReport?
     @State private var isTesting = false
     @State private var didLoad = false
 
@@ -219,6 +221,27 @@ struct MacSettingsView: View {
                         .foregroundColor(statusOK == true ? Theme.Semantic.ok : Theme.Semantic.bad)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // One row per address, exactly like iOS: a fallback that is
+                // down is visible now, not when failover first needs it.
+                if let report = testReport {
+                    ForEach(report.results) { row in
+                        HStack(spacing: Theme.Spacing.sm.rawValue) {
+                            Image(systemName: row.isOK ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(row.isOK ? Theme.Semantic.ok : Theme.Semantic.bad)
+                            Text(row.host)
+                                .foregroundColor(Theme.Semantic.onSurface)
+                            if report.willUse(row.host) {
+                                Text("will use")
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.Semantic.accent)
+                            }
+                            Spacer(minLength: 0)
+                            Text(row.detail)
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                }
                 if let failure = settings.tokenSaveFailure {
                     Label(failure, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -316,6 +339,7 @@ struct MacSettingsView: View {
         fallbackHosts = []
         statusLine = nil
         statusOK = nil
+        testReport = nil
     }
 
     private func loadActive() {
@@ -337,6 +361,7 @@ struct MacSettingsView: View {
         token = KeychainStore.readToken(forCluster: cluster.id) ?? ""
         statusLine = nil
         statusOK = nil
+        testReport = nil
     }
 
     private func moveFallback(at index: Int, by offset: Int) {
@@ -377,22 +402,21 @@ struct MacSettingsView: View {
     private func testConnection() async {
         guard canTest else { return }
         isTesting = true
+        testReport = nil
         defer { isTesting = false }
-        let config = APIConfig(
-            host: host.trimmingCharacters(in: .whitespacesAndNewlines),
+
+        // The same shared all-address probe iOS runs: one row per address in
+        // the operator's order, success when at least one address answers, and
+        // the fastest working address remembered for widgets.
+        let report = await ClusterConnectionTest.test(
+            hosts: [host.trimmingCharacters(in: .whitespacesAndNewlines)]
+                + cleanedFallbacks,
             port: Int(port) ?? 8788,
-            token: token,
-            fallbackHosts: cleanedFallbacks
+            token: token
         )
-        let client = WidgetDataClient(config: config, timeout: 6)
-        switch await client.clusterStatus() {
-        case .success(let status):
-            statusLine = "Connected — \(status.total_hosts) hosts, \(status.workloads.count) workloads."
-            statusOK = true
-        case .failure(let failure):
-            statusLine = failure.operatorLine
-            statusOK = false
-        }
+        testReport = report
+        statusLine = report.overallLine
+        statusOK = report.overallSuccess
     }
 
     // MARK: - Text
