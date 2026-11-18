@@ -235,21 +235,45 @@ def test_a_missing_agent_tree_returns_none_and_adds_nothing(tmp_path, monkeypatc
         assert missing not in sys.path
 
 
-def test_a_preexisting_tree_entry_is_not_taken_back(agent_tree, monkeypatch):
+@pytest.mark.parametrize("window_owner", ["peer", "local"])
+def test_a_preexisting_agent_tree_entry_is_not_taken_back(
+        tmp_path, monkeypatch, window_owner):
     """A path somebody else put on ``sys.path`` is not the fence's to remove.
 
-    ``finally: sys.path.remove(path)`` — the naive fix — passes the case above and
-    breaks this one, which is why both directions are pinned (same pair the leg already
-    keeps for ``fleet._daemon_mod`` in ``test_fleet.py``).
+    ``finally: sys.path.remove(path)`` — the naive fix — passes every byte-identity case
+    above (there the fence added the entry) and breaks THIS one, which is why both
+    directions are pinned (same pair the leg keeps for ``fleet._daemon_mod`` in
+    ``test_fleet.py``, and for the window itself in
+    ``hscc_daemon/tests/test_hermes_import_window.py``).
+
+    Reaching it takes the awkward shape: the window only opens when the import failed,
+    so the dir must already be on the path AND hold no importable ``hermes_cli`` —
+    otherwise the first attempt succeeds and no window is ever opened to remove
+    anything. A fence that then takes the entry back is removing a path it never added.
     """
-    before = list(sys.path)
-    before.insert(0, agent_tree)
-    sys.path[:] = before
-    try:
-        assert workflow._active_profile_name() == FAKE_PROFILE_NAME
-        assert agent_tree in sys.path, (
-            "the fence removed an entry it did not add — its finally must take back only "
-            "what it inserted itself")
-        assert list(sys.path) == before
-    finally:
-        sys.path[:] = [p for p in sys.path if p != agent_tree]
+    empty = tmp_path / "empty-agent-tree"
+    empty.mkdir()
+    consulted = []
+    if window_owner == "local":
+        def _no_peer():
+            consulted.append("attempted")
+            raise ImportError("no hscc_daemon in this install")
+
+        monkeypatch.setattr(workflow, "_hermes_import_module", _no_peer)
+
+    with _blocked_hermes(monkeypatch, str(tmp_path / "never-on-the-path")):
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(empty))
+        original = list(sys.path)
+        before = [str(empty)] + original
+        sys.path[:] = before
+        try:
+            assert workflow._active_profile_name() is None
+            assert str(empty) in sys.path, (
+                "the fence removed a sys.path entry it did not add — its finally must "
+                "take back only what it inserted itself")
+            assert list(sys.path) == before
+        finally:
+            sys.path[:] = original
+    if window_owner == "local":
+        assert consulted == ["attempted"], (
+            "the fallback was never attempted, so this run proved nothing about it")
