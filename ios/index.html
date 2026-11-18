@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>HSCC 1.0.0 — install on iPhone</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px 20px 56px;
+    background: #000;
+    color: #fff;
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  .brand { text-align: center; }
+  .brand img {
+    width: 112px; height: 112px;
+    border-radius: 25px;
+    background: #000;
+    box-shadow: 0 0 0 1px #262626;
+  }
+  h1 { margin: 16px 0 2px; font-size: 2rem; letter-spacing: -0.02em; }
+  .version { margin: 0 0 28px; color: #9a9a9a; font-variant-numeric: tabular-nums; }
+  .install {
+    display: block;
+    padding: 17px 24px;
+    border-radius: 14px;
+    background: #FF5722;
+    color: #000;
+    font-size: 1.28rem;
+    font-weight: 800;
+    text-align: center;
+    text-decoration: none;
+  }
+  .install:active { background: #e64a19; }
+  .hint { margin: 14px 0 0; color: #9a9a9a; text-align: center; font-size: .95rem; }
+  h2 { margin: 38px 0 12px; font-size: 1.15rem; color: #FF5722; }
+  ol { margin: 0; padding-left: 1.35em; }
+  li { margin: 0 0 12px; }
+  code { font: .93em ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; }
+  a { color: #FF5722; }
+  .card {
+    margin: 18px 0 0;
+    padding: 16px;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    background: #0b0b0b;
+  }
+  .card p { margin: 0 0 10px; }
+  .card p:last-child { margin-bottom: 0; }
+  .foot { margin-top: 40px; color: #777; font-size: .86rem; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <img src="icons/icon-1024.png" width="112" height="112" alt="HSCC app icon">
+    <h1>HSCC</h1>
+    <p class="version">Version 1.0.0</p>
+  </div>
+
+  <a class="install" href="itms-services://?action=download-manifest&amp;url=https://pom11.github.io/hscc/ios/manifest.plist">Install HSCC</a>
+  <p class="hint">Open this page in <strong>Safari on the iPhone</strong>. The button does nothing in other browsers.</p>
+
+  <h2>Before you install</h2>
+  <ol start="0">
+    <li><strong>Your device must be registered by the maintainer.</strong> This is an Ad Hoc build: Apple only allows the iPhones listed in its provisioning profile. To find your UDID, connect the iPhone to a Mac, open Finder, select the iPhone, and click the line that shows its model and capacity until the UDID appears (Apple Configurator shows it too). Send that UDID to the maintainer, who adds it at <a href="https://developer.apple.com/account/resources/devices/list" rel="noopener">developer.apple.com → Devices</a> and re-runs the release. <a href="#register">Get your device ID registered</a>.</li>
+  </ol>
+
+  <h2>Install</h2>
+  <ol>
+    <li>Open <code>https://pom11.github.io/hscc/ios/</code> in <strong>Safari</strong> on the iPhone.</li>
+    <li>Tap <strong>Install HSCC</strong> above, then confirm <strong>Install</strong> in the dialog.</li>
+    <li>Settings → General → VPN &amp; Device Management is <strong>not</strong> needed for an Ad Hoc build. Only if iOS explicitly asks you to trust the developer, trust it there.</li>
+    <li>Open HSCC, add your cluster (the addresses and token), then add widgets (long-press the Home Screen or Lock Screen → <strong>+</strong>) and start any Live Activities you want.</li>
+    <li>To update, open this page again and tap <strong>Install HSCC</strong>. The new build replaces the old one and keeps your settings.</li>
+  </ol>
+
+  <h2>Troubleshooting</h2>
+  <div class="card">
+    <p><strong>“Unable to install HSCC”</strong> — this iPhone is not in the provisioning profile. Send the maintainer its UDID (step 0), then re-run the release and install again.</p>
+    <p><strong>Nothing happens when I tap Install</strong> — the page is not open in Safari, or it is not being served over HTTPS. Copy the link into Safari.</p>
+    <p><strong>It installs but widgets or Live Activities cannot see my cluster</strong> — make sure the app itself is configured first, then re-add the widget from the gallery.</p>
+  </div>
+
+  <h2 id="register">Get your device ID registered</h2>
+  <div class="card">
+    <p>Ad Hoc installs are limited to devices the maintainer has registered with Apple. You only need to do this once per iPhone.</p>
+    <p><strong>Finder:</strong> connect the iPhone → select it in the sidebar → click the model/capacity line until the UDID is shown → right-click to copy it.</p>
+    <p><strong>Apple Configurator:</strong> select the device → the UDID is in the device details.</p>
+    <p>Send the UDID to the maintainer. They add it at developer.apple.com → Devices, then re-run <code>ios-app/scripts/release_adhoc.sh &lt;version&gt;</code> so the new profile includes it.</p>
+  </div>
+
+  <p class="foot">HSCC · Ad Hoc distribution from GitHub · <a href="https://github.com/pom11/hscc">github.com/pom11/hscc</a></p>
+</main>
+</body>
+</html>
