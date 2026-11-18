@@ -30,21 +30,29 @@ import api_server
 import gateway_driver as gd
 import routes_ws  # noqa: F401  (registers the WS route at import)
 from gateway_driver import GatewayConfig, GatewayDriver
+
+# ``hermes_state`` ships only with the hermes-agent runtime (the hermes venv).
+# The sanctioned sibling interpreter (scripts/run_tests.sh HSCC_TEST_PY=conda
+# p313) lacks it, so every case here that builds a real state.db must SKIP there
+# — the same documented env gap as backfill, store_tail and session_resolver.
+# The probe is :mod:`hermes_gap`: ONE definition for the leg, one posture per
+# capability (t_02c98915). This file used to carry its own ``try/except`` around
+# the import plus a ``_HAS_HERMES_STATE`` flag, and that private copy was
+# strictly weaker in exactly the two ways the audit warns about — it cached the
+# import failure at COLLECTION, so a hermes tree that reached ``sys.path`` later
+# than collection (the production resolvers insert it themselves) would skip
+# these three cases while they could still have run, silently; and its skip
+# reason dropped the import error itself, which is the one thing the runner's
+# stamp rule asks a skip to carry.
+from hermes_gap import require_hermes_state
 from session_event import get_store, reset_stores
 from tests.test_api import RunningServer
-
-try:
-    from hermes_state import SessionDB  # noqa: F401
-    _HAS_HERMES_STATE = True
-except Exception:
-    _HAS_HERMES_STATE = False
 
 
 @pytest.fixture
 def hs_state():
-    if not _HAS_HERMES_STATE:
-        pytest.skip("hermes_state not importable on this interpreter "
-                    "(needs the hermes-agent runtime / hermes venv)")
+    """Skip the whole state-db-backed test when hermes_state is unavailable."""
+    require_hermes_state()
     yield
 
 
@@ -97,6 +105,11 @@ def _append(state_path, session_id, messages):
 
 def _wire_seams(monkeypatch, state_path):
     import routes_orchestrator
+    # Local on purpose: the module-level probe is gone (``hermes_gap`` owns it),
+    # and this lambda is called later by production code, from inside a case the
+    # gate has already let through — the same seam shape as
+    # ``test_gateway_store_tail._make_state_db``.
+    from hermes_state import SessionDB
     monkeypatch.setattr(
         routes_orchestrator, "_open_profile_session_db",
         lambda profile, read_only=False: SessionDB(db_path=state_path))

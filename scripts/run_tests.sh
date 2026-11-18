@@ -45,6 +45,13 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 #                                        (``hermes_cli.profiles``: resolver +
 #                                        writer, test_profile_root.py)
 #
+# Enforced, not asserted: hscc-api/tests/test_hermes_gap_single_posture.py
+# sweeps that leg for a private copy of any probe above — the shape this block
+# exists to prevent was measured in it until t_0fd2c149 — and fails if this
+# roster and the probe modules disagree in either direction. THIS BLOCK is the
+# live authority for which probes exist; the audit page below is the dated
+# measurement of record.
+#
 # THE STAMP RULE. Under a sibling interpreter a leg is GREEN when the only
 # non-passing lines are skips whose reason names the missing hermes import
 # (`-rs`, below, is what makes them visible). So:
@@ -57,7 +64,10 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 #   * never "fix" a red sibling leg by installing hermes' deps into the sibling
 #     env. That is the option this repo considered and rejected; the measurement,
 #     the 21-test roster and the reasoning are in
-#     docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md.
+#     docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md — a dated record
+#     of why, with an amendment block naming what changed since it was measured
+#     (two families added, one private posture folded in). Which probes exist
+#     TODAY is the block above, not that page.
 # Compare legs one-dir-per-process, exactly as this loop does — a merged-dir
 # baseline counts cross-file isolation failures as environment failures and gives
 # a wrong answer (see the header above, and

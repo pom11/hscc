@@ -3,6 +3,122 @@
 Card: `t_02c98915` · measured at `origin/main` = `3aca67dd` (2026-11-10) ·
 host: Razvans-Mac-Studio (macOS), load recorded below with each timed number.
 
+## Amendment (2026-11-18, t_0fd2c149) — this page is the measurement; the
+runner's roster is the live authority
+
+Everything below this block is the 2026-11-10 record, unchanged: the 21-test
+roster, the before/after table and the option-1-vs-option-2 reasoning, all at
+`3aca67dd`. It is a dated measurement with a sha. Drift is expected and is not a
+reason to rewrite it — the fix for drift is the pointer you are reading.
+
+Two documents answer two different questions:
+
+| | authoritative for | where |
+|---|---|---|
+| **live authority** | which capability probes exist right now, which family uses which, and what a green sibling leg means | the `sibling interpreter is THIN on purpose` roster block in `scripts/run_tests.sh` — it sits directly above the loop that runs the legs and states the stamp rule |
+| **measurement of record** | why the gates exist at all, why option 2 rather than option 1, and what was measured when that was decided | this page |
+
+When they disagree the runner is right and this page is stale. That
+disagreement is a red test now, not a doc nobody re-reads:
+`hscc-api/tests/test_hermes_gap_single_posture.py::test_the_live_roster_in_the_runner_names_exactly_the_probes_that_exist`
+fails if a probe exists that the roster does not name, or the roster names a
+gate no probe module defines.
+
+### Two families were added after this measurement
+
+Neither is in the 21-test roster below. Case counts measured at `d000bf20`
+(2026-11-18), thin sibling, `-rs`:
+
+| family | cases | capability | probed by | provenance |
+|---|---|---|---|---|
+| gateway tail — `test_gateway_backfill.py`, `test_gateway_store_tail.py`, `test_gateway_degraded_tail.py` | 7 + 8 + 3 = **18** | real `hermes_state.SessionDB` | `hermes_gap.require_hermes_state` (all three, since t_0fd2c149) | the files predate this audit (`38e4375b`, `b9553afa`, `596cd7fc`); the first two were folded onto the probe by t_02c98915 (`c08aa9b7`), the third only by t_0fd2c149 |
+| hermes profile library — `test_profile_root.py` | **6** | `hermes_cli.profiles` (resolver + writer) — **not** `hermes_state` | `hermes_gap.require_hermes_profile_library` | t_2cc3d482, PR #359, merged as `d000bf20` |
+
+The second is a second *capability*, deliberately a separate probe: an
+interpreter that lacks `ruamel.yaml` does not necessarily lack `hermes_cli`, and
+skipping one family for the other's reason is a blind spot wearing a green leg.
+`hermes_gap.py` holds one function per capability, one posture per function.
+
+### The roster and this page's own table already disagreed
+
+The verification table at the bottom of this page records
+`hscc-api | 0 failed, 970 passed, **25 skipped**`. Those 25 are, measured:
+
+| | skips |
+|---|---|
+| `test_session_resolver.py` — the rostered six (reported at `hermes_gap.py:74`) | 6 |
+| gateway tail — backfill 7 + store_tail 8 + degraded_tail 3 | **18** |
+| `test_gateway_driver.py` — "captured corpus not present", nothing to do with hermes | 1 |
+| **= the 25 the table above records** | **25** |
+| + profile library — `test_profile_root.py` (`hermes_gap.py:136`, t_2cc3d482) | +6 |
+| **thin-sibling `hscc-api` leg at `d000bf20`** | **31** |
+
+The roster was therefore already short by 18 the day it was written: the gateway
+tail skips sat in the table above it and were never listed as a family. The
+document written to prevent an unreadable leg went unread itself, which is the
+argument for pinning the roster to code rather than trusting a list.
+
+### One posture corrected (t_0fd2c149)
+
+`test_gateway_degraded_tail.py` was the last file in the leg carrying its own
+probe — a module-level `try: from hermes_state import SessionDB` /
+`except: _HAS_HERMES_STATE = False`, plus a skip reason it wrote for itself. Its
+three cases are now gated through `hermes_gap.require_hermes_state()` like their
+three siblings. Not for tidiness: the private copy was strictly weaker in
+exactly the two ways GAP-D-1 (t_b82ad0fe) is about.
+
+* **It cached the answer at collection.** `hermes_state_import_error()` re-tries
+  the import at call time on purpose, and that is not hypothetical: in ONE
+  full-leg process on the thin sibling the same probe reports
+  `ModuleNotFoundError: No module named 'hermes_state'` for the early gateway
+  files and `ModuleNotFoundError: No module named 'ruamel'` for the later
+  `test_session_resolver` — so the answer to "can this interpreter run hermes?"
+  changes mid-run, because something puts the hermes-agent tree on `sys.path`
+  partway through the leg (which one, this card did not establish). A flag
+  computed at import keeps answering the question it asked at collection, and it
+  can only ever skip — including cases that had become runnable.
+* **Its reason dropped the import error.** The stamp rule is read off `-rs`.
+  "hermes_state not importable" names a capability; `No module named 'ruamel'`
+  names the missing module, which is what tells an operator whether the sibling
+  env is thin (correct) or has hermes' deps and is still broken (a finding).
+
+Measured effect at leg scale: nothing moved — same 31 skips, same skip sites, and
+the three reasons now carry the import error like the other 28. Under the
+canonical interpreter all three cases still RUN (30 passed, 0 skipped across the
+four real-DB files). And the posture cannot silently regrow:
+`hscc-api/tests/test_hermes_gap_single_posture.py` sweeps the leg for a `def` of
+a probe name, for the `try`/`except`-around-a-hermes-import shape, for a private
+skip reason, and for a file that imports the real `hermes_state` without the
+shared gate.
+
+### Re-measured (2026-11-18, thin sibling `~/miniconda3/envs/p313/bin/python`,
+one pytest process per dir exactly as the runner does)
+
+| leg | this page's "after (gated)" table (`3aca67dd`) | today, at `41cd7cdb` |
+|---|---|---|
+| `hscc-project` | 0 failed, 1458 passed, 4 skipped | 0 failed, 1458 passed, 4 skipped, rc=0 |
+| `hscc_daemon` | 0 failed, 3672 passed, 23 skipped | 0 failed, 3693 passed, 23 skipped, rc=0 |
+| `hscc-api` | 0 failed, 970 passed, 25 skipped | 0 failed, 1041 passed, 31 skipped, rc=0 |
+
+The `hscc-api` delta is fully accounted for: +7 tests are this card's guard, +6
+skips are the profile-library family from the reconciliation above, nothing else
+moved. Under the canonical interpreter the same command reports
+`1071 passed, 1 skipped`, rc=0 — the canonical skip count is precisely the number
+that must NOT move when a gate is added, and it did not.
+
+Two honest notes for whoever enforces the stamp rule next:
+
+* The thin `hscc_daemon` leg's 23 skips include two whose reasons are not a
+  missing hermes import (`test_orch_waker_wake_claim.py` — "deployed Hermes has
+  no §3.1 wake-claim helpers"; `test_kanban_monitor_deps.py` — "clean board-read
+  pass is not healthy on this machine"). They were already in the 23 this page
+  counted, so they are not drift; but read literally, the stamp rule's "a skip
+  that does not name that reason is a test that quietly stopped running" would
+  flag them. Different leg, not this card's call — recorded so the next reader
+  does not re-derive it.
+* Case counts in these tables are measurements at a sha, not invariants. The
+  guard pins roster ↔ probe agreement; it deliberately does not pin counts.
+
 ## TL;DR
 
 `scripts/run_tests.sh` takes any interpreter through `HSCC_TEST_PY`. The
