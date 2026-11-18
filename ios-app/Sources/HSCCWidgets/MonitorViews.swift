@@ -2,7 +2,8 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// HSCC Monitor widget views — medium + large.
+// HSCC Monitor widget views — small + medium + large, plus the three Lock Screen
+// accessory families.
 // ---------------------------------------------------------------------------
 
 /// The Home Screen "HSCC Monitor" widget: `hscc cluster monitor` per-node
@@ -19,7 +20,8 @@ struct MonitorWidget: Widget {
         }
         .configurationDisplayName("HSCC Monitor")
         .description("Cluster monitor metrics and the machine HSCC runs on.")
-        .supportedFamilies([.systemMedium, .systemLarge])
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .accessoryInline, .accessoryCircular, .accessoryRectangular])
     }
 }
 
@@ -30,10 +32,35 @@ struct MonitorWidgetView: View {
 
     var body: some View {
         switch family {
+        case .systemSmall:
+            SmallMonitorWidget(entry: entry)
+        case .accessoryInline:
+            InlineMonitorWidget(entry: entry)
+        case .accessoryCircular:
+            CircularMonitorWidget(entry: entry)
+        case .accessoryRectangular:
+            RectangularMonitorWidget(entry: entry)
         case .systemLarge:
             LargeMonitorWidget(entry: entry)
         default:
             MediumMonitorWidget(entry: entry)
+        }
+    }
+}
+
+extension WidgetFamily {
+    /// True for the families that can draw the daemon-host strip/block. The Lock
+    /// Screen accessories draw per-node numbers only, so their refresh must not
+    /// spend `/v1/daemon/host` on pixels that cannot exist (§2's budget).
+    /// Positive-listed for the same reason as `showsBoardWork`: WidgetKit marks
+    /// the `accessory*` cases unavailable on the host, and this decision has to
+    /// stay executable.
+    var showsDaemonHost: Bool {
+        switch self {
+        case .systemSmall, .systemMedium, .systemLarge, .systemExtraLarge:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -43,23 +70,60 @@ struct MonitorWidgetView: View {
 // ---------------------------------------------------------------------------
 
 /// Honest rendition of the gate states (unconfigured / paused / unreachable).
-/// `entry.isLive` distinguishes live content from a full-pane gate. The
-/// unreachable pane says whether a last-known snapshot exists and how old it is
-/// — a stale read is never presented as live data, and no stale node row is
+/// The unreachable pane says whether a last-known snapshot exists and how old it
+/// is — a stale read is never presented as live data, and no stale node row is
 /// drawn at all, so the only thing the container hands back to a view is the
 /// projected node COUNT plus the daemon-host block (§7).
 extension MonitorEntry {
-    var isLive: Bool { configured && !paused && state != .unreachable }
+    /// The label the Lock Screen accessory families draw for a gate state.
+    /// `configured` is checked FIRST, so an unconfigured device can never read
+    /// as "paused" (audit-3 / t_5c554c5b).
+    var shortGateLabel: String {
+        if !configured { return "Set up in HSCC" }
+        return "Paused"
+    }
+
+    /// The node the compact families draw: the first node with a sample (the
+    /// medium grid draws every node, so this is a subset of what it already
+    /// has), else the first node so its error can still be named.
+    var headlineNode: MonitorNode? {
+        nodes.first(where: { $0.sample != nil }) ?? nodes.first
+    }
+
+    /// Fleet CPU: the mean of the per-node values the medium grid already draws.
+    /// nil when no node reported one — never a fabricated 0.
+    var averageCPU: Double? {
+        let values = nodes.compactMap { $0.sample?.cpuUsagePct }
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    /// `accessoryInline`: one short line of the same node numbers the medium
+    /// view draws. A gate state, an unreachable read and a missing sample each
+    /// say so in words instead of rendering a zero.
+    var inlineLine: String {
+        if !configured || paused { return shortGateLabel }
+        if state == .unreachable {
+            return lastKnownAgeMinutes.map { "Can't reach · \($0)m" } ?? "Can't reach"
+        }
+        guard showSections.contains("nodes") else { return state.label }
+        guard let node = headlineNode else { return "no data" }
+        guard let sample = node.sample else { return "no sample" }
+        var parts: [String] = []
+        if let cpu = sample.cpuUsagePct { parts.append("CPU \(monitorPercent(cpu))") }
+        if let gpu = sample.gpuUtilPct { parts.append("GPU \(monitorPercent(gpu))") }
+        return parts.isEmpty ? "no sample" : parts.joined(separator: " · ")
+    }
 
     @ViewBuilder
     var gateView: some View {
         if !configured {
             MonitorGateView(icon: "gearshape",
-                            title: "Set up the app to see the cluster",
+                            title: state.label,
                             caption: "Add host, port, and token in Settings.")
         } else if paused {
             MonitorGateView(icon: "pause.circle",
-                            title: "Paused in Settings",
+                            title: state.label,
                             caption: "Turn this widget back on in Settings.")
         } else if state == .unreachable {
             unreachablePane
@@ -118,6 +182,12 @@ struct MonitorGateView: View {
     }
 }
 
+/// "42%" — a utilisation percent, rounded. nil is the em dash, never `0`.
+private func monitorPercent(_ value: Double?) -> String {
+    guard let value else { return "—" }
+    return "\(Int(value.rounded()))%"
+}
+
 /// A single labelled meter: label left, thin bar, percent right. The bar colour
 /// is honest — derived from the value against warn/bad thresholds (CPU>85 warn,
 /// >95 bad; other gauges at >90 warn, >95 bad). Dims for stale last-known data.
@@ -153,10 +223,7 @@ struct MonitorMeter: View {
         }
     }
 
-    private var valueText: String {
-        guard let value else { return "—" }
-        return "\(Int(value.rounded()))%"
-    }
+    private var valueText: String { monitorPercent(value) }
 
     /// Honest data-colouring: CPU>85 warn, >95 bad; other gauges >90 warn, >95 bad.
     static func color(for value: Double, isCPU: Bool) -> Color {
@@ -180,7 +247,11 @@ struct MediumMonitorWidget: View {
     let entry: MonitorEntry
 
     var body: some View {
-        if entry.isLive {
+        if !entry.configured || entry.paused {
+            entry.gateView
+        } else if entry.state == .unreachable {
+            entry.gateView
+        } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                 stateLine
                 if showNodes && !entry.nodes.isEmpty {
@@ -190,8 +261,6 @@ struct MediumMonitorWidget: View {
                     HostStrip(host: host)
                 }
             }
-        } else {
-            entry.gateView
         }
     }
 
@@ -258,6 +327,53 @@ struct MediumNodeCell: View {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Small — state line + the first node's CPU/RAM/GPU (or the daemon-host strip
+// when the node section is off)
+// ---------------------------------------------------------------------------
+
+struct SmallMonitorWidget: View {
+    let entry: MonitorEntry
+
+    var body: some View {
+        if !entry.configured || entry.paused {
+            entry.gateView
+        } else if entry.state == .unreachable {
+            entry.gateView
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                stateLine
+                if showNodes, let node = entry.headlineNode {
+                    MediumNodeCell(node: node)
+                } else if showHost, let host = entry.daemonHost {
+                    HostStrip(host: host)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var showNodes: Bool { entry.showSections.contains("nodes") }
+    private var showHost: Bool { entry.showSections.contains("host") }
+
+    private var stateLine: some View {
+        HStack(spacing: Theme.Spacing.xs.rawValue) {
+            Circle().fill(entry.state.color).frame(width: 8, height: 8)
+            Text(entry.state.label)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(Theme.Semantic.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+            if let age = entry.lastKnownAgeMinutes {
+                Text("\(age)m")
+                    .font(.caption2)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+}
+
 /// A slim daemon-host strip for the medium widget: hostname + CPU/RAM/DISK bars.
 struct HostStrip: View {
     let host: MonitorDaemonHost
@@ -300,7 +416,11 @@ struct LargeMonitorWidget: View {
     let entry: MonitorEntry
 
     var body: some View {
-        if entry.isLive {
+        if !entry.configured || entry.paused {
+            entry.gateView
+        } else if entry.state == .unreachable {
+            entry.gateView
+        } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                 stateLine
                 if showNodes && !entry.nodes.isEmpty {
@@ -311,8 +431,6 @@ struct LargeMonitorWidget: View {
                 }
                 Spacer(minLength: 0)
             }
-        } else {
-            entry.gateView
         }
     }
 
@@ -447,6 +565,139 @@ struct HostBlock: View {
             Text("daemon down")
                 .font(.system(size: 9))
                 .foregroundColor(Theme.Semantic.bad)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lock Screen accessories — one line inline, one CPU gauge circular, two lines
+// rectangular. Each draws only the per-node numbers the medium view already
+// has; the daemon-host half is neither fetched nor drawn here (§2's budget).
+// ---------------------------------------------------------------------------
+
+/// The Lock Screen inline: the first node's CPU and GPU, or the gate label.
+struct InlineMonitorWidget: View {
+    let entry: MonitorEntry
+
+    var body: some View {
+        if !entry.configured || entry.paused {
+            Text(entry.shortGateLabel)
+                .accessibilityLabel(entry.shortGateLabel)
+        } else {
+            Text(entry.inlineLine)
+                .accessibilityLabel(entry.inlineLine)
+        }
+    }
+}
+
+/// The Lock Screen circular: the fleet CPU the medium grid already draws, as a
+/// gauge. A read with no sample renders a glyph or `—`, never a false 0.
+struct CircularMonitorWidget: View {
+    let entry: MonitorEntry
+
+    var body: some View {
+        if !entry.configured || entry.paused {
+            Text(entry.shortGateLabel)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .minimumScaleFactor(0.6)
+                .accessibilityLabel(entry.shortGateLabel)
+        } else if entry.state == .unreachable {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(Theme.Semantic.bad)
+                .accessibilityLabel(entry.state.label)
+        } else if entry.showSections.contains("nodes"), let cpu = entry.averageCPU {
+            Gauge(value: min(max(cpu, 0), 100), in: 0...100) {
+                Text("CPU")
+            } currentValueLabel: {
+                Text(monitorPercent(cpu))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            }
+            .gaugeStyle(.accessoryCircularCapacity)
+            .tint(MonitorMeter.color(for: cpu, isCPU: true))
+            .accessibilityLabel("CPU \(monitorPercent(cpu))")
+        } else if !entry.showSections.contains("nodes") {
+            Text(entry.state.label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(entry.state.color)
+                .minimumScaleFactor(0.6)
+                .accessibilityLabel(entry.state.label)
+        } else {
+            Text("—")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .accessibilityLabel("no sample")
+        }
+    }
+}
+
+/// The Lock Screen rectangular: the first node's label plus its CPU/MEM, or the
+/// unreachable state with the age of the last-known snapshot.
+struct RectangularMonitorWidget: View {
+    let entry: MonitorEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+            if !entry.configured || entry.paused {
+                Text(entry.shortGateLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+                Text("Open HSCC to configure the cluster")
+                    .font(.system(size: 9))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            } else if entry.state == .unreachable {
+                Text(entry.state.label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Text(entry.lastKnownAgeMinutes.map { "last known \($0) min ago" } ?? "no snapshot")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            } else if !entry.showSections.contains("nodes") {
+                Text(entry.state.label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(entry.state.color)
+                    .lineLimit(1)
+            } else if let node = entry.headlineNode, let sample = node.sample {
+                HStack(spacing: Theme.Spacing.xs.rawValue) {
+                    Circle()
+                        .fill(sample.cpuUsagePct.map { MonitorMeter.color(for: $0, isCPU: true) }
+                              ?? Theme.Semantic.neutral)
+                        .frame(width: 6, height: 6)
+                    Text(node.displayLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Theme.Semantic.onSurface)
+                        .lineLimit(1)
+                }
+                Text("CPU \(monitorPercent(sample.cpuUsagePct)) · MEM \(monitorPercent(sample.memUsedPct))")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            } else if let node = entry.headlineNode {
+                Text(node.displayLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Text("no sample")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            } else {
+                Text(entry.state.label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Text("no data")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
     }
 }

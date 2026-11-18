@@ -1,0 +1,211 @@
+#!/bin/bash
+# widget_view_dispatch/widgetMonitor.sh — the HSCC MONITOR widget surface
+# (WidgetSurfaceKind.widgetMonitor).
+#
+# Subject: Sources/HSCCWidgets/MonitorWidget.swift (provider/model) and
+# Sources/HSCCWidgets/MonitorViews.swift (families). This surface predates the
+# shared `widget_surface_gate` because its reads go through the older
+# `ExtensionClient`/`APIConfig` pair rather than `WidgetDataClient`, so the
+# checks below are explicit rather than a gate call.
+#
+# What this file proves:
+#   * the widget offers small, medium and large plus all three Lock Screen
+#     families, and the dispatcher names every one of them;
+#   * every family body takes the unconfigured/paused gate in ONE step, and the
+#     accessory copy routes through the entry's `shortGateLabel`, which checks
+#     `!configured` before it can say "Paused";
+#   * the new compact families draw only numbers the medium view already has
+#     (first node's CPU/RAM/GPU, fleet CPU) — no new route and no second fetch;
+#   * the accessory refresh refuses the daemon-host request BEFORE it is sent
+#     (`showsDaemonHost`, the same positive-list decision `ClusterWidget` uses
+#     for its board row), so a Lock Screen family never pays for a block it
+#     cannot draw;
+#   * a family that does not fetch the host leaves the stored host half alone
+#     instead of erasing it from the last-known snapshot.
+#
+# Run standalone, or through the aggregator:
+#   ./ios-app/scripts/widget_view_dispatch/widgetMonitor.sh
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+SUBJECT=Sources/HSCCWidgets/MonitorWidget.swift
+VIEWS=Sources/HSCCWidgets/MonitorViews.swift
+[ -f "$SUBJECT" ] || { wbad "missing $SUBJECT"; wvd_finish; exit $?; }
+[ -f "$VIEWS" ] || { wbad "missing $VIEWS"; wvd_finish; exit $?; }
+
+# (1) The family list. Small and all three accessories are the card; medium and
+# large must not be lost in the same edit. Measured inside the supportedFamilies
+# block, not file-wide: a dispatch case proves the family is handled, not that
+# WidgetKit is allowed to offer it.
+family_list=$(sed -n '/\.supportedFamilies(\[/,/)\]/p' "$VIEWS")
+for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+  if printf '%s\n' "$family_list" | grep -q "\.$fam"; then
+    wok "supportedFamilies offers .$fam"
+  else
+    wbad "supportedFamilies does not offer .$fam"
+  fi
+done
+
+# (2) Registration without dispatch is a family that never renders.
+for fam in systemSmall accessoryInline accessoryCircular accessoryRectangular; do
+  if grep -q "case \.$fam:" "$VIEWS"; then
+    wok "the view dispatches .$fam"
+  else
+    wbad "the view has no case for .$fam"
+  fi
+done
+
+# (3) One gate step per family body. Six = small, medium, large, inline,
+# circular, rectangular. Two branches is how a body gates the invite and
+# forgets the pause.
+n=$(grep -c 'if !entry.configured || entry.paused' "$VIEWS")
+if [ "$n" -ge 6 ]; then
+  wok "$n bodies gate on !configured||paused (want >= 6)"
+else
+  wbad "only $n bodies gate on !configured||paused (want >= 6) — a family can draw data on a paused surface"
+fi
+
+# (4) The paused copy has exactly one CODE owner (MonitorState.label). The gate
+# pane reads that label instead of spelling the copy again.
+n=$(grep '"Paused in Settings"' "$SUBJECT" "$VIEWS" | grep -v '^[^:]*:[[:space:]]*//' | wc -l | tr -d ' ')
+if [ "$n" -eq 1 ]; then
+  wok "one paused copy, owned by MonitorState.label"
+else
+  wbad "\"Paused in Settings\" appears $n times (want exactly 1 — the copy must be owned by the entry state)"
+fi
+
+# (5) The accessory label rule, and the invite-first order inside it.
+if grep -q 'var shortGateLabel: String' "$VIEWS"; then
+  wok "the entry owns the accessory shortGateLabel"
+else
+  wbad "no shortGateLabel on the entry — a Lock Screen gate has no copy of its own"
+fi
+copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' "$VIEWS")
+if [ -z "$copy" ]; then
+  wbad "could not locate var shortGateLabel in $VIEWS — the invite-first rule is not being measured"
+else
+  u=$(printf '%s\n' "$copy" | grep -n '!configured' | head -1 | cut -d: -f1)
+  p=$(printf '%s\n' "$copy" | grep -n 'Paused' | head -1 | cut -d: -f1)
+  if [ -n "$u" ] && [ -n "$p" ] && [ "$u" -lt "$p" ]; then
+    wok "shortGateLabel checks !configured (line $u) before any paused copy (line $p) — an unconfigured device cannot read as paused"
+  else
+    wbad "shortGateLabel does NOT check !configured first (configured-check line=$u paused-copy line=$p)"
+  fi
+fi
+n=$(grep -c 'entry\.shortGateLabel' "$VIEWS")
+if [ "$n" -ge 2 ]; then
+  wok "accessory families draw shortGateLabel ($n sites)"
+else
+  wbad "only $n accessory sites route through shortGateLabel (want >= 2 — inline and circular)"
+fi
+
+# (6) The compact families draw a subset of the medium data, not a new route.
+for helper in headlineNode averageCPU inlineLine; do
+  if grep -q "var $helper" "$VIEWS"; then
+    wok "the compact families share the entry's $helper rule"
+  else
+    wbad "missing $helper on the entry — a compact family is inventing its own numbers"
+  fi
+done
+small_range=$(awk '/^struct SmallMonitorWidget/,/^}/' "$VIEWS")
+if printf '%s\n' "$small_range" | grep -q 'headlineNode'; then
+  wok "the small family draws the first node the medium grid already has"
+else
+  wbad "the small family does not use headlineNode"
+fi
+accessory_range=$(awk '/^struct InlineMonitorWidget/,0' "$VIEWS")
+if printf '%s\n' "$accessory_range" | grep -q 'cpuUsagePct\|memUsedPct\|averageCPU\|inlineLine' \
+   && printf '%s\n' "$accessory_range" | grep -q 'gpuUtilPct\|headlineNode\|inlineLine'; then
+  wok "the accessory families draw only the medium view's node numbers"
+else
+  wbad "an accessory family does not draw the medium view's node numbers"
+fi
+if printf '%s\n' "$accessory_range" | grep -q 'daemonHost\|HostStrip\|HostBlock\|"host"'; then
+  wbad "an accessory body reads the daemon-host half it will not draw"
+else
+  wok "the accessory bodies never read the daemon-host half"
+fi
+
+# (7) No new network call: one node route, one host route, both in the provider.
+n=$(grep -c '"/v1/cluster/monitor"' "$SUBJECT")
+if [ "$n" -eq 1 ]; then
+  wok "exactly one /v1/cluster/monitor read"
+else
+  wbad "expected exactly 1 /v1/cluster/monitor read, got $n"
+fi
+n=$(grep -c '"/v1/daemon/host"' "$SUBJECT")
+if [ "$n" -eq 1 ]; then
+  wok "exactly one /v1/daemon/host read"
+else
+  wbad "expected exactly 1 /v1/daemon/host read, got $n"
+fi
+if grep -q '"/v1/' "$VIEWS"; then
+  wbad "a route literal appears in the view file — reads belong in the provider"
+else
+  wok "no /v1/ route literal in the view file"
+fi
+
+# (8) The family-aware fetch: both entry points pass the family, and the host
+# request is refused before it is sent when the family does not draw it.
+n=$(grep -c 'fetchEntry(family: context.family)' "$SUBJECT")
+if [ "$n" -eq 2 ]; then
+  wok "both snapshot and timeline pass context.family into fetchEntry"
+else
+  wbad "expected snapshot + timeline to pass context.family, got $n site(s)"
+fi
+if grep -q 'private func fetchEntry(family: WidgetFamily)' "$SUBJECT"; then
+  wok "the provider's fetch is family-aware"
+else
+  wbad "fetchEntry is not family-aware"
+fi
+if grep -q 'let wantsHost = family.showsDaemonHost' "$SUBJECT"; then
+  wok "the daemon-host read is decided by the family"
+else
+  wbad "the daemon-host read is not decided by the family"
+fi
+if grep -q 'case \.systemSmall, \.systemMedium, \.systemLarge, \.systemExtraLarge:' "$VIEWS"; then
+  wok "showsDaemonHost positive-lists the Home Screen sizes"
+else
+  wbad "showsDaemonHost is not the positive list the gate can execute"
+fi
+guard_line=$(grep -n 'guard enabled else' "$SUBJECT" | head -1 | cut -d: -f1)
+host_line=$(grep -n '"/v1/daemon/host"' "$SUBJECT" | head -1 | cut -d: -f1)
+if [ -n "$guard_line" ] && [ -n "$host_line" ] && [ "$guard_line" -lt "$host_line" ]; then
+  wok "the host-refusal guard (line $guard_line) precedes the host request (line $host_line)"
+else
+  wbad "the host-refusal guard does not precede the host request (guard=${guard_line:-none} host=${host_line:-none})"
+fi
+
+# (9) Paused is decided BEFORE the client exists, and the paused entry is the
+# entry's own factory — no live nodes, no host, no stale snapshot.
+region=$(awk '/private func fetchEntry\(family:/ {f=1} f {print} f && /^    \}$/ {exit}' "$SUBJECT")
+if [ -z "$region" ]; then
+  wbad "could not locate fetchEntry(family:) — the pause-before-client order is not being measured"
+else
+  a=$(printf '%s\n' "$region" | grep -n 'if let surface, !surface.isActive' | head -1 | cut -d: -f1)
+  c=$(printf '%s\n' "$region" | grep -n 'APIConfig.load()' | head -1 | cut -d: -f1)
+  if [ -n "$a" ] && [ -n "$c" ] && [ "$a" -lt "$c" ]; then
+    wok "inside the fetch: paused decided (line $a) before the client exists (line $c) — zero requests when paused"
+  else
+    wbad "inside the fetch, paused is NOT decided before the client is built (active=$a client=$c)"
+  fi
+fi
+if grep -q 'return \.paused()' "$SUBJECT"; then
+  wok "the provider returns the entry's own paused factory"
+else
+  wbad "the provider does not build its paused entry with .paused()"
+fi
+if grep -q 'setting(for: \.widgetMonitor)' "$SUBJECT"; then
+  wok "cadence and pause come from WidgetSurfaceKind.widgetMonitor (one registry, one write path)"
+else
+  wbad "$SUBJECT reads its cadence somewhere other than WidgetSurfaceKind.widgetMonitor"
+fi
+
+# (10) An accessory refresh must not erase the host half a larger family stored.
+if grep -q 'MonitorSnapshotStore.load()?.daemonHost' "$SUBJECT"; then
+  wok "a no-host family preserves the stored daemon-host half"
+else
+  wbad "a no-host refresh would overwrite the stored daemon-host half with nil"
+fi
+
+wvd_finish
