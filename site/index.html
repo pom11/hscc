@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<meta name="description" content="hscc looks after a small cluster of AI computers for you: it starts the models, keeps them running, hands work to the right helper, and restarts anything that falls over.">
+<title>hscc — the manager for a small AI cluster</title>
+<link rel="stylesheet" href="site.css">
+<link rel="icon" href="assets/hscc-icon.png">
+</head>
+<body>
+<main>
+
+  <header class="brand">
+    <img src="assets/hscc-icon.png" width="104" height="104" alt="hscc app icon: an orange H on black">
+    <h1>hscc</h1>
+    <p class="tagline">hscc looks after a small cluster of AI computers for you.</p>
+  </header>
+
+  <!-- 1. What it is (ELI5) -->
+  <section aria-labelledby="s-what">
+    <h2 id="s-what">What it is</h2>
+    <p class="lede">You have a few machines that run AI models, and a team of AI
+    helpers that do your work on them. hscc is the manager in between: it starts
+    the models, keeps them running, hands work to the right helper, and restarts
+    anything that falls over — then tells you only when it actually needs you.</p>
+    <p class="lede">You watch all of it from your phone or your Mac, without
+    opening a terminal.</p>
+    <p class="actions">
+      <a class="primary" href="#get-it">Get it</a>
+      <a class="secondary" href="https://github.com/pom11/hscc">Source on GitHub</a>
+    </p>
+  </section>
+
+  <!-- 2. Why -->
+  <section aria-labelledby="s-why">
+    <h2 id="s-why">Why</h2>
+    <p class="lead">One tool instead of ssh + docker + a folder of your own scripts.</p>
+    <div class="grid">
+      <div class="card">
+        <span class="title">One command brings the fleet up or down.</span>
+        <p>No logging into each machine, no remembering which container runs what.</p>
+      </div>
+      <div class="card">
+        <span class="title">The models stay up on their own.</span>
+        <p>A watchdog keeps checking the serving path and restarts a model that
+        died; if it can't fix it, it stops retrying and tells you why.</p>
+      </div>
+      <div class="card">
+        <span class="title">Templates switch what the cluster serves.</span>
+        <p>One command turns the same hardware from "one big brain" into
+        "one brain plus a team of coders".</p>
+      </div>
+      <div class="card">
+        <span class="title">Agents work on task boards you can actually read.</span>
+        <p>Orchestrator agents take a goal, split it into cards, and workers pick
+        the cards up — with a review step before anything lands.</p>
+      </div>
+      <div class="card">
+        <span class="title">You see everything from your phone or Mac.</span>
+        <p>Six widgets, Live Activities, and a menu-bar tile — no laptop required.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. What it does -->
+  <section aria-labelledby="s-does">
+    <h2 id="s-does">What it does</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="title">🖥️ Runs the fleet</span>
+        <p>Starts and stops the models on every machine, from one place.</p>
+      </div>
+      <div class="card">
+        <span class="title">🩺 Watches it constantly</span>
+        <p>Health checks for the machines, the serving gateway, storage, and the
+        AI agents themselves.</p>
+      </div>
+      <div class="card">
+        <span class="title">🔁 Heals what it can</span>
+        <p>Restarts a dead model on its own, and speaks up when it can't.</p>
+      </div>
+      <div class="card">
+        <span class="title">💤 Saves power when idle</span>
+        <p>Puts the GPU serving layer to sleep after a quiet period and wakes it
+        when work arrives.</p>
+      </div>
+      <div class="card">
+        <span class="title">📋 Runs agents on boards</span>
+        <p>Cards for todo / ready / running / blocked / done, per project, with a
+        standup digest.</p>
+      </div>
+      <div class="card">
+        <span class="title">📱 Shows it on your devices</span>
+        <p>The same state as widgets on iOS and macOS, plus live tiles on the Lock
+        Screen and Dynamic Island.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. Templates -->
+  <section aria-labelledby="s-templates">
+    <h2 id="s-templates">Templates</h2>
+    <p class="lead">A template is a picture of your cluster written down.</p>
+    <p>It says: this many machines, this model here, these workers there. Applying
+    a template rebuilds the cluster to match the picture — so switching what your
+    hardware does is one command, not an afternoon.</p>
+    <p><code>hscc template preview &lt;name&gt;</code> shows what would change
+    before anything moves; <code>hscc template apply &lt;name&gt; --confirm</code>
+    makes it real.</p>
+
+    <table class="tpl">
+      <caption>The registry we actually ship — 23 templates, from 1 machine to 8
+      (from <code>hscc template list</code>; run it for the live list, this table
+      drifts):</caption>
+      <thead>
+        <tr><th scope="col">Template</th><th scope="col">What you get</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>1node-orchestrator-only</code></th><td class="desc">1 machine: just the orchestrator, no worker team</td></tr>
+        <tr><th scope="row"><code>2node-coding</code></th><td class="desc">2 machines: orchestrator + 1 coding worker</td></tr>
+        <tr><th scope="row"><code>2node-fast</code></th><td class="desc">2 machines: orchestrator + 1 fast coding worker — the smallest useful fleet</td></tr>
+        <tr><th scope="row"><code>3node-balanced</code></th><td class="desc">3 machines: orchestrator + 1 coding worker + 1 fast worker</td></tr>
+        <tr><th scope="row"><code>3node-coding</code></th><td class="desc">3 machines: orchestrator + 2 coding workers</td></tr>
+        <tr><th scope="row"><code>3node-flux2-media</code></th><td class="desc">3 machines: orchestrator + an image unit + a video unit — <strong>draft, preview only, never applied</strong></td></tr>
+        <tr><th scope="row"><code>4node-balanced</code></th><td class="desc">4 machines: orchestrator + 2 coding + 1 fast</td></tr>
+        <tr><th scope="row"><code>4node-coding</code></th><td class="desc">4 machines: orchestrator + 3 coding workers</td></tr>
+        <tr><th scope="row"><code>4node-coding-plus-fast</code></th><td class="desc">4 machines: orchestrator + a coding family + a fast family</td></tr>
+        <tr><th scope="row"><code>4node-colocated-dual</code></th><td class="desc">4 machines: orchestrator + 3 workers, each running two models side by side</td></tr>
+        <tr><th scope="row"><code>4node-deepseek-v4-orchestrator</code></th><td class="desc">4 machines: a big orchestrator split over 2 machines + 2 coding workers</td></tr>
+        <tr><th scope="row"><code>4node-dsv4-plus-coding</code></th><td class="desc">4 machines: a big orchestrator over 2 machines + 2 coding workers</td></tr>
+        <tr><th scope="row"><code>4node-dual-dsv4</code></th><td class="desc">4 machines: two big models, each over 2 machines — one orchestrator, one reasoning pool</td></tr>
+        <tr><th scope="row"><code>4node-dual-orch</code></th><td class="desc">4 machines: two orchestrators (one per project board) + 2 coding workers</td></tr>
+        <tr><th scope="row"><code>4node-flash-next-all</code></th><td class="desc">4 machines: the same model everywhere — 1 orchestrator + a load-balanced pool of 3</td></tr>
+        <tr><th scope="row"><code>4node-quality</code></th><td class="desc">4 machines: a quality-first orchestrator + 2 coding + 1 fast</td></tr>
+        <tr><th scope="row"><code>4node-review-heavy</code></th><td class="desc">4 machines: orchestrator + 1 coder + 2 reviewer workers, sized for heavy auto-review</td></tr>
+        <tr><th scope="row"><code>4node-throughput</code></th><td class="desc">4 machines: fast orchestrator + 3 fast coders — burst mode</td></tr>
+        <tr><th scope="row"><code>8node-coding</code></th><td class="desc">8 machines: orchestrator + 7 coding workers</td></tr>
+        <tr><th scope="row"><code>8node-coding-plus-fast</code></th><td class="desc">8 machines: orchestrator + 4 coding + 3 fast</td></tr>
+        <tr><th scope="row"><code>colocated-two-models</code></th><td class="desc">One worker family, two models per machine on their own ports behind one proxy</td></tr>
+        <tr><th scope="row"><code>single-family</code></th><td class="desc">Orchestrator + one coding family across all machines, load-balanced behind a proxy</td></tr>
+        <tr><th scope="row"><code>hscc-live</code></th><td class="desc">Our own running layout: orchestrator + one coding family across all workers, behind the proxy</td></tr>
+      </tbody>
+    </table>
+
+    <p class="note">Which model each template serves lives in the template itself
+    — check <code>hscc template preview &lt;name&gt;</code> rather than trusting a
+    web page.</p>
+  </section>
+
+  <!-- 5. Commands -->
+  <section aria-labelledby="s-commands">
+    <h2 id="s-commands">Commands</h2>
+    <p>The whole tool is one command, <code>hscc</code>. This is every command
+    group, in the order the tool lists them.</p>
+<!-- COMMANDS:BEGIN — generated by scripts/gen_site_commands.py from `hscc --help`;
+     do not hand-edit. Regenerate: python3 scripts/gen_site_commands.py --write
+     Prose comes from site/COPY.md (the copy card); the command list, order and
+     grouping come from the installed CLI, so the two cannot drift apart. -->
+<div class="cmdgroup">
+<h3>Daemon control</h3>
+<p class="note">The background watcher that does the checking and the healing.</p>
+<ul class="cmds">
+<li><code>hscc start</code><span class="say">start the watcher in the background.</span></li>
+<li><code>hscc stop</code><span class="say">stop it gracefully.</span></li>
+<li><code>hscc status</code><span class="say">is everything healthy? One screen: the watcher plus the last result of every health check.</span></li>
+<li><code>hscc install</code><span class="say">make the watcher start by itself when the machine boots.</span></li>
+<li><code>hscc uninstall</code><span class="say">remove that auto-start and stop the watcher.</span></li>
+<li><code>hscc plist</code><span class="say">print the auto-start config without installing it.</span></li>
+<li><code>hscc log</code><span class="say">read what the watcher has been saying.</span></li>
+</ul>
+</div>
+<div class="cmdgroup">
+<h3>Health &amp; monitoring</h3>
+<ul class="cmds">
+<li><code>hscc check</code><span class="say">run the health checks now instead of waiting, or just one stream (machines, gateway, local, heartbeat, storage, watchdog, triggers).</span></li>
+<li><code>hscc check --repo &lt;path&gt;</code><span class="say">is a given checkout still protected by the commit-time leak guard? Says so plainly when it isn't.</span></li>
+<li><code>hscc watch</code><span class="say">follow the check results live.</span></li>
+<li><code>hscc triggers</code><span class="say">the alert rules and what fired recently.</span></li>
+<li><code>hscc verify</code><span class="say">one long smoke test of the whole cluster.</span></li>
+<li><code>hscc stats</code><span class="say">what the fleet has been doing over the last N days.</span></li>
+<li><code>hscc throughput</code><span class="say">how fast the models are answering and how deep the queue is, across the fleet.</span></li>
+<li><code>hscc autoscale</code><span class="say">what the autoscaler would decide right now, without doing it.</span></li>
+<li><code>hscc escalate</code><span class="say">which failures are waiting for a human, without touching them.</span></li>
+</ul>
+</div>
+<div class="cmdgroup">
+<h3>Cluster &amp; templates</h3>
+<ul class="cmds">
+<li><code>hscc cluster status</code><span class="say">what is running and which machines are idle.</span></li>
+<li><code>hscc cluster hosts</code><span class="say">every machine and every saved cluster you know about.</span></li>
+<li><code>hscc cluster monitor</code><span class="say">CPU, memory and GPU per machine; <code>--live</code> adds the load per model.</span></li>
+<li><code>hscc cluster jobs</code><span class="say">every job running right now.</span></li>
+<li><code>hscc cluster info</code><span class="say">the resolved cluster configuration in detail.</span></li>
+<li><code>hscc cluster stop &lt;id&gt;</code><span class="say">stop one running workload.</span></li>
+<li><code>hscc cluster down</code><span class="say">stop every workload on the fleet (<code>--dry-run</code> first).</span></li>
+<li><code>hscc cluster up</code><span class="say">start every unit the serving config declares (<code>--dry-run</code> first).</span></li>
+<li><code>hscc template list</code><span class="say">every template we ship.</span></li>
+<li><code>hscc template status</code><span class="say">which template is applied right now.</span></li>
+<li><code>hscc template preview &lt;name&gt;</code><span class="say">a dry run: what applying it would change.</span></li>
+<li><code>hscc template validate &lt;name&gt;</code><span class="say">check a template offline and against the live cluster.</span></li>
+<li><code>hscc template apply &lt;name&gt; --confirm</code><span class="say">rebuild the cluster to match the template.</span></li>
+<li><code>hscc profiles</code><span class="say">how many cards each agent role is holding.</span></li>
+<li><code>hscc project …</code><span class="say">mission control for several projects at once: standup, decompose, review, qa, verify, doctor, metrics and more.</span></li>
+<li><code>hscc api start</code><span class="say">the read-only HTTP API your phone and Mac read from; prints the pairing QR code (<code>stop</code> / <code>status</code> too).</span></li>
+<li><code>hscc autodown</code><span class="say">the idle sleep/wake for the GPU layer: <code>status</code>, <code>enable</code>, <code>disable</code>, <code>wake</code>, <code>cancel</code>.</span></li>
+<li><code>hscc kanban</code><span class="say">board hygiene: blocked cards (list and recover), stale cards (list and archive), and a live board monitor.</span></li>
+<li><code>hscc cards monitor</code><span class="say">one live panel per running card, streaming what its worker is doing.</span></li>
+<li><code>hscc orch inject</code><span class="say">send a message into a running agent's session.</span></li>
+<li><code>hscc orch waker</code><span class="say">the built-in orchestrator waker: <code>status</code>, <code>enable</code>, <code>disable</code>.</span></li>
+</ul>
+</div>
+<div class="cmdgroup">
+<h3>Utility</h3>
+<ul class="cmds">
+<li><code>hscc notify "message"</code><span class="say">send a desktop notification.</span></li>
+<li><code>hscc bootstrap</code><span class="say">the installer, runnable from a repo checkout, a plugin tree or a Homebrew install.</span></li>
+<li><code>hscc update --check</code><span class="say">ask GitHub whether a newer release exists. Reads only; it never installs anything.</span></li>
+</ul>
+</div>
+<!-- COMMANDS:END -->
+  </section>
+
+  <!-- 6. How it looks -->
+  <section aria-labelledby="s-looks">
+    <h2 id="s-looks">How it looks</h2>
+    <p>Six widgets, the same six on iPhone and on the Mac desktop, so the cluster
+    is a glance instead of a login:</p>
+    <div class="grid">
+      <div class="card">
+        <span class="title">Cluster</span>
+        <p>Is it serving, waking up, or down, with a small map of the machines and
+        how long before an idle cluster goes to sleep.</p>
+      </div>
+      <div class="card">
+        <span class="title">Monitor</span>
+        <p>CPU, memory and GPU per machine.</p>
+      </div>
+      <div class="card">
+        <span class="title">Running cards</span>
+        <p>The jobs being worked right now, who is doing them, and for how long.</p>
+      </div>
+      <div class="card">
+        <span class="title">Kanban monitor</span>
+        <p>Running, ready and blocked at a glance.</p>
+      </div>
+      <div class="card">
+        <span class="title">Board status</span>
+        <p>Todo / ready / running / blocked / done for one board you pick.</p>
+      </div>
+      <div class="card">
+        <span class="title">Projects</span>
+        <p>Your projects and the board each one owns.</p>
+      </div>
+    </div>
+    <div class="card">
+      <p class="title">Live Activities</p>
+      <p>Put the same information on the Lock Screen and the Dynamic Island while
+      something is happening: the cluster waking, models serving, cards running, a
+      board making progress, or the fleet's overall health.</p>
+    </div>
+    <div class="card">
+      <p class="title">You can restyle it.</p>
+      <p>One global style for every widget and Live Activity, or a different one per
+      tile — colour (including a transparent background), font, weight, text size,
+      density, and whether the header and icons show. Presets get you most of the
+      way there, and everything has a live preview.</p>
+    </div>
+  </section>
+
+  <!-- 7. Get it -->
+  <section aria-labelledby="get-it">
+    <h2 id="get-it">Get it</h2>
+
+    <h3>CLI (Mac or Linux control host):</h3>
+    <pre><code>brew tap pom11/hscc
+brew install hscc
+hscc bootstrap --yes</code></pre>
+
+    <h3>iPhone app:</h3>
+    <p>Open <a href="ios/">https://pom11.github.io/hscc/ios/</a> in
+    <strong>Safari</strong> on the iPhone and tap Install.</p>
+    <div class="card">
+      <p>It's an Ad Hoc build, so your device has to be registered with the
+      maintainer first — see
+      <a href="https://github.com/pom11/hscc/blob/main/ios-app/INSTALL.md">ios-app/INSTALL.md</a>.</p>
+    </div>
+
+    <h3>Mac menu-bar app + desktop widgets:</h3>
+    <pre><code>brew install --cask pom11/hscc/hscc-widgets</code></pre>
+
+    <h3>The code:</h3>
+    <p><a href="https://github.com/pom11/hscc">https://github.com/pom11/hscc</a> (MIT).</p>
+
+    <div class="card">
+      <p>You'll need a configured sparkrun DGX Spark cluster and Hermes on the
+      control host — hscc is the manager layer, not the hardware.</p>
+    </div>
+  </section>
+
+  <footer>
+    hscc · Hermes Spark Cluster Control ·
+    <a href="https://github.com/pom11/hscc">github.com/pom11/hscc</a>
+  </footer>
+
+</main>
+</body>
+</html>

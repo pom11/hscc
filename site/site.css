@@ -1,0 +1,288 @@
+/* hscc landing page — https://pom11.github.io/hscc/
+ *
+ * Same identity as the iOS and macOS apps: black field, #FF5722 accent, the
+ * orange "H" mark (ios-app/Assets.xcassets/AppIcon.appiconset/AppIcon.png).
+ * No frameworks, no web fonts, no remote references of any kind — the page is
+ * one html file, this css file and one png, which is also what lets it be
+ * published next to /ios/ and /macos/ without touching them.
+ *
+ * The layout is phone-first: everything below reads at 360px, and the two
+ * grids (feature cards, command rows) only appear from 620px up.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #000;
+  --field: #0b0b0b;
+  --line: #2a2a2a;
+  --ink: #fff;
+  --muted: #9a9a9a;
+  --faint: #8a8a8a;   /* small print still clears 4.5:1 on black */
+  --accent: #FF5722;
+  --accent-down: #e64a19;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  padding: 32px 18px 64px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Helvetica Neue", Arial, sans-serif;
+}
+
+main { max-width: 760px; margin: 0 auto; }
+
+a { color: var(--accent); }
+a:active { color: var(--accent-down); }
+
+code {
+  font: .92em ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+strong { font-weight: 700; }
+
+/* ── hero ─────────────────────────────────────────────────────────────────── */
+
+.brand { text-align: center; }
+
+.brand img {
+  width: 104px;
+  height: 104px;
+  border-radius: 23px;   /* the app's own superellipse feel */
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+h1 {
+  margin: 16px 0 0;
+  font-size: 2.1rem;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 6px 0 0;
+  font-size: 1.12rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.lede { margin: 14px 0 0; }
+.lede + .lede { color: var(--muted); }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 22px 0 0;
+}
+
+.actions a {
+  flex: 1 1 150px;
+  padding: 13px 16px;
+  border-radius: 14px;
+  font-weight: 800;
+  text-align: center;
+  text-decoration: none;
+}
+
+.actions .primary { background: var(--accent); color: #000; }
+.actions .primary:active { background: var(--accent-down); }
+.actions .secondary {
+  border: 1px solid var(--line);
+  background: var(--field);
+  color: var(--ink);
+}
+
+/* ── sections ─────────────────────────────────────────────────────────────── */
+
+section { margin-top: 44px; }
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 1.2rem;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+}
+
+h3 { margin: 26px 0 8px; font-size: 1rem; }
+
+p { margin: 12px 0 0; }
+.lead { font-weight: 700; margin-top: 0; }
+.note { color: var(--muted); font-size: .95rem; }
+
+ul.plain {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── cards ────────────────────────────────────────────────────────────────── */
+
+.card {
+  margin: 14px 0 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--field);
+}
+
+.card p:first-child { margin-top: 0; }
+.card p:last-child { margin-bottom: 0; }
+
+.grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.grid .card { margin: 0; }
+
+.card .title { display: block; font-weight: 700; }
+.card p { margin: 6px 0 0; color: var(--muted); }
+
+/* ── template table ───────────────────────────────────────────────────────── */
+
+table.tpl {
+  width: 100%;
+  margin-top: 14px;
+  border-collapse: collapse;
+  font-size: .95rem;
+}
+
+table.tpl caption {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: .9rem;
+  text-align: left;
+}
+
+table.tpl th,
+table.tpl td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #1e1e1e;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.tpl thead th {
+  border-bottom: 1px solid var(--line);
+  color: var(--faint);
+  font-size: .82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+table.tpl th[scope="row"] {
+  width: 40%;
+  font-weight: 400;
+}
+
+table.tpl td.desc { color: var(--muted); }
+table.tpl td.desc strong { color: var(--accent); }
+
+table.tpl tbody tr:last-child th,
+table.tpl tbody tr:last-child td { border-bottom: 0; }
+
+/* ── commands (generated region) ──────────────────────────────────────────── */
+
+.cmdgroup + .cmdgroup { margin-top: 26px; }
+.cmdgroup h3 { margin: 0 0 4px; color: var(--ink); font-size: 1.02rem; }
+.cmdgroup .note { margin: 0 0 8px; }
+
+ul.cmds {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+ul.cmds li {
+  display: grid;
+  gap: 2px;
+  padding: 9px 0;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+ul.cmds li:last-child { border-bottom: 0; }
+
+ul.cmds code {
+  color: var(--accent);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+ul.cmds .say { color: var(--muted); }
+
+/* ── install ──────────────────────────────────────────────────────────────── */
+
+pre {
+  margin: 12px 0 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--field);
+}
+
+pre code { font-size: .9rem; }
+
+footer {
+  margin-top: 48px;
+  color: var(--faint);
+  font-size: .86rem;
+  text-align: center;
+}
+
+/* ── breakpoints ──────────────────────────────────────────────────────────── */
+
+/* Phone: the template table becomes a stacked list, one block per template. */
+@media (max-width: 619px) {
+  table.tpl thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  table.tpl, table.tpl caption, table.tpl tbody, table.tpl tr,
+  table.tpl th, table.tpl td {
+    display: block;
+    width: auto;
+  }
+
+  table.tpl tr {
+    padding: 10px 0;
+    border-bottom: 1px solid #1e1e1e;
+  }
+
+  table.tpl th[scope="row"],
+  table.tpl td {
+    padding: 0;
+    border: 0;
+  }
+
+  table.tpl td.desc { margin-top: 3px; }
+}
+
+/* Wider: two-up cards, and command rows sit on one line. */
+@media (min-width: 620px) {
+  .grid { grid-template-columns: 1fr 1fr; }
+
+  ul.cmds li {
+    grid-template-columns: minmax(0, 21rem) 1fr;
+    gap: 0 14px;
+  }
+}
+
+@media (min-width: 900px) {
+  body { padding-top: 56px; }
+}

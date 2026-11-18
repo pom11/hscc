@@ -1,0 +1,83 @@
+HSCC — Hermes Spark Cluster Control   v2.15.11
+Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
+Usage:  hscc <command> [args]        hscc help <command>   for details
+Daemon control
+  start                Start the monitoring daemon in the background
+  stop                 Gracefully stop the running daemon
+  status               Daemon status + last result of every health stream
+  install              Install the launchd service (auto-start at login)
+  uninstall            Remove the service and stop the daemon
+  plist                Print the launchd plist (no install)
+  log                  Show the daemon log output
+
+Health & monitoring
+  check [stream]       Run one check cycle now (default: all)
+      streams: dgx gateway local heartbeat nas watchdog triggers
+  check --repo <path>  Commit-time address-guard posture for that checkout
+                       (default cwd; --json; exit 0 only when 'armed')
+  watch [stream]       Live-tail check results
+  triggers             Show trigger-engine rules and recent firings
+  verify
+      Run a full compatibility/health smoke-test of the cluster
+  stats [days]
+      Fleet activity — completions & tool usage over N days (default 7)
+  throughput
+      Aggregate vLLM throughput + queue depth across the fleet
+  autoscale
+      Show autoscale decision from current queue depth (read-only)
+  escalate
+      Show pending failure escalations (dry-run, no mutations)
+
+Cluster & templates
+  cluster status       Running workloads + idle hosts
+  cluster hosts        All cluster hosts and saved sparkrun clusters
+  cluster monitor [--live]
+      Fleet CPU/RAM/GPU; --live adds per-node, per-model load
+  cluster jobs         All sparkrun jobs currently running
+  cluster info         Detailed resolved cluster configuration
+  cluster stop <id>    Stop a running workload by container id
+  cluster down [--dry-run] Stop ALL sparkrun workloads fleet-wide
+  cluster up   [--dry-run] Start every unit in serving.json (orch + keepalive)
+  template list
+      List available cluster templates (declared fleet layouts)
+  template status      Which template is currently applied
+  template preview <name> Dry-run: what applying <name> would change
+  template validate <name> [--structural-only] [--json]
+      Validate a template: structural (offline) layer always; placement (live)
+      layer unless --structural-only. Exit non-zero if either layer fails.
+  template apply <name> [--confirm] [--force-recreate]
+      Apply a template (--confirm executes; --force-recreate stops+reruns
+      units so changed serve flags reach vLLM)
+  profiles             Running kanban task counts per profile
+  project <cmd>        Project-portfolio commands: standup verify doctor ...
+  api <cmd>            HSCC HTTP API server: start stop status (external apps)
+  autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
+  kanban <cmd>
+      Board hygiene: blocked (show/recover), stale (list/archive)
+  cards monitor [--live] One live panel per running card, streaming its worker
+  orch inject <p> "<msg>" Inject into a running Hermes REPL pane (tmux)
+  orch waker status|enable|disable
+      The built-in orchestrator waker (daemon-resident)
+
+Utility
+  notify <message>     Send a desktop notification
+  bootstrap [flags]
+      Run the HSCC installer from any layout (repo, plugins, brew)
+                       flags pass through: --yes --dry-run --force --no-backup
+      --skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)
+  update --check       Check GitHub releases for a newer version (read-only)
+
+Examples
+  hscc status                          # is the daemon healthy?
+  hscc check gateway                   # re-run just the gateway check
+  hscc template list                   # see the declared fleet layouts
+  hscc template preview 3node-coding
+  hscc template apply 3node-coding --confirm
+  hscc cluster status
+
+
+Docs: ~/dev/hscc/README.md   Slash commands (in Hermes chat):
+  /cluster /workers-up /cluster-restart /template
+Run `hscc help advanced` for internal/service-manager commands.
+Theme: add `--theme dark|light` after any command to pick a palette
+  (default: auto).
