@@ -223,6 +223,12 @@ EXTERNAL = frozenset({
     "sparkrun", "hermes", "hf",
     # VCS / forge / packaging
     "git", "gh", "pip", "pip3", "uv", "pipx", "brew",
+    # Homebrew's tap is Ruby, so the release gates syntax-check in Ruby:
+    # bump_cask.py::ruby_check and bump_formula.py::ruby_check both run
+    # `ruby -c` on the rendered file and raise CannotRun (never a silent
+    # pass) when the binary is missing. scripts/README.md quotes that gate,
+    # and no hscc CLI oracle can enumerate an external interpreter (t_d3448025).
+    "ruby",
     # python test/doc tooling usable as a bare verb
     "pytest",
     # iOS / macOS

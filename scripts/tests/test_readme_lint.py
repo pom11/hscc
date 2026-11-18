@@ -189,6 +189,8 @@ def _cls(tok, oracle, readme=None, repo=None, names=None):
     "sparkrun cluster list",
     "git clone",
     "python3 scripts/address_guard.py --tracked",
+    "ruby -c",                                 # the tap render gate (README)
+    "ruby -c Casks/hscc-widgets.rb",           # same gate, with its file arg
     "scripts/run_tests.sh",
     "changelog_fragments.py",                  # bare existing script name
 ])
@@ -313,6 +315,31 @@ def test_mutation_dead_command(oracle, tmp_path):
     v_dead, payload = _cls("hscc doctor", oracle)
     assert v_live == "pass"
     assert v_dead == "fail" and payload[0] == "CMD-UNKNOWN"
+
+
+def test_mutation_external_allowlist_entry_is_load_bearing(oracle, monkeypatch):
+    """An allow-list entry is a decision, not decoration (t_d3448025).
+
+    scripts/README.md quotes `ruby -c` because `bump_cask.py` /
+    `bump_formula.py` really do gate the rendered tap file with it, so the
+    entry must be load-bearing in BOTH directions: with `ruby` on the list the
+    quote passes, and with that ONE entry removed it fails CMD-BINARY again
+    (the exact finding the gate was red with on `main`). The unlisted sibling
+    interpreter (`perl -c`) must fail in both postures — that is the proof the
+    fix named one genuinely external binary instead of widening the rule to
+    "any interpreter the oracle does not know", which would silence it.
+    """
+    listed = "ruby -c Casks/hscc-widgets.rb"
+    unlisted = "perl -c script.pl"
+    assert _cls(listed, oracle)[0] == "pass"
+    assert _cls(unlisted, oracle)[0] == "fail"
+
+    monkeypatch.setattr(lint_mod, "EXTERNAL",
+                        frozenset(set(lint_mod.EXTERNAL) - {"ruby"}))
+    v, payload = _cls(listed, oracle)
+    assert v == "fail" and payload[0] == "CMD-BINARY", (
+        f"removing the entry did not re-arm the rule: {v} {payload}")
+    assert _cls(unlisted, oracle)[0] == "fail"
 
 
 def test_cannot_run_is_never_a_pass(monkeypatch, capsys):

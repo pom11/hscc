@@ -7,7 +7,8 @@
 Every command quoted here exists in the real CLI surface or the tree.
 Run `hscc status` first, then `hscc template list` and `hscc cluster
 status`. External CLIs are allow-listed: `sparkrun cluster list`,
-`git pull`, `brew install xcodegen`. The repo script `scripts/real_check.py`
+`git pull`, `brew install xcodegen`, `ruby -c` (the tap syntax gate the
+release scripts really run). The repo script `scripts/real_check.py`
 exists, so `python3 scripts/real_check.py` is fine too. Project verbs quote
 as real: `hscc project standup`, `hscc project why <card>`.
 
