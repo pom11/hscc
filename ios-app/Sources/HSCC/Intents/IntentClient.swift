@@ -23,14 +23,11 @@ enum IntentClient {
     /// here used to return an empty host, so every voice intent falsely
     /// reported "not configured" even when the app was set up.
     static func make() -> HSCCClient? {
-        let defaults = UserDefaults(suiteName: AppGroup.suiteName)
-        guard let host = defaults?.string(forKey: AppGroup.hostKey),
-              !host.trimmingCharacters(in: .whitespaces).isEmpty,
-              let port = Int(defaults?.string(forKey: AppGroup.portKey) ?? "8788"),
-              let token = KeychainStore.readToken(), !token.isEmpty else {
-            return nil
-        }
-        return HSCCClient(host: host, port: port, token: token)
+        // `APIConfig.load()` reads the SAME App-Group suite and shared Keychain
+        // item, and carries the active cluster's whole address list, so an
+        // intent fails over exactly like the app and the widgets.
+        guard let config = APIConfig.load() else { return nil }
+        return HSCCClient(config: config)
     }
 }
 

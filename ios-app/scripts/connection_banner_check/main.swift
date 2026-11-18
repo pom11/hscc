@@ -53,7 +53,24 @@ m.requestFailed()
 assert(ConnectionMonitor.shared.status == .unreachable("Can't reach the cluster — is Tailscale connected?"),
        "a failure after a success RE-SETS the .unreachable alarm")
 
-// 3) in-flight is NOT an error: the monitor has no red "inFlight" outcome, and
+// 3) The banner can name WHICH address answered. Multi-address failover
+//    reports the winning host; reset() clears it with the status so a cluster
+//    switch never leaves the old address on screen.
+m.reset()
+assert(ConnectionMonitor.shared.activeHost == nil, "reset() clears the active address")
+m.requestSucceeded(host: "host-b.example")
+assert(ConnectionMonitor.shared.activeHost == "host-b.example",
+       "a success reports the address that answered")
+assert(ConnectionMonitor.shared.status == .reachable,
+       "naming the address does not change the reachable state")
+m.requestFailed()
+assert(ConnectionMonitor.shared.status == .unreachable(ConnectionMonitor.transportReason),
+       "only a transport failure (after every address was tried) raises unreachable")
+m.reset()
+assert(ConnectionMonitor.shared.activeHost == nil,
+       "a cluster switch clears the remembered banner address")
+
+// 4) in-flight is NOT an error: the monitor has no red "inFlight" outcome, and
 //    only a COMPLETED transport failure raises the alarm. A request that is
 //    merely underway leaves the last known status untouched.
 m.reset()

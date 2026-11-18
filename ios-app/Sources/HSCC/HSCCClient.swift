@@ -20,7 +20,9 @@ import Foundation
 ///     (B5 consumes it).
 ///   * The token is NEVER logged — not in this file, not in debug output.
 struct HSCCClient {
-    private let host: String
+    /// Primary + fallbacks, in SAVED order. Each request walks
+    /// `HostFailover.orderedHosts` so the last-working address is tried first.
+    private let hosts: [String]
     private let port: Int
     private let token: String
     private let session: URLSession
@@ -32,22 +34,29 @@ struct HSCCClient {
         return .shared
     }
 
-    /// `portFallback` is used when `port` isn't a valid Int.
-    init(host: String, port: Int, token: String,
+    /// Build a client for one saved cluster. `fallbacks` are tried, in order,
+    /// only when a transport attempt fails (see `HostFailover`).
+    init(host: String, fallbacks: [String] = [], port: Int, token: String,
          session: URLSession = HSCCClient.defaultSession()) {
-        self.host = host
+        self.hosts = HostFailover.orderedHosts(primary: host, fallbacks: fallbacks)
         self.port = port
         self.token = token
         self.session = session
     }
 
+    /// Build from the shared settings read, so app/extension clients share the
+    /// exact same address list and the same failover order.
+    init(config: APIConfig,
+         session: URLSession = HSCCClient.defaultSession()) {
+        self.init(host: config.host, fallbacks: config.fallbackHosts,
+                  port: config.port, token: config.token, session: session)
+    }
+
     // MARK: - URL building (host + port, no hardcoded tailnet address)
 
-    /// Build a URL for `path` (e.g. "/v1/ping") against the configured host+port.
-    private func url(for path: String) throws -> URL {
-        guard var components = URLComponents() as URLComponents? else {
-            throw HSCCError.invalidURL
-        }
+    /// Build a URL for `path` (e.g. "/v1/ping") against one address + the port.
+    private func url(for path: String, host: String) throws -> URL {
+        var components = URLComponents()
         components.scheme = "http"
         components.host = host
         components.port = port
@@ -66,7 +75,8 @@ struct HSCCClient {
     /// parameters that matter — like a paging `before` cursor — must go
     /// through `URLQueryItem`, which percent-encodes name/value and keeps the
     /// path clean.
-    private func url(for path: String, queryItems: [URLQueryItem]) throws -> URL {
+    private func url(for path: String, host: String,
+                     queryItems: [URLQueryItem]) throws -> URL {
         var components = URLComponents()
         components.scheme = "http"
         components.host = host
@@ -91,8 +101,9 @@ struct HSCCClient {
     /// orchestrator chat shells out to `hermes chat` and a real answer takes
     /// 30-90s (measured floor: 16.8s for a two-word reply), so the default
     /// would abort a request the server is still successfully working on.
-    private func request(for path: String, timeout: TimeInterval? = nil) throws -> URLRequest {
-        try request(for: try url(for: path), timeout: timeout)
+    private func request(for path: String, host: String,
+                         timeout: TimeInterval? = nil) throws -> URLRequest {
+        try request(for: try url(for: path, host: host), timeout: timeout)
     }
 
     /// Build a request from an already-constructed `URL` (used by the
@@ -107,23 +118,47 @@ struct HSCCClient {
 
     // MARK: - Core GET helper
 
+    /// The ONE transport loop every request in this client goes through.
+    ///
+    /// Returns the first HTTP ANSWER (any status) and the address that gave it.
+    /// Only transport failures advance to the next address — a reachable
+    /// daemon's 401/404/5xx is an answer, never a reason to try another host.
+    private func send(_ build: (String) throws -> URLRequest)
+        async throws -> (data: Data, http: HTTPURLResponse, host: String) {
+        let outcome = await HostFailover.run(hosts: hosts) { host -> HostFailover.Attempt<(Data, HTTPURLResponse)> in
+            do {
+                var req = try build(host)
+                req.timeoutInterval = HostFailover.attemptTimeout(base: req.timeoutInterval,
+                                                                 hostCount: hosts.count)
+                let (data, response) = try await session.data(for: req)
+                guard let http = response as? HTTPURLResponse else {
+                    return .transport(URLError(.badServerResponse))
+                }
+                return .answered((data, http))
+            } catch {
+                return .transport(error)
+            }
+        }
+        switch outcome {
+        case .success(let pair, let host):
+            ConnectionMonitor.shared.requestSucceeded(host: host)
+            return (pair.0, pair.1, host)
+        case .failed(let lastError):
+            // Every address failed the TRANSPORT: one honest unreachable alarm.
+            ConnectionMonitor.shared.requestFailed()
+            if let error = lastError as? HSCCError, error == .invalidURL {
+                throw error
+            }
+            throw HSCCError.transport(underlying: lastError)
+        }
+    }
+
     /// Perform a GET and decode into `T` (a Decodable read response).
     ///
     /// - Throws: `HSCCError` on transport failure, HTTP error, or decoding failure.
     func get<T: Decodable>(_ path: String, as type: T.Type = T.self) async throws -> T {
-        let req = try request(for: path)
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: req)
-        } catch {
-            // A transport-level error (connection refused, DNS, timeout) means
-            // we never reached the cluster.
-            throw HSCCError.transport(underlying: error)
-        }
-
-        guard let http = response as? HTTPURLResponse else {
-            throw HSCCError.decoding("non-HTTP response")
+        let (data, http, _) = try await send { host in
+            try self.request(for: path, host: host)
         }
 
         let status = http.statusCode
@@ -169,17 +204,9 @@ struct HSCCClient {
     func get<T: Decodable>(path: String,
                            queryItems: [URLQueryItem],
                            as type: T.Type = T.self) async throws -> T {
-        let req = try request(for: try url(for: path, queryItems: queryItems))
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: req)
-        } catch {
-            throw HSCCError.transport(underlying: error)
-        }
-
-        guard let http = response as? HTTPURLResponse else {
-            throw HSCCError.decoding("non-HTTP response")
+        let (data, http, _) = try await send { host in
+            try self.request(for: try self.url(for: path, host: host,
+                                               queryItems: queryItems))
         }
 
         let status = http.statusCode
@@ -220,32 +247,21 @@ struct HSCCClient {
                             body: [String: Any],
                             as type: T.Type = T.self,
                             timeout: TimeInterval? = nil) async throws -> T {
-        var req = try request(for: path, timeout: timeout)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } catch {
-            throw HSCCError.decoding(String(describing: error))
-        }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: req)
-        } catch {
-            ConnectionMonitor.shared.requestFailed()
-            throw HSCCError.transport(underlying: error)
-        }
-
-        guard let http = response as? HTTPURLResponse else {
-            throw HSCCError.decoding("non-HTTP response")
+        let (data, http, _) = try await send { host in
+            var req = try self.request(for: path, host: host, timeout: timeout)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            do {
+                req.httpBody = try JSONSerialization.data(withJSONObject: body)
+            } catch {
+                throw HSCCError.decoding(String(describing: error))
+            }
+            return req
         }
 
         let status = http.statusCode
         if (200...299).contains(status) {
             do {
-                ConnectionMonitor.shared.requestSucceeded()
                 return try Self.decoder.decode(T.self, from: data)
             } catch {
                 throw HSCCError.decoding(String(describing: error))
@@ -254,8 +270,8 @@ struct HSCCClient {
 
         // Non-2xx (409 confirm missing/refused, 502 merge/apply/stop failed):
         // surface the real error. Never a success value. We DID reach the API,
-        // so this is not a reachability failure — keep the banner honest.
-        ConnectionMonitor.shared.requestSucceeded()
+        // so this is not a reachability failure — `send` already kept the
+        // banner honest (any HTTP answer is reachable).
         throw Self.error(from: data, status: status)
     }
 

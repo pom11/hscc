@@ -125,6 +125,13 @@ final class SettingsStore: ObservableObject {
 
     var host: String { activeCluster?.host ?? "" }
 
+    /// Extra addresses for the active cluster, in operator order. Same port
+    /// and token as the primary — mirrors `SavedCluster.fallbackHosts`.
+    var fallbackHosts: [String] { activeCluster?.fallbackHosts ?? [] }
+
+    /// The full try-order the app's clients use: primary → fallbacks.
+    var hosts: [String] { activeCluster?.hosts ?? [] }
+
     var port: String { activeCluster.map { String($0.port) } ?? "" }
 
     var token: String? {
@@ -145,7 +152,7 @@ final class SettingsStore: ObservableObject {
     /// the actual host/port/token catches every edit. The token is reduced to a
     /// presence/hash marker here, never the raw secret.
     var connectionIdentity: String {
-        "\(host)|\(port)|\((token ?? "<none>").hashValue)"
+        "\(host)|\(fallbackHosts.joined(separator: ","))|\(port)|\((token ?? "<none>").hashValue)"
     }
 
     /// True when the app is configured to be useful against the active cluster
@@ -268,10 +275,16 @@ final class SettingsStore: ObservableObject {
         guard let c = activeCluster else {
             d.removeObject(forKey: AppGroup.hostKey)
             d.removeObject(forKey: AppGroup.portKey)
+            d.removeObject(forKey: AppGroup.fallbackHostsKey)
+            d.removeObject(forKey: AppGroup.lastWorkingHostKey)
             return
         }
         d.set(c.host, forKey: AppGroup.hostKey)
         d.set(String(c.port), forKey: AppGroup.portKey)
+        // Mirror the FULL ordered list next to hscc.host. The primary stays
+        // hscc.host for every older reader; extensions use this list to try
+        // the fallbacks when the primary's transport fails.
+        d.set(c.hosts, forKey: AppGroup.fallbackHostsKey)
         // Mirror the active cluster's token into the legacy item the
         // extensions/intents read.
         if let t = KeychainStore.readToken(forCluster: c.id) {

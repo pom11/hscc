@@ -41,6 +41,7 @@ real_monitor="Sources/HSCC/ConnectionMonitor.swift"
 real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
+  Sources/Shared/SharedStore.swift
   Sources/HSCC/APIError.swift
 )
 harness="scripts/connection_probe_check/main.swift"

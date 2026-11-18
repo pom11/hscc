@@ -127,6 +127,8 @@ struct CardDetailView: View {
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }
-        return HSCCClient(host: settings.host, port: port, token: token)
+        return HSCCClient(host: settings.host,
+                          fallbacks: settings.fallbackHosts,
+                          port: port, token: token)
     }
 }

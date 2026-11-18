@@ -96,7 +96,7 @@ struct ConnectionBanner: View {
         case .unknown:
             return "Configured — waiting for the first request…"
         case .reachable:
-            return "Connected to \(settings.host)."
+            return "Connected to \(monitor.activeHost ?? settings.host)."
         case .unreachable(let message):
             return message
         }
@@ -141,6 +141,9 @@ struct ConfigView: View {
     @State private var hostField: String = ""
     @State private var portField: String = ""
     @State private var tokenField: String = ""
+    /// Extra addresses for the ACTIVE/named cluster, in try order after Host.
+    /// Same port and token; reordering here changes the failover order.
+    @State private var fallbackFields: [String] = []
     @State private var showingToken = false
     /// True while the operator is defining a brand-new cluster (Add Cluster was
     /// tapped and the form fields were cleared). Save then CREATES a new
@@ -246,6 +249,57 @@ struct ConfigView: View {
                     Text(connectionHeader)
                 } footer: {
                     Text("Plain HTTP over Tailscale is fine — Tailscale is the encrypted transport. The token is stored only in the iOS Keychain.")
+                }
+
+                Section {
+                    if fallbackFields.isEmpty {
+                        Text("No extra addresses — only the Host above is tried.")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                    ForEach(fallbackFields.indices, id: \.self) { index in
+                        HStack(spacing: Theme.Spacing.sm.rawValue) {
+                            TextField("e.g. host-b.example", text: $fallbackFields[index])
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.URL)
+                            // Explicit reorder controls: the list order IS the
+                            // failover order, and a drag-only affordance is
+                            // undiscoverable in a Form.
+                            Button {
+                                moveFallback(at: index, by: -1)
+                            } label: {
+                                Image(systemName: "arrow.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == 0)
+                            .accessibilityLabel("Move address up")
+                            Button {
+                                moveFallback(at: index, by: 1)
+                            } label: {
+                                Image(systemName: "arrow.down")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(index == fallbackFields.count - 1)
+                            .accessibilityLabel("Move address down")
+                            Button(role: .destructive) {
+                                fallbackFields.remove(at: index)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Remove address")
+                        }
+                    }
+                    Button {
+                        fallbackFields.append("")
+                    } label: {
+                        Label("Add Address", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Additional Addresses")
+                } footer: {
+                    Text("Tried top to bottom after Host when a connection attempt fails. Every address uses the same port and token. The app remembers the last address that answered and tries it first next time.")
                 }
 
                 Section {
@@ -455,6 +509,7 @@ struct ConfigView: View {
 
     private var hasEdits: Bool {
         hostField != settings.host
+            || fallbackFields != settings.fallbackHosts
             || portField != settings.port
             || tokenField != (settings.token ?? "")
     }
@@ -489,6 +544,14 @@ struct ConfigView: View {
                     if !cluster.host.isEmpty {
                         Text("\(cluster.host):\(cluster.port) · \(healthLabel(cluster.health))")
                             .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .lineLimit(1)
+                    }
+                    if isActive {
+                        // Which address the last request actually used, not
+                        // merely which one is first in the saved list.
+                        Text("In use: \(inUseHost(for: cluster)):\(cluster.port)")
+                            .font(.caption2)
                             .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             .lineLimit(1)
                     }
@@ -533,6 +596,16 @@ struct ConfigView: View {
     /// gets a `confirmationDialog` that names the target).
     @State private var pendingDelete: SavedCluster?
 
+    /// The address the App Group last saw answer for this active cluster, else
+    /// the saved primary. Never a stale address from a DIFFERENT cluster.
+    private func inUseHost(for cluster: SavedCluster) -> String {
+        guard let remembered = HostFailover.lastWorkingHost(),
+              cluster.hosts.contains(where: {
+                  $0.caseInsensitiveCompare(remembered) == .orderedSame
+              }) else { return cluster.host }
+        return remembered
+    }
+
     private func healthLabel(_ health: ClusterHealth) -> String {
         switch health {
         case .ok: return "last test ok"
@@ -564,8 +637,18 @@ struct ConfigView: View {
         hostField = ""
         portField = ""
         tokenField = ""
+        fallbackFields = []
         testResult = nil
         testIsSuccess = nil
+    }
+
+    /// Move one extra address one slot up/down. The list order is the failover
+    /// order, so this is the operator's only reorder control.
+    private func moveFallback(at index: Int, by offset: Int) {
+        let target = index + offset
+        guard fallbackFields.indices.contains(index),
+              fallbackFields.indices.contains(target) else { return }
+        fallbackFields.swapAt(index, target)
     }
 
     /// Delete a saved cluster (its token too), keeping the edit form coherent.
@@ -579,6 +662,7 @@ struct ConfigView: View {
     private func loadFromStore() {
         addingCluster = false
         hostField = settings.host
+        fallbackFields = settings.fallbackHosts
         portField = settings.port
         tokenField = settings.token ?? ""
     }
@@ -607,6 +691,11 @@ struct ConfigView: View {
                                 lastConnected: nil, lastTestSuccess: nil)
         }
         cluster.host = host
+        // Trim blanks/duplicates and keep the operator's order. Host is always
+        // the primary, so it is never repeated in the fallback list.
+        cluster.fallbackHosts = HostFailover.orderedHosts(primary: host,
+                                                          fallbacks: fallbackFields)
+            .filter { $0.caseInsensitiveCompare(host) != .orderedSame }
         cluster.port = port
         // Trim the token too: a trailing space/newline pasted from terminal
         // output would otherwise be stored verbatim, making the app "configured"
@@ -652,7 +741,9 @@ struct ConfigView: View {
         // (unreachable host vs rejected token vs wrong app version) instead of a
         // generic transport message. `QRPairingOutcome` is the same surface the
         // onboarding flow uses, so both paths report identically.
-        let outcome = await QRPairing.test(host: settings.host, port: port, token: token)
+        let outcome = await QRPairing.test(host: settings.host,
+                                           port: port, token: token,
+                                           fallbacks: settings.fallbackHosts)
         if case .success = outcome {
             testResult = outcome.message   // "Connected to <service> v<version>."
             testIsSuccess = true
@@ -793,7 +884,9 @@ struct ConfigView: View {
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }
-        return HSCCClient(host: settings.host, port: port, token: token)
+        return HSCCClient(host: settings.host,
+                          fallbacks: settings.fallbackHosts,
+                          port: port, token: token)
     }
 
     /// One onAppear for the whole app: seed the surviving subsystems with a

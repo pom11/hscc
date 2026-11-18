@@ -226,46 +226,67 @@ struct WidgetDataClient {
             // transport — no request, no side effect, an honest failure.
             return .failure(.pathNotAllowed(path: path))
         }
-        guard let url = url(for: path, queryItems: queryItems) else {
-            return .failure(.invalidURL)
+
+        let hosts = config.hosts
+        let attemptCeiling = HostFailover.attemptTimeout(base: timeout,
+                                                         hostCount: hosts.count)
+        let outcome = await HostFailover.run(hosts: hosts) { host -> HostFailover.Attempt<Result<T, WidgetDataFailure>> in
+            guard let url = self.url(for: path, host: host, queryItems: queryItems) else {
+                // A bad address is a transport-class failure: try the next one
+                // rather than condemning the whole cluster on one typo.
+                return .transport(nil)
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"                       // the only method in this file
+            request.timeoutInterval = attemptCeiling
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("Bearer \(self.config.token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            do {
+                let (data, response) = try await self.session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    // A non-HTTP response is "we did not get to the API", not a
+                    // status the surface can render.
+                    return .answered(.failure(.unreachable(code: nil)))
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    // ANY HTTP answer proves the daemon is reachable. A 401/404
+                    // or 5xx must be surfaced as-is, never retried on another
+                    // address (same token, same daemon).
+                    return .answered(.failure(Self.httpFailure(status: http.statusCode,
+                                                               body: data, path: path)))
+                }
+                do {
+                    return .answered(.success(try JSONDecoder().decode(T.self, from: data)))
+                } catch {
+                    // A 2xx we cannot read. The detail is kept for the gate/diagnostics
+                    // ONLY — `shortLabel` and `operatorLine` never interpolate it, for
+                    // the same reason `HSCCError.decoding` does not: it is internal
+                    // symbol noise, and a decode failure of a 2xx body means the app
+                    // and the cluster disagree on the schema.
+                    return .answered(.failure(.decoding(detail: String(describing: error))))
+                }
+            } catch {
+                // Transport only: timeout, refused, DNS, TLS/connection lost.
+                return .transport(error)
+            }
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"                       // the only method in this file
-        request.timeoutInterval = timeout
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                // A non-HTTP response is "we did not get to the API", not a
-                // status the surface can render.
-                return .failure(.unreachable(code: nil))
+        switch outcome {
+        case .success(let result, _):
+            return result
+        case .failed(let lastError):
+            // Every address failed the transport. ONE failure leaves this
+            // function, so a surface renders one honest line, not N errors.
+            if let error = lastError as? URLError, error.code == .timedOut {
+                return .failure(.timeout(seconds: attemptCeiling))
             }
-            guard (200...299).contains(http.statusCode) else {
-                return .failure(Self.httpFailure(status: http.statusCode, body: data, path: path))
-            }
-            do {
-                return .success(try JSONDecoder().decode(T.self, from: data))
-            } catch {
-                // A 2xx we cannot read. The detail is kept for the gate/diagnostics
-                // ONLY — `shortLabel` and `operatorLine` never interpolate it, for
-                // the same reason `HSCCError.decoding` does not: it is internal
-                // symbol noise, and a decode failure of a 2xx body means the app
-                // and the cluster disagree on the schema.
-                return .failure(.decoding(detail: String(describing: error)))
-            }
-        } catch let error as URLError {
-            if error.code == .timedOut {
-                return .failure(.timeout(seconds: timeout))
-            }
+            if lastError == nil { return .failure(.invalidURL) }
             // `code` is a URLError integer — a diagnostic, never an address, and
             // never the token. Nothing here may carry a LAN/tailnet host (§7).
-            return .failure(.unreachable(code: error.code.rawValue))
-        } catch {
-            return .failure(.unreachable(code: nil))
+            return .failure(.unreachable(code: (lastError as? URLError)?.code.rawValue))
         }
     }
 
@@ -288,10 +309,11 @@ struct WidgetDataClient {
     /// transport), caller-supplied host + port, query items through
     /// `URLQueryItem` so a `?` in a path can never be percent-encoded into the
     /// path itself.
-    private func url(for path: String, queryItems: [URLQueryItem]) -> URL? {
+    private func url(for path: String, host: String,
+                     queryItems: [URLQueryItem]) -> URL? {
         var components = URLComponents()
         components.scheme = "http"
-        components.host = config.host
+        components.host = host
         components.port = config.port
         components.path = path
         if !queryItems.isEmpty { components.queryItems = queryItems }

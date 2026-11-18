@@ -1,0 +1,7 @@
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "name": "legacy cluster",
+  "host": "host-a.example",
+  "port": 8788,
+  "lastTestSuccess": true
+}

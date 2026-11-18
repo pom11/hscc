@@ -96,6 +96,30 @@ final class Harness {
         var a = SavedCluster(name: "alpha", host: "host-a", port: 8788)
         store.saveCluster(a, token: "tok-a")
         check(store.activeClusterID == a.id, "saving first cluster makes it active")
+
+        // ── Multi-address mirror (automatic failover) ────────────────────────
+        // The App Group must carry the FULL ordered list next to the legacy
+        // hscc.host (still the primary), so every extension can try fallbacks.
+        let defaults = UserDefaults(suiteName: AppGroup.suiteName)
+        check(defaults?.string(forKey: AppGroup.hostKey) == "host-a",
+              "legacy hscc.host stays the primary address")
+        check(defaults?.stringArray(forKey: AppGroup.fallbackHostsKey) == ["host-a"],
+              "a single-address cluster mirrors just its primary")
+        a.fallbackHosts = ["host-b", "host-c"]
+        store.saveCluster(a, token: "tok-a")
+        defaults?.synchronize()
+        check(store.hosts == ["host-a", "host-b", "host-c"],
+              "the store exposes primary -> fallbacks in saved order")
+        check(defaults?.stringArray(forKey: AppGroup.fallbackHostsKey)
+                == ["host-a", "host-b", "host-c"],
+              "the App Group mirrors the full ordered address list")
+        check(defaults?.string(forKey: AppGroup.hostKey) == "host-a",
+              "hscc.host is still the primary, not the first fallback")
+        let idWithFallbacks = store.connectionIdentity
+        a.fallbackHosts = ["host-b", "host-d"]
+        store.saveCluster(a, token: "tok-a")
+        check(store.connectionIdentity != idWithFallbacks,
+              "changing a fallback changes the identity so the banner re-probes")
         let aID = store.activeClusterID
         StateCache.store(Data("alpha-projects".utf8), for: EndpointPath.projects)
         check(StateCache.hasValue(for: EndpointPath.projects),
