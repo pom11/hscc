@@ -122,28 +122,28 @@ checkCount("a counted zero stays a zero",
 // The headline: a blind read leads with its own label; a number only ever comes
 // from a read that answered.
 checkText("blind read leads with its label",
-          CardsRunningReading.headline(count: nil, blockedCount: nil, failureLabel: "API offline"),
+          CardsRunningReading.headline(count: nil, failureLabel: "API offline"),
           "API offline")
 checkText("blind read can never say 0 running",
-          CardsRunningReading.headline(count: nil, blockedCount: 3, failureLabel: "API offline").contains("0 running") ? "0 running" : "honest",
+          CardsRunningReading.headline(count: nil, failureLabel: "API offline").contains("0 running") ? "0 running" : "honest",
           "honest")
 checkText("live zero is a fact",
-          CardsRunningReading.headline(count: 0, blockedCount: nil, failureLabel: nil),
+          CardsRunningReading.headline(count: 0, failureLabel: nil),
           "0 running")
 checkText("one card reads singular",
-          CardsRunningReading.headline(count: 1, blockedCount: nil, failureLabel: nil),
+          CardsRunningReading.headline(count: 1, failureLabel: nil),
           "1 running")
-checkText("blocked joins when known",
-          CardsRunningReading.headline(count: 2, blockedCount: 1, failureLabel: nil),
-          "2 running · 1 blocked")
+checkText("the headline is the running count, never a blocked total",
+          CardsRunningReading.headline(count: 2, failureLabel: nil),
+          "2 running")
 checkText("stale rows keep their number (the warn line carries the failure)",
-          CardsRunningReading.headline(count: 4, blockedCount: nil, failureLabel: "API offline"),
+          CardsRunningReading.headline(count: 4, failureLabel: "API offline"),
           "4 running")
 checkText("no count, no label -> em dash, not zero",
-          CardsRunningReading.headline(count: nil, blockedCount: nil, failureLabel: nil),
+          CardsRunningReading.headline(count: nil, failureLabel: nil),
           "—")
 checkText("an empty label is not a headline",
-          CardsRunningReading.headline(count: nil, blockedCount: nil, failureLabel: ""),
+          CardsRunningReading.headline(count: nil, failureLabel: ""),
           "—")
 
 // The compact Island region: ~4 characters, and still three distinct answers.

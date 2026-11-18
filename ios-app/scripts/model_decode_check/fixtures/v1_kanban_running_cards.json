@@ -1,0 +1,42 @@
+{
+ "boards": [
+  "demo",
+  "hscc",
+  "sample"
+ ],
+ "tasks": [
+  {
+   "board": "hscc",
+   "id": "t_1a2b3c4d",
+   "title": "Widget route parity: the cards monitor count matches the running route",
+   "assignee": "ios-engineer",
+   "status": "running",
+   "pid": 40001,
+   "host_local": true,
+   "started_at": "2026-11-18T14:17:52+00:00"
+  },
+  {
+   "board": "demo",
+   "id": "t_5e6f7a8b",
+   "title": "Dashboard labels: one headline number per widget family",
+   "assignee": "ux-engineer",
+   "status": "running",
+   "pid": 40002,
+   "host_local": true,
+   "started_at": "2026-11-18T15:28:16+00:00"
+  },
+  {
+   "board": "hscc",
+   "id": "t_9c0d1e2f",
+   "title": "Live Activity rows: worker and run time from the same projection",
+   "assignee": "ios-engineer",
+   "status": "running",
+   "pid": 40003,
+   "host_local": true,
+   "started_at": "2026-11-18T15:21:07+00:00"
+  }
+ ],
+ "errors": [],
+ "count": 3,
+ "speak": "3 running tasks."
+}

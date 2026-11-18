@@ -577,6 +577,13 @@ targets:
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/CardsRunningActivity.swift
+      # The stored row type `RunningCardMetric(row:)` projects from. Foundation
+      # only, so the extension can compile the one mapping without touching the
+      # App Group store it also declares.
+      - path: Sources/Shared/CardsRunningProjection.swift
+      # The projection's failure vocabulary (`WidgetDataFailure`) is declared
+      # here; Foundation/Security only, and the extension still never fetches.
+      - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/ClusterHealthActivity.swift
       - path: Sources/Shared/BoardProgressActivity.swift
       # Needed by the projection block inside the file above — the extension

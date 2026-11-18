@@ -52,11 +52,16 @@ struct CardsRunningLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(CardsRunningReading.headline(count: count,
-                                                          blockedCount: state.blockedCount,
                                                           failureLabel: state.failureLabel))
                             .font(style.font(.headline))
                             .foregroundColor(style.primaryTextColor)
                             .lineLimit(1)
+                        if let blocked = state.blockedCount, blocked > 0 {
+                            Text(CardsRunningReading.blockedText(blocked))
+                                .font(style.font(.caption2, weight: .semibold))
+                                .foregroundColor(style.badColor)
+                                .lineLimit(1)
+                        }
                         if let failureLabel = state.failureLabel, !failureLabel.isEmpty {
                             // Stale is not quiet: the rows below are real, and
                             // this says why the newest one is not.
@@ -137,40 +142,48 @@ struct CardsRowList: View {
     }
 }
 
-/// One running card: board · title · worker · age.
-///
+/// One running card, two lines: the title, then `worker` · board · run time.
 /// The card id only appears where a title is missing (it is the fallback
 /// headline, never decoration), the worker is `—` when nobody was named, and
-/// the age is `—` when `started_at` was missing or unparseable — a row never
-/// claims a card started this instant.
+/// the age is `—` when no clock was usable — a row never claims a card started
+/// this instant.
 struct CardsRunningRowView: View {
     @Environment(\.widgetStyle) private var style
     let row: RunningCardMetric
     let labelFont: Font
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 6) {
             Circle()
                 .fill(style.cardStatusColor(row.status ?? ""))
                 .frame(width: 6, height: 6)
-            if let board = row.board, !board.isEmpty {
-                Text(board)
-                    .font(labelFont)
-                    .foregroundColor(style.secondaryTextColor)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(row.headline)
+                    .font(style.font(.caption, weight: .medium))
+                    .foregroundColor(style.primaryTextColor)
                     .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(row.workerText)
+                        .font(style.font(size: 10, weight: .medium))
+                        .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(1)
+                    if let board = row.board, !board.isEmpty {
+                        Text("·")
+                            .font(style.font(size: 10))
+                            .foregroundColor(style.secondaryTextColor)
+                        Text(board)
+                            .font(style.font(size: 10))
+                            .foregroundColor(style.secondaryTextColor)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Text(row.ageText)
+                        .font(labelFont)
+                        .monospacedDigit()
+                        .foregroundColor(style.secondaryTextColor)
+                }
             }
-            Text(row.headline)
-                .font(style.font(.caption))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Text(row.workerText)
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-                .lineLimit(1)
-            Text(row.ageText)
-                .font(labelFont)
-                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -192,17 +205,37 @@ struct LockScreenCardsView: View {
             HStack(spacing: 8) {
                 CardsGlyph(state: state)
                 Text(CardsRunningReading.headline(count: count,
-                                                  blockedCount: state.blockedCount,
                                                   failureLabel: state.failureLabel))
                     .font(style.font(.headline))
                     .foregroundColor(style.primaryTextColor)
                     .lineLimit(1)
+                if let blocked = state.blockedCount, blocked > 0 {
+                    Text(CardsRunningReading.blockedText(blocked))
+                        .font(style.font(.caption2, weight: .semibold))
+                        .foregroundColor(style.badColor)
+                        .lineLimit(1)
+                }
                 Spacer()
-                Text(CardsRunningReading.pushedAgeText(updatedAt: state.updatedAt, now: Date()))
-                    .font(style.font(.caption2))
-                    .foregroundColor(style.secondaryTextColor)
+                HStack(spacing: 3) {
+                    Image(systemName: "clock").widgetIcon(style)
+                        .font(style.font(size: 9))
+                        .foregroundColor(style.secondaryTextColor)
+                    Text(state.updatedAt, style: .relative)
+                        .font(style.font(.caption2))
+                        .foregroundColor(state.failureLabel?.isEmpty == false
+                                         ? style.warnColor : style.secondaryTextColor)
+                }
             }
             .widgetHeader(style)
+
+            // A stale push is never quiet: the rows are real, and this says why
+            // the newest one is not.
+            if let failureLabel = state.failureLabel, !failureLabel.isEmpty {
+                Text("stale · \(failureLabel)")
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundColor(style.warnColor)
+                    .lineLimit(1)
+            }
 
             // The rows, or the one sentence that replaces them.
             if state.rows.isEmpty {

@@ -501,6 +501,35 @@ c.assertions("v1_kanban_running.json", "the kanban trio (Lite decoders)") {
              qAges == [12, 7, 5], "ages came back \(qAges)")
 }
 
+// The cards surface's own pair (B2). `v1_kanban_running_cards.json` is a
+// scrubbed live capture; `v1_kanban_running_contract.json` is the fixed route's
+// CARD_VIEW_FIELDS shape (worker + run_s + hb_s) that the 2.15.11 server does
+// not send yet. Both decode through the same REAL `RunningCardLite`.
+c.assertions("v1_kanban_running_cards.json", "the running-cards surface (live + contract shapes)") {
+    let live = try JSONDecoder().decode(KanbanRunningLite.self,
+                                        from: try c.load("v1_kanban_running_cards.json"))
+    c.expect("v1_kanban_running_cards.json", "the scrubbed live capture decodes",
+             live.count == 3 && live.tasks?.count == 3,
+             "count/tasks disagree")
+    c.expect("v1_kanban_running_cards.json", "the old server's rows use assignee + started_at",
+             live.tasks?.allSatisfy { $0.worker == nil && $0.started_at != nil } == true,
+             "the live shape drifted")
+
+    let contract = try JSONDecoder().decode(KanbanRunningLite.self,
+                                            from: try c.load("v1_kanban_running_contract.json"))
+    let first = contract.tasks?.first
+    c.expect("v1_kanban_running_contract.json",
+             "worker / run_s / hb_s decode from CARD_VIEW_FIELDS",
+             first?.worker == "backend-engineer" && first?.run_s == 3720
+             && first?.hb_s == 12.4 && contract.count == 3,
+             "a CARD_VIEW_FIELDS key is not decoded")
+    c.expect("v1_kanban_running_contract.json",
+             "an absent clock is nil, never a zero",
+             contract.tasks?.last?.run_s != nil
+             && contract.tasks?.last?.started_at == nil,
+             "the run_s-only row lost its shape")
+}
+
 // Dataset 5 — cluster monitor + daemon host. `output` (54% of the body) is not
 // declared, and `displayLabel` is §7's redacted node identity: asserted here so no
 // surface can quietly render a LAN address.

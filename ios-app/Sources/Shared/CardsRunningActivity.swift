@@ -63,19 +63,27 @@ struct CardsRunningActivityAttributes: ActivityAttributes {
     /// The most rows the expanded Island and the Lock Screen row can hold. The
     /// view clips to this as well, because a pushed ContentState is untrusted
     /// input to a fixed-height region.
-    static let rowLimit = 3
+    static let rowLimit = CardsRunningLimits.rowLimit
 
     /// A token identifying this activity so it can be updated/ended.
     public var cardsID: UUID = UUID()
 }
 
+// GATE-SLICE-BEGIN: cards-row-metric
+/// The activity's row budget, declared beside the row mapping so the headless
+/// check executes the same number the extension clips to.
+enum CardsRunningLimits {
+    static let rowLimit = 3
+}
+
 /// One running card, in the compact form the activity renders.
 ///
 /// Mirrors `CardsRunningRow` (the widget's stored projection) field for field —
-/// the same five scalars plus the card id — so the Island and the Home Screen
-/// cannot disagree about what a row means. It is a separate type because
-/// `CardsRunningRow` lives in the widget target and the App Group must keep no
-/// payload type (§7); this one is ActivityKit's, never persisted.
+/// board, card id, title, worker, status, age — so the Island and the Home
+/// Screen cannot disagree about what a row means. It is a separate type because
+/// this one is ActivityKit's and is never persisted; the initializer below is
+/// the ONE mapping, sliced out and executed by
+/// `cards_running_widget_check.sh` against the committed live fixture.
 struct RunningCardMetric: Codable, Hashable, Identifiable {
     /// Board slug, or nil when the row did not carry one.
     public var board: String?
@@ -83,12 +91,27 @@ struct RunningCardMetric: Codable, Hashable, Identifiable {
     public var cardID: String
     /// The card title. Human-written, so it renders in the system font.
     public var title: String?
-    /// The worker profile running it (`assignee` on the wire).
+    /// The worker profile running it (the CLI's `worker` column).
     public var worker: String?
     public var status: String?
-    /// Minutes since `started_at`, computed once when the app built the state.
-    /// nil = the row had no usable `started_at`, which draws `—`.
-    public var ageMinutes: Int?
+    /// Seconds since the card started, computed once when the app built the
+    /// state. nil = no usable clock, which draws `—`. Seconds so the Lock
+    /// Screen prints the CLI's `30s` instead of rounding to `0m`.
+    public var ageSeconds: Int?
+
+    /// The one projection from the widget's stored row. Field for field, so a
+    /// card cannot read differently on the Lock Screen than on the Home Screen.
+    init(row: CardsRunningRow) {
+        board = row.board
+        cardID = row.cardID
+        title = row.title
+        worker = row.worker
+        status = row.status
+        ageSeconds = row.ageSeconds
+    }
+
+    /// Whole minutes, for callers that only need the minute figure.
+    var ageMinutes: Int? { ageSeconds.map { $0 / 60 } }
 
     /// Board-qualified: the same card id on two boards is two rows, and a
     /// `ForEach` id must not collide.
@@ -108,14 +131,21 @@ struct RunningCardMetric: Codable, Hashable, Identifiable {
         return worker
     }
 
-    /// `—` when unknown; `12m` under an hour; `2h07m` above it — the same rule
-    /// the widget's rows use, so the two surfaces age a card identically.
+    /// `—` when unknown, otherwise the CLI's own `fmt_age`: `30s` under a
+    /// minute, `12m` under an hour, `2h07m` under a day, `1d2h` above it — the
+    /// same rule the widget's rows use, so the two surfaces age a card
+    /// identically.
     var ageText: String {
-        guard let minutes = ageMinutes else { return "—" }
-        if minutes < 60 { return "\(minutes)m" }
-        return String(format: "%dh%02dm", minutes / 60, minutes % 60)
+        guard let seconds = ageSeconds else { return "—" }
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m" }
+        if seconds < 86400 {
+            return String(format: "%dh%02dm", seconds / 3600, (seconds % 3600) / 60)
+        }
+        return String(format: "%dd%dh", seconds / 86400, (seconds % 86400) / 3600)
     }
 }
+// GATE-SLICE-END: cards-row-metric
 
 // GATE-SLICE-BEGIN: cards-reading-rules
 // ---------------------------------------------------------------------------
@@ -142,12 +172,12 @@ enum CardsRunningReading {
     }
 
     /// The headline. A blind read leads with its own label; only a read that
-    /// answered may say anything about how much is running.
-    static func headline(count: Int?, blockedCount: Int?, failureLabel: String?) -> String {
+    /// answered may say anything about how much is running. Blocked is a
+    /// separate, secondary figure (`blockedText`) — `hscc cards monitor` counts
+    /// running cards, and the running number must stay the headline.
+    static func headline(count: Int?, failureLabel: String?) -> String {
         if let count {
-            let head = count == 1 ? "1 running" : "\(count) running"
-            if let blockedCount { return head + " · \(blockedCount) blocked" }
-            return head
+            return count == 1 ? "1 running" : "\(count) running"
         }
         if let failureLabel, !failureLabel.isEmpty { return failureLabel }
         return "—"
