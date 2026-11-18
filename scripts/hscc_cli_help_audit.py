@@ -482,17 +482,35 @@ class Prober:
         self.canary = canary
         self.real_home = real_home
         self._cache = {}
+        # port -> the socket this Prober itself holds. Populated by the hold
+        # below; `port_busy_at_start` runs BEFORE it, when nothing is held, so
+        # that first reading still comes from the kernel.
+        self._held_ports: dict = {}
         self.port_busy_at_start = self._port_busy()
         # Defensive hold: bind (WITHOUT listen) the api ports for the whole
         # audit. A `--help` probe must never fork a server (t_bf9f1909 made
         # cmd_api intercept --help before dispatch); if that intercept ever
         # regresses, a stray grandchild here dies on EADDRINUSE instead of
-        # staying bound to the operator's machine. No listen() means
-        # connect_ex still reports "refused", so the port_flip sensor below
-        # keeps its exact semantics (a regression is then detected via
-        # new_files/hang findings instead). A port already in use (operator's
-        # live API, or a concurrent audit) degrades to holding nothing.
-        self._tripwire_socks = []
+        # staying bound to the operator's machine. A port already in use
+        # (operator's live API, or a concurrent audit) degrades to holding
+        # nothing — and only then does `_port_busy` ask the kernel.
+        #
+        # This comment used to add "no listen() means connect_ex still reports
+        # 'refused', so the port_flip sensor below keeps its exact semantics".
+        # MEASURED FALSE on macOS (t_4c9feb44, pinned by
+        # scripts/tests/test_cli_help_surface.py::
+        # test_bound_without_listen_does_not_report_refused): a port bound
+        # without listen() does not answer a SYN at all, so connect_ex returns
+        # EINPROGRESS only after burning its ENTIRE socket timeout — 0.252 s of
+        # a 0.25 s timeout, where an unbound port answers ECONNREFUSED in
+        # 0.000 s. Asking a port we hold was therefore never free: `Prober.run`
+        # asks once per probe and paid 0.232 s x 961 probes = 223 s of a 308 s
+        # audit wall (host load 2.1; 60 s with the hold closed, identical
+        # report), which is what made the `scripts` leg look hung from test
+        # ~233. It also never told us anything: while this hold is up a stray
+        # server cannot bind the port, so `port_flip` is unfireable by
+        # construction and a regression surfaces as a hang/new_files finding —
+        # exactly as the sentence above already says.
         for port in (API_DEFAULT_PORT, API_SMOKE_PORT):
             s = socket.socket()
             try:
@@ -500,7 +518,8 @@ class Prober:
             except OSError:
                 s.close()
             else:
-                self._tripwire_socks.append(s)
+                self._held_ports[port] = s
+        self._tripwire_socks = list(self._held_ports.values())
 
     def _env(self, width: int) -> dict:
         env = {k: v for k, v in os.environ.items()
@@ -526,10 +545,30 @@ class Prober:
     def _trips(self):
         return (self.canary / "trips.log").read_text().splitlines()
 
-    def _port_busy(self):
+    def _port_busy(self, port: int | None = None) -> bool:
+        """Is a server listening on `port`? Cheap, and honest about the hold.
+
+        A port this Prober holds itself can never be reported busy by a
+        connect, and asking is not free: a bound-but-not-listening port drops
+        the SYN, so `connect_ex` answers EAGAIN/EINPROGRESS only after the whole
+        `settimeout` window (measured 0.252 s; an unbound port answers
+        ECONNREFUSED in 0.000 s — see the hold in __init__ and the pin in
+        scripts/tests/test_cli_help_surface.py, t_4c9feb44). The answer for a
+        held port is therefore read off the hold instead of bought with a
+        timeout per probe. When the bind FAILED (live api / concurrent audit)
+        the port is not held and the sensor probes for real, exactly as before.
+
+        `port` is resolved at CALL time, not in the signature, so a test can
+        move the sensor onto a throwaway loopback port instead of fighting the
+        running audit for the real one.
+        """
+        if port is None:
+            port = API_DEFAULT_PORT
+        if port in self._held_ports:
+            return False
         with socket.socket() as s:
             s.settimeout(0.25)
-            return s.connect_ex(("127.0.0.1", API_DEFAULT_PORT)) == 0
+            return s.connect_ex(("127.0.0.1", port)) == 0
 
     def _plist(self):
         return (self.real_home / "Library" / "LaunchAgents"

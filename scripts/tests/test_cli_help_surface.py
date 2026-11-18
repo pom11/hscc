@@ -85,7 +85,16 @@ MIN_EXAMPLES = 60
 
 @pytest.fixture(scope="module")
 def report():
-    """One audit run shared by every assertion (full CLI walk ~35 s)."""
+    """One audit run shared by every assertion.
+
+    MEASURED cost, because every test in this file waits on it: 59.69 s on a
+    clean `main` worktree at host load 1.9 (t_4c9feb44) — 961 CLI subprocesses
+    over 331 probed surfaces. The "~35 s" this docstring used to claim was both
+    wrong and load-blind; the same walk measured 307.64 s while `Prober` paid a
+    0.25 s black-holed port probe per call, which is what made the whole `scripts`
+    leg look hung from test ~233. Budget against the measured number, and check
+    the census before believing any new per-probe cost.
+    """
     return audit_mod.audit(str(REPO))
 
 
@@ -1101,6 +1110,188 @@ def test_findings_match_expected(report, rules):
             lines.append(f"  …and {len(stale) - 25} more")
     if lines:
         pytest.fail("\n".join(lines))
+
+
+# ── the defensive port hold must not cost the leg a socket timeout (t_4c9feb44)
+#
+# `Prober` binds the api ports WITHOUT listen() as a defensive hold, and the
+# comment beside it asserted that "no listen() means connect_ex still reports
+# 'refused'". It does not. Measured on this host: nothing bound -> ECONNREFUSED
+# in 0.000 s; bound-no-listen -> EAGAIN/EINPROGRESS only after the WHOLE 0.25 s
+# socket timeout, because the SYN is never answered at all. `Prober.run` asks
+# that question once per probe, so the leg paid a quarter second 961 times:
+# 223.05 s of a 307.64 s audit wall (MEASURED, host load 2.1; the same audit
+# with the hold closed is 60.00 s and produces the identical report). That is
+# why the `scripts` leg looked hung from test ~233 — the module `report`
+# fixture alone needed five minutes, so no test in this file ever completed.
+#
+# The pins below are deliberately `report`-free: they must stay seconds-cheap
+# so they still run when the walk itself is the thing under investigation. They
+# also move the sensor onto a throwaway loopback port (`API_DEFAULT_PORT` is
+# resolved at call time) rather than contend for 8787 with the `report`
+# fixture's own hold, which lives for the whole module and is released by
+# nobody — a test that needed the real port would silently skip in a full-file
+# run and un-gate the fix.
+
+def _free_loopback_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _make_prober(tmp_path, request=None):
+    """A real `Prober` on a throwaway sandbox — shipped hold included.
+
+    `request` (when a test passes it) registers a finalizer: the hold has no
+    teardown of its own, and a Prober that leaks 8787 would silently degrade
+    every later hold on this host to "bind failed".
+    """
+    sandbox = tmp_path / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    canary = audit_mod.make_canary_dir(tmp_path)
+    audit_mod._seed_sandbox(sandbox)
+    prober = audit_mod.Prober(sandbox, canary, Path(os.path.expanduser("~")))
+    if request is not None:
+        request.addfinalizer(lambda: [s.close() for s in prober._tripwire_socks])
+    return prober
+
+
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="the black hole is macOS/BSD behaviour: Linux answers "
+                           "a SYN to a bound-but-not-listening port with an RST, "
+                           "so the refused-vs-in-progress split cannot exist")
+def test_bound_without_listen_does_not_report_refused():
+    """PIN THE TRAP: "bound" is not "refused", and the gap is a timeout.
+
+    The hold is only safe if asking it a question is free. It is not, so the
+    kernel behaviour is pinned here on a throwaway port rather than trusted
+    from a comment: an unbound port answers instantly, a bound-but-not-listened
+    port does not answer at all and the caller waits out its own timeout. If a
+    future OS ever answers this instantly the pin fires and the cost model
+    above needs re-measuring — either way the assumption is tested, not held.
+    """
+    import errno
+    import socket
+
+    port = _free_loopback_port()
+
+    def ask(timeout):
+        s = socket.socket()
+        s.settimeout(timeout)
+        t0 = time.monotonic()
+        try:
+            rc = s.connect_ex(("127.0.0.1", port))
+        finally:
+            secs = time.monotonic() - t0
+            s.close()
+        return rc, secs
+
+    rc, secs = ask(2.0)
+    assert rc == errno.ECONNREFUSED, (
+        f"premise broken: with nothing bound, 127.0.0.1:{port} must answer "
+        f"refused instantly, got {errno.errorcode.get(rc, rc)} after {secs:.3f}s")
+    assert secs < 0.5, f"refused must be instant, took {secs:.3f}s"
+
+    hold = socket.socket()
+    hold.bind(("127.0.0.1", port))            # bound, NOT listen()ed = the hold
+    try:
+        rc, secs = ask(1.0)
+    finally:
+        hold.close()
+    code = errno.errorcode.get(rc, rc)
+    # macOS answers the un-started non-blocking connect with EAGAIN (35);
+    # EINPROGRESS (36) is what the same call returns on other BSDs. Both mean
+    # "still waiting", which is the whole point — see the seconds assertion.
+    assert rc in (errno.EAGAIN, errno.EINPROGRESS), (
+        f"a bound-but-not-listening port must black-hole the SYN and leave the "
+        f"caller waiting; got {code} after {secs:.3f}s — the OS changed under "
+        f"the audit's defensive hold, re-measure Prober._port_busy")
+    assert secs >= 0.5, (
+        f"{code} after only {secs:.3f}s of a 1.0s timeout means the wait did "
+        f"not burn the timeout — the cost this card is about is gone, "
+        f"re-measure before keeping the comment that describes it")
+
+
+def test_prober_never_asks_a_port_it_holds(tmp_path, monkeypatch, request):
+    """While the hold is up, the port sensor may not open a socket.
+
+    Deterministic on purpose: the assertion is "no syscall", not "fast", so a
+    loaded box cannot flake it. `port_flip` cannot fire while this Prober holds
+    the port anyway (a stray grandchild dies on EADDRINUSE — that is what the
+    hold IS for), so a held port's answer is known without asking the kernel,
+    and asking costs the 0.25 s black hole pinned above, once per probe.
+    """
+    api_port = _free_loopback_port()
+    monkeypatch.setattr(audit_mod, "API_DEFAULT_PORT", api_port)
+    prober = _make_prober(tmp_path, request)
+    assert api_port in {s.getsockname()[1] for s in prober._tripwire_socks}, (
+        f"premise broken: the hold did not take the test api port {api_port} "
+        f"— this cannot prove anything about a held port")
+
+    def no_sockets(*_a, **_k):
+        raise AssertionError(
+            "Prober._port_busy opened a socket while holding the api port. A "
+            "bound-but-not-listening port never answers a SYN (pinned by "
+            "test_bound_without_listen_does_not_report_refused), so this "
+            "connect cannot tell us anything and burns the full socket timeout "
+            "on every one of ~1k probes (t_4c9feb44).")
+
+    monkeypatch.setattr(audit_mod.socket, "socket", no_sockets)
+    assert prober._port_busy() is False, (
+        "the api port is held by this Prober: nothing else can have bound it, "
+        "so 'busy' here would be a phantom (D) finding")
+
+
+def test_prober_still_probes_a_port_it_does_not_hold(tmp_path, monkeypatch,
+                                                     request):
+    """The fix must not blind the sensor for the case where the bind FAILED.
+
+    That is the state the sensor exists for: the operator's live api (or a
+    concurrent audit) owns the port, so the hold is empty and the answer must
+    still come from a real connect — otherwise the (D) "a --help bound the api
+    port" check dies silently. The blocker is bound WITHOUT listen() on
+    purpose: a `listen()` here would make a CONCURRENT audit on this host read
+    the port as busy and manufacture a false (D) finding in someone else's leg.
+    """
+    import socket
+
+    api_port = _free_loopback_port()
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", api_port))     # bound, no listen: "already taken"
+    request.addfinalizer(blocker.close)
+    opened = []
+
+    class _FakeSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def settimeout(self, _t):
+            pass
+
+        def connect_ex(self, addr):
+            opened.append(addr)
+            return 0                          # accepted -> a server IS listening
+
+    monkeypatch.setattr(audit_mod, "API_DEFAULT_PORT", api_port)
+    # Build the Prober with REAL sockets first — its hold must genuinely FAIL
+    # on the blocked port — and only then fake the sensor's socket factory.
+    prober = _make_prober(tmp_path, request)
+    monkeypatch.setattr(audit_mod.socket, "socket", _FakeSock)
+    assert api_port not in {
+        s.getsockname()[1] for s in prober._tripwire_socks}, (
+        "premise broken: the Prober took the api port even though the blocker "
+        "holds it, so this does not measure the un-held case")
+    assert prober._port_busy() is True, (
+        "with the hold empty the sensor must ask the kernel again, or the (D) "
+        "port-flip check silently stops existing")
+    assert opened == [("127.0.0.1", api_port)], opened
 
 
 def test_write_findings_artifact(report):
