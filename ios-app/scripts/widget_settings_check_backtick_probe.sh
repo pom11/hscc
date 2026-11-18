@@ -137,6 +137,53 @@ if [ -z "$shell_anchor" ]; then
   shell_anchor="$ban_line"
 fi
 
+# ---- what a clean pass PRINTS is derived from the gate, never transcribed ------
+# This is the leg that reddened main: the expectation here was the literal 3, and
+# the gate gained a fourth section (SURFACE COVERAGE). The control copy then ran
+# byte-identical to the canonical gate, exited 0, printed all four banners and zero
+# FAIL lines — a PASS — and was reported as "the guard is refusing legitimate runs".
+# The copy mechanism was never the problem; a number was written down. That is the
+# transcribed-count trap this repo already documents for `defaults.surfaces.count
+# == 4` inside this very gate: any claim about HOW MANY of something a thing has
+# must be read out of the thing, or it reddens the day the thing grows.
+#
+# Derived by NAME rather than counted: a run that stops half-way can match a count
+# by accident and cannot match a set. A banner statement is a line whose first
+# non-blank character is not '#' (a comment is not a print) that prints a quoted
+# ALL-CAPS string ending in the word PASSED — the shape every banner here has, in
+# both its bash echo form and its Swift print form inside the harness heredoc.
+banner_stmts=$(awk '
+  { line = $0
+    gsub(/^[[:space:]]/, "", line)
+    if (line == "" || substr(line, 1, 1) == "#") next
+    if (match($0, /["(][A-Z][A-Z ]*PASSED/)) {
+      s = substr($0, RSTART, RLENGTH)
+      gsub(/["(]/, "", s)
+      gsub(/[[:space:]]+$/, "", s)
+      print s
+    }
+  }' "$GATE")
+expected_banners=$(printf '%s\n' "$banner_stmts" | grep -c .)
+banners_derived=1
+if [ "$expected_banners" -eq 0 ]; then
+  pfail "no banner statement could be derived from $GATE — with nothing to expect, 'the unmodified copy passed' would be a claim about an exit code and nothing else, which is the exact evidence this probe exists to refuse. A banner is a non-comment line printing a quoted ALL-CAPS string ending in PASSED; if the gate changed that shape, update this derivation rather than trusting RC 0."
+  banners_derived=0
+else
+  echo "expected banners: $expected_banners, derived from $GATE (not transcribed) — $(printf '%s\n' "$banner_stmts" | paste -sd ',' - | sed 's/,/, /g')"
+fi
+
+# missing_banners <out-file>: every derived banner this run did NOT print, joined
+# by '|'. Empty means the run printed the whole expected set. Reads the population
+# through process substitution, not a pipe, so the accumulator stays in this shell.
+missing_banners() {
+  local out="$1" b miss=""
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    grep -qF -- "$b" "$out" 2>/dev/null || miss="${miss}|${b}"
+  done < <(printf '%s\n' "$banner_stmts")
+  printf '%s' "$miss"
+}
+
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/wscprobe.XXXXXX")"
 
 # run_leg <name> <insert-payload-after-this-line> <slash|hash> [above]
@@ -186,8 +233,16 @@ run_leg() {
 
 # classify <leg-name> <expect: refused|inert-ok|passing|report>
 classify() {
-  local name="$1" expect="$2" banners
+  local name="$1" expect="$2" banners fails missing
+  # Two different measures for two different jobs, deliberately. The loose count is
+  # for the REFUSAL legs, where under-counting is the dangerous direction: a run
+  # that exited non-zero while mentioning PASSED anywhere at all is not a clean
+  # refusal, so anything narrower than "any PASSED on stdout" could flatter a
+  # partial run. The PASS legs are judged the other way round, against the derived
+  # NAME set, where over-counting is the dangerous direction.
   banners=$(grep -c 'PASSED' "$OUT" 2>/dev/null); banners=${banners:-0}
+  fails=$(grep -c 'FAIL:' "$OUT" 2>/dev/null); fails=${fails:-0}
+  missing=$(missing_banners "$OUT")
   if [ "$expect" = "report" ]; then
     if [ "$ban_ok" != 1 ]; then
       pfail "$name: cannot report the uncovered span because the boundary anchor was rejected — a leg that cannot measure its own window must not report a number"
@@ -219,17 +274,30 @@ classify() {
       # stopped. Only the first is a property of the comment.
       if [ "$RC" -ne 0 ] && [ "$banners" -eq 0 ]; then
         pok "$name: REFUSED BY THE BAN (RC $RC, 0 banners) — the ban caught it before bash expanded anything; do not read this as the comment being inert"
-      elif [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
-        pok "$name: INERT (RC 0, 4 banners) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
+      elif [ "$RC" -eq 0 ] && [ "$banners_derived" = 1 ] && [ -z "$missing" ] && [ "$fails" -eq 0 ]; then
+        pok "$name: INERT (RC 0, all $expected_banners derived banner(s) present, 0 FAIL:) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
       else
-        pfail "$name: unexplained outcome (RC $RC, $banners banner(s)) — a comment leg must either be refused by the ban or run clean to four banners"
+        pfail "$name: unexplained outcome (RC $RC, $banners PASSED line(s), $fails FAIL: line(s), unprinted derived banner(s): ${missing:-none}) — a comment leg must either be refused by the ban or run clean to the full derived banner set ($expected_banners)"
       fi
       ;;
     passing)
-      if [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
-        pok "$name: unmodified copy still passes (RC 0, 4 banners, $(grep -c 'FAIL:' "$OUT" 2>/dev/null) FAIL:)"
+      # "It passed" is four things and the exit code is the weakest of them: RC 0,
+      # every derived banner printed, none missing, no FAIL line on the way. A copy
+      # that exited 0 without the last banner never reached the end of the gate; one
+      # that exited 0 over a FAIL line is the shape of the shipped defect this class
+      # descends from. All four are checked, against names read out of the gate.
+      if [ "$banners_derived" != 1 ]; then
+        pfail "$name: cannot judge a pass at all — no banner statement was derivable from $GATE (see the FAIL above), so this leg has no outside measure and will not guess from an exit code"
+      elif [ "$RC" -ne 0 ]; then
+        pfail "$name: unmodified copy exited $RC with $banners PASSED line(s), $fails FAIL: line(s), unprinted derived banner(s): ${missing:-none} — the control copy is cp'd from the canonical gate with nothing edited (the gate's own sha is verified unchanged below), so a refusal here is the guard refusing a legitimate run, not an attack"
+      elif [ -n "$missing" ]; then
+        pfail "$name: copy exited 0 but never printed ${missing#|} — of $expected_banners banner statement(s) derived from $GATE the run printed $banners, so it stopped short of the end of the gate while still exiting 0"
+      elif [ "$fails" -ne 0 ]; then
+        pfail "$name: copy exited 0 while printing $fails FAIL: line(s) alongside $banners PASSED line(s) — a green exit over a red assertion is the original defect's shape, never a pass"
+      elif [ "$banners" -ne "$expected_banners" ]; then
+        pfail "$name: every derived banner printed ($expected_banners) yet $banners line(s) carried PASSED — the gate prints that word somewhere no banner statement is; name it and account for it"
       else
-        pfail "$name: unmodified copy did NOT pass (RC $RC, $banners banner(s)) — the guard is refusing legitimate runs, not just attacks"
+        pok "$name: unmodified copy passes (RC 0, $banners/$expected_banners banners, names derived from $GATE, 0 FAIL:) — the expectation is derived, so a fifth section added to the gate cannot redden this leg again"
       fi
       ;;
   esac
