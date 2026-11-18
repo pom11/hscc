@@ -186,10 +186,30 @@ struct BoardStatusEntry: TimelineEntry {
         return BoardStatusReading.countsShortLine(projection)
     }
 
+    /// The one large number the small family and the circular accessory lead
+    /// with — blocked when something is stuck, otherwise running, otherwise
+    /// done-today. Every choice is a count the CLI prints for this board.
+    var headlineNumber: Int? { BoardStatusReading.headlineNumber(projection) }
+    var headlineLabel: String { BoardStatusReading.headlineLabel(projection) }
+
     /// The number the `accessoryCircular` draws — see
-    /// `BoardStatusReading.circularNumber` for the rule (blocked first, open
-    /// total as the fallback, nil when neither is known so it draws `—`).
+    /// `BoardStatusReading.circularNumber` for the rule (blocked first, running
+    /// next, done-today last, nil when none is known so it draws `—`).
     var circularNumber: Int? { BoardStatusReading.circularNumber(projection) }
+    var circularLabel: String { BoardStatusReading.circularLabel(projection) }
+
+    /// The freshness line every family can afford. Live data says so in words;
+    /// a kept snapshot carries its age AND the reason it was kept, so an old
+    /// number can never look like this refresh's answer.
+    var updatedLine: String {
+        if !configured { return "Set up the app to see this board." }
+        if let age = ageMinutes {
+            return "updated \(age)m ago · \(failure?.shortLabel ?? "no answer")"
+        }
+        if let failure { return failure.operatorLine }
+        if projection != nil { return "updated just now · done = last 24h" }
+        return "No board counts yet"
+    }
 
     /// The ring's colour is the one question a circular complication answers:
     /// does this board need me? (The five TILES use `style.cardStatusColor`,
@@ -200,18 +220,18 @@ struct BoardStatusEntry: TimelineEntry {
     /// The age / failure line every home-screen family can show.
     var footerLine: String {
         if !configured { return "Set up the app to see this board." }
-        if let age = ageMinutes { return "last known \(age) min ago · \(failure?.shortLabel ?? "no answer")" }
+        if let age = ageMinutes { return "updated \(age)m ago · \(failure?.shortLabel ?? "no answer")" }
         if let failure { return failure.operatorLine }
         // On the interim path a dash is a fact about the cluster, and the footer
         // names it: `done` needs the compact route, `blocked` needs its own read
         // to have answered. Silence here would let a `—` look like the design.
         if let projection, projection.source == .openOnly {
             var gaps: [String] = []
-            if projection.done == nil { gaps.append("done needs /v1/mobile/summary on this cluster") }
+            if projection.done == nil { gaps.append("done 24h needs /v1/mobile/summary") }
             if projection.blockedUnknown { gaps.append("blocked unreadable this refresh") }
             if !gaps.isEmpty { return gaps.joined(separator: " · ") }
         }
-        return "counts from this refresh"
+        return "updated just now · done = last 24h"
     }
 
     /// The five tiles in the order the board reads them.
@@ -469,7 +489,7 @@ struct BoardStatusWidget: Widget {
                 .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Board Status")
-        .description("Todo, ready, running, blocked and done for one board you pick.")
+        .description("Todo, ready, running, blocked and done today for one board you pick.")
         // The accessory families are iOS-only; the macOS desktop tile offers
         // the three system sizes (t_1143c19b).
         #if os(iOS)
@@ -540,7 +560,7 @@ struct BoardStatusCircularView: View {
                     .font(style.font(.body))
                     .fontWeight(.semibold)
                     .foregroundStyle(color)
-                Text(entry.circularIsUrgent ? "blocked" : "open").widgetHeader(style)
+                Text(entry.circularLabel).widgetHeader(style)
                     .font(style.font(size: 8))
                     .foregroundStyle(.secondary)
             }
@@ -580,10 +600,35 @@ struct BoardStatusSmallView: View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
         } else {
-            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
-                BoardStatusTileGrid(tiles: entry.tiles, columns: 3)
+                if entry.projection == nil {
+                    BoardStatusFailurePane(entry: entry)
+                } else {
+                    // ONE headline number, then the four supporting counts in a
+                    // single compact line. The old five-tile grid made every
+                    // number the same size, which is the "truncated soup" this
+                    // family is meant to avoid.
+                    HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                        Text(BoardStatusReading.numberText(entry.headlineNumber))
+                            .font(style.font(.largeTitle, weight: .bold))
+                            .foregroundStyle(entry.circularIsUrgent ? style.warnColor : style.primaryTextColor)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text(entry.headlineLabel)
+                            .font(style.font(.caption, weight: .semibold))
+                            .foregroundStyle(style.secondaryTextColor)
+                    }
+                    Text(BoardStatusReading.smallCountsLine(entry.projection))
+                        .font(style.font(.caption2))
+                        .foregroundStyle(style.secondaryTextColor)
+                        .lineLimit(2)
+                }
                 Spacer(minLength: 0)
+                Text(entry.updatedLine)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(entry.failure == nil ? style.secondaryTextColor : style.warnColor)
+                    .lineLimit(2)
             }
         }
     }
@@ -596,6 +641,8 @@ struct BoardStatusMediumView: View {
     var body: some View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
+        } else if entry.projection == nil {
+            BoardStatusFailurePane(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
@@ -616,6 +663,8 @@ struct BoardStatusLargeView: View {
     var body: some View {
         if !entry.configured || entry.paused {
             BoardStatusGateView(entry: entry)
+        } else if entry.projection == nil {
+            BoardStatusFailurePane(entry: entry)
         } else {
             VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.md.rawValue)) {
                 BoardStatusHeaderView(entry: entry)
@@ -664,9 +713,10 @@ private struct BoardStatusHeaderView: View {
                 .lineLimit(1)
             Spacer(minLength: 0)
             if let age = entry.ageMinutes {
-                Text("\(age) min")
+                Text("updated \(age)m ago")
                     .font(style.font(.caption2, weight: .medium))
                     .foregroundStyle(style.warnColor)
+                    .lineLimit(1)
             }
         }
     .widgetHeader(style)
@@ -698,6 +748,33 @@ private struct BoardStatusTileGrid: View {
                 .background(RoundedRectangle(cornerRadius: style.corner(Theme.Corner.badge.rawValue), style: .continuous)
                     .fill(tile.color(style).opacity(0.16)))
             }
+        }
+    }
+}
+
+/// The explicit failure pane for a read that produced no numbers at all: the
+/// reason, in the entry's own words, never five dashes pretending to be a
+/// quiet board. Shown by the small family; medium/large carry the same sentence
+/// in their footer.
+private struct BoardStatusFailurePane: View {
+    @Environment(\.widgetStyle) private var style
+    let entry: BoardStatusEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+            HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+                Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                    .font(style.font(size: 10))
+                    .foregroundStyle(style.warnColor)
+                Text(entry.failure?.shortLabel ?? "No board counts")
+                    .font(style.font(.caption, weight: .semibold))
+                    .foregroundStyle(style.primaryTextColor)
+                    .lineLimit(1)
+            }
+            Text(entry.failure?.operatorLine ?? "The cluster returned no counts for this board.")
+                .font(style.font(size: 8))
+                .foregroundStyle(style.secondaryTextColor)
+                .lineLimit(3)
         }
     }
 }

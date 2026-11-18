@@ -6,8 +6,7 @@ import ActivityKit
 //
 // `BoardProgressActivityAttributes` is the ActivityKit attributes type for the
 // per-board progress bubble: the Dynamic Island / Lock Screen form of the Board
-// Status widget's five numbers, narrowed to the four the operator watches while
-// work moves — done · running · blocked · ready.
+// Status widget's five numbers — running · ready · todo · blocked · done 24h.
 //
 // It is NOT a second data path. The numbers come from the same projection the
 // Board Status widget reads (`BoardStatusProjection` over
@@ -26,26 +25,32 @@ import ActivityKit
 // ---------------------------------------------------------------------------
 
 struct BoardProgressActivityAttributes: ActivityAttributes {
-    /// The state the Dynamic Island / Lock Screen renders: the four board
+    /// The state the Dynamic Island / Lock Screen renders: the five board
     /// counts as the app last pushed them, plus when it last pushed.
     public struct ContentState: Codable, Hashable {
-        /// The four numbers the surface draws. Every one is optional on
-        /// purpose: nil means "this refresh did not carry that count" and draws
-        /// `—`, while `0` is the server's own "none".
+        /// The five numbers the surface draws — exactly the CLI board table's
+        /// Running/Ready/Todo/Blocked/Done 24h cells for this board. Every one
+        /// is optional on purpose: nil means "this refresh did not carry that
+        /// count" and draws `—`, while `0` is the server's own "none".
         public var done: Int?
         public var running: Int?
         public var blocked: Int?
         public var ready: Int?
+        public var todo: Int?
         /// The blind-read label (`WidgetDataFailure.shortLabel`, ≤ 18 chars by
         /// contract), or nil when the last push came from a live read.
         public var failureLabel: String?
+        /// The operator-facing reason, when there is one. Separated from the
+        /// label so the Lock Screen can say "No connection — is Tailscale
+        /// connected?" while the Island stays one short word.
+        public var failureDetail: String?
         /// When the app last pushed. Drives the age line and `staleDate`.
         public var updatedAt: Date
 
         /// Whether anything at all is drawable. False means the surface shows
-        /// the failure line, never four reassuring dashes dressed as a zero.
+        /// the failure line, never five reassuring dashes dressed as a zero.
         var hasNumbers: Bool {
-            done != nil || running != nil || blocked != nil || ready != nil
+            done != nil || running != nil || blocked != nil || ready != nil || todo != nil
         }
     }
 
@@ -82,14 +87,16 @@ enum BoardProgressTone: String {
 /// Lock Screen regions of one pushed state cannot disagree — and a refresh that
 /// did not answer can never render as a quiet board.
 enum BoardProgressReading {
-    /// The four tiles, in reading order: what is finished, what is moving, what
-    /// is stuck, what is available to pick up.
-    static func counts(done: Int?, running: Int?, blocked: Int?, ready: Int?) -> [BoardProgressCount] {
+    /// The five CLI columns, in reading order: what is moving, what is queued,
+    /// what is stuck, what is finished today.
+    static func counts(done: Int?, running: Int?, blocked: Int?,
+                       ready: Int?, todo: Int?) -> [BoardProgressCount] {
         [
-            BoardProgressCount(key: "done", label: "done", value: done),
             BoardProgressCount(key: "running", label: "run", value: running),
-            BoardProgressCount(key: "blocked", label: "blocked", value: blocked),
             BoardProgressCount(key: "ready", label: "ready", value: ready),
+            BoardProgressCount(key: "todo", label: "todo", value: todo),
+            BoardProgressCount(key: "blocked", label: "blocked", value: blocked),
+            BoardProgressCount(key: "done", label: "done 24h", value: done),
         ]
     }
 
@@ -175,9 +182,9 @@ enum BoardProgressReading {
     /// A clock ahead of this device reads `now`, never a negative age.
     static func pushedAgeText(updatedAt: Date, now: Date) -> String {
         let total = max(0, Int(now.timeIntervalSince(updatedAt)))
-        if total < 60 { return "now" }
+        if total < 60 { return "updated just now" }
         let minutes = total / 60
-        if minutes < 60 { return "\(minutes)m ago" }
-        return String(format: "%dh%02dm ago", minutes / 60, minutes % 60)
+        if minutes < 60 { return "updated \(minutes)m ago" }
+        return String(format: "updated %dh%02dm ago", minutes / 60, minutes % 60)
     }
 }

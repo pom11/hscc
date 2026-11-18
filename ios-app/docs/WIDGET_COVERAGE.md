@@ -1,12 +1,14 @@
 # Widget coverage audit — iOS and macOS
 
-Measured on `wt/oc-t_d3ee353c` (2026-11-18), rebased on `origin/main` after the
-cluster route parity fix. This revision refurbishes the Cluster and Monitor
-widgets and their Live Activities against `hscc-api/docs/WIDGET_ROUTES.md`; the
-family matrix below is unchanged. A family is counted as covered only when it is
-both listed in that widget's `supportedFamilies` **and** has a non-placeholder
-view in the family dispatch switch (or routes through the shared, gated text
-model the dispatch selects).
+Measured on the merged tree rebased on `origin/main` (2026-11-18), after the
+cluster route parity fix and the CARD B3 board/project refurbish. A family is
+counted as covered only when it is both listed in that widget's
+`supportedFamilies` **and** has a non-placeholder view in the family dispatch
+switch (or routes through the shared, gated text model the dispatch selects).
+The Cluster and Monitor surfaces were refurbished by the sibling card; the
+Kanban Monitor, Board Status and Projects widgets plus the Board Progress Live
+Activity were refurbished by CARD B3. Every surface reads the fields in
+`hscc-api/docs/WIDGET_ROUTES.md`.
 
 Legend:
 
@@ -71,12 +73,13 @@ Cluster and Monitor.
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 | Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | absent | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
 | CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | absent | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
-| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | absent | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
+| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
 
-The four `absent` XL cells are the documented macOS family split, not a defect:
-all six widgets ship small/medium/large, and Cluster and Monitor also ship
-`systemExtraLarge` (`changelog.d/t_1143c19b.md`).
+The three remaining `absent` XL cells are the documented macOS family split, not
+a defect: all six widgets ship small/medium/large, and Cluster, Monitor and
+Kanban Monitor also ship `systemExtraLarge`. Kanban Monitor gained XL in CARD B3
+because the per-board table is the surface that benefits from the extra rows.
 
 ## 4. Compile results
 
@@ -106,7 +109,7 @@ compiling real models + harness into a macOS CLI...
 ALL DECODE CHECKS PASSED — 93/93 checks (over 56 committed fixtures) decoded against the real models
 ```
 
-### Cluster/Monitor render check
+## 5a. Cluster/Monitor render check
 
 ```text
 $ bash ios-app/scripts/cluster_widget_check.sh
@@ -133,6 +136,25 @@ models/throughput = `serving[].model` / `serving[].gen_tps`, jobs =
 `workloads[].workload_id` (and `status.workloads.count`), temperatures =
 `sample.cpu_temp_c` / `sample.gpu_temp_c`, daemon health =
 `daemon_running` / `daemon_uptime_seconds`.
+
+## 5b. Widget execution checks
+
+```text
+$ bash ios-app/scripts/board_status_widget_check.sh
+104 assertions, 0 failure(s)
+
+$ bash ios-app/scripts/projects_widget_check.sh
+PROJECTS WIDGET CHECK PASSED
+
+$ bash ios-app/scripts/kanban_monitor_widget_check.sh
+29 assertions, 0 failure(s)
+```
+
+The board-status and projects counts are unchanged by CARD B3; the board harness
+gained no assertions, only updated expectations for the renamed Done 24h tile
+and the ring's running/done fallback. The Kanban Monitor check is new: it decodes
+a scrubbed live capture of `GET /v1/mobile/summary` and asserts every drawn
+number equals its fixture field, including `done` = Done 24h.
 
 ## 6. Shipped feature checklist
 
@@ -162,11 +184,11 @@ Non-gap coverage notes:
 - `WakingActivityAttributes` belongs to the separate `HSCCLiveActivity`
   extension rather than `HSCCLiveActivityMonitor`; it is still covered on all
   four surfaces.
-- Four macOS widgets do not offer `systemExtraLarge`; the macOS feature
-  intentionally reserves that family for Cluster and Monitor.
 - The Cluster tile no longer draws a kanban board row. That row was not
   `hscc cluster monitor` / `hscc cluster status` output; the board surfaces own
   it. The removed read also brings the tile back to two cluster requests.
 - The Monitor tile no longer computes a fleet CPU average for its circular
   family. A circular now shows the answered/listed host tally; the per-node CPU
   numbers remain on the node rows, exactly as the CLI prints them.
+- Three macOS widgets (Projects, Cards Running, Board Status) do not offer
+  `systemExtraLarge`; Cluster, Monitor and Kanban Monitor do.

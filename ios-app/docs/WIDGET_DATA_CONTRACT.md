@@ -240,6 +240,13 @@ rather than a fabricated zero. `repo` remains undecoded and unstored.
 The widget is five numbers for one board (`t_6d8731ab`: todo/ready/running/
 blocked/done, board selectable in configuration).
 
+**Amendment (CARD B3, 2026-11-18).** `done` means `done_24h` — the CLI board
+table's **Done 24h** column — and is labelled that way on every family. The
+route's `projects[].counts` and `boards[].counts` come from the same
+`kanban_live.board_status_counts`, so the Projects widget, Board Status tile and
+Board Progress Live Activity cannot disagree about a board's running/ready/todo/
+blocked/done-today numbers.
+
 | family | needs | bytes that must travel |
 |---|---|---|
 | accessoryInline | `"3 run · 15 blocked"` (≤25 chars) | 5 ints |
@@ -293,6 +300,12 @@ never draw.
 | small | running/blocked/stale + 1 title | 3 counts + `tasks[0].title` (≤40) |
 | medium | 3 counts + up to 4 rows `{title≤40, board}` | counts + `tasks[].{title,board}` |
 | large | 3 counts + up to 7 rows `{title≤60, board, age_days}`; blocked rows may add `block_kind` | + `age_days`, `block_kind` |
+
+**Amendment (CARD B3, 2026-11-18).** The Kanban Monitor widget now draws the
+CLI's **board table**, not a card list: one `GET /v1/mobile/summary` read gives
+`boards[].counts.{running,ready,todo,blocked,done}` with `done` = Done 24h,
+which the three-route trio cannot answer. The trio remains the card-list source
+for the Cards Running surface; its narrowing rules below still bind there.
 
 Client-side narrowing (binding): request the three routes as-is (they are the
 cheapest per-row source in the API), decode with the existing `Lite` models

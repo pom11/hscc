@@ -1,0 +1,72 @@
+{
+  "generated_at": "2026-11-18T15:32:05Z",
+  "boards": [
+    {
+      "board": "ecofire-app",
+      "counts": {
+        "todo": 0,
+        "ready": 0,
+        "running": 0,
+        "blocked": 1,
+        "done": 0,
+        "archived": 26
+      },
+      "total": 27
+    },
+    {
+      "board": "ecofire-flows",
+      "counts": {
+        "todo": 2,
+        "ready": 0,
+        "running": 1,
+        "blocked": 1,
+        "done": 6,
+        "archived": 5
+      },
+      "total": 15
+    },
+    {
+      "board": "gateclerk",
+      "counts": {
+        "todo": 0,
+        "ready": 0,
+        "running": 0,
+        "blocked": 2,
+        "done": 0,
+        "archived": 1
+      },
+      "total": 3
+    },
+    {
+      "board": "headless-display",
+      "counts": {
+        "todo": 0,
+        "ready": 0,
+        "running": 0,
+        "blocked": 10,
+        "done": 0,
+        "archived": 20
+      },
+      "total": 30
+    },
+    {
+      "board": "hscc",
+      "counts": {
+        "todo": 0,
+        "ready": 0,
+        "running": 2,
+        "blocked": 5,
+        "done": 73,
+        "archived": 119
+      },
+      "total": 200,
+      "other": 1,
+      "other_statuses": {
+        "scheduled": 1
+      }
+    }
+  ],
+  "board_count": 5,
+  "total_boards": 5,
+  "speak": "5 boards: 25 open, 3 running, 79 done."
+}

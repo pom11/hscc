@@ -265,7 +265,7 @@ enum BoardStatusReading {
         ("ready", "ready"),
         ("running", "run"),
         ("blocked", "blocked"),
-        ("done", "done"),
+        ("done", "done 24h"),
     ]
 
     /// The ONE place a count becomes a string (§6 rule 1). `nil` is "this payload
@@ -332,6 +332,20 @@ enum BoardStatusReading {
         }
     }
 
+    /// The small family's supporting line: all five CLI columns in one short
+    /// sentence, with their real labels. `—` is only used when the payload did
+    /// not carry a status, never as a stand-in for zero.
+    static func smallCountsLine(_ projection: BoardStatusProjection?) -> String {
+        guard let projection, projection.hasNumbers else { return "No board counts" }
+        return [
+            "\(numberText(projection.todo)) todo",
+            "\(numberText(projection.ready)) ready",
+            "\(numberText(projection.running)) run",
+            "\(numberText(projection.blocked)) blocked",
+            "\(numberText(projection.done)) done 24h",
+        ].joined(separator: " · ")
+    }
+
     /// `accessoryRectangular`'s second line and the small/medium footer: at most
     /// two operands, most urgent first. §5.2's example is "17 todo · 6 run";
     /// a nonzero `blocked` outruns everything, because it is the number that
@@ -347,13 +361,39 @@ enum BoardStatusReading {
         return parts.prefix(2).joined(separator: " · ")
     }
 
-    /// The number the `accessoryCircular` draws: §5.2 says one scalar, and the
-    /// one worth a glance is what is stuck. Falls back to the open total when
-    /// `blocked` was not in the payload — and when neither is known it is nil,
-    /// which draws `—` rather than a reassuring zero.
+    /// The number the `accessoryCircular` draws: one scalar that is always a
+    /// field the CLI prints. Blocked wins (it is the number that means someone is
+    /// waiting), then running, then done-today. Nothing known draws `—`, never a
+    /// reassuring zero.
     static func circularNumber(_ projection: BoardStatusProjection?) -> Int? {
-        if let blocked = projection?.blocked { return blocked }
-        return projection?.openCount
+        if let blocked = projection?.blocked, blocked > 0 { return blocked }
+        if let running = projection?.running { return running }
+        if let done = projection?.done { return done }
+        return projection?.blocked
+    }
+
+    /// The word under `circularNumber`, chosen with the same precedence so the
+    /// ring can never label a done-today count as "blocked".
+    static func circularLabel(_ projection: BoardStatusProjection?) -> String {
+        if let blocked = projection?.blocked, blocked > 0 { return "blocked" }
+        if projection?.running != nil { return "running" }
+        if projection?.done != nil { return "done 24h" }
+        return "blocked"
+    }
+
+    /// The one large number the small family leads with. Blocked is the urgent
+    /// case; otherwise running is what the board is doing. nil means the read
+    /// carried neither, and the view says why instead of drawing a zero.
+    static func headlineNumber(_ projection: BoardStatusProjection?) -> Int? {
+        if let blocked = projection?.blocked, blocked > 0 { return blocked }
+        if let running = projection?.running { return running }
+        return projection?.done
+    }
+
+    static func headlineLabel(_ projection: BoardStatusProjection?) -> String {
+        if let blocked = projection?.blocked, blocked > 0 { return "blocked" }
+        if projection?.running != nil { return "running" }
+        return "done 24h"
     }
 
     /// The ring's colour is the one question a circular complication answers:

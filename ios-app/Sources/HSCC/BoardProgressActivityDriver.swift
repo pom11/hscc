@@ -216,7 +216,8 @@ final class BoardProgressActivityDriver {
         guard setting().isActive, let board else { return }
 
         guard let client = WidgetDataClient.makeIfConfigured() else {
-            await push(Self.emptyState(label: WidgetDataFailure.notConfigured.shortLabel))
+            await push(Self.emptyState(label: WidgetDataFailure.notConfigured.shortLabel,
+                                       detail: WidgetDataFailure.notConfigured.operatorLine))
             return
         }
         let outcome = await WidgetData.read(
@@ -228,42 +229,51 @@ final class BoardProgressActivityDriver {
 
         let projection: BoardStatusProjection?
         let failureLabel: String?
+        let failureDetail: String?
         switch outcome {
         case .live(let value, let fetchedAt):
             // Save what the widget will also read, then push it label-free.
             BoardStatusSnapshotStore.save(value, at: fetchedAt)
             projection = value
             failureLabel = nil
+            failureDetail = nil
         case .stale(let value, _, let reason):
             // Real numbers, real age, and the reason this refresh did not
             // answer all travel together, so a stale bubble is never quiet.
             projection = value
             failureLabel = reason.shortLabel
+            failureDetail = reason.operatorLine
         case .failed(let failure):
             // Nothing usable: the counts go nil (drawn `—`) and the label is
             // the whole headline.
             projection = nil
             failureLabel = failure.shortLabel
+            failureDetail = failure.operatorLine
         }
 
-        await push(Self.contentState(from: projection, failureLabel: failureLabel))
+        await push(Self.contentState(from: projection, failureLabel: failureLabel,
+                                     failureDetail: failureDetail))
     }
 
-    /// The four counts one push carries. A projection only exists for a read
-    /// that answered; every absent status stays nil all the way to the view.
+    /// The five counts one push carries (the CLI board table's columns). A
+    /// projection only exists for a read that answered; every absent status
+    /// stays nil all the way to the view.
     static func contentState(from projection: BoardStatusProjection?,
-                             failureLabel: String?) -> BoardProgressActivityAttributes.ContentState {
+                             failureLabel: String?,
+                             failureDetail: String? = nil) -> BoardProgressActivityAttributes.ContentState {
         BoardProgressActivityAttributes.ContentState(
             done: projection?.done,
             running: projection?.running,
             blocked: projection?.blocked,
             ready: projection?.ready,
+            todo: projection?.todo,
             failureLabel: failureLabel,
+            failureDetail: failureDetail,
             updatedAt: Date())
     }
 
-    private static func emptyState(label: String) -> BoardProgressActivityAttributes.ContentState {
-        contentState(from: nil, failureLabel: label)
+    private static func emptyState(label: String, detail: String? = nil) -> BoardProgressActivityAttributes.ContentState {
+        contentState(from: nil, failureLabel: label, failureDetail: detail)
     }
 
     /// The board-status route policy, matching `BoardStatusTimelineProvider`:
