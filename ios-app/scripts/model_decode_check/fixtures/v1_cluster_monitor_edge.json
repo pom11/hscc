@@ -1,0 +1,283 @@
+{
+ "success": true,
+ "json": {
+  "timestamp": 1795031479.4,
+  "hosts": [
+   {
+    "host": "192.0.2.21",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-11",
+     "uptime_sec": "90061",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "cpu_load_1m": "0.5",
+     "cpu_load_5m": "1.5",
+     "cpu_load_15m": "2.5",
+     "cpu_usage_pct": "99.95",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "87.25",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "118319",
+     "mem_available_mb": "6227",
+     "mem_bufcache_mb": "1806",
+     "mem_used_pct": "95.0",
+     "swap_total_mb": "1000",
+     "swap_used_mb": "375",
+     "gpu_name": "NVIDIA GB10",
+     "gpu_count": "1",
+     "gpu_util_pct": "94.6",
+     "gpu_mem_used_mb": "57344",
+     "gpu_mem_total_mb": "65536",
+     "gpu_mem_used_pct": "87.5",
+     "gpu_temp_c": "71.5",
+     "gpu_power_w": "37.885",
+     "gpu_power_limit_w": "120",
+     "gpu_clock_mhz": "2405",
+     "gpu_mem_clock_mhz": "4000",
+     "gpu_encoder_pct": "12",
+     "gpu_decoder_pct": "0",
+     "gpu_fan_pct": "45",
+     "net_recv_bytes_s": "999",
+     "net_send_bytes_s": "1000",
+     "sparkrun_jobs": "3"
+    },
+    "workloads": [
+     {
+      "workload_id": "workload-a",
+      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "runtime": "vllm-distributed",
+      "ranks_on_host": 1,
+      "containers": [
+       {
+        "name": "workload-a_solo",
+        "role": "solo",
+        "status": "Up 1 day"
+       }
+      ]
+     }
+    ],
+    "used_slots": 1,
+    "free_slots": 0
+   },
+   {
+    "host": "192.0.2.22",
+    "error": "ssh: connection refused",
+    "sample": null,
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   },
+   {
+    "host": "192.0.2.23",
+    "error": "ssh: timed out after 3s",
+    "sample": {},
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   },
+   {
+    "host": "192.0.2.24",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-14",
+     "uptime_sec": "",
+     "cpu_load_1m": "",
+     "cpu_load_5m": "",
+     "cpu_load_15m": "",
+     "cpu_usage_pct": "",
+     "cpu_freq_mhz": "",
+     "cpu_temp_c": "",
+     "mem_total_mb": "",
+     "mem_used_mb": "",
+     "mem_available_mb": "",
+     "mem_bufcache_mb": "",
+     "mem_used_pct": "",
+     "swap_total_mb": "",
+     "swap_used_mb": "2859",
+     "gpu_name": "",
+     "gpu_count": "",
+     "gpu_util_pct": "",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "",
+     "gpu_power_w": "",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "",
+     "gpu_mem_clock_mhz": "",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "net_recv_bytes_s": "",
+     "net_send_bytes_s": "",
+     "sparkrun_jobs": ""
+    },
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   },
+   {
+    "host": "192.0.2.25",
+    "error": "",
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-15",
+     "cpu_usage_pct": "n/a",
+     "mem_used_pct": "0",
+     "swap_total_mb": "0",
+     "swap_used_mb": "0",
+     "gpu_util_pct": "0",
+     "gpu_temp_c": "0",
+     "gpu_power_w": "0",
+     "sparkrun_jobs": "0"
+    },
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   },
+   {
+    "host": "100.64.0.1",
+    "error": null,
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-16",
+     "cpu_usage_pct": "0.05",
+     "mem_used_pct": "0.05",
+     "swap_total_mb": "8",
+     "swap_used_mb": "1",
+     "gpu_util_pct": "0",
+     "gpu_temp_c": "0.5",
+     "gpu_power_w": "0.005",
+     "gpu_power_limit_w": "0",
+     "sparkrun_jobs": "1"
+    },
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   },
+   {
+    "host": "192.0.2.26",
+    "error": "gpu: nvidia-smi exited 1",
+    "sample": {
+     "timestamp": "2026-11-18T20:00:00Z",
+     "hostname": "node-17",
+     "uptime_sec": "90061",
+     "cpu_name": "X925 (10) + A725 (10)",
+     "cpu_load_1m": "0.5",
+     "cpu_load_5m": "1.5",
+     "cpu_load_15m": "2.5",
+     "cpu_usage_pct": "99.5",
+     "cpu_freq_mhz": "3354",
+     "cpu_temp_c": "87.25",
+     "mem_total_mb": "124546",
+     "mem_used_mb": "118319",
+     "mem_available_mb": "6227",
+     "mem_bufcache_mb": "1806",
+     "mem_used_pct": "95.0",
+     "swap_total_mb": "1000",
+     "swap_used_mb": "375",
+     "gpu_name": "",
+     "gpu_count": "",
+     "gpu_util_pct": "",
+     "gpu_mem_used_mb": "",
+     "gpu_mem_total_mb": "",
+     "gpu_mem_used_pct": "",
+     "gpu_temp_c": "",
+     "gpu_power_w": "",
+     "gpu_power_limit_w": "",
+     "gpu_clock_mhz": "",
+     "gpu_mem_clock_mhz": "",
+     "gpu_encoder_pct": "",
+     "gpu_decoder_pct": "",
+     "gpu_fan_pct": "",
+     "net_recv_bytes_s": "999",
+     "net_send_bytes_s": "1000",
+     "sparkrun_jobs": "3"
+    },
+    "workloads": [],
+    "used_slots": 0,
+    "free_slots": 4
+   }
+  ]
+ },
+ "serving": [
+  {
+   "node": "192.0.2.21",
+   "port": "8000",
+   "model": "local-inference-lab/Model-A",
+   "routes": [
+    "local-inference-lab/Model-A"
+   ],
+   "running": 1,
+   "waiting": 0,
+   "kv": 0.0005,
+   "gen_tps": 12.34,
+   "prompt_tps": 199.6,
+   "prompt_total": 999.0,
+   "gen_total": 1000.0,
+   "error": null
+  },
+  {
+   "node": "192.0.2.25",
+   "port": "8003",
+   "model": "local-inference-lab/Model-A",
+   "routes": [
+    "local-inference-lab/Model-A",
+    "orchestrator-model",
+    "worker-model"
+   ],
+   "running": 2,
+   "waiting": 3,
+   "kv": 0.5309871624612661,
+   "gen_tps": 0.0,
+   "prompt_tps": 0.0,
+   "prompt_total": 1234567.0,
+   "gen_total": 1230000000.0,
+   "error": null
+  },
+  {
+   "node": "100.64.0.1",
+   "port": "8006",
+   "model": "org/Qwen3-30B-A3B[GPTQ]",
+   "routes": [
+    "org/Qwen3-30B-A3B[GPTQ]",
+    "worker-model"
+   ],
+   "running": 0,
+   "waiting": 1,
+   "kv": 0.0,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": 1000000.0,
+   "gen_total": 999.0,
+   "error": null
+  },
+  {
+   "node": "192.0.2.24",
+   "port": "8004",
+   "model": "Model-B",
+   "routes": [],
+   "running": 0,
+   "waiting": 0,
+   "kv": null,
+   "gen_tps": null,
+   "prompt_tps": null,
+   "prompt_total": null,
+   "gen_total": null,
+   "error": null
+  },
+  {
+   "node": "192.0.2.23",
+   "port": "8005",
+   "model": "-",
+   "routes": [
+    "orchestrator-model"
+   ],
+   "error": "read timed out after 3 seconds on /metrics endpoint"
+  }
+ ],
+ "serving_proxy_error": null,
+ "speak": "Fleet snapshot: 6 hosts sampled."
+}

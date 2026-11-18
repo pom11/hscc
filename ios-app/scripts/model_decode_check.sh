@@ -42,9 +42,16 @@ real_models=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
   Sources/HSCC/APIError.swift
+  # The monitor view-model (t_61ed3f5e): the parity checks below run THIS
+  # file's formatters against goldens generated from hscc_daemon/cluster_live.py,
+  # so the harness has to compile the real thing, not a copy of it.
+  Sources/Shared/ClusterMonitorViewModel.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
+  # Declarations only (Swift forbids top-level statements outside main.swift),
+  # so the monitor parity checks live here and main.swift calls them.
+  scripts/model_decode_check/monitor_parity.swift
   scripts/model_decode_check/main.swift
 )
 

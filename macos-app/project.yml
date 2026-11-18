@@ -105,6 +105,10 @@ targets:
       # per saved address, one overall line, one last-working update.
       - path: ../ios-app/Sources/Shared/ConnectionAddressProbe.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
+      # The monitor view-model: every `hscc cluster monitor` column, formatted
+      # as the CLI formats it, so the menu bar app draws the same strings the
+      # iOS widgets draw and the terminal prints (t_61ed3f5e). Foundation-only.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system, so the menu bar app and the iOS widgets share
       # the black + #FF5722 palette and spacing rather than growing a second.
@@ -219,6 +223,9 @@ targets:
       - path: ../ios-app/Sources/Shared/SharedStore.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
+      # The monitor view-model (t_61ed3f5e): the widget cards draw the CLI's
+      # own host and serving cells rather than re-deriving units and rounding.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift
