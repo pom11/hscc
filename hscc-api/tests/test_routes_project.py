@@ -294,6 +294,41 @@ def fakes(monkeypatch):
     # The orchestrator read scans real Hermes profile stores in production; a
     # unit test must never do that. The seam is the same one the handler calls.
     monkeypatch.setattr(routes_project, "_backing_orchestrators", lambda: [])
+
+
+    def fake_collect(board=None):
+        """Shape the fake ``list_cards`` output like kanban_live.collect()."""
+        cards = fd["_kanban"].list_cards(board=board)
+        by_board = {}
+        for card in cards:
+            slug = card.get("board") or "default"
+            entry = by_board.setdefault(
+                slug, {"name": slug, "counts": {}, "done_24h": 0,
+                       "running": [], "ready": []})
+            status = str(card.get("status") or "unknown")
+            entry["counts"][status] = entry["counts"].get(status, 0) + 1
+            if status == "done":
+                entry["done_24h"] += 1
+            if status in ("running", "ready"):
+                entry[status].append({
+                    "board": slug, "id": card["id"], "title": card.get("title"),
+                    "worker": card.get("assignee") or "?",
+                    "assignee": card.get("assignee"), "status": status,
+                    "age_s": 10, "run_s": 10 if status == "running" else None,
+                    "wait_s": 10 if status == "ready" else None,
+                    "started_at": 1000 if status == "running" else None,
+                })
+        boards = list(by_board.values())
+        if board is not None and not boards:
+            boards = [{"name": board, "counts": {}, "done_24h": 0}]
+        return {
+            "boards": boards,
+            "running": [r for b in boards for r in b.get("running", [])],
+            "ready": [r for b in boards for r in b.get("ready", [])],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(routes_project, "_backing_cards_collect", fake_collect)
     return fd
 
 
@@ -353,13 +388,15 @@ def test_cards_200_shape(running, token, fakes):
     assert isinstance(payload["speak"], str) and payload["speak"]
 
 
-def test_cards_status_filter(running, token, fakes):
-    # Real cards have status running; filtering for 'review' yields zero.
+def test_cards_rejects_filters_the_cli_does_not_have(running, token, fakes):
+    # `hscc cards monitor` has no --status/--include-archived; inventing them
+    # is how the old route served stale blocked cards as active.
     status, payload = _request(running, token, path="/v1/cards?status=review")
-    assert status == 200
-    assert payload["count"] == 0
-    assert payload["cards"] == []
-    assert "0" in payload["speak"]
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    status, payload = _request(running, token, path="/v1/cards?include_archived=1")
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
 
 
 def test_cards_board_param_passed(running, token, fakes, monkeypatch):

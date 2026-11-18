@@ -632,7 +632,8 @@ class Monitor:
 
     def _default_collect(self):
         return kanban_live.attach_tokens(
-            kanban_live.collect(kanban_db=self.kanban_db, board=self.board),
+            kanban_live.collect(kanban_db=self.kanban_db, board=self.board,
+                                registered_only=True),
             hermes_home=self.hermes_home)
 
     def _outcomes(self) -> dict:

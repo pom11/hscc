@@ -2,47 +2,39 @@
 
     GET /v1/mobile/summary[?boards=<slug,slug>]  ->  200 per-board status counts
 
-WHY THIS ROUTE EXISTS
-=====================
-``ios-app/docs/WIDGET_DATA_CONTRACT.md`` measured every widget dataset against
-the live daemon. Four of the five fit routes that already exist. One did not:
-the board-status tile wants five integers per board, and no existing route can
-produce them honestly. ``GET /v1/cards`` costs 81,855 B for 40 open cards and
-does not contain ``done`` at all; ``?status=done`` returns 0 rows;
-``?include_archived=1`` costs 8.6 MB. A client-side derivation therefore renders
-``done`` as ``0`` forever — a wrong number, not a missing one. The audit's
-verdict for that dataset was ``needs compact server endpoint`` and this module
-is the whole of that authorisation (§6 of the contract).
+SERVER TRUTH
+============
+This route serves ``hscc kanban monitor``'s per-board table, not a client-side
+derivation. It calls ``hscc_daemon.kanban_live.collect(registered_only=True)``
+— the SAME collection the CLI renders — and projects each board with
+``kanban_live.board_status_counts()``. Consequently:
 
-THE CONTRACT (contract §6 — each rule below is enforced, and tested)
-====================================================================
-1. Every status key is ALWAYS present, as an integer. Absence must never be
-   renderable as ``0``, so ``done``/``archived`` come from the
-   archived-inclusive listing, counted HERE, server-side: the 2,541 cards /
-   8.6 MB that a client would have to download never cross the wire.
-2. Default = every board on the host, ONE request (a widget must not pay N+1
-   reads for N board tiles). ``?boards=`` narrows it.
+* boards are registered projects' boards only (``hscc project list``);
+* ``done`` is the collector's ``done_24h`` (the CLI's "Done 24h" column), never
+  an all-time archive total;
+* ``total`` counts open statuses + archived + done-today, so the client's
+  ``total - done - archived`` equals the open card count.
+
+THE CONTRACT (each rule below is enforced, and tested)
+======================================================
+1. Every status key is ALWAYS present, as an integer. Absence is never
+   renderable as ``0``; an empty board is a measured all-zero entry.
+2. Default = every registered project board, ONE collection pass (a widget must
+   not pay N+1 reads for N board tiles). ``?boards=`` narrows it.
 3. No rows. The contract's optional ``rows``/``with`` blocks are explicitly NOT
-   authorised by the audit, so they are rejected (400) rather than silently
-   ignored — a client that asked for rows and got none must know why.
+   authorised, so they are rejected (400) rather than silently ignored.
 4. Redaction is STRUCTURAL, not a scrub: this handler emits board slugs and
    integers, and nothing else. A slug that does not match the board-slug shape
-   is never echoed and never counted as a board. No ``repo``,
-   ``workspace_path``, ``branch``, address, absolute path or token material can
-   reach the payload because no such value is ever read.
+   is never echoed and never counted as a board.
 5. Budget: the serialized response is under 4 KB so a Live Activity can carry
-   it. Deterministic tail-trim with ``truncated`` / ``omitted_boards`` rather
-   than a silent cap.
-6. Read-only, no mutation, and no new auth surface: one GET registration, so
-   the single central gate in ``ApiHandler._route`` -> ``_authorize()`` is what
-   guards it, exactly like every other route.
-7. Degrade honestly: if the board listing fails, the response carries ``speak``
-   and NO ``boards`` key — an empty ``counts`` map would be read as "the board
-   is quiet". A board whose cards could not be read carries
-   ``{"board": slug, "error": ...}`` and no ``counts``.
+   it. Deterministic tail-trim with ``truncated`` / ``omitted_boards``.
+6. Read-only, no mutation: one GET registration guarded by the single central
+   gate in ``ApiHandler._route`` -> ``_authorize()``.
+7. Degrade honestly: if the collection fails, the response carries ``speak``
+   and NO ``boards`` key — empty counts would be read as "the board is quiet".
 
-Test seam: the two backing calls are ``_backing_*`` module functions, so tests
-never scan a live kanban DB.
+Test seam: ``_backing_collect`` is a module function, so tests never scan a
+live kanban DB.
 """
 
 from __future__ import annotations
@@ -55,21 +47,9 @@ from pathlib import Path
 
 from api_server import ApiError, ROUTES
 
-# Make the relocated flightdeck available exactly like routes_project.py /
-# routes_actions.py do: insert ``hscc-project/`` on sys.path once, then import
-# the module directly. Board enumeration and card reading stay OWNED by
-# flightdeck — this module never re-implements board access.
-_PROJECT_DIR = None
-for _candidate in (
-    Path(__file__).resolve().parent.parent / "hscc-project",  # live checkout
-):
-    if _candidate.is_dir():
-        _PROJECT_DIR = _candidate
-        break
-if _PROJECT_DIR is not None and str(_PROJECT_DIR) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_DIR))
-
-from flightdeck.core import kanban as _kanban  # noqa: E402
+# Board enumeration and card reading stay OWNED by the daemon's kanban
+# collector (``hscc_daemon.kanban_live``) — imported lazily in
+# ``_backing_collect`` so this route never gets a second board implementation.
 
 
 # --------------------------------------------------------------------------- #
@@ -105,19 +85,14 @@ COUNTS_UNAVAILABLE = "counts unavailable"
 # Backing-call seam (monkeypatch these in tests)
 # --------------------------------------------------------------------------- #
 
-def _backing_list_boards() -> list:
-    """Every board slug known to Hermes on this host."""
-    return list(_kanban.list_boards())
+def _backing_collect(board=None) -> dict:
+    """The same one-pass board collection ``hscc kanban monitor`` renders.
 
-
-def _backing_list_cards(board=None) -> list:
-    """Cards of one board (``board``) or of every board (``board=None``).
-
-    ``include_archived=True`` is the whole point of this route: it is the only
-    read that can see ``done`` and ``archived``, and the counting happens here
-    so the cards themselves never travel to the phone.
+    Registered-project boards only; ``done`` is the collector's ``done_24h``
+    (the CLI's "Done 24h" column), never an all-time archive count.
     """
-    return _kanban.list_cards(board=board, include_archived=True)
+    from hscc_daemon import kanban_live
+    return kanban_live.collect(board=board, registered_only=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -315,22 +290,31 @@ def _fit_budget(entries: list, board_total: int,
 # --------------------------------------------------------------------------- #
 
 def handle_mobile_summary(server, ctx, query, body):
-    """``GET /v1/mobile/summary`` — per-board status counts, aggregated here.
+    """``GET /v1/mobile/summary`` — per-board counts from the CLI's collection.
 
     Read-only; the body is never read. ``?boards=a,b`` narrows the response to
-    those boards (404 when one of them does not exist).
+    those boards (404 when one of them is not a registered project board). The
+    numbers are ``kanban_live.board_status_counts`` over the SAME ``collect()``
+    pass ``hscc kanban monitor`` renders, so ``done`` means done in the last
+    24 h (the CLI's "Done 24h" column) — not an all-time archive count.
     """
+    from hscc_daemon import kanban_live
+
     _reject_unimplemented(query)
     requested = _requested_boards(query.get("boards"))
 
     try:
-        known = [str(x) for x in _backing_list_boards()]
+        data = _backing_collect()
     except Exception:
+        data = None
+    if not isinstance(data, dict) or (
+            not data.get("boards") and data.get("errors")):
         # Contract §6 rule 7: NO `boards` key at all. Empty counts here would
         # be rendered as "every board is quiet", which is a lie.
         return 200, {"generated_at": _now_utc_z(),
                      "speak": "Board listing unavailable."}
 
+    known = [str(b.get("name")) for b in data.get("boards", [])]
     # Structural redaction (rule 4): a slug that fails the shape gate is never
     # echoed and never counted as a board. Only its NUMBER is reported.
     slugs = [s for s in known if _valid_slug(s)]
@@ -340,41 +324,20 @@ def handle_mobile_summary(server, ctx, query, body):
         if missing:
             raise ApiError(
                 404, "not_found",
-                f"unknown board(s): {', '.join(missing)}",
-                f"Board {missing[0]} does not exist.",
+                f"not a registered project board: {', '.join(missing)}",
+                f"Board {missing[0]} is not a registered project board.",
             )
         slugs = requested
 
-    entries: list = []
-    if slugs:
-        if requested:
-            # One read per named board (bounded by MAX_REQUESTED_BOARDS), so a
-            # single unreadable board degrades on its own instead of taking the
-            # whole response down.
-            for slug in slugs:
-                try:
-                    cards = _backing_list_cards(board=slug)
-                except Exception:
-                    entries.append({"board": slug, "error": COUNTS_UNAVAILABLE})
-                    continue
-                entries.append({"board": slug, **_count_by_status(cards)})
-        else:
-            # One archived-inclusive read for the whole host, grouped by the
-            # board each card came from: the default is ONE request, not N+1.
-            try:
-                cards = _backing_list_cards()
-            except Exception:
-                return 200, {"generated_at": _now_utc_z(),
-                             "speak": "Board counts unavailable."}
-            by_board: dict = {}
-            for card in cards or []:
-                by_board.setdefault(
-                    str((card or {}).get("board") or ""), []).append(card)
-            for slug in slugs:
-                # A board with no cards gets a real all-zero entry: `total: 0`
-                # is a measured fact, not an absence.
-                entries.append({"board": slug,
-                                **_count_by_status(by_board.get(slug, []))})
+    by_slug = {str(b.get("name")): b for b in data.get("boards", [])}
+    entries = []
+    for slug in slugs:
+        board = by_slug.get(slug)
+        if board is None:
+            entries.append({"board": slug, "error": COUNTS_UNAVAILABLE})
+            continue
+        entries.append({"board": slug,
+                        **kanban_live.board_status_counts(board)})
 
     entries.sort(key=lambda e: e["board"])
     return 200, _fit_budget(entries, len(entries), unusable)

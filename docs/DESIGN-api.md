@@ -203,13 +203,15 @@ Read-only. Backed by `flightdeck.commands.standup.gather_data(registry_path)`
 (`hscc-project/flightdeck/commands/standup.py:53`) — the same one call `flightdeck
 standup` uses. Response is that dict verbatim plus `speak`.
 
-#### `GET /v1/cards?board=default&status=running`
+#### `GET /v1/cards?board=<slug>`
 
-Read-only. Backed by `flightdeck.core.kanban.list_cards(board=..., include_archived=...)`
-(`hscc-project/flightdeck/core/kanban.py:277`), the same call `standup`/`review`/`qa`
-use. Query params optional; when omitted, `list_cards()` with no board reads every
-board (matching the CLI default). `status` filters client-side (optional). Response:
-`{"cards": [...], "count": N, "speak": "..."}`. Cards are the full flightdeck card dicts.
+Read-only. Backed by `hscc_daemon.kanban_live.collect(board=..., registered_only=True)`
+— the same collection `hscc cards monitor` renders — projected with
+`kanban_live.card_rows()` (running cards first, then ready/waiting cards). Boards are
+registered projects' boards only. This is deliberately not `list_cards()`: the CLI
+shows the live queue, not every blocked/archived row in every sqlite file. Only
+`?board=` is accepted (`status`/`include_archived` are 400). Response:
+`{"cards": [...], "count": N, "speak": "..."}`. See `hscc-api/docs/WIDGET_ROUTES.md`.
 
 #### `GET /v1/cards/{card_id}`
 

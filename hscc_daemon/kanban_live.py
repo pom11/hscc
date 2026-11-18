@@ -290,7 +290,8 @@ def _collect_board(conn, label, now_s, since_s):
                         "AND completed_at >= ?",
                   (*DONE_24H_STATUSES, now_s - 86400))[0]["n"]
     running = _q(conn, """
-        SELECT t.id, t.title, t.assignee, t.last_heartbeat_at AS hb_task,
+        SELECT t.id, t.title, t.assignee, t.created_at,
+               t.last_heartbeat_at AS hb_task,
                t.current_run_id, r.profile, r.started_at, r.last_heartbeat_at AS hb_run
         FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id
         WHERE t.status = 'running'""")
@@ -327,6 +328,11 @@ def _collect_board(conn, label, now_s, since_s):
         out_run.append({
             "board": label, "id": r["id"], "title": r["title"],
             "worker": r["profile"] or r["assignee"] or "?",
+            "assignee": r["assignee"],
+            "status": "running",
+            "created_at": r["created_at"],
+            "age_s": (now_s - r["created_at"] if r["created_at"]
+                      else (now_s - r["started_at"] if r["started_at"] else None)),
             "started_at": r["started_at"],
             "run_s": now_s - r["started_at"] if r["started_at"] else None,
             "hb_s": now_s - hb if hb else None,
@@ -340,8 +346,12 @@ def _collect_board(conn, label, now_s, since_s):
         })
     out_ready = [{
         "board": label, "id": r["id"], "title": r["title"],
-        "worker": r["assignee"] or "?", "priority": r["priority"] or 0,
+        "worker": r["assignee"] or "?", "assignee": r["assignee"],
+        "status": "ready", "created_at": r["created_at"],
+        "priority": r["priority"] or 0,
         "wait_s": now_s - (r["ready_at"] or r["created_at"] or now_s),
+        "age_s": now_s - (r["created_at"] or now_s),
+        "started_at": None,
     } for r in ready]
     out_ev = [{"board": label, "id": e["task_id"], "kind": e["kind"],
                "at": e["created_at"], "title": e["title"] or "",
@@ -349,8 +359,13 @@ def _collect_board(conn, label, now_s, since_s):
     return counts, done_24h, out_run, out_ready, out_ev, outcome_of
 
 
-def collect(kanban_db=None, now=None, board=None, read_caps=None):
+def collect(kanban_db=None, now=None, board=None, read_caps=None,
+            registered_only: bool = False):
     """One read-only pass over every board (or just ``board``).
+
+    ``registered_only=True`` restricts the pass to boards owned by a registered
+    flightdeck project — the scope every CLI/API card surface uses, so a stray
+    sqlite board cannot masquerade as a project board.
 
     Returns ``{boards: [{name, counts, done_24h}], running: [...], ready: [...],
     events: [...], outcomes: {board: {card: kind}}, caps: (global, per_profile),
@@ -371,7 +386,8 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
         return result
     result["caps"] = (read_caps or _read_caps)()
     try:
-        boards, multi = autodown._enum_board_names(kanban_db)
+        boards, multi = autodown._enum_board_names(
+            kanban_db, registered_only=registered_only)
     except Exception as e:  # noqa: BLE001
         result["errors"].append(f"could not enumerate kanban boards: {e}")
         return result
@@ -412,6 +428,76 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None):
     result["events"].sort(key=lambda e: -e["at"])
     del result["events"][RECENT_LIMIT:]
     return result
+
+
+#: Fields a widget/API card row exposes. Deliberately excludes the worker
+#: session store path (``session_db``) — it is internal, not card data.
+CARD_VIEW_FIELDS = (
+    "board", "id", "title", "worker", "assignee", "status", "age_s",
+    "run_s", "wait_s", "hb_s", "priority", "started_epoch", "started_at",
+)
+
+
+def _iso_utc(epoch):
+    if not epoch:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(
+            int(epoch), datetime.timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def card_view(row):
+    """Project one ``collect()`` running/ready row to the public card shape.
+
+    One projection for every consumer (``/v1/cards``, ``/v1/kanban/running``),
+    so a widget and the cards monitor cannot disagree about a field. ``age_s``
+    is the card's own age (created_at); ``run_s``/``wait_s`` say how long it has
+    been running or waiting.
+    """
+    out = {name: row.get(name) for name in CARD_VIEW_FIELDS}
+    out["started_epoch"] = row.get("started_at")
+    out["started_at"] = _iso_utc(row.get("started_at"))
+    return out
+
+
+def card_rows(data):
+    """Running rows then ready rows — exactly the set ``hscc cards monitor`` draws."""
+    return ([card_view(r) for r in data.get("running", [])]
+            + [card_view(r) for r in data.get("ready", [])])
+
+
+def board_status_counts(board):
+    """One board's view counts, shared by the kanban table and mobile summary.
+
+    ``done`` is the board's ``done_24h`` (the CLI's "Done 24h" column), never the
+    all-time done count. ``total`` is what the payload actually counts: open
+    statuses + archived + done-today, so ``total - done - archived`` is the open
+    card count on the client too.
+    """
+    raw = dict(board.get("counts") or {})
+    done_today = int(board.get("done_24h") or 0)
+    known = ("todo", "ready", "running", "blocked")
+    counts = {name: int(raw.get(name) or 0) for name in known}
+    counts["done"] = done_today
+    counts["archived"] = int(raw.get("archived") or 0)
+    other = {
+        status: int(n or 0)
+        for status, n in raw.items()
+        if status not in (*known, "done", "archived") and n
+    }
+    total = sum(counts.values()) + sum(other.values())
+    entry = {"counts": counts, "total": total}
+    if other:
+        # ``other`` is an INTEGER on the wire: the iOS BoardStatusCounts model
+        # declares it as Int, and a dict there made the whole widget payload
+        # fail to decode on the first board with a non-standard status (live
+        # boards carry ``scheduled``). The per-status detail stays available
+        # under a key no client decodes.
+        entry["other"] = sum(other.values())
+        entry["other_statuses"] = other
+    return entry
 
 
 def _state_db_path(hermes_home, profile):
@@ -1164,7 +1250,8 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
             while True:
-                data = attach_orchestrators(attach_tokens(collect(kanban_db=kanban_db, board=board)))
+                data = attach_orchestrators(attach_tokens(collect(
+                    kanban_db=kanban_db, board=board, registered_only=True)))
                 live.update(render(data, interval, width=console.width, height=console.height),
                             refresh=True)
                 time.sleep(interval)

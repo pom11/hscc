@@ -288,7 +288,92 @@ def list_all_cron_jobs(jobs_file=None):
     return out
 
 
-def _enum_board_names(kanban_db):
+#: Cached registry read: ``(path, mtime_ns, size) -> (boards, error)``. A
+#: monitor tick runs every few seconds, but the registry changes when a human
+#: registers a project, so cache by the file identity rather than by time.
+_REGISTERED_BOARDS_CACHE: dict = {}
+
+
+def _registry_module():
+    """The flightdeck registry module, or ``None`` when it cannot be loaded.
+
+    Prefer an importable ``flightdeck.core.registry`` (the installed layout) and
+    fall back to the sibling ``hscc-project/`` checkout (the repo layout). The
+    module itself owns name/board parsing, so this never re-implements it.
+    """
+    try:
+        from flightdeck.core import registry as _registry  # type: ignore
+        return _registry
+    except Exception:  # noqa: BLE001 — fall through to the sibling checkout
+        pass
+    import importlib.util
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = (
+        os.path.join(here, "hscc-project", "flightdeck", "core", "registry.py"),
+        os.path.expanduser(
+            "~/.hermes/plugins/hscc-project/flightdeck/core/registry.py"),
+    )
+    path = next((p for p in candidates if os.path.isfile(p)), None)
+    if path is None:
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "hscc_flightdeck_registry_boards", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        # dataclasses look the module up by name while executing, so register
+        # it BEFORE exec_module (same rule verify._load_registry_projects uses).
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001 — reported as an error by the caller
+        return None
+
+
+def registered_board_names(registry_path=None):
+    """``(board_slugs, error)`` for the projects in the flightdeck registry.
+
+    ``board_slugs`` is the set of Hermes board slugs that belong to a REGISTERED
+    project (``Project.board``). A board with no registry entry is not part of
+    any card/kanban surface: it is an orphan sqlite file, not a project board.
+
+    Returns ``(set(), reason)`` when the registry cannot be read, so callers can
+    surface the failure instead of silently treating every board as unregistered.
+    An empty registry is ``(set(), None)`` — no projects means no project boards.
+    """
+    mod = _registry_module()
+    if mod is None:
+        return set(), "flightdeck project registry module not found"
+    path = registry_path or os.environ.get("FLIGHTDECK_REGISTRY")
+    try:
+        resolved = str(mod._resolve_registry_path(path))
+        st = os.stat(resolved)
+        stamp = (resolved, st.st_mtime_ns, st.st_size)
+    except Exception:  # noqa: BLE001 — missing file is an empty registry
+        stamp = None
+    if stamp is not None:
+        cached = _REGISTERED_BOARDS_CACHE.get(stamp)
+        if cached is not None:
+            return cached
+    try:
+        projects = mod.load_registry(path)
+    except Exception as exc:  # noqa: BLE001 — malformed registry is reported
+        return set(), f"project registry unreadable: {exc}"
+    boards = {
+        str(p.board).strip()
+        for p in projects
+        if getattr(p, "board", None) and str(p.board).strip()
+    }
+    result = (boards, None)
+    if stamp is not None:
+        _REGISTERED_BOARDS_CACHE.clear()
+        _REGISTERED_BOARDS_CACHE[stamp] = result
+    return result
+
+
+def _enum_board_names(kanban_db, registered_only: bool = False):
     """The ordered list of board names to scan — the SINGLE enumeration.
 
     Shared by BOTH ``_has_active_work`` (the idle predicate / C3 interlock) and
@@ -305,14 +390,27 @@ def _enum_board_names(kanban_db):
       ``board=`` to ``connect_closing``), False for the single-board legacy
       shape (``connect_closing()`` with no board).
 
+    ``registered_only=True`` narrows the list to boards owned by a registered
+    flightdeck project (``hscc project list``). The autodown idle predicate is
+    deliberately NOT narrowed: it must still refuse teardown while an orphan
+    board holds work. Card/kanban READ surfaces pass the flag so a widget can
+    never show an unregistered ``default``/``myproj`` sqlite file as a project
+    board.
+
     Raises on enumeration failure; the caller decides how to fail (autodown
     fails safe to active, stale reports it).
     """
     multi = hasattr(kanban_db, "list_boards")
     if not multi:
-        return [None], False
-    boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
-    return boards, True
+        boards = [None]
+    else:
+        boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
+    if registered_only:
+        allowed, err = registered_board_names()
+        if err:
+            raise RuntimeError(err)
+        boards = [b for b in boards if (b if b else "default") in allowed]
+    return boards, multi
 
 
 #: Slug the legacy flat DB answers to (hermes' own ``DEFAULT_BOARD``). Kept as a
@@ -526,7 +624,8 @@ DEFAULT_STALE_DAYS = 7
 
 
 def list_stale_tasks(kanban_db=None, now=None, board=None,
-                     older_than: Optional[int] = DEFAULT_STALE_DAYS):
+                     older_than: Optional[int] = DEFAULT_STALE_DAYS,
+                     registered_only: bool = False):
     """Return every non-terminal task across ALL boards, oldest first.
 
     The data behind ``hscc kanban stale``. It REUSES the exact board
@@ -560,7 +659,8 @@ def list_stale_tasks(kanban_db=None, now=None, board=None,
         result["errors"].append(reason)
         return result
     try:
-        boards, multi = _enum_board_names(kanban_db)
+        boards, multi = _enum_board_names(
+            kanban_db, registered_only=registered_only)
     except Exception as e:
         result["errors"].append(f"could not enumerate kanban boards: {e}")
         return result

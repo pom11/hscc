@@ -14,14 +14,41 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | Route | Consumer | Server handler | Same code path the CLI uses |
 |---|---|---|---|
 | `GET /v1/projects` | Projects widget, board/project pickers | `routes_project.handle_projects` | `flightdeck.core.registry.load_registry` + `project_lifecycle.project_health` (`hscc project list`), the archived-inclusive card read (`/v1/mobile/summary`'s projection), and `kanban_live.attach_orchestrators` (`hscc kanban monitor`) |
-| `GET /v1/mobile/summary` | Board-status widget, board-progress Live Activity | `routes_mobile.handle_mobile_summary` | `flightdeck.core.kanban.list_boards` / `list_cards(include_archived=True)` — the same board library the project/kanban commands read (not `/v1/cards`) |
-| `GET /v1/kanban/running` | Cluster, running-cards, board-progress | `routes_kanban.handle_kanban_running` | `hscc_daemon.kill_switch.list_running_tasks` |
-| `GET /v1/kanban/blocked` | Cluster, running-cards, kanban monitor | `routes_kanban.handle_kanban_blocked` | `hscc_daemon.kanban_blocked.list_blocked_tasks` (`hscc kanban blocked` family) |
-| `GET /v1/kanban/stale` | Cluster, kanban monitor, running-cards | `routes_kanban.handle_kanban_stale` | `hscc_daemon.autodown.list_stale_tasks` (`hscc kanban stale`) |
+| `GET /v1/cards` | Cards screen, board lists | `routes_project.handle_cards` | `kanban_live.collect(registered_only=True)` → `card_rows()` — exactly the running + ready cards `hscc cards monitor` draws |
+| `GET /v1/mobile/summary` | Board-status widget, board-progress Live Activity | `routes_mobile.handle_mobile_summary` | `kanban_live.collect(registered_only=True)` → `board_status_counts()` (`hscc kanban monitor`'s board table) |
+| `GET /v1/kanban/running` | Cluster, running-cards, board-progress | `routes_kanban.handle_kanban_running` | `kanban_live.collect(registered_only=True).running` (`hscc cards monitor` / `hscc kanban monitor`), with kill detail merged onto those rows |
+| `GET /v1/kanban/blocked` | Cluster, running-cards, kanban monitor | `routes_kanban.handle_kanban_blocked` | `hscc_daemon.kanban_blocked.list_blocked_tasks(registered_only=True)` (`hscc kanban blocked`) |
+| `GET /v1/kanban/stale` | Cluster, kanban monitor, running-cards | `routes_kanban.handle_kanban_stale` | `hscc_daemon.autodown.list_stale_tasks(registered_only=True)` (`hscc kanban stale`) |
 | `GET /v1/cluster/monitor` | Cluster + monitor widgets, monitor Live Activity | `routes_cluster.handle_cluster_monitor` | `hscc-cluster` engine `cmd_monitor` (`hscc cluster monitor`) |
 | `GET /v1/cluster/status` | Cluster widget | `routes_cluster.handle_cluster_status` | `hscc-cluster` engine `cmd_cluster_status` (`hscc cluster status`) |
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
+
+
+## Card and board truth (CARD A2)
+
+The board scope is **registered projects only**: a board is served only when a
+project in `~/.flightdeck/registry.yaml` (`hscc project list`) names it in its
+`board` field. Orphan sqlite files are not project boards and never appear in a
+widget payload. The autodown idle predicate keeps its full-board safety scope;
+only read surfaces narrow.
+
+**What “cards” means.** `/v1/cards` is not every row in every sqlite file. It is
+exactly the set the cards monitor draws: cards with status `running` (the
+panels) plus `ready` cards waiting for a slot (the bottom lines). Blocked,
+archived, or settled cards are served by `/v1/kanban/blocked`,
+`/v1/kanban/stale`, or the board counts — never smuggled into `/v1/cards` as if
+active. Only `?board=` is accepted, because `hscc cards monitor` has `--board`
+and nothing else; `status=` and `include_archived=` are rejected with `400`
+rather than returning a different set than the CLI.
+
+**What “done” means.** `/v1/mobile/summary` counts `done` as the collector’s
+`done_24h` — the same “Done 24h” column `hscc kanban monitor` prints. It never
+reports the all-time archive total as today’s work. `total` includes open
+statuses, archived, and done-today, so the client’s open count
+(`total - done - archived`) matches the board view. `other` is an integer count
+(the Swift model declares `Int`); per-status detail is under `other_statuses`,
+which no client decodes.
 
 
 Rule (card t_8743f98c): **every route a widget or Live Activity reads is served
@@ -180,7 +207,7 @@ cycle performs the same reconcile (debounced) so the file heals too.
 | Field | Meaning | Owner |
 |---|---|---|
 | `health` | `ok` / `partial` / `absent` | `project_lifecycle.project_health` — identical to `hscc project list` |
-| `counts` | status histogram + `total`, including `done` / `archived` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards` (the `/v1/mobile/summary` projection) |
+| `counts` | status histogram + `total`, including `done` / `archived` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards`; `/v1/mobile/summary` uses `kanban_live.board_status_counts` |
 | `last_activity` | newest parseable card timestamp on the board (epoch seconds), `null` when none | the same card read |
 | `orchestrator` | live turn row (`profile`, `session`, `state`, `turn_s`, tokens) or `null` when idle | `kanban_live.attach_orchestrators` — identical to `hscc kanban monitor` |
 
@@ -210,3 +237,14 @@ counts.
   builds one SQLite board, serves it through the route's flightdeck seam and
   through `hscc_daemon.kanban_live.collect` (the function behind
   `hscc kanban monitor --json`), and asserts identical status histograms.
+
+## Card/kanban parity tests (CARD A2)
+
+`hscc-api/tests/test_widget_route_parity_cards.py` builds one fake fleet (one
+registered project board + one orphan board) and runs both sides on it:
+`/v1/cards` vs `cards_live.Monitor`, `/v1/kanban/running` vs
+`hscc kanban monitor --json`, `/v1/kanban/blocked` vs
+`hscc kanban blocked --json`, `/v1/kanban/stale?older_than=0` vs
+`hscc kanban stale --json`, and `/v1/mobile/summary` vs
+`kanban_live.collect()` + `board_status_counts()`. Each asserts equal
+counts/rows and that the orphan board appears in neither answer.

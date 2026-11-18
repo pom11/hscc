@@ -161,6 +161,26 @@ def test_collect_running_ready_counts_and_recent_events():
     assert d["caps"] == (6, 2)
 
 
+def test_registered_only_keeps_project_boards_and_drops_orphans(monkeypatch):
+    from hscc_daemon import autodown
+    monkeypatch.setattr(autodown, "registered_board_names",
+                        lambda registry_path=None: ({"beta"}, None))
+    d = _collect(kb=_kb(), registered_only=True)
+    assert [b["name"] for b in d["boards"]] == ["beta"]
+    assert {r["board"] for r in d["running"]} == set()
+    # The orphan board's blocked card is not part of the project fleet.
+    assert all(e["board"] != "alpha" for e in d["events"])
+
+
+def test_registered_only_surfaces_registry_failure(monkeypatch):
+    from hscc_daemon import autodown
+    monkeypatch.setattr(autodown, "registered_board_names",
+                        lambda registry_path=None: (set(), "registry exploded"))
+    d = _collect(kb=_kb(), registered_only=True)
+    assert d["boards"] == []
+    assert any("registry exploded" in e for e in d["errors"])
+
+
 def test_board_filter_and_unreadable_board_does_not_stop_the_pass():
     d = _collect(kb=_kb(broken=["gamma"]))
     assert any("gamma" in e and "unreadable" in e for e in d["errors"])
@@ -281,9 +301,9 @@ def test_parse_monitor_args():
 
 def test_cli_json_snapshot_and_live_json_refused(monkeypatch, capsys):
     monkeypatch.setattr(kanban_live, "collect",
-                        lambda board=None: {"boards": [], "running": [], "ready": [],
-                                            "events": [], "caps": (6, 2), "errors": [],
-                                            "at": NOW})
+                        lambda board=None, **kw: {"boards": [], "running": [], "ready": [],
+                                                  "events": [], "caps": (6, 2),
+                                                  "errors": [], "at": NOW})
     assert cmd_kanban(["monitor", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
     assert cmd_kanban(["monitor", "--json", "--live"]) == 1
@@ -301,9 +321,9 @@ def test_hscc_kanban_dispatcher_keeps_json_for_delegated_verbs(monkeypatch, caps
     # handed back or the "JSON" output is the human table.
     from hscc_daemon import kanban_blocked
     monkeypatch.setattr(kanban_live, "collect",
-                        lambda board=None: {"boards": [], "running": [], "ready": [],
-                                            "events": [], "caps": (6, 2), "errors": [],
-                                            "at": NOW})
+                        lambda board=None, **kw: {"boards": [], "running": [], "ready": [],
+                                                  "events": [], "caps": (6, 2),
+                                                  "errors": [], "at": NOW})
     assert kanban_blocked.cmd_kanban(["monitor", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["caps"] == [6, 2]
 

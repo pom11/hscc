@@ -37,6 +37,15 @@ def fakes(monkeypatch):
             or ("default", True)
         ),
         "list_stale": lambda older_than=None, board=None: _stale_result(older_than),
+        "collect": lambda board=None: {
+            "boards": [{"name": "default", "counts": {"running": 1},
+                        "done_24h": 0}],
+            "running": [{"board": "default", "id": "t_run1",
+                         "title": "Running task", "worker": "worker",
+                         "assignee": "worker", "status": "running",
+                         "age_s": 60, "run_s": 60, "started_at": 1000}],
+            "ready": [], "errors": [],
+        },
     }
     _install(monkeypatch, b)
     return state
@@ -179,6 +188,44 @@ def test_recover_auth_401(running, fakes):
                            body={"confirm": True}, method="POST")
     assert status == 401
     assert fakes["recover_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# GET /v1/kanban/running — the cards-monitor collection
+# --------------------------------------------------------------------------- #
+
+def test_running_200_uses_collect_rows(running, token):
+    status, payload = _req(running, token, "/v1/kanban/running")
+    assert status == 200
+    assert payload["count"] == 1
+    row = payload["tasks"][0]
+    assert row["id"] == "t_run1"
+    assert row["status"] == "running"
+    assert row["worker"] == "worker"
+    assert row["age_s"] == 60
+    assert payload["boards"] == ["default"]
+    assert payload["speak"] == "1 running task."
+
+
+def test_running_board_param_reaches_collect(running, token, fakes, monkeypatch):
+    seen = {}
+
+    def collect(board=None):
+        seen["board"] = board
+        return {"boards": [], "running": [], "ready": [], "errors": []}
+
+    _install(monkeypatch, {"collect": collect})
+    status, payload = _req(running, token, "/v1/kanban/running?board=hscc")
+    assert status == 200
+    assert seen["board"] == "hscc"
+    assert payload["count"] == 0
+    assert payload["speak"] == "No running tasks."
+
+
+def test_running_auth_401(running):
+    status, payload = _req(running, None, "/v1/kanban/running")
+    assert status == 401
+    assert payload["error"]["code"] == "unauthorized"
 
 
 # --------------------------------------------------------------------------- #
