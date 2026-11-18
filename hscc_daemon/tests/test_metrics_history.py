@@ -830,3 +830,39 @@ def test_resident_recorder_is_the_owner_of_the_tier0_ring(tmp_path):
     assert mh.resident_recorder().tier0_points() == []    # resident AND empty
     rec.tick(frame(BASE), engines(), BASE)
     assert [p["ts"] for p in mh.resident_recorder().tier0_points()] == [BASE]
+
+
+def test_tier2_rolls_the_serving_series_up_with_the_host_series(tmp_path):
+    """The 7 d tier is the only one a week-long chart can read, and the widgets
+    draw their serving table from it — so per-engine rows have to roll up too,
+    not stop at tier 1.
+
+    The load-bearing number is the weighted mean: minutes 0-3 answered 30 times
+    at 100 tok/s and minute 4 answered 6 times at 0. The true 5-minute value is
+    95.24 tok/s; a plain mean of the minute averages says 80, and a fold that
+    forgot the engine rows says nothing at all — which is what this line used to
+    do (t_c7f57783's read-route parity test found it: `rollups()` read tier 1's
+    engine rows into a local and then folded only the host rows, leaving
+    `engine_rollup` empty for tier 2).
+    """
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    per_minute = [30, 30, 30, 30, 6, 30]
+    gen_tps = [100.0, 100.0, 100.0, 100.0, 0.0, 100.0]
+    for m, (count, tps) in enumerate(zip(per_minute, gen_tps)):
+        minute = BASE + m * 60
+        for i in range(count):
+            t = minute + i * 2
+            rec.tick(frame(t), engines(gen_tps=tps), t)
+    t2 = store.engine_rows(2)
+    assert len(t2) == 1, "the 5-minute bucket produced no engine row"
+    row = t2[0]
+    assert (row["tier"], row["ts"]) == (2, BASE)
+    assert (row["node"], row["port"], row["model"]) == (HOST, "8001",
+                                                        "org/Model-A")
+    assert row["gen_tps"] == pytest.approx(12000 / 126, abs=1e-4)
+    assert row["n"] == 126
+    # The host series of the same bucket is still there — one fold, two series.
+    assert store.count(2) == 1
+    assert store.host_rows(2)[0]["ts"] == BASE
+    store.close()

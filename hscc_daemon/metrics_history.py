@@ -789,8 +789,17 @@ class MetricsRecorder:
             rows = self.store.host_rows(1, since=start, until=hi)
             if not rows:
                 break        # this bucket has not rolled up yet; stop, retry later
-            engines = self.store.engine_rows(1, since=start, until=hi)
-            self.store.write_rollup(*rollup(rows, 2, TIER2_BUCKET_S))
+            # BOTH series of the tier below roll up, in ONE fold. `rollup` takes
+            # a single list and tells the shapes apart itself
+            # (``_host_samples`` / ``_engine_entries`` each skip the other's
+            # rows), which is why the two reads are concatenated rather than
+            # folded by two calls — and why the reading of this line that drops
+            # the engine rows is not merely untidy: it leaves `engine_rollup`
+            # with no tier-2 rows at all, so the 7 d window can serve the node
+            # series and nothing else. (Found by t_c7f57783's read-route parity
+            # test, which is exactly what a parity test is for.)
+            points = rows + self.store.engine_rows(1, since=start, until=hi)
+            self.store.write_rollup(*rollup(points, 2, TIER2_BUCKET_S))
             self.store.set_watermark("tier2_closed_through", start + TIER2_BUCKET_S)
             did["tier2_buckets"] += 1
         # ── retention: each tier prunes by its OWN window ──
