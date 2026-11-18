@@ -24,12 +24,16 @@ struct HSCCMacApp: App {
     /// The shared widget/Live Activity registry and Appearance store. Same
     /// App Group blob the widget extension reads; writes reload timelines.
     @StateObject private var widgetSettings = WidgetSettingsStore()
+    /// Sparkle 2 (t_2a1e5913): daily automatic checks by default, the menu
+    /// item/Settings check, and the "update available" badge in the dropdown.
+    @StateObject private var updates = SparkleUpdater()
 
     var body: some Scene {
         MenuBarExtra {
             DashboardView(dashboard: dashboard)
                 .environmentObject(settings)
                 .environmentObject(preferences)
+                .environmentObject(updates)
         } label: {
             MenuBarLabel(dashboard: dashboard, preferences: preferences)
         }
@@ -41,6 +45,7 @@ struct HSCCMacApp: App {
                 .environmentObject(preferences)
                 .environmentObject(widgetSettings)
                 .environmentObject(dashboard)
+                .environmentObject(updates)
         }
     }
 }

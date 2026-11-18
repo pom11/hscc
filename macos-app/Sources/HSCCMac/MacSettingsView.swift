@@ -11,6 +11,9 @@ struct MacSettingsView: View {
     @EnvironmentObject private var preferences: MacPreferences
     @EnvironmentObject private var widgetSettings: WidgetSettingsStore
     @EnvironmentObject private var dashboard: DashboardMonitor
+    /// Sparkle 2 state (t_2a1e5913): the two automatic-update choices and the
+    /// explicit check live in the Menu Bar tab.
+    @EnvironmentObject private var updates: SparkleUpdater
 
     // The cluster currently in the editor. nil + adding == a new cluster.
     @State private var editingID: UUID?
@@ -99,6 +102,46 @@ struct MacSettingsView: View {
                 Text("Menu Bar")
             } footer: {
                 Text("The stat rides next to the H in the menu bar. Refresh uses the shared read-only client; the system may coalesce it while the Mac sleeps.")
+            }
+
+            // Sparkle 2 (t_2a1e5913). The defaults live in Sparkle's own
+            // preferences; these bindings mirror them so the window always
+            // shows what the updater will actually do.
+            Section {
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { updates.automaticallyChecksForUpdates },
+                    set: { updates.setAutomaticallyChecksForUpdates($0) }
+                ))
+                Toggle("Download updates automatically", isOn: Binding(
+                    get: { updates.automaticallyDownloadsUpdates },
+                    set: { updates.setAutomaticallyDownloadsUpdates($0) }
+                ))
+                .disabled(!updates.automaticallyChecksForUpdates)
+
+                Button {
+                    updates.checkForUpdates()
+                } label: {
+                    if updates.isChecking {
+                        HStack(spacing: Theme.Spacing.xs.rawValue) {
+                            ProgressView().controlSize(.small)
+                            Text("Checking…")
+                        }
+                    } else {
+                        Label("Check for Updates…", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .disabled(updates.isChecking)
+
+                if let result = updates.lastCheckResult {
+                    Text(result)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text("Checks the signed Sparkle feed daily. A found update installs into /Applications and relaunches the menu bar app; the desktop widget extension ships inside the app and is replaced with it.")
             }
         }
         .formStyle(.grouped)

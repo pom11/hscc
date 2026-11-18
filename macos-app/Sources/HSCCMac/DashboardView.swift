@@ -9,11 +9,30 @@ struct DashboardView: View {
     @ObservedObject var dashboard: DashboardMonitor
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var preferences: MacPreferences
+    /// Sparkle state (t_2a1e5913): the update badge/item and the manual check.
+    @EnvironmentObject private var updates: SparkleUpdater
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             header
             Divider().overlay(Theme.Semantic.surfaceElevated)
+
+            if let version = updates.availableVersion {
+                Button {
+                    updates.checkForUpdates()
+                } label: {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        Label("Update \(version) available", systemImage: "arrow.down.circle.fill")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text("Install…")
+                            .font(.caption)
+                    }
+                    .foregroundColor(Theme.Semantic.accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens Sparkle's update window")
+            }
 
             if !dashboard.snapshot.configured {
                 setupInvite
@@ -236,6 +255,19 @@ struct DashboardView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            Button {
+                updates.checkForUpdates()
+            } label: {
+                if updates.isChecking {
+                    Label("Checking for updates…", systemImage: "arrow.triangle.2.circlepath")
+                } else {
+                    Label("Check for Updates…", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(Theme.Semantic.onSurface)
+            .disabled(updates.isChecking)
+
             SettingsLink {
                 Label("Open HSCC Settings…", systemImage: "gearshape")
             }

@@ -24,6 +24,28 @@ TARGET_TRIPLE=arm64-apple-macos14.0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Sparkle is a SwiftPM package, and plain swiftc does not resolve SwiftPM. The
+# source guards its import with `#if canImport(Sparkle)`, so this gate still
+# compiles the target when the framework is absent. When a resolved/prebuilt
+# framework IS available, pass it through and compile the REAL updater branch:
+#   HSCC_SPARKLE_FRAMEWORK=/path/containing/Sparkle.framework scripts/build_check.sh
+sparkle_flags=()
+sparkle_root="${HSCC_SPARKLE_FRAMEWORK:-}"
+if [ -z "$sparkle_root" ] && [ -d "build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle" ]; then
+  sparkle_root="build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle"
+fi
+if [ -n "$sparkle_root" ]; then
+  if [ -d "$sparkle_root/Sparkle.framework" ]; then
+    sparkle_flags=(-F "$sparkle_root")
+    echo "Sparkle: compiling against $sparkle_root/Sparkle.framework"
+  elif [ -d "$sparkle_root" ] && [ "$(basename "$sparkle_root")" = "Sparkle.framework" ]; then
+    sparkle_flags=(-F "$(dirname "$sparkle_root")")
+    echo "Sparkle: compiling against $sparkle_root"
+  else
+    echo "warning: HSCC_SPARKLE_FRAMEWORK has no Sparkle.framework; using the canImport fallback" >&2
+  fi
+fi
+
 sources_for() {  # extract one target's Swift file list from project.yml
   python3 - "$1" <<'PY'
 import re, sys
@@ -54,7 +76,7 @@ for t in HSCCMac HSCCMacWidgets; do
   out=$(swiftc -sdk "$SDK" -target "$TARGET_TRIPLE" \
         -swift-version 5 \
         -module-name "$t" -emit-module -emit-module-path "$TMP/$t.swiftmodule" \
-        -wmo -c -o "$TMP/$t.o" "${files[@]}" 2>&1)
+        -wmo -c -o "$TMP/$t.o" ${sparkle_flags[@]+"${sparkle_flags[@]}"} "${files[@]}" 2>&1)
   n=$(printf '%s\n' "$out" | grep -c "error:")
   w=$(printf '%s\n' "$out" | grep -c "warning:")
   echo "$t: ${#files[@]} files, $n error(s), $w warning(s)"

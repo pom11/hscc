@@ -36,6 +36,9 @@ jobs:
       - name: macOS asset catalog gate
         run: bash macos-app/scripts/actool_icon_check.sh
 
+      - name: macOS Sparkle wiring gate
+        run: bash macos-app/scripts/update_check.sh
+
       - name: iOS compile gate
         run: |
           set +e
@@ -52,3 +55,6 @@ jobs:
             exit 0
           fi
           bash ios-app/scripts/build_check.sh
+
+      - name: iOS update-feed gate
+        run: bash ios-app/scripts/update_check.sh
