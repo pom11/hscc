@@ -36,7 +36,18 @@
 #                    sample printed (t_e89edf70). It had been a word count of the joined
 #                    HIT records — four fields per record, so 4x the lines on every file,
 #                    green summary and all. Every other leg reads the records, so only a
-#                    measurement taken from outside them could see it.
+#                    measurement taken from outside them could see it. The grouped
+#                    per-file sentence ("N line(s) carrying the byte that do NOT expand",
+#                    t_1992ef35 — it said byte(s) while printing a line count) is held to
+#                    the same outside measure: its N must equal grep -c, must equal that
+#                    file's own column, and the sentences must sum to the summary's
+#                    measured-inert figure.
+#   self-claim       the gate must MEASURE the claim its header used to only assert: it
+#                    prints self-bytes=N for its own file, N must equal tr, and a COPY of
+#                    the gate with a byte planted in a comment must print the planted N and
+#                    REFUSE (t_1992ef35 — the header said none while a comment carried two,
+#                    and no leg read either half). Without the copy half, a hard-coded 0
+#                    would pass this leg forever.
 #   depth-live       payload in an unquoted heredoc body of a script BELOW scripts/,
 #                    EXECUTED: marker required. A refusal at that depth is worth
 #                    nothing until the same position is shown to be live there.
@@ -459,6 +470,122 @@ if [ -z "$m_zero" ] || [ -z "$m_one" ] || [ -z "$m_many" ]; then
   pnote "measure: no scanned file on this tree falls in $( [ -z "$m_zero" ] && printf 'zero-line ' )$( [ -z "$m_one" ] && printf 'one-line ' )$( [ -z "$m_many" ] && printf 'many-line ' )— the per-file equality above still covers every file that does exist"
 fi
 
+# ---- the grouped per-file sentence, measured the same way -------------------------
+# (t_1992ef35). The sentence a reader actually uses to decide "is this file clean, and
+# why" read "measured board_status_widget_check.sh: 24 byte(s) that do NOT expand" for a
+# file that carries SIXTY-SIX bytes of the byte on TWENTY-FOUR lines: the number came from
+# the inert record count (lines), the word said bytes, and the summary's measured-inert
+# figure is the sum of those same line counts. The rename to "line(s) carrying the byte"
+# is the fix; these assertions are what stop the class returning, and they are LABEL-BOUND
+# on purpose — the rule from the column check above is that a leg auditing a label binds to
+# it, so a future rename reddens this leg instead of silently checking nothing. Nothing
+# here re-derives a verdict: three numbers already in the output are compared with each
+# other and with grep -c.
+#   sum of the per-file numbers == the summary's measured-inert figure (the total is the
+#     arithmetic of the sentences printed under it, not an independent number);
+#   each per-file number == grep -c on that same file — asserted only when the scan PASSED,
+#     because a live byte is a finding, so a passing scan is exactly the case where every
+#     byte-carrying line is an inert one and the three counts must coincide;
+#   if the summary counts inert lines but no sentence matches the label, that is a failure,
+#     not a shrug: it means either the label moved or the disclosures went silent.
+echo "measure: the grouped per-file sentence vs grep -c, and vs the summary total"
+g_printed="${WORKROOT}/measure/grouped.tsv"
+awk '{
+      if (match($0, /^[[:space:]]*(measured|FINDING)[[:space:]]+[^:]+:[[:space:]]+[0-9]+[[:space:]]+line\(s\) carrying the byte that do NOT expand[[:space:]]/)) {
+        head = substr($0, 1, RLENGTH)
+        sub(/^[[:space:]]*(measured|FINDING)[[:space:]]+/, "", head)
+        b = head; sub(/:.*/, "", b)
+        n = head; sub(/^[^:]+:[[:space:]]+/, "", n); sub(/[^0-9].*$/, "", n)
+        print b "\t" n
+      }
+    }' "$OUT" > "$g_printed"
+g_checked=$(wc -l < "$g_printed" | tr -d ' ')
+g_sum=$(awk -F'\t' '{ s += $2 } END { print s + 0 }' "$g_printed")
+summary_inert=$(grep -oE '[0-9]+ measured-inert' "$OUT" | head -1 | cut -d' ' -f1)
+if [ "${summary_inert:-0}" -gt 0 ] && [ "$g_checked" -eq 0 ]; then
+  pfail "measure: the summary counts $summary_inert measured-inert line(s) but NO grouped sentence matched the label it carries — either that label moved (this leg binds to it deliberately) or the R3 disclosures went silent, and an exemption nobody can read is what R3 exists to forbid"
+elif [ "$g_checked" -gt 0 ] && [ "${summary_inert:-}" = "$g_sum" ]; then
+  pok "measure: the $g_checked grouped sentence(s) sum to $g_sum and the summary prints the same $summary_inert measured-inert — the total is the arithmetic of the sentences printed under it, so the two cannot drift apart"
+elif [ "$g_checked" -gt 0 ]; then
+  pfail "measure: the grouped sentences sum to $g_sum but the summary prints '${summary_inert:-<absent>}' measured-inert — the headline and the disclosures it summarises disagree"
+fi
+g_bad=0
+if [ "$g_checked" -gt 0 ] && [ "$G_RC" != "0" ]; then
+  pnote "measure: this scan refused (RC $G_RC), so inert lines are NOT all the byte-carrying lines here — the per-file grep comparison below is skipped for this run and the summary arithmetic above still holds"
+elif [ "$g_checked" -gt 0 ]; then
+  while IFS=$'\t' read -r gb gn; do
+    [ -n "$gb" ] || continue
+    glines=$(grep -c "$BT" "${SCRIPTS}/${gb}" 2>/dev/null); grc=$?
+    if [ "$grc" -gt 1 ]; then
+      g_bad=$((g_bad + 1)); pfail "measure: grep could not read $gb for the grouped check (rc $grc) — no comparison, no result"
+      continue
+    fi
+    gcol=$(awk -F'\t' -v p="$gb" '$1 == p { print $2; exit }' "$m_printed")
+    if [ "$gn" != "$glines" ]; then
+      g_bad=$((g_bad + 1))
+      pfail "measure: $gb says '$gn line(s) carrying the byte that do NOT expand' but grep -c counts $glines line(s) carrying it — the sentence labels a line count with a word that means something else again"
+    elif [ "$gn" != "$gcol" ]; then
+      g_bad=$((g_bad + 1))
+      pfail "measure: $gb says $gn inert line(s) while its own lines-with-byte column says $gcol — on a scan with no findings those are the same lines, so the gate is printing two different numbers for one file"
+    fi
+  done < "$g_printed"
+  if [ "$g_bad" -eq 0 ]; then
+    pok "measure: every one of the $g_checked grouped sentence(s) matches grep -c on the same file AND the same file's lines-with-byte column — the sentence and the column are one number, measured twice from outside"
+  fi
+  if [ -n "$m_many" ]; then
+    gmn=$(awk -F'\t' -v p="$m_many" '$1 == p { print $2; exit }' "$g_printed")
+    gmlines=$(grep -c "$BT" "${SCRIPTS}/${m_many}")
+    gmbytes=$(tr -dc "$BT" < "${SCRIPTS}/${m_many}" | wc -c | tr -d ' ')
+    pok "measure grouped sample: $m_many — the gate's own sentence reads '${gmn:-<none>} line(s) carrying the byte that do NOT expand', grep -c finds $gmlines line(s) and tr finds $gmbytes byte(s) in that file: the number is the LINES the label claims. Before t_1992ef35 the identical sentence printed this same count and called it byte(s), which tr contradicts here ($gmbytes)"
+  fi
+fi
+
+# ---- self-claim: the gate's own no-bytes claim is measured, and has teeth -----------
+# (t_1992ef35). The gate's header swore it carried none of the byte it bans. One of its
+# comment lines carried two — and the gate itself printed that line as measured-inert on
+# every run, beside a header that kept saying none. Nothing could see the contradiction,
+# because the claim was prose and the measurement was never taken. It is now taken: the
+# gate counts the bytes of its own file with tr, prints self-bytes=N on every run, and
+# refuses before opening a single file when N is not 0.
+# Two halves, and the second is the one that matters. A leg that only checked the clean
+# run would pass forever on a hard-coded zero, which is the same class of defect this
+# whole probe exists to catch — so the second half runs a COPY of the gate with a byte
+# planted in a comment and requires the printed N to have MOVED and the run to have
+# REFUSED. The copy is outside the mirrored tree's scripts/, so it measures itself and is
+# not mistaken for a scanned subject.
+echo "self-claim: the gate measures its own file, and the number can make it fail"
+mk_tree self-claim
+scan "$TREE"
+sc_printed=$(awk '/self-bytes=/ { sub(/.*self-bytes=/, ""); sub(/[^0-9].*$/, ""); print; exit }' "$OUT")
+sc_tr=$(tr -dc "$BT" < "$GATE" | wc -c | tr -d ' ')
+if [ "$G_RC" = "0" ] && [ "$sc_printed" = "0" ] && [ "$sc_tr" = "0" ]; then
+  pok "self-claim: the gate prints self-bytes=0 for its own file and tr counts 0 bytes of that same path — the no-bytes claim is a measurement in the run now, not a sentence in a header"
+else
+  pfail "self-claim: clean tree — the gate printed self-bytes='${sc_printed:-<absent>}' where tr over $GATE counts $sc_tr and a passing gate must print 0 (RC $G_RC). Either the print is not a measurement, or the gate carries the byte it bans"
+fi
+# The negative: a real copy of the gate with a PAIR of the byte planted in a comment, run
+# by the same path. Built with $BT so this probe still carries none of it (the self-audit
+# leg above would go red first if that ever stopped being true).
+sc_copy="${WORKROOT}/self-claim/gate_copy.sh"
+awk -v bt="$BT" '{ print } NR == 1 { print "# planted by the self-claim leg: a quoted example " bt "example" bt " carried inside a comment" }' \
+    "$GATE" > "$sc_copy"
+sc_copy_tr=$(tr -dc "$BT" < "$sc_copy" | wc -c | tr -d ' ')
+sc_out="${WORKROOT}/self-claim/out2.txt"; sc_err="${WORKROOT}/self-claim/err2.txt"
+( cd "$TREE" && bash "$sc_copy" "$TREE" >"$sc_out" 2>"$sc_err" )
+sc2_rc=$?
+sc2_printed=$(awk '/self-bytes=/ { sub(/.*self-bytes=/, ""); sub(/[^0-9].*$/, ""); print; exit }' "$sc_out")
+sc2_banners=$(grep -c 'CHECK PASSED' "$sc_out" 2>/dev/null); sc2_banners=${sc2_banners:-0}
+if [ "$sc_copy_tr" != "0" ] && [ "$sc2_printed" = "$sc_copy_tr" ]; then
+  pok "self-claim (negative): the copy carries $sc_copy_tr planted byte(s) and the same print reads self-bytes=$sc2_printed — the number tracks the file it ran from, so the 0 above is a measurement and not a constant"
+else
+  pfail "self-claim (negative): a copy carrying $sc_copy_tr planted byte(s) printed self-bytes='${sc2_printed:-<absent>}' — the print did not move with the file, so it measures nothing"
+fi
+if [ "$sc2_rc" -ne 0 ] && [ "$sc2_banners" -eq 0 ] && grep -q "of the byte it bans" "$sc_err"; then
+  pok "self-claim (negative): the copy carrying the byte it bans REFUSED (RC $sc2_rc, $sc2_banners PASSED banners) and said so by name, instead of scanning green above its own violation"
+else
+  pfail "self-claim (negative): the copy carrying $sc_copy_tr byte(s) exited $sc2_rc with $sc2_banners PASSED banner(s) — a self-claim that cannot fail is the prose again, and prose is what rotted"
+fi
+
 # ---- depth: a heredoc below scripts/ must be both LIVE and REFUSED -----------
 # The gate went recursive (t_d8f34c60) because the widget-surface checks moved into
 # scripts/<name>/. A widened scan is only proven by the same two halves every other leg
@@ -856,7 +983,9 @@ if [ "$probe_fail" -gt 0 ]; then
 fi
 echo "HEREDOC BACKTICK PROBE PASSED — control green and anti-vacuous, gate and probe" \
      "enumerate the same population path for path, every printed per-file count equals an" \
-     "independent grep/tr measurement, the below-scripts/ heredoc executed" \
+     "independent grep/tr measurement (column, grouped sentence and the summary total" \
+     "agreeing with each other), the gate's own no-bytes claim is measured and can make it" \
+     "fail, the below-scripts/ heredoc executed" \
      "and was refused by path, $body_legs heredoc body leg(s) + $shell_legs shell leg(s)" \
      "+ rename + both fixture tables + the above-guard window all behaved, no marker" \
      "file, real tree byte-identical (work: $WORKROOT)"
