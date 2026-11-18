@@ -46,7 +46,8 @@ if [ -z "$team" ]; then
   cat >&2 <<'MSG'
 error: no development team.
 
-All three targets (HSCC, HSCCWidgets, HSCCLiveActivity) need one. Find your team
+All four targets (HSCC, HSCCWidgets, HSCCLiveActivity, HSCCLiveActivityMonitor)
+need one. Find your team
 id in Xcode > Settings > Accounts (or the OU field of your signing certificate),
 then either export it for this shell:
 
@@ -71,7 +72,7 @@ HSCC_DEVELOPMENT_TEAM="$team" xcodegen generate --spec project.yml
 
 # Prove it actually landed on every target, rather than assuming inheritance.
 missing=0
-for t in HSCC HSCCWidgets HSCCLiveActivity; do
+for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivityMonitor; do
   got=$(DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
         xcodebuild -project HSCC.xcodeproj -target "$t" -showBuildSettings 2>/dev/null \
         | awk '/^ *DEVELOPMENT_TEAM = /{print $3; exit}')

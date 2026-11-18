@@ -84,6 +84,25 @@ grep -rq "static func load() -> APIConfig?" "$SHARED_DIR" \
   && ok "APIConfig.load is optional (honest nil when unconfigured)" \
   || fail "APIConfig.load does not return an optional"
 
+# 6. The group is DERIVED, not named: one prefix in project.yml, one Info.plist
+#    key per target, and the shared Swift reads that key. A literal creeping
+#    back into Swift would silently pin a custom-prefix build to com.hscc.
+grep -q 'HSCC_APP_GROUP: group\.$(HSCC_BUNDLE_PREFIX)\.ios' project.yml \
+  && ok "project.yml derives the App Group from HSCC_BUNDLE_PREFIX" \
+  || fail "project.yml does not derive HSCC_APP_GROUP from HSCC_BUNDLE_PREFIX"
+for plist in Sources/Info.plist Sources/HSCCWidgets/Info.plist \
+             Sources/HSCCLiveActivity/Info.plist \
+             Sources/HSCCLiveActivityMonitor/Info.plist; do
+  grep -q 'HSCCAppGroup' "$plist" \
+    || fail "$plist does not carry the HSCCAppGroup key"
+done
+ok "all four iOS Info.plists carry HSCCAppGroup"
+if grep -q 'group\.com\.hscc\.ios' "$SHARED_DIR/SharedStore.swift"; then
+  fail "SharedStore.swift still names the App Group literal"
+else
+  ok "SharedStore.swift reads the group from Info.plist (no literal)"
+fi
+
 echo ""
 if [ "$rc" -eq 0 ]; then
   echo "SHARED STORE CHECK PASSED — a broken App Group cannot fail silently"

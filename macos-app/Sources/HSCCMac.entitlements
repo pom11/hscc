@@ -11,14 +11,14 @@
 	     settings and last-known snapshots from this group. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.hscc.ios</string>
+		<string>$(HSCC_APP_GROUP)</string>
 	</array>
 	<!-- Empty in Swift on purpose (see KeychainConstants): when no access
 	     group is named, the first group below is used, which is the shared
 	     App Group rather than an app-private item. -->
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)group.com.hscc.ios</string>
+		<string>$(AppIdentifierPrefix)$(HSCC_APP_GROUP)</string>
 	</array>
 </dict>
 </plist>

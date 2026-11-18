@@ -36,7 +36,7 @@ if ! grep -q '^enum AppGroup {' "$shared"; then
   echo "error: could not locate the real AppGroup enum (marker moved?)" >&2
   exit 1
 fi
-awk '/^enum AppGroup \{/{f=1} f{print} f && /^}/{exit}' "$shared" > "$TMP/AppGroup.swift"
+{ echo 'import Foundation'; awk '/^enum AppGroup \{/{f=1} f{print} f && /^}/{exit}' "$shared"; } > "$TMP/AppGroup.swift"
 if ! grep -q 'suiteName' "$TMP/AppGroup.swift"; then
   echo "error: sliced AppGroup lacks suiteName (slice broken?)" >&2
   exit 1

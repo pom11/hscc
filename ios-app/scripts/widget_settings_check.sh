@@ -128,8 +128,14 @@ start=$(grep -n "^// Widgets & Live Activities shared settings" "$SRC" | head -1
 end=$(grep -n "^/// A lightweight read of the token" "$SRC" | head -1 | cut -d: -f1)
 model=$(sed -n "${start},$((end-1))p" "$SRC")
 
-# The storage key + suite come from the real AppGroup enum (verbatim).
-suite=$(grep "static let suiteName" "$SRC" | sed 's/^ *//')
+# The storage key comes from the real AppGroup enum (verbatim). The suite no
+# longer exists there as a literal: SharedStore reads HSCCAppGroup from the
+# target's Info.plist, derived from project.yml's one HSCC_BUNDLE_PREFIX.
+# Reconstruct the SAME default for this bare executable (it has no Info.plist)
+# from that one place, so the harness still exercises the shipped suite domain.
+prefix=$(sed -n 's/^ *HSCC_BUNDLE_PREFIX: *//p' project.yml | head -1)
+[ -n "$prefix" ] || { echo "widget settings check: no HSCC_BUNDLE_PREFIX in project.yml" >&2; exit 1; }
+suite="static let suiteName = \"group.${prefix}.ios\""
 wkey=$(grep "static let widgetSettingsKey" "$SRC" | sed 's/^ *//')
 suite_container="enum AppGroup {
 $suite
@@ -174,8 +180,9 @@ GOLDEN="scripts/widget_settings_check.harness.golden"
 cat > "$WORK/main.swift" <<SWIFT
 import Foundation
 
-// Minimal real shim: the suite name + storage key extracted verbatim from the
-// committed AppGroup enum (the model references these through it).
+// Minimal real shim: the suite name reconstructed from project.yml's one
+// HSCC_BUNDLE_PREFIX (what Info.plist carries in a real build), plus the
+// storage key extracted verbatim from the committed AppGroup enum.
 $suite_container
 
 // The committed model, verbatim, no edits.

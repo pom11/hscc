@@ -34,6 +34,10 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
     SWIFT_EMIT_LOC_STRINGS: YES
+    # Same derivation as the iOS spec: one prefix moves the bundle id and the
+    # App Group together. Defaults keep the shipped com.hscc / group.com.hscc.ios.
+    HSCC_BUNDLE_PREFIX: com.hscc
+    HSCC_APP_GROUP: group.$(HSCC_BUNDLE_PREFIX).ios
 
 schemes:
   HSCCMac:
@@ -105,9 +109,9 @@ targets:
         # Same team-wide container as the iOS app + its extensions. The desktop
         # widget extension reads the same connection settings.
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     dependencies:
       # The desktop widgets ship inside the app bundle; WidgetKit discovers
       # them from the embedded extension.
@@ -120,6 +124,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: HSCC
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         # Menu-bar-only: no Dock icon, no app switcher entry.
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
@@ -129,7 +134,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.mac
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).mac
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Per-TARGET entitlement path, matching the iOS targets: the project-level
         # value alone is not enough once a generated project is inspected.
@@ -185,13 +190,14 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     info:
       path: Sources/HSCCMacWidgets/Info.plist
       properties:
         CFBundleDisplayName: HSCC Widgets
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         LSMinimumSystemVersion: "14.0"
         # WidgetKit discovers the extension through this point identifier.
         NSExtension:
@@ -202,7 +208,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.mac.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).mac.widgets
         # Per-TARGET entitlement path, matching every other target.
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCMacWidgets.entitlements
         CODE_SIGN_STYLE: Automatic

@@ -4,8 +4,13 @@ A **private** iOS app to manage the owner's personal DGX cluster + project
 kanban over Tailscale. It talks to the HSCC HTTP API (Phase A) which listens on
 the Tailscale tailnet.
 
-**This app is for sideloading onto the owner's own device only — it is NEVER
-distributed, and is deliberately NOT App Store–ready.**
+**This app is distributed directly from GitHub, not through the App Store.**
+It is an **Ad Hoc** build for registered iPhones: the IPA is a GitHub release
+asset and the install page is served from GitHub Pages. Testers install it in
+Safari from <https://pom11.github.io/hscc/ios/>; see [INSTALL.md](INSTALL.md).
+Maintainers cut a release with
+[`scripts/release_adhoc.sh`](scripts/release_adhoc.sh) — the runbook is
+[RELEASE.md](RELEASE.md).
 
 > **STATUS: built and exercised in automated gates; not yet on a device.**
 > Every target compiles clean (`scripts/build_check.sh`) and every Codable
