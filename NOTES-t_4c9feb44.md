@@ -134,7 +134,28 @@ The three tests, and why each is shaped that way:
 Also fixed: the `report` fixture docstring claimed "full CLI walk ~35 s". It now
 states the measured 59.69 s, what it was under the bug (307.64 s) and why.
 
-## 7. Not this card / kept out of scope
+## 7. Leg result after the fix
+
+`pytest -q -rs scripts/tests` (the leg form), fixed tree, host load ~2:
+
+```
+1 failed, 466 passed, 3 skipped in 158.71s (0:02:38)
+```
+
+The one failure is the documented baseline — `test_readme_lint.py::
+test_repo_readmes_pass_the_lint` on `scripts/README.md:235` `ruby -c`
+CMD-BINARY — red on `main` and owned by t_d3448025. `test_cli_help_surface.py`
+inside that leg: **28 passed, 1 skipped in 117.04 s**, where the card recorded
+26 items and *zero* completed at 200 s.
+
+Collection counts, so the totals are not mistaken for drift: `main` @ `a65695a6`
+collects **467**; this branch collects **470** (+3 = the pins here). The card's
+"468" was counted on `wt/t_03c0a890`, a different tree.
+
+Landed as PR https://github.com/pom11/hscc/pull/399 (head `2849b291`,
+OPEN/MERGEABLE, not merged by this card per the current hscc convention).
+
+## 8. Not this card / kept out of scope
 
 * `test_readme_lint.py::test_repo_readmes_pass_the_lint` is red on `main`
   (`scripts/README.md` `ruby -c` CMD-BINARY) — baseline noise, owned by
@@ -149,7 +170,7 @@ states the measured 59.69 s, what it was under the bug (307.64 s) and why.
   hold degrades to "bind failed") but worth a `close()`; deliberately not done
   here to keep this diff to the cost that was measured.
 
-## 8. Reproduction
+## 9. Reproduction
 
 ```
 bash probe/capture.sh <worktree> <pytest-target> <outdir> [secs] [every]   # tree watch + kill by pid
