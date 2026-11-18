@@ -11,6 +11,2490 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.15.12] - 2026-11-18
+
+### Added
+- **`ios-app/Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift` —
+  the cluster-health Live Activity: Dynamic Island + Lock Screen.** The phone
+  form of the two lines the cluster widget leads with — is the fleet serving,
+  and how many of its nodes are answering. Dynamic Island: the fleet glyph
+  leading (its colour is the reading), the tally trailing (`3/4`, `3` when no
+  total was named, `!` for a read that produced nothing, `—` when nothing was),
+  the glyph alone minimized, and the expanded region with headline + a
+  `stale · <why>` line + the pushed age + the nodes that did not answer;
+  Lock Screen: the same header, then the tally and the down-node names.
+  It is a separate activity from the monitor one on purpose: that answers *how
+  hard* the fleet is working (per-node CPU/RAM/GPU, daemon host), this answers
+  *whether it is up at all*. Both may be pinned at once; they share only the
+  extension process, never an attributes type or a content state.
+  `Sources/Shared/ClusterHealthActivity.swift` holds the attributes, the reduced
+  `ClusterHealthSignals` they carry, and beside them the two pure rule blocks the
+  rendering forwards to: `ClusterHealthReading` (state word / tally / down text /
+  named nodes / headline / compact string / tone / age) and
+  `ClusterHealthOrphanRule` (the launch-sweep decision). The signals are the
+  reduced set and stay that way: `servingState` is a `ClusterState.rawValue` and
+  nothing else, the counts are optional so a signal the payload did not send
+  renders `—` and never `0` (WIDGET_DATA_CONTRACT §6 rule 1), and the only node
+  identity the type can carry is the `.NNN` display tail — an extension process
+  cannot be handed an address (§7). Read-only by construction: a Live Activity is
+  push-only, so this file renders what the app pushes and never fetches.
+  Two rules those blocks own, and the ones a reader should check first:
+  **a serving fleet with a node down is amber, not mint** — "serving" and
+  "everything healthy" are different claims the surface must not collapse; and
+  **a route that did not answer is silence, not a fault**, so a nil `nodesDown`
+  never turns a fleet amber while a counted `1` does.
+  `Sources/HSCC/ClusterHealthActivitySweep.swift` runs the matching re-hydration
+  sweep at `didFinishLaunching`, beside the monitor's and the cards'. Unlike the
+  monitor's sweep it consults no settings store: `WidgetSurfaceKind` has no case
+  for this surface (that needs `SharedStore.swift` plus the config screen —
+  another card's file set), so the rule is pure instead, which is also what makes
+  it executable by a gate. It ends an activity that carries no signal at all and
+  one whose last push is past the six-hour silence budget; it keeps a fleet the
+  server stated is **down**, which is the difference from the running-cards rule
+  and the point of a health surface — a stated zero is news, not an empty bubble.
+  Deliberately NOT in this slice: the poll-and-push driver that starts the
+  activity (reads `/v1/autodown/status` + `/v1/cluster/monitor`, projects the
+  signals, honours the shared Active toggle and cadence). Same reason the cards
+  activity has no driver yet — the toggle needs a surface key this card does not
+  own. The surface ships renderable, swept, and unfed.
+- **`ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` — `hscc kanban
+  monitor --live` as a widget, read-only, with a pane for a failed board read.**
+  The pivot's kanban surface: three GETs through `WidgetDataClient`
+  (`/v1/kanban/running`, `/v1/kanban/blocked`, `/v1/kanban/stale?older_than=0`),
+  merged in memory into a projected entry and rendered by six families — the
+  three accessories plus small/medium/large, with the row and title budgets
+  `WIDGET_DATA_CONTRACT` §5.3 binds (1 / 4 / 7 rows, titles 40 / 60). It draws the
+  columns the trio actually sends — board, card, worker, run time from
+  `started_at`, `age_days`, `block_kind` — and NO column for what the CLI reads
+  off the board databases and the profiles' `state.db` (heartbeat age, tokens, the
+  `max_in_progress` slot cap, orchestrators, `done 24h`, the event stream): those
+  are absent, never zero and never guessed (§6 rule 1). Two measured facts shape
+  the reads. `/v1/kanban/stale` does NOT contain blocked cards (measured: blocked
+  answered `count: 18`, stale answered 15 with `6 todo / 6 ready / 3 running` and
+  zero blocked), so `blocked` comes only from `/v1/kanban/blocked` — deriving it
+  from stale's histogram would print a confident 0 next to eighteen stuck cards.
+  And a running card appears on BOTH routes, so the row list dedupes by card id
+  with the running route as authority, then sorts the stuck pool `age_days`
+  descending with an absent age last. Every read resolves through
+  `WidgetData.read`, so the failure states are the shared ones: unconfigured is
+  checked before failure in every family (an unconfigured app invites setup, it
+  never claims the cluster is down), a pass that got nothing back draws a
+  **"board read failed"** pane — the CLI's own `board_error_panel` title — with
+  `failure.shortLabel` / `operatorLine`, and a pass that got SOME back renders the
+  missing count as `—` beside a `partial · <why>` strip, so a partial panel is
+  never mistaken for a quiet board. Nothing is written to the App Group: the entry
+  is built per refresh and thrown away, so §7 holds by never storing.
+  Registered in `HSCCWidgetsBundle` and listed in `project.yml` for the
+  `HSCCWidgets` target; it deliberately does NOT read `WidgetSurfaceKind`'s
+  `.widgetMonitor` entry for the Active toggle or cadence — this surface has no
+  registry case yet (adding one means `SharedStore.swift` plus the settings
+  screen), and borrowing the cluster monitor's toggle would let switching off one
+  widget silently blank the other.
+* `hscc-api/tests/test_hermes_gap_single_posture.py` — a structural guard so the
+  posture cannot silently regrow. Sweeps every tracked `hscc-api/tests/*.py` for
+  a `def` of one of `hermes_gap`'s probe names, for the
+  `try`/`except`-around-a-hermes-import shape the folded-in copy used, for a
+  private skip reason for either capability, and for a file that imports the real
+  `hermes_state` without the shared gate (the inverse drift: such a case goes RED
+  on a thin interpreter instead of skipping). Plus a two-way pin between
+  `scripts/run_tests.sh`'s roster block — the live authority — and the probe
+  modules it advertises, and the gate's posture executed in both directions so a
+  gate that skipped everywhere is a red build rather than a quiet leg. 7 tests,
+  green on both interpreters.
+- `ios-app/docs/CONSOLE_RETIREMENT.md` — the console retirement list for the
+  iOS pivot: file-by-file disposition of all 96 Swift files under
+  `ios-app/Sources/` (delete / collapse / keep-prune / keep), the
+  `project.yml` per-target `sources:` sets that change, and a per-script map of
+  which of the `ios-app/scripts/` gates lose their subject — so no check is
+  ever left pointing at a deleted screen. Names the four decisions the deletion
+  commits depend on (session Live Activity, read-only Tier-B screens, the
+  fixture/UI-test lane, three shared helpers) and the commit order that keeps
+  `build_check.sh` green throughout. Document only; nothing is deleted by it.
+- **`macos-app/project.yml` + `ios-app/Sources/HSCCWidgets/HSCCWidgetsBundle.swift`
+  — the macOS desktop widget extension (`HSCCMacWidgets`).** A WidgetKit
+  extension embedded in the menu bar app, compiling the six existing iOS widget
+  surfaces **by path** from `ios-app/Sources/HSCCWidgets`: Cluster, HSCC
+  Monitor, Running Cards, Kanban Monitor, Projects and Board Status. No widget
+  view, provider, entity query or configuration intent is copied for macOS;
+  the only platform split is the family list and the rendering adapter inside
+  the shared files. All six offer `systemSmall`/`systemMedium`/`systemLarge` on
+  the desktop and in Notification Center, and Cluster and Monitor also offer
+  `systemExtraLarge` because their topology/metric rows are what gain from the
+  width. `systemExtraLarge` is dispatched to each widget's large layout rather
+  than falling through to the small one. The extension joins the existing
+  `group.com.hscc.ios` App Group and keychain access group, so saved clusters,
+  the multi-address failover loop and every last-known snapshot are the same
+  ones the iOS widget and the menu bar app read. `macos-app/scripts/build_check.sh`
+  now compiles both `HSCCMac` and `HSCCMacWidgets`, and the shared scheme builds
+  the extension with the app.
+- **`ios-app/Sources/HSCCWidgets/WidgetRendering.swift` — one rendering-mode
+  adapter for full-colour, accented and vibrant widgets.** macOS 14 desktop
+  widgets can be rendered accented or vibrant on the wallpaper, where the
+  system supplies the material and ignores an opaque custom background. The
+  adapter keeps the operator's font, weight, text scale, density, header and
+  icon choices, swaps the colour roles for the system primary/secondary palette
+  selected by the active colour scheme, and paints the widget container
+  background only in `fullColor` so the wallpaper material shows through
+  otherwise. Every widget root routes its background through
+  `WidgetSurfaceBackground(style:)` and applies
+  `.widgetRenderingAdaptation(style:)`; the same code governs the iOS tinted
+  Home Screen mode. The palette logic is shared, not a macOS-only second
+  implementation.
+- **`ios-app/scripts/board_status_widget_check.sh` — the executed gate for the
+  board status widget's count honesty.** Compiles the real
+  `BoardStatusReading.swift` plus the real `SharedModels.swift` /
+  `SharedStore.swift` / `WidgetDataClient.swift` and
+  `model_decode_check/ThemeStub.swift` against the macOS SDK and drives them from
+  fixtures — no network, no simulator, no re-declared mirror (the script greps the
+  harness for subject-type declarations and fails if it grows one). Twenty
+  structural proofs, then the executed table (the run prints its own tally —
+  `104 assertions, 0 failure(s)`), one assertion per rule the widget's honesty
+  rests on:
+  `openOnly` implies `done == nil` (§5.2); **`blocked` never comes from the
+  `kanban/stale` histogram** — a stale payload whose rows *do* carry
+  `status: "blocked"` leaves the blocked number exactly where `kanban/blocked` put
+  it (3 for the board, 5 fleet-wide, and the measured `count: 18` payload renders
+  18 where the stale list knows only 3), because the live daemon answered
+  `blocked count: 18` while `stale?older_than=0` returned 15 rows with no blocked
+  status among them; a list shorter than its own `count` refuses the read with a
+  `.decoding` failure — and `showsStaleData` is asserted on it, which is the half
+  that keeps the last-known snapshot rather than a number low by construction; a
+  failed `kanban/blocked` read nils only `blocked` and leaves todo/ready/running
+  live; `openCount` is nil unless all four open operands are present;
+  `BoardStatusSnapshotStore` gives a foreign slug nothing, refuses a numbers-less
+  projection, and stores the projection and nothing else (keys walked out of the
+  real encoded blob, §7); `numberText(nil)` is `—` and `numberText(0)` is `0`, and
+  the committed `v1_mobile_summary_missing_done.json` capture still fails its
+  decode instead of turning an absent `done` into a zero. The six family bodies'
+  unconfigured-first invariant is checked by `board_status_widget_check/dispatch_order.py`,
+  which dies by name when a body is renamed rather than quietly shrinking the table.
+- **One release command for the iPhone and Mac apps.** `scripts/release_apps.sh
+  <version>` refuses a dirty tree and an older version, writes the marketing
+  version and a monotonic build number into both `project.yml` files, commits
+  `apps: release <version>`, tags `apps-v<version>`, then runs the iOS and
+  macOS pipelines so the IPA and the notarized zip land on **one** GitHub
+  release. `--ios-only`, `--mac-only` and `--dry-run` cover the partial and
+  rehearsal paths. The release is always kept out of GitHub's "latest", which
+  stays with the CLI.
+- **Release notes from the changelog fragments.** Only fragments that touched
+  `ios-app/` or `macos-app/` since the previous app tag are used, grouped
+  Added / Changed / Fixed with card ids removed. The same text is the GitHub
+  release body, the iOS "What's new" section and `/ios/notes/<version>.html`.
+- **Update feeds.** `/ios/version.json` carries version, build, release time,
+  notes link, install URL and minimum iOS; `/macos/appcast.xml` is a Sparkle 2
+  appcast with one item per release, the notarized zip URL, byte length and
+  EdDSA signature. Sparkle 2 is pinned via SwiftPM, the public key goes into
+  Info.plist as `SUPublicEDKey`, and the private key stays in the login
+  keychain.
+- **A macOS install page** at `/macos/` with the Homebrew command and the same
+  release notes, and the iOS page now links previous versions and their notes.
+- **In-app update checks for both apps.** iOS reads the published
+  `https://pom11.github.io/hscc/ios/version.json` on launch and at most every
+  six hours in the foreground, over its own short-timeout session with no token
+  and never through the cluster. A newer version/build shows a dismissible
+  "Update &lt;version&gt; available" banner in the main screen with **What's
+  new** (notes page) and **Install** (install page/Safari); dismissal remembers
+  that one version only. Settings → About shows the running version/build, a
+  manual **Check for updates** action and the last result. The update code is
+  app-target-only — no widget or Live Activity extension compiles or references
+  it. macOS now wires Sparkle 2 through `SPUStandardUpdaterController`: daily
+  automatic checks by default, **Check for Updates…** in the menu bar dropdown
+  and Settings, automatic-check/automatic-download toggles, an **Update
+  &lt;version&gt; available** dropdown item when Sparkle finds a release, and
+  the standard install-and-relaunch flow (the embedded widget extension updates
+  with the app).
+- **`ios-app/Sources/Shared/WidgetDataClient.swift` — the one read-only HTTP
+  client every extension surface reads through.** Compiled into the app target
+  (where the Live Activity drivers live) and `HSCCWidgets`; the three Live
+  Activity extension targets render `ContentState` and never fetch, so they do
+  not carry it. Read-only is structural, not a convention: exactly one HTTP
+  method (`GET`) can be built — no body parameter, no method parameter — and only
+  the nine paths of `WidgetDataPath.all` (the routes `WIDGET_DATA_CONTRACT` §3's
+  five datasets are served by) are fetchable, anything else fails with
+  `.pathNotAllowed` before a URL is constructed, so a later card cannot reach a
+  mutating route by inventing a string. It writes nothing: no App Group value, no
+  response blob (§7 persists the projection, and that is `SharedStore.swift`'s
+  job). Connection settings and auth are reused unchanged — host/port from
+  `APIConfig.load()` (the App Group suite `SettingsStore` writes), bearer token
+  from the shared keychain per client, and the same `Authorization` +
+  `Accept: application/json` headers over plain `http://` as `HSCCClient`, with
+  the token never rendered, persisted or carried in a failure. Two things the
+  nil-returning GET it replaces could not express: `timeout` — a per-request
+  ceiling (default 8 s, both `timeoutIntervalForRequest` and
+  `timeoutIntervalForResource`, cache and connectivity-wait off) instead of
+  URLSession's 60 s default, because an extension that overruns its own budget is
+  killed silently; and `WidgetDataFailure` — the kinds a surface must distinguish
+  (`notConfigured` / `invalidURL` / `pathNotAllowed` / `timeout` / `unreachable` /
+  `unauthorized` / `notFound` / `http` / `decoding`), none of which carries server
+  prose, an address or the token. `showsStaleData` is the stale-while-error rule
+  in one place: an unconfigured app and a bad path never fall back to a snapshot
+  (the t_5c554c5b rule, now structural rather than re-invented per widget), and
+  every other failure keeps the last-known value with its age.
+  `WidgetDataOutcome` + `WidgetData.read(using:lastKnown:_:)` give a timeline
+  provider `.live` / `.stale(value, ageMinutes:, reason:)` / `.failed(failure)` to
+  switch on, so "fall back to the snapshot" is one age formula instead of five
+  hand-rolled ones — and a 2xx that fails to decode lands in `.decoding`, which
+  is what keeps §6 rule 1 (a missing `done` must not render as `0`) honest end to
+  end. `scripts/widget_data_client_check.sh` proves all of it by executing the
+  committed type through a stubbed `URLProtocol` (no network), and owns the exact
+  audited path set as an assertion, so adding a read is a deliberate act in two
+  files rather than a silent widening.
+- **Per-widget scope on the config screen — `ios-app/Sources/HSCC/Views/ConfigView.swift`.**
+  Every widget and Live Activity row now carries the scope it will actually
+  render, and each surface's editor gained a **Scope** section: Board / Project
+  / Node pickers plus "All", so the operator points ONE widget at ONE slice of
+  the fleet without leaving the app. The pickers are populated by the same
+  three `EntityQuery` types the widget configuration sheet uses (read-only
+  `WidgetDataClient`, GET allowlist, sentinel-only on failure), so a board, a
+  project and a node have one definition and two entry points — and an
+  unreachable cluster still yields a usable picker with an honest
+  "nothing came back" line instead of a fabricated row. Connection state is
+  unchanged: `ConnectionBanner` stays the only connection readout, and no
+  second status view was added.
+  **Storage stays one blob.** The per-widget choice is a new optional `scope`
+  field on `WidgetSurfaceSettings`, i.e. inside the existing `surfaces` map of
+  the same `hscc.widgetSettings` key — no second store, no second key, and the
+  screen keeps writing through the store it already had (`WidgetSettingsStore`).
+  Three states, deliberately distinct: **no key** = the surface inherits the
+  fleet-wide scope `t_98fb8726` shipped, **`WidgetScope()`** (encodes as an
+  empty object, so it is distinguishable from absence) = "All, and do not
+  inherit", **a named board/project/node** = scoped. One new call,
+  `AppGroupWidgetSettings.scope(for:)`, resolves all three, and both the row
+  text and the editor read through it — so the screen cannot advertise a slice
+  the store does not hold. Writes fold with the SAME
+  `WidgetScope.buildPickerSelection` the intent folds with.
+  Two bugs this surfaced and fixed: `setting(for:)` rebuilt each entry field by
+  field and would have dropped the new field on every read, and
+  `WidgetSettingsStore` persisted a copy taken at launch, so a fleet-wide scope
+  the intent wrote while the screen was open was silently rolled back by the
+  screen's next write (now it re-reads the blob first).
+  `widget_settings_check.sh` grows 18 executed assertions: cases 15-17 drive
+  the REAL app-side store (compiled into the harness, not copied) on the real
+  suite domain, pin the inherit / explicit-All / scoped distinction **as it is
+  written to disk** — including the flat alternating key/value array Swift
+  writes for a dictionary keyed by a non-`CodingKey` enum — and restore the
+  host's prior blob. Nothing was built or run on a device; the compile gate is
+  the proof.
+- **`ios-app/scripts/merge_base_check.sh` — a branch whose merge-base with `main`
+  has drifted too far behind now fails before review.** Four PRs in the
+  board-status-widget line (#316, #317, #319, #335) died the same death and three
+  of them reported it as something else: the base drifted behind `main` while
+  `mergeable=MERGEABLE/CLEAN` kept answering green, because re-adding a file
+  `main` deleted is not a conflict — #319 still carried 37 paths `main` had
+  retired on purpose (the console screens, `Shared/ExtensionClient.swift`, the
+  retired decode fixtures, the UITests). Measured while writing this: #316, #317
+  and #319 all carried the SAME merge-base `52310791`, 16 commits behind
+  `main` @ `3b5e475c` — three PRs rebasing onto a base they never moved. The gate
+  measures `git rev-list --count <merge-base>..origin/main` — the commits `main`
+  has that the branch's *base* lacks, which is what
+  `git rebase --onto origin/main <merge-base>` has to absorb — against one named
+  constant, `STALE_BASE_FAIL_AT`, and fails hard at it rather than warning: the
+  author this gate is for already had a green badge and shipped anyway. The
+  failure names the count and the base SHA and prints the rebase that drops only
+  the inherited commits. It never fetches (a gate stays offline) and prints the
+  base ref's SHA so a stale local fetch cannot pass as a real green, and it is
+  honest about what it does *not* prove — drift is not harm, and zero drift is not
+  a claim that the branch tree matches `main`. Proven red on a synthetic branch
+  carrying this file on a base exactly `STALE_BASE_FAIL_AT` behind (rc 1, naming
+  the count and the base SHA), green one commit nearer (rc 0), and green on a
+  branch cut from current `main`.
+- **`ios-app/Sources/Shared/SharedStore.swift` — widgets and Live Activities
+  now have a stored appearance model.** `WidgetStyle` is a Codable, Foundation-
+  only style: background (RGBA, so transparent is a real value), primary /
+  secondary text, accent, ok / warn / bad status colours, font design (default,
+  rounded, monospaced, serif), font weight, a 0.8–1.4 text-size scale, compact /
+  regular density, and show/hide header and icons. The default is the app Theme
+  (black + #FF5722). `WidgetColor` parses and stores canonical `#RRGGBBAA`, with
+  six-digit input gaining an opaque alpha. The registry carries a GLOBAL `style`
+  plus an optional per-surface override inside each existing
+  `WidgetSurfaceSettings` entry; `style(for:)` reports only a real override,
+  `resolvedStyle(for:)` resolves override → global → Theme default, and
+  `WidgetStyle.resolved(for:)` is the one helper the rendering side will apply.
+  Absent style keys decode to the default, so old installs need no migration
+  and render exactly as before. Four model presets ship: Default black/orange,
+  High contrast, Transparent and Mono terminal.
+- **`ios-app/Sources/HSCC/WidgetSettingsStore.swift` — the app writes the
+  style through the same shared blob and repaints immediately.**
+  `setGlobalStyle`, `setStyle`, `useGlobalStyle` and the resolved reads persist
+  to the App Group and call `WidgetCenter.shared.reloadAllTimelines()` after
+  every save. Live Activity drivers have no push-only hook (their
+  `refreshOnce()` also starts an activity), so a running bubble picks the style
+  up on its next scheduled push instead of this store launching network work.
+- **`ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift` — Settings gains an
+  Appearance editor.** One global style plus a row per widget / Live Activity
+  surface. Each surface has a "Use global style" toggle (storing absence so
+  inheritance stays real) and its own editor: ColorPickers for all seven
+  colours, font design/weight pickers, size slider, density picker, header/icon
+  toggles, the four presets, Reset to default, and a live preview in small,
+  medium and lock-screen shapes. `Theme.swift` gains the shared SwiftUI bridge
+  (`WidgetColor.color`, style fonts/padding/corner, a `widgetStyle` environment
+  key and the `widgetStyle` / `widgetSurfaceChrome` modifiers) that part 2's
+  widget bodies will apply. No widget rendering changes in this card.
+- **`ios-app/scripts/widget_settings_check.sh` — the gate executes the new
+  contract.** Added checks: an old blob with no style key decodes to the Theme
+  default, a partial style fills missing fields from the default, hex round-
+  trips (including alpha and invalid input), a per-surface override beats the
+  global style, "Use global" falls back to the global style, and the app-side
+  store writes/resolves both levels through a real named suite. Structural
+  checks pin the Appearance row, the editor controls, the WidgetKit reload and
+  the shared SwiftUI modifier. The generated harness golden was refreshed in
+  the same change.
+- **`ios-app/Sources/Shared/BoardProgressActivity.swift` — a per-board kanban-progress Live Activity.** `BoardProgressActivityAttributes` carries the board slug as a fixed attribute and pushes done · running · blocked · ready as an optional-count `ContentState`, plus the blind-read label and push time. `BoardProgressReading` owns every string and tone (`—` for a count the payload did not carry, never `0`), so a refresh that did not answer renders its failure label instead of a quiet board. The counts come from the same `BoardStatusProjection` the Board Status widget draws, and the last-known value is the same `BoardStatusSnapshotStore` App Group blob — no new route and no second store.
+- **`ios-app/Sources/HSCCLiveActivityMonitor/BoardProgressLiveActivity.swift` — the Lock Screen and Dynamic Island rendering.** Compact trailing shows blocked (else running, `!` for a blind read with no counts), the expanded Island shows board + headline + age + the four counts, and the Lock Screen row adds the stale and empty-state lines. Registered in `HSCCLiveActivityMonitorBundle`.
+- **`ios-app/Sources/HSCC/BoardProgressActivityDriver.swift` + the project Board screen — start/stop and a feeder.** The Board screen gains a "Watch Board" toolbar button that starts the bubble for that board and a "Stop Live Activity" state to end it; the driver polls the sanctioned `mobileSummary` → `kanban/{stale,blocked}` pair at the widget's 5-minute cadence, saves live reads into the shared snapshot, adopts a bubble left by a previous process, and submits its own `BGAppRefreshTask` while the activity is up. One board bubble at a time; no new shared-store key and no new backend endpoint.
+- **`ios-app/scripts/heredoc_backtick_check.sh` — an external scanner for the
+  backtick-splice class, over every shell script in `ios-app/scripts/`.**
+  `widget_settings_check.sh` audits itself (it bans the byte from its own source and
+  refuses before expanding anything, `t_9e4a731b`). That guard stays — it is what
+  refuses early — but an in-file guard has two limits it cannot fix from inside: it
+  only judges the file it lives in, and it can only judge text below its own first
+  executable line. So the property "no shell script in this tree splices a command
+  substitution into an interpolating heredoc" depended on each audited file
+  cooperating with its own audit. This gate removes that dependency by being outside.
+  Detection is structural, not a grep: heredoc openers are enumerated at run time,
+  each body is bounded by its terminator, and the scan is per-region. A bare
+  unescaped byte in an unquoted heredoc body or in shell position is a finding
+  anywhere; in a script that carries an unquoted heredoc at all it is a finding
+  file-wide, comment lines included, which keeps this gate's verdict identical to the
+  in-file guard's; quoted-delimiter bodies and whole-line `#` comments are inert
+  because bash itself cannot expand them — and both are still printed with
+  `file:line`, region and reason, never silently exempted. Everything the gate does
+  not scan is reported with its reason, including a heredoc whose region cannot be
+  bounded, which is refused rather than guessed. It carries no byte of its own (the
+  byte is obtained with `printf` octal: a scanner carrying what it bans is
+  disqualified by its own rule), and it is read-only and never executes what it scans.
+- **`ios-app/scripts/probes_check.sh` — the gate that runs the injection probes.**
+  `widget_settings_check_backtick_probe.sh` (t_9e4a731b / PR #345) and
+  `heredoc_backtick_check_probe.sh` (t_4558fd32 / PR #349) are the negative proofs
+  for the backtick-splice class, and **nothing executed either of them**: on
+  `main` @ `38ce2372`, `grep -rn '_probe' .github/workflows ios-app/scripts/build_check.sh`
+  returns only an unrelated comment in `address-guard.yml`. A gate whose negative
+  proof is never run is a gate one refactor away from being silently broken — the
+  shape `merge_base_check.sh`'s trip-wire reached when it sat untested across four
+  orchestrator attempts (t_cedc5f9e). The new gate discovers its probes by **glob**
+  (`ios-app/scripts/*_probe.sh`), so a third probe is executed the day it is
+  committed, and it refuses rather than passing when the glob finds nothing. It is
+  deliberately *not* wired into `build_check.sh` (that gate already costs ~14 min of
+  Swift compile, each probe 5-8 min more) and a probe must never be renamed to
+  `*_check.sh`, because that glob is `build_check.sh`'s gate set — both halves are
+  asserted by the gate itself, not left as a comment. It is also not a CI step: this
+  repo has never had a macOS job (`git log -S 'runs-on: macos' origin/main -- .github`
+  is empty; both workflows are `ubuntu-latest`) and the probes need `swiftc`, so a
+  step bolted onto today's CI could only fail for the wrong reason. The gate
+  preflights the toolchain, clears `HEREDOC_BACKTICK_PROBE_NESTED` so an inherited
+  value cannot make a probe no-op into a green, decides every verdict from a
+  redirection rather than a pipeline's exit code, and refuses a probe that exits 0
+  without printing a `PASSED`/`FAILED` verdict banner.
+- **The Cluster widget now answers the question a cluster tile exists to
+  answer** — nodes up/down, models served, and GPU utilisation, GPU
+  temperature, CPU temperature and 1-minute load — **and it reaches the Lock
+  Screen.** One entry now drives five families: `systemSmall`, `systemMedium`
+  and `.accessoryCircular` / `.accessoryRectangular` / `.accessoryInline`. An
+  accessory gets one line or one gauge, so it gets the honest compression of it
+  (`3/4 up · 2 models · GPU 96%`, or a capacity gauge of the worst GPU) and none
+  of the chrome; the metric tokens are labelled `GPU` / `CPU` because colour
+  alone cannot survive a monochrome complication.
+- `ios-app/scripts/cluster_widget_check.sh` — 78 executed assertions on the
+  widget's **real** data layer (compiled with `SharedModels` / `SharedStore` /
+  `WidgetDataClient` into a macOS CLI): the `/v1/cluster/monitor` projection
+  against the committed fixtures, the nil-is-not-zero rules, §7's workload
+  redaction off the real body, the text rules and heat bands, the ≤18-character
+  failure labels the accessory families need, and which families pay for the
+  board row. Plus structural greps on the layout file. No network, no device.
+- **`ios-app/Sources/Shared/SharedStore.swift` — `WidgetSurfaceKind` gains `widget.projects`, the last widget in `HSCCWidgets` left outside the settings registry.** `ProjectsWidget`'s own provider documented the gap: "`WidgetSurfaceKind` has no `widgetProjects` case yet, so this surface is not in the shared cadence/Active registry … (then this reads `setting(for:)` like they do)", next to a private `refreshMinutes = 5`. So the cadence picker did not reach it and the operator's only lever was pulling the tile off the Home Screen. `isLiveActivity == false`, so the registry derives the shared 5-minute widget cadence and `setting(for:)` fills an absent entry with ON — adding a key cannot blank a widget that is already installed. `availableSections` is the EMPTY set, and the card asked for that to be decided rather than assumed: the surface draws one dataset and BOTH of its keys carry the fact (the widget's header says it exists to show which projects exist *and which board each one lives on*), so a `board` toggle would remove the reason the surface exists; per-project scoping is already `ProjectFilterIntent`'s picker in the widget's own configuration sheet, and a second copy of that choice in this store would be a Toggle the sheet never reads. `WidgetSurfaceEditor` hides its whole "Show Content" group for an empty declaration, so anything invented here would ship as a dead control.
+- **`hscc-api/tests/test_contract_swift_routes.py` now gates the audit doc against the contract matrices, so a doc row can no longer drift from `REQUIRED_QUERY_PARAMS` / `REQUIRED_BODY_PARAMS`.** `t_80e185d2` (PR #355) repaired the divergence it found — the matrices pruned of four retired rows by `t_f09436f1` (PR #351) while `hscc-api/docs/audit-client-server-params.md` still advertised those routes as live contract — but left nothing to catch a repeat, and the stale doc is what mis-led that card's own brief into blaming the wrong commit. New gate `test_audit_doc_live_tables_mirror_the_matrices` parses the doc's two **live** tables by pipe-split (cell 0 = `METHOD /path`, cell 1 = comma-separated required fields) and asserts set equality with the matrices in both directions: every matrix row present with the same required set, and **no** doc row naming a route absent from a matrix. The doc's "Rows retired with their client call site" table is deliberately out of scope — the scan stops at the next heading — because that section is intentionally a superset. Gate, not filter: a row the parser cannot read as `METHOD /path` fails as a doc-only row instead of being skipped, and a renamed heading or deleted table fails rather than passing vacuously on zero rows. `{id}` in the doc and `{param}` in the matrix are unified to one placeholder spelling so the route key does not hinge on which word the author reached for. Matrices stay the source of truth; the doc mirrors them.
+- **`test_audit_doc_citations_still_point_inside_their_handler` gates the citation anchors themselves — the optional half this card named, and the thing that actually rotted first.** `file.py:<line> (`handler`)` is the required citation form here precisely because the anchors had already drifted once by the time `t_80e185d2` read them (`:199`/`:303`/`1304-1310` were all pre-drift), and a wrong anchor is worse than none: it sends the next reader to the wrong code carrying the authority of a citation. The mirror gate proves the *rows* agree and says nothing about whether the line numbers in them still point anywhere. The card's literal wording — "assert every cited `file.py:<line>` still contains the handler name" — is **not implementable** and would fail a correct doc: the name sits on the `def`, not on the 400 site (`routes_actions.py:230` reads `data = _action_fields(...)`, while `handle_create_card` starts at `:228`). The verifiable form is that the cited line/range falls inside the named handler's `def`..`end` span, taken from `ast` rather than guessed. Five of the six live rows named no handler at all, which makes the anchor unverifiable by construction — exactly how the pre-#355 anchors stayed quietly wrong — so they now carry it (`handle_sessions_list`, `handle_create_card`, `handle_cluster_stop`, `handle_sessions_retire`, `handle_sessions_compact`), each verified through `ast` against the real def span.
+- **A saved cluster can carry several addresses with automatic failover.** `SavedCluster`
+  keeps its existing `host` as the primary and gains an ordered `fallbackHosts` list
+  (old saved blobs decode it as empty — no migration prompt). The full order is
+  mirrored to the App Group next to `hscc.host`, and `APIConfig.hosts` exposes it to
+  every extension. One shared `HostFailover` loop now drives `HSCCClient`,
+  `WidgetDataClient`, intents and the Live Activity drivers: the last address that
+  answered is tried first, a transport failure advances to the next address, and an
+  HTTP answer (401/403/404/5xx) never fails over. Settings gains add/remove/reorder
+  controls plus an "In use" line, and the banner names the address that answered.
+- **`ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` — the board status
+  widget: todo / ready / running / blocked / done for ONE board, board chosen in
+  the widget's own configuration sheet.** Rendered across the Home Screen
+  families (`small`, `medium`, `large`) and all three accessory families
+  (`accessoryInline`, `accessoryCircular`, `accessoryRectangular`), per
+  `WIDGET_DATA_CONTRACT` §5.2 — five tiles where there is room, `blocked · run`
+  where there are two lines, one scalar plus a colour where there is a dial
+  (red when `blocked > 0`), and `N open` on the inline line. Read-only like every
+  surface in the pivot: it fetches through `WidgetDataClient` (the GET-only
+  client with the closed read allowlist) and mutates nothing.
+  The read is two steps and both are the contract's, not invented here. Primary:
+  `GET /v1/mobile/summary` with `?boards=` scoped to the picked board (§6 rule 2)
+  — the only route that can count `done` at all, and one request when the cluster
+  has it. Fallback, taken only when that produced no counts (404 on a cluster
+  without the route — which is every cluster today: it answered 404 live on
+  2026-11-17, PR #310 being the server half — a degraded §6-rule-7 response, or
+  the board carrying its own `error` per §6 rule 4): §5.2's granted interim,
+  `GET /v1/kanban/stale?older_than=0` histogrammed per `status` for todo/ready/
+  running and `GET /v1/kanban/blocked` for `blocked`, in parallel. `blocked`
+  cannot come from the stale list, and the file says so with the measurement:
+  that fleet answered `count: 18` with 18 rows on `/v1/kanban/blocked` while
+  `stale?older_than=0` returned 15 rows with no `blocked` status among them —
+  histogramming the stale list would have drawn `blocked: 0` next to eighteen
+  stuck cards. Board scope happens client-side because `?board=` is
+  measured-ignored by these routes (§4.3), a payload that sends fewer rows than
+  its own `count` refuses the read instead of under-counting, and a failed
+  blocked read nils only the blocked tile. So: 1 request per refresh where §6's
+  route exists, 3 where it does not — the three §5.2 authorises for the open-only
+  subset — and `done` renders `—`, never `0`, until the compact route lands.
+  Honesty rules the file encodes rather than draws around: every number is
+  optional so an absent status renders `—` and never a `0` (§6 rule 1 — which is
+  why the all-required shared `BoardStatusCounts` is not reused as the storage
+  shape, since the interim path genuinely does not know `done`), `large` says
+  outright that `done` needs `/v1/mobile/summary` on the cluster instead of
+  letting a dash look like a design choice, and the `openCount` sum exists only
+  when all four operands do, so a partial sum cannot masquerade as a total.
+  Stale-while-error is the one shared rule (`WidgetData.read` +
+  `WidgetDataFailure.showsStaleData`), the last-known projection is keyed by
+  board so `hscc`'s numbers can never be served as `radio`'s, and only the
+  projection is persisted through `SharedStore.suite` — board slug, five optional
+  integers, source, fetch date: no body, no path, no address, no token (§7).
+  Configuration is `AppIntentConfiguration` with a single `board` parameter, so
+  the picker is the system's own rather than a screen in the app while the
+  console is being retired; its rows come from `GET /v1/projects` (the
+  sanctioned `{name, board}` source, §5.1 — `repo` is never decoded), falling
+  back to the slugs this device last saw so the picker is not empty while the
+  cluster is down. `AppEntity`/`EntityQuery` are conformed to by hand because this
+  SDK's `@AppEntity` macro takes only `schema:`. The unconfigured state is checked
+  before any failure or stale state in every family, the same invariant
+  `widget_view_dispatch_check.sh` enforces for the cluster widget (t_5c554c5b):
+  an app with no host or token invites setup, it never renders as
+  "can't reach the cluster". Registered in `HSCCWidgetsBundle` and added to the
+  `HSCCWidgets` target's explicit source list in `project.yml`.
+- **`ios-app/Sources/HSCC/CardsRunningActivityDriver.swift` — the running-cards
+  Live Activity is now fed.** t_f9cc34e0 shipped the rendering and the sweep,
+  and nothing called `Activity.request` for
+  `CardsRunningActivityAttributes`, so the surface was gate-proven but unfed.
+  One refresh reads the same pair the widget reads — `/v1/kanban/running` plus
+  `/v1/kanban/blocked`, never `/v1/cards` — through `WidgetData.read`, with the
+  widget's own stored blob as `lastKnown:`, and pushes a content state. Its two
+  honesty rules live in the shipped source where a gate can reach them: a read
+  that did not answer **never** yields `runningCount = 0` (the count comes from
+  `CardsRunningProjection`, which exists only for a read that did answer, so a
+  blind refresh pushes `nil` — drawn `—` — beside a `failureLabel` naming the
+  outage), and a refresh that found nothing running **ends** the activity
+  instead of leaving an empty bubble up. It reaches that second conclusion
+  through the same shape as `CardsRunningOrphanRule`, so the app never pushes a
+  bubble the next launch immediately kills.
+  A push adopts a leftover activity rather than requesting a second bubble for
+  the same fleet. Cadence and the pause follow the shared settings surface this
+  card adds — `WidgetSurfaceKind.liveActivityCards`, its own row in *Widgets &
+  Live Activities*, its own Active toggle and cadence, never borrowed from the
+  cluster-health monitor's — with `Off` (0 min) meaning no loop and no
+  background task, and `isActive == false` checked before a client is built so
+  a paused surface sends zero requests. Background refresh rides a
+  `BGAppRefreshTask` under a second identifier,
+  `com.hscc.ios.cards.backgroundRefresh`, because one handler can only refresh
+  one surface and sharing the monitor's would make cadence one knob.
+  `CardsRunningFeed.read` — the two-route pairing, the two-request budget and
+  the guard against a `tasks`-less 2xx — moved into
+  `ios-app/Sources/Shared/CardsRunningProjection.swift`, which both targets
+  compile: the widget provider delegates to it and the driver calls it, so
+  there is one reading rule rather than a copy that can drift.
+* `hscc-roles/tests/hermes_gap.py` — this leg's single definition of "can THIS
+  interpreter run hermes?", two capability probes, one posture per function, every
+  skip naming the module that answers (`hermes_gap.py`) and the import error
+  itself, for the same reason `hscc-api/tests/hermes_gap.py` names itself: a reader
+  of `-rs` can tell the leg's one legitimate skip from a second opinion.
+* `hscc-roles/tests/test_hermes_gap_single_posture.py` — a structural guard so the
+  posture cannot silently regrow (10 tests, green on both interpreters). Sweeps
+  every tracked `hscc-roles/tests/*.py` for: a `def` of either probe's name outside
+  the owner; the `try`/`except`-around-a-hermes-import shape (matched on the
+  imported name, so it sees a private copy even when the failure is swallowed); a
+  skip reason for a capability the owner already words, and its stronger sibling —
+  no `pytest.skip` outside the owner may mention hermes AT ALL, because the original
+  posture's wording was not the owner's and the exact-wording sweep alone walks past
+  it; a case that calls a gate which is not its first statement; a case gated that
+  the guard's own roster does not list, or a listed case no longer gated; a file
+  reaching for the real `hermes_cli` — in an import *or* in the source of a child it
+  spawns — without importing the owner (the inverse drift, which goes RED on a thin
+  sibling instead of saying so); and the gate's posture executed in both directions
+  on the interpreter running the leg, so a gate that skips everywhere is a red
+  build. Plus the two-way pin between `scripts/run_tests.sh`'s roster block and the
+  probe modules that advertise gates.
+- **`GET /v1/mobile/summary` — the board-status counts a widget can actually
+  afford.** The widget-data contract audit measured that no existing route can
+  answer "how many cards in each status on this board" honestly: `/v1/cards`
+  costs 81,855 B for 40 open cards and contains no `done` at all, `?status=done`
+  returns 0 rows, and `?include_archived=1` costs 8.6 MB — so a client-side
+  derivation renders `done` as `0` forever. `hscc-api/routes_mobile.py` counts
+  the archived-inclusive listing **server-side** and returns one entry per board:
+  `counts` with `todo`/`ready`/`running`/`blocked`/`done`/`archived` always
+  present as integers (a missing key is a bug, zero is a value), `total`, and a
+  `speak` line. Default is every board in ONE request (no N+1); `?boards=a,b`
+  narrows it (404 on an unknown board). The response is capped at 4 KB so a Live
+  Activity can carry it — over-trimming is reported as `truncated` +
+  `omitted_boards`, never silent. Redaction is structural: the payload carries
+  board slugs and integers only, board slugs are validated at the boundary, and
+  no card text, path, address or token value is ever read. Read-only, one GET
+  registration, so the single central bearer gate guards it. `rows=`/`with=` are
+  rejected with 400 rather than silently ignored — the audit authorised the
+  counts block only.
+- **`hscc-api/docs/WIDGET_ROUTES.md`** documents each cluster / fleet /
+  autodown route a widget or Live Activity reads: every JSON field, what it
+  means, and the exact CLI command + library function that produces it. Other
+  cards append their routes here.
+- **`ios-app/Sources/HSCC/Intents/WidgetScopePickerIntent.swift` — the
+  configuration intent that points the widgets at ONE thing: a board, a
+  project or a node.** The pivot's widgets are read-only; the only
+  configuration they genuinely need is "which slice". One
+  `WidgetConfigurationIntent` with three optional entity parameters answers
+  that with the system's own sheet (long-press → Edit Widget — no screen to
+  build while the console is being retired), and persists the choice through
+  the App Group so EVERY extension's timeline reads the same answer.
+  The persisted shape is a new optional `scope` field of the ONE
+  `hscc.widgetSettings` blob the extensions already load (`WidgetSurfaceKind`
+  untouched — no `availableSections`/`defaults()` switch edits, so no
+  config-screen collision): one write path, one key, one read path, nothing
+  for the two sides to drift. `nil` means "everything"; a blob written before
+  the field existed decodes to `nil` (gate-proven upgrade case).
+  The sheet's "All" is a `"*"` sentinel in the PICKER only —
+  `WidgetScope.buildPickerSelection` folds it (and blanks) to absence before
+  anything reaches the store, and folds a corrupt multi-selection to exactly
+  one thing, board → project → node precedence. The fold and `apply` live as
+  statics on the shared model and the intent only delegates;
+  `widget_settings_check.sh` extracts both verbatim and EXECUTES them against
+  the real suite domain (seed → intent's exact two calls → read back through
+  `AppGroupWidgetSettings.load()` → restore the host), and greps the committed
+  intent to prove the delegation — a private copy in the intent cannot hide
+  here.
+  Picker rows come live from `WidgetDataClient` (GET-only, closed allowlist)
+  — `kanban/running`'s board list topped up by the projects' boards,
+  `/v1/projects` names, and `cluster/monitor` node LABELS via
+  `MonitorNode.displayLabel` (the §7 rule: an address never enters a
+  parameter or the App Group). Every picker always offers "All", so an
+  unreachable cluster still yields a usable sheet; the fetch is an operator
+  action, not a timeline refresh, and does not spend §2's per-refresh budget.
+  `widget_settings_check.sh` grows 20 executed assertions + 14 delegation
+  greps; nothing was run on a device.
+- **`ios-app/Sources/Shared/SharedStore.swift` — the App Group container and
+  the typed stores every target shares.** The pivot's single shared surface,
+  compiled into all five targets (app, `HSCCWidgets`, the three Live Activity
+  extensions): the App Group identifier (`group.com.hscc.ios`), the connection
+  settings (`SavedCluster`, the `AppGroup` key set, `APIConfig`, the shared
+  keychain reference) and the widget / Live Activity configuration registry
+  (`WidgetSurfaceKind`, `AppGroupWidgetSettings`), plus the last-known snapshot
+  stores and `SharedStore` — the one place the suite is opened, so the
+  no-fallback rule cannot be re-invented per call site. No credential-bearing
+  value is ever written here: the bearer token stays in the app's own keychain
+  and is only ever *referenced* (`keychainService` + `keychainAccount`),
+  resolved per request. The five rules that keep a broken App Group from
+  failing silently are now written down once, in the file header.
+- **`macos-app/scripts/release.sh` — one-command signed, notarized macOS
+  release pipeline.** `release.sh <version>` regenerates the Xcode project from
+  `project.yml`, archives Release for Any Mac, exports with `method=developer-id`
+  so the app and its embedded `HSCCMacWidgets.appex` are signed by the keychain's
+  "Developer ID Application" identity with the hardened runtime and the shared
+  `group.com.hscc.ios` App Group entitlement, notarizes via
+  `xcrun notarytool submit --keychain-profile "${HSCC_NOTARY_PROFILE:-hscc-notary}"
+  --wait`, staples, and packages `HSCC-Widgets-<version>.zip` with
+  `ditto -c -k --keepParent`, printing its sha256. The export is verified rather
+  than assumed: both bundles must pass `codesign --verify --deep --strict`, carry
+  a `Developer ID Application` authority and the runtime flag, keep the expected
+  TeamIdentifier, and expose the App Group entitlement; the app's
+  `CFBundleShortVersionString` must equal the release version. A missing
+  Developer ID identity or team fails immediately with the exact setup step; a
+  missing notary profile fails a real run with the one-time
+  `xcrun notarytool store-credentials hscc-notary --apple-id <id> --team-id <team>`
+  command (no values in the repo). `--dry-run` runs generation, archive, export
+  and all verification for real, then stops before notarization and prints every
+  remaining command. The script then uploads the zip to the
+  `macos-widgets-v<version>` GitHub release on `pom11/hscc` (created when
+  absent, always `--latest=false` so it never shadows the CLI releases) and
+  renders the cask; `--push-cask` publishes it.
+- **`scripts/bump_cask.py` + `scripts/templates/hscc-widgets.cask.rb.tmpl` —
+  the `hscc-widgets` cask, generated from the release bytes.** The generator
+  pins `version`, the asset `url`
+  (`.../download/macos-widgets-v<version>/HSCC-Widgets-<version>.zip`) and the
+  `sha256` computed from the local zip that was uploaded — no hand-typed digest.
+  The cask is named "HSCC Widgets", installs `HSCC Widgets.app`, declares
+  `depends_on macos: ">= :sonoma"`, and its `zap trash` removes the App Group
+  container (`~/Library/Group Containers/group.com.hscc.ios`), both sandbox
+  containers and the app/widget preference plists. Rendering passes the real
+  `scripts/address_guard.py` and real `ruby -c`; `--push` creates or updates
+  `Casks/hscc-widgets.rb` through `gh api` (contents API, blob sha on update),
+  with no tap checkout, and reports "up to date" without a PUT when the tap
+  already holds the rendered bytes.
+- **`scripts/tests/test_bump_cask.py` — 38 tests for the cask contract.** Pure
+  render (version/url/name/app/depends_on/zap, malformed versions and digests,
+  unresolved template placeholders), the digest-is-the-zip contract, the real
+  address guard and real `ruby -c`, and the gh-api flow against a fake `gh`:
+  create without a blob sha, update with one, idempotent no-op, dry-run never
+  calling gh, and a rejected PUT exiting 1 without claiming the tap changed.
+- **The Cluster widget now offers `systemLarge`.** `ClusterWidget` declared
+  five families — `systemSmall`, `systemMedium`, `accessoryCircular`,
+  `accessoryRectangular`, `accessoryInline` — so the large Home Screen size was
+  the one supported family missing. It is now in `supportedFamilies`, dispatched
+  to its own `LargeClusterWidget`, and draws the same committed entry at full
+  size: the state line with its last-known age, nodes up / models served / idle
+  minutes, one heat-coloured card per reported GPU / temperature / load token,
+  both topology pairs with their role and node labels, and the board's running /
+  queued / blocked counts, plus the failure line when a read failed. Nothing is
+  invented: a nil metric drops its card, an absent count is omitted, and a stale
+  topology or metric strip is dimmed.
+- No provider change was needed: `WidgetFamily.showsBoardWork` already returns
+  true for `systemLarge`, so the large tile gets the board row and the same
+  ≤2-read cluster half plus the sanctioned kanban trio. The three Lock Screen
+  families already existed and keep their real views.
+- **`ios-app/scripts/cluster_widget_check.sh` now asserts the large family** —
+  `supportedFamilies` names `.systemLarge`, the dispatcher has a
+  `case .systemLarge:`, and `LargeClusterWidget` exists rather than falling
+  through to the medium layout.
+* `hscc-cluster/tests/hermes_gap.py` — one capability probe per hermes surface this leg
+  reaches for, decided per call, with the skip wording (module + import error + what the
+  cases needed) derived from one table rather than typed per case.
+* `hscc-cluster/tests/test_hermes_gap_single_posture.py` — this leg's own guard, 11
+  tests: one owner per leg, the roster block pinned in both directions, the
+  collection-time flag shape dead, every real-hermes case gated before it touches it,
+  stub-only cases deliberately NOT gated, and the probe's answer compared against a real
+  import. It sweeps `hscc-cluster/tests` only; `hscc-api`'s and `hscc-roles`' guards stay
+  theirs (t_0fd2c149's rule, kept by t_74141b24 and here).
+- **iOS Ad Hoc releases install directly from GitHub Pages.** `ios-app/scripts/release_adhoc.sh <version>`
+  archives the four targets with Xcode's automatic signing (the account signed
+  in under Xcode → Settings → Accounts; an App Store Connect API key remains an
+  optional `ASC_*` override), exports a `release-testing` IPA, and publishes it
+  to a non-latest `ios-v<version>` release. `publish_pages.sh` generates Apple's
+  OTA `manifest.plist` (a plist, not JSON), `index.html` and 57/512/1024 px
+  icons into the `gh-pages` branch under `/ios/`, keeps a versioned manifest
+  archive, and enables Pages through `gh api` idempotently. The install page
+  carries the full step-by-step instructions (device registration → Safari →
+  install → widgets/Live Activities → updates) and troubleshooting.
+- **The OTA manifest generator is tested.** `ios-app/scripts/make_manifest.py`
+  emits the Apple `items/assets/metadata` shape with the release asset URL and
+  matching bundle id / `bundle-version`; `scripts/tests/test_ios_manifest.py`
+  pins the plist shape, URLs and version fields. `ios-app/INSTALL.md` is the
+  tester-facing copy; `ios-app/RELEASE.md` is the maintainer runbook.
+- **`ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` — the running-cards
+  widget: what is moving, who is moving it, and for how long.** The phone answer
+  to `hscc cards monitor --live`, whose panel header is
+  `board · card · worker` + run time (`hscc_daemon/cards_live.py`); the widget
+  keeps those three fields and the one age the payload can actually support.
+  Rows come from `GET /v1/kanban/running`, not `/v1/cards` — §8.3's rule and
+  §5.4's measurement (8 rows cost 81,855 B from `/v1/cards`, 98.6 % discarded,
+  against ~2 KB for the same rows already projected server-side). Paired with
+  `GET /v1/kanban/blocked` as §5.4's "failure rows", so an empty running list
+  can be told apart from a jammed fleet: **two requests per refresh, exactly
+  §2's ceiling**, run in parallel. The failure read failing nulls one number
+  (`blocked —`), it never fails the surface the rows came from.
+  Rendered across `systemSmall` (2 rows), `systemMedium` (4, with board),
+  `systemLarge` (8 = the stored cap), and the three accessory families
+  (§5.4's per-family row/field budget). Age is minutes since `started_at`
+  (ISO-8601 UTC from `kill_switch._started_iso`, parsed with and without
+  fractional seconds), computed once per refresh; the route carries no heartbeat
+  field, so a row never renders the heartbeat age `--live` also prints, and an
+  unparseable `started_at` draws `—` rather than `0m`. §6 rule 1 end to end:
+  `runningCount`/`blockedCount` are optional, `nil` is "this refresh was not
+  told" and draws `—`, `0` is "the server counted none". **A blind read cannot
+  render an idle board**: a 2xx with no `tasks` array is
+  `.decoding`, not an empty list, and with no projection `runningText` returns
+  nil so no zero exists to draw — every family then shows
+  `exclamationmark.triangle.fill` in `Theme.Semantic.bad` with
+  `WidgetDataFailure.shortLabel`/`.operatorLine`, and the stale state shows the
+  rows *plus* their age *plus* why this refresh did not answer, in `warn`. The
+  setup invite is checked before any failure or stale state in every family
+  body (audit-3, as `widget_view_dispatch_check.sh` enforces for the cluster
+  widget). Storage is the projection only — five scalars per row, no `body`, no
+  path, no address, no token — keyed fleet-wide, through `SharedStore.suite`.
+  Registered in `HSCCWidgetsBundle` and listed in `project.yml`; the shared
+  per-surface cadence is not honoured because `WidgetSurfaceKind` has no case
+  for this surface (a `SharedStore.swift` + config-screen change, another card's
+  file set), so it uses a conservative 15 minutes. Nothing was run on a device.
+- **`macos-app/` — a menu-bar-only macOS client (part 1: project + app).**
+  The new XcodeGen spec targets macOS 14+, uses the parallel `com.hscc.mac`
+  bundle id, and reuses the iOS app's `Sources/Shared` files **by path** — the
+  same GET-only `WidgetDataClient`, App Group connection store, Keychain token
+  and multi-address `HostFailover` loop, with no copied client and no new
+  backend route. `HSCCMac` is `LSUIElement` (no Dock icon): a `MenuBarExtra`
+  carries the monochrome block-H template mark plus an optional short stat
+  (running-card count or nodes-up/total), and its dropdown shows cluster state,
+  nodes up, models served, running cards (title · worker · age), board totals
+  (todo/ready/running/blocked/done), the project summary, and
+  Settings/Refresh/Quit. The Settings scene reuses the existing saved-cluster
+  store and per-cluster Keychain tokens, adds the menu bar stat, refresh
+  cadence, `SMAppService` launch-at-login, and a placeholder Appearance
+  section. The macOS `AppIcon` set is rendered from
+  `ios-app/assets-master/appicon-*.svg` by `scripts/make_appicon.sh` (never
+  hand-dropped), while `MenuBarIcon.imageset` carries the H alone as a
+  template-rendered SVG.
+- **`macos-app/scripts/build_check.sh` + `actool_icon_check.sh`** compile the
+  exact `project.yml` source set against the macosx SDK with the iOS gate's
+  0-errors/0-warnings rule, and prove the asset catalog resolves `AppIcon`.
+  `.github/workflows/app-build-checks.yml` runs the macOS gates and the iOS
+  gate (announced skip when the runner's iOS SDK is below the project's iOS 26
+  deployment target).
+- **`ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` — the projects surface:
+  one widget file, three families, one read.** `GET /v1/projects` is §3 row 1 of
+  `WIDGET_DATA_CONTRACT` and its verdict is `reuse` (1,854 B for 18 projects), so
+  the widget fetches through `WidgetDataClient.projects()` and draws
+  `{name, board}` — the two keys §4.1 says a family can render — at the §5.1
+  depths: small the count plus 3 names, medium 6 rows with their boards, large 8
+  rows with the board label. The read goes through `WidgetData.read`, so this
+  surface gets the same stale-while-error rule as every other extension rather
+  than a fourth hand-rolled one: `.live` renders rows, `.stale` renders the rows
+  it kept with their age and the short label of the failure that caused it,
+  `.failed` renders `failure.shortLabel`/`operatorLine`, and `.notConfigured`
+  renders the setup invite — checked first in all three families, so an
+  unconfigured app can never claim "can't reach the cluster" (t_5c554c5b).
+  **The project is chosen via the widget's own configuration**: a
+  `WidgetConfigurationIntent` whose option list comes from an `EntityQuery`, live
+  from the cluster when it answers and from the stored projection when it does
+  not, with a `All projects` sentinel that folds to "no filter" before any view
+  sees it. A project that was renamed or deleted drops out of the list and the
+  widget says so (`No project "x"` / `It is not on this cluster any more`)
+  instead of quietly widening the scope back to the full list.
+  **What it refuses to show is the other half of the deliverable.** `repo` is an
+  absolute path on the operator's machine and 58% of the array's bytes (§4.1), so
+  it is not declared in `ProjectLite` and cannot be decoded; and the rows are
+  persisted through a separate `ProjectRow`/`ProjectsSnapshotStore` pair rather
+  than the response type, so the App Group write cannot widen to a third field if
+  the payload grows one — 50 rows stored, dated, and nothing else (§7). Per-project
+  card counts are deliberately absent: no route gives them (`done` needs
+  `?include_archived=1` at 8.6 MB, `/v1/cards?status=done` answers zero, §4.2) and
+  §5.1 assigns that pairing to the board-status card and §6's counts block "rather
+  than invent a third read", so a row carries its board rather than a number this
+  app cannot get. The count a family prints comes from the rows it drew, so the
+  number and the list under it cannot disagree. Cadence is the contract's 5-minute
+  widget default; the surface is not in the `WidgetSurfaceKind` cadence/Active
+  registry yet, and the comment at `ProjectsTimelineProvider.refreshMinutes` says
+  exactly what to change when the config-screen slice adds it.
+- **`ios-app/scripts/projects_widget_check.sh` — 59 assertions, 45 of them
+  executed against the committed widget file** (compiled for macOS with the real
+  `WidgetDataClient`/`SharedModels`/`SharedStore` and one UI-token stub, no
+  network, no device). It asserts the §5.1 family depths off
+  `ProjectsEntry.rowLimit(for:)`, that `WidgetData.read` reaches the widget with
+  a real snapshot present and still refuses to render `.notConfigured` as stale
+  data (t_5c554c5b, now proven at the surface rather than only in the client's
+  own gate), that `.stale` and `.failed` do not share an accessor (a stale entry
+  draws rows; only a failure draws the error pane), that `scope(_:to:)` returns
+  EMPTY for a selected project that is gone instead of widening back to the full
+  list, and — the §7 one — that a payload decoded with `repo` and `speak`
+  present produces stored bytes containing neither, and no absolute path. The
+  rest are structural greps: no `/v1/` route literal in the widget file, no
+  legacy nil-returning `get(`, the App Group suite touched on exactly two lines,
+  both inside the projection store, and all three family bodies branching
+  unconfigured → failure → empty in that order.
+- **`hscc api` can listen on several addresses at once.** `--bind <ip>` is
+  repeatable and combines with `--tailscale`, so one process serves the same
+  port, token and handlers on the LAN and the tailnet (first `--bind` is the
+  primary). Default stays loopback; `0.0.0.0`/`::` are refused per address and
+  every explicit address must be an interface on this host. A failed non-tailnet
+  bind fails the whole start (earlier listeners are closed), while a tailnet
+  bind with Tailscale down leaves the others serving and is reported by
+  `hscc api status`. `install-service` carries all the flags into the launchd
+  unit, the QR payload adds a `hosts` array (legacy `host` stays primary), and
+  `~/.hscc/api-state.json` records the runtime addresses with the same
+  back-compatible `host` field.
+- **`ios-app/Sources/HSCC/ClusterHealthActivityDriver.swift` — the cluster-health
+  Live Activity now has its feeder, and a surface of its own in Settings.**
+  `t_0120475a` shipped the attributes, the Island/Lock-Screen rendering and the
+  launch sweep, and left the bubble unfed on purpose: an Active toggle and a
+  cadence need a `WidgetSurfaceKind` case, which is this card's file set. The
+  driver is shaped like `MonitorActivityDriver` — the one Live Activity feeder
+  already proven on this app — so the two cannot drift in lifecycle: a
+  foreground poll loop on the settings cadence, a `BGAppRefreshTask`
+  (`com.hscc.ios.clusterhealth.backgroundRefresh`, its OWN identifier because
+  the two surfaces have independent cadences and one identifier would let one
+  surface's wake push for the other), re-armed on every background entry, gated
+  on the launch handler being installed first so no `submit()` can race it into
+  the fatal `NSInternalInconsistencyException`, and `staleDate` at three refresh
+  cycles so a force-quit freezes the bubble into "Stale" rather than letting it
+  go on claiming the fleet is serving.
+  It reads exactly two routes, both already on the §3 allowlist, both through
+  `WidgetData.read(using: WidgetDataClient.makeIfConfigured(), lastKnown:)` so
+  stale-while-error stays one rule rather than a fourth: `GET
+  /v1/autodown/status` for the serving state and `GET /v1/cluster/monitor` for
+  the tally. The last-known payloads are kept **in memory only** — §7 keeps the
+  activity's content out of the App Group, and a bubble that outlives the
+  process is reconciled by the sweep, not by a snapshot.
+  **What it decides is nothing.** Every word, count, label and colour comes from
+  the sliced `ClusterHealthProjection` + `ClusterHealthReading` rules; the
+  driver's own choices are scheduling ones (when to poll, whether to push, when
+  to end). A push is refused while `signals.isEmpty` — exactly the condition the
+  launch sweep ENDS a bubble for — so the feeder and the sweep cannot disagree
+  about whether a bubble should exist. The Active toggle lives here and only
+  here: `ClusterHealthActivitySweep` still consults no settings store, which is
+  what keeps its rule pure enough for the gate to execute it (the monitor
+  driver's settings-reading sweep cannot be gated, and that half was
+  deliberately not copied).
+  `WidgetSurfaceKind.liveActivityClusterHealth` (`"liveActivity.clusterHealth"`)
+  is the settings surface — Active, cadence, and one content section. The node
+  tally is the only optional section: the serving state is this activity's
+  headline, every region draws from it, and offering it as a toggle would let an
+  operator switch a section off and produce the empty bubble the sweep deletes —
+  a settings change should never be what removed their surface.
+- **The HSCC Monitor widget now reaches the Home Screen small size and all
+  three Lock Screen families.** `MonitorViews.swift` offered only
+  `systemMedium`/`systemLarge`; it now also registers `.systemSmall`,
+  `.accessoryInline`, `.accessoryCircular` and `.accessoryRectangular`, and the
+  dispatcher names every family. The compact layouts draw only numbers the
+  medium view already has: the small tile is the state line plus the first
+  node's CPU/RAM/GPU (or the daemon-host strip when the node section is off),
+  inline is that node's CPU and GPU, circular is fleet CPU as a gauge, and
+  rectangular is the node label plus CPU/MEM. No new route and no second fetch.
+- **The accessory refresh spends nothing on the daemon-host half.** The
+  provider's fetch is now family-aware (`fetchEntry(family:)`): the two entry
+  points pass `context.family`, and `WidgetFamily.showsDaemonHost` refuses the
+  `/v1/daemon/host` request before it is sent for the Lock Screen families,
+  which draw no host block (the same positive-list decision `ClusterWidget`
+  uses for its board row). A no-host refresh also preserves the host half
+  already in `MonitorSnapshotStore` instead of overwriting it with nil.
+- **`ios-app/scripts/widget_view_dispatch/widgetMonitor.sh` is the monitor's
+  own surface check**, and `widget_view_dispatch_check.sh` now lists it in the
+  manifest. It proves the six-family registration and dispatch, the one-step
+  `!configured || paused` gate in every family body, the accessory
+  `shortGateLabel` invite-first copy, the compact families' shared
+  `headlineNode`/`averageCPU`/`inlineLine` rules, the exactly-two read budget,
+  and the family-aware host refusal's position before the request.
+- **`ios-app/Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift` —
+  the running-cards Live Activity: Dynamic Island + Lock Screen.** The phone
+  form of `hscc cards monitor --live`'s panel header — board · card · worker ·
+  run time — for the whole fleet at once. Dynamic Island: the cards glyph
+  leading, the count trailing (`!` for a read that produced nothing, `—` for a
+  subset with no server count), the glyph alone minimized, and the expanded
+  region with headline + a `stale · <why>` line + the pushed age + up to three
+  rows; Lock Screen: the same header plus the row list, longest-running first.
+  The content state carries the same five fields the running-cards *widget*
+  stores (board slug, card id, title, worker, status, minutes) and nothing
+  else — no card prose, no workspace path, no branch, no address, nothing that
+  could carry a secret into an extension process.
+  Read-only by construction: a Live Activity is push-only, so this file renders
+  what the app pushes and never fetches, and it draws no column for anything
+  the kanban routes do not send.
+  `Sources/Shared/CardsRunningActivity.swift` holds the attributes and, beside
+  them, the two pure rule blocks the rendering forwards to:
+  `CardsRunningReading` (headline / count / blocked / age) and
+  `CardsRunningOrphanRule` (the launch-sweep decision). Those rules own one
+  promise the whole pivot rests on — **a blind read never renders as an idle
+  board**: a read that answered nothing leads with its failure label and can
+  produce no `0 running`, and rows that are a subset with no server `count`
+  render `—` rather than their own number.
+  `Sources/HSCC/CardsRunningActivitySweep.swift` runs the matching re-hydration
+  sweep at `didFinishLaunching`, beside the monitor's, so the bubble a
+  force-quit strands is ended on the next launch instead of ageing forever.
+  Deliberately NOT in this slice: the poll-and-push driver that starts the
+  activity. It needs a `WidgetSurfaceKind` case to honour the shared Active
+  toggle and cadence, and that means `SharedStore.swift` plus the widget/Live
+  Activity config screen — another card's file set. Borrowing the cluster
+  monitor's toggle would let switching off one surface silently stop the
+  other, so the surface ships renderable and swept, and unfed.
+- **`ios-app/Sources/Shared/SharedStore.swift` — `WidgetSurfaceKind` gains `widget.cardsRunning` and `widget.kanbanMonitor`, so the two widgets that were outside the settings registry become surfaces the operator can actually pause.** Both declared their cadence on their own provider (`CardsRunningTimelineProvider` carried `private static let refreshMinutes = 15` with a comment naming this exact missing case; `KanbanMonitorWidget` carried `refreshMinutes` on its entry from `defaultRefreshMinutes = 5` and its header said it "is never 'paused'"), which meant the cadence picker did not reach them and the only lever the operator had was pulling the widget off the Home Screen. Both are `isLiveActivity == false`, so the registry derives the shared 5-minute widget cadence for them and `setting(for:)` fills an absent entry with ON/5 — adding a key cannot silently blank a live widget. `availableSections` is the EMPTY set for both, on the same ruling t_09cd8abf recorded for the board-status tile: each draws one dataset with nothing optional inside it, so every toggle that could be offered would either empty the surface or do nothing.
+- **`ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` — the projects surface
+  now works on the Lock Screen.** `supportedFamilies` gains
+  `.accessoryInline`, `.accessoryCircular` and `.accessoryRectangular`, so the
+  same one-read entry draws: an inline line that counts the unfiltered list
+  ("3 projects", or "1 project") or names the scoped project; a circular count
+  of the projects in the entry (a dash, never `0`, when the read returned
+  nothing); and a rectangular pane with up to three project names and their
+  board as the short status. The entry gains the `shortGateLabel` the prior doc
+  comment anticipated, with the setup invite checked before the paused copy, so
+  an unconfigured device reads "Set up in HSCC" and a scoped pause can say
+  "radio · paused" inside the Lock Screen's ~25-character budget. Stale rows
+  stay warn-coloured in the accessory families and paused entries still draw a
+  label rather than a count, keeping the existing false-zero rule.
+- **`ios-app/scripts/projects_widget_check.sh`,
+  `ios-app/scripts/projects_widget_check/main.swift` and
+  `ios-app/scripts/widget_view_dispatch/widgetProjects.sh` — the gates expect
+  six families.** The dispatch surface call drops its `home-screen-only` mode
+  and requires five gated bodies, matching small/medium/large/circular/
+  rectangular (inline routes through the entry's `inlineLine`); the structural
+  counts move from 3 to 5 for the gate step and 3 to 4 for the failure/empty
+  branches, and the family assertion now pins the three accessory cases. The
+  executed harness adds section 9 over the real entry: inline count/name/empty/
+  failure/long-name fallback, invite-first `shortGateLabel`, nil circular
+  numbers for empty and failed reads, and the rectangular three-row cap.
+
+### Changed
+- **"Test connection" now tests EVERY address of the cluster.** Both apps call
+  one shared `ClusterConnectionTest` (`ios-app/Sources/Shared/ConnectionAddressProbe.swift`)
+  that probes the primary and every fallback concurrently with one
+  `GET /v1/ping` each, under the existing per-attempt timeout. The result keeps
+  the operator's order and gives one row per address: ✓ with latency when the
+  ping decodes and reports ok, or ✗ with a short reason (timeout, refused, DNS,
+  TLS, token rejected, wrong version). The overall line is
+  "Connected — n of m addresses reachable" when at least one address works, and
+  succeeds/fails exactly like failover does. A successful test remembers the
+  fastest working address as the App Group's last-working host, so widgets and
+  the next request start on the best measured link.
+- **The board status widget now has a real settings surface — Active toggle and
+  cadence — in the app's "Widgets & Live Activities" screen
+  (`ios-app/Sources/Shared/SharedStore.swift`, `Sources/HSCC/Views/ConfigView.swift`,
+  `Sources/HSCCWidgets/BoardStatusWidget.swift`).** The widget shipped (PR #319)
+  with a hard-coded quarter-hour cadence and no way to pause it, because
+  `WidgetSurfaceKind` had no case for the surface and adding one means the shared
+  store plus the config screen — a second file set. It now has one:
+  `case widgetBoardStatus = "widget.boardStatus"`, read by
+  `BoardStatusTimelineProvider` exactly the way `ClusterWidgetTimelineProvider`
+  reads `.widgetCluster`. Two behaviours, both the shipped precedent's: an
+  **Off** cadence (0) yields `policy: .atEnd` rather than scheduling an instant
+  refresh loop, and a **paused** surface returns a `paused` entry *before* the
+  client is built — zero requests, no live counts, no last-known snapshot, no
+  failure pane — drawing "Paused in Settings" in every family (a dash and the
+  label `hscc · paused` where there is no room for a pane). A paused widget that
+  kept drawing its last-known numbers, or went blank, is the failure
+  `ClusterEntry.paused` exists to prevent.
+  **The default is ON at the shared widget cadence (5 min), not the parent's 15.**
+  Deliberately: `AppGroupWidgetSettings.setting(for:)` fills an absent surface
+  with the widget defaults, so a device that never opened the settings screen
+  keeps rendering, and adding a registry key cannot silently pause a widget that
+  is already on someone's Home Screen.
+  **`availableSections` for this surface is the empty set**, and that is a
+  decision, not an omission: the widget draws one dataset — five counts for one
+  board — and nothing else, so any section toggle here would either empty the
+  widget or do nothing, and a toggle that does nothing is a lie in the settings
+  UI. `WidgetSurfaceEditor` therefore hides its whole "Show Content" group when a
+  surface declares no sections, so the screen offers no dead choice. (The
+  cluster and monitor surfaces keep their toggles; they consume them.)
+  The config screen needed no new row logic — its rows are already
+  `ForEach(WidgetSurfaceKind.allCases)` over the shared `WidgetSurfaceEditor`;
+  this adds the display metadata (name, and the same SF Symbol the widget draws
+  in its own header so the row and the widget read as one thing) plus the empty
+  section guard.
+  Two gates changed with it, both because they transcribed a fact instead of
+  reading it: `widget_settings_check.sh` asserted `defaults.surfaces.count == 4`,
+  so a fifth surface reddened the gate, and now reads the count off
+  `WidgetSurfaceKind.allCases` — plus executed cases for the new key (pause and
+  Off survive the encode/decode the extension performs; an install that has never
+  seen the key still defaults ON at 5 min). `widget_view_dispatch_check.sh`
+  covered only the cluster widget's dispatch; it now also proves this widget's
+  five live-data bodies gate on `!configured || paused`, that the paused decision
+  lands *inside* `entry(for:surface:)` before the client exists (so "a paused
+  surface sends zero requests" is measured, not claimed), and that the cadence
+  rule holds — by slicing `nextRefreshDate` out of the committed source by
+  `GATE-SLICE` marker and executing it on the macOS SDK, so the Off branch (the
+  one that becomes a refresh loop if it is wrong) is a run assertion and not a
+  comment. `project.yml` is untouched: no file added or deleted. Nothing was
+  built or run on a device or simulator.
+- **`macos-app/Sources/HSCCMac/MacSettingsView.swift` — the Appearance
+  placeholder is replaced by the shared Appearance editor.** The Settings
+  window is now Menu Bar / Clusters / Appearance. The Appearance tab embeds
+  `WidgetAppearanceView()` from the iOS app by path, so the macOS window offers
+  the same one global style, per-surface override with a real "Use global"
+  toggle, presets, colour pickers, typography/density controls and live
+  preview. `WidgetAppearanceView` gained a `#if os(macOS)` shell (sidebar +
+  detail, because a Settings window has no navigation stack) and an AppKit
+  colour conversion; the editors and preview below the shell are unchanged
+  iOS code. The surface display names/icons moved from `ConfigView.swift` to
+  `WidgetSurfaceLabels.swift`, compiled into both apps, so the two Settings
+  screens cannot grow separate lists. `WidgetSettingsStore` and
+  `WidgetAppearanceView` are compiled into `HSCCMac` by path.
+- **`macos-app/Sources/HSCCMac/MacSettingsView.swift`,
+  `DashboardView.swift`, `HSCCMacApp.swift` — settings writes reload both
+  surfaces.** The app now owns one `WidgetSettingsStore`, injects it into
+  Settings, and every cluster save/switch/delete calls
+  `WidgetCenter.shared.reloadAllTimelines()` and refreshes the menu bar
+  dashboard. Grouped appearance writes already reload from the shared store;
+  the settings window observes the same registry so an open dropdown reflects a
+  cadence or style edit immediately, and the dropdown refreshes when it opens
+  rather than waiting for the next menu bar tick.
+- **The board status widget's count rules moved to
+  `ios-app/Sources/HSCCWidgets/BoardStatusReading.swift` (Foundation only).**
+  `BoardStatusWidget.swift` imports WidgetKit + AppIntents, so `build_check.sh`
+  can only ever *compile* it and nothing in `ios-app/scripts/` could run a line of
+  it — the exact shape under which a widget ships a confident zero with every gate
+  green. `BoardStatusSource`, `BoardStatusProjection` (with `value(for:)`),
+  `BoardStatusSnapshotStore` and the interim read rules now live in their own file
+  as `BoardStatusReading` static funcs, and the widget delegates to them: the
+  timeline provider returns `BoardStatusReading.interim(stale:blocked:boardSlug:)`,
+  the tile grid, the `large` rows and the circular dial all draw their numbers
+  through `BoardStatusReading.numberText`, and the tile list is
+  `BoardStatusReading.statuses`. No rule changed — this is a move, not a rewrite —
+  and the same split already carries the cluster widget (`ClusterWidgetMetrics.swift`).
+  Two disclosed touches beyond the move: the snapshot store's two preference keys
+  went internal so a gate can capture/restore the real App Group suite instead of
+  leaving operator state behind, and the three `?? "—"` number sites collapsed into
+  `numberText`, so `—` versus `0` is now one rule a gate can execute rather than
+  three literals it can only grep.
+- **The two platform tags become one.** Releases use `apps-v<version>` with
+  both assets; `ios-v*` and `macos-widgets-v*` still work for a standalone
+  platform run through `HSCC_RELEASE_TAG`.
+- **The iOS release identity is fixed.** The release path defaults
+  `HSCC_BUNDLE_PREFIX` to `ro.parsec.hscc`, the prefix 1.0.0 actually shipped,
+  so a release cannot silently move the bundle id or App Group. macOS keeps
+  `com.hscc`.
+- **The Homebrew cask declares `auto_updates true`** because Sparkle updates
+  the app itself; its version and sha256 are still bumped on every release.
+- **The per-board kanban-progress Live Activity now has a Settings row — pause,
+  cadence and scope — and the settings screen is gated to keep covering every
+  surface (`ios-app/Sources/Shared/SharedStore.swift`,
+  `Sources/HSCC/Views/ConfigView.swift`,
+  `Sources/HSCC/BoardProgressActivityDriver.swift`,
+  `scripts/widget_settings_check.sh`).** The audit on `main` found the ten
+  older surfaces already listed. A sibling card landed
+  `BoardProgressActivityAttributes` in parallel and the rebase exposed the
+  actual gap: the newest Live Activity had no `WidgetSurfaceKind` case, so it
+  could never appear in Settings. It now has one,
+  `case liveActivityBoardProgress = "liveActivity.boardProgress"`, with the
+  row name "Board Progress Live Activity" and a bar-chart glyph that resolves.
+  `BoardProgressActivityDriver` is the entry's only consumer, so the controls
+  are not decorative: Active off suppresses a start and ends a bubble already
+  up, Off (0) keeps the bubble but schedules no refresh, and the stored
+  cadence replaces the old hard-coded 5 minutes in both the foreground poll
+  loop and the BGAppRefreshTask (the default for an install that never opened
+  Settings stays 5 minutes). The board it watches still comes from the Board
+  screen's own start action, not the settings blob. Sections are empty on
+  purpose: four counts from one board projection, nothing optional, so the
+  editor shows no content toggles. Scope stays offered because the surface is
+  per-board, matching the other Live Activity rows. No new surface kind or
+  scope kind was invented.
+  The guard itself is new: `widget_settings_check.sh` now derives the shipped
+  list from `HSCCWidgetsBundle` and the Live Activity extensions'
+  `ActivityConfiguration` declarations, then requires every entry to have a
+  registry case, both display-metadata arms in `ConfigView`, and a registry
+  read on the widget/driver side; it also pins the screen's
+  one-row-per-surface and shared-editor shape. Before the rebase the list was
+  6 widgets + 4 Live Activities with no row missing; after it, 6 + 5 with the
+  board-progress bubble added.
+- **`ios-app/scripts/widget_view_dispatch_check.sh` is now a thin aggregator; the
+  checks live one file per widget surface.** It had become a single append-only
+  program that every widget-registry card added its own numbered checks to, so
+  any two concurrent widget cards collided in it by construction — PR #341 and
+  PR #344 conflicted there in all three commits of #341's rebase, and the
+  `CONFLICTING` badge that collision produced generated a rebase card that was
+  void on arrival. A conflict in a *test* file is also the one most likely to be
+  resolved by taking the wrong side. The harness is now
+  `ios-app/scripts/widget_view_dispatch/<WidgetSurfaceKind case>.sh` — one file
+  per surface (`widgetCluster`, `widgetBoardStatus`, `widgetKanbanMonitor`,
+  `widgetCardsRunning`, `widgetProjects`) — plus `common.sh` (the `bok`/`wok`/
+  `bfail`/`wbad` verdict helpers, the shared `widget_surface_gate` procedure, and
+  the macOS SDK resolution, each declared once) and a `MANIFEST` list in the
+  aggregator. **Adding a surface is one new file and one manifest line; nobody
+  appends to the aggregator again.** The manifest carries names and no check
+  counts, because a transcribed count reddens a healthy gate the day a neighbour
+  adds a check.
+- **The checks moved verbatim.** Each moved region was extracted from
+  `c270ba84` with `sed` rather than retyped, and the moved ranges diff clean
+  against the original line ranges, so no assertion was weakened, dropped or
+  "simplified" in the move — including the `awk` region programs and the
+  END-ANCHORED `GATE-SLICE` marker matches, which are the parts a hand-copy is
+  most likely to soften. `scripts/widget_view_dispatch_check.sh` takes no
+  arguments and exits 0 only when every check passed, exactly as before, and a
+  fully green run prints **byte-identical** stdout to the pre-split harness.
+  `widget_view_dispatch/references/check-inventory.md` is the inventory the split
+  was checked against, as a point-in-time record at `c270ba84`: which check
+  belongs to which surface, the line range it occupied, and the verdict text it
+  prints. It is a record, not a tally to keep in sync — the run prints its own
+  verdict lines and fails on a miss.
+- **Two guards the append-only file could not have.** A surface named in the
+  manifest whose file is missing is a red run, and a `*.sh` in the surface
+  directory that is not in the manifest is a red run — the second one closes the
+  new failure mode this layout could otherwise introduce, a check added in a file
+  no one ever executes.
+- **Two deliberate behaviour deltas, both on the red path only.** A hard failure
+  inside one surface (the cluster surface's source-order regression, a missing
+  subject file, a harness that will not compile) no longer aborts the remaining
+  surfaces — each surface is a child process, so the run continues and still
+  exits non-zero, which is strictly more diagnostic. And the final banner no
+  longer lies: pre-split, a failing board-status check set the exit status to 1
+  while the widget section went on to print `WIDGET SURFACE GATE CHECK PASSED`,
+  so a red check wore a green banner; any failing surface now prints the `FAILED`
+  banner. Ten negative tests were run against the aggregator — a body losing the
+  paused half of its gate step, a cadence read moving off the shared registry,
+  the cadence `Off` branch scheduling again (an EXECUTED assertion, which is what
+  proves a child's non-zero exit is not swallowed), a `GATE-SLICE` marker grown
+  a suffix, an accessory family appearing in a `home-screen-only` surface, the
+  unconfigured-first order regressing in the real source, a paused-factory literal
+  drifting, both manifest guards, and a green re-run after every subject was
+  restored (each restore proved by `sha256`, never by `git checkout --`, which
+  restores from the index and can silently revert an unstaged edit).
+- **Untouched:** every file under `Sources/` (this is a test-harness refactor with
+  zero product-code change, so `project.yml` and `scripts/generate.sh` are
+  untouched), `widget_settings_check.sh` (same append-only smell, deliberately a
+  separate card), `merge_base_check.sh`, `sf_symbol_check.sh`,
+  `projects_widget_check.sh`, and `board_status_widget_check/dispatch_order.py`.
+- **`.sessions` is now a mapped alias onto the app root and the drawer has no
+  "Sessions" row.** `AppDestination.sessions` keeps its case, carries `Home`'s
+  title and glyph, and `AppShell.normalized` sends it to `.home` — the same
+  convention `.clusterHub`, `.selfHeal`, `.boardHygiene` and `.fleetControl`
+  follow, so a stale caller lands on a real screen instead of routing to a view
+  that no longer exists. `Sidebar.swift` drops the row.
+- **The two screens that linked into the deleted views lose those entries**:
+  `ProjectDetailView` has no more "Session History" toolbar item and
+  `CardDetailView` no more "Files & diff" section — a navigation link to a
+  deleted view must not survive its target.
+- **The nav-graph walker still describes the code, not the other way round.**
+  The curated `expect("sessions", …)` plan is removed from
+  `UITests/NavGraphUITests.swift` and `UITests/NavGraphScreenTable.swift` is
+  regenerated with `scripts/nav_graph_screens.py emit` (17 → 16 drawer
+  screens); `nav_graph_screens.py check` is green. The card-detail walk now
+  proves the screen landed through the Card section's "Assignee" row — the
+  fixture card always renders it — instead of the deleted "Files & diff" link.
+- **`offline_cache_fix_check` no longer proves the offline cache through
+  `/v1/sessions`.** CASE 1 and the read-back case now ride
+  `/v1/kanban/stale?older_than=0`: the same single-shot query read through the
+  same `HSCCClient.get(path:queryItems:)` code path, on a route the cluster
+  widget and the operator notifier actually call. Proven against the live API
+  (read-only GETs), not just compiled.
+- **`ios-app/Sources/HSCC/Views/ConfigView.swift` + `ios-app/scripts/build_check.sh` — the two places that still named the dead activity.** The root's `rootDidAppear()` drops `SessionActivityDriver.sweepLeftoverSessions()` beside the surviving `LiveActivityManager.sweepLeftoverWakes()`: the cold-start orphan sweep moved out of the deleted `AppShell` into the root in t_9664a1c8, so the call and the file it calls had to leave together or `build_check.sh` would fail on an unresolved symbol in the root — the one file three sibling cards all have a named edit in. The monitor activity needs no sweep here: its `sweepLeftoverMonitors()` is owned by `NotificationsAppDelegate` / `HSCCApp`. `build_check.sh` also loses `HSCCLiveActivitySession` from its hard-coded target list at `:46`; CONSOLE_RETIREMENT.md §3 says the script "needs no edit (it parses `project.yml`)", which is true of its per-target *file sets* but not of its target *loop* — leaving the name there makes a removed target report `no sources found in project.yml` and fail the gate. Two deliberate non-deletions, both because CONSOLE_RETIREMENT.md §5's S10 was written assuming S2 (chat) had already landed and it has not: `Sources/HSCC/SessionEvent.swift` stays (`Views/StreamReplyWatcher.swift:121` still takes a `SessionEvent`, and `HSCCClient`'s session-history read still returns `SessionHistoryResponse`), and with it `SessionStreamCursor` / `StreamHello` / `StreamConnectionError`, which `scripts/reconnect_check.sh` and `scripts/ws_decode_check.sh` still compile and pass against. Retiring those four files and those two harnesses belongs to the slice that removes `StreamReplyWatcher`, not here.
+- **Widget and Live Activity views now render the operator's `WidgetStyle`.**
+  Every surface resolves its own style once at the configuration root
+  (`WidgetStyle.resolved(for:)`) and applies it through the environment:
+  Projects, Running Cards, Kanban Monitor, Board Status, Cluster and Monitor
+  widgets, plus the fleet-wake, monitor, cluster-health, running-cards and
+  board-progress Live Activities, including their Lock Screen and Dynamic
+  Island compact / expanded / minimal presentations. Backgrounds come from
+  `containerBackground` / `activityBackgroundTint`, text/accent/status roles
+  come from the style, and font design, weight and text scale apply to every
+  label. Density scales the shared spacing and corner tokens. Header and icon
+  switches are wired through the shared `widgetHeader` / `widgetIcon` /
+  `WidgetLabelStyle` modifiers.
+- **Lock Screen accessory families stay system-tinted.** Circular, rectangular
+  and inline complications apply only the font design/weight/scale and the
+  header/icon switches; their colours remain the system's. The Appearance
+  editor footer now says so.
+- **No hard-coded colours or fonts remain in widget / Live Activity views.**
+  Across the eleven view files the literal `Color(...)`, `.font(.system...)`,
+  `.hsccMono(...)` and `Theme.Semantic` / `Theme.Palette` / `Theme.cardStatusColor`
+  call sites drop from 457 to 0 (comments excluded).
+- **`ios-app/scripts/widget_style_check.sh` — new gate.** Fails if a widget or
+  Live Activity view uses a literal colour or system font, reads a Theme colour,
+  omits a registry surface's style resolution, applies style colours inside a
+  system-tinted accessory, or loses the style environment / header / icon
+  wiring. Widget backgrounds must come from `style.backgroundColor` and Live
+  Activity roots must tint from it. Also updated the projects widget harness
+  stub so it compiles the new style bridge.
+- **The cluster surface is two reads and `cluster/status` is not one of them.**
+  A refresh is `GET /v1/autodown/status` (the power state, which is the
+  headline) + `GET /v1/cluster/monitor` (every host the monitor sampled, with
+  its `error`, `sample` and `workloads`) — §2's budget of ≤2 requests per
+  surface. `/v1/cluster/status` is dropped: §4.4 measured it answering 39 B
+  `{"speak": ...}` with no `workloads` / `total_hosts` when the fleet is off,
+  and those keys are REQUIRED by `ClusterStatusResponse`, so on a down fleet the
+  read failed to decode and the tile said "Can't reach the cluster" about a
+  cluster the API had just reported DOWN. `/v1/cluster/monitor` degrades to a
+  decodable `{"speak": ...}` instead, and carries everything the dropped read
+  contributed.
+- **"Models served" counts distinct `cluster_id` values, not workload entries.**
+  The committed fixture is 4 hosts and 2 models — a tensor-parallel pair shares
+  one `cluster_id` across two hosts — so summing per-host workload lists would
+  have rendered "4 models" for a fleet serving two. Only `cluster_id` is
+  declared on the workload projection: `recipe` (an absolute path) and the
+  container names sit in that same object and §7 redacts them, and a key nobody
+  decodes is a stronger guarantee than a key nobody prints.
+- **Metrics are worst-node, and an unreported metric is absent, not zero.** GPU
+  util and both temperatures take the busiest / hottest host, because the mean
+  of that fixture is 48 % for a fleet with two GPUs pinned at 96 %. Nodes up /
+  total and the model count come only from hosts the monitor actually listed, so
+  a down fleet renders "No data" rather than `0/4 up` — and each metric token is
+  dropped when its value is nil, since a row of dashes in a small widget reads
+  as zeros. Heat bands match `MonitorMeter` (CPU warns above 85 %, everything
+  else above 90 %, both hot above 95 %) so a number and the monitor's bar agree.
+- **The board row is now conditional, and the section list grew.** The three
+  kanban reads behind it (running / queue / blocked, §5.3) are skipped for the
+  accessory families — no family that draws no board row pays for it — and for
+  an operator who switched the section off. `widgetCluster`'s
+  `availableSections` gained `"nodes"`, the canonical identifier the metric
+  strip and the counts line gate on.
+- **The widget's data layer moved to
+  `Sources/HSCCWidgets/ClusterWidgetMetrics.swift`** (projection, entry, heat
+  bands, text rules, the board-row decision). WidgetKit marks every `accessory*`
+  family `@available(macOS, unavailable)`, so the file that names them cannot be
+  compiled on the host at all — and the rules above are exactly the ones worth
+  executing. `ClusterWidget.swift` keeps the provider and configuration,
+  `ClusterWidgetViews.swift` keeps the layout.
+- **`ios-app/Sources/Shared/SharedModels.swift` is now the widget / Live Activity
+  payload vocabulary** — the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3,
+  ordered by dataset, each type anchored to the route and the section that sized
+  it. The narrowing is structural: a value that must never reach a surface or the
+  App Group container is declared nowhere, so it is never decoded. Gone from the
+  kanban envelopes: `boards[]` (264 B of board names, duplicated in two bodies),
+  `errors[]`, `older_than`, and running's `pid`/`host_local` — those two existed
+  so an operator could see which process a kill would stop, and every surface in
+  the pivot is read-only. `blocked`'s `why`/`comments` stay undeclared, so card
+  prose cannot reach an extension. `cluster/monitor`'s `output` table string
+  (54% of the body) is still not declared. Console-only fields the app *does*
+  still render (`ClusterWorkload`'s `tp`/`pp`/`container_id`,
+  `AutodownStatusResponse`'s `blocked_by`/`watchdog_*`/`force_armed*` family)
+  remain, each carrying a `RETIRE` marker naming the retirement slice and the
+  check scripts that take them, so the next card can see they are debt with a
+  due date rather than payload the widgets need.
+- **Two payloads that the five datasets needed and the file did not have.**
+  `ProjectsLite`/`ProjectLite` — `{name, board}` only, so `repo` (an absolute
+  path on the operator's machine, 58% of the projects array) and `topic` are
+  never decoded. `MobileSummaryResponse`/`MobileSummaryBoard`/
+  `BoardStatusCounts` — the §6 board-status counts, where **all six statuses are
+  required `Int`s**: a missing key is a bug and zero is a value, so a server that
+  omits `done` makes the decode throw and the surface keeps its last-known
+  snapshot, instead of rendering `done: 0` forever (the bug the client-side
+  derivation shipped). Degrade (no `boards` key), per-board `error` and 4 KB
+  truncation each decode and assert their own path; `openTotal` follows the
+  server's own `total − done − archived`.
+- **One node-identity rule instead of two.** `MonitorNode.displayLabel` (sample
+  hostname, else the address tail) and `MonitorNode.shortTail` now live on the
+  model in `Sources/Shared/`, matching `shortTail` in
+  `scripts/widget_datapath_live/template.swift`; `MonitorViews.swift` dropped its
+  private copy of the same rule. §7's redaction depends on there being exactly one
+  place that decides how a node is named.
+- **The row rules the contract binds are now on the envelopes**: `rows(limit:)`
+  caps what a surface draws and orders blocked/stale rows oldest-first (§5.3), so
+  no widget can invent a different sort while claiming to follow the contract.
+- **Two mirror harnesses deleted**: `scripts/shared_model_check.swift` and
+  `scripts/widget_kanban_decode_check.swift`. Each re-declared the shared structs
+  key-for-key, neither was wired to any `.sh`, and a mirror that quietly drifts
+  from the real model is precisely the false green `model_decode_check` exists to
+  prevent. Their ground is covered against the real types now.
+- **`ios-app/Sources/HSCC/Views/ConfigView.swift` — the projects row appears on the "Widgets & Live Activities" screen as "Projects Widget" with its own glyph.** `displayName` / `displayIcon` are the two switches a new surface must join (plus the two in `SharedStore`) or the build dies. The glyph is `folder.badge.gearshape`, deliberately not the bare `folder` the widget draws — that one belongs to a project ROW (`ProjectRowView` draws it once per project) and the settings row is the surface, not one of its rows — and it was resolved through the same `NSImage(systemSymbolName:)` call the gate uses before being written, because `folder.badge.list` (the obvious pick) does not exist at all and would have rendered a blank row that no gate could see until #341. No neighbour row in that list uses a folder glyph.
+- **`ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` — the provider reads `AppGroupWidgetSettings.load()?.setting(for: .widgetProjects)`, decides `!isActive` BEFORE building the client, and maps cadence 0 to `policy: .atEnd`; the entry gains a first-class paused state that every family draws.** A paused surface sends zero requests (WIDGET_DATA_CONTRACT §2's budget) and draws "Paused in Settings" — never its last-known rows, which is what a paused tile claiming 18 projects would be — and `nil` from the registry stays "the blob was never written", never "paused", so a fresh install still renders. `snapshot(for:)` reads the same entry, so the gallery previews paused as paused. Paused is a case of the existing `ProjectsStatus` enum rather than a second `paused` flag beside it (two representations of one state are two things that can disagree), and `configured` / `paused` on the entry are read off it; `gateLine` owns the copy and checks `configured` first, so an app that was never configured cannot read as "paused" (audit-3 / t_5c554c5b). `ProjectsSetupView` became `ProjectsGateView(entry:)` with two copies, and the three family bodies take `if !entry.configured || entry.paused` as ONE step — two branches is how a body gates the invite and forgets the pause. There is no `shortGateLabel` on this entry because `supportedFamilies` is small/medium/large: with no accessory family there is no complication with room only for a label, and a copy nothing can reach is one that rots (the ruling #341 applied to a glance case) — the gate below proves that absence rather than trusting it. `ProjectEntityQuery.candidates()` keeps its own read on purpose: that fetch is the operator opening the configuration sheet, not a timeline refresh, and pausing a surface governs what it does on its own schedule.
+- **Projects widget now reads the CLI's project truth, not a name/board stub.**
+  `GET /v1/projects` adds each registered project's `health`, board status
+  counts (`running`/`blocked`/`ready`, plus `done`/`archived`/`total`), newest
+  board activity and live orchestrator turn. The rows come from the same
+  `registry` + `project_health` calls as `hscc project list` and the same
+  archived-inclusive kanban read + `attach_orchestrators` pass as
+  `hscc kanban monitor`; the widget renders the counts and omits anything the
+  server did not send instead of printing zero.
+- **Widget route contract covers the extension sources.** The Swift-route gate
+  now parses `WidgetDataClient.swift`, every widget and Live Activity source,
+  and requires each `/v1/...` read to be registered on the server and named in
+  `hscc-api/docs/WIDGET_ROUTES.md`. A widget route with no server route fails
+  CI. `/v1/mobile/summary` is already on `main` (`d804d5fa`); the live 2.15.11
+  host predates it and answers 404, which the widget renders as stale/last-known
+  rather than zero.
+- **`ios-app/Sources/HSCC/Views/ConfigView.swift` — the app is now ONE screen: connection settings + widget/Live Activity configuration, read-only.** `SettingsView.swift` collapses into it (git records the pair as an R078 rename: the cluster list, host/port/token fields, Scan QR with its confirm-gated apply, Test connection, the notification toggles, `widgetsAndLiveActivitiesRows`, `WidgetSurfaceEditor` and the App-Group / token-save diagnostics all move byte-for-byte; after t_0f3f70e6 pruned its switch sites SettingsView held no console routing left to drop). `ConnectionBanner` moves in beside them from the deleted `ContentView.swift`, and the root keeps the app-lifecycle glue `AppShell` carried because the surviving surfaces depend on it: client seeding for `NotificationCoordinator` / `DeepLinkRouter` / `StreamReplyWatcher`, `ConnectionMonitor.reset()` on `connectionIdentity`, the cold-start `sweepLeftoverWakes` + `sweepLeftoverSessions`, the `onOpenURL`/Handoff intake with its honest link-error alert, and `.id(activeClusterID)` so a cluster switch rebuilds every field. Two things the root deliberately does NOT keep: the `OfflineSendQueue.sendHandler` seeding and its cluster-switch drop banner (queueing an orchestrator message is a mutation — §1.2 rule 2 — and the queue fails safe with no handler seeded, its file is retired by S2), and `navigationDestination(for: ProjectRoute.self)` (a `hscc://` link can no longer land on a project, card or board, because those screens are being deleted by the cards that own them). `shared_store_check.sh` is re-pointed at `ConfigView.swift` rather than deleted — its subject, the root rendering `settings.appGroupUnavailable`, survives the collapse, and deleting a check whose subject lives is the inversion of the dies-with-its-subject rule.
+- **`HSCCApp.swift`, `Views/ConfigView.swift`, `Views/ProjectsView.swift` — the three places that still wired the chat objects in.** `HSCCApp` drops the `unread` / `replyWatcher` `@StateObject` pair, the `init()` seeding that existed only so both shared ONE `ProjectUnreadCenter`, and the two `.environmentObject()` injections; `ConfigView` drops the `@EnvironmentObject replyWatcher` declaration and the `replyWatcher.setClient(client)` line in `seedClients()` (now two subsystems seeded, not three). A dangling `@EnvironmentObject` is a **runtime** crash, not a compile error, so declaration and injection had to leave in the same commit — that is why t_9664a1c8 had deliberately kept both. `ProjectsView` loses the `unread` environment object with its `unreadBadge`, and `ProjectOverviewView` loses the `lastReply` / `lastReplySection` pair that read the app's own persisted transcript. No other view declared either object (`Notify/` names `StreamReplyWatcher` only in comments, exactly as §5 S2 predicted, so `Notify/` is untouched).
+- **Four harnesses re-pointed, not retired — their subjects survive, they just no longer compile a deleted file.** `model_decode_check.sh`, `live_decode_check.sh`, `logs_redactor_check.sh` and `offline_cache_fix_check.sh` each carried `Sources/HSCC/SessionEvent.swift` in its `real_models` / `real_sources` list. For the last two that line was copy-paste boilerplate — neither harness mentions a session type anywhere — and `check_sources.sh` is blind to `scripts/`, so a stale entry there fails a gate no card body names. `live_decode_check/main.swift` also loses its `SessionHistoryResponse` decode line, and its hand-kept `let total = 35` denominator is now **derived** from a call counter instead of a literal every added or removed route had to remember to bump (`model_decode_check` prints 87/87 here, down from 89/89 — two checks, both in the deleted block). `HSCCClient`'s `before`-paging comment is re-worded: `sessionEvents` was the only producer of a `before` cursor, so that cache-suppression branch is now defensive rather than live.
+- **`ios-app/Sources/Shared/SharedModels.swift` is now wire payloads only**
+  (829 → 412 lines). Everything that is *stored* moved to `SharedStore.swift`;
+  everything that is *decoded* stayed, so the file no longer references the App
+  Group at all and the next slice (narrowing it to the five widget payloads)
+  has nothing shared left to break.
+- **`SettingsStore` reads container availability through
+  `SharedStore.containerAvailable`** instead of repeating
+  `containerURL(forSecurityApplicationGroupIdentifier:)` — one copy of the
+  canonical check, same behaviour.
+- **Five path-anchored harnesses re-pointed at the moved code**:
+  `shared_store_check.sh`, `notify_check.sh`, `widget_settings_check.sh`,
+  `snapshot_store_check.sh` and `first_run_check_settings.sh` (it compiles
+  `SettingsStore`, so it now compiles the new file too). The App-Group asserts
+  in `shared_store_check.sh` are directory-scoped over `Sources/Shared/`
+  rather than pinned to one file — a file-pinned grep stops covering its own
+  rule the moment a type moves, which is exactly what happened here.
+- **`macos-app/project.yml` — the generated Info.plists carry the release
+  version.** `CFBundleShortVersionString` is `$(MARKETING_VERSION)` and
+  `CFBundleVersion` is `$(CURRENT_PROJECT_VERSION)` for both `HSCCMac` and
+  `HSCCMacWidgets`, so the archive built by `release.sh` reports the cask's
+  version instead of a hard-coded `1.0`; release.sh fails if they disagree.
+- **`AppShell.projectRouteView` maps the `.chat` route to
+  `ProjectDetailView`.** `StreamingChatView` no longer exists, so an
+  `hscc://session/<project>` deep link or an in-app Chat tap now lands on the
+  project Overview instead of routing to a deleted view — the convention this
+  repo already follows for a retired screen (`.clusterHub`, `.selfHeal`,
+  `.boardHygiene`, `.fleetControl`). The Chat segment and its row retire with
+  the two-screen collapse.
+- **New app icon and a black/orange dark-only theme (operator request
+  2026-11-18).** The icon is now the operator's flat block letter H — a solid
+  black 1024 canvas with three `#FF5722` rectangles (left bar x 254–346, right
+  bar x 676–768, both y 241–745; crossbar x 346–676, y 447–539). All three
+  appearance masters were rewritten (`ios-app/assets-master/appicon-*.svg`),
+  light and dark carrying the black+orange art and tinted carrying a monochrome
+  white H so iOS can recolour it; `make_appicon.sh` regenerated the PNGs and
+  its size floor was lowered for the deliberately flat, much smaller render.
+  The in-app `HSCCMark` now draws the same block H instead of the retired
+  "Orbit" node motif, and the design docs record the supersession.
+  `Theme.swift` is now a simple black palette: `surface #000000`, raised
+  `#111111`, elevated `#1C1C1E`, white/muted-grey text, accent `#FF5722` with
+  black `onAccent` (6.64:1 — white on the orange is only 3.16:1), and subtle
+  `#2A2A2A` hairlines. Status keeps separate semantic colours retuned for
+  black: ok `#4ADE80`, warn `#FFC857`, bad `#FF6B6B`. The light palette and the
+  dynamic trait resolver were deleted; the app pins
+  `.preferredColorScheme(.dark)` and every target's Info.plist sets
+  `UIUserInterfaceStyle=Dark`. Both build-only `ThemeStub.swift` copies and the
+  widget/Live Activity surfaces use the same tokens/palette.
+- **One configurable bundle-id prefix for all iOS targets and their App Group.**
+  `HSCC_BUNDLE_PREFIX` (default `com.hscc`) now derives the four product bundle
+  ids and `HSCC_APP_GROUP: group.$(HSCC_BUNDLE_PREFIX).ios` in `project.yml`;
+  every entitlement and Info.plist reads that derivation. `SharedStore.AppGroup`
+  reads the group from the `HSCCAppGroup` Info.plist key instead of naming a
+  literal, so a team can release under its own reverse-DNS prefix without
+  editing Swift. The macOS target carries the same derived key because it reuses
+  the shared store.
+- **The App Group and release-config gates moved with the derivation.**
+  `widget_settings_check.sh` reconstructs its bare-executable suite shim from
+  the same `project.yml` prefix, and `notify_check.sh` imports Foundation for
+  the sliced `AppGroup` enum. `generate.sh` now verifies all four targets and
+  names the missing-team error for each of them.
+- **`ios-app/Sources/Shared/ClusterNodeTally.swift` — there is now ONE host
+  tally, and the cluster widget runs it too.** `ClusterFleet` (the cluster
+  widget's projection, `t_56b910c8`) and this activity's driver both ask
+  `/v1/cluster/monitor` the same question — how many hosts did the route list,
+  and how many of them answered — and were about to answer it with two
+  hand-written loops over `hosts`. Two loops is how one surface ends up calling
+  a fleet degraded while the other calls it healthy, so `ClusterFleet` now reads
+  `nodesUp`/`nodesTotal` out of `ClusterNodeTally.project` and the activity gets
+  `nodesDown` and the `.NNN` `downLabels` from the same call. The predicates are
+  still `MonitorNode.isUp` and `MonitorNode.displayLabel` (the file only counts
+  and filters by them), and the widget's existing nil rules are preserved
+  exactly: a degraded route (`json` absent) and an empty host list are both
+  "not told", never `0/0` (§6 rule 1).
+- **`ios-app/scripts/widget_settings_check.sh` — the surface count is read, not
+  remembered.** The script asserted `defaults.surfaces.count == 4`, so the
+  healthy act of adding a surface reddened a gate — the transcribed-count
+  failure mode this repo has now hit three times. It compares the defaults' keys
+  against `WidgetSurfaceKind.allCases` instead, which proves the stronger claim
+  (nothing missing, nothing invented) and cannot rot on the next case.
+- **`ios-app/Sources/Info.plist` + `project.yml` — `NSSupportsLiveActivities`
+  untouched, one new `BGTaskSchedulerPermittedIdentifiers` entry.** The plist is
+  generated from `project.yml`, so both are committed together (regenerated with
+  `xcodegen`, diff is the one string).
+- **`ios-app/Sources/HSCCLiveActivityMonitor/` — the monitor extension now
+  hosts two Live Activities, and the "one per target" rule is retired.** The
+  extension's `@main` is `HSCCLiveActivityMonitorBundle`, a `WidgetBundle`
+  declaring one `ActivityConfiguration` per attributes type;
+  `MonitorLiveActivity.swift` loses its `@main` with it. Three files in this
+  repo (this file's header, `project.yml`, `README.md`) asserted that a widget
+  extension body can contain only ONE `ActivityConfiguration`, which is why
+  wake/session/monitor were three targets. That is false on the iOS 26 SDK —
+  the bundle above compiles clean (0 errors, 0 warnings) under
+  `build_check.sh`'s own invocation — so activities added to the monitor family
+  now join this target instead of costing an extension, an entitlements file, a
+  bundle id and an embed dependency each. The wake activity keeps its own
+  target; nothing here undoes that split.
+- **`ios-app/Sources/HSCC/Views/ConfigView.swift` — the two new surfaces appear on the "Widgets & Live Activities" screen with their own name and glyph, and the "Show Content" group now appears only when the surface has sections to offer.** `displayName` / `displayIcon` are the only per-surface metadata the rows need (the list is `ForEach(WidgetSurfaceKind.allCases)`). Both glyph names were run through the same `NSImage` resolution the gate uses before being written, and neither copies its widget's header: the running-cards widget draws no glyph at all outside its failure banner and the monitor panel's headline is a Text of counts, so the pair had to be chosen to read as the surface AND to stay distinguishable from the rows above them — `rectangle.stack.badge.play` rather than the obvious `square.stack.3d.up`, because the board-status tile (main, #340) already owns that glyph two rows up, and two identical rows in one list are the same row twice at a glance. `displayIcon` is a `var … : String` switch read by `Image(systemName:)` in another file, which is the hole `sf_symbol_check.sh` documents, so its body is now extracted by that script's second pass like `AppDestination.symbol` already was — before this commit a typo there was a blank row and a console line, and no gate could see it. A surface that declares no sections no longer renders an empty "Show Content" group with a "choose which sections" footer promising a choice that does not exist.
+- **`ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` and `KanbanMonitorWidget.swift` — both providers read `AppGroupWidgetSettings.load()?.setting(for:)`, decide `!isActive` BEFORE building the client, and map cadence 0 to `policy: .atEnd`; both entries gain a first-class `paused` state and every family draws it.** A paused surface sends zero requests (WIDGET_DATA_CONTRACT §2's budget) and draws "Paused in Settings" — never live data, never its last-known numbers, never a blank. `nil` from the registry is "the blob was never written", not "paused", so a fresh install still renders. Each file gained a `paused` entry factory plus the gate copy the type owns (`gateLine`, `shortGateLabel` — which checks `configured` FIRST so an unconfigured device can never read as paused, audit-3 / t_5c554c5b). Eleven family bodies now test `!entry.configured || entry.paused` in ONE step (six in the monitor panel, five in running cards) and the two inline families route both states through the entry's own `inlineLine`, so no body can take the gate step for one state and skip it for the other. The setup panes became gate panes with two copies (`KanbanMonitorSetup` → `KanbanMonitorGateView(entry:)`, `CardsRunningInviteView` → `CardsRunningGateView(entry:)`; the invite's `compact` parameter went with it — every remaining caller passed `false` and the one that passed `true` was the ring, which now draws the label itself, so the parameter had a single value left). Each `accessoryCircular` draws the gate LABEL rather than a number or an em dash: a paused ring still showing a count claims something about the fleet that nothing was asked about (§6 rule 1). `CardsRunningEntry.Glance` deliberately gained no `.paused` case — the ring decides `paused` before it asks for a glance, and a case no body can reach is one that rots — while `showsFailureLoudly` does now say `!paused`, because a paused entry has no projection either and is not blind. The cadence decision in each file is one `nextRefreshDate(refreshMinutes:from:)` bracketed by a `GATE-SLICE` marker so the Off branch is executed by a gate instead of commented.
+
+### Removed
+- **`ios-app/Sources/HSCC/DebugHarness.swift` — the debug capture harness retires, and the tap-free navigation lane dies with it.** The `HSCC_DEBUG_FIXTURES` / `HSCC_DEBUG_SCREEN` seam was the only reason the `HSCCUITests` target, `nav_graph_check.sh`, `nav_graph_screens.py`, `capture_screens.sh`, `seed_fixtures.sh`, `nav_probe_drawer.sh` and `make_empty_fixtures.py` existed (CONSOLE_RETIREMENT.md §4.1, D3 = retire); all are deleted in the same slice, together with the every-call-site `#if DEBUG` fixture branches in `HSCCApp`, `HSCCClient.defaultSession`, `AppShell` (probe view, negative-test seam, fixture client bypass included), `CardsView`, `NotificationCoordinator` and the three Live Activity drivers. The two-screen app gets its own small UI-test lane as a separate card (§7).
+- **`ios-app/Sources/HSCC/Views/ApprovalsView.swift` (+`ApprovalBadge.swift`) — the approvals inbox, its board-hygiene sections and the pending-approvals badge poller retire with the console.** The new app is read-only: no approval surface survives (CONSOLE_RETIREMENT.md §1.2 rule 2). `ApprovalsIntent` + `ReviewQueueIntent` (the Siri approval/review voice surfaces) die beside them, as does `ProjectIntents.swift` (`AskOrchestratorIntent`, `ProjectStatusIntent`, `HSCCProject`, `SpeechSpeaker`); `AppShortcuts` keeps the two survivors (`ClusterStatusIntent`, `DispatchCannedCardIntent`). `.approvals`, `.opsHealth`, `.memory` and the merged `.boardHygiene` stay registered as mapped aliases onto the app root, Sidebar drops their rows, the Home dock drops the Approvals verb and the tile.
+- **`ios-app/Sources/HSCC/Views/MemoryView.swift` — the memory viewer retires, and its mutation round-trip with it.** `HSCCClient.deleteMemory`/`editMemory` were POSTs (rule 2), the `MemoryItem`/`MemoryListResponse`/`MemoryMutationResponse` structs, the `memories()` read (last caller gone) and the `memory_list`/`memory_delete` fixtures + `model_decode_check` blocks leave as one pair (struct + fixture + harness block, same commit). The searchable `ProfilePickerSheet` was NOT retyped: its bytes moved verbatim into `CreateCardSheet.swift`, its last consumer (the assignee field). `OpsView.swift` (escalations/daemon/verify console) goes in the same commit; `escalateRun` stays until the endpoint prune (S8).
+- **`ios-app/Sources/HSCC/Views/AutodownView.swift` + `Views/TemplateDetailView.swift` — the autodown console and the template detail screen retire.** All four autodown mutations (`POST /v1/autodown/enable|disable|wake|cancel`, confirm-gated — rule 2), the template dry-run (`GET /v1/template/preview/{name}`, its only caller was this detail screen) and the confirm-gated `POST /v1/template/apply` leave with their views, structs, fixtures and `model_decode_check`/`live_decode_check` blocks as one pair. `.autodown` (and its merged `.selfHeal` alias) stay registered as mapped aliases onto the app root; Sidebar drops the row. The `GET /v1/autodown/status` read, its shared struct and the `autodown_status` fixture STAY (widget + wake Live Activity sweep consume them). The Templates library survives as a browse-only list — `TemplateTopologyView` and `AppliedTemplateStatus` are its shared read-only parts.
+- **`ios-app/Sources/Shared/ExtensionClient.swift`.** The pre-pivot extension GET
+  helper: GET-only by construction already, but with a hardcoded 15 s timeout and
+  `nil` on any failure, which cannot tell "not configured" from "cluster down"
+  from "answered and unreadable" — so `ClusterWidget` and `MonitorWidget` each
+  re-implemented the fallback by hand. It is deleted rather than kept beside
+  `WidgetDataClient`, because two clients for one surface is exactly how a widget
+  and a Live Activity end up disagreeing on a timeout. A
+  `typealias ExtensionClient = WidgetDataClient` plus the nil-returning
+  `get(_:as:queryItems:)` shim keeps both providers compiling unchanged while the
+  widget cards move to the typed reads; the alias is marked `RETIRE` with the
+  slice that takes it.
+- **The session and diff screens are gone: `SessionsView.swift` (313 lines),
+  `SessionHistoryView.swift` (454) and `DiffDetailView.swift` (307), together
+  with the harnesses that exercised only them** — `diff_model_check.sh` plus its
+  `scripts/diff_model_check/` directory (`main.swift` and the
+  `v1_review_diff.json` fixture) and the ad-hoc `scripts/sessions_row_check/`
+  harness. This is slice **S3** of `ios-app/docs/CONSOLE_RETIREMENT.md`: the
+  widget + Live Activity client keeps no session list, no session-history pager
+  and no per-card diff. The `SessionsListResponse` / `DiffDetailResponse`
+  structs and their `model_decode_check` fixtures stay for now — the retirement
+  rule is that a struct, its fixture and its decode block leave together, in the
+  prune slice (S8), not here.
+- **`ios-app/Sources/HSCCLiveActivitySession/` (+ `Sources/HSCCLiveActivitySession.entitlements`, `Sources/Shared/SessionActivity.swift`, `Sources/HSCC/SessionActivityDriver.swift`, `Sources/HSCC/SessionActivitySummary.swift`) — the session Live Activity extension is deleted; the app now ships TWO Live Activity extensions (wake + monitor), not three.** This is CONSOLE_RETIREMENT.md §1.4 **D1b**, the option the pivot card set chose over the doc's own recommendation D1a: the activity's only filler was `SessionActivityDriver`, which was fed by `StreamingTranscript` folding the session event stream, and that chat pipeline is already gone (t_bd6e7c0a) — the extension had been rendering an activity nothing could start. The monitor Live Activity target is untouched and stays the survivor the two new activities (cluster health, running cards) land on. Everything the attribute needed went with it: `SessionActivityAttributes` (`Shared/SessionActivity.swift`), the driver, and `SessionActivitySummary` with its input vocabulary (`ChatItem` / `ChatRow` / `ToolRender` / `StreamPhase` / `ConnectionPhase`) and the two `JSONValue` rendering helpers — every one of which had exactly one consumer, the driver. `project.yml` loses the target block, its `schemes.HSCC.build.targets` entry, the app's `embed: true` dependency, the `- path:` lines for the two app-side files and `Sources/Shared/SessionActivity.swift`, all in this commit (`check_sources.sh` fails both directions on a half-done deletion). **Bundle id: `com.hscc.ios.liveactivity.session` disappears and `CFBundleDisplayName: HSCC Session` with it — it is removed, not renamed, and no other bundle id changes.** The app has never been installed on a device, so there is no orphaned appex to clean up and no migration to run.
+- **`ios-app/Sources/HSCC/Views/AppShell.swift` (+`Sidebar.swift`, `HomeView.swift`, `ContentView.swift`) — the drawer shell, the drawer rows, the home dock and the pre-drawer tab root are deleted.** Slice S1 of CONSOLE_RETIREMENT.md §5, which orders the root collapse FIRST because while `AppShell` + `Sidebar` live every screen-deletion card has to edit those two files. `AppDestination` and its four switch sites (cases, `title`, `symbol`, destination views), `normalized()`, the app-owned slide-over drawer, the `ProjectRoute` destination host and the 4-verb `DockItem` dock all go, and `project.yml` loses their `- path:` lines in the same commit (`check_sources.sh` fails both directions on a half-done deletion). `ContentView.Tab` — the deep-link router's public vocabulary — was MOVED, not deleted: it now lives in `DeepLink.swift`, its only consumer, and `deeplink_check/Stubs.swift` drops the stub that would otherwise be a redefinition. `sf_symbol_check.sh` loses both of its `var symbol: String` extraction targets (`AppDestination.symbol`, `DockItem.symbol`) with these files and still resolves 55 symbols from the surviving `systemImage:` literals, so it stays above its zero-extraction floor rather than failing as rotted grep.
+- **`ios-app/Sources/HSCC/SessionStreamCursor.swift`, `StreamHello.swift`, `StreamConnectionError.swift` + `ios-app/scripts/reconnect_check.sh` (+ `reconnect_check/`) and `ios-app/scripts/ws_decode_check.sh` (+ `ws_decode_check/`) — the orphaned stream layer and the two harnesses that were its only remaining consumers.** This is CONSOLE_RETIREMENT.md §5 **S10** under the D1b ruling, the half t_3b15b8c9 could not do because S2 (chat) had not landed: `SessionActivityDriver` and its target are already gone (a69b8692), and after them nothing in the app called `isHelloEnvelope`, `helloNextSeq`, `cursorRebaseAfterHello` or `classifyStreamError` — the three files survived only because their harnesses compiled them (`reconnect_check.sh:41-47` lists exactly these three sources; `ws_decode_check.sh:23-27` compiles `SessionEvent` + `StreamHello` and its whole claim is the hello envelope, so it cannot be re-pointed without gutting it). The checked-in WS fixtures `ios-app/tests/fixtures/ws_frames/*.jsonl` were evidence for `ws_decode_check` alone, so they go with it, along with the `!…/ws_frames/*.jsonl` negation in the root `.gitignore` that existed only to keep those two files visible past `*.jsonl` — a dead negation for an untracked directory is exactly the kind of rule that misleads the next reader.
+- **`ios-app/Sources/HSCC/Views/ChatStore.swift`, `ChatEntry.swift`, `ChatsRootView.swift`, `ComposerText.swift`, `StreamReplyWatcher.swift`, `ProjectUnreadCenter.swift` + `ios-app/Sources/HSCC/OfflineSendQueue.swift` — the chat family CONSOLE_RETIREMENT.md §5 calls S2, now that nothing is left that could read it.** `t_bd6e7c0a` deleted the chat *screens* (StreamingChatStore / StreamingChatView) but recorded these as `orphaned_subjects_awaiting_S2`; they survived because the shell still injected them. Nothing constructs `ChatsRootView` any more and each store had one writer, so the last live readers were the `unread` badge and the last-reply preview on `ProjectsView` — both of which could only ever show zero once nothing wrote a transcript. `OfflineSendQueue` goes with them on the doc's own word (§6: *"Both subjects (`ChatStore.swift`, `OfflineSendQueue.swift`) die in S2 anyway"*) and §1.2 rule 2 (the app keeps no actions): `ChatStore.reconcileQueued` was its only caller, so it had zero consumers the moment `ChatStore` left.
+
+- **`ios-app/scripts/chat_state_check.sh` and `ios-app/scripts/offline_queue_check.sh` (+ their harness dirs) are retired — these were ALREADY RED on `main`, not green gates.** Both failed the same way ever since `ChatEntry` was sliced out of the renamed-away `Views/OrchestratorChatView.swift` (`grep: Sources/HSCC/Views/OrchestratorChatView.swift: No such file or directory` → `error: could not locate the real ChatEntry enum (markers moved?)`), and CONSOLE_RETIREMENT.md §6 says explicitly *"do not fix them — retire them with the chat family"*. Their subjects are `ChatStore` / `ChatEntry` / `OfflineSendQueue`, all deleted in this commit, so retiring each harness beside its subject is the only correct move.
+- **`ios-app/Sources/HSCC/SessionEvent.swift` (+ `fixtures/v1_session_events.json`) and `HSCCClient.sessionEvents(project:before:limit:)` — the last of the session-stream vocabulary.** Once `StreamReplyWatcher` was gone, `SessionEvent` / `ParsedPayload` and the seven payload structs had no app-side reader at all: `HSCCClient.sessionEvents` was the only method that decoded them and its only caller had just been deleted, so the pair left together (`scripts/capture_live.sh` + `scripts/compare_fixtures_live.py` still list the `/v1/projects/{name}/session/events` capture; both tolerate a missing committed fixture — t_0f3f70e6 left `template_preview` the same way — and CONSOLE_RETIREMENT.md §5 names those two lists as **S8**'s row, so they are deliberately untouched here). `v1_sessions.json` (the sessions-manager list, `SessionsListResponse` in `Models.swift`) stays: it is not this file's payload. **Struct, fixture and `main.swift` block left in ONE commit**, because a struct without its fixture fails the harness at runtime and a fixture without its struct fails it at compile.
+- **The live streaming chat is gone: `StreamingChatView.swift` (1094 lines),
+  `StreamingChatStore.swift` (561) and `StreamingTranscript.swift` (326),
+  together with the checks that exercised only them** — `streaming_check`,
+  `turn_state_check`, `voice_draft_check`, `reply_watcher_check`,
+  `slash_palette_check` / `slash_preview_check` and `session_activity_check`.
+  First cut of the iOS pivot to a widget + Live Activity client.
+  `ChatItem` / `ChatRow` / `ToolRender`, the `JSONValue`
+  `renderInline()` / `renderArgs()` helpers, and `StreamPhase` with its
+  `ConnectionPhase` alias were **moved into `SessionActivitySummary.swift`
+  byte-for-byte** rather than deleted with the files: they are the input
+  contract of `SessionActivitySummary.make(rows:phase:)` and
+  `SessionActivityDriver.reflect(rows:phase:)`, which belong to the Live
+  Activity path the pivot keeps, so the summary and driver derive exactly what
+  they derived before. `TurnState` and `StreamSettings` went with the store —
+  they drove only the chat view's own working/approval banners.
+
+### Fixed
+* `hscc-api/tests/test_gateway_degraded_tail.py` no longer answers "can THIS
+  interpreter run hermes?" for itself. Its three real-`SessionDB` cases are now
+  gated through `hermes_gap.require_hermes_state()`, the same posture as
+  `test_gateway_backfill`, `test_gateway_store_tail` and
+  `test_session_resolver` (t_02c98915). The local copy cached the import failure
+  at COLLECTION — so a hermes tree reaching `sys.path` later than collection
+  (measured: it does, see the audit amendment) left those cases skipped although
+  they could have run, and nothing reported it — and its skip reason dropped the
+  import error itself, which is the one thing the runner's stamp rule reads off
+  `-rs`. `SessionDB` in `_wire_seams` is now imported where it is used, the same
+  seam as `test_gateway_store_tail._make_state_db`.
+- **The iOS OTA manifest and the IPA now agree on the build.** The manifest's
+  `bundle-version` is the monotonic `CFBundleVersion`, not the marketing
+  version, and the IPA is verified against both fields before publishing.
+- **`hscc-api/tests/test_profile_root.py` now skips the six `HSCC_API_PROFILES_ROOT` cases that can only fail on an interpreter without the hermes runtime, through the suite's EXISTING `hermes_gap` capability probe.** The leg was red on `main` with zero diff — `pytest -q -rs <repo>/hscc-api/tests -p no:cacheprovider` measured `6 failed, 1030 passed, 25 skipped` at `72f65838` under the thin sibling interpreter: `test_a1_no_intent_boots_permits_and_uses_relocated_ambient_root`, `test_a3_profile_mode_hermes_home_boots_permits_and_writes`, `test_a4_scratch_home_inside_live_root_default_path_unchanged`, `test_c1_child_boot_refusal_exit2_nothing_bound_written`, `test_c2_daemon_serve_refusal_exit2_marks_pid_stopped_and_logs`, `test_c3_control_without_intent_the_same_write_lands`. All six depend on the CHILD process importing `hermes_cli`, and the three failure shapes have one cause: A1/A3 assert `roots["hermes get_profile_dir"] == <fake live root>` while `profile_root._native_profiles_dir()` answers `None` when its `from hermes_cli.profiles import get_profile_dir` raises; A4/C3 drive a real write through `routes_profiles._backing_describe_set`, which dies with `ModuleNotFoundError: No module named 'hermes_cli'` at the lazy `_profiles_module()` seam; C1/C2 assert `profile_root.KEY_HERMES` is named in the divergence report, and `divergence()` deliberately omits a resolver that answered `None` (`if got is not None and ...`), so the key never appears. The gateway family (`test_gateway_backfill`, `test_gateway_degraded_tail`, `test_gateway_store_tail`, `test_session_resolver`) already skips exactly this env via `hermes_gap.require_hermes_state`; `test_profile_root.py` had no guard, so the same missing module produced a red leg in one file and clean skips in four.
+
+- **`hscc-api/tests/hermes_gap.py` gained a second capability probe, `require_hermes_profile_library()`, rather than a new mechanism.** One module stays the one definition of "can THIS interpreter run hermes' runtime", and the new probe shares the existing posture exactly: a capability probe and never `sys.version_info`, and a real `pytest.skip()` carrying the import error itself so the reason is visible through the canonical runner's `-rs` (the GAP-D-1 rule from t_b82ad0fe). It keys on the exact import the production code performs — `from hermes_cli.profiles import get_profile_dir` — not on `hermes_state`: those are genuinely different capabilities (`hermes_state` needs `ruamel.yaml` and nothing of the CLI's), and collapsing them into one probe would skip profile-root cases for a reason that had nothing to do with them. Unlike the `SessionDB` probe it has no module-level attempt, because importing the real `hermes_cli` into this leg's `sys.modules` at collection time is precisely what this file's `fake_hermes` and `test_c8_hermes_cli_unimportable_...` inject a fake for; the probe runs once per gated test, so there is nothing to cache. The six call it as their **first statement**, before a single tmp tree is seeded.
+
+- **The gate cannot make the intent gate pass vacuously — pinned by two new tests, not argued.** `test_f1_hermes_gate_agrees_with_the_resolver_it_guards` asserts, on every interpreter, that the gate's predicate and `profile_root.writer_roots()[KEY_HERMES]`'s own predicate agree, and then executes both directions: where `hermes_cli.profiles` imports, `require_hermes_profile_library()` must NOT skip — a skip there fails F1 rather than silently silencing the six; where it does not import, the gate must skip and must carry the import error as the reason. `test_f2_the_gate_covers_exactly_the_six_cases_that_need_it` is an AST source pin (the D7 idiom) that the gated set is exactly the six named cases, where GATED means "the gate is the first statement of the test" — so the gate can neither lose one of the six nor creep over the B*/D*/E* cases, and a gate placed after the test has already written something does not count as a gate. Coverage of the *unimportable* branch did not move with them: `test_c8_hermes_cli_unimportable_uses_ladder_and_rolelib` and `test_c9_no_root_resolvable_while_intent_asked_refuses` assert it in-process via the `roots` fixture (`roots.hermes = None` injected into `profile_root._native_profiles_dir`) and stay ungated, so they run and pass on the thin interpreter too.
+
+- **Where the guard lives was decided from the runner, not assumed.** `scripts/run_tests.sh:289` runs the leg as `"$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider` — the command in this card's brief verbatim — with `PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"` (`run_tests.sh:20`). Both values are legitimate and the suite is *meant* to be stamped under both (the dual-interpreter stamp), so the choice belongs to the runner and the test layer has to tolerate both: the guard goes in `hermes_gap` with the tests, not in `run_tests.sh`. `os.execv` (`hermes_bootstrap.py:599`) turns out not to be a factor on this leg at all — `tests/conftest.py` sets `HERMES_DISABLE_LAZY_INSTALLS=1` before any hermes import for exactly that reason (t_82fa20f5). CI runs no pytest leg: `.github/workflows/` holds only `address-guard.yml` and `check-runtime-deps.yml`, so "green" here means the canonical local leg, measured below on both interpreters. The thin interpreter that reproduced the red is the documented sibling itself — `python3` on this host resolves to `~/miniconda3/envs/p313/bin/python3` (3.13.12), which carries pytest and lacks `hermes_state`, `ruamel`, and `hermes_cli` — the same env `hermes_gap`'s own docstring names.
+
+- **Not a regression of `t_02c98915`'s gate, and `scripts/run_tests.sh`'s probe roster now says so.** `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` records an `hscc-api` leg of `6 failed, 970 passed, 19 skipped` → `0 failed, 970 passed, 25 skipped`, and its `6 failed` is a *different* six: that roster is `test_session_resolver.py`'s six real-`SessionDB` cases, and the audit was committed `2026-11-10` — three days BEFORE `hscc-api/tests/test_profile_root.py` existed (`040cd41a`, #303, `2026-11-13`). The number matching is a coincidence, and reading it as "this was already fixed once" would send the next reader to the wrong gate; the audit's roster is left as the dated measurement it is, and the runner's roster comment now names the second capability beside the first.
+- **The App Group no longer holds a node's LAN address.**
+  `MonitorSnapshotStore.Snapshot.nodes` was `[MonitorNode]` — the decoded
+  `/v1/cluster/monitor` host entry, whose `host` field *is* the node's LAN address
+  as the API reports it — and the monitor widget's stale-while-error path wrote it
+  into `group.com.hscc.ios` on every successful fetch. §7 names
+  `cluster.monitor hosts[].host` (and `sample.sparkrun_job_names`) as fields that
+  must never enter shared storage or a view; the container is readable by every
+  extension and outlives the app process, so that write persisted a LAN address
+  indefinitely and made it reachable from any extension.
+- **The storage shape is now the projection.** `MonitorNodeEntry: Codable,
+  Equatable` in `Sources/Shared/SharedStore.swift` (with the store, per the
+  `SharedStore`/`SharedModels` split — the wire file is never persisted) carries
+  exactly the §3 row-5 six fields: `label`, `cpuUsagePct`, `memUsedPct`,
+  `gpuUtilPct`, `usedSlots`, `freeSlots`. `label` is `MonitorNode.displayLabel` —
+  the single node-identity rule from t_595a5fee (sample hostname, else the address
+  tail) — so a stored label can name a node without naming where it lives. No
+  `host`, no `sparkrun_job_names`, no raw sample.
+- **`MonitorSnapshotStore.project(_:)` is the only path from wire type to
+  storage.** `save(nodes:)` takes `[MonitorNodeEntry]`, so a caller cannot persist
+  the response by accident: it has to call `project` and watch the address drop.
+  `MonitorWidget`'s fetch now writes `project(nodes)`; the widget's rendering is
+  unchanged (this is a storage-shape change, not a UI change).
+- **The unreachable pane reads a count, not the wire type.** Its only use for the
+  stale nodes was `!nodes.isEmpty` — "did the last good fetch have nodes?" — so
+  `MonitorEntry` now carries `lastKnownNodeCount: Int` instead of receiving
+  `[MonitorNode]` back out of the container, and nothing drawn by a gate can hold
+  an address. `daemonHost` stays in the snapshot (t_595a5fee's decision): its
+  `hostname` is the daemon host's own name, which §5.5 names as renderable and §7
+  does not list — and the decode check now proves that key by key rather than
+  trusting it.
+* `hscc-roles` no longer answers "can THIS interpreter run hermes?" three different
+  ways. The leg had three postures and none of them was a probe:
+  `test_profile_root_assert.py` ran a child `rolelib.py` and treated **any non-zero
+  exit** as "`hermes_cli` not importable on this interpreter", so a real `rolelib`
+  bug on a machine that does have hermes was reported as "environment" — it skipped
+  on `ModuleNotFoundError` and on `NameError: name 'hermes' is not defined` alike;
+  `test_generator.py` asked *production code* for the answer
+  (`_hermes_writer_available()` was `generator._hermes_atomic_config_write() is not
+  None`) and froze that one call into three collection-time
+  `@pytest.mark.skipif` marks; and one in-function skip gave the reason
+  `the refusal lives in hermes' writer`, which names no module and carries no
+  import error — the one thing the runner's stamp rule reads off `-rs`. The ten
+  gated cases now go through `hscc-roles/tests/hermes_gap.py`: two capability
+  probes, one posture each, each a real `pytest.skip()` carrying the import error
+  itself. Kept apart on purpose, as in `hscc-api`: `hermes_cli.profiles` (what
+  `rolelib.native_profiles_dir` resolves through) is not `hermes_cli.config` (the
+  round-trip writer `generator` delegates to, which pulls ruamel's round-trip
+  machinery), and one probe answering both would skip one family for the other's
+  reason.
+* Measured while doing this, and the reason the card was not cosmetic: the thin
+  sibling leg was **red**, not skipping — `5 failed, 255 passed, 5 skipped`, rc=1.
+  The five are refusal cases (a profile home inside the live root must be refused;
+  a refused intent must write nothing) whose premise is hermes' own native root,
+  and `rolelib.native_profiles_dir()` returns `None` without `hermes_cli` — there
+  is no divergence to aim at, so the case asserts on a behaviour that cannot exist
+  there. `hscc-roles` is also the leg
+  `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` never measured: its
+  four surfaces were `hscc-project`, `hscc-api`, `hscc_daemon`, `install.sh`.
+* With the gates in place, a child that fails on an interpreter the probe says has
+  hermes is a FAILURE with the child's output in the message (`rc=…` plus
+  stdout/stderr), never a skip. The pre-`rolelib` `SystemExit` branch inside the
+  child script stays a child-side skip: a child process cannot reach the parent's
+  skip counters, so that one has no better option.
+- **`hscc-cluster/workflow.py` — `_active_profile_name()`'s hermes import fence now puts `sys.path` back; the runtime dir no longer stays on it for the life of the process.** The lookup retried `hermes_cli` by hand-inserting `~/.hermes/hermes-agent` at `sys.path[0]` and never removing it, so the first lifecycle case in a process changed the import posture of every case that came after it. Measured on `~/miniconda3/envs/p313` at `1fd3c6cf` (the parent's head), in ONE run of `hscc-cluster/tests`: one capability (`hermes_cli.kanban_db`) skipped with TWO different import errors — 9 cases `ModuleNotFoundError: No module named 'hermes_cli'` (before the fence had run) and 4 cases `ModuleNotFoundError: No module named 'ruamel'` (after it) — i.e. hermes went from absent to present-but-thin-deps purely because of that insert. The same leak was the only reason three `hermes_cli.plugins_dispatch` cases in `test_lifecycle_hooks.py` ran at all on that interpreter: at `1fd3c6cf` `TestPreToolCallThroughRealHermesBinder::test_binder_forwards_no_profile_name`, `::test_real_payload_row_carries_a_real_profile` and `TestRealHermesPayloadShape::test_dispatch_through_real_hermes_binding` PASSED there and skip properly now. The fence is now the sanctioned context manager, `hscc_daemon.hermes_import.agent_tree_on_path` (t_8eafef82, whose `profile_roster._hermes_gate` docstring already named this exact shape as the bug it replaced), reached through this plugin's own path-robust sibling loader `fleet._daemon_mod` — deliberately not a second local implementation of the window, because two refcounting registries over one directory let the first window to close pull the path out from under the other, the flake that module's docstring names. The window covers the **call** as well as the import, per the same module's "wrap the call too" rule (a Hermes function can trigger a fresh top-level import). An install that ships `hscc-cluster` without `hscc_daemon` gets `_local_agent_tree_window`, the same `finally` contract in the plugin, reached only when the peer module cannot be imported — the "peer optional" doctrine of `_theme._cli_theme`. Observable behaviour is unchanged in both directions: hermes resolvable during the import, `None` on any remaining failure, and the `pre_tool_call` hot path still never raises.
+- **`install/hscc-skills/devops/kanban-orchestrator/SKILL.md` lagged the live
+  `hscc-orch` profile copy so far behind that a profile recreated from the
+  template silently lost whole rule sections — including the two newest
+  lessons.** Measured at card time, the template was a strict content-subset
+  of the live copy: `diff` carried exactly one change hunk (the `version:`
+  line) and six pure-insertion hunks. Landing only the two requested blocks
+  in isolation would have orphaned them — a `###` subsection with no parent
+  section and a pitfall anchored before a pitfall the template never had —
+  so this lands the live-only scaffold they live in verbatim: the
+  `### Stacked PRs: prevent the ghost, then test supersession correctly`
+  subsection (immediately before the `**Assert verdicts and method, not
+  coordinates of `main`.**` paragraph inside "Verify the PR before you card
+  against it"), the `**gh pr close` on an already-closed PR is a silent no-op
+  that swallows your closing comment.**` pitfall (immediately before the
+  `**gh pr merge --delete-branch` can close a SIBLING PR.**` pitfall), and
+  the surrounding sections they cross-reference ("Anchor on content, never on
+  coordinates", "Prove absence by searching, not by walking edges", the
+  Verify-PR pre-flight and its decision table, and the sibling pitfall
+  blocks). Every line comes verbatim from the live copy — zero re-authoring.
+  `version:` bumped `3.0.0 -> 3.0.1` (patch increment; deliberately not the
+  live copy's `3.1.0`, which would erase the single repo-only line the drift
+  gate counts). Known gap, carded separately: the new text cites
+  `references/*.md` docs that exist only in the live profile copy — the
+  template directory has no `references/` yet.
+- **`GET /v1/cluster/status` and `GET /v1/cluster/monitor` now return the CLI's
+  own data instead of degrading to `unavailable`.** Both handlers call
+  `hscc-cluster/hscc.py::cmd_cluster_status()` / `cmd_monitor()` — the exact
+  functions `hscc cluster status` / `hscc cluster monitor` call — and the
+  monitor route adds the same `ServingPoller` rows the CLI's one-shot renderer
+  prints (model per node, running/waiting, KV, token totals/rates). Failure
+  bodies now carry `error` and a `speak` naming the real cause (engine-load
+  path errors, command exit status/stderr) instead of swallowing it.
+  Root cause of the live outage: the API process had been launched from
+  `/opt/homebrew/Cellar/hscc/2.15.4/...` and a Homebrew upgrade deleted that
+  directory, so the old sibling-only engine lookup returned None forever. The
+  loader now falls back to the engine beside an imported `hscc_daemon`, the
+  deployed Hermes plugin, the stable Homebrew opt link, and
+  `HSCC_CLUSTER_DIR`.
+- **`GET /v1/autodown/status` and `hscc autodown status` now report the real
+  fleet state.** Both call one new `hscc_daemon/autodown.py::status_snapshot()`
+  builder (route adds only `speak`). When the file says `down` but the serving
+  orchestrator answers healthy, status reports `state: "up"`,
+  `state_recorded: "down"`, `down_since: null`, `state_source: "live probe"`
+  and a `state_note`; the read itself writes nothing. The daemon's disabled
+  early-return now also runs the debounced §8 reconcile, so a stale
+  `autodown.json` heals instead of showing "down since" for a fleet that has
+  been up for days.
+- **`hscc-roles/tests/test_hermes_gap_single_posture.py` — `ALL_OWNERS` learned
+  about the fifth probe owner, so the runner's roster block is true again.**
+  t_b884497b added `hscc-cluster`'s five gates to the roster block in
+  `scripts/run_tests.sh` and extended `hscc-api`'s copy of the owners list to
+  cover them, but left this twin's list at four owners. The block and the list
+  are the same inventory in two places — the constant says so ("carries the same
+  list and both have to move together") — so the roster guard in this leg read
+  four of those gates as "gates that no probe owner defines" (the fifth,
+  `require_hermes_cli_profiles`, has hscc-roles' own owner behind it) and the
+  `hscc-roles` leg went red on the stack: 1 failed, 274 passed, where the same
+  leg on `main` is 275 passed. The fix moves the list, not the block: the roster
+  is the live authority and every name in it is genuinely defined, in
+  `hscc-cluster/tests/hermes_gap.py`. Nothing about the comparison changed — the
+  two directions (a gate advertised with no module behind it, a probe this leg
+  defines that the block does not list) are still both asserted, un-widened, and
+  this leg's guard still sweeps only `hscc-roles/tests`.
+- **`ios-app/scripts/model_decode_check/main.swift` — the banner stops calling
+  its check count a fixture count, because the docs now cite that line as the
+  authority for how many are green.** `c.passed` increments once per CHECK: a
+  fixture decoded against two models adds two, and a `checkFails` fixture adds
+  one by *throwing*. The pass line printed that number as
+  `89/89 fixtures decoded against the real models`, while the directory held 54
+  JSON files — measured on this card's own run: `87` `OK` lines against
+  `ls scripts/model_decode_check/fixtures/*.json | wc -l` → `54`. The failure
+  line had the same unit bug in the other direction: `N fixture(s) did not
+  decode` for a count of failed checks. It now prints
+  `ALL DECODE CHECKS PASSED — N/N checks (over F committed fixtures) decoded
+  against the real models` and
+  `DECODE FAILURES — N check(s) did not pass against the real models`. `F` is
+  not typed: `DecodeCheck` records the distinct names it actually opened inside
+  `load` — the one function every committed fixture's bytes pass through (the
+  handful of older inline `Data(contentsOf:)` reads each name a file `load` also
+  opens, checked by name at this head) — so the fixture number is derived from
+  the run, exactly like the check number, and a card that adds or retires a
+  fixture changes both without editing a sentence. That is the whole point of the
+  card this one follows: t_74b0c758 deleted every transcribed count out of
+  `ios-app/README.md` and this harness's `fixtures/README.md` and pointed the
+  prose at this line instead, so handing the docs a number whose unit was wrong
+  just moved the rot somewhere more authoritative. The derivation was proved
+  rather than asserted, by the branch itself: it started at `89` checks over `55`
+  files, `#336` retired `v1_session_events.json` and its decode blocks while this
+  card was open, and after rebasing onto that the same unmodified code printed
+  `87/87 checks (over 54 committed fixtures)` — no fragment, README or source
+  edit. The exit codes are untouched (0 on all-pass, 1 on any failure) — the exit
+  code is the guard, the words only report. Both paths were verified against the
+  real binary rather than by reading the string: the green run exits 0 with the
+  banner above; a scratch copy of the fixtures with `cards.json` truncated and
+  `cron_list.json` given `{"jobs": 7}` prints
+  `DECODE FAILURES — 3 check(s) did not pass against the real models` over two
+  broken files and exits 1 — three failed checks over two fixtures, which is the
+  distinction the old wording erased. No decode assertion, fixture, or exit-code
+  logic changed; the only other edit is the one place in `fixtures/README.md`
+  that quoted the old wording verbatim, which now quotes the new shape with its
+  `N`/`F` placeholders (still no number). `grep -rn "ALL DECODE CHECKS PASSED"`
+  re-checked at this head: the remaining hits are dated point-in-time records
+  (`ios-app/docs/audits/`, `E2E-API-REVIEW-2026-08-27.md`, archived changelog and
+  `CHANGELOG.md` lines), which are evidence of what those runs printed and were
+  left alone.
+- **Widget card/kanban routes now answer from the CLI's own functions.**
+  `GET /v1/cards`, `/v1/kanban/running`, `/v1/kanban/blocked`,
+  `/v1/kanban/stale`, and `/v1/mobile/summary` call the same
+  `kanban_live.collect()` / `kanban_blocked.list_blocked_tasks()` /
+  `autodown.list_stale_tasks()` paths as `hscc cards monitor` and
+  `hscc kanban monitor|blocked|stale`. `/v1/cards` returns exactly the cards
+  the monitor draws (running, then ready) instead of old blocked/archived rows,
+  and only accepts the CLI's `?board=` filter. Every surface is scoped to
+  boards owned by registered projects (`hscc project list`), so orphan
+  sqlite boards no longer appear as project boards. `done` is the CLI's
+  done-in-the-last-24 h count, not an all-time archive total. Parity tests run
+  both the CLI path and the HTTP route over one fixture fleet and assert equal
+  rows/numbers; route documentation is in `hscc-api/docs/WIDGET_ROUTES.md`.
+- **`ios-app/scripts/widget_settings_check.sh` executed its own text as shell.**
+  The gate writes its harness with an UNQUOTED heredoc
+  (`cat > "$WORK/main.swift" <<SWIFT`) on purpose — `$suite_container` and
+  `$model` are expanded into it, and that verbatim extraction out of
+  `Sources/Shared/SharedStore.swift` is the whole reason the gate cannot drift.
+  An unquoted heredoc also runs every backtick it contains as a command
+  substitution, and three Swift comment lines had backticked prose
+  (`defaults.surfaces.count == 4`, `defaults()`, `surfaces`), so bash executed
+  them on every single run: `command not found` ×2 plus a `syntax error:
+  unexpected end of file` on stderr, while the gate still exited 0 with all its
+  assertions green. It looked benign because the substitutions expanded to
+  nothing and landed inside comments — but capture the generated harness and the
+  damage is visible: **six backticks had been deleted from the code this gate
+  compiles and asserts on**, every unescaped one, the balanced pairs silently and
+  the unbalanced ones loudly. Whatever a backticked word resolves to is what gets
+  compiled, so the next such comment — a `git …`, a shell snippet, a word that
+  happens to name a binary — would have quietly changed what the gate proves
+  while still printing ALL PASS.
+- **The blast radius is wider than the heredoc, and the review round proved it by
+  execution.** The first cut of this fix escaped the three comments and scanned
+  only the heredoc body — which is what this card asked for — and a planted
+  payload still ran. Measured with `widget_settings_check_backtick_probe.sh`
+  against that intermediate state: a backtick in **shell position** on either side
+  of the heredoc (including a comment-SHAPED `// …` line, which in shell position
+  is a command word, not a comment) ran to `RC 0` with all three `PASSED` banners
+  printed and the payload's marker file created. A `#` comment never expands
+  (measured: no marker file), but a comment is only a comment while its line stays
+  one. So the rule is now the whole file rather than one region: **this gate
+  carries no backtick character at all, in any context**, checked before anything
+  else in the script runs. The three comments that must render a backtick in the
+  generated Swift interpolate `${BT}` (built with `printf '\140'`, so the gate
+  source needs none); a shell never re-scans the result of an expansion, which is
+  precisely why that path is inert and a typed backtick is not. The harness they
+  generate is byte-for-byte what it was before this rule existed. Quoting the
+  delimiter (`<<'SWIFT'`) remains the wrong fix — it kills the extraction.
+- **`ios-app/scripts/widget_settings_check_backtick_probe.sh` — the control leg
+  now reads its expectation out of the gate instead of remembering one.** The leg
+  asserted the gate's pass-banner count as a literal (3 at `d9b78273`, where the red
+  was measured; raised to a literal 4 on `main` by t_d1a9eeb6 while this was in
+  flight). `widget_settings_check.sh` prints one banner per pass-path section, so every
+  section anyone appends reddens the leg a second time. From the kept work dir the copy
+  was `cmp`-identical to the canonical gate, exit 0, every banner printed, zero `FAIL:`
+  lines — the probe was accusing a healthy guard of refusing legitimate runs while the
+  same gate run in place passed, and at that commit the copy/run mechanism was not
+  involved: cwd, path resolution and the harness golden all resolved and the copy
+  genuinely passed. (t_d1a9eeb6 also linked `project.yml` into the copy for a *separate*
+  cause that became real on the later base, where the gate derives its suite shim from
+  `HSCC_BUNDLE_PREFIX`; that link is kept. Two distinct causes, both real, one fixed
+  over there and this one here.) What this entry fixes is the number written down in
+  prose-shaped code. The expectation is now
+  derived per run from the gate source by banner *name* (a non-comment line printing a
+  quoted ALL-CAPS string ending in `PASSED`) and printed on every run, so a fifth
+  section cannot redden the leg again and a leg with nothing to expect refuses rather
+  than trusting an exit code. A pass is judged on four things instead of one: exit 0,
+  every derived banner printed, none missing, no `FAIL:` line — so a copy that exits 0
+  without reaching the last banner no longer scores. The three refusal legs are
+  untouched and still keep the deliberately loose "any `PASSED` on stdout" count,
+  because under-counting is the dangerous direction there; the pass legs use the
+  strict name set, where over-counting is. Proven non-vacuous by sabotaged copies:
+  neutering the ban makes a planted payload execute and the probe exit 1 with
+  `BACKTICK PAYLOAD EXECUTED`; dropping a banner from the control copy makes the leg
+  name the unprinted banner (the old code scored that run green); and an empty
+  expectation makes the control leg refuse to judge at all.
+- **`ios-app/scripts/widget_settings_check_backtick_probe.sh` — the probe was
+  carrying the character it exists to ban, and its own check was blind to it.** Two
+  backticks in a comment line (markdown-style code quoting in prose) made
+  `heredoc_backtick_check.sh` refuse the whole tree — R2 holds a file that writes an
+  interpolating heredoc to the zero-byte rule *including its comments* — which reddened
+  `heredoc_backtick_check_probe.sh`'s control leg and seven legs behind it, so the
+  runner blamed the wrong probe. The check that missed it was structurally incapable of
+  firing: piping `tr -dc` into `wc -l` counts lines, and tr emits no newline, so it
+  reports 0 for any byte count. The header's "this probe contains no backtick" sentence
+  is now the measurement it always claimed to be — `self-bytes` printed on every run,
+  counted with `wc -c`, and refused before a single leg executes. Negative-proven: a
+  copy planted with two bytes in a comment prints `self-bytes: 2` and exits 1 with
+  `PROBE FAILED` without running anything.
+- **`ios-app/scripts/widget_settings_check_backtick_probe.sh` — the copy tree could not
+  see the sibling project the gate reads, so the control leg failed a gate that passed
+  in place.** `widget_settings_check.sh` gained a desktop-widget section (t_1143c19b)
+  that greps `MAC_APP="../macos-app"` for the shared Appearance editor and the
+  `HSCCMacWidgets` target. The probe runs each leg from a private ios-app-shaped tree
+  whose `Sources`, `project.yml` and harness golden are symlinks, and nothing in it
+  stood where the gate resolves `../macos-app` — so the unmodified copy printed
+  `FAIL: macOS app/settings or project spec is missing` and exited 1 while the same gate
+  run in place printed `ok:` and exited 0. The list of siblings is now read out of the
+  gate's own quoted `"../name"` literals and linked into each leg's parent, with the
+  link asserted after it is made — a leg that could not expose a sibling is a harness
+  fault and says so, rather than quietly judging a tree the real gate never runs in.
+  Derived rather than listed for the same reason the banner set is: this is the second
+  time a hand-written copy tree reddened the runner, the first being `project.yml`
+  (t_d1a9eeb6).
+
+
+- **A copy of the gate that gains a sibling project can write back into the checkout, and the probe now
+  refuses the run for it.** The sibling link was made with a bare ln -s on every leg, and a link made onto
+  a destination that already resolves to a directory is created INSIDE that directory — so from the second
+  leg of a run onwards the link landed in the real macos-app/, a tree the copies exist to read. Both legs
+  still printed green, because ../macos-app resolved either way: the artifact was invisible to the verdict,
+  and it only showed in git status when someone happened to look. Two changes, both load-bearing. The link
+  is made only when the destination is absent — the destination is a per-run work dir, so "already present"
+  means this probe's own earlier leg made it — and the probe snapshots git status --porcelain before its
+  first leg and compares it after the last, so any NEW path under the project it audits, or under a sibling
+  the copies read, fails by name instead of becoming an untracked file someone finds next week; a new path
+  elsewhere is reported, not blamed on this probe. Proved in both directions: a mirror tree with the
+  idempotence guard reverted ends with
+  FAIL: stray-artifact: this probe left macos-app/macos-app inside the checkout (under macos-app/, a tree
+  the copies read) and rc 1, while two consecutive runs of the fixed probe add nothing to the work tree and
+  print ok: stray-artifact: nothing new appeared inside the checkout. Same lesson as the cp-onto-a-symlink
+  trap this harness already documents: a link that lands somewhere else changes nothing and still looks
+  like a pass.
+* `hscc-cluster`'s four hermes-gated test files now ask ONE probe module, at runtime,
+  instead of each freezing its own answer at collection: `hermes_gap.require_hermes_kanban_board`,
+  `require_hermes_cli_plugins`, `require_hermes_cli_plugin_dispatcher`,
+  `require_hermes_cli_profiles` (and `require_child_ran_hermes`, for the case that
+  imports no hermes in this process at all and spawns `_pvb_sim.py` with
+  `sys.executable`). Each skips carrying the import error and naming the module that
+  failed, so a red/green sibling leg reads the same way from `-rs` as it does from the
+  code. The replaced shapes: `_HAS_HERMES_CLI` in `test_lifecycle_hooks.py`, and module-level
+  `pytest.importorskip("hermes_cli…")` in `test_dispatch_hook.py`,
+  `test_review_escalation.py` and `test_protocol_violation_bound.py` — a reason
+  ("hermes_cli not installed in this env") that named a capability, no module and no
+  import error, and that collapsed a three-case module into one skipped item.
+* `test_dispatch_hook.py` defined `test_hook_fires_on_each_claim` twice; Python binds
+  the last definition, so the first-claim contract was never collected while the leg
+  reported it green. The first case is now `test_hook_fires_on_the_first_claim`. ruff
+  had been saying `F811 Redefinition of unused test_hook_fires_on_each_claim from line
+  38` since before this card.
+* Six cases run now that used to skip for a hermes they never touch: the four
+  `TestBlockedHandler`/`TestCompletedHandler` JSONL-writer cases, and the two
+  `TestOnKanbanTaskClaimedProfileName` cases that inject a `types.ModuleType` stub.
+  The guard pins them un-gated so the exemption cannot quietly become a gate.
+- **`ActivityFeedView` row body split into sub-expressions.** GitHub's CI Xcode
+  hit "unable to type-check this expression in reasonable time" on the combined
+  `feedRow` body while newer local toolchains accepted it. Behaviour is
+  unchanged: `leadingCell`, `captionText` and `trailingCell` carry the same
+  views and modifiers the row had inline.
+- **`ios-app/scripts/heredoc_backtick_check.sh` — the meta-gate now walks `ios-app/scripts/` recursively.** Its stated goal was "no shell script in this tree splices a backtick into an interpolating heredoc", but its file list came from `"$SCRIPTS"/*.sh`, which cannot see a subdirectory. That was harmless while every harness was a top-level file; the widget-surface checks now live one file per surface under `scripts/widget_view_dispatch/`, so a subject could leave the audited population simply by moving down one directory — the same "the guard cannot see it" defect the gate exists to close, expressed as a path instead of as a line number. The population now comes from `find "$SCRIPTS" ! -type d -name '*.sh' -print0 | LC_ALL=C sort -z`: sorted so two runs diff cleanly, `! -type d` rather than `-type f` because the glob it replaces matched symlinks and a symlinked `.sh` is as executable as a real one, and an entry that is not readable is refused instead of contributing zero records. Every rule (R1/R2/R3), the vacuity guard and the summary line are unchanged; a finding names its file by path relative to `scripts/` so two same-named files in different directories cannot be confused. The "subdirs are NOT scanned" disclaimer is replaced by measured `cover`/`limit` lines describing what the recursive walk actually saw on this run.
+- **`ios-app/scripts/heredoc_backtick_check.sh` — the per-file `bytes=N` column was 4x the number of lines carrying the byte, and is now `lines-with-byte=N`, counted from the records that actually drive the verdicts.** `N` came from `nwords "$hits"`, and `hits` was built by printing the whole HIT record per matching line — `HIT<TAB>region<TAB>line<TAB>expanding`, four tab-separated fields — so the word count reported four words per line: `build_check.sh` carries the byte on 3 lines and printed 12, `sf_symbol_check.sh` on 8 and printed 32, in every file and in both directions of the recursion change, with rc=0 and a clean summary. Nothing else could see it: the findings count records, the `measured-inert` total counts a list that is one word per record, and a constant factor leaves both green. The column is exactly what the gate's own header promises a reader can check ("all of them are measured on the tree being scanned, on this run"), so a reader who grepped for the byte got a number that was neither a byte count nor a line count. The value is now the number of HIT **records** — the verdict machinery is per line, so a line count is the number the rules use; the gate's only byte count remains the `tr`-measured one it prints for a skipped `.golden`. The two columns on the same line that read as counts and never were one now say what they hold: `unquoted-openers-at=` (line:delimiter pairs) and `quoted-openers-at=` (line numbers), where `quoted-heredoc=29` previously read like a count of 29 and named one line. `here-strings=` and `operator-mentions=` are counts and keep their names. Verdicts, enumeration and the `summary:` line are unchanged (measured on this tree: 45 scanned / 0 findings / 169 measured-inert / rc=0).
+
+### Verified
+- `ios-app/scripts/build_check.sh` — all four iOS targets compile, 0 errors /
+  0 warnings. `macos-app/scripts/build_check.sh` — both macOS targets compile,
+  0 errors / 0 warnings. `connection_probe_check.sh` — **47 assertions** (was 31)
+  covering all-OK, first-down + second-OK, all-down, one 401 among OKs, order
+  preservation and the last-working update. `connection_banner_check.sh`,
+  `widget_data_client_check.sh` and `model_decode_check.sh` (93/93) stay green;
+  the tracked-tree address guard reports no real operator address.
+- **`ios-app/scripts/live_activity_rehydration_check.sh` — extended to the
+  cluster-health activity, and now slices from two files.** 82 new assertions
+  (the table runs 42 → 124 green rows):
+  the orphan rule (a stated-down fleet at 2 min keeps, and at 12 h ends —
+  silence outranks the news; exactly the budget keeps, `budget + 0.001 s` ends;
+  a signal-less state ends at any age, fresh, old, or stamped in the future,
+  while a counted `0/0` or a failure label keeps it); the reading rules
+  (`— up` distinct from `0/4 up`; `— down` distinct from `0 down`; a blind
+  headline carries no number; a stale read keeps its state word and its
+  last-known tally; `9+` clipping; names clipped to the region's limit with a
+  blank label taking no slot and `+2 more` counted, never negative); and the
+  tone order as ten rows (blind with nothing `bad`, blind with last-known
+  numbers `warn`, `down` `bad` even with no node numbers, `waking` `warn`,
+  serving-with-a-node-down `warn`, serving-with-no-count `ok`).
+  Nothing is transcribed: the script slices both `GATE-SLICE` blocks out of
+  `ClusterHealthActivity.swift` and compiles them with the harness, so the table
+  runs against the code the app's sweep calls and the extension's views draw.
+  The spec list now carries the **file** each marker lives in, not just the
+  marker — with a second attributes file in play, a spec that named only the
+  marker would start slicing the wrong file the day one moved. Proven red on
+  purpose by renaming one marker (`FAIL: … has no 'GATE-SLICE-BEGIN:
+  cluster-health-orphan-decision' marker`, rc 1) and restoring it. The harness
+  also compiles the real `SharedModels.swift` for one assertion no sliced table
+  can make about itself: every `ClusterState` raw value this activity has copy
+  for is still a real case of the enum the app and the widget share, and a state
+  it does not have gets the fallback word.
+* Thin sibling (`~/miniconda3/envs/p313/bin/python`), `python -m pytest -q -rs
+  hscc-api/tests -p no:cacheprovider` (`scripts/run_tests.sh:289` verbatim):
+  control at `d000bf20` = `1034 passed, 31 skipped`, rc=0 → this branch =
+  `1041 passed, 31 skipped`, rc=0 (+7 = the guard). Skip COUNT and skip SITES
+  identical; only the three `test_gateway_degraded_tail` reasons change, and they
+  now name the missing module like the other 28.
+* Canonical interpreter (`~/.hermes/hermes-agent/venv/bin/python`), same command:
+  `1071 passed, 1 skipped`, rc=0 — the canonical skip count does not move, so the
+  fold-in silences nothing where hermes resolves.
+* The four real-`SessionDB` files alone: thin `6 passed, 24 skipped`; canonical
+  `30 passed, 0 skipped`.
+* Mutation probes on the guard, 7/7 CAUGHT, each verdict naming the failing test
+  id (green controls before and after, tree restored pristine, `__pycache__`
+  dropped per run): P1 the old private posture restored verbatim → both the
+  shape sweep and the reason sweep; P2 a private skip reason alone; P3 a second
+  `def require_hermes_state`; P4 a real-DB file stripped of its gate import (the
+  anti-vacuity sweep bites too); P5 the roster drops a probe; P6 the roster
+  invents one; P7 the gate made to skip unconditionally, caught on the CANONICAL
+  interpreter by the both-directions posture test — the "leg green because
+  silenced" case.
+* Other legs on the thin sibling, re-measured for the amended table:
+  `hscc-project` `1458 passed, 4 skipped`, rc=0 (unchanged from the audit's
+  gated row); `hscc_daemon` `3693 passed, 23 skipped`, rc=0 (skips unchanged,
+  passed up from 3672 as the leg grew).
+- **Gates, all green and compile-only (never launched or installed).**
+  `macos-app/scripts/build_check.sh` — `HSCCMac: 18 files, 0 error(s),
+  0 warning(s)` and `HSCCMacWidgets: 18 files, 0 error(s), 0 warning(s)`.
+  `ios-app/scripts/build_check.sh` — HSCC 69, HSCCWidgets 18,
+  HSCCLiveActivity 5, HSCCLiveActivityMonitor 13, all 0/0;
+  `check_sources.sh` — 86 Swift files, all listed;
+  `widget_view_dispatch_check.sh` — every surface still gates paused and
+  unconfigured in one step, and now also proves `HSCCMacWidgets` compiles all
+  six widget files plus the shared store/client/theme by path;
+  `widget_settings_check.sh` — the shared appearance writes still reload
+  WidgetKit, and the macOS Settings window embeds the same editor and reloads
+  timelines; `widget_style_check.sh` — every root paints through the
+  rendering-mode adapter, full-colour keeps `style.backgroundColor`, and no
+  hard-coded colour/font remains; `cluster_widget_check.sh`,
+  `projects_widget_check.sh` and `board_status_widget_check.sh` still pass;
+  `check_theme.sh`, `sf_symbol_check.sh` and `scripts/address_guard.py
+  --tracked` are clean.
+- **`ios-app/scripts/board_status_widget_check.sh` PASSED, and proven red on
+  purpose four ways.** The gate's own run: twenty structural proofs ok, `104
+  assertions, 0 failure(s)`. Then four mutations, each reverted: adding
+  `case "blocked"` to the interim histogram → `FAIL: the interim stale switch has
+  NO blocked case` (rc 1); folding `"blocked"` into the running case → four
+  executed failures including `...running folds the claimed dialect and ignores
+  review/nil [got: 4]` and `the interim's open total is the four it knows (2+1+2+3)
+  [got: 10]`, so the fixture really does carry the blocked rows the assertion
+  claims; making `numberText(nil)` render `0` → `FAIL: the em dash exists exactly
+  once in the widget pair — want 1, got 0` plus the two dash assertions; replacing
+  `if !entry.configured` with `if true` in the circular body →
+  `FAIL: body 'accessoryCircular' (line 406) never checks '!entry.configured'`.
+  Three of the harness's own expectations were wrong on the first run and were
+  corrected against the source, not against the output: the circular dial *does*
+  legitimately draw `0` when `blocked` is known to be zero and only an open operand
+  is missing.
+- `scripts/tests/test_apps_release.py` and the updated cask tests cover notes,
+  `version.json`, a valid Sparkle appcast (URLs, versions, signatures,
+  monotonic builds), the Pages render and the project version bump.
+- `ios-app/scripts/build_check.sh` and `macos-app/scripts/build_check.sh` are
+  clean; `scripts/release_apps.sh 1.1.0 --dry-run` runs end to end.
+- `ios-app/scripts/build_check.sh`: all four iOS targets compile, **0 errors /
+  0 warnings** (73 HSCC files). `macos-app/scripts/build_check.sh`: both macOS
+  targets **0/0**, including a real `import Sparkle` compile against the pinned
+  Sparkle 2.6.4 framework. `ios-app/scripts/update_check.sh`: **35 feed/version/
+  dismissal/throttle assertions** plus **9 target-boundary assertions** proving
+  the update files are app-only (no network). `macos-app/scripts/update_check.sh`:
+  **24 Sparkle wiring assertions** (feed URL, public key, daily interval, both
+  toggles, found-update badge, manual items) and no Sparkle in the widget.
+  Existing gates stay green: `check_sources` (90 files), `check_theme`,
+  `sf_symbol_check` (71), `shared_store_check`, `first_run_check`,
+  `first_run_check_settings`, `deeplink_check` (41), `notify_check`,
+  `widget_view_dispatch_check`, `widget_settings_check`, `model_decode_check`
+  (93/93), `connection_banner_check`, `connection_probe_check`,
+  `live_activity_rehydration_check`, `monitor_activity_check`,
+  `projects_widget_check` (47), `cluster_widget_check`, `board_status_widget_check`,
+  `widget_data_client_check`, `widget_style_check`, `logs_redactor_check`,
+  `no_op_handler_check`, `offline_cache_fix_check`, `qr_classify_check`,
+  `serving_placement_check`, `snapshot_store_check`, `fleet_models_check` and
+  `fleet_offline_check`. `macos-app/scripts/actool_icon_check.sh` clean;
+  `python3 scripts/address_guard.py --tracked` passes.
+- **`bash ios-app/scripts/widget_settings_check.sh`: 146 -> 171 `ok:` lines,
+  green**, including the new surface-coverage block and the existing executed
+  store/scope cases. The pre-change count was measured on `main` @ `78a59433`
+  before the edit; the new block adds 25 assertions and drops none.
+- **`bash ios-app/scripts/build_check.sh`: 0 errors, 0 warnings** across
+  HSCC (67 files), HSCCWidgets (17), HSCCLiveActivity (5) and
+  HSCCLiveActivityMonitor (13); compile only, no device or simulator build.
+  `bash ios-app/scripts/sf_symbol_check.sh`: all 65 symbols resolve.
+- **Gate, not filter: the six still RUN and still assert wherever hermes is importable, and every way of breaking that is caught by a probe rather than argued away.** Mutation driver `probe_gate.py` (in-place on this committed, disposable worktree; pristine bytes captured once per file, byte-compared after every restore — `restored pristine: True` — `__pycache__` dropped before every run, `PYTHONDONTWRITEBYTECODE=1`, `-p no:cacheprovider`, and a catch credited only when the *named* test id appears in the `FAILED` lines). P0 control unmutated on BOTH interpreters first: thin p313 `25 passed, 6 skipped`, hermes venv `31 passed`. Then **9/9 caught**: P1 the gate skipping unconditionally, on the interpreter where hermes IS importable → `test_f1` fails (this is the card's required probe — the blind spot is a red leg, not a quiet pass); P2 the probe always reporting "importable" → A1 goes red again on the thin interpreter, which is what proves the skip and not the code is what makes the thin leg green today; P3 the skip losing the import error from its reason → `test_f1`; P4/P4b a gate creeping onto A2 as its first statement, on both interpreters → `test_f2`; P4c the same call planted mid-body, which is the mutant that SURVIVED the first version of `test_f2` — the pin was then widened with a second assertion (`any_call − subject == the six`) and the mutant re-run to CAUGHT, so the version shipped is the one that bites, not the one that was written first; P5 A1 losing its gate, on the venv where A1 itself still passes so only the pin can see it → `test_f2`; P5b the same removal on the thin interpreter → the original `test_a1` failure returns; P6 the gate moved to run after the fake tree is seeded → `test_f2`. Every verdict names the failing id, so a catch cannot be misattributed to an unrelated test.
+- **The leg, green on both interpreters, with the pre-fix control measured in the same session.** Command is `scripts/run_tests.sh:289` verbatim — `python -m pytest -q -rs hscc-api/tests -p no:cacheprovider` — run one-dir-per-process as the runner does, in a scratch worktree, and re-measured at the final head rather than quoting the earlier one.
+
+  | interpreter | pre-fix `72f65838`, zero diff | post-fix `089f8e5f` |
+  |---|---|---|
+  | thin sibling `~/miniconda3/envs/p313/bin/python` (3.13.12) | `6 failed, 1030 passed, 25 skipped`, rc=1, 270.69 s | **`1032 passed, 31 skipped`, rc=0**, 270.81 s |
+  | canonical `~/.hermes/hermes-agent/venv/bin/python` (3.14.10) | `1060 passed, 1 skipped`, rc=0, 275.57 s | **`1062 passed, 1 skipped`, rc=0**, 276.14 s |
+
+  The arithmetic is the finding: the thin leg gains exactly `+2 passed` (`test_f1`, `test_f2`), exactly `+6 skipped` (the six, and only the six) and loses exactly `6 failed`; the canonical leg gains the same `+2 passed` and its skip count does **not** move (1 → 1, the pre-existing `test_gateway_driver` corpus skip), which is the leg-scale proof that nothing was silenced where hermes resolves. The pre-fix canonical control ran in a separate detached worktree at `72f65838` so no edited file could be imported mid-run. `python3` on this host IS the thin sibling — verified with a capability probe under both interpreters: p313 has pytest and lacks `hermes_state`, `ruamel` and `hermes_cli`; the venv has all four, `hermes_state` resolving to `~/.hermes/hermes-agent/hermes_state.py` — which is why the card's brief reproduced red on a bare `python3` while a neighbouring card measured the same command green minutes earlier: same command, different interpreter, and this leg had a posture for one of those two cases and none for the other.
+- `ios-app/scripts/build_check.sh` — full compile+link of every target with its
+  real per-target file set against the iOS 26 SDK: HSCC 86 → **83** files,
+  0 errors, 0 warnings; HSCCWidgets 9, HSCCLiveActivity 5,
+  HSCCLiveActivitySession 5, HSCCLiveActivityMonitor 5, each 0 errors /
+  0 warnings. `check_sources.sh`: 91 Swift files on disk, all listed in
+  `project.yml`. `check_theme.sh`, `actool_icon_check.sh`,
+  `model_decode_check.sh` (62/62 fixtures), `deeplink_check.sh` and
+  `nav_graph_screens.py check` clean; `offline_cache_fix_check.sh` green against
+  the live API. Compile gate only — never built or run on a device.
+- `ios-app/scripts/model_decode_check.sh`: **ALL DECODE CHECKS PASSED — 98/98
+  fixtures** (was 88/88). `Sources/Shared/SharedStore.swift` is in the compiled
+  real-source list, so the new §7 block runs against the production store types —
+  never a mirror. Ten new assertions: the fixture's own `hosts[].host` values are
+  dotted quads (the control, so the scan cannot pass vacuously), `project()`
+  yields one entry per node labelled by `displayLabel` and never by `host`, the
+  six projected fields survive, `MonitorNodeEntry` round-trips through the real
+  `Snapshot` encode/decode, **no key and no string value in the stored JSON holds
+  a dotted-quad**, a stored node object declares no key outside the six projection
+  fields (so `host` cannot be added back silently), and the stored daemon-host
+  object holds exactly §5.5's eleven machine fields with a `hostname` that is a
+  name, not an address. Plus a **negative** fixture,
+  `v1_monitor_snapshot_legacy.json` — the bytes the old code wrote (`host`,
+  `error`, full `sample` with `sparkrun_job_names`) — asserted to **fail** decode,
+  which is the upgrade behaviour: a build that updates in place refuses the legacy
+  blob rather than reading an address back out of the container. Test-the-test:
+  pointing `project()`'s label at `node.host` turned the scan red and named the
+  paths (`$.nodes[0].label=192.0.2.1 (gx10-cad0)`), then was reverted.
+- `ios-app/scripts/build_check.sh`: HSCC **83** / HSCCWidgets **9** /
+  HSCCLiveActivity **5** / HSCCLiveActivitySession **5** /
+  HSCCLiveActivityMonitor **5** files, **0 error(s), 0 warning(s)** —
+  `full compile clean, 0 warnings (compile only — never built or run on a device)`.
+  No file added or removed under `Sources/`, so `project.yml` is untouched.
+- `check_sources.sh`: `sources in sync: 91 Swift files, all listed in
+  project.yml`. `check_theme.sh`: `CLEAN — no raw colour outside Theme.swift.`
+  `actool_icon_check.sh`: `ACTOOL ICON CHECK PASSED — AppIcon compiles and is
+  wired (still not verified on a device).`
+- Neighbours that could notice a monitor/storage change, each run and passing:
+  `shared_store_check.sh` (`SHARED STORE CHECK PASSED — a broken App Group cannot
+  fail silently`), `snapshot_store_check.sh` (`✅ REAL SnapshotStore
+  encode/decode round-trip OK`), `widget_settings_check.sh`,
+  `widget_view_dispatch_check.sh`, `live_activity_rehydration_check.sh`, and
+  `monitor_activity_check.sh` against the live API (`PASS: real
+  /v1/cluster/monitor + /v1/daemon/host decode + derive to a populated
+  ContentState` — with its own honest `WARN: no nodes derived`, the fleet being
+  down at the time of the run).
+- `scripts/snapshot_store_check.sh` and `scripts/monitor_activity_check.sh` were
+  named as the harnesses whose subject moves. Checked rather than assumed:
+  `grep -rn "MonitorSnapshotStore\|MonitorNode" scripts/` finds no reference to the
+  monitor snapshot store in either — the first exercises the *topology*
+  `SnapshotStore`'s encode/decode (extracted verbatim from the same file, still
+  unchanged), the second the monitor **Live Activity**'s push path
+  (`MonitorActivityAttributes.ContentState` + `NodeMetric`), which never reads the
+  store. Both still pass; the §7 storage invariant therefore has its home in
+  `model_decode_check`, where the bytes written to the container are the subject.
+- `ios-app/scripts/build_check.sh` — full compile of all four targets, 0 errors / 0 warnings (compile only, never a device build). `model_decode_check.sh` — **87/87 checks over 54 fixtures**, unchanged from main. `widget_view_dispatch_check.sh` — green. The new surface has no `WidgetSurfaceKind` entry on purpose: it is operator-started and Stopped from the Board screen, not an ambient surface with a pause/cadence registry row.
+- **`ios-app/scripts/heredoc_backtick_check_probe.sh` — the gate's evidence, built
+  from planted payloads rather than greps.** Every leg plants a payload that WRITES A
+  MARKER FILE into a mutated COPY inside a private ios-app-shaped tree whose
+  `Sources/` and golden are symlinks, and requires both halves of the proof: no marker
+  file, and this gate refusing. A control leg runs the same mechanism with nothing
+  mutated (a scanner that refuses everything cannot score green), and an anti-vacuity
+  leg refuses to score a body leg whose payload did not execute — a payload that
+  never ran makes every refusal beneath it worthless. Covered: the unquoted heredoc
+  body of each splice-capable gate and of a fresh script; shell position; a rename
+  that drops `_check.sh` from the leaf (the in-file sentinel cannot be planted in a
+  renamed copy; the external scan keys on the directory); both fixture tables — an
+  inert payload in a quoted-delimiter body and in a `#` comment must pass AND print
+  its line, and a backslash-escaped byte in shell position must be measured and
+  reported, not refused; and the window above a guard, by planting an executable
+  payload above the guard of each self-auditing gate, measuring whether bash executed
+  it, and then requiring this gate to refuse the very bytes the in-file guard could
+  not see. That residual is disclosed rather than counted as a pass: whoever can write
+  above a guard can also delete it, which is why the closure is an external scanner.
+  The real tree is verified byte-identical by `git status --porcelain` afterwards.
+- Clean run of the runner on a branch of `origin/main`: both probes executed, each with
+  its own RC 0 and its own `PASSED` verdict line, runner RC 0. The per-probe seconds it
+  printed are quoted in the PR body rather than transcribed here — the runner prints
+  them on every run for exactly that reason.
+- Negative-proven, twelve legs, transcript attached to the card: both probes renamed
+  out of the glob (refused, RC 2, and the refusal names the directory it looked in, how
+  many scripts it considered, and every name that nearly matched, so the two
+  `.sh.disabled` files are shown rather than merely missed); a throwaway probe added to
+  the directory (the discovery count goes 1, 2, 3 — nothing about the probe set is
+  hardcoded); a probe exiting 0 with no verdict banner (refused); a probe printing
+  `FAILED` and then exiting 0 (refused — the original defect's shape); a probe exiting
+  1 (runner RC 1, probe named); a hanging probe under `PROBES_CHECK_TIMEOUT=30`
+  (runner RC 2, named, and the orphan check afterwards is empty, so the tree died with
+  it); a live payload planted into a throwaway copy of the real probe by an env-var-free
+  edit (probe RC 1 with its gate's `FINDING` line quoted, runner RC 1 naming it, while
+  the unmutated probe stayed RC 0 in the same run and no marker file appeared);
+  `build_check.sh` edited to name a probe (refused before any probe ran); the nesting
+  guard `heredoc_backtick_check_probe.sh` carries demonstrated to exit 0 on one line of
+  output — a green that ran nothing — and cleared by the runner, which runs the probe
+  fully under that same hostile environment; the report writer with stdout closed early
+  (non-zero); and the runner's own invariant trip-wire, made live by uncounting one
+  verdict in a throwaway copy (refused RC 2, and the `PASSED` banner was absent).
+- `build_check.sh`, `check_sources.sh`, `check_theme.sh` and
+  `python3 scripts/changelog_fragments.py check` all RC 0 on this branch, and
+  `heredoc_backtick_check.sh` stays RC 0 with the runner in the scanned population.
+  No probe was added to `build_check.sh`, and the runner refuses it if that changes.
+- `ios-app/scripts/build_check.sh` — full compile+link of every target with its
+  real per-target file set against the iOS 26 SDK: HSCC 68, **HSCCWidgets 12**
+  files (one more than the base — `ClusterWidgetMetrics.swift`),
+  HSCCLiveActivity 5, HSCCLiveActivityMonitor 8, every target **0 errors, 0
+  warnings**; "full compile clean, 0 warnings". `check_sources.sh`: 80 Swift
+  files on disk, all listed in `project.yml`. `check_theme.sh`: CLEAN — no raw
+  colour outside Theme.swift. `actool_icon_check.sh` PASSED.
+  `model_decode_check.sh`: 89/89 fixtures decoded against the real models.
+  `cluster_widget_check.sh`: 78/78 assertions. `widget_data_client_check.sh`,
+  `widget_view_dispatch_check.sh`, `widget_settings_check.sh`,
+  `shared_store_check.sh`, `snapshot_store_check.sh`, `monitor_activity_check.sh`
+  all clean. Compile gate only — never built or run on a device or simulator.
+- `ios-app/scripts/model_decode_check.sh`: **ALL DECODE CHECKS PASSED — 88/88
+  fixtures** (was 62/62), compiled against the real `Models.swift` +
+  `SharedModels.swift` — never a mirror. New coverage, per dataset: projects
+  (row cap + the `repo`/`topic` structural-redaction proof), the four
+  mobile-summary shapes and the **negative** counts-without-`done` fixture
+  (asserted to *fail* decode), the kanban trio (`boards`/`errors`/`pid`/
+  `host_local` on the wire and not in the type, blocked rows stuck-longest-first,
+  queue depth = ready+todo), and cluster monitor + daemon host (node metrics
+  parse, `displayLabel` can never render the node's address).
+- New fixtures: `v1_daemon_host.json` and `v1_kanban_running.json` are **live
+  captures** (read-only `GET`s, value-sanitized — the daemon hostname became
+  `gateway-1`); the five `v1_mobile_summary*.json` are **authored from
+  `hscc-api/routes_mobile.py`** because that route is not deployed (PR #310 open,
+  and a live `GET /v1/mobile/summary` returned 404 when checked); and
+  `kanban_stale_queued.json` closes a gap the committed fixtures could not — the
+  captured `kanban_stale.json` holds two `running` rows, so queue depth and age
+  ordering were exercised by nothing. Provenance is recorded per file in
+  `fixtures/README.md`.
+- `ios-app/scripts/build_check.sh`: HSCC **86** / HSCCWidgets **9** /
+  HSCCLiveActivity **5** / HSCCLiveActivitySession **5** /
+  HSCCLiveActivityMonitor **5** files, **0 error(s), 0 warning(s)** — full
+  compile+link of every target against the iOS 26 SDK. Never built or run on a
+  device.
+- `check_sources.sh`: 94 Swift files, all listed in `project.yml` (no file added
+  or removed under `Sources/`; the two deletions were harnesses in `scripts/`).
+  `check_theme.sh`: CLEAN. `actool_icon_check.sh`: PASSED. `ws_decode_check.sh`:
+  both live frame captures decode through the shipped parsers.
+- **`ios-app/scripts/widget_view_dispatch_check.sh`, `widget_settings_check.sh` and `projects_widget_check.sh` — the gates that now cover this behaviour, and the eight negative tests run against them.** The dispatch gate adds ONE `widget_surface_gate` call for this widget (file, cadence marker, paused-factory literal, minimum gated bodies, the awk program naming the fetch function, registry key), not another forty greps: 3 gated bodies = its 3 families, the paused copy must have exactly one CODE owner, paused-before-client order is measured INSIDE `fetch(for:surface:)` (file-global line numbers read the configuration sheet's own `makeIfConfigured()` and fail for the wrong reason), and the cadence function is sliced out by an END-ANCHORED `GATE-SLICE` marker and executed — Off and a corrupt negative both mean "no next date", 5/60 min are exactly +300s/+3600s. Its 7th argument is new: `home-screen-only` replaces the accessory checks with the inverse claim, that `supportedFamilies` names no accessory family AND no `shortGateLabel` exists, so the entry's missing label rule is a proven absence rather than an oversight that goes false the day someone adds `.accessoryCorner`. Both label checks now exclude comment lines — this card's own doc comment naming `shortGateLabel` turned the check red, which is the same "a comment is not an owner" trap #341 hit on the paused copy, and prose about a rule is not a body that draws one. `widget_settings_check.sh` gained section 7d: raw value pinned to the literal, absent entry ON at the 5-minute widget cadence, first-launch seed ON, the operator's pause and its Off (0) cadence surviving the bounding read, and a foreign `["state","board"]` blob bounded to nothing by the empty declaration. `projects_widget_check.sh` — the only gate that compiles the REAL widget file — gained executed assertions over the real `AppGroupWidgetSettings`: absent reads ON, the paused factory carries no rows/no age/no failure, the invite copy and the paused copy are different strings, and the one that matters, `dispatch(paused entry WITH rows) == "gate"`; its greps were re-pointed off the deleted `isUnconfigured` in the same commit.
+
+  Eight negatives, each observed to fail by name and then restored byte-identically (sha256 of the subject file compared before and after): suffixing the `projects_cadence` marker ("GATE-SLICE marker projects_cadence missing from …"), flipping the one-step gate to its inverse ("only 0 bodies gate on !configured||paused (want >= 3)"), adding `.accessoryCorner` to `supportedFamilies` while gated `home-screen-only`, giving the entry a `shortGateLabel` nothing can reach, swapping the row glyph for `folder.badge.list` (unresolvable — the SF Symbol gate names it), making `availableSections` non-empty ("projects declares no optional content section"), renaming the raw value ("widget.projects registry key"), and stubbing `var paused: Bool { false }`, which the executed harness caught three ways including "PAUSED wins even when rows are present". One pitfall this card hit while running them: `git checkout -- <file>` restores from the INDEX, so in a negative loop over a file whose work is still unstaged it reverted the card's own edits rather than the mutation — the negatives above are run after the slice was committed, and the loop verifies the restore by hash rather than assuming it.
+
+  Gate, all rc=0 and no device or simulator: `build_check` — "HSCC: 62 files, 0 error(s), 0 warning(s) / HSCCWidgets: 16 files / HSCCLiveActivity: 5 files / HSCCLiveActivityMonitor: 11 files / full compile clean, 0 warnings (compile only — never built or run on a device)"; `check_sources` — "sources in sync: 78 Swift files, all listed in project.yml"; `check_theme` — "CLEAN — no raw colour outside Theme.swift."; `actool_icon_check` — "ACTOOL ICON CHECK PASSED — AppIcon compiles and is wired (still not verified on a device)."; `model_decode_check` — "ALL DECODE CHECKS PASSED — 87/87 checks (over 54 committed fixtures)"; `shared_store_check`; `widget_settings_check`; `widget_view_dispatch_check` — "WIDGET SURFACE GATE CHECK PASSED"; `sf_symbol_check` — "PASS: all 64 SF Symbols resolve"; `projects_widget_check` — "PROJECTS WIDGET CHECK PASSED"; and `scripts/changelog_fragments.py check`. No file was added under `Sources/`, so `project.yml` and `scripts/generate.sh` are untouched. Compile-only: nothing here was built or run on a device, so the paused pane's rendered pixels remain the on-device checklist's job.
+- **Both gates mutation-probed, 9/9 as expected, with a negative control.** Driver on an in-place disposable worktree (pristine bytes for both mutated files captured once, byte-compared after every restore, `__pycache__` dropped per run, `PYTHONDONTWRITEBYTECODE=1`). Control first: whole file unmutated `13 passed`. Caught — fake row added to a LIVE table (the probe this card required), live row deleted, field set disagreeing, heading renamed (the vacuous-pass trap), row added to the MATRIX only (proves direction of truth), unparseable first cell failing rather than being skipped, anchor moved outside the handler's def, live row stripped of its handler name. **Negative control held green**: a row added to the "Rows retired with their client call site" table fails nothing, which is what proves the gate skips that section on purpose rather than reading past the heading. Provenance is demonstrated rather than asserted: every doc mutation was made only in this worktree's doc, and the gate read it.
+- **The `hscc-api` leg is red on `main` already, independent of this card — measured with a control, not assumed.** `pytest -q -rs <repo>/hscc-api/tests -p no:cacheprovider` measured at code commit `b114d737` (the only diff to the fragment's own commit is this fragment): **`6 failed, 1032 passed, 25 skipped`** in 270.70 s. Control in a detached worktree at the base `72f65838` with **zero diff**, same interpreter, same command: **`6 failed, 1030 passed, 25 skipped`** — the six failure node ids are **identical** between the two runs (`diff` of the extracted headers: empty), and the delta is exactly `+2 passed`, the two gates this card adds. No regression, no new failure. The six are all in `hscc-api/tests/test_profile_root.py` (`test_a1_no_intent_boots_permits_and_uses_relocated_ambient_root`, `test_a3_profile_mode_hermes_home_boots_permits_and_writes`, `test_a4_scratch_home_inside_live_root_default_path_unchanged`, `test_c1_child_boot_refusal_exits_2_...`, `test_c2_daemon_server_refusal_...`, `test_c3_control_without_intent_the_same_write_lands`), all failing at `AssertionError: hermes get_profile_dir -> None != <temp home>` — the `HSCC_API_PROFILES_ROOT` family, not this card's surface. Note also that the same command reported `1059 passed, 1 skipped` on a near-identical tree ~50 min earlier: the leg's hermes-runtime gap detection is invocation-sensitive (`hermes_state` resolves from a path pytest does not put on `sys.path`), so 24 tests skip here that passed there, and `test_profile_root.py` — which, unlike the gateway family, has no `hermes_gap` guard — fails instead of skipping. Out of scope here; worth its own card.
+- `ios-app/scripts/build_check.sh` — all four targets compile, 0 errors / 0 warnings.
+  `model_decode_check.sh` — **93/93 checks over 56 fixtures** (was 87/54).
+  `widget_data_client_check.sh` — **115 ok** (was 102). `connection_probe_check.sh`,
+  `connection_banner_check.sh`, `first_run_check.sh`, `shared_store_check.sh` and the
+  widget/store checks that compile the shared sources stay green; the tracked-tree
+  address guard reports no real operator address.
+- **The driver's decisions are gate-asserted, and the settings screen's
+  delegation is no longer only prose.** `live_activity_rehydration_check.sh`
+  gained a third `GATE-SLICE` block, `cards-feed-decision`, holding the driver's
+  push/end/leave-alone rule in Foundation-only code the script slices out of
+  `Sources/Shared/CardsRunningActivity.swift` and executes — the existing two
+  blocks are untouched — plus a part that compiles
+  `CardsRunningProjection.swift` as shipped and asserts the count honesty there:
+  the answered-empty-list real zero, the server's count beating a subset of
+  rows, a down blocked route giving `nil` and never `0`, unknown age sorting
+  last, the stored row cap, an unparseable `started_at` giving no age.
+  `widget_settings_check.sh` gained two content guards (a content group is not
+  offered for a surface with no sections; the scope pickers appear only where
+  the route honours a scope) and the registry-invariant cases: no two surfaces
+  share a registry key, every key is namespaced by surface kind, a surface with
+  no sections stays section-less through the bounded read, and the running-cards
+  surface is push-fed under a stable key. Each reads the registry's own
+  `allCases` rather than a remembered number, so the next surface cannot redden
+  a healthy gate.
+
+- **Two edits this branch first brought are deliberately NOT in the delivered
+  diff, because `main` already carries the same rule in a better form** (rebase
+  onto `main` @ `e550f944`). The surface-count assertion is already a set
+  comparison over `allCases`, and the backtick splice this branch patched by
+  routing the extracted model block through `printf` inside quoted heredocs is
+  settled file-wide by the same card's ban plus the committed harness golden —
+  keeping the branch's narrower shape would have put a second mechanism in place
+  of one and frozen the harness body out of the escape the ban documents. That
+  the ban is the sufficient half is measurable rather than argued: the committed
+  golden carries backticked lines lifted verbatim out of
+  `Sources/Shared/SharedStore.swift`, intact, so a backtick arriving through an
+  expansion is inert text and only the ones typed into this gate's own prose can
+  splice.
+
+- **One pre-existing red on `main` is repaired by this branch.** At `e550f944`
+  `widget_settings_check.sh` failed its OWN backtick guard — comment lines in the
+  harness body had landed carrying literal backticks after the guard shipped — so
+  it exited before compiling anything; and its committed harness reference had
+  never been refreshed for the model block `main` grew since, so no current model
+  matches those bytes. Both are fixed here: the prose interpolates the documented
+  escape instead of carrying the byte, and the reference is refreshed for the
+  current model plus the cases this branch adds. Measured by running the same
+  script set in two clean worktrees — the base and this head: the base fails
+  exactly this one gate and passes every other script in the set, and this head
+  passes the whole set.
+* Thin sibling (`~/miniconda3/envs/p313/bin/python`), `python -m pytest -q -rs
+  hscc-roles/tests -p no:cacheprovider`: baseline `5 failed, 255 passed, 5
+  skipped`, rc=1 → this branch `265 passed, 10 skipped`, rc=0. The arithmetic closes
+  exactly — 5 skips + 5 failures became 10 skips, and the +10 passed are the guard.
+  `-rs` reports two skip sites, both in `hscc-roles/tests/hermes_gap.py`: `[6]
+  hermes_gap.py:112` (`hermes_cli.profiles` — the 4 `test_profile_root_assert`
+  cases + the 2 `test_sync_profile_root` ones) and `[4] hermes_gap.py:155`
+  (`hermes_cli.config` — the 4 `test_generator` cases). Both reasons carry
+  `ModuleNotFoundError: No module named 'hermes_cli'`.
+* Canonical interpreter (`~/.hermes/hermes-agent/venv/bin/python`), same command:
+  `275 passed`, **0 skipped**, rc=0 — the number that must not move when a gate is
+  added, and did not.
+* `hscc-api` unaffected: `1071 passed, 1 skipped` (canonical) and `1041 passed, 31
+  skipped` (thin), rc=0 both — identical to what t_0fd2c149 measured, so widening
+  that guard's `owners` list silenced nothing.
+* Mutation probes on the guard, **13/13 CAUGHT**, each verdict naming the failing
+  test id (green controls before and after, tree restored and byte-compared,
+  `__pycache__` dropped per run, provenance asserted rather than printed): P1 the
+  card's posture restored verbatim → the gated-cases test *and* the stray-skip
+  sweep; P1b the private skip restored inside a still-gated case → only the
+  stray-skip sweep, which is the gap that test was written for; P2 the full private
+  copy including the owner import stripped; P3 the `try`/`except` shape planted in a
+  gated case; P4 a private skip reason worded by hand; P5 a gate moved to the second
+  statement; P6 an ungated case quietly gated; P7 the roster drops this leg's
+  probes; P8 the roster invents a gate no module defines; P9 the writer gate made to
+  skip unconditionally, caught on the CANONICAL interpreter — the "leg green because
+  silenced" case; P10 the profiles probe made to always answer "importable", caught
+  on the THIN interpreter by the gated cases going red again; P11 the skip losing
+  the import error from its reason; P12 a second `def require_hermes_cli_profiles`.
+  One driver bug found and fixed mid-run: a probe that writes each mutation from the
+  pristine copy applies only its LAST mutation, so a two-mutation probe silently
+  becomes a different probe — P1 first read MISSED for that reason.
+* `changelog_fragments.py check` rc=0 and both live-directory gates green after the
+  fragment conversion above.
+- **Independent bisect closes the card's open question, and exonerates its suspect.** Tight loop `pytest hscc-api/tests/test_contract_swift_routes.py` (3 s) in detached worktrees: `be154aec^` (= `52310791`) → `10 passed` **GREEN**; `be154aec` (#318, the console retirement) → `2 failed` **RED** at exactly the sites the card measured. The card suspected `040cd41a` (PR #303, `HSCC_API_PROFILES_ROOT`) of making `profile` required; `040cd41a` is an **ancestor of `be154aec`** and the leg was green *after* it, so #303 broke nothing and no server requirement was reverted. The real client was never broken — the four `HSCCClient` methods it had to call were deleted by #318 (`HSCCClient.swift:630`/`:715` hold the marker comments).
+- **Duplicate collision, handled without a second fix.** While this card ran, `t_f09436f1` shipped the identical root-cause diagnosis and the same four-row prune to `main` as `c66aa7c6` (PR #351). This card therefore **dropped its own test-file change** (its `b9255f63`, kept local on the abandoned `wt/t_80e185d2` branch as the audit trail) and re-played only the doc half onto `origin/main` with a fresh branch + cherry-pick (force-push is policy-blocked, and no rewrite was needed anyway), shipping the surface #351 did not touch — `git show --name-only c66aa7c6` lists exactly one file, the test. Findings shared on `t_f09436f1`; `hscc-api/tests/test_contract_swift_routes.py` flagged as a two-cards-in-two-hours hotspot.
+- **The `hscc-api` leg is green on `main` again, and this diff changes no behaviour.** `pytest -q -rs <repo>/hscc-api/tests -p no:cacheprovider` — the exact command `scripts/run_tests.sh` runs for that leg — in a detached worktree at the measured tree `fdff7b8f`: **`1059 passed, 1 skipped`, RC=0** in 275.33 s. Control at the parent `c66aa7c6` (same interpreter, none of my diff): **identical `1059 passed, 1 skipped`, RC=0** in 275.14 s, which is also the leg line `t_f09436f1` reported — three independent runs of the same leg agree. The only commit between the measured tree and the branch head is this fragment (`git diff --name-only fdff7b8f..HEAD` → `changelog.d/t_80e185d2.md`). Standalone `hscc-api/tests/test_contract_swift_routes.py`: `11 passed`.
+- **`hscc-cluster/tests/test_hermes_fence_sys_path.py` (new, 8 cases, zero skips) — a case that runs the fence leaves `sys.path` byte-identical to what it found, and the guard that says so cannot be satisfied by a fence that never opened.** Every case runs behind a `sys.meta_path` finder that refuses `hermes_cli*` unless a planted agent tree is on `sys.path`, so "the fake profile name came back" and "the window was open" are one fact — a fence that never inserted the path returns `None` and fails the first assertion rather than quietly passing the second, and the operator's real `~/.hermes/hermes-agent` cannot answer the lookup behind the test's back on the hermes venv. Pinned per window owner (`peer` = the sanctioned manager, `local` = the plugin's fallback, both parametrised): byte-identity after the fence, byte-identity when the planted `hermes_cli` raises at import time (the restore is a `finally`, not success-path cleanup), `None` plus no phantom entry for a `HERMES_AGENT_PATH` that does not exist, and — the shape that took a mutation probe to find — a `sys.path` entry the fence did NOT add is not taken back, which needs the awkward setup of a dir already on the path holding no importable `hermes_cli`, because otherwise the first attempt succeeds and no window ever opens to remove anything. Real hermes is evicted from `sys.modules` explicitly rather than via `monkeypatch.delitem`, which restores only keys that existed and would otherwise hand the next case in the process a fake `hermes_cli` whose tmp dir is still on disk.
+- **Leg counts at `a90eebf6`, both interpreters, through `scripts/run_tests.sh` itself with its `DIRS` reduced to `hscc-cluster`** (the runner's own loop, env pins and heartbeat; one pytest process per leg dir is the runner's isolation contract, and the full 12-leg run was NOT executed in this session — `hscc_daemon` alone is ~12 min, and the parent of this card set the same per-leg precedent). `HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python`: `1100 passed, 23 skipped`, `ALL GREEN`, rc=0. Default `PY=~/.hermes/hermes-agent/venv/bin/python`: `1120 passed, 3 skipped`, `ALL GREEN`, rc=0. The same two commands bare (no runner env) reproduce both counts exactly. At the parent's `1fd3c6cf` they gave `1112 passed, 3 skipped` and `1095 passed, 20 skipped`, so the arithmetic closes on the +8 new cases with the three `hermes_cli.plugins_dispatch` cases listed above moving from pass-on-a-leaked-path to skip-with-a-reason, and the four `No module named 'ruamel'` skips joining the thirteen `No module named 'hermes_cli'` ones — one capability, one answer, for the whole run.
+- **`scripts/tests/test_changelog_fragments.py` 49 passed and `changelog_fragments.py check` rc=0** ("OK — [Unreleased] is pointer, 105 fragment entries consistent") with this fragment in place — the two gates a fragment can break, which live in the `scripts` leg and so are invisible to the address-guard CI checks.
+- **Mutation probes: 9/9 CAUGHT, each verdict naming the failing test id** (driver on a copy of the worktree, pristine reset and byte-compared before every probe, green control on both interpreters first, provenance gated from inside the run by a `-p` plugin that purges a cached `hscc_daemon` so a sibling-plugin import cannot silently load the unmutated repo). `P1` delete the restore in the sanctioned `hermes_import.agent_tree_on_path` → red naming `test_a_case_that_runs_the_fence_leaves_sys_path_byte_identical[peer]` (plus two siblings) on both interpreters — the card's required mutation. `P2` the same deletion in the plugin's local window → `[local]`. `P3` the local window's `if added:` guard dropped, i.e. the naive `finally: sys.path.remove(path)` → `test_a_preexisting_agent_tree_entry_is_not_taken_back[local]`. `P4` the hand-rolled insert back in place of the peer window → `test_the_fence_prefers_the_sanctioned_peer_window`. `P5` the guard file's own blocker made to stop blocking → `test_hermes_resolves_only_inside_the_window` on the canonical interpreter (on the thin sibling hermes is absent anyway, which is exactly why that control exists).
+- `hscc-api` leg measured at `93c705f6` with the canonical runner's own command
+  (one pytest process over `hscc-api/tests`, `-q -rs`, board pins removed from
+  the env): **1058 passed, 1 skipped** in 4m32s. 33 of those are this card's
+  `tests/test_routes_mobile.py`; the skip is the pre-existing
+  `test_gateway_driver.py:210` "captured corpus not present". The only commit
+  after that run is this fragment — markdown, no code, cannot move the count.
+  The one archived-inclusive-seam test is the anti-regression core — drop
+  `include_archived=True` and it goes red rather than shipping a widget that
+  renders `done` as 0 forever.
+- iOS gates on this branch (Python-only diff, run because the gate has no
+  exceptions): `build_check.sh` HSCC 88 / HSCCWidgets 8 / HSCCLiveActivity 4 /
+  HSCCLiveActivitySession 4 / HSCCLiveActivityMonitor 4 files, 0 error(s),
+  0 warning(s), full compile clean; `check_sources.sh` 96 Swift files in sync;
+  `check_theme.sh` CLEAN; `actool_icon_check.sh` PASSED;
+  `model_decode_check.sh` 62/62 fixtures. Never built or run on a device.
+- **Additivity proof.** `diff` old -> new shows one deletion and it is the old
+  `version:` line, replaced by the bump (git: 155 insertions, 1 deletion).
+  Repo-only line count against the live copy (`diff | grep -c '^<'`): **1
+  before, 1 after** — both times solely the `version:` line. The template is
+  now content-identical to the live copy (350 lines; the only differing line
+  is `version: 3.0.1` vs `3.1.0`). Both card-specified anchor placements
+  verified in the landed file. Full-suite `scripts/run_tests.sh` counts at
+  the PR head sha are stamped in the PR body and the card handoff.
+- **`hscc-api/tests/test_widget_route_parity.py`** runs the CLI function and
+  the live route over the same neutral fixture state and asserts equal
+  numbers/rows for cluster status, cluster monitor (hosts + serving), and
+  autodown status (including the stale-down ⇒ live-up reconcile). Cluster
+  failure tests now pin the specific-cause error/speak instead of the old
+  `unavailable` string.
+- `hscc-api/tests/test_routes_project.py`: the HTTP route and
+  `hscc project list --json` are driven over one registry/board fixture and
+  compare equal rows. `hscc-api/tests/test_routes_mobile.py`: one SQLite board
+  is served through the route and through `kanban_live.collect` (the
+  `hscc kanban monitor --json` path) and the status histograms compare equal.
+  `hscc-api/tests/test_contract_swift_routes.py` derives all nine extension
+  reads from Swift and asserts registration plus the route-map doc.
+- **The pin still bites in both directions after the list moved.** Three
+  mutations at the fixed tree, each reverted (`hermes` venv python 3.14.10,
+  pytest 9.1.1): dropping `hscc_daemon/tests/real_hermes.py` from `ALL_OWNERS`
+  reports `require_real_hermes` as unbacked; making the block stop listing this
+  leg's `require_hermes_cli_profiles` fires the missing-direction assertion; and
+  renaming `def require_hermes_kanban_board(` in the hscc-cluster owner reports
+  that gate unbacked — the three cases the guard exists for. The pre-fix
+  reproduction is the control that the added
+  owner is what closes it: the same node id, with no local diff, fails at both
+  `bf115a4f` (the stacked tip the card names) and `e34fa629` (PR #363's head, the
+  base the fix sits on), naming exactly the four `hscc-cluster` gates.
+- **Leg counts, `hermes` venv python, from the repo root, stripped Kanban env.**
+  `hscc-roles/tests`: 275 passed, 0 failed (was 1 failed, 274 passed).
+  `hscc-cluster/tests`: 1120 passed, 3 skipped — the two
+  `test_media_recipes.py:269` diffusion-fixture skips and the live
+  `sparkrun show` fence at `test_template_intent.py:182`.
+  `bash scripts/run_tests.sh`: all 12 legs ✓, `ALL GREEN`, rc 0.
+  `ruff check` on the changed file reports the same three findings as that same
+  file at `origin/main` — none introduced here.
+- **Two guards, each covering what the other cannot.** A static ban runs as the
+  gate's FIRST executable code and refuses the file before a heredoc is ever
+  expanded, naming the offending line numbers. It fails closed: grep rc 0 means
+  "the byte was found" and rc ≥ 2 means "the guard could not read the file it is
+  judging" — both refuse, because a guard that waves a run through after failing
+  to look is not a guard. It judges `${BASH_SOURCE[0]}`, the file actually
+  executing, not a hardcoded leaf name: a mutated renamed copy sitting beside a
+  clean canonical gate is now refused, where the leaf-name version audited the
+  clean neighbour and let the copy through. At the foot of the gate, before the
+  harness binary is run, the generated `$WORK/main.swift` must be **byte-identical
+  to the committed `ios-app/scripts/widget_settings_check.harness.golden`**. That
+  half is a drift check and is described as one: the harness is assembled from
+  `$model`, `$suite` and `$wkey` lifted out of `Sources/` at run time, so anything
+  that moves in those inputs moves these bytes, and a harness whose bytes moved is
+  a harness whose assertions moved. It is **not** a backtick detector and no longer
+  claims to be — the harness legitimately carries backticks (the extracted model's
+  own doc comments use them), and a backtick arriving through an expansion is
+  inert text either way.
+- **`widget_settings_check_backtick_probe.sh` is that proof, kept in-tree.** A
+  guard whose only evidence is a claim in a comment is a guard nobody has seen
+  fire, and "the gate exits 0" proves nothing about a defect that exits 0 while
+  executing shell. The probe plants a marker-writing payload into every context the
+  gate can expand — each unquoted heredoc region (openers enumerated at run time,
+  so a second heredoc is covered without editing the probe: hardcoding one opener
+  is what let the first payload through), shell position above and below the
+  heredoc, a renamed copy with the canonical gate clean beside it, and a real `#`
+  comment — and requires per leg that no marker file appears AND that the guard
+  refused, rather than the payload having been inert by luck. It also runs an
+  unmodified copy and requires it still to pass, so a guard that refuses everything
+  cannot score green here, and it verifies it never mutated the gate. Before the
+  fix: 5 legs red, payloads executed. After: every planted leg refused before
+  execution, control green, gate sha unchanged. It carries no backtick of its own
+  (`printf '\140'`), because a probe holding the banned byte is disqualified by the
+  rule it tests.
+- **Its one honest limit, printed every run — and made smaller.** A guard can
+  only judge the text at or below its own first executable statement. The first
+  version of this fix left that statement sitting below its own documentation and
+  measured the span from the guard's comment paragraph: the probe reported an
+  uncovered prologue of 4 lines when the ban statement was 48 lines down, so 46
+  insertable lines were in fact unjudged, and a payload planted one line below
+  the anchor the probe called the boundary executed. Two changes. The probe now
+  anchors on a `GUARD-FIRST-EXEC` marker on the ban statement itself (deriving it
+  as the first non-comment line after the sentinel if the marker is lost) and
+  refuses to print a figure at all when the anchor lands on a comment line or
+  above the sentinel — a boundary that is guessed is the bug the leg exists to
+  catch. And the ban moved above its own prose, so the span it cannot judge is now
+  the shebang, the `set` line and a three-line pointer. The figure is the probe's
+  to print, not this file's to remember. Reported, never passed: whoever can write
+  above the guard can also delete it, and closing that for real needs a meta-gate
+  scanning every script in `ios-app/scripts/`, which is its own task
+  (`t_4558fd32`) rather than a longer comment here.
+- **Measured, not asserted.** Against `origin/main` @ `3b5e475c` the gate emitted
+  the 3 stderr lines and generated a harness missing those 6 backticks; with the
+  fix, the diff of the two generated harnesses is exactly the 3 restored comment
+  lines and nothing else — the assertions are untouched. A clean run prints `99`
+  `ok:` assertions, `0` `FAIL:`, the three banners (`WIDGET SETTINGS CHECK
+  PASSED …`, `INTENT DELEGATION CHECK PASSED …`, `CONFIG SCREEN CHECK PASSED …`)
+  and **zero bytes of stderr**, RC 0, from `ios-app/` and from the repo root. The
+  golden-mismatch negative is proven too: tampering one line of the golden gives
+  RC 1 with **no** assertion and **no** banner on stdout — which is why the
+  integrity checks sit between the compile and the run, and why the probe demands
+  zero banners on a refused leg. That check earned its keep during this change: it
+  caught the fix's own first attempt (`$BT defaults` rendering one extra space)
+  before a single assertion ran. `build_check.sh`, `check_sources.sh`,
+  `check_theme.sh` and `python3 scripts/changelog_fragments.py check` all RC 0;
+  `project.yml` is untouched (no source file added) and both new files live in
+  `scripts/`, outside every target.
+- **Why the escape-parity counter was dropped rather than fixed.** The first
+  version counted *unescaped* backticks, which needed a backslash-parity loop,
+  which hit a macOS trap worth recording: BSD awk treats a `$` in the MIDDLE of a
+  regex as a literal dollar sign, so `match(head, /\$/)` never fails on ordinary
+  text and such a loop spins instead of terminating. The counter is gone now — a
+  whole-file ban has nothing to count — but the trap is real for anyone writing awk
+  on this host.
+- `ios-app/scripts/build_check.sh`: HSCC **89** / HSCCWidgets **9** /
+  HSCCLiveActivity **5** / HSCCLiveActivitySession **5** /
+  HSCCLiveActivityMonitor **5** files, **0 error(s), 0 warning(s)** — every
+  target compiles and links the new file against the iOS 26 SDK with its real
+  per-target set (each count is +1 over the parent card's, which is the point).
+- `check_sources.sh`: 97 Swift files, all listed in `project.yml` (was 96).
+  `check_theme.sh`: CLEAN. `actool_icon_check.sh`: PASSED.
+  `model_decode_check.sh`: ALL DECODE CHECKS PASSED — 62/62 fixtures.
+- The five re-pointed harnesses all pass by execution, not by grep:
+  `shared_store_check.sh`, `notify_check.sh`, `widget_settings_check.sh`,
+  `snapshot_store_check.sh`, `first_run_check_settings.sh`.
+- Whole `scripts/*.sh` suite re-run: the only reds are
+  `no_op_handler_check.sh` (a `TODO` inside a comment in `Theme.swift`) and
+  `offline_queue_check.sh` (a `ChatEntry` marker whose subject file is already
+  gone). Both reproduce identically on the base commit — pre-existing, not
+  this card's, and both named for the next worker to fix.
+- Every byte figure in the contract is a captured response body from the
+  running daemon, not an estimate: 10 routes plus 8 query variants
+  (`?board=`, `?status=`, `?include_archived=1`) — 1,854 B for
+  `/v1/projects`, 81,855 B for `/v1/cards`, 8,625,393 B for archived cards,
+  46 B for `?status=done` (0 cards), 11,745 B for the kanban trio,
+  10,747 B up-state for `/v1/cluster/monitor`. The fleet was autodowned
+  during the run, so the two cluster routes are labelled as the degraded
+  38/39 B responses they returned and the up-state size comes from the
+  committed 4-node fixture — flagged in the doc for re-measurement rather
+  than presented as live. `?board=` on `/v1/kanban/running` was proven to be
+  ignored (byte-identical to the unscoped call).
+- **Gates.** `macos-app/scripts/build_check.sh` — `HSCCMac: 18 files, 0
+  error(s), 0 warning(s)`, `HSCCMacWidgets: 18 files, 0 error(s), 0
+  warning(s)`. `ios-app/scripts/build_check.sh` — all four targets 0/0.
+  `pytest scripts/tests/test_bump_cask.py scripts/tests/test_bump_formula.py` —
+  green. `macos-app/scripts/release.sh --dry-run 0.1.0` on this host generated
+  the project, archived, exported with Developer ID, verified the app and the
+  embedded extension (Developer ID + hardened runtime + App Group), and stopped
+  before notarization as designed. No notarization was submitted and the tap was
+  not pushed. `scripts/address_guard.py --tracked` is clean.
+- `ios-app/scripts/build_check.sh` — full compile of every target with its real
+  per-target file set against the iOS 26 simulator SDK: HSCC 64, HSCCWidgets 17,
+  HSCCLiveActivity 5, HSCCLiveActivityMonitor 11 files, every target
+  **0 errors, 0 warnings**; "full compile clean, 0 warnings". Compile gate only
+  — never built for or run on a device.
+- `ios-app/scripts/cluster_widget_check.sh` — 78/78 executed assertions still
+  pass, plus the new structural checks for `systemLarge` (108 ok lines in the
+  full run). `widget_view_dispatch_check.sh` PASSED with every surface and
+  `model_decode_check.sh` still 87/87 checks over 54 fixtures. `check_theme.sh`
+  CLEAN, `check_sources.sh` 80 Swift files all listed in `project.yml`,
+  `sf_symbol_check.sh` all 64 SF Symbols resolve.
+* `hscc-cluster/tests` at `634ddc94`, runner's stripped env, one leg per process:
+  canonical `~/.hermes/hermes-agent/venv/bin/python` 1112 passed / 3 skipped (the 2
+  diffusion-fixture skips and the live-`sparkrun` fence — no hermes skip, which is the
+  point); thin `~/miniconda3/envs/p313/bin/python` 1095 passed / 20 skipped (17 hermes
+  capability skips + the same 3). Guard: 11 passed on both interpreters. Base at
+  `c4d42d64` on the thin sibling was 1077 passed / 22 skipped.
+* The thin `-rs` line is the evidence the collection-time flag was wrong, not merely
+  ugly: the SAME capability skips with two different import errors in one process —
+  `ModuleNotFoundError: No module named 'hermes_cli'` (13 cases) and `No module named
+  'ruamel'` (4 cases) — because `workflow._active_profile_name` puts
+  `~/.hermes/hermes-agent` on `sys.path` the first time it runs (workflow.py:523) and
+  leaves it. A flag computed at import can report only one of those two.
+* Anti-vacuity: mutation probes run on a copy of the worktree with in-run provenance
+  (a collection hook that raises, plus a sentinel file, if any module resolves outside
+  the copy), pristine reset and byte-compare after every probe.
+- `ios-app/scripts/build_check.sh` — full compile+link of every target with its
+  real per-target file set against the iOS 26 SDK: HSCC 88 → **85** files,
+  0 errors, 0 warnings; HSCCWidgets 8, HSCCLiveActivity 4,
+  HSCCLiveActivitySession 4, HSCCLiveActivityMonitor 4, each 0 errors /
+  0 warnings. `check_sources.sh`: 93 Swift files on disk, all listed in
+  `project.yml`. `check_theme.sh`, `actool_icon_check.sh` and
+  `model_decode_check.sh` clean. Compile gate only — never built or run on a
+  device.
+- **`bash ios-app/scripts/build_check.sh`: 0 errors, 0 warnings** across HSCC
+  (67 files), HSCCWidgets (17), HSCCLiveActivity (5) and
+  HSCCLiveActivityMonitor (13); compile only, no device or simulator build.
+  `check_theme.sh`: CLEAN. `check_appicon.py`: PASS (3 PNG geometry checks +
+  Contents.json + actool wiring). `actool_icon_check.sh`: PASS (icon wired,
+  no unassigned children, device sizes derived).
+- **ThemeStub-using checks: ok counts unchanged vs `main` @ `64f8361f`.**
+  board-status 124, cluster widget 108, connection probe 1,
+  live-activity rehydration 203, logs redactor 1, projects widget 97,
+  widget data client 115 (all green); model decode / offline cache / fleet
+  models / serving placement green with their existing counts. The two
+  live-capture checks (`fleet_stats_render_check`, `live_decode_check`) still
+  require `scripts/capture_live.sh` data and report the same pre-existing
+  "no captures" failure as on `main`; their ok counts are 0 both before and
+  after.
+- `bash macos-app/scripts/build_check.sh` → HSCCMac 15 files, **0 errors /
+  0 warnings**; `actool_icon_check.sh` → **0 warnings**, CFBundleIconName =
+  AppIcon. `bash ios-app/scripts/build_check.sh` still **0/0** across all four
+  iOS targets, and the iOS checks that compile Shared remain green.
+- **`ios-app/scripts/heredoc_backtick_check_probe.sh` — the probe now agrees with the gate about what "every script" means, and proves the widened scan can actually fail.** A probe that globbed one directory would have kept agreeing with a gate that had silently lost a subtree, which is the opposite of a cross-check, so its own enumeration became the same recursive walk (`all_sh`), its digest now covers the whole population, and its private trees build real subdirectories instead of symlinking a directory — `find` does not descend a symlink it was not told to follow, so a symlinked subtree would have made every leg report green on files it never entered. Two new leg groups, each with the liveness half this class requires: `scope` compares the gate's per-file population against the probe's own enumeration **path for path** (a count would not catch the failure this card is about) and asserts the limits block no longer disclaims directories the walk enters; `depth-live`/`depth-scan` plant an unquoted heredoc carrying the byte in a script below `scripts/`, first EXECUTE it so the position is proven live there, then require the scan to refuse and name it by path. Plus `link-edge` and `samename`, the two silent-green shapes the new enumeration could otherwise create: a dangling symlink (zero records) must refuse rather than read as clean, a symlink to a real script must still be in the population, and two `common.sh` files in different directories must be told apart by path — every other leg already runs against a `scripts/` tree made entirely of symlinks, so a `-type f` regression reddens the whole probe by itself. Measured on one tree (`main` @ `c66aa7c6` plus these commits): the pre-change gate reports 39 scanned / 148 measured-inert / rc=0 while printing that the six `widget_view_dispatch/*.sh` files are not scanned, and the widened gate reports 45 scanned / 169 measured-inert / rc=0 with those six listed as covered; the same planted splice is invisible to the pre-change gate (rc=0, 0 of 6 subtree files in its population) and refused by the widened one (rc=1, 12 findings, `widget_view_dispatch/common.sh:221`). The probe is green on that tree with `scope` reporting 45 scripts path for path, 6 of them below `scripts/`.
+- **`ios-app/scripts/heredoc_backtick_check_probe.sh` — a `measure` leg checks every printed per-file count against a measurement taken outside the record machinery, so a mislabelled count can no longer sit green.** Every other leg reads the gate's records or its summary, which is precisely why a 4x factor in a printed column survived: the new leg compares `lines-with-byte=` against `grep -c` for **every** scanned file (45 on this tree) and prints, for a file with none, one and many matching lines, the three numbers side by side — `check_theme.sh` prints 1, `grep -c` says 1 line, `tr` says 2 bytes; `board_status_widget_check.sh` prints 24, `grep -c` says 24, `tr` says 66 — so the equality is in the run output instead of asserted in prose, and the label's meaning is checked rather than trusted. `cmp` proves each compared file is byte-identical between the real tree and the private mirror the gate scanned, so the pair is one file measured two ways. Two negatives, both planted in private copy trees and never in the real tree: restoring the old word count reddens the leg for 29 files (rc=1) with no other leg disturbed, and renaming the label away makes all 45 report a missing column (rc=1) rather than passing on nothing. The `scope` leg's population parse keyed on the old `bytes=` label and is now label-independent (the path is the second field of a `scanned` line), so a future rename can neither redden it nor — the worse failure — make it compare nothing; the measure leg is deliberately the opposite, bound to the label because the label is what it audits. Measured on this tree: probe rc=0 with 94 ok / 0 FAIL (was 89 ok; no leg removed), and `probes_check.sh` runs it in CI by glob.
+- **`ios-app/scripts/live_activity_rehydration_check.sh` — the projection joins
+  the executed table: 124 → 154 rows.** A third `GATE-SLICE` block
+  (`cluster-health-projection-rules`) is sliced out of
+  `Sources/Shared/ClusterHealthActivity.swift` by the same awk rule and compiled
+  with the harness, alongside the real `ClusterNodeTally` — so the table runs the
+  code the driver pushes through, not a transcription of it. 30 new assertions
+  cover: the state-word map and the one route to `unreachable` (a live read can
+  never print it); `up`/`waking`/`down`/unmodelled/absent-state; a degraded
+  `{speak}` body and an empty host list both yielding **no counts** while a
+  stated `0 down` stays a fact; 4 listed / 2 errored yielding `2 up`, `2 down`,
+  total `4` and `.3`/`.4` named in listed order, with no input address ever
+  reaching a label (§7); the state read's failure label beating the node read's
+  (it is the headline); a failed node read nils its counts and the headline
+  becomes the gap — **`— up`, never `0/4 up`**; and the two cases the sweep must
+  NOT end (a blind push, and a tally the operator switched off). The new marker
+  was proven to bite by renaming it (rc 1, `FAIL: … has no
+  'GATE-SLICE-BEGIN: cluster-health-projection-rules' marker`) and restoring it.
+  `cluster_widget_check.sh` compiles the tally too — the widget's side of the
+  same code, 78 assertions, still green.
+- **`ios-app/scripts/live_activity_rehydration_check.sh` — extended to the
+  running-cards activity, by slicing rather than transcribing.** 25 new
+  assertions over the orphan rule (rows + fresh push keep; rows past the
+  silence budget end; **zero rows end at any age**, including a fresh one and
+  one stamped in the future — an empty bubble is never "still in flight") and
+  over the reading rules (server count beats the rows; a subset with no count
+  yields `nil`; a blind headline contains no zero; `99+` clipping; `— blocked`
+  distinct from `0 blocked`; a clock ahead of the device reads `now`).
+  `live_activity_rehydration_check/main.swift` copies none of it: the script
+  extracts the two `GATE-SLICE` blocks out of `CardsRunningActivity.swift` and
+  compiles them with the harness, so the table runs against the code the app
+  and the extension actually build, and a moved marker fails the script **by
+  name** instead of quietly shrinking the table. Proven red on purpose by
+  renaming one marker (`FAIL: … has no 'GATE-SLICE-BEGIN:
+  cards-orphan-decision' marker`, rc 1) and restoring it.
+- **`ios-app/scripts/widget_view_dispatch_check.sh`, `widget_settings_check.sh` and `sf_symbol_check.sh` — the gates that now cover this behaviour, and the negative tests run against them.** `widget_view_dispatch_check.sh` gained a `widget_surface_gate` function and one call per widget this card touched: the bodies are grepped for the one-step gate (6 for the monitor panel, 5 for running cards, where the sixth family is the entry's `inlineLine`), the paused copy is asserted to have exactly one CODE owner per file, the paused-before-client order is measured INSIDE the function that owns it (a file-global line comparison reads a `makeIfConfigured()` elsewhere in the same file and fails for the wrong reason), and each cadence function is sliced out of the committed source by an END-ANCHORED `GATE-SLICE` marker and executed — Off and a corrupt negative both mean "no next date", 5/60 min are exactly +300s/+3600s. The board tile's hand-written section from #340 is left exactly as it shipped; converting it to a call here would rewrite a merged card's gate for no added coverage. `widget_settings_check.sh` pins both raw values to their literals and adds an executed block per surface: absent entry means ON (absent is never paused), the first-launch seed from `AppGroupWidgetSettings.defaults()` must also be ON at the 5-minute widget cadence (that function derives from `isLiveActivity`, so a wrong branch there is every device refreshing three times too slowly, quietly), and a surface declaring no sections must end up with NONE even when a foreign blob claims `["state"]`. `sf_symbol_check.sh` now extracts `displayIcon`'s switch body and both arms of a `systemName:` ternary, which is how `pause.circle` — drawn only inside a ternary, in both widgets — reaches a gate at all.
+
+  Three negatives were run against the new gate, each observed to fail by name and then restored byte-for-byte (sha256 of the subject file compared before and after): suffixing either `GATE-SLICE` marker ("GATE-SLICE marker cards_running_cadence missing from …"), un-gating the bodies ("only 0 bodies gate on !configured||paused (want >= 5)"), and adding a second non-comment owner of the paused copy ("…appears 2 times (want exactly 1)"). The third one fired for real on the first attempt — this card's own header bullet quoting the copy made the count 2, which is why that assertion counts code lines only. And one assertion this card wrote did not survive being executed: it named `WidgetSurfaceKind.defaultSettings`, a symbol that does not exist, and the executed gate failed to compile it where a grepped gate would have waved it through forever. That is the argument for slicing and running rather than matching, in one line.
+
+  Gate, all rc=0 and no device or simulator: `build_check` — "HSCC: 62 files, 0 error(s), 0 warning(s) / HSCCWidgets: 16 files, 0 error(s), 0 warning(s) / HSCCLiveActivity: 5 files / HSCCLiveActivityMonitor: 11 files / full compile clean, 0 warnings (compile only — never built or run on a device)"; `check_sources` — "sources in sync: 78 Swift files, all listed in project.yml"; `check_theme` — "CLEAN — no raw colour outside Theme.swift."; `actool_icon_check` — "ACTOOL ICON CHECK PASSED — AppIcon compiles and is wired (still not verified on a device)."; `model_decode_check` — "ALL DECODE CHECKS PASSED — 87/87 checks (over 54 committed fixtures) decoded against the real models"; `shared_store_check`, `widget_settings_check`, `widget_view_dispatch_check` and `sf_symbol_check` ("PASS: all 63 SF Symbols resolve") all PASSED; `scripts/changelog_fragments.py check` — "OK — [Unreleased] is pointer". `main` moved under this card while it was in flight (#333 merged as #340, the board-status tile), so the branch is rebased onto `3b5e475c` and its `ConfigView` / `SharedStore` / `widget_settings_check.sh` hunks are resolved against that content rather than stacked on the old PR — which is also why the two new row glyphs had to be chosen to differ from the board tile's. No file was added under `Sources/`, so `project.yml` and `scripts/generate.sh` are untouched. Compile-only: nothing here was built or run on a device, so the paused pane's rendered pixels remain the on-device checklist's job.
+
+### Docs
+* `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — amendment block at
+  the top; the 2026-11-10 measurement stays exactly as it was, sha and dates. The
+  block names what changed since (gateway tail, 18 cases; hermes profile library,
+  6 — t_2cc3d482 / PR #359 / `d000bf20`), reconciles the audit's own `25 skipped`
+  against a roster that listed only 6 of those 25, and says which document is
+  authoritative for what: `scripts/run_tests.sh`'s roster block is live, this page
+  is the measurement of record.
+* `scripts/run_tests.sh` — comment-only: the roster block now says it is the live
+  authority and names the guard that enforces it; the pointer to the audit page
+  says what that page is (a dated record of why) and is not (today's list).
+- Root `RELEASING.md` documents the one command, prerequisites (Xcode account,
+  notary profile, Sparkle key, registered devices), adding a device, the feed
+  formats and rollback.
+* `scripts/run_tests.sh` — comment-only. The roster block now lists
+  `hscc-roles tests/hermes_gap.py` with its two gates and points at this leg's
+  guard, next to `hscc_daemon`'s `real_hermes.py`, `hscc-project`'s
+  `_require_hermes_state` and `hscc-api`'s `hermes_gap.py`.
+* `hscc-api/tests/test_hermes_gap_single_posture.py` — `owners` gains
+  `hscc-roles/tests/hermes_gap.py`, so the roster pin cannot read this leg's new
+  gates as advertised-but-unowned. The two guards stay separate sweeps on purpose:
+  this card is explicitly *not* `hscc-api` policing another plugin's fixtures.
+* `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — one subsection added
+  to the 2026-11-18 amendment naming the leg the audit never measured and what
+  resolved it. The 2026-11-10 measurement below it is untouched.
+* `changelog.d/t_0fd2c149.md` — reformatted to the `kind:` header form
+  `scripts/changelog_fragments.py` requires, prose unchanged. It was written in the
+  pre-migration `# title` / `## Section` shape, which the parser rejects:
+  `changelog_fragments.py check` exited 2 and BOTH live-directory gates
+  (`test_repo_pending_fragments_pass_the_body_gate`,
+  `test_repo_pending_fragments_pass_the_kind_gate`) were failing on the `scripts`
+  leg at `2d4320c6`, and the entry would have vanished silently at release — the
+  exact failure mode that module's docstring names. Found by reproduction: this
+  card's own fragment copied the shape and failed the same two tests until it was
+  converted.
+- **`ios-app/README.md` + `ios-app/scripts/model_decode_check/fixtures/README.md`
+  — the decode counts stop being transcribed, because transcribing them is what
+  rotted them.** The card that spawned this one measured `ios-app/README.md`
+  advertising `88/88` and `62 JSONs` against a real run of `98/98`. By the time
+  it was picked up that was obsolete: t_0f3f70e6 (#318) had deleted the console
+  fixtures and re-numbered all three of those spots to `55 JSONs` / `89 decode
+  checks`, and re-running the gate here confirms those three are now correct
+  (`ALL DECODE CHECKS PASSED — 89/89`). The counts still lying were one
+  directory deeper, in the fixtures README, which nothing had re-counted since
+  before the console retired: `All 62 JSON fixtures`, `88/88 committed-fixture
+  checks (62 JSON bodies)`, `62/62 committed fixtures decode`, and a list of
+  `17 mutation/detail fixtures` of which seven (`template_apply`, `memory_list`,
+  `memory_delete`, `autodown_enable/disable/wake/cancel`) are no longer files.
+  Fixed by **removing the inline counts rather than re-deriving them** — the
+  option the card allowed — and saying where each one sat that the run is the
+  authority for its own tally: `model_decode_check.sh` prints `N/N` and exits
+  nonzero on the first miss, so a figure copied into prose can only lag it, and
+  a card that adds or retires a fixture must never have to remember to edit a
+  sentence in another file to stay honest. The reason is measured, not
+  rhetorical: this number drifted twice, and at `52310791` it was already stale
+  **in the commit that wrote it** — #314's own diff added `88/88` / `88 decode
+  checks` while that same commit's run prints `98/98`. No new check script: the
+  README gates nothing and the card's own context forbids a fake guard.
+  What survives is the shape that does not rot — there are more checks than
+  files because some fixtures decode against several models, the widget blocks
+  assert derived values, and `v1_mobile_summary_missing_done` /
+  `v1_monitor_snapshot_legacy` are counted by *failing* to decode — plus the
+  per-file provenance (capture vs handler-derived vs shape-faithful rewrite),
+  which is why the seven deleted names are kept in the provenance list with a
+  note that they are gone rather than silently dropped.
+  Two count claims are kept but relabelled for what they are: `36/36 live
+  routes` and the Phase 4 `56 + 3 + 3` reconciliation are point-in-time
+  measurements of one run, and the fixtures README now says so —
+  `live_decode_check.sh` needs `capture_live.sh` against a running daemon and
+  `scripts/live_captures/` is not committed, so neither is reproducible from a
+  checkout. The `autovalidate as JSON` line keeps its method and loses its
+  number; re-run today (`python3 -m json.tool` over every `*.json`) it yields
+  55 valid files, 0 invalid. Also corrected in passing, from the script's own
+  `real_models` array: the README said the harness compiles three model files,
+  it compiles five — `SharedStore.swift` (since t_438aa6ce, §7 binds the
+  **stored** shape) and `SessionEvent.swift` were missing from the sentence.
+- **`hscc-api/docs/audit-client-server-params.md` — the human-facing mirror of the two contract matrices still listed retired client routes as live, and every surviving row cited a handler line that had drifted.** `t_f09436f1` (PR #351) pruned the four dead rows from `REQUIRED_QUERY_PARAMS` / `REQUIRED_BODY_PARAMS` and added `test_matrices_name_routes_the_client_still_calls`; this card ships the half that stayed: the audit doc still had `GET /v1/memory`, `POST /v1/template/apply` and both `POST /v1/memory/{node}/*` rows in its live matrices, and both the doc and the surviving rows of the test's own audit table pointed at pre-drift lines (`routes_actions.py:199`/`:303` vs `:230`/`:334`, `routes_sessions.py:252-254`/`:291-293` vs `:254`/`:293`, `routes_orchestrator.py:1304-1310` vs `_validate_prompt` at `:1970-1975`). The doc now separates **live client contract** from **server requirement whose client call site retired**, naming the still-enforced server site on every retired row (`routes_memory.py:288`/`:315`/`:342`/`:346`, `routes_actions.py:312`) so a pruned row can never be misread as a pruned requirement; the test's kept rows gained handler names beside their lines, so the next drift leaves the citation readable. Comment- and doc-only — no assertion, matrix row or gate is touched.
+- **`ios-app/docs/WIDGET_DATA_CONTRACT.md` — the payload contract the widget /
+  Live Activity pivot builds against.** Each of the five datasets (projects,
+  board status counts, kanban monitor, cards monitor, cluster monitor) is
+  measured against the live `hscc-api` (base derived at runtime, never
+  hardcoded): wire bytes, per-field byte attribution, the fields each view
+  family can actually render, and a `reuse` / `narrow client-side` /
+  `needs compact server endpoint` verdict. The headline: `/v1/cards` spends
+  65 KB of its 82 KB on the `body` field a widget never draws, `done` cards are
+  reachable only through `?include_archived=1` at **8.6 MB** (and
+  `?status=done` answers with 0 cards), and `/v1/cluster/monitor` spends 54% of
+  its 10.7 KB on an ANSI table string. Four datasets fit the existing routes
+  with client-side projection; only board status counts needs a server change,
+  so `t_8580f9a3` is authorised with a scoped `GET /v1/mobile/summary` spec
+  (all five statuses always present, `done` counted server-side, < 4 KB so a
+  Live Activity can carry it, no `body`/`workspace_path`/`repo`/node address
+  ever crossing the wire) and the §7 hygiene rules bind every widget card.
+- **`macos-app/README.md` — install and release sections.** Install is
+  `brew install --cask pom11/hscc/hscc-widgets`, add widgets by right-clicking
+  the desktop → Edit Widgets, the menu bar H appears after first launch, and
+  launch-at-login lives in Settings → Menu Bar. Release documents the one-time
+  notary profile setup, the `--dry-run` rehearsal, the release command, the
+  `macos-widgets-v<version>` tag (never latest) and the cask push.
+* `scripts/run_tests.sh`'s roster block names `hscc-cluster tests/hermes_gap.py` with
+  its five gates, and the "Enforced, not asserted" paragraph names this leg's guard —
+  the fifth consecutive card to edit that block (t_02c98915, t_2cc3d482, t_0fd2c149,
+  t_74141b24, this one), flagged on the card so the orchestrator can decompose it.
+  `hscc-api/tests/test_hermes_gap_single_posture.py`'s `owners` gains
+  `hscc-cluster/tests/hermes_gap.py`.
+* `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` gains a 2026-11-18
+  subsection for `hscc-cluster`, the fifth surface measured after `hscc-project`,
+  `hscc-api`, `hscc_daemon` and `install.sh`.
+- **`ios-app/docs/WIDGET_COVERAGE.md` — widget coverage audit for iOS and
+  macOS.** Records every widget × family and every Live Activity × surface from
+  the shipped `supportedFamilies` declarations and their view dispatch, lists
+  the eight feature/PR pairs from #371 through #379, and records the clean
+  iOS/macOS compile summaries plus the 93/93 model-decode banner. Read-only
+  audit: no widget code changed.
 ## [2.15.11] - 2026-11-14
 
 ### Added

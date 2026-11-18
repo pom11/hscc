@@ -11,10 +11,10 @@ import ActivityKit
 /// types, each with its own `ActivityConfiguration`.
 ///
 /// Live Activities are PUSH-ONLY — this extension never fetches. It renders the
-/// four board counts the app last pushed into
-/// `BoardProgressActivityAttributes.ContentState` (done · running · blocked ·
-/// ready, from the same projection the Board Status widget draws) and ages
-/// honestly via the pushed `updatedAt`.
+/// five board counts the app last pushed into
+/// `BoardProgressActivityAttributes.ContentState` (running · ready · todo ·
+/// blocked · done 24h, from the same projection the Board Status widget draws)
+/// and ages honestly via the pushed `updatedAt`.
 ///
 /// Dynamic Island:
 ///   * compact leading  — the board glyph, coloured by the reading.
@@ -68,7 +68,7 @@ struct BoardProgressLiveActivity: Widget {
                             // last-known, and this says why they are not new.
                             // With no counts the headline already IS the
                             // failure, so it is not repeated here.
-                            Text("stale · \(failureLabel)")
+                            Text("last known · \(failureLabel)")
                                 .font(style.font(.caption2))
                                 .foregroundColor(style.warnColor)
                                 .lineLimit(1)
@@ -153,7 +153,8 @@ struct BoardProgressCountsRow: View {
         let counts = BoardProgressReading.counts(done: state.done,
                                                  running: state.running,
                                                  blocked: state.blocked,
-                                                 ready: state.ready)
+                                                 ready: state.ready,
+                                                 todo: state.todo)
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             ForEach(counts) { count in
                 VStack(alignment: .leading, spacing: 1) {
@@ -215,10 +216,16 @@ struct LockScreenBoardProgressView: View {
                 if let failureLabel = state.failureLabel, !failureLabel.isEmpty {
                     // Stale is not quiet: the counts above are last-known, and
                     // this says why the newest one is not.
-                    Text("stale · \(failureLabel)")
+                    Text("last known · \(failureLabel)")
                         .font(style.font(.caption2))
                         .foregroundColor(style.warnColor)
                         .lineLimit(1)
+                    if let detail = state.failureDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(style.font(size: 9))
+                            .foregroundColor(style.secondaryTextColor)
+                            .lineLimit(2)
+                    }
                 } else if let line = BoardProgressReading.emptyLine(hasNumbers: true,
                                                                     running: state.running,
                                                                     blocked: state.blocked,
@@ -238,6 +245,12 @@ struct LockScreenBoardProgressView: View {
                     .foregroundColor(state.failureLabel?.isEmpty == false
                                      ? style.warnColor
                                      : style.secondaryTextColor)
+                if let detail = state.failureDetail, !detail.isEmpty {
+                    Text(detail)
+                        .font(style.font(size: 9))
+                        .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(2)
+                }
             }
         }
         .padding()

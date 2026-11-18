@@ -49,11 +49,10 @@ import BackgroundTasks
 //     any client is built, so a paused surface sends zero requests.
 //
 // The scope question, answered: `AppGroupWidgetSettings.scope(for:)` is
-// deliberately NOT consulted. `/v1/kanban/running` and `/v1/kanban/blocked`
-// were measured to ignore `?board=` (WIDGET_DATA_CONTRACT §4.3), so this
-// surface is fleet-wide whatever the store holds — which is also why
+// deliberately NOT consulted. This surface is the fleet-wide answer — the same
+// default `hscc cards monitor` shows with no `--board` — which is why
 // `WidgetSurfaceKind.supportsScope` is false for it and the config screen offers
-// it no scope picker.
+// it no scope picker. Board-scoped counts belong to the BoardStatus tile.
 // ---------------------------------------------------------------------------
 
 @MainActor
@@ -228,14 +227,8 @@ final class CardsRunningActivityDriver {
     /// while this one is ActivityKit's and never persisted.
     static func metrics(from projection: CardsRunningProjection?) -> [RunningCardMetric] {
         guard let projection else { return [] }
-        return projection.rows.prefix(CardsRunningActivityAttributes.rowLimit).map { row in
-            RunningCardMetric(board: row.board,
-                              cardID: row.cardID,
-                              title: row.title,
-                              worker: row.worker,
-                              status: row.status,
-                              ageMinutes: row.ageMinutes)
-        }
+        return projection.rows.prefix(CardsRunningActivityAttributes.rowLimit)
+            .map(RunningCardMetric.init(row:))
     }
 
     /// The ContentState one push carries. `runningCount` / `blockedCount` come

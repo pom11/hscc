@@ -44,6 +44,12 @@ struct HSCCLiveActivityMonitor: Widget {
                         Text(headline(context.state.state))
                             .font(style.font(.headline))
                             .foregroundColor(style.primaryTextColor)
+                        if let feed = feedText(context.state) {
+                            Text(feed)
+                                .font(style.font(.caption))
+                                .foregroundColor(style.secondaryTextColor)
+                                .lineLimit(1)
+                        }
                         if let host = context.state.host {
                             Text(hostSummary(host))
                                 .font(style.font(.caption))
@@ -59,7 +65,9 @@ struct HSCCLiveActivityMonitor: Widget {
                 Image(systemName: "gauge.with.dots.needle.bottom.50percent").widgetIcon(style)
                     .foregroundColor(style.warnColor)
             } compactTrailing: {
-                stateDot(context.state.state, style: style)
+                Text(tallyText(context.state))
+                    .font(style.font(size: 11, weight: .semibold))
+                    .foregroundColor(stateColor(context.state.state, style: style))
             } minimal: {
                 stateDot(context.state.state, style: style)
             }
@@ -124,6 +132,22 @@ struct HSCCLiveActivityMonitor: Widget {
     private func fmt(_ v: Double) -> String {
         String(format: "%.0f", v)
     }
+
+    /// The CLI's host tally: `4/4 up`, or `— up` when the monitor route did
+    /// not answer. Never `0/0`.
+    private func tallyText(_ state: MonitorActivityAttributes.ContentState) -> String {
+        guard let up = state.nodesUp else { return "—" }
+        guard let total = state.nodesTotal else { return "\(up)" }
+        return "\(up)/\(total)"
+    }
+
+    /// The serving table's model + total rate, when the route had them.
+    private func feedText(_ state: MonitorActivityAttributes.ContentState) -> String? {
+        var parts: [String] = []
+        if let model = state.nodes.compactMap({ $0.model }).first { parts.append(model) }
+        if let gen = state.genTps { parts.append(String(format: "%.1f t/s", gen)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 }
 
 // MARK: - Lock Screen / banner view
@@ -138,18 +162,28 @@ struct LockScreenMonitorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Header: state dot + headline + age.
+            // Header: state dot + headline + tally + age.
             HStack(spacing: 8) {
                 stateDot(context.state.state, style: style)
                 Text(headline(context.state.state))
                     .font(style.font(.headline))
                     .foregroundColor(style.primaryTextColor)
+                Text(tallyText)
+                    .font(style.font(.subheadline, weight: .semibold))
+                    .foregroundColor(stateColor(context.state.state, style: style))
                 Spacer()
                 Text(ageString(context.state.updatedAt))
                     .font(style.font(.caption2))
                     .foregroundColor(style.secondaryTextColor)
             }
             .widgetHeader(style)
+
+            if let feed = feedText {
+                Text(feed)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
+                    .lineLimit(1)
+            }
 
             // Per-node meters.
             if !context.state.nodes.isEmpty {
@@ -190,6 +224,19 @@ struct LockScreenMonitorView: View {
                 MonitorNodeRow(node: node)
             }
         }
+    }
+
+    private var tallyText: String {
+        guard let up = context.state.nodesUp else { return "—" }
+        guard let total = context.state.nodesTotal else { return "\(up)" }
+        return "\(up)/\(total)"
+    }
+
+    private var feedText: String? {
+        var parts: [String] = []
+        if let model = context.state.nodes.compactMap({ $0.model }).first { parts.append(model) }
+        if let gen = context.state.genTps { parts.append(String(format: "%.1f t/s", gen)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func stateDot(_ state: String, style: WidgetStyle) -> some View {
@@ -247,19 +294,34 @@ struct MonitorNodeRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(node.label)
-                .font(style.font(size: 11, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-                .frame(width: 40, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(node.label)
+                    .font(style.font(size: 11, weight: .semibold))
+                    .foregroundColor(style.primaryTextColor)
+                if let model = node.model {
+                    Text(model)
+                        .font(style.font(size: 9))
+                        .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(1)
+                }
+            }
+            .frame(width: 70, alignment: .leading)
             MBar(value: node.cpuPct, icon: "cpu")
             MBar(value: node.memPct, icon: "memorychip")
             MBar(value: node.gpuUtilPct, icon: "gpu")
-            if let name = node.gpuName, !name.isEmpty {
-                Text(name)
-                    .font(style.font(.caption2))
-                    .foregroundColor(style.secondaryTextColor)
-                    .lineLimit(1)
+            VStack(alignment: .trailing, spacing: 1) {
+                if let gpuTemp = node.gpuTempC {
+                    Text("GPU \(Int(gpuTemp.rounded()))°C")
+                        .font(style.font(size: 9))
+                        .foregroundColor(style.secondaryTextColor)
+                }
+                if let cpuTemp = node.cpuTempC {
+                    Text("CPU \(Int(cpuTemp.rounded()))°C")
+                        .font(style.font(size: 9))
+                        .foregroundColor(style.secondaryTextColor)
+                }
             }
+            .frame(width: 58, alignment: .trailing)
         }
     }
 }

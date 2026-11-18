@@ -15,7 +15,7 @@ with no server route now fails CI instead of reaching a phone as a 404.
 |---|---|---|---|
 | `GET /v1/projects` | Projects widget, board/project pickers | `routes_project.handle_projects` | `flightdeck.core.registry.load_registry` + `project_lifecycle.project_health` (`hscc project list`), the archived-inclusive card read (`/v1/mobile/summary`'s projection), and `kanban_live.attach_orchestrators` (`hscc kanban monitor`) |
 | `GET /v1/cards` | Cards screen, board lists | `routes_project.handle_cards` | `kanban_live.collect(registered_only=True)` → `card_rows()` — exactly the running + ready cards `hscc cards monitor` draws |
-| `GET /v1/mobile/summary` | Board-status widget, board-progress Live Activity | `routes_mobile.handle_mobile_summary` | `kanban_live.collect(registered_only=True)` → `board_status_counts()` (`hscc kanban monitor`'s board table) |
+| `GET /v1/mobile/summary` | Board-status widget, Kanban monitor widget, board-progress Live Activity | `routes_mobile.handle_mobile_summary` | `kanban_live.collect(registered_only=True)` → `board_status_counts()` (`hscc kanban monitor`'s board table) |
 | `GET /v1/kanban/running` | Cluster, running-cards, board-progress | `routes_kanban.handle_kanban_running` | `kanban_live.collect(registered_only=True).running` (`hscc cards monitor` / `hscc kanban monitor`), with kill detail merged onto those rows |
 | `GET /v1/kanban/blocked` | Cluster, running-cards, kanban monitor | `routes_kanban.handle_kanban_blocked` | `hscc_daemon.kanban_blocked.list_blocked_tasks(registered_only=True)` (`hscc kanban blocked`) |
 | `GET /v1/kanban/stale` | Cluster, kanban monitor, running-cards | `routes_kanban.handle_kanban_stale` | `hscc_daemon.autodown.list_stale_tasks(registered_only=True)` (`hscc kanban stale`) |
@@ -23,6 +23,38 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/cluster/status` | Cluster widget | `routes_cluster.handle_cluster_status` | `hscc-cluster` engine `cmd_cluster_status` (`hscc cluster status`) |
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
+
+
+## GET /v1/kanban/running
+
+Source: `hscc cards monitor` / `hscc kanban monitor` → the
+`kanban_live.collect(registered_only=True).running` list, projected by
+`kanban_live.card_rows()` (`CARD_VIEW_FIELDS`). A row is one running card; the
+route's `count` is `len(tasks)`, so it is exactly the number of running cards the
+CLI counts. Kill detail (`pid`, `host_local`, `killable`, `pin_conflict`) is
+merged onto the same rows by `routes_kanban.handle_kanban_running`; widgets do
+not declare it.
+
+| field | type | meaning |
+|---|---|---|
+| `tasks` | array | running cards, longest `run_s` first |
+| `tasks[].board` / `.id` / `.title` | string | the card's board slug, id and title |
+| `tasks[].worker` | string | `collect()`'s `profile or assignee` — the CLI panel header's `worker` |
+| `tasks[].assignee` | string/null | the card's assignment; the fallback for a server that predates `worker` |
+| `tasks[].status` | string | `running` for this route |
+| `tasks[].started_at` | string/null | ISO-8601 UTC start, also carried as `started_epoch` |
+| `tasks[].run_s` | number/null | seconds since the card started — the CLI's `run` column |
+| `tasks[].hb_s` | number/null | seconds since the worker's last heartbeat — the CLI's `heartbeat` column |
+| `tasks[].age_s` | number/null | seconds since the card was created |
+| `tasks[].priority` | integer | card priority |
+| `count` | integer | `len(tasks)`; the running-card count |
+| `errors` / `boards` | array | the collector's board-read errors and registered board names |
+| `speak` | string | one-line summary |
+
+The running-cards widget shows `title`, `board`, `worker` (falling back to
+`assignee`) and `run_s` (falling back to `started_at`), with `count` as its
+headline. Its secondary blocked figure is `/v1/kanban/blocked`'s `count` — the
+`hscc kanban blocked` number, never a headline for this surface.
 
 
 ## Card and board truth (CARD A2)
@@ -48,7 +80,17 @@ reports the all-time archive total as today’s work. `total` includes open
 statuses, archived, and done-today, so the client’s open count
 (`total - done - archived`) matches the board view. `other` is an integer count
 (the Swift model declares `Int`); per-status detail is under `other_statuses`,
-which no client decodes.
+which no *widget* decodes. The server's `/v1/projects` enrichment folds that
+detail map to keep `scheduled`/`review` cards in its counts instead of letting
+the integer mask them.
+
+**Board-table consumers (CARD B3).** The Kanban monitor widget draws one row per
+registered board with `counts.running`, `counts.ready`, `counts.todo`,
+`counts.blocked` and `counts.done` (= Done 24h), sorted like
+`kanban_live.boards_table`. The Board Status widget draws the same five fields
+for one board, and the Board Progress Live Activity carries them across the Lock
+Screen and Dynamic Island. No client derives a status from a card list; the
+numbers are the route's fields, which are the CLI's columns.
 
 
 Rule (card t_8743f98c): **every route a widget or Live Activity reads is served

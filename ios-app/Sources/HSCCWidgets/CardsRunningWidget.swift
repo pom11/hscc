@@ -30,13 +30,13 @@ import WidgetKit
 //      number (`—`) rather than failing the surface.
 //
 // AGE — what this file does and does not know. `hscc cards monitor --live`
-// prints TWO ages: run time and heartbeat age. Only the first is in this
-// payload: `/v1/kanban/running` carries `started_at` (ISO-8601 UTC, from
-// `kill_switch._started_iso`) and no heartbeat field at all, so a row renders
-// minutes-since-start and never renders a heartbeat age it cannot know — a
-// heartbeat dot would be decoration claiming a fact. `started_at` missing or
-// unparseable draws `—`, never `0m` (§6 rule 1, one step further than zero:
-// an unparseable timestamp is not a card that started this instant).
+// prints TWO ages: run time and heartbeat age. The route now exposes both as
+// `run_s` / `hb_s` (`kanban_live.CARD_VIEW_FIELDS`); this surface shows the run
+// time exactly as the CLI's `run` column does, preferring the server's `run_s`
+// and falling back to `started_at` on the older 2.15.11 server. A row never
+// renders a heartbeat age it was not asked to show, and a missing or
+// unparseable clock draws `—`, never `0m` (§6 rule 1, one step further than zero: an
+// unparseable timestamp is not a card that started this instant).
 //
 // THE LOUD FAILURE (§5.4 + the card's own acceptance rule: a blind read must
 // never look like an idle board). Four distinct states, never collapsed:
@@ -72,9 +72,10 @@ import WidgetKit
 // and `RunningCardLite` never decodes it.
 //
 // No configuration parameter, so no `AppIntentConfiguration`: the fleet-wide
-// running set is one question with one answer, and a picker that cannot narrow
-// the route (measured: `?board=` is ignored by `/v1/kanban/running`, §4.3) would
-// offer a choice the network cannot honour.
+// running set is one question with one answer, and `hscc cards monitor` with no
+// `--board` is the very view this surface stands for. A board picker would
+// narrow the same route, but the widget is deliberately the fleet answer, and
+// the operator already has the board-scoped BoardStatus tile for one board.
 // ---------------------------------------------------------------------------
 
 // MARK: - The projection lives in Shared
@@ -90,6 +91,11 @@ import WidgetKit
 
 struct CardsRunningEntry: TimelineEntry {
     let date: Date
+    /// When the data on screen was read. Equal to `date` for a live entry; the
+    /// snapshot's timestamp for stale data. The footer draws it as a
+    /// self-updating relative date, so "updated 3m ago" cannot stay frozen at
+    /// "just now" while WidgetKit holds the entry.
+    let updatedAt: Date
     /// nil = nothing usable came back; `failure` then says why, and no family
     /// may draw a count.
     let projection: CardsRunningProjection?
@@ -109,12 +115,12 @@ struct CardsRunningEntry: TimelineEntry {
     /// produced rows to draw here.
     let paused: Bool
 
-    static let sample = CardsRunningEntry(date: .now, projection: .preview,
+    static let sample = CardsRunningEntry(date: .now, updatedAt: .now, projection: .preview,
                                           ageMinutes: nil, failure: nil,
                                           configured: true, paused: false)
 
     static func unconfigured() -> CardsRunningEntry {
-        CardsRunningEntry(date: .now, projection: nil, ageMinutes: nil,
+        CardsRunningEntry(date: .now, updatedAt: .now, projection: nil, ageMinutes: nil,
                           failure: .notConfigured, configured: false, paused: false)
     }
 
@@ -124,7 +130,7 @@ struct CardsRunningEntry: TimelineEntry {
     /// not consulted (stale rows on a paused panel would be the lie this state
     /// exists to refuse).
     static func paused() -> CardsRunningEntry {
-        CardsRunningEntry(date: .now, projection: nil, ageMinutes: nil,
+        CardsRunningEntry(date: .now, updatedAt: .now, projection: nil, ageMinutes: nil,
                           failure: nil, configured: true, paused: true)
     }
 
@@ -151,25 +157,19 @@ struct CardsRunningEntry: TimelineEntry {
     // disagree about what the same entry means)
 
     /// `accessoryInline`: one short line, counts only (§5.4's inline row is
-    /// "counts only — use row 2/3"). A long variant drops the board-free
-    /// commentary rather than the numbers.
+    /// "counts only — use row 2/3"). The entry owns the gate word; the numeric
+    /// half is `CardsRunningCopy`, which the fixture check executes.
     var inlineLine: String {
         // Both gate states through ONE copy rule, and the rule itself puts the
         // setup invite first — an unconfigured device can never read as "paused"
         // (audit-3, t_5c554c5b).
         if !configured || paused { return shortGateLabel }
-        guard let projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
-        var parts: [String] = []
-        if let running = projection.runningCount { parts.append("\(running) running") }
-        if let blocked = projection.blockedCount, blocked > 0 { parts.append("\(blocked) blocked") }
-        guard !parts.isEmpty else { return "idle" }
-        let line = parts.joined(separator: " · ")
-        return line.count <= 25 ? line : (parts.first ?? line)
+        return CardsRunningCopy.inlineLine(projection: projection, failure: failure)
     }
 
     /// The `accessoryCircular` scalar: running is the number this surface is
     /// about. nil draws the glyph in `CardsRunningCircularView`, never `0`.
-    var circularNumber: Int? { projection?.runningCount }
+    var circularNumber: Int? { CardsRunningCopy.headlineNumber(projection) }
 
     /// The ring's colour is the question a complication answers: is the fleet
     /// working, is something stuck, or did we not get to look?
@@ -201,41 +201,26 @@ struct CardsRunningEntry: TimelineEntry {
     /// family draws this through one door, which is what makes "a blind read
     /// never renders `0 running`" a property of the type rather than of six
     /// views behaving themselves.
-    var runningText: String? {
-        guard let running = projection?.runningCount else { return nil }
-        return "\(running) running"
-    }
+    var runningText: String? { CardsRunningCopy.runningText(projection) }
 
     /// The blocked count, or `—` when the failure read did not answer. A dash
     /// here is a fact about the read; a zero would be a claim about the fleet.
-    var blockedText: String? {
-        guard let projection else { return nil }
-        guard let blocked = projection.blockedCount else { return "blocked —" }
-        return "\(blocked) blocked"
-    }
+    var blockedText: String? { CardsRunningCopy.blockedText(projection) }
 
     /// The footer every home-screen family can show: the age, or the failure,
-    /// or what the numbers do not cover.
+    /// or what the numbers do not cover. Gate copy is owned here so the setup
+    /// invite is checked first in every family.
     var footerLine: String {
         if !configured { return "Set up the app to see running cards." }
-        if let age = ageMinutes {
-            return "last known \(age) min ago · \(failure?.shortLabel ?? "no answer")"
-        }
-        if let failure { return failure.operatorLine }
-        guard let projection else { return "no data" }
-        var notes: [String] = []
-        if !projection.rowsAreComplete, let total = projection.runningCount {
-            notes.append("showing \(projection.rows.count) of \(total)")
-        }
-        if projection.blockedCount == nil { notes.append("blocked unreadable this refresh") }
-        if notes.isEmpty { return "read just now" }
-        return notes.joined(separator: " · ")
+        return CardsRunningCopy.footerLine(projection: projection,
+                                           ageMinutes: ageMinutes,
+                                           failure: failure)
     }
 
     /// Whether the blocked number says someone is waiting. Used for colour only:
     /// a nil `blockedCount` is `false` here and draws a dash, so an unreadable
     /// read never colours a surface red.
-    var isStuckGlance: Bool { projection?.isStuck ?? false }
+    var isStuckGlance: Bool { CardsRunningCopy.blockedIsWarning(projection) }
 
     /// True when the failure must be drawn rather than a count. `projection`
     /// nil is the only blind state, and `failure` is non-nil in all of them —
@@ -337,15 +322,17 @@ struct CardsRunningTimelineProvider: TimelineProvider {
         switch outcome {
         case .live(let projection, let fetchedAt):
             CardsRunningSnapshotStore.save(projection, at: fetchedAt)
-            return CardsRunningEntry(date: .now, projection: projection,
+            return CardsRunningEntry(date: .now, updatedAt: fetchedAt, projection: projection,
                                      ageMinutes: nil, failure: nil, configured: true,
                                      paused: false)
         case .stale(let projection, let ageMinutes, let reason):
-            return CardsRunningEntry(date: .now, projection: projection,
+            return CardsRunningEntry(date: .now,
+                                     updatedAt: Date().addingTimeInterval(-Double(ageMinutes) * 60),
+                                     projection: projection,
                                      ageMinutes: ageMinutes, failure: reason, configured: true,
                                      paused: false)
         case .failed(let failure):
-            return CardsRunningEntry(date: .now, projection: nil,
+            return CardsRunningEntry(date: .now, updatedAt: .now, projection: nil,
                                      ageMinutes: nil, failure: failure, configured: true,
                                      paused: false)
         }
@@ -376,14 +363,15 @@ struct CardsRunningWidget: Widget {
                 .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Running Cards")
-        .description("Cards being worked right now, with the worker running each and how long it has been going.")
+        .description("Running cards with their worker and run time, plus a clear running count.")
         // The accessory families are iOS-only; the macOS desktop tile offers
-        // the three system sizes (t_1143c19b).
+        // the three system sizes plus XL, which reuses the large renderer with
+        // room for the same eight rows.
         #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
         #else
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
         #endif
     }
 }
@@ -445,8 +433,8 @@ struct CardsRunningCircularView: View {
         } else {
             VStack(spacing: 0) {
                 Text(entry.circularNumber.map { "\($0)" } ?? "—")
-                    .font(style.font(.body))
-                    .fontWeight(.semibold)
+                    .font(style.font(size: 22, weight: .bold))
+                    .monospacedDigit()
                     .foregroundStyle(Self.glanceColor(entry.circularGlance))
                 Text(Self.glanceLabel(entry.circularGlance)).widgetHeader(style)
                     .font(style.font(size: 8))
@@ -536,12 +524,11 @@ struct CardsRunningSmallView: View {
             CardsRunningFailureView(entry: entry, compact: true)
         } else {
             VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                CardsRunningHeaderView(entry: entry)
-                // §5.4's small family: 2-3 rows. Two here, because the small
-                // tile also carries the header count and the age footer, and a
-                // third row would push the footer off the widget — the age is
-                // not optional, rows are.
-                CardsRunningRowList(rows: entry.rows(limit: 2), showBoard: false, titleMax: 32)
+                // One clear headline number: the count `hscc cards monitor`
+                // prints beside "slots". Rows and age are supporting detail.
+                CardsRunningHeadlineView(entry: entry, size: 34)
+                CardsRunningRowList(rows: entry.rows(limit: 2), showBoard: false,
+                                    titleMax: 30)
                 Spacer(minLength: 0)
                 CardsRunningFooterView(entry: entry)
             }
@@ -560,9 +547,11 @@ struct CardsRunningMediumView: View {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
             VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                CardsRunningHeaderView(entry: entry)
-                // §5.4's medium family: 4 rows, with the board.
-                CardsRunningRowList(rows: entry.rows(limit: 4), showBoard: true, titleMax: 40)
+                CardsRunningHeadlineView(entry: entry, size: 28)
+                // Three two-line rows fit one medium tile beside the headline
+                // and the age footer; a fourth would push the age off.
+                CardsRunningRowList(rows: entry.rows(limit: 3), showBoard: true,
+                                    titleMax: 42)
                 Spacer(minLength: 0)
                 CardsRunningFooterView(entry: entry)
             }
@@ -581,11 +570,11 @@ struct CardsRunningLargeView: View {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
             VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                CardsRunningHeaderView(entry: entry)
-                // §5.4's large family: 7-8 rows with board and age. 8, which is
-                // also the stored cap, so the footer's "showing N of M" and the
-                // blob can never disagree.
-                CardsRunningRowList(rows: entry.rows(limit: 8), showBoard: true, titleMax: 60)
+                CardsRunningHeadlineView(entry: entry, size: 30)
+                // 8, which is also the stored cap, so the footer's "showing N
+                // of M" and the App Group blob can never disagree.
+                CardsRunningRowList(rows: entry.rows(limit: 8), showBoard: true,
+                                    titleMax: 52)
                 Spacer(minLength: 0)
                 CardsRunningFooterView(entry: entry)
             }
@@ -595,33 +584,53 @@ struct CardsRunningLargeView: View {
 
 // MARK: Parts
 
-/// The count line: `3 running · 1 blocked`, with the blocked half drawn `—`
-/// when its own read did not answer.
-struct CardsRunningHeaderView: View {
+/// The one number a glance should land on: running cards. Blocked is a
+/// secondary, clearly-labelled warning and never replaces the headline.
+struct CardsRunningHeadlineView: View {
     @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
+    /// Point size from the family, scaled by the operator's text scale in
+    /// `style.font(size:)`; no family hard-codes a font.
+    var size: CGFloat = 30
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            Text(entry.runningText ?? "—")
-                .font(style.font(.callout, weight: .semibold))
-                .foregroundStyle(style.primaryTextColor)
-                .lineLimit(1)
-            if let blocked = entry.blockedText {
-                Text(blocked)
-                    .font(style.font(.caption2, weight: .medium))
-                    .foregroundStyle(entry.isStuckGlance ? style.badColor : style.secondaryTextColor)
+            Image(systemName: "play.circle.fill").widgetIcon(style)
+                .font(style.font(size: 10))
+                .foregroundStyle(entry.circularNumber == nil ? style.secondaryTextColor : style.okColor)
+            if let number = entry.circularNumber {
+                Text("\(number)")
+                    .font(style.font(size: size, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(style.primaryTextColor)
                     .lineLimit(1)
+                Text("running")
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundStyle(style.secondaryTextColor)
+                    .lineLimit(1)
+            } else {
+                // No count was sent: a dash, never a fabricated zero.
+                Text("—")
+                    .font(style.font(size: size, weight: .bold))
+                    .foregroundStyle(style.secondaryTextColor)
             }
             Spacer(minLength: 0)
+            if entry.isStuckGlance, let blocked = entry.blockedText {
+                Text(blocked)
+                    .font(style.font(size: 9, weight: .semibold))
+                    .foregroundStyle(style.badColor)
+                    .lineLimit(1)
+            }
         }
-    .widgetHeader(style)
+        .widgetHeader(style)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(entry.runningText ?? "no running count")
     }
 }
 
-/// One row per running card: `worker` and run time on the same line as the
-/// title, board when there is room for it — `hscc cards monitor --live`'s
-/// header order, dropped right-to-left exactly the way that view drops it.
+/// One running card, two lines: the CLI's `title`, then `worker` · board ·
+/// run time. `hscc cards monitor --short`'s panel header order — board, card,
+/// worker — with the age the route can prove.
 struct CardsRunningRowList: View {
     @Environment(\.widgetStyle) private var style
     let rows: [CardsRunningRow]
@@ -638,56 +647,89 @@ struct CardsRunningRowList: View {
                 .font(style.font(.caption2))
                 .foregroundStyle(style.secondaryTextColor)
         } else {
-            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                 ForEach(rows) { row in
-                    HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                    HStack(alignment: .top, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                         Circle()
                             .fill(style.cardStatusColor(row.status ?? ""))
                             .frame(width: 5, height: 5)
-                        Text(row.headline(max: titleMax))
-                            .font(style.font(.caption2))
-                            .foregroundStyle(style.primaryTextColor)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        if showBoard, let board = row.board {
-                            Text(board)
-                                .font(style.font(.caption2, weight: .regular))
-                                .foregroundStyle(style.secondaryTextColor)
+                            .padding(.top, 3)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(row.headline(max: titleMax))
+                                .font(style.font(.caption2, weight: .medium))
+                                .foregroundStyle(style.primaryTextColor)
                                 .lineLimit(1)
+                            HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+                                Text(row.workerText)
+                                    .font(style.font(size: 9, weight: .medium))
+                                    .foregroundStyle(style.secondaryTextColor)
+                                    .lineLimit(1)
+                                if showBoard, let board = row.board, !board.isEmpty {
+                                    Text("·")
+                                        .font(style.font(size: 9))
+                                        .foregroundStyle(style.secondaryTextColor)
+                                    Text(board)
+                                        .font(style.font(size: 9))
+                                        .foregroundStyle(style.secondaryTextColor)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                                Text(row.ageText)
+                                    .font(style.font(size: 9, weight: .semibold))
+                                    .monospacedDigit()
+                                    .foregroundStyle(row.ageMinutes == nil
+                                                     ? style.warnColor : style.secondaryTextColor)
+                            }
                         }
-                        Text(row.workerText)
-                            .font(style.font(.caption2, weight: .medium))
-                            .foregroundStyle(style.secondaryTextColor)
-                            .lineLimit(1)
-                        Text(row.ageText)
-                            .font(style.font(.caption2, weight: .semibold))
-                            .foregroundStyle(row.ageMinutes == nil ? style.warnColor : style.primaryTextColor)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(row.headline(max: titleMax)), \(row.workerText), \(row.ageText)")
                 }
             }
         }
     }
 }
 
-/// The age / failure line. Warn-coloured whenever what is on screen is not from
-/// this refresh — a stale surface must not look like a live one at a glance.
+/// The age / failure line. A live tile shows a self-updating relative age, so
+/// "updated 3m ago" keeps ageing while WidgetKit holds the entry. A stale tile
+/// swaps that for the stored age and the reason; a blind one never reaches here.
 struct CardsRunningFooterView: View {
     @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
-            if entry.ageMinutes != nil || entry.failure != nil {
+        if entry.ageMinutes != nil || entry.failure != nil {
+            HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
                 Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
                     .font(style.font(size: 8))
                     .foregroundStyle(entry.ageMinutes != nil ? style.warnColor : style.badColor)
+                Text(entry.footerLine)
+                    .font(style.font(size: 9))
+                    .foregroundStyle(entry.ageMinutes != nil ? style.warnColor : style.badColor)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             }
-            Text(entry.footerLine)
-                .font(style.font(size: 9))
-                .foregroundStyle(entry.ageMinutes != nil ? style.warnColor
-                                    : (entry.failure != nil ? style.badColor : style.secondaryTextColor))
-                .lineLimit(2)
-            Spacer(minLength: 0)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+                Image(systemName: "clock").widgetIcon(style)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(style.secondaryTextColor)
+                Text("updated")
+                    .font(style.font(size: 9))
+                    .foregroundStyle(style.secondaryTextColor)
+                Text(entry.updatedAt, style: .relative)
+                    .font(style.font(size: 9, weight: .medium))
+                    .foregroundStyle(style.secondaryTextColor)
+                if let notes = CardsRunningCopy.notesLine(entry.projection) {
+                    Text("· \(notes)")
+                        .font(style.font(size: 8))
+                        .foregroundStyle(style.secondaryTextColor)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("updated \(entry.footerLine)")
         }
     }
 }

@@ -275,13 +275,45 @@ struct KanbanRunningLite: Decodable {
 }
 
 /// One running task (`handle_kanban_running`'s keys, minus `pid`/`host_local`).
+///
+/// `worker` / `run_s` / `hb_s` are the three fields `kanban_live.card_view()`
+/// sends from `CARD_VIEW_FIELDS` and `hscc cards monitor` draws:
+///
+///   * `worker` — `collect()`'s `r["profile"] or r["assignee"]`, the profile
+///     actually running the card (the CLI panel header's `worker` column).
+///     `assignee` is the card's assignment and is only the fallback for an
+///     older server, exactly the way `kanban_live.py` builds it.
+///   * `run_s` — seconds since the card started, the CLI's `run` column.
+///   * `hb_s` — seconds since the worker's last heartbeat, the CLI's `heartbeat`
+///     column. Decoded for completeness; the widget shows run time only.
+///
+/// All three are optional because the live 2.15.11 server predates the route
+/// fix and sends only `assignee` + `started_at`; a missing field is "the server
+/// did not send it", never zero.
 struct RunningCardLite: Decodable, Identifiable {
     let board: String?
     let id: String
     let title: String?
+    let worker: String?
     let assignee: String?
     let status: String?
+    let run_s: Double?
+    let hb_s: Double?
     let started_at: String?
+
+    init(board: String?, id: String, title: String?, worker: String? = nil,
+         assignee: String?, status: String?, run_s: Double? = nil,
+         hb_s: Double? = nil, started_at: String?) {
+        self.board = board
+        self.id = id
+        self.title = title
+        self.worker = worker
+        self.assignee = assignee
+        self.status = status
+        self.run_s = run_s
+        self.hb_s = hb_s
+        self.started_at = started_at
+    }
 }
 
 /// GET /v1/kanban/blocked — work stuck waiting: the widget's failure signal.
@@ -361,10 +393,47 @@ struct StaleCardLite: Decodable, Identifiable {
 struct MonitorResponse: Codable, Speakable {
     /// The nested per-node payload. Absent when the route degraded.
     let json: MonitorPayload?
+    /// The CLI's serving table: one row per (backend, model). Additive on the
+    /// route; absent only from an older server, which is not the same as "zero
+    /// models" (see `ServingSummary`).
+    let serving: [ServingRow]?
+    /// Why the serving poll failed, when it did. Nil on a clean poll.
+    let serving_error: String?
+    /// Why the proxy route map could not be refreshed. Nil on a clean poll.
+    let serving_proxy_error: String?
     let speak: String
 
     /// Computed passthrough so the widget reads the node list directly.
     var nodes: [MonitorNode] { json?.hosts ?? [] }
+}
+
+/// One row of `hscc cluster monitor`'s serving table: the model a backend is
+/// running plus the load and token rates the CLI prints beside it.
+struct ServingRow: Codable, Identifiable {
+    let node: String?
+    let port: String?
+    let model: String?
+    let routes: [String]?
+    let running: Int?
+    let waiting: Int?
+    let kv: Double?
+    let gen_tps: Double?
+    let prompt_tps: Double?
+    let prompt_total: Double?
+    let gen_total: Double?
+    let error: String?
+
+    var id: String { "\(node ?? "?")-\(port ?? "?")-\(model ?? "?")" }
+
+    /// The CLI prints "down" when the backend could not be scraped. A row with
+    /// a model but an error is not a served model.
+    var isDown: Bool { error != nil || model == nil || model == "-" }
+
+    /// `org/model` -> `model`, the same shortening the CLI table applies.
+    var shortModel: String? {
+        guard let model, !model.isEmpty, model != "-" else { return nil }
+        return model.components(separatedBy: "/").last ?? model
+    }
 }
 
 /// The nested `json` payload of /v1/cluster/monitor.
@@ -428,7 +497,14 @@ struct MonitorNode: Codable, Identifiable {
 /// served" is answered: a tensor-parallel model occupies both hosts of a pair
 /// under one id (measured in the committed 4-node fixture: 4 hosts, 2 ids).
 struct MonitorWorkload: Codable {
+    /// The contract's id for one sparkrun workload (`workloads[].workload_id`).
+    let workload_id: String?
+    /// Legacy spelling in captures written before the route renamed the key.
+    /// Decoded only so an older fixture still counts its job; both name the
+    /// same sparkrun workload.
     let cluster_id: String?
+
+    var id: String? { workload_id ?? cluster_id }
 }
 
 /// The per-node `sample` dict — all numeric metrics are STRINGS (may be empty
@@ -529,6 +605,18 @@ struct MonitorDaemonHost: Codable, Speakable {
     /// A human uptime ("2d 11h") from `uptime_seconds`, or nil.
     var uptimeText: String? {
         guard let s = uptime_seconds, s >= 0 else { return nil }
+        let d = s / 86400
+        let h = (s % 86400) / 3600
+        if d > 0 { return "\(d)d \(h)h" }
+        let m = (s % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+
+    /// The daemon process's own uptime (`daemon_uptime_seconds`), separate from
+    /// the machine's uptime. Used by the monitor widget's health line.
+    var daemonUptimeText: String? {
+        guard let s = daemon_uptime_seconds, s >= 0 else { return nil }
         let d = s / 86400
         let h = (s % 86400) / 3600
         if d > 0 { return "\(d)d \(h)h" }
@@ -670,6 +758,10 @@ struct ClusterStatusResponse: Decodable, Speakable {
     let workloads: [ClusterWorkload]
     let idle_hosts: [String]
     let total_hosts: Int
+    /// The route's specific failure when the backing command failed. Absent on
+    /// a healthy answer, so `total_hosts: 0` from a degraded route is never
+    /// mistaken for a genuinely empty cluster.
+    let error: String?
     let speak: String
 }
 

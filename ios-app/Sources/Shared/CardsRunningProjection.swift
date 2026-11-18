@@ -23,7 +23,7 @@ import Foundation
 // file as-is on the macOS SDK and execute the count rules below against real
 // wire fixtures, instead of transcribing them into a table that can drift.
 //
-// STORAGE (§7): the projection declares five scalars per row and so cannot
+// STORAGE (§7): the projection declares six scalars per row and so cannot
 // hold a card body, a workspace path, a branch, an address or a token even if a
 // later card wanted to persist one by accident. Writes go through
 // `SharedStore.suite` — never a `.standard` fallback.
@@ -36,7 +36,7 @@ import Foundation
 /// Deliberately NOT `RunningCardLite`: that is the wire shape, it owns `pid`-
 /// adjacent keys the pivot dropped, and storing it would put a payload type in
 /// the App Group container, which §7 forbids. The mapping below is the whole
-/// projection — five scalars, nothing nested, nothing that can carry prose.
+/// projection — six scalars, nothing nested, nothing that can carry prose.
 struct CardsRunningRow: Codable, Equatable, Identifiable {
     /// Board slug, or nil when the row did not carry one.
     let board: String?
@@ -44,37 +44,79 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
     let cardID: String
     /// The card title. Human-written, so it renders in the system font.
     let title: String?
-    /// The worker profile running it — `assignee` on the wire, `worker` in
-    /// `hscc cards monitor --live`'s header. They name the same thing.
+    /// The worker profile running it — `worker` on the wire (the CLI's panel
+    /// header), falling back to `assignee` on a server that predates it.
     let worker: String?
     let status: String?
-    /// Minutes since `started_at`, computed once at fetch time. nil = the row
-    /// had no usable `started_at`, which draws `—`.
-    let ageMinutes: Int?
+    /// Seconds since `started_at` (or the route's `run_s`), computed once at
+    /// fetch time. nil = the row had no usable clock, which draws `—`.
+    ///
+    /// Seconds, not minutes: `hscc cards monitor` prints `30s` for a card under
+    /// a minute, and storing whole minutes would round that to `0m` — a number
+    /// the CLI never shows.
+    let ageSeconds: Int?
 
     /// Board-qualified, because the same card id on two boards is two rows and
     /// a `ForEach` id must not collide.
     var id: String { "\(board ?? "?")/\(cardID)" }
 
+    /// Whole minutes, for the callers that sort or gate on a minute figure.
+    var ageMinutes: Int? { ageSeconds.map { $0 / 60 } }
+
     init(board: String?, cardID: String, title: String?, worker: String?,
-         status: String?, ageMinutes: Int?) {
+         status: String?, ageSeconds: Int?) {
         self.board = board
         self.cardID = cardID
         self.title = title
         self.worker = worker
         self.status = status
-        self.ageMinutes = ageMinutes
+        self.ageSeconds = ageSeconds
     }
 
-    /// Project one wire row. `startedAt` is the raw `started_at` string, parsed
-    /// here so the parse failure is visible as a nil age rather than a crash.
+    /// Convenience for previews/tests that speak in minutes. Whole minutes only:
+    /// a fixture that needs `30s` uses the seconds initializer.
+    init(board: String?, cardID: String, title: String?, worker: String?,
+         status: String?, ageMinutes: Int?) {
+        self.init(board: board, cardID: cardID, title: title, worker: worker,
+                  status: status, ageSeconds: ageMinutes.map { $0 * 60 })
+    }
+
+    /// Project one wire row. `worker` is the CLI's `worker` column when the
+    /// route sends it (`collect()`'s profile-or-assignee), with `assignee` as
+    /// the fallback for the older server; `run_s` is the CLI's run clock when
+    /// present, with `started_at` as the fallback.
     init(task: RunningCardLite, now: Date) {
         board = task.board
         cardID = task.id
         title = task.title
-        worker = task.assignee
+        worker = task.worker ?? task.assignee
         status = task.status
-        ageMinutes = Self.age(from: task.started_at, now: now)
+        ageSeconds = Self.ageSeconds(task: task, now: now)
+    }
+
+    /// Seconds of run time, from the fields `hscc cards monitor` prints.
+    ///
+    /// `run_s` wins when the route sent it: it is the server's own measurement
+    /// of the same clock (`kanban_live.collect()`), so the widget and the CLI
+    /// cannot disagree by the phone/daemon clock skew. `started_at` is the
+    /// fallback the live 2.15.11 server leaves us. A negative value is clamped
+    /// to "just started", never a future age.
+    static func ageSeconds(task: RunningCardLite, now: Date) -> Int? {
+        if let run = task.run_s {
+            return max(0, Int(run))
+        }
+        return ageSeconds(from: task.started_at, now: now)
+    }
+
+    /// Seconds since an ISO-8601 `started_at`, floored at zero.
+    static func ageSeconds(from startedAt: String?, now: Date) -> Int? {
+        guard let startedAt, !startedAt.isEmpty else { return nil }
+        guard let started = Self.dateParser.date(from: startedAt)
+            ?? Self.fractionalParser.date(from: startedAt)
+        else { return nil }
+        // A timestamp ahead of this clock (skew between the daemon host and the
+        // phone) is "just started", not a negative age.
+        return max(0, Int(now.timeIntervalSince(started)))
     }
 
     /// The row's headline: its title, or its id when the card sent no title.
@@ -91,11 +133,16 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
         return worker
     }
 
-    /// `—` when unknown; `12m` under an hour; `2h07m` above it.
+    /// `—` when unknown, otherwise the CLI's own `fmt_age`: `30s` under a
+    /// minute, `12m` under an hour, `2h07m` under a day, `1d2h` above it.
     var ageText: String {
-        guard let minutes = ageMinutes else { return "—" }
-        if minutes < 60 { return "\(minutes)m" }
-        return String(format: "%dh%02dm", minutes / 60, minutes % 60)
+        guard let seconds = ageSeconds else { return "—" }
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m" }
+        if seconds < 86400 {
+            return String(format: "%dh%02dm", seconds / 3600, (seconds % 3600) / 60)
+        }
+        return String(format: "%dd%dh", seconds / 86400, (seconds % 86400) / 3600)
     }
 
     static func truncate(_ value: String, max: Int) -> String {
@@ -103,22 +150,10 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
         return String(value.prefix(max - 1)) + "…"
     }
 
-    /// Minutes since an ISO-8601 `started_at`, floored at zero.
-    ///
-    /// Two formatters because the server builds this string with
-    /// `datetime.fromtimestamp(int(ts), utc).isoformat()`
-    /// (`kill_switch._started_iso`), which is second-precision today; the
-    /// fractional variant is the same string the day a producer keeps
-    /// microseconds, and silently failing to parse it is exactly how a row
-    /// starts claiming `—` for every card.
+    /// Minutes since an ISO-8601 `started_at`, floored at zero. Kept for the
+    /// gates and callers that only need the minute figure.
     static func age(from startedAt: String?, now: Date) -> Int? {
-        guard let startedAt, !startedAt.isEmpty else { return nil }
-        guard let started = Self.dateParser.date(from: startedAt)
-            ?? Self.fractionalParser.date(from: startedAt)
-        else { return nil }
-        // A timestamp ahead of this clock (skew between the daemon host and the
-        // phone) is "just started", not a negative age.
-        return max(0, Int(now.timeIntervalSince(started) / 60))
+        ageSeconds(from: startedAt, now: now).map { $0 / 60 }
     }
 
     private static let dateParser: ISO8601DateFormatter = {
@@ -177,7 +212,7 @@ struct CardsRunningProjection: Codable, Equatable {
         // Longest run first; an unknown age is not "the oldest", so it sorts
         // last rather than to the top of the list.
         rows = Array(projected.sorted { lhs, rhs in
-            (lhs.ageMinutes ?? -1) > (rhs.ageMinutes ?? -1)
+            (lhs.ageSeconds ?? -1) > (rhs.ageSeconds ?? -1)
         }.prefix(Self.rowCap))
         // The server's `count` is the number; when it is missing, the rows this
         // payload did send are the only evidence, and counting them is honest
@@ -222,6 +257,87 @@ struct CardsRunningProjection: Codable, Equatable {
     var isIdle: Bool { (runningCount ?? 0) == 0 }
 
     var isStuck: Bool { (blockedCount ?? 0) > 0 }
+}
+
+// MARK: - The words every surface prints
+
+/// The numeric copy, in one Foundation-only place so the widget's family
+/// bodies, the Live Activity, and the headless `cards_running_widget_check`
+/// all print the same answer for the same projection.
+///
+/// Gate copy (setup/paused) stays on `CardsRunningEntry`: it is a property of
+/// the operator's settings, not of the payload, and `widget_view_dispatch`
+/// asserts the invite-first order there. This enum owns only the strings a
+/// fixture can prove.
+enum CardsRunningCopy {
+    /// `3 running`, or nil when the refresh was not told. Never a fabricated
+    /// zero: the count is `/v1/kanban/running`'s own `count`, which the route
+    /// builds as `len(running)` — the same number `hscc cards monitor` puts
+    /// beside "slots".
+    static func runningText(_ projection: CardsRunningProjection?) -> String? {
+        guard let running = projection?.runningCount else { return nil }
+        return "\(running) running"
+    }
+
+    /// The secondary blocked figure, or `—` when that route did not answer.
+    /// Never the headline: `hscc cards monitor` draws running cards, and a
+    /// blocked count is the separate `hscc kanban blocked` read.
+    static func blockedText(_ projection: CardsRunningProjection?) -> String? {
+        guard let projection else { return nil }
+        guard let blocked = projection.blockedCount else { return "blocked —" }
+        return "\(blocked) blocked"
+    }
+
+    /// The one number the circular complication and the small tile lead with.
+    static func headlineNumber(_ projection: CardsRunningProjection?) -> Int? {
+        projection?.runningCount
+    }
+
+    /// `accessoryInline`'s counts-only line. Gate copy is prepended by the
+    /// entry, which owns setup/paused; this is what a readable entry shows.
+    /// The running count is the whole line: `hscc cards monitor` draws running
+    /// cards, and a blocked total would be a different command's number.
+    static func inlineLine(projection: CardsRunningProjection?, failure: WidgetDataFailure?) -> String {
+        guard let projection, projection.hasNumbers else { return failure?.shortLabel ?? "No data" }
+        if let running = runningText(projection) { return running }
+        if let blocked = projection.blockedCount { return "\(blocked) blocked" }
+        return failure?.shortLabel ?? "No data"
+    }
+
+    /// The qualifiers a live footer adds beside its age: a capped row list or a
+    /// blocked read that did not answer. nil when there is nothing to qualify.
+    static func notesLine(_ projection: CardsRunningProjection?) -> String? {
+        guard let projection else { return nil }
+        var notes: [String] = []
+        if !projection.rowsAreComplete, let total = projection.runningCount {
+            notes.append("showing \(projection.rows.count) of \(total)")
+        }
+        if projection.blockedCount == nil { notes.append("blocked unreadable") }
+        return notes.isEmpty ? nil : notes.joined(separator: " · ")
+    }
+
+    /// The age or reason line for the Home Screen families.
+    ///
+    /// A stale snapshot says how old it is AND why this refresh did not answer;
+    /// a blind read says the failure and never a number. Live data says
+    /// "updated just now" — the view pairs that with a self-updating relative
+    /// timestamp, so it keeps ageing while WidgetKit holds the entry.
+    static func footerLine(projection: CardsRunningProjection?, ageMinutes: Int?,
+                           failure: WidgetDataFailure?) -> String {
+        if let age = ageMinutes {
+            return "last known \(age) min ago · \(failure?.shortLabel ?? "no answer")"
+        }
+        if let failure { return failure.operatorLine }
+        guard let projection else { return "no data" }
+        if let notes = notesLine(projection) { return notes }
+        return "updated just now"
+    }
+
+    /// Whether the secondary blocked figure is a warning. A nil count is not a
+    /// warning: nothing was read, so nothing is coloured red.
+    static func blockedIsWarning(_ projection: CardsRunningProjection?) -> Bool {
+        (projection?.blockedCount ?? 0) > 0
+    }
 }
 
 // MARK: - The two reads, in parallel, into one projection
@@ -275,10 +391,10 @@ enum CardsRunningFeed {
 
 /// The projection + its age, in the App Group suite.
 ///
-/// Fleet-wide, so one slot: unlike the board-status tile there is no scope to
-/// key on (the route cannot be scoped — §4.3), and a snapshot of a different
-/// question would not be last-known data for this one. The stored shape is
-/// `CardsRunningProjection`, which declares five scalars per row and so cannot
+/// Fleet-wide, so one slot: the surface is the CLI's fleet answer (no board
+/// scope), and a snapshot of a different question would not be last-known data
+/// for this one. The stored shape is
+/// `CardsRunningProjection`, which declares six scalars per row and so cannot
 /// hold a card body, a path, an address or a token even if a later card wanted
 /// to persist one by accident.
 enum CardsRunningSnapshotStore {

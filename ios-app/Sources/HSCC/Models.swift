@@ -230,6 +230,10 @@ struct ClusterMonitorResponse: Decodable, Speakable {
     /// The nested per-node payload (`cmd_monitor()['json']`). Absent when the
     /// route degraded to `{"speak": "..."}`.
     let json: ClusterMonitorPayload?
+    /// `hscc cluster monitor`'s serving table (model per node, run/wait, rates).
+    let serving: [ServingRow]?
+    let serving_error: String?
+    let serving_proxy_error: String?
     let speak: String
 
     /// Computed passthroughs so `FleetView` reads the node list directly.

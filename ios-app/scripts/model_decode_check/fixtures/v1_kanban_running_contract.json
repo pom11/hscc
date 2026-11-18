@@ -1,0 +1,57 @@
+{
+ "boards": [
+  "demo",
+  "hscc",
+  "sample"
+ ],
+ "tasks": [
+  {
+   "board": "hscc",
+   "id": "t_aa11bb22",
+   "title": "Cards route: worker, run clock and heartbeat come from the CLI projection",
+   "worker": "backend-engineer",
+   "assignee": "backend-orch",
+   "status": "running",
+   "age_s": 7200,
+   "run_s": 3720,
+   "wait_s": null,
+   "hb_s": 12.4,
+   "priority": 2,
+   "started_epoch": 1795011472,
+   "started_at": "2026-11-18T14:17:52+00:00"
+  },
+  {
+   "board": "demo",
+   "id": "t_cc33dd44",
+   "title": "Cards route: an older server sends assignee only",
+   "worker": null,
+   "assignee": "ios-engineer",
+   "status": "running",
+   "age_s": 5400,
+   "run_s": null,
+   "wait_s": null,
+   "hb_s": null,
+   "priority": 0,
+   "started_epoch": 1795015696,
+   "started_at": "2026-11-18T15:28:16+00:00"
+  },
+  {
+   "board": "sample",
+   "id": "t_ee55ff66",
+   "title": "Cards route: run_s alone is enough for the age",
+   "worker": "researcher",
+   "assignee": "researcher",
+   "status": "running",
+   "age_s": 600,
+   "run_s": 180.5,
+   "wait_s": null,
+   "hb_s": null,
+   "priority": 1,
+   "started_epoch": null,
+   "started_at": null
+  }
+ ],
+ "errors": [],
+ "count": 3,
+ "speak": "3 running tasks."
+}

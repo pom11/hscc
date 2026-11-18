@@ -45,6 +45,7 @@ struct DaemonHostResponse: Decodable {
     let memory: DaemonMem?
     let disk: DaemonDisk?
     let daemon_running: Bool?
+    let daemon_uptime_seconds: Int?
 }
 struct DaemonCpu: Decodable { let percent: Double? }
 struct DaemonMem: Decodable { let percent: Double? }
@@ -75,16 +76,32 @@ enum MonitorContent {
                      state: String,
                      updatedAt: Date,
                      sections: Set<String>) -> MonitorActivityAttributes.ContentState {
-        // Per-node metrics (section "nodes").
+        // Per-node metrics (section "nodes"), plus the serving table's model
+        // and run/wait for that node. The same short-tail rule matches a host
+        // row to its serving row, so the two tables cannot disagree.
         var nodes: [NodeMetric] = []
         if sections.contains("nodes") {
+            let serving = monitor?.serving
             for node in monitor?.hosts ?? [] {
-                guard let sample = node.sample else { continue }
+                let tail = MonitorNode.shortTail(node.host)
+                var row: ServingRow?
+                for candidate in serving ?? [] where !candidate.isDown {
+                    guard let address = candidate.node else { continue }
+                    if MonitorNode.shortTail(address) == tail {
+                        row = candidate
+                        break
+                    }
+                }
                 nodes.append(NodeMetric(label: shortLabel(for: node.host),
-                                        cpuPct: sample.cpuUsagePct,
-                                        memPct: sample.memUsedPct,
-                                        gpuName: sample.gpu_name?.isEmpty == false ? sample.gpu_name : nil,
-                                        gpuUtilPct: sample.gpuUtilPct))
+                                        cpuPct: node.sample?.cpuUsagePct,
+                                        memPct: node.sample?.memUsedPct,
+                                        gpuName: node.sample?.gpu_name?.isEmpty == false ? node.sample?.gpu_name : nil,
+                                        gpuUtilPct: node.sample?.gpuUtilPct,
+                                        model: row?.shortModel,
+                                        cpuTempC: node.sample?.cpuTempC,
+                                        gpuTempC: node.sample?.gpuTempC,
+                                        running: row?.running,
+                                        waiting: row?.waiting))
             }
         }
 
@@ -97,12 +114,24 @@ enum MonitorContent {
                               cpuPct: h.cpu?.percent,
                               memPct: h.memory?.percent,
                               diskPct: h.disk?.percent,
-                              daemonRunning: h.daemon_running ?? false)
+                              daemonRunning: h.daemon_running ?? false,
+                              daemonUptimeSeconds: h.daemon_uptime_seconds)
         }
 
+        // The app's monitor struct and the widget's Shared one carry the same
+        // hosts/error shape but are separate types; apply the SAME predicate
+        // (`error == nil`) rather than inventing a second notion of "up".
+        let listed = monitor?.hosts
+        let nodesUp = listed.map { rows in rows.filter { $0.error == nil }.count }
+        let nodesTotal = listed.map { $0.count }
+        let serving = ServingSummary(rows: monitor?.serving)
         return MonitorActivityAttributes.ContentState(state: state,
                                                       nodes: nodes,
                                                       host: host,
+                                                      nodesUp: nodesUp,
+                                                      nodesTotal: nodesTotal,
+                                                      models: serving.models,
+                                                      genTps: serving.genTps,
                                                       updatedAt: updatedAt)
     }
 }

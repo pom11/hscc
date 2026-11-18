@@ -87,6 +87,13 @@ def main():
     # which lives in Models.swift — we extract the minimal monitor decode lines
     # from that too.
     models_src = open(os.path.join(REPO, "ios-app", "Sources", "HSCC", "Models.swift")).read()
+    shared_models_src = open(os.path.join(REPO, "ios-app", "Sources", "Shared", "SharedModels.swift")).read()
+    tally_src = open(os.path.join(REPO, "ios-app", "Sources", "Shared", "ClusterNodeTally.swift")).read()
+    serving_row = extract_block(shared_models_src, r"struct ServingRow:")
+    monitor_node = extract_block(shared_models_src, r"struct MonitorNode:")
+    monitor_sample = extract_block(shared_models_src, r"struct MonitorSample:")
+    monitor_workload = extract_block(shared_models_src, r"struct MonitorWorkload:")
+    serving_summary = extract_block(tally_src, r"struct ServingSummary:")
     cluster_mon = extract_block(models_src, r"struct ClusterMonitorResponse:")
     cluster_payload = extract_block(models_src, r"struct ClusterMonitorPayload:")
     cluster_host = extract_block(models_src, r"struct ClusterMonitorHost:")
@@ -106,6 +113,8 @@ def main():
 
     models = "\n".join([
         attrs, node_metric, host_metric,
+        serving_row, serving_summary,
+        monitor_node, monitor_sample, monitor_workload,
         cluster_mon, cluster_payload, cluster_host, node_sample,
         daemon_host, daemon_cpu, daemon_mem, daemon_disk,
         monitor_content,
