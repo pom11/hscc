@@ -68,9 +68,24 @@ def fakes(monkeypatch):
         "load_watchdog_block": lambda: dict(block),
         "clear_intentional_block": lambda reason=None: (
             state["clears"].append(reason)),
-        "status_context": lambda: {
-            "blocked_by": None, "kanban_ok": True, "kanban_reason": "",
+        "status_snapshot": lambda: {
+            "enabled": bool(cfg.get("enabled")),
+            "state": cfg.get("state"),
+            "state_recorded": cfg.get("state"),
+            "state_source": "autodown.json",
+            "fleet_up": None,
+            "idle_minutes": cfg.get("idle_minutes"),
+            "last_activity_iso": cfg.get("last_activity_iso"),
+            "down_since": cfg.get("down_since"),
+            "wake_source": cfg.get("wake_source"),
+            "reason": cfg.get("reason"),
+            "watchdog_blocked": bool(block.get("blocked")),
+            "watchdog_intentional": block.get("intentional"),
+            "kanban_ok": True, "kanban_reason": "", "blocked_by": None,
+            "force_armed": bool(cfg.get("force_armed")),
+            "force_armed_overrides": cfg.get("force_armed_overrides") or [],
             "active_cron_cpu_only": [], "active_cron_model": [],
+            "prci_active": False, "prci_ok": True, "prci_reason": "",
         },
         "list_active_cron_jobs": lambda: [],
         "autoup": lambda: state["autoup_calls"] and None or

@@ -228,105 +228,12 @@ def _cmd_status(rest, json_mode, theme_name=None):
     writes, never creates, never acts. The human view is a themed Rich Panel
     ("autodown"); ``--json`` stays a raw dumps for scripting.
     """
-    cfg = autodown.load_config()
-    from hscc_daemon import lifecycle
-    block = lifecycle.load_watchdog_block()
-
-    # Which signal is CURRENTLY blocking teardown. This actively evaluates the
-    # (read-only) kanban idle predicate in this process so status always shows
-    # the truth rather than a bare ``state: up`` that hides whether autodown is
-    # healthy-and-waiting or stuck on an interlock. Never mutates anything.
-    blocking = None
-    if autodown._has_active_work():
-        blocking_board = autodown.kanban_blocking_board()
-        if blocking_board and blocking_board != autodown._UNREADABLE_BOARD:
-            # Name the SPECIFIC blocking task(s), not just the board, so the
-            # operator can act without running a second command. Reuses the
-            # same board enumeration the predicate just did (list_stale_tasks
-            # → _enum_board_names) so status names exactly the work that blocks.
-            tasks = autodown.list_stale_tasks(
-                board=blocking_board, older_than=None)["tasks"]
-            if tasks:
-                names = ", ".join(
-                    f"{t['id']} ({t['title']})" for t in tasks[:3])
-                if len(tasks) > 3:
-                    names += f", … and {len(tasks) - 3} more"
-                blocking = f"kanban work on board '{blocking_board}': {names}"
-            else:
-                # Predicate said active but no task could be enumerated (e.g.
-                # the interlock is held by an unreadable board). Name the board.
-                blocking = f"kanban work on board '{blocking_board}'"
-        else:
-            blocking = "kanban work (board unknown)"
-
-    # PR/CI interlock — actively evaluate it here (read-only) and surface it.
-    # Open PRs / active CI runs keep the interlock active the same way kanban
-    # work does. ``_has_active_pr_ci`` populates ``prci_check_state()`` /
-    # ``prci_blocking_signal()``, so those are read AFTER the predicate.
-    prci_active = autodown._has_active_pr_ci()
-    prci = autodown.prci_blocking_signal()
-    if prci_active:
-        if prci == autodown._PRCI_UNREACHABLE:
-            prci_blocking = "PR/CI source unreachable — treating as active "
-            "(fail-safe)"
-        else:
-            prci_blocking = "open PR / active CI run on a tracked repo"
-        # Prepend PR/CI blocking if kanban is not already blocking, else list
-        # both — never hide one interlock behind the other.
-        blocking = f"{prci_blocking}, and {blocking}" if blocking \
-            else prci_blocking
-
-    # Kanban interlock resolution — read AFTER the predicate above, which
-    # resolves the lib, so ok/reason reflect the live evaluation and let an
-    # operator see when the interlock is unevaluable (and why) instead of
-    # guessing why autodown never fires.
-    kc = autodown.kanban_check_state()
-    pci = autodown.prci_check_state()
-
-    # Informational: active Hermes cron jobs, classified (feat t_c94f8b8c).
-    # status is read-only — we only READ jobs.json (Hermes' source of truth),
-    # never write it. cpu_only watchdogs are noted so the operator still knows
-    # they exist, even though they never block arming; model-requiring ones are
-    # surfaced because they are the only reason enable would (or, force-armed,
-    # did) abort.
-    active_crons = autodown.list_active_cron_jobs()
-    if isinstance(active_crons, list):
-        cpu_only_crons = [j for j in active_crons if j.get("cpu_only")]
-        model_crons = [j for j in active_crons if not j.get("cpu_only")]
-    else:
-        cpu_only_crons, model_crons = [], []
-
-    status = {
-        "enabled": bool(cfg.get("enabled")),
-        "state": cfg.get("state"),
-        "idle_minutes": cfg.get("idle_minutes"),
-        "last_activity_iso": cfg.get("last_activity_iso"),
-        "down_since": cfg.get("down_since"),
-        "wake_source": cfg.get("wake_source"),
-        "reason": cfg.get("reason"),
-        "watchdog_blocked": bool(block.get("blocked")),
-        "watchdog_intentional": block.get("intentional"),
-        "kanban_ok": kc["ok"] if kc else None,
-        "kanban_reason": kc["reason"] if kc else "",
-        "blocked_by": blocking,
-        # Force-armed without --force: set when the operator armed despite
-        # active Hermes cron jobs. Surfaced so the operator can always see WHY
-        # autodown is armed despite scheduled jobs (§7, feat t_2b711a94).
-        "force_armed": bool(cfg.get("force_armed")),
-        "force_armed_overrides": cfg.get("force_armed_overrides") or [],
-        # Active cron jobs, classified (feat t_c94f8b8c): cpu_only watchdogs
-        # never block arming; model-requiring jobs are the abort-able ones.
-        "active_cron_cpu_only": [j.get("name") or j.get("id")
-                                 for j in cpu_only_crons],
-        "active_cron_model": [j.get("name") or j.get("id")
-                              for j in model_crons],
-        # PR/CI interlock resolution (figures above): ``prci_active`` True means
-        # an open PR / active run (or an unreachable source, fail-safe) is
-        # keeping the interlock active; ``prci`` names the signal.
-        "prci_active": bool(prci_active),
-        "prci_ok": (pci or {}).get("ok"),
-        "prci_reason": (pci or {}).get("reason") or "",
-    }
+    # ONE builder shared with GET /v1/autodown/status (t_8743f98c). It owns
+    # the read-only interlock evaluation and reconciles a recorded "down"
+    # against the serving layer, so the CLI and the widget can never disagree.
+    status = autodown.status_snapshot()
+    kc = {"ok": status["kanban_ok"], "reason": status["kanban_reason"]}
+    prci = status.get("prci_signal")
     if json_mode:
         print(json.dumps(status))
         return 0
@@ -367,6 +274,9 @@ def _cmd_status(rest, json_mode, theme_name=None):
         rows.append(f"  active cron (model):    {names} — model-requiring, "
                     "the reason enable aborts/force-arms.")
     rows.append(f"  state:           {theme.esc(status['state'])}")
+    if status.get("state_note"):
+        rows.append("  state note:      "
+                    f"[warn]{theme.esc(status['state_note'])}[/warn]")
     if status["blocked_by"]:
         rows.append("  blocked by:      "
                     f"[warn]{theme.esc(status['blocked_by'])}[/warn]")
