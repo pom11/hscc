@@ -1138,6 +1138,7 @@ extension WidgetSurfaceKind {
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
         case .liveActivityCards: return "Running Cards Live Activity"
+        case .liveActivityBoardProgress: return "Board Progress Live Activity"
         }
     }
 
@@ -1182,6 +1183,12 @@ extension WidgetSurfaceKind {
         // stack glyph to make the list look tidier would put a symbol on screen
         // that no rendering of either surface ever uses.
         case .liveActivityCards: return "square.stack.3d.up"
+        // The progress bubble draws four counts for one board, which is the
+        // Board Status widget's dataset in Live Activity form. A bar-chart
+        // glyph reads as "counts over a board" and stays distinct from the
+        // card-stack pair above it in the same list; checked through the same
+        // NSImage(systemSymbolName:) call sf_symbol_check.sh uses.
+        case .liveActivityBoardProgress: return "chart.bar.xaxis"
         }
     }
 
