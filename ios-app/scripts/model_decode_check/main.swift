@@ -792,6 +792,12 @@ monitorParity(c, fixture: "v1_cluster_monitor_edge.json",
               text: "v1_cluster_monitor_edge.cli.txt")
 monitorSampleDecodeShape(c)
 
+// ---- The systemSmall grid (t_9e110d88). The checks are in
+// cluster_small_grid.swift next to this file. They EXECUTE
+// Sources/HSCCWidgets/ClusterSmallGrid.swift — the tile the small widget draws —
+// against the fixtures above and, where a golden exists, the CLI's own cells.
+clusterSmallGridChecks(c)
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. The exit code is the guard; the words below only
