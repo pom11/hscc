@@ -1,0 +1,121 @@
+# XcodeGen project spec for the HSCC macOS app.
+#
+# Generate the Xcode project reproducibly with:
+#   brew install xcodegen
+#   macos-app/scripts/generate.sh
+#
+# The app is a MENU-BAR-ONLY client of the existing HSCC API (LSUIElement = YES,
+# no Dock icon). It reuses the iOS app's Sources/Shared files by path — there
+# are no copied models, no second HTTP client, and no new backend endpoints.
+# Part 2 (a desktop-widget extension) will join the same App Group; this card
+# ships the project scaffold + the menu bar app.
+#
+# The App Group is deliberately the SAME `group.com.hscc.ios` the iOS app and
+# its widget use. It is a team-wide container, not an iOS-only one, and keeping
+# one group means the operator's saved clusters are one store rather than two
+# that silently drift. Bundle identifiers are the parallel `com.hscc.mac…`
+# family; the group identifier is a container name, not a bundle id.
+
+name: HSCCMac
+options:
+  bundleIdPrefix: com.hscc
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Same signing mechanism as ios-app/project.yml: export the team once and
+    # it survives every regenerate. A team picked in the Xcode UI is lost on the
+    # next `xcodegen generate`.
+    DEVELOPMENT_TEAM: ${HSCC_DEVELOPMENT_TEAM}
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    SWIFT_EMIT_LOC_STRINGS: YES
+
+schemes:
+  HSCCMac:
+    build:
+      targets:
+        HSCCMac: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+  HSCCMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      # Explicit list, matching the iOS spec's discipline: a source added to the
+      # folder but not here is never compiled, so it is obvious in review.
+      - path: Sources/HSCCMac/HSCCMacApp.swift
+      - path: Sources/HSCCMac/MenuBarLabel.swift
+      - path: Sources/HSCCMac/DashboardMonitor.swift
+      - path: Sources/HSCCMac/DashboardView.swift
+      - path: Sources/HSCCMac/MacPreferences.swift
+      - path: Sources/HSCCMac/MacSettingsView.swift
+      # AppIcon + the monochrome MenuBarIcon template image. The app icon PNGs
+      # are generated from ios-app/assets-master/*.svg by scripts/make_appicon.sh
+      # (never hand-dropped); the menu bar H is an SVG asset with a template
+      # rendering intent.
+      - path: Sources/HSCCMac/Assets.xcassets
+      # Shared cross-platform sources, reused BY PATH from the iOS app. No
+      # copies: one decoder, one App Group store, one failover loop.
+      - path: ../ios-app/Sources/Shared/SharedModels.swift
+      - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
+      - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
+      # The one design system, so the menu bar app and the iOS widgets share
+      # the black + #FF5722 palette and spacing rather than growing a second.
+      - path: ../ios-app/Sources/HSCC/Views/Theme.swift
+      # The existing cluster list + Keychain store. Reused, not re-implemented:
+      # saved clusters, multiple addresses, automatic failover, and per-cluster
+      # tokens keep exactly the behaviour the iOS app already ships.
+      - path: ../ios-app/Sources/HSCC/SettingsStore.swift
+      - path: ../ios-app/Sources/HSCC/KeychainStore.swift
+      # SettingsStore clears the shared last-known read cache on a cluster
+      # switch. Foundation-only.
+      - path: ../ios-app/Sources/HSCC/StateCache.swift
+    entitlements:
+      path: Sources/HSCCMac.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        # Same team-wide container as the iOS app + its extensions. The desktop
+        # widget extension (part 2) will read the same connection settings.
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: HSCC
+        # Menu-bar-only: no Dock icon, no app switcher entry.
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        # HTTP over Tailscale is the transport (same contract as iOS); ATS must
+        # allow it or every read to the daemon is blocked.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.mac
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Per-TARGET entitlement path, matching the iOS targets: the project-level
+        # value alone is not enough once a generated project is inspected.
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCMac.entitlements
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_HARDENED_RUNTIME: YES

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" width="18" height="18">
+  <!-- HSCC menu bar mark — the block H from the app icon, monochrome.
+       Template-rendered by the asset catalog, so the system tints it for a
+       light or dark menu bar and only the alpha shape matters. The geometry is
+       the app icon's H (left/right bars + crossbar) scaled to an 18 pt canvas
+       with optical padding for the menu bar. -->
+  <g fill="#000000">
+    <rect x="3.2" y="3.0" width="2.8" height="12.0"/>
+    <rect x="12.0" y="3.0" width="2.8" height="12.0"/>
+    <rect x="6.0" y="7.4" width="6.0" height="3.2"/>
+  </g>
+</svg>

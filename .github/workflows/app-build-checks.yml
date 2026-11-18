@@ -1,0 +1,54 @@
+name: app-build-checks
+
+# Compile gates for the two Apple clients. Both scripts are swiftc-only: they
+# generate nothing, sign nothing, link nothing and never launch an app.
+#
+# The iOS project targets iOS 26, so its leg SKIPS on a runner whose Xcode is
+# older than that SDK. Skipping is announced and does not fail the job; the
+# macOS leg runs everywhere (macOS 14 deployment target).
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-build-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          echo "iOS SDK:   $(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null || echo unavailable)"
+
+      - name: macOS compile gate
+        run: bash macos-app/scripts/build_check.sh
+
+      - name: macOS asset catalog gate
+        run: bash macos-app/scripts/actool_icon_check.sh
+
+      - name: iOS compile gate
+        run: |
+          set +e
+          ver=$(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] || [ -z "$ver" ]; then
+            echo "::notice::No iphonesimulator SDK on this runner; iOS leg skipped."
+            exit 0
+          fi
+          major="${ver%%.*}"
+          if [ "$major" -lt 26 ]; then
+            echo "::notice::iOS SDK $ver is below the project's iOS 26 deployment target; iOS leg skipped."
+            exit 0
+          fi
+          bash ios-app/scripts/build_check.sh
