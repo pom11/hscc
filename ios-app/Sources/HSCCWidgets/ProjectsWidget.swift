@@ -269,22 +269,58 @@ struct ProjectsEntry: TimelineEntry {
     /// Read off `status` for the same single-owner reason as `configured`.
     var paused: Bool { status == .paused }
 
-    /// The line the gate pane draws. One owner for the copy, so three families
-    /// cannot invent three paused messages, and the setup invite is checked
+    /// The line the gate pane draws. One owner for the copy, so six families
+    /// cannot invent six paused messages, and the setup invite is checked
     /// FIRST: an app that was never configured has not "paused" anything
     /// (audit-3 / t_5c554c5b).
-    ///
-    /// There is deliberately no `shortGateLabel` on this entry. `supportedFamilies`
-    /// is small/medium/large — no corner, circular, rectangular or inline
-    /// complication exists to run out of room and need a label-only copy — and a
-    /// string no body can reach is one that rots (the ruling #341 applied to a
-    /// glance case that no family could ask for). `widget_view_dispatch_check.sh`
-    /// proves the absence rather than trusting it: called with `home-screen-only`
-    /// it fails if an accessory family ever appears in `supportedFamilies` while
-    /// this entry still has no label rule to draw.
     var gateLine: String {
         if !configured { return "Set up the app to see your projects" }
         return "Paused in Settings"
+    }
+
+    /// The label the accessory families draw for a gate state — the ~25-character
+    /// budget the Lock Screen gives an inline row and a ring. The setup invite is
+    /// checked FIRST, so a device that was simply never set up can never render
+    /// "paused" (audit-3 / t_5c554c5b). A scoped pause says which project is
+    /// paused while it fits; past that, "Paused" is the honest short form.
+    var shortGateLabel: String {
+        if !configured { return "Set up in HSCC" }
+        if let selectedName, !selectedName.isEmpty {
+            let scoped = "\(selectedName) · paused"
+            if scoped.count <= 25 { return scoped }
+        }
+        return "Paused"
+    }
+
+    // MARK: Text the accessory families draw (one rule per string)
+
+    /// `accessoryInline`: one short line. The Lock Screen row has room for a
+    /// count or one name, not a list, so a scoped widget names the project and
+    /// an unfiltered one counts the rows it actually holds. A name that does not
+    /// fit the ~25-character budget falls back to the count rather than a
+    /// truncated name.
+    var inlineLine: String {
+        // Both gate states through ONE copy rule, which itself puts the setup
+        // invite first — an unconfigured device can never read as "paused".
+        if !configured || paused { return shortGateLabel }
+        if let failure = status.failure { return failure.shortLabel }
+        let countText = rows.count == 1 ? "1 project" : "\(rows.count) projects"
+        guard !rows.isEmpty else {
+            return selectedName.map { "No \($0)" } ?? "No projects"
+        }
+        guard let selectedName else { return countText }
+        return selectedName.count <= 25 ? selectedName : countText
+    }
+
+    /// The `accessoryCircular` scalar: how many projects this entry holds. nil
+    /// when there is nothing to count, so the ring draws `—`, never `0` — a
+    /// failed or empty read is not "this cluster has no projects".
+    var circularNumber: Int? { rows.isEmpty ? nil : rows.count }
+
+    /// The top rows `accessoryRectangular` can draw: the names plus their board
+    /// as the short status. Three is the family's height on the Lock Screen.
+    func rectangularRows(limit: Int = 3) -> [ProjectRow] {
+        Array(rows.prefix(limit))
     }
 
     /// Rows this family can afford (§5.1: small 3, medium 6, large 8).
@@ -460,7 +496,8 @@ struct ProjectsTimelineProvider: AppIntentTimelineProvider {
 
 // MARK: - Widget
 
-/// The Home Screen projects widget. Three families, one read, no actions.
+/// The projects widget: three Home Screen sizes and three Lock Screen
+/// accessories. One read, no actions.
 struct ProjectsWidget: Widget {
     let kind = "ProjectsWidget"
 
@@ -475,7 +512,15 @@ struct ProjectsWidget: Widget {
         }
         .configurationDisplayName("Projects")
         .description("The cluster's projects and the board each one is on. Read-only.")
+        #if os(iOS)
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .accessoryInline, .accessoryCircular, .accessoryRectangular])
+        #else
+        // The macOS compile is the headless harness in
+        // scripts/projects_widget_check.sh; WidgetKit marks the accessory
+        // families unavailable there, and this widget only ships for iOS.
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        #endif
     }
 }
 
@@ -490,6 +535,14 @@ struct ProjectsWidgetView: View {
 
     var body: some View {
         switch family {
+        #if os(iOS)
+        case .accessoryInline:
+            Text(entry.inlineLine)
+        case .accessoryCircular:
+            ProjectsCircularView(entry: entry)
+        case .accessoryRectangular:
+            ProjectsRectangularView(entry: entry)
+        #endif
         case .systemSmall:
             SmallProjectsWidget(entry: entry)
         case .systemLarge:
@@ -532,7 +585,7 @@ private struct ProjectRowView: View {
 /// paused state (t_5f246177). One pane, two copies, chosen by the entry, so a
 /// paused tile can never fall through to its last-known rows or to a blank.
 /// The words belong to `ProjectsEntry.gateLine`, not to this view, which is how
-/// three families are kept from inventing three sentences.
+/// six families are kept from inventing six sentences.
 ///
 /// `compact` stays (unlike the running-cards pane, where #341 could drop it):
 /// the small family really does draw the tighter version of this pane, so it has
@@ -641,6 +694,77 @@ private struct ProjectsStatusDot: View {
             .fill(status.failure != nil ? Theme.Semantic.bad
                 : (status.isStale ? Theme.Semantic.warn : Theme.Semantic.ok))
             .frame(width: 6, height: 6)
+    }
+}
+
+// MARK: accessoryCircular — how many projects this entry holds
+
+private struct ProjectsCircularView: View {
+    let entry: ProjectsEntry
+
+    var body: some View {
+        if !entry.configured || entry.paused {
+            // A label, never a number: a paused ring that still drew a count
+            // would be the false zero §6 rule 1 refuses. The copy rule inside
+            // `shortGateLabel` keeps the setup invite first.
+            Text(entry.shortGateLabel)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(entry.shortGateLabel)
+        } else {
+            VStack(spacing: 0) {
+                Text(entry.circularNumber.map { "\($0)" } ?? "—")
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(color)
+                Text("projects")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+
+    private var color: Color {
+        if entry.status.failure != nil { return Theme.Semantic.bad }
+        if entry.status.isStale { return Theme.Semantic.warn }
+        return Theme.Semantic.onSurface
+    }
+}
+
+// MARK: accessoryRectangular — the top three names and their board
+
+private struct ProjectsRectangularView: View {
+    let entry: ProjectsEntry
+
+    var body: some View {
+        if !entry.configured || entry.paused {
+            ProjectsGateView(entry: entry, compact: true)
+        } else if let failure = entry.status.failure {
+            ProjectsEmptyView(failure: failure, compact: true)
+        } else if entry.rows.isEmpty {
+            ProjectsEmptyView(failure: nil, selectedName: entry.selectedName, compact: true)
+        } else {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(entry.rectangularRows()) { row in
+                    HStack(spacing: Theme.Spacing.xs.rawValue) {
+                        Text(row.name)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.Semantic.onSurface)
+                            .lineLimit(1)
+                        Spacer(minLength: Theme.Spacing.xs.rawValue)
+                        if let board = row.board, !board.isEmpty {
+                            Text(board)
+                                .font(.caption2)
+                                .foregroundStyle(entry.status.isStale ? Theme.Semantic.warn
+                                                    : Theme.Semantic.onSurfaceMuted)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

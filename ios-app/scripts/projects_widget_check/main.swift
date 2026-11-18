@@ -190,8 +190,9 @@ check("the store is bounded, not open-ended",
 check("rows(limit:) still caps at the payload size (§5.1)", payload.rows(limit: 8).count == 2)
 
 // ---------------------------------------------------------------------------
-// 7. The dispatch chain, mirrored from the three family bodies (which the
-//    script proves by grep are still in that order in the real source).
+// 7. The dispatch chain, mirrored from the gated family bodies (which the
+//    script proves by grep are still in that order in the real source). The
+//    accessory text rules are executed in [9].
 //
 //    The FIRST step is ONE test for BOTH gate states since t_5f246177
 //    (`!entry.configured || entry.paused`), so this mirror has one gate branch,
@@ -294,9 +295,56 @@ check("the cadence rule the timeline uses: Off is nil (atEnd), 5 min is +300s",
          == twelveMinutesAgo.addingTimeInterval(300))
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 9. The accessory families (t_fece1b58): the text rules the Lock Screen
+//    renders, executed on the same entry type the views receive. The inline
+//    line is one string so a scoped widget and an unfiltered one cannot
+//    disagree; the circular number is nil (never 0) when nothing was read.
+// ---------------------------------------------------------------------------
+print("\n[9] accessory families (inline / circular / rectangular)")
+let liveEntry = ProjectsEntry(date: .now, configuration: nil, rows: rows,
+                              selectedName: nil, status: .live)
+let scopedEntry = ProjectsEntry(date: .now, configuration: nil, rows: [rows[1]],
+                                selectedName: "radio", status: .live)
+let emptyEntry = ProjectsEntry(date: .now, configuration: nil, rows: [],
+                               selectedName: nil, status: .live)
+let scopedMissing = ProjectsEntry(date: .now, configuration: nil, rows: [],
+                                  selectedName: "radio", status: .live)
+let failedEntry = ProjectsEntry(date: .now, configuration: nil, rows: [],
+                                selectedName: nil, status: failed)
+let longName = String(repeating: "p", count: 30)
+let longScoped = ProjectsEntry(date: .now, configuration: nil, rows: rows,
+                               selectedName: longName, status: .live)
+check("inline counts the unfiltered list", liveEntry.inlineLine == "3 projects")
+check("inline names the scoped project", scopedEntry.inlineLine == "radio")
+check("inline singles out one project", {
+    let one = ProjectsEntry(date: .now, configuration: nil, rows: [rows[0]],
+                            selectedName: nil, status: .live)
+    return one.inlineLine == "1 project"
+}())
+check("inline says No projects for an honest empty", emptyEntry.inlineLine == "No projects")
+check("inline names a vanished scoped project", scopedMissing.inlineLine == "No radio")
+check("inline reports a failure's short label", failedEntry.inlineLine == "Token rejected")
+check("a long scoped name falls back to the count, not a truncation",
+      longScoped.inlineLine == "3 projects")
+check("shortGateLabel keeps the setup invite first",
+      unconfiguredEntry.shortGateLabel == "Set up in HSCC"
+      && unconfiguredEntry.inlineLine == "Set up in HSCC")
+check("a paused scoped label says which project is paused",
+      pausedEntry.shortGateLabel == "radio · paused"
+      && pausedEntry.inlineLine == "radio · paused")
+check("circular counts the rows it holds", liveEntry.circularNumber == 3)
+check("circular draws no number for an empty read", emptyEntry.circularNumber == nil)
+check("circular draws no number for a failed read", failedEntry.circularNumber == nil)
+check("rectangular caps at three names in server order",
+      liveEntry.rectangularRows().map(\.name) == ["hscc", "radio", "memori"])
+check("rectangular never widens past its limit",
+      liveEntry.rectangularRows(limit: 2).map(\.name) == ["hscc", "radio"]
+      && liveEntry.rows.count == 3)
+
 print("")
 if failures == 0 {
-    print("PROJECTS WIDGET CHECK PASSED — family depths, status accessors, unconfigured-beats-stale, scope, §7 projection bytes")
+    print("PROJECTS WIDGET CHECK PASSED — family depths, status accessors, unconfigured-beats-stale, scope, §7 projection bytes, accessory text")
     exit(0)
 } else {
     print("PROJECTS WIDGET CHECK FAILED — \(failures) assertion(s)")

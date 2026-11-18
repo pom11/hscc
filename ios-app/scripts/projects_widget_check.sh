@@ -93,14 +93,14 @@ report "no ExtensionClient alias use" \
 # One rule, two call sites (the timeline and the configuration sheet's options).
 count_is "both reads go through WidgetData.read" "$SUBJECT" 'WidgetData\.read\(' 2
 count_is "both reads build the client the same way" "$SUBJECT" 'WidgetDataClient\.makeIfConfigured\(\)' 2
-# The gate step every family takes, in all three family bodies. ONE branch for
-# both states since t_5f246177: two branches is how a body gates the invite and
-# forgets the pause, and the executed mirror in main.swift [7] proves which one
-# the real bodies match.
-count_is "small+medium+large each take the ONE gate step (unconfigured OR paused)" \
-  "$SUBJECT" 'if !entry\.configured \|\| entry\.paused' 3
-count_is "…then the failure branch, three times" "$SUBJECT" 'else if let failure = entry\.status\.failure' 3
-count_is "…then the empty branch, three times" "$SUBJECT" 'else if entry\.rows\.isEmpty' 3
+# The gate step every family takes, in all five bodies that can draw data. ONE
+# branch for both states since t_5f246177: two branches is how a body gates the
+# invite and forgets the pause, and the executed mirror in main.swift [7] proves
+# which one the real bodies match.
+count_is "small+medium+large+circular+rectangular each take the ONE gate step (unconfigured OR paused)" \
+  "$SUBJECT" 'if !entry\.configured \|\| entry\.paused' 5
+count_is "…then the failure branch, four times" "$SUBJECT" 'else if let failure = entry\.status\.failure' 4
+count_is "…then the empty branch, four times" "$SUBJECT" 'else if entry\.rows\.isEmpty' 4
 # The paused state is built by the entry's own factory, and the copy belongs to
 # the entry — one `var gateLine` and one call to that factory in the provider.
 count_is "one paused factory, called from the provider" "$SUBJECT" 'return \.paused\(selectedName:' 1
@@ -117,10 +117,16 @@ count_is "the App Group suite is touched twice, both in the store" "$SUBJECT" 'U
 # `repo` must never become a field this file reads or writes.
 report "repo is never a field" \
   "$(grep -nE '(let|var) repo|\.repo\b' "$SUBJECT")"
-# One configuration, one widget, three families.
+# One configuration, one widget, six families: the three Home Screen sizes and
+# the three Lock Screen accessories the operator asked for.
 count_is "one configuration intent" "$SUBJECT" 'struct ProjectFilterIntent: WidgetConfigurationIntent' 1
 count_is "one options provider" "$SUBJECT" 'struct ProjectEntityQuery: EntityQuery' 1
-count_is "one widget, three families" "$SUBJECT" 'supportedFamilies\(\[\.systemSmall, \.systemMedium, \.systemLarge\]\)' 1
+count_is "one widget, six families" "$SUBJECT" \
+  'supportedFamilies\(\[\.systemSmall, \.systemMedium, \.systemLarge,' 1
+count_is "the three Lock Screen families are declared once" "$SUBJECT" \
+  '\.accessoryInline, \.accessoryCircular, \.accessoryRectangular\]\)' 1
+count_is "the entry owns exactly one short gate label" "$SUBJECT" \
+  'var shortGateLabel: String \{' 1
 # The harness itself must not be able to reach the network either.
 report "the harness never calls the options fetch" \
   "$(grep -n 'suggestedEntities\|allEntities\|entities(for' scripts/projects_widget_check/main.swift)"
