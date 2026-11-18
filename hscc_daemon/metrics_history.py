@@ -962,6 +962,30 @@ def close_sampler() -> None:
         s.close()
 
 
+def resident_recorder() -> "MetricsRecorder | None":
+    """The process-wide ``MetricsRecorder``, or None when this process hosts none.
+
+    WHY THIS EXISTS (t_c7f57783). Tier 0 is memory-only, so it belongs to the
+    one process that samples — the daemon. The API server is a *separate*
+    process (``hscc_daemon/api_launchd.py`` starts its own
+    ``python -m api_server serve``), and a read route in that process has no way
+    to see the daemon's ring. ``get_sampler()`` cannot answer that question
+    because it CONSTRUCTS on first use, which spawns a
+    ``sparkrun cluster monitor`` child — a read route must never sample the
+    fleet, so it must never call it.
+
+    The two answers are different facts and callers must not have to guess
+    between them: None means "tier 0 is not readable from this process", while
+    an empty ``tier0_points()`` means "this process does sample and has nothing
+    yet" (the stated post-restart state). Returning the recorder rather than the
+    ring keeps this one name for the whole tier-0 read, so a caller goes through
+    the recorder's own API instead of touching ``_sampler``.
+    """
+    with _sampler_lock:
+        sampler = _sampler
+    return sampler.recorder if sampler is not None else None
+
+
 def check_metrics_history(now=None, hscc_dir=None) -> dict:
     """The daemon's ``metrics_history`` stream body (cadence: the SOT entry in
     ``PERIODIC_INTERVALS``).

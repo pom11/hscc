@@ -797,3 +797,36 @@ def test_a_broken_store_reports_itself_in_the_state(tmp_path):
     out = mh.check_metrics_history(now=BASE + 62)
     assert out["ok"] is False and "OperationalError" in out["error"]
     assert state.read_state(mh.STREAM_NAME)["error"]
+
+
+# ── the cross-process read seam (t_c7f57783: GET /v1/cluster/history) ──────
+#
+# Tier 0 lives in the sampler's process and the API server is a different
+# process, so the read route asks "does THIS process own the ring?" rather than
+# "give me a sampler". These two tests are what keep that question answerable:
+# the first pins that answering it never constructs a Sampler (constructing one
+# spawns `sparkrun cluster monitor` — a read route that sampled the fleet would
+# be the second poller this module's whole design exists to avoid), and the
+# second pins the other answer, "resident, and empty right after a restart",
+# which is a different fact from "not resident here".
+
+def test_resident_recorder_answers_without_building_a_sampler(monkeypatch):
+    def _no_construction(*args, **kwargs):
+        raise AssertionError("resident_recorder() must never construct a Sampler")
+    monkeypatch.setattr(mh, "Sampler", _no_construction)
+    mh.close_sampler()
+    assert mh.resident_recorder() is None
+    # The distinction this seam exists for: get_sampler() DOES construct on
+    # first use, which is exactly why a read route must not call it.
+    with pytest.raises(AssertionError, match="must never construct"):
+        mh.get_sampler()
+
+
+def test_resident_recorder_is_the_owner_of_the_tier0_ring(tmp_path):
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    mh.set_sampler(mh.Sampler(host_stream=FakeStream(2), serving=FakePoller(),
+                              recorder=rec))
+    assert mh.resident_recorder() is rec
+    assert mh.resident_recorder().tier0_points() == []    # resident AND empty
+    rec.tick(frame(BASE), engines(), BASE)
+    assert [p["ts"] for p in mh.resident_recorder().tier0_points()] == [BASE]
