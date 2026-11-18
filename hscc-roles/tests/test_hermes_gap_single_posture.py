@@ -67,8 +67,9 @@ SWEEP_ROOT = "hscc-roles/tests"
 #: for this leg by t_74141b24; ``hscc-api/tests/test_hermes_gap_single_posture.py``
 #: carries the same list and both have to move together. t_b884497b added the
 #: hscc-cluster rows to the block and moved hscc-api's list only, which left THIS
-#: twin reading five advertised gates as gates "no probe owner defines" — the drift
-#: the pair exists to catch, caught (t_979ec491).
+#: twin reading four of those advertised gates as gates "no probe owner defines"
+#: (the fifth, ``require_hermes_cli_profiles``, has hscc-roles' own owner behind it)
+#: — the drift the pair exists to catch, caught (t_979ec491).
 ALL_OWNERS = (OWNER,
               "hscc-api/tests/hermes_gap.py",
               "hscc_daemon/tests/real_hermes.py",
