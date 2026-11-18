@@ -1,5 +1,10 @@
 # Releasing HSCC for iPhone (Ad Hoc + GitHub Pages)
 
+**The supported entry point is [`../scripts/release_apps.sh`](../RELEASING.md).**
+It releases iOS and macOS together, sets both versions/builds, cuts one
+`apps-v<version>` release and renders the notes/feeds. This file documents the
+iOS leg and remains usable standalone.
+
 The iOS app is distributed from this public repository. A release produces a
 signed **Ad Hoc** IPA, attaches it to a GitHub release, and publishes an
 `itms-services` install page on GitHub Pages:
@@ -48,9 +53,11 @@ cd ios-app
 HSCC_DEVELOPMENT_TEAM=YOURTEAMID scripts/release_adhoc.sh 1.2.3
 ```
 
-The version is the marketing version and the build number of the IPA
-(`CFBundleShortVersionString` and `CFBundleVersion`), and it names the release
-tag `ios-v1.2.3`. Use digits and dots only.
+`CFBundleShortVersionString` is the version; `CFBundleVersion` is the monotonic
+build from `../apps/BUILD_NUMBER` (both are passed to the archive). The default
+release tag is `apps-v1.2.3`; set `HSCC_RELEASE_TAG=ios-v1.2.3` when running the
+platform script standalone to keep the old per-platform tag. Use digits and
+dots only.
 
 What the script does:
 
@@ -61,10 +68,10 @@ What the script does:
    `signingStyle=automatic`, the team, `compileBitcode=NO`, `thinning=none`.
    The exported IPA is renamed `HSCC-1.2.3.ipa` and its bundle id/version are
    verified before publishing.
-4. `publish_pages.sh` uploads the IPA to the `ios-v1.2.3` release with
+4. `publish_pages.sh` uploads the IPA to the `apps-v1.2.3` release with
    `--latest=false` (so it never shadows CLI releases), writes `manifest.plist`,
-   the install page, icons and a versioned manifest archive to `gh-pages`, and
-   enables Pages if needed.
+   the install page, `version.json`, release notes/history, icons and a versioned
+   manifest archive to `gh-pages`, and enables Pages if needed.
 
 ### Preview without signing
 
@@ -76,7 +83,8 @@ Every step is printed; nothing is generated, signed, uploaded or committed.
 
 ### Releasing under a different reverse-DNS prefix
 
-`HSCC_BUNDLE_PREFIX` defaults to `com.hscc`. Override it for the whole build;
+`HSCC_BUNDLE_PREFIX` defaults to `ro.parsec.hscc` — the identity 1.0.0 actually
+shipped (`group.com.hscc.ios` belongs to another team). Override it for the whole build;
 the four bundle ids and the App Group (`group.<prefix>.ios`) move together
 because project.yml derives them from that one setting:
 

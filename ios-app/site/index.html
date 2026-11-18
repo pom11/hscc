@@ -40,8 +40,11 @@
   .install:active { background: #e64a19; }
   .hint { margin: 14px 0 0; color: #9a9a9a; text-align: center; font-size: .95rem; }
   h2 { margin: 38px 0 12px; font-size: 1.15rem; color: #FF5722; }
-  ol { margin: 0; padding-left: 1.35em; }
+  ol, ul { margin: 0; padding-left: 1.35em; }
   li { margin: 0 0 12px; }
+  .notes h1, .notes h2, .notes h3 { margin: 0 0 10px; font-size: 1.05rem; color: #FF5722; }
+  .notes ul { margin-bottom: 12px; }
+  .history span { color: #777; font-size: .9em; }
   code { font: .93em ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; }
   a { color: #FF5722; }
   .card {
@@ -61,11 +64,26 @@
   <div class="brand">
     <img src="icons/icon-1024.png" width="112" height="112" alt="HSCC app icon">
     <h1>HSCC</h1>
-    <p class="version">Version __HSCC_VERSION__</p>
+    <p class="version">Version __HSCC_VERSION__ (build __HSCC_BUILD__)</p>
   </div>
 
   <a class="install" href="itms-services://?action=download-manifest&amp;url=https://pom11.github.io/hscc/ios/manifest.plist">Install HSCC</a>
   <p class="hint">Open this page in <strong>Safari on the iPhone</strong>. The button does nothing in other browsers.</p>
+
+  <h2>What's new</h2>
+  <div class="card notes">
+    __HSCC_NOTES__
+  </div>
+  <p><a href="__HSCC_NOTES_URL__">Permanent link to these notes</a></p>
+
+  <h2>Previous versions</h2>
+  <div class="card">
+    <ul class="history">
+      __HSCC_HISTORY__
+    </ul>
+    <p>Install an older build with its manifest:
+      <code>https://pom11.github.io/hscc/ios/manifests/&lt;version&gt;.plist</code>.</p>
+  </div>
 
   <h2>Before you install</h2>
   <ol start="0">

@@ -19,20 +19,32 @@
 #      App Group entitlement
 #   5. notarize with `xcrun notarytool submit --keychain-profile
 #      "${HSCC_NOTARY_PROFILE:-hscc-notary}" --wait`, then staple
-#   6. zip with `ditto -c -k --keepParent` as HSCC-Widgets-<version>.zip and
-#      print its sha256
-#   7. upload the zip to the GitHub release macos-widgets-v<version> on
-#      pom11/hscc (created when absent, ALWAYS --latest=false so it never
-#      shadows the CLI's releases)
-#   8. render the Homebrew cask; with --push-cask commit it to the tap via
+#   6. zip with `ditto -c -k --keepParent` as HSCC-Widgets-<version>.zip,
+#      print its sha256 and sign it with Sparkle's sign_update (EdDSA key in
+#      the login keychain)
+#   7. upload the zip to the GitHub release apps-v<version> on pom11/hscc
+#      (created when absent, ALWAYS --latest=false so it never shadows the
+#      CLI's releases; the iOS IPA lands on the same release)
+#   8. publish /macos/ on gh-pages: the install page and a Sparkle 2 appcast
+#      item with the notarized zip URL, length and EdDSA signature
+#   9. render the Homebrew cask; with --push-cask commit it to the tap via
 #      `gh api` (scripts/bump_cask.py)
 #
 # --dry-run runs steps 1-4 for real (generate, archive, export, verify) and then
-# PRINTS steps 5-8 without notarizing, stapling, zipping or publishing. Use it
+# PRINTS steps 5-9 without notarizing, stapling, zipping or publishing. Use it
 # to prove the signing setup before a real release. A missing Developer ID
 # identity or team stops the dry run with the exact setup step that is missing;
 # a missing notary profile only stops a REAL run (the dry run never reaches
 # notarization, and prints the one-time setup command instead).
+#
+# SPARKLE (one-time, on the release Mac):
+#   The Sparkle package is pinned in project.yml. Resolve it once, then create
+#   the EdDSA key; the private key stays in the login keychain and only the
+#   PUBLIC key is put in Info.plist:
+#     xcodebuild -project macos-app/HSCCMac.xcodeproj -scheme HSCCMac \
+#       -resolvePackageDependencies -derivedDataPath macos-app/build/DerivedData
+#     macos-app/build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_keys
+#   release.sh finds sign_update in that directory automatically.
 #
 # ONE-TIME NOTARY SETUP (values are never stored in this repo):
 #   xcrun notarytool store-credentials hscc-notary --apple-id <id> --team-id <team>
@@ -45,7 +57,12 @@
 #   HSCC_BUNDLE_PREFIX      reverse-DNS prefix (default: com.hscc); moves the
 #                           bundle ids and the App Group together
 #   HSCC_REPO               release repo (default: pom11/hscc)
-#   HSCC_RELEASE_TAG_PREFIX release tag prefix (default: macos-widgets-v)
+#   HSCC_RELEASE_TAG        exact release tag (default: apps-v<version>)
+#   HSCC_RELEASE_TAG_PREFIX tag prefix when HSCC_RELEASE_TAG is unset
+#   HSCC_BUILD_NUMBER       CFBundleVersion (default: apps/BUILD_NUMBER)
+#   HSCC_RELEASE_NOTES_FILE rendered notes (default: generic release text)
+#   HSCC_SPARKLE_PUBLIC_KEY public EdDSA key; passed through to the build
+#   HSCC_SPARKLE_SIGN_UPDATE override the sign_update path
 #
 # Exit codes: 0 success; 2 usage; any other non-zero is the failed
 # build/sign/notarize/upload step (xcodebuild and notarytool keep their own
@@ -90,14 +107,21 @@ if [ "$UPLOAD" = "0" ] && [ "$PUSH_CASK" = "1" ]; then
 fi
 
 REPO="${HSCC_REPO:-pom11/hscc}"
-TAG_PREFIX="${HSCC_RELEASE_TAG_PREFIX:-macos-widgets-v}"
-TAG="${TAG_PREFIX}${VERSION}"
+TAG_PREFIX="${HSCC_RELEASE_TAG_PREFIX:-apps-v}"
+TAG="${HSCC_RELEASE_TAG:-${TAG_PREFIX}${VERSION}}"
 ASSET="HSCC-Widgets-${VERSION}.zip"
 APP_NAME="HSCC Widgets"
 PREFIX="${HSCC_BUNDLE_PREFIX:-com.hscc}"
 APP_GROUP="group.${PREFIX}.ios"
 TEAM="${HSCC_DEVELOPMENT_TEAM:-}"
 PROFILE="${HSCC_NOTARY_PROFILE:-hscc-notary}"
+BUILD="${HSCC_BUILD_NUMBER:-$(cat "$REPO_ROOT/apps/BUILD_NUMBER" 2>/dev/null || echo 1)}"
+NOTES_FILE="${HSCC_RELEASE_NOTES_FILE:-}"
+SPARKLE_KEY="${HSCC_SPARKLE_PUBLIC_KEY:-}"
+if ! printf '%s' "$BUILD" | grep -Eq '^[0-9]+$'; then
+  echo "error: build number must be one integer (apps/BUILD_NUMBER): $BUILD" >&2
+  exit 2
+fi
 
 BUILD_DIR="$MACOS_DIR/build/release/$VERSION"
 ARCHIVE="$BUILD_DIR/HSCCMac.xcarchive"
@@ -132,6 +156,24 @@ need() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 not found. $2"
 }
 
+# Sparkle's release tools come from the pinned SwiftPM package, after a resolve.
+# The private EdDSA key is in the login keychain; only sign_update is needed
+# here (generate_keys is documented in the header and RELEASING.md).
+sparkle_tool() {
+  local tool="$1" base candidate
+  if [ "$tool" = "sign_update" ] && [ -n "${HSCC_SPARKLE_SIGN_UPDATE:-}" ]; then
+    printf '%s\n' "$HSCC_SPARKLE_SIGN_UPDATE"
+    return 0
+  fi
+  base="$MACOS_DIR/build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin"
+  if [ -x "$base/$tool" ]; then
+    printf '%s\n' "$base/$tool"
+    return 0
+  fi
+  candidate="$(find "$MACOS_DIR/build" -type f -path "*/Sparkle/bin/$tool" -perm -111 2>/dev/null | head -1)"
+  [ -n "$candidate" ] && printf '%s\n' "$candidate"
+}
+
 notary_setup_hint() {
   cat >&2 <<MSG
 
@@ -149,11 +191,11 @@ MSG
 # ── preflight ────────────────────────────────────────────────────────────────
 
 step "Preflight"
-note "version:       $VERSION"
+note "version:       $VERSION (build $BUILD)"
 note "release:       $REPO  tag $TAG  asset $ASSET"
 note "bundle prefix: $PREFIX   app group: $APP_GROUP"
 note "notary:        profile ${PROFILE}"
-[ "$DRY_RUN" = "1" ] && note "mode:          DRY RUN — steps 1-4 run for real, 5-8 are printed only"
+[ "$DRY_RUN" = "1" ] && note "mode:          DRY RUN — steps 1-4 run for real, 5-9 are printed only"
 [ "$UPLOAD" = "0" ] && note "upload:        disabled (--no-upload)"
 
 need xcodegen "Install it with: brew install xcodegen"
@@ -231,7 +273,38 @@ mkdir -p "$BUILD_DIR"
 
 step "Generate the Xcode project (xcodegen)"
 run env HSCC_DEVELOPMENT_TEAM="$TEAM" HSCC_BUNDLE_PREFIX="$PREFIX" \
+  HSCC_SPARKLE_PUBLIC_KEY="$SPARKLE_KEY" \
   xcodegen generate --spec "$MACOS_DIR/project.yml" --project "$MACOS_DIR"
+
+# ── 1b. Sparkle tools + the PUBLIC EdDSA key ─────────────────────────────────
+
+step "Resolve Sparkle and read the public EdDSA key"
+if [ -z "$(sparkle_tool generate_keys || true)" ]; then
+  resolve_cmd=(xcodebuild -project "$MACOS_DIR/HSCCMac.xcodeproj" \
+    -scheme HSCCMac -resolvePackageDependencies \
+    -derivedDataPath "$MACOS_DIR/build/DerivedData")
+  if [ "$DRY_RUN" = "1" ]; then
+    plan "${resolve_cmd[@]}"
+  else
+    run "${resolve_cmd[@]}"
+  fi
+fi
+generate_keys_bin="$(sparkle_tool generate_keys || true)"
+if [ -z "$SPARKLE_KEY" ] && [ -n "$generate_keys_bin" ] && [ "$DRY_RUN" = "0" ]; then
+  SPARKLE_KEY="$("$generate_keys_bin" -p 2>/dev/null || true)"
+fi
+if [ -z "$SPARKLE_KEY" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    note "[dry-run] no public key resolved yet (a real run requires one)"
+    plan "${generate_keys_bin:-<Sparkle>/bin/generate_keys}   # once, if the keychain has no key"
+  else
+    fail "no Sparkle public EdDSA key. Run this once and re-run:
+    ${generate_keys_bin:-<Sparkle>/bin/generate_keys}
+then either export HSCC_SPARKLE_PUBLIC_KEY or let this script read it with -p."
+  fi
+else
+  note "sparkle public key: ${SPARKLE_KEY:0:12}… (private key stays in the login keychain)"
+fi
 
 # ── 2. archive ───────────────────────────────────────────────────────────────
 
@@ -246,10 +319,11 @@ archive_cmd=(
   -allowProvisioningUpdates
   DEVELOPMENT_TEAM="$TEAM"
   HSCC_BUNDLE_PREFIX="$PREFIX"
+  HSCC_SPARKLE_PUBLIC_KEY="$SPARKLE_KEY"
   CODE_SIGN_STYLE=Automatic
   ENABLE_HARDENED_RUNTIME=YES
   MARKETING_VERSION="$VERSION"
-  CURRENT_PROJECT_VERSION="$VERSION"
+  CURRENT_PROJECT_VERSION="$BUILD"
   archive
 )
 run "${archive_cmd[@]}"
@@ -319,12 +393,15 @@ verify_entitlement "$APPEX" "the embedded widget extension"
 built_version="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
 [ "$built_version" = "$VERSION" ] \
   || fail "the exported app reports version '$built_version', expected $VERSION"
+built_build="$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
+[ "$built_build" = "$BUILD" ] \
+  || fail "the exported app reports build '$built_build', expected $BUILD"
 built_id="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
 [ "$built_id" = "${PREFIX}.mac" ] \
   || fail "the exported app has bundle id '$built_id', expected ${PREFIX}.mac"
 note "signed:  Developer ID Application + hardened runtime (app and extension)"
 note "group:   $APP_GROUP"
-note "version: $built_version ($built_id)"
+note "version: $built_version ($built_build) [$built_id]"
 
 # ── 5. notarize + staple ─────────────────────────────────────────────────────
 
@@ -357,11 +434,13 @@ fi
 
 # ── 6. zip + digest ──────────────────────────────────────────────────────────
 
-step "Package $ASSET"
+step "Package $ASSET and sign it for Sparkle"
 if [ "$DRY_RUN" = "1" ]; then
   plan ditto -c -k --keepParent "$APP" "$ZIP"
   plan shasum -a 256 "$ZIP"
-  note "a real run also verifies the zip's top-level $APP_NAME.app and prints the digest."
+  plan "$(sparkle_tool sign_update 2>/dev/null || echo '<Sparkle>/bin/sign_update')" "$ZIP"
+  note "a real run also verifies the zip's top-level $APP_NAME.app, prints the digest"
+  note "and parses sign_update's sparkle:edSignature for the appcast."
 else
   rm -f "$ZIP" "$ZIP.sha256"
   run ditto -c -k --keepParent "$APP" "$ZIP"
@@ -371,6 +450,21 @@ else
   printf '%s  %s\n' "$digest" "$ASSET" > "$ZIP.sha256"
   note "sha256: $digest"
   note "zip:    $ZIP"
+
+  sign_update="$(sparkle_tool sign_update || true)"
+  [ -n "$sign_update" ] || fail "Sparkle's sign_update was not found. Resolve the pinned package:
+    xcodebuild -project \"$MACOS_DIR/HSCCMac.xcodeproj\" -scheme HSCCMac \\
+      -resolvePackageDependencies -derivedDataPath \"$MACOS_DIR/build/DerivedData\"
+then re-run, or set HSCC_SPARKLE_SIGN_UPDATE=/path/to/sign_update."
+  sig_output="$("$sign_update" "$ZIP")"
+  signature="$(printf '%s\n' "$sig_output" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' | head -1)"
+  zip_length="$(wc -c < "$ZIP" | tr -d ' ')"
+  [ -n "$signature" ] || fail "sign_update produced no sparkle:edSignature (output: $sig_output).
+If the key is missing, create it once with:
+    $(dirname "$sign_update")/generate_keys
+the private key stays in your login keychain; put the printed PUBLIC key in
+HSCC_SPARKLE_PUBLIC_KEY so it lands in Info.plist."
+  note "sparkle: signed with EdDSA (signature ${signature:0:16}…)"
 fi
 
 # ── 7. upload ────────────────────────────────────────────────────────────────
@@ -388,14 +482,18 @@ if [ "$DRY_RUN" = "1" ] || [ "$UPLOAD" = "0" ]; then
   plan gh release edit "$TAG" --repo "$REPO" --latest=false
   note "  (when the release does not exist: gh release create $TAG <zip> --latest=false)"
 else
+  notes_args=(--notes "Menu bar app and desktop widgets for HSCC. The asset is a Developer ID-signed, notarized and stapled app bundle.")
+  if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
+    notes_args=(--notes-file "$NOTES_FILE")
+  fi
   if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
     run gh release upload "$TAG" "$ZIP" --repo "$REPO" --clobber
-    run gh release edit "$TAG" --repo "$REPO" --latest=false
+    run gh release edit "$TAG" --repo "$REPO" --latest=false "${notes_args[@]}"
   else
     run gh release create "$TAG" "$ZIP" \
       --repo "$REPO" \
-      --title "HSCC Widgets $VERSION" \
-      --notes "Menu bar app and desktop widgets for HSCC. The asset is a Developer ID-signed, notarized and stapled app bundle." \
+      --title "HSCC apps $VERSION" \
+      "${notes_args[@]}" \
       --latest=false
   fi
   run gh release view "$TAG" --repo "$REPO" --json assets \
@@ -404,19 +502,32 @@ else
   note "asset: https://github.com/$REPO/releases/download/$TAG/$ASSET"
 fi
 
-# ── 8. cask ──────────────────────────────────────────────────────────────────
+# ── 8. macos page + Sparkle appcast on gh-pages ─────────────────────────────
+
+step "Publish the /macos page and appcast"
+zip_url="https://github.com/$REPO/releases/download/$TAG/$ASSET"
+if [ "$DRY_RUN" = "1" ] || [ "$UPLOAD" = "0" ]; then
+  plan python3 "$REPO_ROOT/scripts/apps_release.py" publish-macos \
+    --pages-dir "<gh-pages>" --macos-dir "$MACOS_DIR" \
+    --version "$VERSION" --build "$BUILD" \
+    --zip-url "$zip_url" --length "<zip length>" --signature "<EdDSA signature>"
+else
+  run "$SCRIPT_DIR/publish_macos.sh" "$VERSION" "$BUILD" "$ZIP" "$signature" "$NOTES_FILE"
+fi
+
+# ── 9. cask ──────────────────────────────────────────────────────────────────
 
 step "Homebrew cask (pom11/homebrew-hscc)"
 if [ "$DRY_RUN" = "1" ] || [ "$UPLOAD" = "0" ]; then
-  plan python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP"
-  plan python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP" --push
+  plan env HSCC_RELEASE_TAG="$TAG" python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP"
+  plan env HSCC_RELEASE_TAG="$TAG" python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP" --push
 else
-  run python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP"
+  run env HSCC_RELEASE_TAG="$TAG" python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP"
   if [ "$PUSH_CASK" = "1" ]; then
-    run python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP" --push
+    run env HSCC_RELEASE_TAG="$TAG" python3 "$REPO_ROOT/scripts/bump_cask.py" --version "$VERSION" --zip "$ZIP" --push
   else
     note "tap not changed. Publish the cask with:"
-    note "  python3 scripts/bump_cask.py --version $VERSION --zip $ZIP --push"
+    note "  HSCC_RELEASE_TAG=$TAG python3 scripts/bump_cask.py --version $VERSION --zip $ZIP --push"
     note "  (or re-run this script with --push-cask to do it here)"
   fi
 fi

@@ -56,10 +56,11 @@ def test_render_carries_the_whole_cask_contract():
     assert 'version "1.2.3"' in text
     assert f'sha256 "{SHA}"' in text
     assert ('url "https://github.com/pom11/hscc/releases/download/'
-            'macos-widgets-v1.2.3/HSCC-Widgets-1.2.3.zip"') in text
+            'apps-v1.2.3/HSCC-Widgets-1.2.3.zip"') in text
     assert 'name "HSCC Widgets"' in text
     assert 'app "HSCC Widgets.app"' in text
     assert 'depends_on macos: :sonoma' in text
+    assert "auto_updates true" in text
 
 
 def test_render_zaps_the_app_group_container_and_preferences():
@@ -93,7 +94,15 @@ def test_asset_name_and_url_shape():
     assert bc.asset_name("1.2.3") == "HSCC-Widgets-1.2.3.zip"
     assert bc.asset_url("1.2.3") == (
         "https://github.com/pom11/hscc/releases/download/"
-        "macos-widgets-v1.2.3/HSCC-Widgets-1.2.3.zip")
+        "apps-v1.2.3/HSCC-Widgets-1.2.3.zip")
+    assert bc.asset_url("1.2.3", tag="macos-widgets-v1.2.3").endswith(
+        "/macos-widgets-v1.2.3/HSCC-Widgets-1.2.3.zip")
+
+
+def test_release_tag_env_override(monkeypatch):
+    monkeypatch.setenv("HSCC_RELEASE_TAG", "apps-v9.9.9")
+    assert bc.release_tag("1.2.3") == "apps-v9.9.9"
+    assert "/apps-v9.9.9/" in bc.asset_url("1.2.3")
 
 
 def test_unresolved_template_placeholder_fails_loudly():

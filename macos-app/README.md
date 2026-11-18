@@ -89,6 +89,11 @@ and refreshes the open menu bar dropdown.
 
 ## Release
 
+**The supported entry point is [`../scripts/release_apps.sh`](../RELEASING.md).**
+It fills both apps' versions/builds, cuts one `apps-v<version>` release for the
+IPA and the zip, renders notes and publishes the Sparkle appcast. The commands
+below are the macOS leg, usable standalone.
+
 Releases are Developer ID-signed, notarized, stapled and published as a GitHub
 release asset on `pom11/hscc`; the Homebrew cask points at that asset. One-time
 setup on the release Mac (the values are never committed):
@@ -98,6 +103,11 @@ export HSCC_DEVELOPMENT_TEAM=YOURTEAMID   # same team as the iOS app
 xcrun notarytool store-credentials hscc-notary --apple-id <id> --team-id <team>
 ```
 
+Also resolve the pinned Sparkle package once and create the EdDSA key (the
+private key stays in the login keychain; the public key is what release.sh puts
+in `SUPublicEDKey`). The exact commands and tool paths are in
+[`../RELEASING.md`](../RELEASING.md).
+
 Rehearse first — `--dry-run` really runs the project generation, archive,
 Developer ID export and signature/extension/App Group checks, then only prints
 the notarize/staple/zip/upload/cask steps:
@@ -106,8 +116,9 @@ the notarize/staple/zip/upload/cask steps:
 macos-app/scripts/release.sh --dry-run 0.1.0
 ```
 
-Real release (builds, notarizes, staples, zips, uploads `macos-widgets-v<version>`
-with `--latest=false`, and prints the cask):
+Real release (builds, notarizes, staples, zips, uploads `apps-v<version>` with
+`--latest=false`, updates the `/macos/` page and Sparkle appcast, and prints the
+cask):
 
 ```sh
 macos-app/scripts/release.sh 0.1.0
@@ -121,10 +132,13 @@ clone):
 python3 scripts/bump_cask.py --version 0.1.0 --zip macos-app/build/release/0.1.0/HSCC-Widgets-0.1.0.zip --push
 ```
 
-The release tag is deliberately `macos-widgets-v<version>`, not `v<version>`:
-the macOS app must never shadow the CLI's "latest" release. Re-running the
-script for a version already released replaces the asset (`--clobber`) and keeps
-the release out of "latest"; the cask push is idempotent.
+The release tag is deliberately `apps-v<version>` (a standalone platform run can
+use the legacy `macos-widgets-v<version>` with `HSCC_RELEASE_TAG`), not
+`v<version>`: the app must never shadow the CLI's "latest" release. Re-running
+the script for a version already released replaces the asset (`--clobber`) and
+keeps the release out of "latest"; the cask push is idempotent. The appcast is
+signed with Sparkle's `sign_update`; the EdDSA private key stays in the login
+keychain and only the public key is in Info.plist (`SUPublicEDKey`).
 
 ## Gates
 

@@ -24,6 +24,18 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
+# Sparkle 2 drives the in-app update check (next card consumes the appcast the
+# release path publishes at /macos/appcast.xml). Pinned exactly: an update
+# framework is not a place for a floating minor version. The package also
+# supplies the release tools (generate_keys / sign_update) after:
+#   xcodebuild -project HSCCMac.xcodeproj -scheme HSCCMac \
+#     -resolvePackageDependencies -derivedDataPath build/DerivedData
+# They land in build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin/.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.6.4
+
 settings:
   base:
     # Same signing mechanism as ios-app/project.yml: export the team once and
@@ -38,6 +50,9 @@ settings:
     # App Group together. Defaults keep the shipped com.hscc / group.com.hscc.ios.
     HSCC_BUNDLE_PREFIX: com.hscc
     HSCC_APP_GROUP: group.$(HSCC_BUNDLE_PREFIX).ios
+    # Filled by the release path from `generate_keys -p`; the private key never
+    # leaves the operator's login keychain. Empty in a dev build is expected.
+    HSCC_SPARKLE_PUBLIC_KEY: ""
 
 schemes:
   HSCCMac:
@@ -120,6 +135,9 @@ targets:
       # them from the embedded extension.
       - target: HSCCMacWidgets
         embed: true
+      # Sparkle 2 is linked into the app (the widget extension never updates
+      # itself). The pinned package also provides sign_update at release time.
+      - package: Sparkle
       # Settings writes call WidgetCenter, and WidgetSettingsStore reloads
       # timelines from the app process.
       - sdk: WidgetKit.framework
@@ -133,6 +151,14 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         HSCCAppGroup: $(HSCC_APP_GROUP)
+        # Sparkle 2: the feed the release path publishes and the PUBLIC EdDSA
+        # key printed by `generate_keys`. The private key stays in the login
+        # keychain; release.sh signs the zip with it and puts the signature in
+        # the appcast. An empty key disables updates rather than trusting an
+        # unverifiable feed.
+        SUFeedURL: https://pom11.github.io/hscc/macos/appcast.xml
+        SUPublicEDKey: $(HSCC_SPARKLE_PUBLIC_KEY)
+        SUEnableAutomaticChecks: true
         # Menu-bar-only: no Dock icon, no app switcher entry.
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"

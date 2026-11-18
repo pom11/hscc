@@ -16,7 +16,7 @@
 #   1. xcodegen generate (Release project; prefix + App Group from env)
 #   2. xcodebuild archive for a generic iOS device, automatic signing
 #   3. xcodebuild -exportArchive with method=release-testing (Ad Hoc)
-#   4. scripts/publish_pages.sh: IPA → GitHub release ios-v<version> (not
+#   4. scripts/publish_pages.sh: IPA → GitHub release apps-v<version> (not
 #      "latest"), manifest.plist + index.html + icons → gh-pages branch
 #
 # Usage:
@@ -25,8 +25,11 @@
 #       ios-app/scripts/release_adhoc.sh 1.2.3
 #   ios-app/scripts/release_adhoc.sh --dry-run 1.2.3
 #
-# HSCC_BUNDLE_PREFIX defaults to com.hscc (the shipped identity). The App Group
-# is always group.<prefix>.ios, derived once in project.yml.
+# HSCC_BUNDLE_PREFIX defaults to ro.parsec.hscc — the identity the shipped 1.0.0
+# actually uses (group.com.hscc.ios belongs to another team). The App Group is
+# always group.<prefix>.ios, derived once in project.yml. A release must never
+# silently change the app identity, so the entry point
+# scripts/release_apps.sh fixes this prefix too.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,11 +55,17 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$'; then
   echo "error: version must look like 1.2.3 (digits and dots, no leading 'v'): $VERSION" >&2
   exit 2
 fi
+if ! printf '%s' "$BUILD" | grep -Eq '^[0-9]+$'; then
+  echo "error: build number must be one integer (apps/BUILD_NUMBER): $BUILD" >&2
+  exit 2
+fi
 
-PREFIX="${HSCC_BUNDLE_PREFIX:-com.hscc}"
+PREFIX="${HSCC_BUNDLE_PREFIX:-ro.parsec.hscc}"
 BUNDLE_ID="${HSCC_BUNDLE_ID:-${PREFIX}.ios}"
 APP_GROUP="group.${PREFIX}.ios"
 TEAM="${HSCC_DEVELOPMENT_TEAM:-}"
+BUILD="${HSCC_BUILD_NUMBER:-$(cat "$REPO_ROOT/apps/BUILD_NUMBER" 2>/dev/null || echo 1)}"
+TAG="${HSCC_RELEASE_TAG:-apps-v${VERSION}}"
 
 KEY_ID="${ASC_KEY_ID:-}"
 ISSUER_ID="${ASC_ISSUER_ID:-}"
@@ -113,9 +122,10 @@ need() {
 }
 
 step "Preflight"
-note "version:  $VERSION"
+note "version:  $VERSION (build $BUILD)"
 note "bundle:   $BUNDLE_ID"
 note "app group: $APP_GROUP"
+note "release:  $TAG"
 need xcodegen "Install it with: brew install xcodegen"
 need xcodebuild "Install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app"
 need xcrun "Install Xcode from the App Store."
@@ -222,7 +232,7 @@ archive_cmd=(
   HSCC_BUNDLE_PREFIX="$PREFIX"
   CODE_SIGN_STYLE=Automatic
   MARKETING_VERSION="$VERSION"
-  CURRENT_PROJECT_VERSION="$VERSION"
+  CURRENT_PROJECT_VERSION="$BUILD"
 )
 if [ "$KEY_COUNT" -eq 3 ]; then
   archive_cmd+=(
@@ -284,11 +294,13 @@ if [ "$DRY_RUN" = "0" ]; then
 
   # The manifest's bundle-version must equal the IPA's CFBundleVersion, and the
   # bundle id must match what the page says. Verify the artifact, not the intent.
+  got_marketing="$(unzip -p "$IPA" 'Payload/*.app/Info.plist' | plutil -extract CFBundleShortVersionString raw -o - - 2>/dev/null || true)"
   got_version="$(unzip -p "$IPA" 'Payload/*.app/Info.plist' | plutil -extract CFBundleVersion raw -o - - 2>/dev/null || true)"
   got_bundle="$(unzip -p "$IPA" 'Payload/*.app/Info.plist' | plutil -extract CFBundleIdentifier raw -o - - 2>/dev/null || true)"
-  [ "$got_version" = "$VERSION" ] || { echo "error: IPA CFBundleVersion is '$got_version', expected $VERSION" >&2; exit 1; }
+  [ "$got_marketing" = "$VERSION" ] || { echo "error: IPA CFBundleShortVersionString is '$got_marketing', expected $VERSION" >&2; exit 1; }
+  [ "$got_version" = "$BUILD" ] || { echo "error: IPA CFBundleVersion is '$got_version', expected $BUILD" >&2; exit 1; }
   [ "$got_bundle" = "$BUNDLE_ID" ] || { echo "error: IPA bundle id is '$got_bundle', expected $BUNDLE_ID" >&2; exit 1; }
-  note "verified IPA: $got_bundle $got_version"
+  note "verified IPA: $got_bundle $got_marketing ($got_version)"
 else
   note "[dry-run] would copy the exported .ipa to $IPA"
 fi
@@ -296,12 +308,14 @@ fi
 step "Publish the IPA and the GitHub Pages install site"
 if [ "$DRY_RUN" = "1" ]; then
   note "[dry-run] would run:"
-  note "  HSCC_BUNDLE_PREFIX=$PREFIX $SCRIPT_DIR/publish_pages.sh $VERSION $IPA"
-  note "  release tag: ios-v$VERSION (never marked latest)"
+  note "  HSCC_BUNDLE_PREFIX=$PREFIX HSCC_BUILD_NUMBER=$BUILD \\"
+  note "    $SCRIPT_DIR/publish_pages.sh $VERSION $IPA"
+  note "  release tag: $TAG (never marked latest)"
   note "  install page: https://pom11.github.io/hscc/ios/"
   note "  manifest:     https://pom11.github.io/hscc/ios/manifest.plist"
 else
-  HSCC_BUNDLE_PREFIX="$PREFIX" "$SCRIPT_DIR/publish_pages.sh" "$VERSION" "$IPA"
+  HSCC_BUNDLE_PREFIX="$PREFIX" HSCC_BUILD_NUMBER="$BUILD" \
+    "$SCRIPT_DIR/publish_pages.sh" "$VERSION" "$IPA"
 fi
 
 echo ""

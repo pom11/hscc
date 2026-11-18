@@ -15,10 +15,11 @@ into the tap is the step that goes stale, and a wrong digest makes every
 
 WHAT IT COMPUTES
 ----------------
-* ``version``  = the release version, without a leading ``v`` (``macos-widgets-v``
-  is the *git tag* prefix, not part of the cask version).
+* ``version``  = the release version, without a leading ``v`` (``apps-v`` is the
+  *git tag* prefix, not part of the cask version).
 * ``url``      = ``https://github.com/pom11/hscc/releases/download/
-  macos-widgets-v<version>/HSCC-Widgets-<version>.zip``.
+  apps-v<version>/HSCC-Widgets-<version>.zip`` (the release path can point at a
+  legacy per-platform tag with ``HSCC_RELEASE_TAG``).
 * ``sha256``   = the hash of the LOCAL zip that was uploaded to that asset. There
   is deliberately no default hand-typed digest: pass ``--zip`` (preferred) or
   ``--sha256`` for an offline render, and the same bytes are what Homebrew
@@ -51,9 +52,10 @@ EXIT CODES (same convention as ``scripts/address_guard.py``)
     2  usage error, or the step COULD NOT RUN (bad version, missing zip, no gh,
        no ruby, no guard) — never a silent pass
 
-Env overrides: ``HSCC_RELEASE_REPO`` (default ``pom11/hscc``), ``HSCC_TAP_REPO``
-(default ``pom11/homebrew-hscc``), ``HSCC_TAP_BRANCH`` (default ``main``),
-``HSCC_RUBY_BIN``, ``HSCC_ADDRESS_GUARD_PY``.
+Env overrides: ``HSCC_RELEASE_REPO`` (default ``pom11/hscc``),
+``HSCC_RELEASE_TAG`` (exact release tag; default ``apps-v<version>``),
+``HSCC_TAP_REPO`` (default ``pom11/homebrew-hscc``), ``HSCC_TAP_BRANCH``
+(default ``main``), ``HSCC_RUBY_BIN``, ``HSCC_ADDRESS_GUARD_PY``.
 
 Stdlib only. The only writes are stdout, a temp file for ``ruby -c`` and (with
 ``--push``) the tap's cask blob.
@@ -81,8 +83,14 @@ TAP_REPO = os.environ.get("HSCC_TAP_REPO", "pom11/homebrew-hscc")
 TAP_BRANCH = os.environ.get("HSCC_TAP_BRANCH", "main")
 CASK_REL = "Casks/hscc-widgets.rb"
 TEMPLATE_REL = Path("templates") / "hscc-widgets.cask.rb.tmpl"
-TAG_PREFIX = "macos-widgets-v"
+TAG_PREFIX = "apps-v"
 ASSET_TEMPLATE = "HSCC-Widgets-{version}.zip"
+
+
+def release_tag(version: str, tag: str | None = None) -> str:
+    """The release that holds the zip: one apps-v tag, or an explicit override."""
+    return tag or (os.environ.get("HSCC_RELEASE_TAG")
+                   or f"{TAG_PREFIX}{normalize_version(version)}")
 
 #: ``v`` is tolerated on input and stripped; a pre-release suffix is not a cask
 #: version Homebrew can compare, so it is rejected rather than published.
@@ -119,10 +127,10 @@ def asset_name(version: str) -> str:
     return ASSET_TEMPLATE.format(version=version)
 
 
-def asset_url(version: str, repo: str | None = None) -> str:
+def asset_url(version: str, repo: str | None = None, tag: str | None = None) -> str:
     repo = repo or RELEASE_REPO
-    return (f"https://github.com/{repo}/releases/download/{TAG_PREFIX}{version}/"
-            f"{asset_name(version)}")
+    return (f"https://github.com/{repo}/releases/download/"
+            f"{release_tag(version, tag)}/{asset_name(version)}")
 
 
 def sha256_file(path: Path) -> str:
@@ -150,7 +158,8 @@ def load_template() -> str:
 
 
 def render_cask(version: str, sha256: str, *, url: str | None = None,
-                template_text: str | None = None) -> str:
+                template_text: str | None = None,
+                tag: str | None = None) -> str:
     """Return the cask text. Pure: no tap, no network, no ruby.
 
     The digest is validated before interpolation so a malformed value can never
@@ -164,7 +173,7 @@ def render_cask(version: str, sha256: str, *, url: str | None = None,
     replacements = {
         "__HSCC_VERSION__": version,
         "__HSCC_SHA256__": sha256,
-        "__HSCC_URL__": url or asset_url(version),
+        "__HSCC_URL__": url or asset_url(version, tag=tag),
     }
     for token, value in replacements.items():
         text = text.replace(token, value)
@@ -346,8 +355,8 @@ def main(argv=None) -> int:
         description="Render the HSCC Widgets cask; optionally publish it to the "
                     "Homebrew tap with `gh api`.")
     ap.add_argument("--version", required=True,
-                    help="release version, e.g. 0.1.0 (the git tag is "
-                         f"{TAG_PREFIX}<version>)")
+                    help="release version, e.g. 1.1.0 (the git tag is "
+                         f"{TAG_PREFIX}<version> unless HSCC_RELEASE_TAG is set)")
     source = ap.add_mutually_exclusive_group(required=True)
     source.add_argument("--zip", default=None,
                         help="the HSCC-Widgets-<version>.zip that was uploaded; "

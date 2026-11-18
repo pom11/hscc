@@ -208,12 +208,23 @@ operator must create. It ships inert (`.disabled` extension, plus a
 rename the file while the release card still runs the script locally, or every
 release grows a red X.
 
+## App releases (`release_apps.sh` + `apps_release.py`)
+
+`scripts/release_apps.sh <version>` is the one command for both Apple apps: it
+gates the version against `apps-v*`, bumps both `project.yml` files plus
+`apps/BUILD_NUMBER`, commits/tags `apps-v<version>`, then runs the iOS and macOS
+pipelines so both assets land on one non-latest release. It also renders notes
+from the app-touching `changelog.d/` fragments and drives the Pages feeds
+(`/ios/version.json`, `/macos/appcast.xml`, the two install pages). See
+`../RELEASING.md` for prerequisites and rollback.
+
 ## Tap cask (`bump_cask.py`) — the macOS Widgets install step
 
 `pom11/homebrew-hscc` also carries `Casks/hscc-widgets.rb`, which installs the
-notarized `HSCC Widgets.app` from a `macos-widgets-v<version>` release asset.
-`macos-app/scripts/release.sh` builds and uploads that asset; the cask pins its
-url and sha256:
+notarized `HSCC Widgets.app` from the `apps-v<version>` release asset (a
+standalone macOS run can use the legacy `macos-widgets-v<version>` tag via
+`HSCC_RELEASE_TAG`). `scripts/release_apps.sh` / `macos-app/scripts/release.sh`
+build and upload that asset; the cask pins its url and sha256:
 
 ```bash
 python3 scripts/bump_cask.py --version 0.1.0 --zip dist/HSCC-Widgets-0.1.0.zip

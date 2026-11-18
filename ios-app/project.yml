@@ -12,10 +12,12 @@
 #   * HSCCLiveActivityMonitor  — the HSCC Monitor Live Activity (ActivityKit).
 # All four targets share one App Group so the widget and Live Activities see the
 # operator's connection settings and the cluster state. The group is DERIVED
-# from the bundle-id prefix (`HSCC_BUNDLE_PREFIX`, default `com.hscc`) in one
-# place below; every target, entitlement and Info.plist reads that derivation
-# instead of naming a literal. A team releasing under its own reverse-DNS
-# prefix overrides the build setting (release_adhoc.sh does this from the env):
+# from the bundle-id prefix (`HSCC_BUNDLE_PREFIX`, default `com.hscc` for DEV
+# builds) in one place below; every target, entitlement and Info.plist reads
+# that derivation instead of naming a literal. The RELEASE path fixes the
+# prefix to the identity 1.0.0 actually shipped — `ro.parsec.hscc`, because
+# `group.com.hscc.ios` belongs to another team — and only an explicit override
+# changes it:
 #
 #     HSCC_BUNDLE_PREFIX=dev.example ios-app/scripts/release_adhoc.sh 1.0.0
 #
