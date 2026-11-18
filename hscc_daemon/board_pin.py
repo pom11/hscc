@@ -254,6 +254,33 @@ def open_board(kanban_db, board, *, multi=True, mode="read", env=None,
         yield conn
 
 
+def open_board_ro(kanban_db, board, *, multi=True, env=None, warned=None):
+    """A read-only connection to exactly ``board``, without ``hermes_state``.
+
+    :func:`open_board` goes through ``kanban_db.connect_closing()``, the
+    write-capable door whose writability preflight imports ``hermes_state``.
+    The brew libexec venv does not ship that module, so a listing run as
+    ``/opt/homebrew/bin/hscc kanban blocked`` / ``kanban stale`` failed every
+    board with ``No module named 'hermes_state'``. Listings only SELECT, so
+    they open the file hermes resolves for ``board`` with ``mode=ro`` (the
+    same path :func:`resolve_board_db_path` guards). A lib that cannot answer
+    the path (an injected fake, an older Hermes) falls back to
+    :func:`open_board` unchanged.
+    """
+    if multi and board is not None:
+        try:
+            path = resolve_board_db_path(kanban_db, board, env=env,
+                                         warned=warned)
+        except Exception:  # noqa: BLE001 — resolver failure = use the old door
+            path = None
+        if path:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+            conn.row_factory = sqlite3.Row
+            return contextlib.closing(conn)
+    return open_board(kanban_db, board, multi=multi, env=env, warned=warned)
+
+
 def resolve_board_db_path(kanban_db, board, *, mode="read", env=None,
                           warned=None):
     """Path view of the same guard: the DB file hermes resolves for ``board``,

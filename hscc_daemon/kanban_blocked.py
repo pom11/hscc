@@ -209,18 +209,22 @@ def list_blocked_tasks(kanban_db=None, registered_only: bool = False):
         try:
             # t_b014c2b8: read of the whole fleet — a worker shell's pin would
             # otherwise re-read one board once per slug.
-            with board_pin.open_board(kanban_db, board, multi=multi) as conn:
+            # Read-only door: the brew venv has no hermes_state for
+            # connect_closing()'s writability preflight, and this only SELECTs.
+            # Comments are read on the same connection, before it closes.
+            with board_pin.open_board_ro(kanban_db, board, multi=multi) as conn:
                 rows = conn.execute(
                     "SELECT id, assignee, created_at, block_kind, status, "
                     "last_failure_error, consecutive_failures, title "
                     "FROM tasks WHERE status = 'blocked'"
                 ).fetchall()
+                found = [(row, _block_comments(conn, row["id"])) for row in rows]
         except Exception as e:
             label = board if board else "default"
             errors.append(f"board {label!r} unreadable: {e}")
             continue
 
-        for row in rows:
+        for row, comments in found:
             tid = row["id"]
             tasks.append({
                 "board": board if board else "default",
@@ -232,7 +236,7 @@ def list_blocked_tasks(kanban_db=None, registered_only: bool = False):
                                if "block_kind" in row.keys() else None),
                 "why": _block_summary(row) or "(no block reason recorded)",
                 "title": (row["title"] if "title" in row.keys() else "") or "",
-                "comments": _block_comments(conn, tid),
+                "comments": comments,
             })
     # Oldest first (board hygiene's convention, matching the stale command):
     # the card that has sat blocked longest surfaces first.
