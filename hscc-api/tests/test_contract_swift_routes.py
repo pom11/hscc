@@ -26,6 +26,7 @@ import ast
 import http.client
 import inspect
 import json
+import os
 import re
 
 import pytest
@@ -501,6 +502,147 @@ def test_matrices_name_routes_the_client_still_calls():
         "or restore the deleted client method if the app still needs the "
         "call:\n"
         + "\n".join(f"  {label}: {m} {p}" for label, m, p in stale)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The audit doc must MIRROR the matrices
+# --------------------------------------------------------------------------- #
+#
+# The two matrices above are the source of truth; the human-facing deliverable
+# they point readers at is `hscc-api/docs/audit-client-server-params.md`. t_80e185d2
+# found the pair had silently diverged: t_f09436f1 (PR #351) pruned four retired
+# rows out of the matrices while the doc still presented them as live contract.
+# The stale doc then mis-led that card's own brief into blaming the wrong commit
+# (PR #303) for the red. PR #355 re-pointed the doc — that repaired the symptom.
+# THIS is what stops the recurrence.
+#
+# Same shape as test_matrices_name_routes_the_client_still_calls, and deliberately
+# so: a GATE, not a filter. The doc's two LIVE tables must equal the matrices —
+# every matrix row present with the same required set, and no doc row naming a
+# route absent from a matrix. Neither half is optional; the half that went stale
+# was "doc has rows the matrix no longer has", and a one-directional check would
+# have passed it.
+#
+# Retired rows are NOT a failure: they belong in the doc's "Rows retired with
+# their client call site" section, which the parser never reads because it stops
+# at the next heading. That section is intentionally a superset — it documents
+# server requirements whose client call site is gone.
+
+AUDIT_DOC_PATH = "hscc-api/docs/audit-client-server-params.md"
+
+# (doc section heading, the matrix that section must mirror). Prefix match: the
+# doc's headings carry a " (GET routes)" / " (POST routes)" qualifier.
+_LIVE_DOC_TABLES = (
+    ("## Required-query-param matrix", REQUIRED_QUERY_PARAMS),
+    ("## Required-body-field matrix", REQUIRED_BODY_PARAMS),
+)
+
+# The doc writes `/v1/sessions/{id}/retire`, the matrix writes
+# `/v1/sessions/{param}/retire`. Same route, different placeholder spelling —
+# the route KEY must not hinge on which word the author reached for.
+_PLACEHOLDER_SEG = re.compile(r"\{[^{}]*\}")
+
+
+def _canonical_route(method, path):
+    """Normalize one route key: upper-case verb, `{...}` segments unified."""
+    return (method.upper(), _PLACEHOLDER_SEG.sub("{param}", path))
+
+
+def _doc_table_rows(doc_lines, heading_prefix):
+    """Parse the markdown table under `heading_prefix` into
+    ``{canonical_route: frozenset(required_fields)}``.
+
+    Pipe-split, not prose-matched: cell 0 is ``METHOD /path``, cell 1 is the
+    comma-separated required fields. The header and ``|---|`` separator rows are
+    skipped, and the scan STOPS at the next heading — that is what keeps the
+    retired-rows table (an intentional superset) out of the comparison.
+
+    A row whose first cell is not a single ``METHOD /path`` pair is kept under a
+    sentinel key so it surfaces as a doc-only row rather than being skipped: the
+    doc is evidence, and a row this parser cannot read is a row the gate cannot
+    clear.
+    """
+    rows = {}
+    in_section = False
+    for raw in doc_lines:
+        line = raw.strip()
+        if not in_section:
+            in_section = line.startswith(heading_prefix)
+            continue
+        if line.startswith("#"):
+            break
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= set("-: "):
+            continue
+        if cells[0].lower() == "client route":
+            continue
+        parts = cells[0].split()
+        if len(parts) != 2:
+            route = ("?", cells[0])
+        else:
+            route = _canonical_route(parts[0], parts[1])
+        rows[route] = frozenset(
+            f.strip() for f in cells[1].split(",") if f.strip())
+    return rows
+
+
+def test_audit_doc_live_tables_mirror_the_matrices():
+    """The doc-mirror gate: each of the doc's two LIVE tables must state exactly
+    the rows of the matrix it mirrors — same routes, same required sets.
+
+    Fails when the doc falls behind the matrices (the t_80e185d2 class: a pruned
+    matrix row still advertised as live contract), when the doc runs ahead of
+    them (a row naming a route no matrix has, i.e. a requirement the gates do not
+    actually enforce), or when a shared row disagrees on its field set.
+
+    Fixing a red here means editing the doc's live table to match the matrix —
+    the matrices are the source of truth — or moving a retired row down into the
+    "Rows retired with their client call site" section, which this gate skips.
+    """
+    doc_path = f"{_REPO_ROOT}/{AUDIT_DOC_PATH}"
+    assert os.path.exists(doc_path), (
+        f"Audit doc {AUDIT_DOC_PATH} is gone; the matrices name it as the "
+        f"deliverable readers are sent to."
+    )
+    doc_lines = open(doc_path).read().split("\n")
+
+    missing, extra, differ = [], [], []
+    for heading, matrix in _LIVE_DOC_TABLES:
+        doc = _doc_table_rows(doc_lines, heading)
+        want = {_canonical_route(m, p): frozenset(v)
+                for (m, p), v in matrix.items()}
+        assert doc or not want, (
+            f"{AUDIT_DOC_PATH}: no table rows parsed under {heading!r}, but "
+            f"{len(want)} matrix row(s) should be mirrored there. Either the "
+            f"heading was renamed or the table was deleted — the gate cannot "
+            f"read what is not there, so it fails rather than passing vacuously."
+        )
+        missing += [(heading, r) for r in sorted(set(want) - set(doc))]
+        extra += [(heading, r, sorted(doc[r]))
+                  for r in sorted(set(doc) - set(want))]
+        differ += [(heading, r, sorted(want[r]), sorted(doc[r]))
+                   for r in sorted(set(want) & set(doc))
+                   if want[r] != doc[r]]
+
+    report = (
+        [f"  MISSING from the doc (matrix row not in {h!r}): {m} {p}"
+         for h, (m, p) in missing]
+        + [f"  EXTRA in the doc (row in {h!r} with no matrix row): "
+           f"{m} {p} -> {fields}. If the client call site is retired, move "
+           f"this row to the doc's 'Rows retired with their client call "
+           f"site' section; otherwise add the matrix row."
+           for h, (m, p), fields in extra]
+        + [f"  DIFFERS ({m} {p} in {h!r}): matrix requires {want_f}, "
+           f"doc states {doc_f}"
+           for h, (m, p), want_f, doc_f in differ]
+    )
+    assert not report, (
+        f"{AUDIT_DOC_PATH} no longer mirrors the contract matrices. The "
+        f"matrices in this file are the source of truth; the doc mirrors them.\n"
+        + "\n".join(report)
     )
 
 
