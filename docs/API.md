@@ -18,13 +18,22 @@ fleet health and drive actions programmatically.
 ```bash
 hscc api start                 # bind loopback (127.0.0.1), port 8787
 hscc api start --tailscale     # bind to this host's tailnet IP
+hscc api start --tailscale --bind 192.0.2.10
+                               # LAN + tailnet at once (first --bind = primary)
 hscc api stop
-hscc api status                # running/stopped + the bound host:port
+hscc api status                # running/stopped + every bound host:port
 ```
 
 `start` forks the server into the background (own PID/log at
-`~/.hscc/api.pid` / `~/.hscc/api.log`). `status` reports the resolved bind
-host:port so a client knows where to point.
+`~/.hscc/api.pid` / `~/.hscc/api.log`). It serves the same port, token and
+handlers on every requested address. `--bind <ip>` is repeatable and combines
+with `--tailscale`; each explicit address must be an interface address on this
+host. If any non-tailnet listener fails to bind, the whole start fails with no
+half-up state. If the tailnet address is requested and Tailscale is down, the
+other listeners stay up and `status` reports the tailnet one as unavailable.
+`status` lists every bound host:port from the runtime snapshot
+(`~/.hscc/api-state.json`, `host` = primary, `hosts` = all) and the QR payload
+carries the same `hosts` array so clients can fail over.
 
 ### Config
 
@@ -33,17 +42,18 @@ Precedence (lowest → highest): defaults → `~/.hscc/api.json` → flags.
 ```jsonc
 // ~/.hscc/api.json
 {
-  "bind": "loopback",   // "loopback" | "tailscale" | "<explicit ip>"
+  "bind": "loopback",   // "loopback" | "tailscale" | "<explicit ip>" | [ ... ]
   "port": 8787
 }
 ```
 
 - `bind: "loopback"` (default) → `127.0.0.1`.
 - `bind: "tailscale"` → the host's tailnet IPv4; a hard error if none is found
-  (never widens the bind).
-- An explicit IP string is used as-is, **unless** it is `0.0.0.0` / `::` —
-  those are **always refused**.
-- `port`: default **8787**.
+  and it is the only address (never widens the bind).
+- An explicit IP string is used only when it is an interface address on this
+  host, **unless** it is `0.0.0.0` / `::` — those are **always refused**.
+- A list binds several addresses (first = primary).
+- `port`: default **8787**, shared by every listener.
 
 ---
 

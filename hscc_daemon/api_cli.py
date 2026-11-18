@@ -59,20 +59,23 @@ SUB_HELP = ("--help", "-h")
 # them.
 SUBCOMMAND_HELP = {
     "start": """\
-Usage: hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]
+Usage: hscc api start [--tailscale] [--bind <ip>]... [--port <n>] [--no-qr]
 
 Start the HSCC API server in the background (double-fork, PID at
 ~/.hscc/api.pid, log at ~/.hscc/api.log). Refuses to start a second
 instance — prints the running PID instead.
 
-  --tailscale     Bind the tailnet address instead of loopback
-  --bind <ip>     Bind this specific address (0.0.0.0 is always refused)
+  --tailscale     Also bind the tailnet address (combinable with --bind)
+  --bind <ip>     Bind this address; repeat for several (0.0.0.0 is refused)
   --port <n>      Override the configured port (default 8787)
   --no-qr         Suppress the scannable connection QR
 
-Bind defaults to loopback (127.0.0.1). The QR encodes the live auth token
-from ~/.hscc/api-token — treat it like a password. '--theme <name>' selects
-the human palette.""",
+Bind defaults to loopback (127.0.0.1). Each --bind address must be an
+interface address on this host. The first --bind is the PRIMARY; --tailscale
+is added after it. If Tailscale is down, the other addresses still serve and
+status says the tailnet one is unavailable. The QR encodes every address
+(primary first) plus the live auth token from ~/.hscc/api-token — treat it
+like a password. '--theme <name>' selects the human palette.""",
     "stop": """\
 Usage: hscc api stop
 
@@ -98,14 +101,15 @@ and screen-shares); '--no-qr' suppresses the QR.
 
 '--theme <name>' selects the human palette.""",
     "install-service": """\
-Usage: hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]
+Usage: hscc api install-service [--tailscale] [--bind <ip>]... [--port <n>]
 
 OPT-IN boot-resilience (macOS only): write the launchd unit
 ~/Library/LaunchAgents/com.hscc.api.plist (RunAtLoad + KeepAlive) so a
 reboot no longer takes the API offline. The bind flags are carried into
-the unit exactly as 'start' honours them; no flags keeps the loopback
-unit. '--no-qr' is accepted and ignored (a launchd unit has no terminal).
-Deliberately does NOT load the unit — activating stays your call:
+the unit exactly as 'start' honours them — every --bind, plus --tailscale;
+no flags keeps the loopback unit. '--no-qr' is accepted and ignored (a
+launchd unit has no terminal). Deliberately does NOT load the unit —
+activating stays your call:
 
   plutil -lint ~/Library/LaunchAgents/com.hscc.api.plist
   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.hscc.api.plist
@@ -152,11 +156,11 @@ Usage: hscc api <subcommand> [args]
   hscc api --help
       This help
 
-Bind defaults to loopback (127.0.0.1). '--tailscale' or '--bind <ip>' opt in
-to exposing it on the tailnet / a specific IP. 0.0.0.0 is always refused.
-The auth token lives at ~/.hscc/api-token and is ENCODED into the QR, so the
-QR must be treated like a password — do not show it on a stream or
-screen-share.
+Bind defaults to loopback (127.0.0.1). '--bind <ip>' is repeatable and may
+be combined with '--tailscale'; each address must be local to this host.
+The first --bind is the primary; 0.0.0.0 / :: are always refused. The QR
+carries every address plus the auth token from ~/.hscc/api-token, so treat
+it like a password — do not show it on a stream or screen-share.
 '--no-qr' suppresses the scannable connection QR shown by start/status."""
 
 
@@ -262,35 +266,53 @@ def _is_loopback(host) -> bool:
     return host.startswith("127.") or host == "[::1]"
 
 
-def _build_qr_payload(host, port, token) -> str:
+def _normalise_hosts(host, hosts=None) -> list[str]:
+    """Primary first, then the rest, deduped; always includes ``host``."""
+    ordered: list[str] = []
+    for candidate in [host, *(hosts or [])]:
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+    return ordered
+
+
+def _build_qr_payload(host, port, token, hosts=None) -> str:
     """Connection-settings JSON for the QR.
 
-    Single line, NO trailing newline, and key order fixed (v, host, port,
-    token) — the iOS scanner depends on this byte-for-byte. No spaces after
-    the colons. ``token`` is the real live credential read from the token
-    file; the caller prints it ONLY to stdout and never to a log/error.
+    Single line, NO trailing newline. With no ``hosts`` argument this is the
+    LEGACY byte-exact payload (v, host, port, token) old apps already parse.
+    With ``hosts`` the same prefix is kept and a ``hosts`` array is appended
+    (primary first), so old scanners read ``host`` and new ones get every
+    address for failover. ``token`` is the real live credential read from the
+    token file; the caller prints it ONLY to stdout and never to a log/error.
     """
-    return '{"v":1,"host":"%s","port":%d,"token":"%s"}' % (host, port, token)
+    if hosts is None:
+        return '{"v":1,"host":"%s","port":%d,"token":"%s"}' % (host, port, token)
+    ordered = _normalise_hosts(host, hosts)
+    listed = ",".join('"%s"' % h for h in ordered)
+    return ('{"v":1,"host":"%s","port":%d,"token":"%s","hosts":[%s]}'
+            % (host, port, token, listed))
 
 
-def _print_api_qr(host, port, token, *, force_ascii=False, theme_name=None):
+def _print_api_qr(host, port, token, hosts=None, *, force_ascii=False,
+                  theme_name=None):
     """Print the scannable connection-settings QR with a security warning.
 
     The warning is printed unconditionally (it accompanies the QR itself, not
     the flag state): whoever scans this QR is handed a live credential. When
-    the bind is loopback-only we additionally warn that a phone cannot reach
-    it. `--no-qr` suppresses this entire block at the call site.
+    EVERY bound address is loopback we additionally warn that a phone cannot
+    reach it. `--no-qr` suppresses this entire block at the call site.
 
     Only the surrounding prose is themed; the QR matrix itself is fixed-width
     block art rendered verbatim (theming it would break its alignment). The
     QR payload (``_build_qr_payload``) is WIRE DATA for the iOS scanner and is
     never altered. On a non-tty stdout Rich degrades to plain text — no ANSI.
     """
-    payload = _build_qr_payload(host, port, token)
+    ordered = _normalise_hosts(host, hosts)
+    payload = _build_qr_payload(host, port, token, hosts=ordered)
     matrix = qr_code.make_qr(payload.encode("utf-8"))
     console = _console(theme_name)
     console.print("  Scan to connect: grants API access to this host.")
-    if _is_loopback(host):
+    if all(_is_loopback(h) for h in ordered):
         console.print(
             "  [warn]Warning:[/warn] bound to loopback — a phone cannot reach "
             "this host."
@@ -300,25 +322,28 @@ def _print_api_qr(host, port, token, *, force_ascii=False, theme_name=None):
 
 
 def _parse_start_flags(argv):
-    """Parse ``start`` flags into (bind_override, port_override, no_qr).
+    """Parse ``start`` flags into (binds, tailscale, port, no_qr).
 
-    Supports ``--tailscale`` (→ bind 'tailscale'), ``--bind <ip>``, ``--port
-    <n>``, and ``--no-qr`` (suppress the QR), matching the design §C config
-    precedence (flags are the highest precedence). Unknown flags are ignored.
+    ``--bind <ip>`` is repeatable (order preserved: the first is the primary)
+    and combines with ``--tailscale``. ``--port <n>`` and ``--no-qr`` keep
+    their old meaning. Unknown flags are ignored. ``binds`` is ``None`` when no
+    ``--bind`` was given, so the config/default still applies.
     """
-    bind_override = None
+    binds = None
+    tailscale = False
     port_override = None
     no_qr = False
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--tailscale":
-            bind_override = "tailscale"
+            tailscale = True
         elif arg == "--no-qr":
             no_qr = True
         elif arg == "--bind":
             if i + 1 < len(argv):
-                bind_override = argv[i + 1]
+                binds = binds or []
+                binds.append(argv[i + 1])
                 i += 1
         elif arg == "--port":
             if i + 1 < len(argv):
@@ -328,15 +353,20 @@ def _parse_start_flags(argv):
                     pass
                 i += 1
         i += 1
-    return bind_override, port_override, no_qr
+    return binds, tailscale, port_override, no_qr
 
 
-def _serve(api, bind_override, port_override):
+def _serve(api, binds=None, tailscale=False, port_override=None):
     """Run the API server loop in the foreground (grandchild of `start`).
 
+    ``binds`` is the ordered ``--bind`` list (first = primary) and
+    ``tailscale`` adds the tailnet address. The legacy three-argument form
+    ``_serve(api, bind_override, port_override)`` is still accepted.
+
     Resolves config + token again here (the child has the same disk state) via
-    A1's ``create_server`` — which honors the bind rules and fails closed on an
-    unreadable/empty token. Cleans up the PID file on exit.
+    A1's ``create_servers`` — which honors the bind rules, binds every address
+    atomically, and fails closed on an unreadable/empty token. Cleans up the
+    PID file on exit.
 
     A refused profile-root INTENT (t_c443c001) exits 2, not 1: like
     ``serve_main``, an operator must be able to tell a misconfigured
@@ -345,9 +375,17 @@ def _serve(api, bind_override, port_override):
     divergence report (requested root + every divergent root + the env) goes to
     the API log at ERROR — nothing bound, nothing written.
     """
+    if isinstance(binds, str):
+        binds = [binds]
+    # Legacy call shape: _serve(api, bind_override, port_override)
+    if (isinstance(tailscale, int) and not isinstance(tailscale, bool)
+            and port_override is None):
+        port_override = tailscale
+        tailscale = False
     try:
-        server = api.create_server(
-            bind_override=bind_override,
+        server = api.create_servers(
+            bind_overrides=binds,
+            tailscale=tailscale,
             port_override=port_override,
         )
     except api.profile_root.ProfileRootRefusal as exc:
@@ -364,12 +402,26 @@ def _serve(api, bind_override, port_override):
         )
         daemon_ops.write_stopped(API_PID_FILE)
         os._exit(1)
+    except OSError as exc:
+        daemon_ops.log(
+            f"HSCC API cannot bind: {exc}", "ERROR",
+            log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+        )
+        daemon_ops.write_stopped(API_PID_FILE)
+        os._exit(1)
 
     addr = server.ctx.config
-    daemon_ops.log(
-        f"HSCC API listening on {addr['host']}:{addr['port']}",
-        log_file=API_LOG_FILE, pid_file=API_PID_FILE,
-    )
+    for host in addr["hosts"]:
+        daemon_ops.log(
+            f"HSCC API listening on {host}:{addr['port']}",
+            log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+        )
+    for miss in addr.get("unavailable") or []:
+        daemon_ops.log(
+            f"HSCC API NOT listening on {miss.get('bind')}: "
+            f"{miss.get('reason')}",
+            "WARN", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+        )
     # Same startup line as serve_main (t_c443c001) — both entry paths state the
     # root they will write, so an operator has one thing to look at.
     daemon_ops.log(
@@ -411,6 +463,10 @@ def _serve(api, bind_override, port_override):
             _bridge2 = _load_gateway_bridge()
             if _bridge2 is not None:
                 _bridge2.shutdown()
+        except Exception:
+            pass
+        try:
+            api.clear_api_state()
         except Exception:
             pass
         daemon_ops.write_stopped(API_PID_FILE)
@@ -662,7 +718,7 @@ def _handle_start(argv, theme_name=None):
     argv, theme_name_ = _strip_theme(argv)
     theme_name = theme_name_ if theme_name_ is not None else theme_name
     api = _load_api_server()
-    bind_override, port_override, no_qr = _parse_start_flags(argv)
+    binds, tailscale, port_override, no_qr = _parse_start_flags(argv)
 
     existing = daemon_ops.get_pid(API_PID_FILE)
     if existing:
@@ -674,12 +730,13 @@ def _handle_start(argv, theme_name=None):
     # the repo. Silent on ok=None (no repo) / ok=True (match); loud on drift.
     _warn_payload_drift(theme_name=theme_name)
 
-    # Fail-closed BEFORE forking: resolve bind/port + validate/generate the
-    # token. We never fork a child that would then fail on disk state we can
-    # check now, and we never bind 0.0.0.0 (A1's resolve_config refuses it).
+    # Fail-closed BEFORE forking: resolve every bind/port + validate/generate
+    # the token. We never fork a child that would then fail on disk state we can
+    # check now, and we never bind 0.0.0.0/:: (A1's resolve_binds refuses each).
     try:
         config = api.resolve_config(
-            bind_override=bind_override,
+            bind_overrides=binds,
+            tailscale=tailscale,
             port_override=port_override,
         )
     except RuntimeError as exc:
@@ -691,17 +748,22 @@ def _handle_start(argv, theme_name=None):
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    _console(theme_name).print(
-        f"Starting HSCC API on {config['host']}:{config['port']}..."
-    )
+    hosts = config.get("hosts") or [config["host"]]
+    endpoints = ", ".join(f"{host}:{config['port']}" for host in hosts)
+    _console(theme_name).print(f"Starting HSCC API on {endpoints}...")
+    for miss in config.get("unavailable") or []:
+        _console(theme_name).print(
+            f"  [warn]Note:[/warn] {miss.get('bind')} unavailable — "
+            f"{theme.esc(str(miss.get('reason')))}"
+        )
 
     # Print the scannable connection QR unless the user suppressed it. We do
     # this only after config+token are known to be valid, so the user gets a
-    # useful QR of the endpoint they are about to start. The token in the QR
+    # useful QR of the endpoints they are about to start. The token in the QR
     # is the real live credential printed only to stdout, never logged.
     if not no_qr:
         _print_api_qr(config["host"], config["port"], token_server,
-                      theme_name=theme_name)
+                      hosts=hosts, theme_name=theme_name)
 
     daemon_ops.log(
         "HSCC API starting", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
@@ -730,7 +792,7 @@ def _handle_start(argv, theme_name=None):
 
     # Grandchild — write the real PID and run the serve loop.
     daemon_ops.save_pid(API_PID_FILE)
-    _serve(api, bind_override, port_override)
+    _serve(api, binds, tailscale, port_override)
     os._exit(0)
 
 
@@ -905,9 +967,13 @@ def _handle_status(argv, theme_name=None):
         return 1
 
     host = port = None
+    hosts: list[str] = []
+    unavailable: list[dict] = []
     try:
         cfg = api.resolve_config()
         host, port = cfg["host"], cfg["port"]
+        hosts = list(cfg.get("hosts") or [host])
+        unavailable = list(cfg.get("unavailable") or [])
     except RuntimeError as exc:
         # Config issues shouldn't stop the status report entirely.
         print(f"Warning: could not resolve bind address: {exc}", file=sys.stderr)
@@ -935,6 +1001,22 @@ def _handle_status(argv, theme_name=None):
     else:
         status, state_line = "warn", "not running"
 
+    # A running process records what it ACTUALLY bound (its start flags are not
+    # in api.json, so re-resolving config alone would miss --bind/--tailscale).
+    # The snapshot keeps `host` = primary and adds `hosts` for the full list.
+    reader = getattr(api, "read_api_state", None)
+    if status == "ok" and reader:
+        try:
+            snapshot = reader() or {}
+        except Exception:
+            snapshot = {}
+        snap_hosts = list(snapshot.get("hosts") or [])
+        if snap_hosts:
+            hosts = snap_hosts
+            host = snapshot.get("host") or snap_hosts[0]
+            port = snapshot.get("port", port)
+            unavailable = list(snapshot.get("unavailable") or unavailable)
+
     console = _console(theme_name)
     rows = [state_line]
     if sup.get("refused"):
@@ -950,8 +1032,11 @@ def _handle_status(argv, theme_name=None):
         rows.append(f"Supervisor:    launchd {_launchd_label()} loaded"
                     + (f", pid {sup['pid']}" if sup.get("pid") else ", no pid")
                     + (f", state {sup['state']}" if sup.get("state") else ""))
-    if host is not None:
-        rows.append(f"Listening:     {host}:{port}")
+    for bound_host in hosts:
+        rows.append(f"Listening:     {bound_host}:{port}")
+    for miss in unavailable:
+        rows.append(f"Unavailable:   {miss.get('bind')} — "
+                    f"{miss.get('reason')}")
     console.print(theme.make_status_panel(
         "\n".join(rows), status=status, title="api"))
 
@@ -965,7 +1050,7 @@ def _handle_status(argv, theme_name=None):
             # exc text embeds the token-file path — DATA.
             console.print(f"No connection QR: could not read auth token ({theme.esc(exc)})")
         else:
-            _print_api_qr(host, port, token, theme_name=theme_name)
+            _print_api_qr(host, port, token, hosts=hosts, theme_name=theme_name)
     return 0
 
 
@@ -994,8 +1079,9 @@ def _handle_install_service(argv, theme_name=None):
     from hscc_daemon import api_launchd
     try:
         _strict_serve_flag_values(argv)
-        bind_override, port_override, _no_qr = _parse_start_flags(argv)
-        extra = api_launchd.serve_args(bind=bind_override, port=port_override)
+        binds, tailscale, port_override, _no_qr = _parse_start_flags(argv)
+        extra = api_launchd.serve_args(
+            binds=binds, tailscale=tailscale, port=port_override)
     except ValueError as exc:
         # Refused BEFORE the file is touched — a unit that cannot start is
         # worse than no unit (launchd would respawn the failure forever).

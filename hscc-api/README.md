@@ -56,21 +56,41 @@ actions (A4), the `hscc api` CLI verb (A5), conversational orchestrator chat
 ## CLI — `hscc api`
 
 ```
-hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]  start in the background
+hscc api start [--tailscale] [--bind <ip>]... [--port <n>] [--no-qr]  start in the background
 hscc api stop                                                      stop it
-hscc api status [--no-qr]                                          running/stopped + bound host:port
-hscc api install-service [--tailscale] [--bind <ip>] [--port <n>]  OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
+hscc api status [--no-qr]                                          running/stopped + every bound host:port
+hscc api install-service [--tailscale] [--bind <ip>]... [--port <n>]  OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
 hscc api uninstall-service                                         remove the launchd unit written by install-service
 ```
 
+`--bind <ip>` is **repeatable** and may be combined with `--tailscale`, so the
+same process can serve the API on the LAN and over Tailscale at once:
+
+```console
+hscc api start --tailscale --bind 192.0.2.10
+hscc api install-service --tailscale --bind 192.0.2.10   # same flags in the unit
+```
+
+The first `--bind` is the **primary**; `--tailscale` is added after it. Default
+is still loopback only. Each explicit address must be an interface address on
+this host (a typo or someone else's IP is refused before anything binds), and
+`0.0.0.0` / `::` are refused per address. Every listener uses the same port,
+token and handlers. If any non-tailnet listener fails to bind, the whole start
+fails and earlier listeners are closed (no half-up state). The one soft
+failure is a tailnet listener while Tailscale is down: the other listeners stay
+up and `hscc api status` reports the tailnet address as unavailable.
+
 `start`/`status` print a scannable connection QR (suppressed by `--no-qr`).
-The token is **encoded into that QR**, so the QR must be treated like a
-password — never show it on a stream or screen-share. `start` also runs the
-repo-vs-installed payload-drift check and warns loudly on drift.
+The payload carries **all** addresses (`hosts` array, primary first) while
+keeping the legacy `host` field equal to the primary, so older apps still pair
+and newer ones get every address for failover. The token is **encoded into that
+QR**, so the QR must be treated like a password — never show it on a stream or
+screen-share. `start` also runs the repo-vs-installed payload-drift check and
+warns loudly on drift.
 
 `install-service` takes the same bind flags as `start` and writes them into the
-unit's `ProgramArguments`, so a tailnet-served API can move onto launchd
-without losing its bind; with no flags the unit is the plain loopback one.
+unit's `ProgramArguments`, so a tailnet+LAN-served API can move onto launchd
+without losing any bind; with no flags the unit is the plain loopback one.
 The unit stores the intent (`--tailscale`, not a resolved address), so the
 tailnet IP is re-resolved at every boot. `--no-qr` is accepted and ignored
 (a launchd unit has no terminal). `hscc api status` consults
@@ -100,10 +120,16 @@ Precedence (lowest → highest): defaults → `~/.hscc/api.json` → explicit
 overrides passed to `create_server()` / the CLI flags.
 
 - `bind`: `"loopback"` (default → `127.0.0.1`) | `"tailscale"` (resolve the
-  tailnet IPv4; hard error if none found) | an explicit IP string.
-  **`0.0.0.0` / `::` are ALWAYS refused** — the API can start/stop GPU work and
-  must never be reachable from an untrusted LAN.
-- `port`: default **8787**.
+  tailnet IPv4; hard error if none found and it is the only address) | an
+  explicit IP string. A JSON **list** is accepted for several addresses. CLI
+  `--bind` is repeatable and combines with `--tailscale`; the first address is
+  the primary. Every explicit address must be an interface address on this
+  host. **`0.0.0.0` / `::` are ALWAYS refused, per address** — the API can
+  start/stop GPU work and must never be reachable from an untrusted LAN.
+- `port`: default **8787**, shared by every listener.
+- Runtime snapshot: `~/.hscc/api-state.json` records the addresses actually
+  bound (`host` = primary for old consumers, `hosts` = full ordered list, plus
+  any `unavailable` tailnet entry). It never contains the token.
 - Tailscale here is the App Store build, so the CLI is *not* on PATH — it lives
   at `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. Both that path and
   a bare `tailscale` are probed, plus the interfaces for a `100.x` address.

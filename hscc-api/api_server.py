@@ -31,6 +31,7 @@ import sys
 import secrets
 import socket
 import subprocess
+import threading
 from pathlib import Path
 
 # The profile-root INTENT gate (t_c443c001). Imported at module level so the
@@ -54,6 +55,11 @@ MAX_BODY_BYTES = 1 * 1024 * 1024   # 1 MiB request-body cap (design §C)
 DEFAULT_HSCC_DIR = os.path.expanduser("~/.hscc")
 CONFIG_FILE = "api.json"
 TOKEN_FILE = "api-token"
+# Runtime snapshot of what the living server actually bound. `hscc api status`
+# reads it so it can list every address (and say when the tailnet address was
+# unavailable) without re-resolving a config that does not know the flags the
+# operator started with. Never carries the token.
+API_STATE_FILE = "api-state.json"
 
 # Tailscale is the App Store build here: the CLI is NOT on PATH, it lives at
 # this absolute path. Probe that first, then fall back to a bare `tailscale`.
@@ -241,28 +247,39 @@ def _read_config_file(hscc_dir: str | os.PathLike) -> dict:
 
 def resolve_config(
     hscc_dir: str | os.PathLike | None = None,
-    bind_override: str | None = None,
+    bind_override: str | list[str] | None = None,
     port_override: int | None = None,
+    *,
+    tailscale: bool = False,
+    bind_overrides: list[str] | None = None,
 ) -> dict:
-    """Resolve (host, port) from defaults <- api.json <- explicit overrides.
+    """Resolve the listening addresses and port.
 
-    Lower-precedence values lose to higher ones (defaults are lowest, explicit
-    overrides highest). Never binds ``0.0.0.0`` — that is a hard error.
+    Precedence: defaults <- api.json <- explicit CLI overrides. ``--bind`` is
+    repeatable and may be combined with ``--tailscale``; the first address is
+    the PRIMARY (kept in the legacy ``host`` key, with the full ordered list in
+    ``hosts``). Never binds ``0.0.0.0``/``::`` — that is a hard error per
+    address. Every explicit address must be an interface address on THIS host,
+    unless it is the tailnet address (resolved by Tailscale).
 
-    Returns a dict with keys ``host`` (resolved IP string) and ``port`` (int).
+    When the tailnet address is requested together with at least one other
+    address and Tailscale is down, the tailnet entry is skipped and reported in
+    ``unavailable`` instead of failing the whole start. A tailnet-only request
+    still fails closed with the resolver's own error.
     """
     hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
     cfg = _read_config_file(hscc_dir)
 
-    bind_value = bind_override if bind_override is not None else cfg.get("bind", DEFAULT_BIND)
-    host = resolve_bind(bind_value, hscc_dir)
+    if bind_overrides is not None:
+        bind_values = bind_overrides
+    elif bind_override is not None:
+        bind_values = ([bind_override] if isinstance(bind_override, str)
+                       else list(bind_override))
+    else:
+        bind_values = None
 
-    if host in _REFUSED_BINDS:
-        raise RuntimeError(
-            f"refusing to bind {host!r} — the HSCC API must never be reachable "
-            "from an untrusted network. Set bind to 'loopback' or a specific "
-            "tailnet/explicit IP."
-        )
+    hosts, unavailable = resolve_binds(
+        bind_values, hscc_dir=hscc_dir, tailscale=tailscale, config=cfg)
 
     port = port_override if port_override is not None else cfg.get("port", DEFAULT_PORT)
     try:
@@ -272,7 +289,165 @@ def resolve_config(
     if not (0 <= port <= 65535):
         raise RuntimeError(f"port {port} out of range 0-65535")
 
-    return {"host": host, "port": port}
+    return {
+        "host": hosts[0],          # legacy single-host field = primary
+        "hosts": hosts,            # every address, primary first
+        "port": port,
+        "unavailable": unavailable,
+    }
+
+
+def resolve_binds(
+    bind_values: str | list[str] | None = None,
+    *,
+    hscc_dir: str | os.PathLike | None = None,
+    tailscale: bool = False,
+    config: dict | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Resolve every requested bind value to ordered, deduped IP strings.
+
+    ``bind_values=None`` means "use api.json / the loopback default"; an
+    explicit list (from repeated ``--bind``) replaces the config. Returns
+    ``(hosts, unavailable)`` where ``unavailable`` describes tailnet targets
+    that were skipped because Tailscale is down (and another address exists).
+    """
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
+    cfg = config if config is not None else _read_config_file(hscc_dir)
+
+    if bind_values is not None and not bind_values and not tailscale:
+        bind_values = None
+    values: list[str] = []
+    if bind_values is None:
+        if not tailscale:
+            configured = cfg.get("bind", DEFAULT_BIND)
+            if isinstance(configured, (list, tuple)):
+                values.extend(configured)
+            else:
+                values.append(configured)
+    else:
+        if isinstance(bind_values, str):
+            values.append(bind_values)
+        else:
+            values.extend(bind_values)
+    if tailscale:
+        values.append("tailscale")
+
+    hosts: list[str] = []
+    unavailable: list[dict] = []
+    has_non_tailnet = any(v != "tailscale" for v in values)
+    for value in values:
+        value = str(value)
+        try:
+            host = resolve_bind(value, hscc_dir)
+        except RuntimeError as exc:
+            # A down Tailscale must not take the LAN/loopback listeners down
+            # with it — but only when there is another address to serve.
+            if value == "tailscale" and has_non_tailnet:
+                unavailable.append({"bind": "tailscale", "reason": str(exc)})
+                continue
+            raise
+        if host not in hosts:
+            hosts.append(host)
+
+    if not hosts:
+        if unavailable:
+            raise RuntimeError(unavailable[0]["reason"])
+        raise RuntimeError("no bind addresses resolved")
+    return hosts, unavailable
+
+
+def _assert_local_bind(host: str) -> str:
+    """Refuse an explicit address that is not an interface on THIS host."""
+    bare = host.split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(bare)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"invalid bind address {host!r} — expected an IP address"
+        ) from exc
+    if addr.is_loopback:
+        return host
+    if bare not in local_interface_addresses():
+        raise RuntimeError(
+            f"refusing to bind {host!r} — it is not an address on this host. "
+            "Use one of this host's interface addresses (see `ifconfig`) or "
+            "'tailscale'."
+        )
+    return host
+
+
+def local_interface_addresses() -> set[str]:
+    """Every IPv4/IPv6 address configured on this host's interfaces.
+
+    Loopback is always included (it is local even on a host whose ifconfig is
+    unavailable). This is the allow-list an explicit ``--bind`` must match;
+    tests can monkeypatch it, and Tailscale-discovered addresses are exempt
+    because the Tailscale CLI is the authority for them.
+    """
+    addresses = {"127.0.0.1", "::1"}
+    try:
+        for line in _ifconfig_lines():
+            ip = _extract_ip_from_ifconfig(line)
+            if ip:
+                addresses.add(ip)
+            ip6 = _extract_ipv6_from_ifconfig(line)
+            if ip6:
+                addresses.add(ip6)
+    except Exception:  # pragma: no cover - defensive, ifconfig is best-effort
+        pass
+    return addresses
+
+
+def _extract_ipv6_from_ifconfig(line: str) -> str | None:
+    """Best-effort parse of an ``inet6`` address from an ifconfig line."""
+    m = re.search(r"\binet6\s+(?:addr:)?([0-9a-fA-F:]+)", line)
+    if m:
+        return m.group(1).split("%", 1)[0]
+    return None
+
+
+def write_api_state(config: dict, hscc_dir: str | os.PathLike | None = None) -> dict:
+    """Persist the runtime listening addresses (never the token).
+
+    Written by the serving process once every listener is bound. The legacy
+    single ``host`` stays = primary, and ``hosts`` carries the full list, so a
+    consumer that only understands the old shape keeps working.
+    """
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
+    hosts = list(config.get("hosts") or [config["host"]])
+    entry = {
+        "host": hosts[0],
+        "hosts": hosts,
+        "port": int(config["port"]),
+    }
+    if config.get("unavailable"):
+        entry["unavailable"] = list(config["unavailable"])
+    path = Path(hscc_dir) / API_STATE_FILE
+    Path(hscc_dir).mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(entry, indent=2) + "\n")
+    os.replace(str(tmp), str(path))
+    return entry
+
+
+def read_api_state(hscc_dir: str | os.PathLike | None = None) -> dict:
+    """Read the runtime listening snapshot; ``{}`` when absent or malformed."""
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
+    path = Path(hscc_dir) / API_STATE_FILE
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def clear_api_state(hscc_dir: str | os.PathLike | None = None) -> None:
+    """Remove the runtime snapshot (best-effort)."""
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
+    try:
+        (Path(hscc_dir) / API_STATE_FILE).unlink()
+    except OSError:
+        pass
 
 
 def resolve_bind(bind_value: str, hscc_dir: str | os.PathLike | None = None) -> str:
@@ -282,8 +457,8 @@ def resolve_bind(bind_value: str, hscc_dir: str | os.PathLike | None = None) -> 
       * ``"loopback"``  -> 127.0.0.1 (the default)
       * ``"tailscale"`` -> the host's tailnet IPv4 (hard error if not found;
         never widens the bind)
-      * an explicit IP string, used as-is — unless it is ``0.0.0.0`` / ``::``
-        (always refused)
+      * an explicit IP string, used only when it is an interface address on
+        this host — unless it is ``0.0.0.0`` / ``::`` (always refused)
 
     Raises RuntimeError on any refusal, with a clear actionable message.
     """
@@ -304,7 +479,7 @@ def resolve_bind(bind_value: str, hscc_dir: str | os.PathLike | None = None) -> 
             f"refusing to bind {bind_value!r} — the HSCC API must never be "
             "reachable from an untrusted network."
         )
-    # Explicit IP string: validate it is a real address.
+    # Explicit IP string: validate it is a real, LOCAL interface address.
     try:
         ipaddress.ip_address(bind_value)
     except ValueError as exc:
@@ -312,7 +487,7 @@ def resolve_bind(bind_value: str, hscc_dir: str | os.PathLike | None = None) -> 
             f"invalid bind value {bind_value!r} — expected 'loopback', "
             "'tailscale', or an explicit IP address"
         ) from exc
-    return bind_value
+    return _assert_local_bind(bind_value)
 
 
 def _find_tailnet_ip() -> str | None:
@@ -494,6 +669,10 @@ class _ApiServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, server_address, handler_cls, context: ApiContext):
+        # ThreadingHTTPServer defaults to AF_INET; an explicit IPv6 bind (::1)
+        # must use the matching family or it fails with EAFNOSUPPORT.
+        if ":" in str(server_address[0]):
+            self.address_family = socket.AF_INET6
         super().__init__(server_address, handler_cls)
         self.ctx = context
 
@@ -711,37 +890,167 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
 # Server orchestration (used by /v1/* tests and, later, the api_cli `start`)
 # ---------------------------------------------------------------------------
 
-def create_server(
+class _MultiServer:
+    """One process serving the SAME app on every bound address.
+
+    Holds one ``_ApiServer`` per address (all sharing one ``ApiContext``: same
+    token, same handlers, same port) and presents the small surface the
+    lifecycle code already used — ``serve_forever`` / ``shutdown`` /
+    ``server_close`` / ``server_address`` — so callers do not branch on how many
+    listeners there are.
+    """
+
+    def __init__(self, servers, ctx, unavailable=None):
+        self.servers = list(servers)
+        self.ctx = ctx
+        self.unavailable = list(unavailable or [])
+        self.server_address = self.servers[0].server_address
+        self._threads = []
+        self._started = False
+
+    @property
+    def hosts(self) -> list[str]:
+        return [s.server_address[0] for s in self.servers]
+
+    def serve_forever(self, poll_interval=0.5):
+        self._started = True
+        self._threads = [
+            threading.Thread(target=s.serve_forever,
+                             kwargs={"poll_interval": poll_interval},
+                             name=f"hscc-api-{s.server_address[0]}",
+                             daemon=True)
+            for s in self.servers
+        ]
+        for thread in self._threads:
+            thread.start()
+        try:
+            while any(t.is_alive() for t in self._threads):
+                for thread in self._threads:
+                    thread.join(0.5)
+        except KeyboardInterrupt:  # pragma: no cover - terminal foreground path
+            pass
+
+    def shutdown(self):
+        # `BaseServer.shutdown()` blocks until serve_forever returns, so never
+        # call it for a listener whose loop was never started.
+        if not self._started:
+            return
+        for server in self.servers:
+            server.shutdown()
+
+    def server_close(self):
+        for server in self.servers:
+            server.server_close()
+
+
+def create_servers(
     hscc_dir: str | os.PathLike | None = None,
-    bind_override: str | None = None,
+    bind_override: str | list[str] | None = None,
     port_override: int | None = None,
     addr: tuple | None = None,
+    *,
+    tailscale: bool = False,
+    bind_overrides: list[str] | None = None,
 ):
-    """Resolve config + token, then bind and return a running server.
+    """Resolve config + token, then bind EVERY address before serving any.
 
-    ``addr`` overrides the (host, port) computed from config — used by tests to
-    bind loopback port 0 (ephemeral) for a hermetic, parallel-safe suite.
+    ``addr`` overrides the (host, port) pair — used by tests for a single
+    ephemeral loopback listener. Otherwise one listener is created per resolved
+    address, all on the same port.
 
-    The profile-root INTENT is asserted FIRST (t_c443c001, D8): it is the
-    cheapest check, it runs before `resolve_config`/`load_token` so a refused
-    boot never reads a token, and it happens before the bind — so a server whose
-    configured ``HSCC_API_PROFILES_ROOT`` does not match every writable root
-    never serves and never writes. No intent ⇒ this is a no-op and today's
-    behaviour is unchanged.
+    Atomicity: if any non-tailnet listener fails to bind, every listener
+    already opened is closed and the start fails — there is no half-up state.
+    A tailnet listener is the one exception: when Tailscale is down, the other
+    listeners stay up and the miss is recorded in ``unavailable`` for status.
+
+    The profile-root INTENT is asserted FIRST (t_c443c001, D8): before config,
+    token, or any bind, so a refused boot never serves and never writes.
     """
     resolved_intent = profile_root.assert_boot_intent()
     profile_root.capture(resolved_intent)
 
     hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
-    config = resolve_config(hscc_dir, bind_override, port_override)
+    config = resolve_config(
+        hscc_dir, bind_override, port_override,
+        tailscale=tailscale, bind_overrides=bind_overrides,
+    )
     token = load_token(hscc_dir)
     ctx = ApiContext(config, token, str(hscc_dir),
                      profile_root_intent=resolved_intent)
 
+    if addr is not None:
+        targets = [addr[0]]
+        port = addr[1]
+    else:
+        targets = list(config["hosts"])
+        port = config["port"]
+
+    servers = []
+    unavailable = list(config.get("unavailable") or [])
+    for host in targets:
+        try:
+            server = _ApiServer((host, port), ApiHandler, ctx)
+        except OSError as exc:
+            for opened in servers:
+                opened.server_close()
+            # A tailnet listener that cannot bind while Tailscale is down is
+            # the documented soft failure; everything else fails the start.
+            if host.startswith("100.") and _find_tailnet_ip() is None:
+                unavailable.append({
+                    "bind": "tailscale",
+                    "reason": f"cannot bind tailnet address {host}: {exc}",
+                })
+                continue
+            raise OSError(
+                f"cannot bind {host}:{port}: {exc}"
+            ) from exc
+        servers.append(server)
+        if port == 0:
+            # One ephemeral port for ALL listeners, not a different one each.
+            port = server.server_address[1]
+
+    if not servers:
+        reason = unavailable[0]["reason"] if unavailable else "no listeners"
+        raise RuntimeError(f"cannot start the HSCC API: {reason}")
+
+    bound = dict(config)
+    bound["hosts"] = [s.server_address[0] for s in servers]
+    bound["host"] = bound["hosts"][0]
+    bound["port"] = int(servers[0].server_address[1])
+    bound["unavailable"] = unavailable
+    ctx.config = bound
+
+    multi = _MultiServer(servers, ctx, unavailable=unavailable)
     if addr is None:
-        addr = (config["host"], config["port"])
-    server = _ApiServer(addr, ApiHandler, ctx)
-    return server
+        # This is a real serving process, not a test-only ephemeral listener:
+        # snapshot what is actually bound for `hscc api status`. Auxiliary —
+        # never fail a served API because the snapshot could not be written.
+        try:
+            write_api_state(bound, hscc_dir)
+        except OSError:
+            log.warning("could not write the API state snapshot")
+    return multi
+
+
+def create_server(
+    hscc_dir: str | os.PathLike | None = None,
+    bind_override: str | list[str] | None = None,
+    port_override: int | None = None,
+    addr: tuple | None = None,
+    *,
+    tailscale: bool = False,
+    bind_overrides: list[str] | None = None,
+):
+    """Back-compatible single-entry wrapper around :func:`create_servers`.
+
+    Returns a ``_MultiServer`` whose ``server_address`` is the primary
+    listener, so existing tests/callers keep working while the real process may
+    hold several listeners.
+    """
+    return create_servers(
+        hscc_dir, bind_override, port_override, addr,
+        tailscale=tailscale, bind_overrides=bind_overrides,
+    )
 
 
 # A2: load cluster + fleet read routes. routes_cluster.py's load() appends to
@@ -818,15 +1127,13 @@ import routes_ws  # noqa: E402,F401  (registers /v1/projects/{name}/session/ws)
 # ---------------------------------------------------------------------------
 
 def _parse_serve_argv(argv):
-    """Parse the `serve` argv. Returns (subcommand, bind_override, port_override).
+    """Parse the `serve` argv.
 
-    Accepts the same flags `hscc api start` takes (api_cli._parse_start_flags),
-    including `--no-qr`, which is accepted and ignored here: a launchd unit has
-    no terminal to print a QR to, and accepting it means the operator can paste
-    their existing `hscc api start --tailscale --no-qr` flag tail into the unit
-    without the boot failing on an unknown argument. Unknown flags are a hard
-    error (exit 2) — a hand-edited unit should fail loudly, not quietly serve
-    something else.
+    Returns ``(subcommand, bind_overrides, tailscale, port_override)``.
+    ``--bind`` is repeatable and combinable with ``--tailscale``; ``--no-qr`` is
+    accepted and ignored (a launchd unit has no terminal). Unknown flags are a
+    hard error (exit 2) — a hand-edited unit should fail loudly, not quietly
+    serve something else.
     """
     import argparse
 
@@ -836,27 +1143,29 @@ def _parse_serve_argv(argv):
     sub = parser.add_subparsers(dest="cmd", required=True)
     serve = sub.add_parser("serve", help="bind and serve the API in the foreground")
     serve.add_argument("--tailscale", action="store_true",
-                       help="bind the tailnet address instead of loopback")
-    serve.add_argument("--bind", default=None, metavar="<ip>",
-                       help="bind this specific address (0.0.0.0 is always refused)")
+                       help="also bind the tailnet address (combinable with --bind)")
+    serve.add_argument("--bind", action="append", default=None, metavar="<ip>",
+                       help="bind this specific address (repeatable; 0.0.0.0 "
+                            "and :: are always refused)")
     serve.add_argument("--port", default=None, type=int, metavar="<n>",
                        help=f"override the configured port (default {DEFAULT_PORT})")
     serve.add_argument("--no-qr", action="store_true",
                        help="accepted for parity with 'hscc api start'; has no "
                             "effect when run under launchd")
     ns = parser.parse_args(argv)
-    bind = "tailscale" if ns.tailscale else ns.bind
-    return ns.cmd, bind, ns.port
+    return ns.cmd, ns.bind, ns.tailscale, ns.port
 
 
-def serve_main(bind_override=None, port_override=None) -> int:
+def serve_main(bind_override=None, port_override=None, *,
+               tailscale=False, bind_overrides=None) -> int:
     """Bind + serve in the foreground; returns a process exit code.
 
-    Uses create_server() — the same resolution `hscc api start` runs, so the
-    bind rules (loopback default, tailnet opt-in, 0.0.0.0 refused) and the
-    fail-closed token load are not re-implemented here and cannot drift. Every
-    startup failure exits NON-ZERO: that is what tells launchd the unit failed
-    instead of letting an unbound process look like a served API.
+    Uses create_servers() — the same resolution `hscc api start` runs, so the
+    bind rules (loopback default, tailnet opt-in, per-address 0.0.0.0/:: refusal,
+    local-interface validation) and the fail-closed token load are not
+    re-implemented here and cannot drift. Every startup failure exits NON-ZERO:
+    that is what tells launchd the unit failed instead of letting an unbound
+    process look like a served API.
 
     The live-gateway sidecar is started best-effort, exactly as api_cli._serve
     does (a serve that cannot boot must not stop the API — the WS relay's REST
@@ -871,9 +1180,15 @@ def serve_main(bind_override=None, port_override=None) -> int:
     # ~/.hscc/logs/api.log / api.err.log, which is where to look.
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
+    if bind_overrides is None and bind_override is not None:
+        bind_overrides = ([bind_override] if isinstance(bind_override, str)
+                          else list(bind_override))
     try:
-        server = create_server(bind_override=bind_override,
-                               port_override=port_override)
+        server = create_servers(
+            port_override=port_override,
+            tailscale=tailscale,
+            bind_overrides=bind_overrides,
+        )
     except profile_root.ProfileRootRefusal as exc:
         # Misconfigured profile root (t_c443c001) — deliberately NOT folded into
         # the RuntimeError branch below, which means "bind/token failed" and maps
@@ -900,7 +1215,11 @@ def serve_main(bind_override=None, port_override=None) -> int:
         return 1
 
     addr = server.ctx.config
-    print(f"hscc-api: listening on {addr['host']}:{addr['port']}", flush=True)
+    for host in addr["hosts"]:
+        print(f"hscc-api: listening on {host}:{addr['port']}", flush=True)
+    for miss in addr.get("unavailable") or []:
+        print(f"hscc-api: NOT listening on {miss.get('bind')} — "
+              f"{miss.get('reason')}", flush=True)
     # The profiles root this server will actually write, plus the intent it was
     # given (t_c443c001, adopted from option 1's diagnostic). Printed on every
     # boot so a wrong-root symptom has a line to be diagnosed against.
@@ -942,6 +1261,7 @@ def serve_main(bind_override=None, port_override=None) -> int:
         print(f"hscc-api: crashed: {exc}", file=sys.stderr)
         return 1
     finally:
+        clear_api_state()
         if bridge is not None:
             try:
                 bridge.shutdown()
@@ -961,11 +1281,12 @@ def main(argv=None) -> int:
               "'python -m api_server serve' (see 'hscc api install-service')",
               file=sys.stderr)
         return 2
-    cmd, bind_override, port_override = _parse_serve_argv(argv)
+    cmd, bind_overrides, tailscale, port_override = _parse_serve_argv(argv)
     if cmd != "serve":            # add_subparsers(required=True) keeps this defensive
         print(f"hscc-api: unknown command {cmd!r}", file=sys.stderr)
         return 2
-    return serve_main(bind_override=bind_override, port_override=port_override)
+    return serve_main(bind_overrides=bind_overrides, port_override=port_override,
+                      tailscale=tailscale)
 
 
 if __name__ == "__main__":
