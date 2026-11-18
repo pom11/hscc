@@ -1,0 +1,135 @@
+# Widget coverage audit — iOS and macOS
+
+Measured on `origin/main` at `f8325093` (2026-11-18). This is a read-only
+audit: no widget code was changed. A family is counted as covered only when it
+is both listed in that widget's `supportedFamilies` **and** has a non-placeholder
+view in the family dispatch switch.
+
+Legend:
+
+- **declared-and-renders** — in `supportedFamilies`, and the dispatch switch
+  names the view that draws it.
+- **declared-but-placeholder** — in `supportedFamilies`, but the family only
+  draws `placeholder(in:)` / sample data.
+- **absent** — not in `supportedFamilies` for that platform.
+- **unknown** — could not be determined from the code; the reason is stated.
+
+No cell below is `declared-but-placeholder` or `unknown`.
+
+## 1. iOS widgets × family
+
+Every widget type under `ios-app/Sources/HSCCWidgets/` is listed. The bundle at
+`HSCCWidgetsBundle.swift` contains exactly these six widgets; there are no
+additional `Widget` types in that directory.
+
+| Widget | systemSmall | systemMedium | systemLarge | accessoryInline | accessoryCircular | accessoryRectangular | Source |
+|---|---|---|---|---|---|---|---|
+| Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`ProjectsCircularView`) | declared-and-renders (`ProjectsRectangularView`) | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
+| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`CardsRunningCircularView`) | declared-and-renders (`CardsRunningRectangularView`) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
+| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`KanbanMonitorInline`) | declared-and-renders (`KanbanMonitorCircular`) | declared-and-renders (`KanbanMonitorRectangular`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
+| BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`BoardStatusCircularView`) | declared-and-renders (`BoardStatusRectangularView`) | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
+| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`InlineClusterWidget`) | declared-and-renders (`CircularClusterWidget`) | declared-and-renders (`RectangularClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
+| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
+
+Coverage note: all six iOS widgets also contain a `.systemExtraLarge` branch in
+their view switch, but none declares `.systemExtraLarge` in `supportedFamilies`
+on iOS. That family is therefore **absent** on iOS by configuration, not a
+missing renderer.
+
+## 2. Live Activities × surface
+
+All five `ActivityAttributes` types declared under `ios-app/Sources/Shared/` are
+on `main`. Live Activities are push-only: the extension renders, and an app-side
+driver performs the fetches and calls `update()`. The monitor extension never
+refreshes an activity itself.
+
+| ActivityAttributes | Lock screen | DI compact | DI expanded | DI minimal | Hosted by `HSCCLiveActivityMonitor`? | Refresh owner |
+|---|---|---|---|---|---|---|
+| `MonitorActivityAttributes` | declared-and-renders (`LockScreenMonitorView`) | declared-and-renders (`compactLeading` / `compactTrailing`) | declared-and-renders (`DynamicIslandExpandedRegion` leading/center/bottom) | declared-and-renders (`minimal`) | Yes | No in the extension: `MonitorActivityDriver` polls and pushes |
+| `CardsRunningActivityAttributes` | declared-and-renders (`LockScreenCardsView`) | declared-and-renders (`compactLeading` / `compactTrailing`) | declared-and-renders (`DynamicIslandExpandedRegion` leading/center/trailing/bottom) | declared-and-renders (`minimal`) | Yes | No in the extension: `CardsRunningActivityDriver` polls and pushes |
+| `ClusterHealthActivityAttributes` | declared-and-renders (`LockScreenClusterHealthView`) | declared-and-renders (`compactLeading` / `compactTrailing`) | declared-and-renders (`DynamicIslandExpandedRegion` leading/center/trailing/bottom) | declared-and-renders (`minimal`) | Yes | No in the extension: `ClusterHealthActivityDriver` polls and pushes |
+| `BoardProgressActivityAttributes` | declared-and-renders (`LockScreenBoardProgressView`) | declared-and-renders (`compactLeading` / `compactTrailing`) | declared-and-renders (`DynamicIslandExpandedRegion` leading/center/trailing/bottom) | declared-and-renders (`minimal`) | Yes | No in the extension: `BoardProgressActivityDriver` polls and pushes |
+| `WakingActivityAttributes` | declared-and-renders (`LockScreenWakeView`) | declared-and-renders (`compactLeading` / `compactTrailing`) | declared-and-renders (`DynamicIslandExpandedRegion` leading/center/bottom) | declared-and-renders (`minimal`) | No — hosted by the separate `HSCCLiveActivity` extension | No in the extension: `LiveActivityManager` polls every 30 s and pushes |
+
+Sources: `ios-app/Sources/HSCCLiveActivityMonitor/{MonitorLiveActivity,CardsRunningLiveActivity,ClusterHealthLiveActivity,BoardProgressLiveActivity}.swift`,
+`ios-app/Sources/HSCCLiveActivity/HSCCLiveActivity.swift`, and
+`ios-app/Sources/HSCC/{MonitorActivityDriver,CardsRunningActivityDriver,ClusterHealthActivityDriver,BoardProgressActivityDriver,LiveActivityManager}.swift`.
+
+## 3. macOS desktop widgets × family
+
+The macOS extension (`HSCCMacWidgets` in `macos-app/project.yml`) compiles the
+six iOS widget files by path. On macOS the accessory families are unavailable,
+so they are not part of this table. `systemExtraLarge` is declared only by
+Cluster and Monitor.
+
+| Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
+|---|---|---|---|---|---|
+| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
+| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
+| Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | absent | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
+| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | absent | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
+| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | absent | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
+| BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
+
+The four `absent` XL cells are the documented macOS family split, not a defect:
+all six widgets ship small/medium/large, and Cluster and Monitor also ship
+`systemExtraLarge` (`changelog.d/t_1143c19b.md`).
+
+## 4. Compile results
+
+Commands, run in this worktree:
+
+```text
+$ bash ios-app/scripts/build_check.sh
+HSCC: 69 files, 0 error(s), 0 warning(s)
+HSCCWidgets: 18 files, 0 error(s), 0 warning(s)
+HSCCLiveActivity: 5 files, 0 error(s), 0 warning(s)
+HSCCLiveActivityMonitor: 13 files, 0 error(s), 0 warning(s)
+full compile clean, 0 warnings (compile only — never built or run on a device)
+```
+
+```text
+$ bash macos-app/scripts/build_check.sh
+HSCCMac: 18 files, 0 error(s), 0 warning(s)
+HSCCMacWidgets: 18 files, 0 error(s), 0 warning(s)
+full compile clean, 0 warnings (compile only — never built or run)
+```
+
+## 5. Decode check
+
+```text
+$ bash ios-app/scripts/model_decode_check.sh
+compiling real models + harness into a macOS CLI...
+ALL DECODE CHECKS PASSED — 93/93 checks (over 56 committed fixtures) decoded against the real models
+```
+
+## 6. Shipped feature checklist
+
+| Feature | PR | Merge commit on `main` | Evidence |
+|---|---|---|---|
+| Multi-address clusters with automatic failover | #371 | `64f8361f` | `ios-app/Sources/Shared/SharedStore.swift`, `ios-app/Sources/Shared/WidgetDataClient.swift`, `ios-app/Sources/HSCC/SettingsStore.swift` |
+| Block-H app icon and black/orange dark-only theme | #372 | `e0b88ff7` | `ios-app/Sources/HSCC/Views/Theme.swift`, `ios-app/Sources/HSCC/Views/HSCCMark.swift`, `ios-app/assets-master/appicon-*.svg` |
+| Widget style model, App Group storage and appearance editor | #373 | `8bab4521` | `ios-app/Sources/HSCC/WidgetSettingsStore.swift`, `ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift`, `ios-app/Sources/Shared/SharedStore.swift` |
+| Widget style applied to every widget and Live Activity | #375 | `14b080dc` | all six widget roots under `ios-app/Sources/HSCCWidgets/` and all five Live Activity configurations; `ios-app/scripts/widget_style_check.sh` |
+| macOS menu-bar app | #374 | `d9b78273` | `macos-app/Sources/HSCCMac/` (menu-bar-only app, `LSUIElement`) |
+| macOS desktop widgets | #376 | `a3da0180` | `HSCCMacWidgets` target in `macos-app/project.yml`; `ios-app/Sources/HSCCWidgets/WidgetRendering.swift` |
+| GitHub Pages OTA install | #377 | `b5691c09` | `ios-app/scripts/publish_pages.sh`, `ios-app/scripts/make_manifest.py` |
+| Notarized release and Homebrew cask | #379 | `f8325093` | `macos-app/scripts/release.sh`, `scripts/templates/hscc-widgets.cask.rb.tmpl`, `scripts/bump_cask.py` |
+
+## 7. Gaps
+
+No GAP rows were found in the widget-family or Live Activity matrices. Every
+declared family has a dedicated non-placeholder renderer, every Live Activity
+type has all four surfaces (Lock Screen, compact, expanded, minimal), and both
+platform build checks are clean.
+
+Non-gap coverage notes:
+
+- The monitor extension does not refresh Live Activities. That is the platform
+  contract, not a missing path: all five activities are refreshed by app-side
+  drivers that poll and push.
+- `WakingActivityAttributes` belongs to the separate `HSCCLiveActivity`
+  extension rather than `HSCCLiveActivityMonitor`; it is still covered on all
+  four surfaces.
+- Four macOS widgets do not offer `systemExtraLarge`; the macOS feature
+  intentionally reserves that family for Cluster and Monitor.
