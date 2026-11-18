@@ -45,6 +45,10 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
         // handler (t_71deac83), registered here for the same reason and with the
         // same synchronous-before-submit requirement.
         CardsRunningActivityDriver.registerBackgroundTasks()
+        // The per-board progress activity (t_451cbe25) has its own identifier
+        // and launch handler, registered here for the same
+        // synchronous-before-submit reason.
+        BoardProgressActivityDriver.registerBackgroundTasks()
 
         // The async block holds everything that must not block launch AND does
         // not need to precede registration: the notification-auth request and
