@@ -1,14 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- HSCC app icon, candidate A "Orbit" — LIGHT appearance master.
-       Same geometry as the dark master, tones for a light home screen:
-       raised near-white field, the app's dark mint #1B7E55 as the live node. -->
-  <rect width="1024" height="1024" fill="#F1F2F6"/>
-  <g stroke="#1B7E55" stroke-opacity="0.9" stroke-width="34" stroke-linecap="round" fill="none">
-    <path d="M512 262 L300 682"/>
-    <path d="M512 262 L724 682"/>
-    <path d="M330 700 L694 700"/>
+  <!-- HSCC app icon — LIGHT/default appearance master.
+       Operator-selected design (2026-11-18): a solid black field with a flat
+       #FF5722 block letter H. Full-bleed: iOS applies the home-screen mask.
+       Measured geometry on the 1024 canvas: left bar x 254–346, right bar
+       x 676–768, both y 241–745; crossbar x 346–676, y 447–539. -->
+  <rect width="1024" height="1024" fill="#000000"/>
+  <g fill="#FF5722">
+    <rect x="254" y="241" width="92" height="504"/>
+    <rect x="676" y="241" width="92" height="504"/>
+    <rect x="346" y="447" width="330" height="92"/>
   </g>
-  <circle cx="512" cy="262" r="118" fill="#1B7E55"/>
-  <circle cx="280" cy="712" r="118" fill="#55606E"/>
-  <circle cx="744" cy="712" r="118" fill="#B45309"/>
 </svg>

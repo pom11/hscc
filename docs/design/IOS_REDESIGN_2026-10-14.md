@@ -131,6 +131,13 @@ renders the placeholder "H". A real gap, not a style gap (§7).
 
 ## 2. Design tokens
 
+> **Superseded 2026-11-18 (operator request).** The app is dark-only now:
+> `surface` `#000000`, `raised` `#111111`, `elevated` `#1C1C1E`, `accent`
+> `#FF5722` with black `onAccent` (6.64:1), text `#FFFFFF` / muted `#9A9A9A`,
+> and statuses green/amber/red retuned for black. The table below records the
+> 2026-10-14 pass; `ios-app/Sources/HSCC/Views/Theme.swift` is the shipped
+> source of truth.
+
 The token *set* stays in `Theme.swift` and remains the single source; the
 change is **add the missing roles, then enforce adoption** (a lint-style audit
 script, not a new system).
@@ -412,11 +419,19 @@ destructive in the primary slot; ≤1 toolbar action per screen (kills the
 
 ## 7. App icon
 
-**Candidate A "Orbit"** (recommended): three nodes — the live one lit mint,
-two in `mist`/`thermal` — joined by faint links; reads as "a control centre
-watching a cluster". Legible at 29 pt (the mockup shows it at 60 and 29 pt with
-a tinted variant). B "Rack" (server rack, one unit lit) and C "Grid+hub"
-(cleanest, but the cross reads as "add" at small size) are shown as
+**Superseded 2026-11-18 (operator request).** The shipped mark is now a solid
+black square with a flat #FF5722 block letter H — no nodes, no labels.
+`ios-app/assets-master/appicon-{light,dark,tinted}.svg` carry that design,
+`ios-app/scripts/make_appicon.sh` regenerates the single-size 1024 px PNGs, and
+`ios-app/scripts/check_appicon.py` measures the block geometry and the actool
+wiring. The 2026-10-14 candidates below are kept as the record of that design
+pass, not as a TODO.
+
+**Candidate A "Orbit"** (the 2026-10-14 recommendation): three nodes — the live
+one lit mint, two in `mist`/`thermal` — joined by faint links; reads as "a
+control centre watching a cluster". Legible at 29 pt (the mockup shows it at 60
+and 29 pt with a tinted variant). B "Rack" (server rack, one unit lit) and C
+"Grid+hub" (cleanest, but the cross reads as "add" at small size) are shown as
 alternatives. No text beyond the mark.
 
 Ship as **single-size 1024 px** AppIcon (Xcode 15+ format): one 1024 PNG per

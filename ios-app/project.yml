@@ -308,6 +308,10 @@ targets:
       properties:
         CFBundleDisplayName: HSCC
         UILaunchScreen: {}
+        # Dark-only app (operator request 2026-11-18): the black/orange palette
+        # has no light variants. HSCCApp also pins preferredColorScheme(.dark);
+        # this key covers launch chrome and any scene the system creates.
+        UIUserInterfaceStyle: Dark
         # Deep links (t_136762f3): the `hscc://` URL scheme lets a notification,
         # a Telegram message, or a Mac session open a specific project, card or
         # session directly instead of starting from the root. CFBundleURLTypes
@@ -420,6 +424,8 @@ targets:
         # A display name so the widget gallery / Home Screen shows a friendly
         # label instead of the raw target identifier "HSCCWidgets".
         CFBundleDisplayName: HSCC Widgets
+        # Same dark-only contract as the app (see the app's info block).
+        UIUserInterfaceStyle: Dark
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:
@@ -470,6 +476,8 @@ targets:
         # A display name so the Live Activity / Lock Screen surfaces a friendly
         # label instead of the raw target identifier "HSCCLiveActivity".
         CFBundleDisplayName: HSCC Live Activity
+        # Same dark-only contract as the app (see the app's info block).
+        UIUserInterfaceStyle: Dark
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:
@@ -544,6 +552,8 @@ targets:
         # A display name so the monitor Live Activity / Lock Screen surfaces a
         # friendly label instead of the raw target identifier "HSCCLiveActivityMonitor".
         CFBundleDisplayName: HSCC Monitor
+        # Same dark-only contract as the app (see the app's info block).
+        UIUserInterfaceStyle: Dark
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:

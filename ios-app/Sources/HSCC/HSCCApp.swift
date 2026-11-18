@@ -51,6 +51,11 @@ struct HSCCApp: App {
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
                 .environmentObject(router)
+                // Dark-only (operator request 2026-11-18): the black/orange
+                // palette has no light variants, so pin every scene to dark
+                // even if the device is set to light. The Info.plist
+                // `UIUserInterfaceStyle=Dark` key backs this up at launch.
+                .preferredColorScheme(.dark)
         }
         // HSCC Monitor Live Activity (t_03d318cd). Scene phase drives the
         // foreground poll loop (active → poll; background → stop the tight loop

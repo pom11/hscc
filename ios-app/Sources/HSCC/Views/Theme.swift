@@ -2,20 +2,24 @@ import SwiftUI
 
 /// HSCC design system — tokens, defined ONCE here and used everywhere.
 ///
-/// The subject is a 4-node DGX Spark cluster running a dozen agent
-/// orchestrators, used by ONE operator, often on the move. The palette is a
-/// cool near-black graphite with soft, non-alarm semantic signals (mint =
-/// healthy, amber = busy/waking, muted red = fault) — deliberately neither the
-/// neon-on-black "hacker terminal" look nor cream + serif.
+/// Operator request 2026-11-18: the app is simple black with orange accents,
+/// matching the new block-H app icon. Surfaces are pure black (#000000),
+/// raised/elevated surfaces are near-black greys, text is white + muted grey,
+/// and the accent is the icon's flat orange (#FF5722). Status keeps its own
+/// semantic colours (ok green, warn amber, bad red), retuned to stay readable
+/// on black — status must never collapse into the orange accent.
+///
+/// The app is DARK ONLY. `HSCCApp` pins `.preferredColorScheme(.dark)` and every
+/// Info.plist sets `UIUserInterfaceStyle=Dark`; the palette has no light
+/// variants to fall back to, so a trait change can never repaint a light
+/// screen. Widgets and Live Activities compile this same file.
 ///
 /// Every color at a call site must come from the semantic roles below (or the
-/// raw `Palette` slots for the base graphite/slate), never from an ad-hoc hex
-/// or a hardcoded `.red` / `.green` / `.orange`. The roles are dynamic colors:
-/// they resolve to the dark-mode palette by default and shift for light mode,
-/// so views adapt automatically with no per-view color-scheme plumbing.
+/// raw `Palette` slots), never from an ad-hoc hex or a hardcoded `.red` /
+/// `.green` / `.orange`.
 enum Theme {
 
-    // MARK: - Palette (the spec's six tokens, in hex)
+    // MARK: - Palette (the base tokens, in hex)
 
     private static func hex(_ value: UInt32) -> Color {
         Color(red: Double((value >> 16) & 0xFF) / 255.0,
@@ -24,99 +28,71 @@ enum Theme {
     }
 
     enum Palette {
-        /// #16181D — base, cool near-black (faintly blue).
-        static let graphite = Theme.hex(0x16181D)
-        /// #232730 — raised surfaces / cards.
-        static let slate = Theme.hex(0x232730)
-        /// #7AE2B0 — healthy, serving (soft mint, NOT acid green).
-        static let signal = Theme.hex(0x7AE2B0)
-        /// #F2A65A — busy, waking, warning (amber from GPU thermal readouts).
-        static let thermal = Theme.hex(0xF2A65A)
-        /// #E56A6A — down, fault (muted, not alarm red).
-        static let halt = Theme.hex(0xE56A6A)
-        /// #A7B0C0 — secondary text.
-        static let mist = Theme.hex(0xA7B0C0)
-
-        // Light-appearance variants of the signal/surface set. The dark palette
-        // is a cool near-black designed to sit UNDER light text (mint, amber,
-        // muted-red are bright and glow on graphite). Reused verbatim in light
-        // mode they collapse to near-invisible on white (ok #7AE2B0 on white =
-        // 1.58:1; and `surfaceRaised` stays dark slate while `onSurface` text
-        // flips to black = 1.40:1). These slots remap the SAME roles to
-        // darker/toned values that hold ≥4.5:1 on white so light mode stays
-        // legible. Values measured with WCAG relative-luminance contrast.
-        /// #F1F2F6 — light raised surfaces / cards (black text = 18.8:1).
-        static let lightRaised = Theme.hex(0xF1F2F6)
-        /// #E6E8EE — light elevated chips/banners (black text = 17.1:1).
-        static let lightElevated = Theme.hex(0xE6E8EE)
-        /// #1B7E55 — healthy, tuned for light surfaces (5.05:1 on white).
-        static let lightSignal = Theme.hex(0x1B7E55)
-        /// #B45309 — busy/warning, tuned for light surfaces (5.02:1 on white).
-        static let lightThermal = Theme.hex(0xB45309)
-        /// #B3261E — fault, tuned for light surfaces (6.54:1 on white).
-        static let lightHalt = Theme.hex(0xB3261E)
-        /// #55606E — secondary text, tuned for light surfaces (6.39:1 on white).
-        static let lightMist = Theme.hex(0x55606E)
-
-        /// #08241A — the ink drawn ON a mint fill in dark mode. White on mint
-        /// is 1.58:1 (fails AA); this near-black scores 10.44:1 on `signal`.
-        static let signalInk = Theme.hex(0x08241A)
+        /// #000000 — base surface, pure black.
+        static let graphite = Theme.hex(0x000000)
+        /// #111111 — raised surfaces / cards.
+        static let raised = Theme.hex(0x111111)
+        /// #1C1C1E — one step higher than `raised` (badges, chips, banners).
+        static let elevated = Theme.hex(0x1C1C1E)
+        /// #FF5722 — the operator's icon orange: primary action / selection.
+        static let accent = Theme.hex(0xFF5722)
+        /// #000000 — ink on the orange fill. Black on #FF5722 is 6.64:1 (AA);
+        /// white on it is only 3.16:1, so black is the readable choice.
+        static let accentInk = Theme.hex(0x000000)
+        /// #FFFFFF — primary text (21.0:1 on black).
+        static let white = Theme.hex(0xFFFFFF)
+        /// #9A9A9A — secondary text (7.46:1 on black).
+        static let mist = Theme.hex(0x9A9A9A)
+        /// #4ADE80 — healthy, serving (12.05:1 on black).
+        static let signal = Theme.hex(0x4ADE80)
+        /// #FFC857 — busy, waking, warning (13.65:1 on black). Deliberately
+        /// distinct from the #FF5722 accent so "warning" never reads as
+        /// "primary action".
+        static let thermal = Theme.hex(0xFFC857)
+        /// #FF6B6B — down, fault (7.57:1 on black).
+        static let halt = Theme.hex(0xFF6B6B)
+        /// #2A2A2A — hairline separators (subtle on black).
+        static let hairline = Theme.hex(0x2A2A2A)
     }
 
     // MARK: - Semantic roles (the ONLY thing views should reference)
     //
-    // Dynamic colors that resolve to the dark palette by default and shift
-    // for light mode via `UIColor { traits in ... }`. Views call
-    // `Theme.Semantic.surface` etc.; they never hardcode a palette hex.
+    // Plain constants: there is no light palette, so nothing has to resolve per
+    // trait collection. Views call `Theme.Semantic.surface` etc.; they never
+    // hardcode a palette hex.
 
     enum Semantic {
         /// Primary surface background (the app's canvas).
-        static var surface: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.graphite) : .white } }
+        static var surface: Color { Palette.graphite }
         /// Raised surfaces / cards sitting on `surface`.
-        static var surfaceRaised: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.slate) : UIColor(Palette.lightRaised) } }
+        static var surfaceRaised: Color { Palette.raised }
         /// One step higher than `surfaceRaised` (badges, chips).
-        static var surfaceElevated: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.slate).withAlphaComponent(0.6) : UIColor(Palette.lightElevated) } }
+        static var surfaceElevated: Color { Palette.elevated }
         /// Primary text on a surface.
-        static var onSurface: Color { dynamic { _ in UIColor.label } }
+        static var onSurface: Color { Palette.white }
         /// Secondary / muted text.
-        static var onSurfaceMuted: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : .secondaryLabel } }
+        static var onSurfaceMuted: Color { Palette.mist }
         /// Healthy / serving / ok.
-        static var ok: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.signal) : UIColor(Palette.lightSignal) } }
+        static var ok: Color { Palette.signal }
         /// Busy / waking / warning.
-        static var warn: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.thermal) : UIColor(Palette.lightThermal) } }
+        static var warn: Color { Palette.thermal }
         /// Down / fault.
-        static var bad: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.halt) : UIColor(Palette.lightHalt) } }
+        static var bad: Color { Palette.halt }
         /// A neutral signal for an unknown / indeterminate state.
-        static var neutral: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : UIColor(Palette.lightMist) } }
+        static var neutral: Color { Palette.mist }
 
-        /// PRIMARY ACTION + selection + the live/connection dot (IOS_REDESIGN
-        /// 2026-10-14 §2.1). Previously the app used `Color.accentColor` in 6+
-        /// views because Theme had no accent role at all — every accent usage
-        /// was off-system by construction. Same value as `ok` (mint), but a
-        /// distinct ROLE: mint-as-status and mint-as-primary-action can now be
-        /// retuned independently without touching each other.
-        static var accent: Color { ok }
+        /// PRIMARY ACTION + selection + the live/connection dot. A distinct
+        /// ROLE from `ok`: status-as-green and action-as-orange are tuned
+        /// independently, and the orange never means "healthy".
+        static var accent: Color { Palette.accent }
 
-        /// Text/glyph drawn ON an accent-colored fill. The real contrast bug
-        /// this fixes: white on the mint fill is 1.58:1 (fails AA by a mile),
-        /// so `.white` was hardcoded on filled buttons. This resolves to a
-        /// near-black on dark-mode mint (10.44:1) and white on the darker
-        /// light-mode mint (5.05:1).
-        static var onAccent: Color {
-            // dark: #08241A on mint #7AE2B0 = 10.44:1
-            // light: white on #1B7E55 = 5.05:1
-            dynamic { $0.userInterfaceStyle == .dark
-                ? UIColor(Palette.signalInk)
-                : .white }
-        }
+        /// Text/glyph drawn ON an accent-colored fill. Black on #FF5722 is
+        /// 6.64:1 (passes AA); white on the same fill is 3.16:1 and fails.
+        static var onAccent: Color { Palette.accentInk }
 
-        /// The tint wash behind banners/chips that used to hand-roll
-        /// `someColor.opacity(0.12)` / `0.15` in at least four places
-        /// (StreamingChatView, ContentView). One recipe, one place.
+        /// The tint wash behind banners/chips. One recipe, one place.
         static func tintOverlay(_ base: Color) -> Color {
-            dynamic { traits in
-                UIColor(base).withAlphaComponent(traits.userInterfaceStyle == .dark ? 0.14 : 0.12)
-            }
+            base.opacity(0.16)
         }
     }
 
@@ -162,32 +138,19 @@ enum Theme {
     // `.hsElevated(.low)` / `.hsElevated(.mid)`.
     enum Elevation {
         /// Separators between rows: a hairline stroke, no shadow.
-        static var hairline: Color { Theme.Semantic.onSurface.opacity(0.08) }
+        static var hairline: Color { Palette.hairline }
 
-        /// Cards and small raised surfaces (spec `low` = 0/1/3). Light mode is
-        /// stronger because white-on-white carries no other cue (spec §2.3).
-        static var lowShadow: Color {
-            dynamic { $0.userInterfaceStyle == .light
-                ? UIColor.black.withAlphaComponent(0.28)
-                : UIColor.black.withAlphaComponent(0.20) }
-        }
+        /// Cards and small raised surfaces (spec `low` = 0/1/3). On black the
+        /// shadow is mostly a depth cue; the `surfaceRaised` fill does the
+        /// visible separation.
+        static var lowShadow: Color { Palette.graphite.opacity(0.60) }
         static let lowRadius: CGFloat = 3
         static let lowY: CGFloat = 1
 
         /// Floating bars such as the home dock (spec `mid` = 0/6/16).
-        static var midShadow: Color {
-            dynamic { $0.userInterfaceStyle == .light
-                ? UIColor.black.withAlphaComponent(0.28)
-                : UIColor.black.withAlphaComponent(0.18) }
-        }
+        static var midShadow: Color { Palette.graphite.opacity(0.55) }
         static let midRadius: CGFloat = 16
         static let midY: CGFloat = 6
-    }
-
-    /// Build a `Color` that re-resolves per trait collection (used to make the
-    /// semantic roles adapt to light/dark automatically).
-    private static func dynamic(_ resolve: @escaping (UITraitCollection) -> UIColor) -> Color {
-        Color(UIColor { resolve($0) })
     }
 }
 

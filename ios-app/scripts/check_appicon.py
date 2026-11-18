@@ -3,8 +3,10 @@
 Two things are proven here, both by measurement (not by looking):
 
 1. PIXELS — each 1024 master is the geometry it claims. Coordinates come from
-   assets-master/*.svg (1024 canvas): live node (512,262), parked node
-   (280,712), waking node (744,712), field sampled at the corners.
+   assets-master/*.svg (1024 canvas): the operator's block letter H is three
+   flat rectangles — left bar x 254–346, right bar x 676–768, both y 241–745;
+   crossbar x 346–676, y 447–539. The field is sampled at the corners. The
+   tinted master is monochrome by contract (white H, no hue).
 2. WIRING — actool (the asset compiler Xcode uses) compiles the catalog,
    leaves no unassigned child, and emits CFBundleIconName == AppIcon.
    This is the check that matters: build_check.sh is swiftc-only and would
@@ -24,17 +26,32 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 SET = ROOT / "Assets.xcassets" / "AppIcon.appiconset"
 
-DARK = {"field": (0x16, 0x18, 0x1D), "live": (0x7A, 0xE2, 0xB0),
-        "parked": (0xA7, 0xB0, 0xC0), "waking": (0xF2, 0xA6, 0x5A)}
-LIGHT = {"field": (0xF1, 0xF2, 0xF6), "live": (0x1B, 0x7E, 0x55),
-         "parked": (0x55, 0x60, 0x6E), "waking": (0xB4, 0x53, 0x09)}
-TINTED = {"field": (0x1D, 0x21, 0x29), "live": (0xFF, 0xFF, 0xFF),
-          "parked": None, "waking": None}
+# The app is dark-only, so the default and dark appearances are the same art:
+# pure black field with the #FF5722 block H. Tinted is the monochrome variant
+# iOS recolours with the user's chosen tint.
+BLACK_ORANGE = {"field": (0x00, 0x00, 0x00),
+                "left": (0xFF, 0x57, 0x22),
+                "right": (0xFF, 0x57, 0x22),
+                "cross": (0xFF, 0x57, 0x22)}
+TINTED = {"field": (0x00, 0x00, 0x00),
+          "left": (0xFF, 0xFF, 0xFF),
+          "right": (0xFF, 0xFF, 0xFF),
+          "cross": (0xFF, 0xFF, 0xFF)}
 
-PTS = {"field": (32, 1000), "live": (512, 262), "parked": (280, 712), "waking": (744, 712)}
+# Interior points of the three H strokes + a background point.
+PTS = {"field": (32, 1000), "left": (300, 400), "right": (720, 600),
+       "cross": (512, 493)}
 
-# filename -> expected tones (default entry is the LIGHT master)
-FILES = {"AppIcon.png": LIGHT, "AppIcon-dark.png": DARK, "AppIcon-tinted.png": TINTED}
+# Measured spans of the H at row 400 (bar-to-bar) and column 512 (crossbar).
+ROW_Y = 400
+ROW_SPAN = (254, 767)          # x 254–768 exclusive
+COL_X = 512
+COL_SPAN = (447, 538)          # y 447–539 exclusive (rasterise rounds the last row)
+
+# filename -> expected tones (default entry is the shared black+H master)
+FILES = {"AppIcon.png": BLACK_ORANGE,
+         "AppIcon-dark.png": BLACK_ORANGE,
+         "AppIcon-tinted.png": TINTED}
 
 
 def close(a, b, tol=10):
@@ -54,29 +71,37 @@ def check_pixels() -> bool:
             print(f"FAIL {name}: size {im.size}, expected (1024,1024)")
             ok = False
             continue
+        file_ok = True
         for key, (x, y) in PTS.items():
-            want = expect[key]
-            if want is None:
-                continue
             got = im.getpixel((x, y))
-            if not close(got, want):
-                print(f"FAIL {name}.{key} at {(x, y)}: got {got}, want {want}")
-                ok = False
-        if name == "AppIcon-tinted.png":
-            # monochrome variant: lower nodes are white at reduced alpha over
-            # the field — assert a light grey, not a colour.
-            for key in ("parked", "waking"):
-                x, y = PTS[key]
-                r, g, b = im.getpixel((x, y))[:3]
-                if not (r > 0x60 and abs(r - g) < 14 and abs(g - b) < 14):
-                    print(f"FAIL tinted.{key}: {(r, g, b)} is not a grey value")
-                    ok = False
+            if not close(got, expect[key]):
+                print(f"FAIL {name}.{key} at {(x, y)}: got {got}, want {expect[key]}")
+                file_ok = False
         for cx, cy in ((4, 4), (1020, 4), (4, 1020), (1020, 1020)):
             if not close(im.getpixel((cx, cy)), expect["field"], tol=6):
                 print(f"FAIL {name}: corner {(cx, cy)} not field colour")
-                ok = False
-        if ok:
-            print(f"ok   {name}: 1024x1024, node + field colours verified")
+                file_ok = False
+        mark = expect["left"]
+        xs = [x for x in range(1024) if close(im.getpixel((x, ROW_Y)), mark)]
+        ys = [y for y in range(1024) if close(im.getpixel((COL_X, y)), mark)]
+        if not xs or abs(xs[0] - ROW_SPAN[0]) > 1 or abs(xs[-1] - ROW_SPAN[1]) > 1:
+            print(f"FAIL {name}: H bar span at row {ROW_Y} is "
+                  f"{(xs[0], xs[-1]) if xs else None}, want {ROW_SPAN}")
+            file_ok = False
+        if not ys or abs(ys[0] - COL_SPAN[0]) > 1 or abs(ys[-1] - COL_SPAN[1]) > 1:
+            print(f"FAIL {name}: crossbar span at column {COL_X} is "
+                  f"{(ys[0], ys[-1]) if ys else None}, want {COL_SPAN}")
+            file_ok = False
+        if name == "AppIcon-tinted.png":
+            # Monochrome contract: the H carries no hue, so iOS can tint it.
+            for key in ("left", "right", "cross"):
+                r, g, b = im.getpixel(PTS[key])[:3]
+                if not (r > 0xF0 and abs(r - g) < 4 and abs(g - b) < 4):
+                    print(f"FAIL tinted.{key}: {(r, g, b)} is not a white/grey value")
+                    file_ok = False
+        if file_ok:
+            print(f"ok   {name}: 1024x1024, block-H geometry + field colours verified")
+        ok = ok and file_ok
     return ok
 
 
