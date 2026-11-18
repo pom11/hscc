@@ -141,6 +141,55 @@ not sign up for.
 Thin sibling after the change: `265 passed, 10 skipped`, rc=0 — 5 skips + 5
 failures became 10 skips and nothing else moved. Canonical: `275 passed, 0 skipped`.
 
+### And a third the audit still had not measured — `hscc-cluster` (t_b884497b)
+
+`hscc-cluster` answered the same question four separate ways in four files — a
+`_HAS_HERMES_CLI` module flag in `test_lifecycle_hooks.py`, and module-level
+`pytest.importorskip("hermes_cli…")` in `test_dispatch_hook.py`,
+`test_review_escalation.py` and `test_protocol_violation_bound.py` — none of it
+visible to the roster block, so a green `hscc-cluster` leg said nothing about why
+19 cases had not run. Base on the thin sibling: `1077 passed, 22 skipped`.
+
+This leg is also where the collection-time answer is **provably** the wrong shape,
+not merely inelegant. `workflow._active_profile_name` inserts
+`~/.hermes/hermes-agent` into `sys.path` the first time it runs and leaves it
+there (workflow.py:523) — production's own import fence, the hand-rolled kind that
+`hscc_daemon` replaced with `hermes_import.agent_tree_on_path` for exactly this
+reason in t_8eafef82 (`hscc_daemon/profile_roster.py:120-126`). So the same
+process gives the same capability two different answers, and the thin `-rs` output
+after the change shows both in one run:
+
+| skip reason (all `hermes_cli.kanban_db` unless noted) | cases | what it means |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'hermes_cli'` | 13 | hermes not on the path yet |
+| `ModuleNotFoundError: No module named 'ruamel'` | 4 | hermes found, its deps not — after the fence ran |
+| `hermes_cli.plugins` / `hermes_cli.profiles`, no module named `hermes_cli` | 3 + 1 | other capabilities, same cause |
+
+A flag computed once at import can report exactly one of the first two. Four
+capabilities are probed instead of one flag, because the measured import graph
+says they fail apart: `hermes_cli.plugins` survives without
+`ruamel`/`toolsets`/`agent.deadline`, `hermes_cli.plugins_dispatch` needs neither
+it nor `hermes_cli.config`, and the board trio (`kanban_db` +
+`kanban_db_connect` + `kanban_db_dispatch`) does not. Plus a fifth probe for the
+case that imports no hermes in this process at all and spawns its payload with
+`sys.executable` — that one asks the child, from the child's own stderr, and skips
+only on an import failure so a child that died of anything else still fails.
+
+Thin sibling after the change: `1095 passed, 20 skipped`, rc=0 (17 hermes skips —
+down from 19 because four JSONL-writer cases and two stub-injecting ones were
+being skipped for a hermes they never touch, and module-level `importorskip` had
+been collapsing three real cases into one skipped item). Canonical:
+`1112 passed, 3 skipped`, rc=0 — and those 3 are the diffusion fixture and the
+live-`sparkrun` fence: **no hermes skip at all**, which is the property that
+matters. Guard: `hscc-cluster/tests/test_hermes_gap_single_posture.py`, 11 tests,
+green on both interpreters.
+
+One finding the probes surfaced about the guards themselves: a "must not skip"
+check written as a bare probe call does not fail when a probe is mutated to skip
+unconditionally — the `Skipped` skips the *watcher*, and the leg prints green. The
+guard now converts a skip in that position into an `AssertionError`
+(`_must_not_skip`); the mutation that proved it was P4.
+
 ## TL;DR
 
 `scripts/run_tests.sh` takes any interpreter through `HSCC_TEST_PY`. The

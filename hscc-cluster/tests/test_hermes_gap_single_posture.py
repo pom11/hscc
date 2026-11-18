@@ -440,7 +440,8 @@ def test_every_case_that_touches_real_hermes_gates_before_it_touches_it():
             if not node.name.startswith("test_"):
                 continue
             touches = bool(_hermes_imports(_imports_in(node))) or bool(
-                _calls_in(node) & helpers)
+                _calls_in(node) & helpers) or any(
+                _is_owner_gate(s) for s in ast.walk(node) if isinstance(s, ast.Call))
             if not touches:
                 continue
             body = _body_after_docstring(node)
@@ -501,7 +502,11 @@ def test_a_capability_that_is_importable_does_not_skip():
             f"{label}: getter reported {reported!r} but importing "
             f"{[m for m in modules if not _imports_here(m)]} says otherwise")
         if importable:
-            getattr(hermes_gap, require)()           # must not raise Skipped
+            # NOT `with _assert_skipped()` in reverse: a Skipped raised here would
+            # skip THIS test and the leg would stay green — the mutant silences its
+            # own watcher, which is exactly the "leg green because silenced" shape
+            # this probe exists to catch. A skip here is a failure, said plainly.
+            _must_not_skip(require, lambda: getattr(hermes_gap, require)())
         else:
             with _assert_skipped():
                 getattr(hermes_gap, require)()
@@ -533,8 +538,10 @@ def test_the_child_probe_answers_from_the_child_not_from_here():
         f"the child skip must name the module and say it was the child: {reason}")
     with _assert_skipped():
         hermes_gap.require_child_ran_hermes(1, died)
-    hermes_gap.require_child_ran_hermes(0, "")        # a good run never skips
-    hermes_gap.require_child_ran_hermes(1, "assertion blew up")   # a bug never skips
+    _must_not_skip("require_child_ran_hermes(rc=0 — the child succeeded)",
+                   lambda: hermes_gap.require_child_ran_hermes(0, ""))
+    _must_not_skip("require_child_ran_hermes(rc=1 of an assertion, not an import)",
+                   lambda: hermes_gap.require_child_ran_hermes(1, "assertion blew up"))
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +565,23 @@ class _assert_skipped:
             return False                      # a real error: let it propagate
         self._caught.value = exc
         return True
+
+
+def _must_not_skip(what, call):
+    """Run a probe call that must NOT skip, and treat a skip as a FAILURE.
+
+    The obvious spelling — call it and let the skip bubble — is a hole this family
+    has to close deliberately: a ``Skipped`` raised inside a test skips THAT test,
+    so a probe mutated to always skip turns its own watcher yellow instead of red
+    and the leg prints "green". Mutation P4 proved the hole was real here.
+    """
+    try:
+        call()
+    except pytest.skip.Exception as exc:
+        raise AssertionError(
+            f"{what} skipped where it must not — a probe that answers 'missing' "
+            "when the capability is present silences every gated case in the leg "
+            "and nothing reports it") from exc
 
 
 def _imports_here(module):
