@@ -37,12 +37,15 @@ Scope decisions (stated, not hidden):
     ``hscc-project/tests/test_session_discovery.py::_require_hermes_state``) and
     ``scripts/run_tests.sh``'s roster block above is the authority for who owns
     what; ``test_the_live_roster_...`` pins that block against the code.
-  * ``hscc-roles/tests/test_profile_root_assert.py:149`` carries its own
+  * ``hscc-roles/tests/test_profile_root_assert.py`` once carried its own
     ``pytest.skip("hermes_cli not importable ...")`` with no probe module behind
-    it. Deliberately NOT folded into this sweep: it is a different leg with a
+    it. Deliberately NOT folded into this sweep — it is a different leg with a
     different capability, and folding it in here would make an hscc-api guard
-    police another plugin's harness. Recorded as found-by-sweep, carded
-    separately (t_0fd2c149).
+    police another plugin's fixtures. Recorded as found-by-sweep and carded
+    separately (t_0fd2c149); t_74141b24 resolved it the same way, ONE rung over:
+    ``hscc-roles/tests/hermes_gap.py`` plus that leg's own guard
+    ``hscc-roles/tests/test_hermes_gap_single_posture.py``. So the two legs share
+    an idiom and an owner list, not a sweep.
   * ``routes_orchestrator.py`` imports ``hermes_state`` in PRODUCTION code and
     is out of scope: production code must not skip, it must answer honestly.
 
@@ -256,7 +259,13 @@ def test_the_live_roster_in_the_runner_names_exactly_the_probes_that_exist():
     # ``require_*`` / ``_require_*`` names the roster block advertises as gates.
     advertised = set(re.findall(r"\b_?require_[a-z_]+\b", roster))
     owners = (OWNER, "hscc_daemon/tests/real_hermes.py",
-              "hscc-project/tests/test_session_discovery.py")
+              "hscc-project/tests/test_session_discovery.py",
+              # This leg's guard does not police another leg's probe modules, so
+              # an hscc-roles gate the roster advertises would otherwise read here
+              # as "a gate no probe owner defines". Its own guard
+              # (hscc-roles/tests/test_hermes_gap_single_posture.py) carries the
+              # same list and pins ITS owner's exports back against the block.
+              "hscc-roles/tests/hermes_gap.py")
     texts = {rel: (REPO / rel).read_text() for rel in owners}
     for rel in owners:
         assert (REPO / rel).exists(), f"probe owner {rel} is gone"

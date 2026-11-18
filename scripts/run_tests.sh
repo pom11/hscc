@@ -40,17 +40,24 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 #                                        real_predicate_or_skip
 #   hscc-project  tests/test_session_discovery.py::_require_hermes_state,
 #                 tests/test_mcp_server.py::_hermes_kanban_error
+#   hscc-roles    tests/hermes_gap.py    require_hermes_cli_profiles (hermes'
+#                                        own profile resolver — what
+#                                        rolelib.native_profiles_dir resolves
+#                                        through) / require_hermes_cli_config_writer
+#                                        (``hermes_cli.config``: the round-trip
+#                                        writer generator.py delegates to)
 #   hscc-api      tests/hermes_gap.py    require_hermes_state (SessionDB) /
 #                                        require_hermes_profile_library
 #                                        (``hermes_cli.profiles``: resolver +
 #                                        writer, test_profile_root.py)
 #
-# Enforced, not asserted: hscc-api/tests/test_hermes_gap_single_posture.py
-# sweeps that leg for a private copy of any probe above — the shape this block
-# exists to prevent was measured in it until t_0fd2c149 — and fails if this
-# roster and the probe modules disagree in either direction. THIS BLOCK is the
-# live authority for which probes exist; the audit page below is the dated
-# measurement of record.
+# Enforced, not asserted: one guard per leg that has a probe —
+# hscc-api/tests/test_hermes_gap_single_posture.py and
+# hscc-roles/tests/test_hermes_gap_single_posture.py each sweep THEIR OWN leg for
+# a private copy of a probe (the shape this block exists to prevent was measured
+# in both of those legs) and fail if this roster and the probe modules disagree in
+# either direction. THIS BLOCK is the live authority for which probes exist; the
+# audit page below is the dated measurement of record.
 #
 # THE STAMP RULE. Under a sibling interpreter a leg is GREEN when the only
 # non-passing lines are skips whose reason names the missing hermes import
