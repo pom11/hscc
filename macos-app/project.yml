@@ -124,6 +124,11 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: HSCC
+        # Release scripts pass MARKETING_VERSION/CURRENT_PROJECT_VERSION on the
+        # xcodebuild command line; without these keys in the generated plist the
+        # cask's version and the app's CFBundleShortVersionString would drift.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         HSCCAppGroup: $(HSCC_APP_GROUP)
         # Menu-bar-only: no Dock icon, no app switcher entry.
         LSUIElement: true
@@ -197,6 +202,8 @@ targets:
       path: Sources/HSCCMacWidgets/Info.plist
       properties:
         CFBundleDisplayName: HSCC Widgets
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         HSCCAppGroup: $(HSCC_APP_GROUP)
         LSMinimumSystemVersion: "14.0"
         # WidgetKit discovers the extension through this point identifier.

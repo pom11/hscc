@@ -4,6 +4,32 @@ Menu-bar-only macOS client for the same HSCC API the iOS app reads. Part 1 is
 the XcodeGen project, the menu bar app and Settings. Part 2 (t_1143c19b) adds
 `HSCCMacWidgets`, a WidgetKit extension that puts the same six widgets on the
 desktop and in Notification Center. Both targets join the iOS app's App Group.
+Part 3 installs the app with Homebrew (cask) and publishes signed, notarized
+releases.
+
+## Install
+
+```sh
+brew install --cask pom11/hscc/hscc-widgets
+```
+
+The cask installs `HSCC Widgets.app` into `/Applications`, requires macOS
+Sonoma (14) or newer, and upgrades with `brew upgrade --cask hscc-widgets`.
+
+**Add the desktop widgets:** right-click an empty part of the desktop →
+**Edit Widgets** (or click the widget gallery at the bottom of Notification
+Center), search for **HSCC**, then drag any of the six widgets onto the desktop.
+The first launch may ask for permission to open the app; after that the tiles
+read the clusters saved in the app.
+
+**Menu bar icon:** after the first launch a monochrome **H** appears in the menu
+bar. The app is menu-bar-only — there is no Dock icon and no main window. Click
+the H for the dashboard, or open **Settings…** from that menu.
+
+**Launch at login:** Settings → **Menu Bar** → **Launch at login**. This uses
+`SMAppService`; macOS may ask for approval in System Settings → General →
+Login Items, and the toggle mirrors the real state rather than only storing a
+preference.
 
 ## Build
 
@@ -60,6 +86,45 @@ launch at login (`SMAppService`). The **Appearance** tab is the iOS editor
 override, presets, colour/typography/density controls and the live preview.
 Every write reloads the desktop timelines with `WidgetCenter.reloadAllTimelines`
 and refreshes the open menu bar dropdown.
+
+## Release
+
+Releases are Developer ID-signed, notarized, stapled and published as a GitHub
+release asset on `pom11/hscc`; the Homebrew cask points at that asset. One-time
+setup on the release Mac (the values are never committed):
+
+```sh
+export HSCC_DEVELOPMENT_TEAM=YOURTEAMID   # same team as the iOS app
+xcrun notarytool store-credentials hscc-notary --apple-id <id> --team-id <team>
+```
+
+Rehearse first — `--dry-run` really runs the project generation, archive,
+Developer ID export and signature/extension/App Group checks, then only prints
+the notarize/staple/zip/upload/cask steps:
+
+```sh
+macos-app/scripts/release.sh --dry-run 0.1.0
+```
+
+Real release (builds, notarizes, staples, zips, uploads `macos-widgets-v<version>`
+with `--latest=false`, and prints the cask):
+
+```sh
+macos-app/scripts/release.sh 0.1.0
+```
+
+Publish the cask to the tap with `--push-cask`, or run the generator directly
+(it renders from the local zip, commits through `gh api`, and needs no tap
+clone):
+
+```sh
+python3 scripts/bump_cask.py --version 0.1.0 --zip macos-app/build/release/0.1.0/HSCC-Widgets-0.1.0.zip --push
+```
+
+The release tag is deliberately `macos-widgets-v<version>`, not `v<version>`:
+the macOS app must never shadow the CLI's "latest" release. Re-running the
+script for a version already released replaces the asset (`--clobber`) and keeps
+the release out of "latest"; the cask push is idempotent.
 
 ## Gates
 
