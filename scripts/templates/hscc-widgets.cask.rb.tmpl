@@ -13,7 +13,7 @@ cask "hscc-widgets" do
     strategy :github_releases
   end
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "HSCC Widgets.app"
 
