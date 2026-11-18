@@ -49,7 +49,15 @@
 #
 # This probe contains NO backtick character of its own — the payload is built
 # with printf '\140'. Deliberate: a probe carrying the banned byte would be
-# disqualified by the rule it tests.
+# disqualified by the rule it tests, and because this file writes a file with an
+# interpolating heredoc, R2 of heredoc_backtick_check.sh holds even its COMMENTS to
+# that rule — a byte in a comment here is a refusal, not a measured-inert note.
+#
+# CHECK THE MEASUREMENT, not the claim. That sentence was prose for three cards and
+# the first edit to this file since put two bytes of the byte in a comment while a
+# check that looked like the one below passed: piping tr -dc into "wc -l" counts LINES,
+# and tr's output has no newline in it, so it reports 0 for any number of bytes. The
+# count below is BYTES, printed on every run and load-bearing before a single leg runs.
 #
 # Usage: ios-app/scripts/widget_settings_check_backtick_probe.sh
 set -uo pipefail
@@ -59,6 +67,22 @@ GATE="${SELF_DIR}/widget_settings_check.sh"
 [ -f "$GATE" ] || { echo "PROBE FAILED — gate not found at $GATE" >&2; exit 1; }
 GATE_BEFORE="$(shasum -a 256 "$GATE" | cut -d' ' -f1)"
 IOSAPP="$(cd "${SELF_DIR}/.." && pwd)"
+REPO="$(cd "${IOSAPP}/.." && pwd)"
+
+# Sibling projects the gate reads by relative path, read out of the gate itself.
+# widget_settings_check.sh greps MAC_APP="../macos-app" for the desktop-widget wiring
+# (t_1143c19b), and a copy that cannot see a sibling prints FAIL where the real gate
+# prints ok — the control leg then accuses a healthy guard of refusing legitimate runs.
+# Derived rather than listed here for the same reason the banner set is derived: the
+# copy tree being written down by hand is exactly what made project.yml (t_d1a9eeb6) and
+# then macos-app (t_b62678cc) each redden the runner in turn. Only the double-quoted
+# "../name" literal form counts, and any name starting with '.' is dropped so no value
+# can point a link above the repo.
+gate_siblings=$(grep -o '"\.\./[A-Za-z0-9_.-]*"' "$GATE" 2>/dev/null \
+                | tr -d '"' | sed -e 's|^\.\./||' | grep -v '^\.' | sort -u || true)
+if [ -n "$gate_siblings" ]; then
+  echo "gate siblings to expose to each copy (derived from $GATE): $(printf '%s ' $gate_siblings)"
+fi
 
 # The byte under discussion, without writing it into this file.
 BT="$(printf '\140')"
@@ -77,6 +101,19 @@ probe_fail=0
 pok()   { echo "  ok: $1"; }
 pfail() { echo "  FAIL: $1"; probe_fail=$((probe_fail + 1)); }
 pnote() { echo "  note: $1"; }
+
+# The zero-byte claim, as a measurement with teeth rather than a sentence. BYTES, via
+# wc -c — wc -l on the same output reports 0 for any count, which is exactly how two
+# bytes in a comment once passed this file's own check (t_b62678cc). Refused before a
+# single leg runs: a probe carrying the byte cannot certify its absence in anyone else,
+# and R2 of heredoc_backtick_check.sh refuses this file for it anyway.
+SELF_PATH="${SELF_DIR}/$(basename "${BASH_SOURCE[0]}")"
+self_bytes=$(tr -dc "$BT" < "$SELF_PATH" | wc -c | tr -d '[:space:]')
+echo "self-bytes: $self_bytes byte(s) of the banned character in $SELF_PATH"
+if [ "$self_bytes" != "0" ]; then
+  echo "PROBE FAILED — this probe carries $self_bytes byte(s) of the character it exists to ban, so every verdict it prints would be worthless. Quote prose with double quotes: this file may carry the byte in NO context, comment included." >&2
+  exit 1
+fi
 
 sentinel_line=$(awk -v s="$SENTINEL" 'index($0, s) { print NR; exit }' "$GATE")
 if [ -z "$sentinel_line" ]; then
@@ -137,7 +174,62 @@ if [ -z "$shell_anchor" ]; then
   shell_anchor="$ban_line"
 fi
 
+# ---- what a clean pass PRINTS is derived from the gate, never transcribed ------
+# This is the leg that reddened main: the expectation here was the literal 3, and
+# the gate gained a fourth section (SURFACE COVERAGE). The control copy then ran
+# byte-identical to the canonical gate, exited 0, printed all four banners and zero
+# FAIL lines — a PASS — and was reported as "the guard is refusing legitimate runs".
+# The copy mechanism was never the problem; a number was written down. That is the
+# transcribed-count trap this repo already documents for the
+# defaults.surfaces.count == 4 assertion inside this very gate: any claim about HOW
+# MANY of something a thing has must be read out of the thing, or it reddens the day
+# the thing grows. (Written without the banned byte on purpose — this file carries an
+# unquoted heredoc, so R2 of heredoc_backtick_check.sh holds its COMMENTS to the
+# zero-byte rule too; see the check-the-measurement note in the header.)
+#
+# Derived by NAME rather than counted: a run that stops half-way can match a count
+# by accident and cannot match a set. A banner statement is a line whose first
+# non-blank character is not '#' (a comment is not a print) that prints a quoted
+# ALL-CAPS string ending in the word PASSED — the shape every banner here has, in
+# both its bash echo form and its Swift print form inside the harness heredoc.
+banner_stmts=$(awk '
+  { line = $0
+    gsub(/^[[:space:]]/, "", line)
+    if (line == "" || substr(line, 1, 1) == "#") next
+    if (match($0, /["(][A-Z][A-Z ]*PASSED/)) {
+      s = substr($0, RSTART, RLENGTH)
+      gsub(/["(]/, "", s)
+      gsub(/[[:space:]]+$/, "", s)
+      print s
+    }
+  }' "$GATE")
+expected_banners=$(printf '%s\n' "$banner_stmts" | grep -c .)
+banners_derived=1
+if [ "$expected_banners" -eq 0 ]; then
+  pfail "no banner statement could be derived from $GATE — with nothing to expect, 'the unmodified copy passed' would be a claim about an exit code and nothing else, which is the exact evidence this probe exists to refuse. A banner is a non-comment line printing a quoted ALL-CAPS string ending in PASSED; if the gate changed that shape, update this derivation rather than trusting RC 0."
+  banners_derived=0
+else
+  echo "expected banners: $expected_banners, derived from $GATE (not transcribed) — $(printf '%s\n' "$banner_stmts" | paste -sd ',' - | sed 's/,/, /g')"
+fi
+
+# missing_banners <out-file>: every derived banner this run did NOT print, joined
+# by '|'. Empty means the run printed the whole expected set. Reads the population
+# through process substitution, not a pipe, so the accumulator stays in this shell.
+missing_banners() {
+  local out="$1" b miss=""
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    grep -qF -- "$b" "$out" 2>/dev/null || miss="${miss}|${b}"
+  done < <(printf '%s\n' "$banner_stmts")
+  printf '%s' "$miss"
+}
+
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/wscprobe.XXXXXX")"
+
+# Baseline for the stray-artifact leg: what the checkout already looked like dirty.
+# Compared again at the end, so a copy that writes into the tree it audits becomes a
+# finding naming the path instead of an untracked file someone finds next week.
+repo_dirty_before="$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort)"
 
 # run_leg <name> <insert-payload-after-this-line> <slash|hash> [above]
 # "above" is for the boundary leg ONLY: it re-puts the payload directly after the
@@ -154,6 +246,31 @@ run_leg() {
   # HSCC_BUNDLE_PREFIX. Without this link the unmodified control copy fails to
   # find it, so the probe would be refusing a legitimate gate (t_d1a9eeb6).
   ln -s "${IOSAPP}/project.yml" "${root}/project.yml" 2>/dev/null
+  # Sibling projects the gate reads as "../name" (macos-app today) have to exist
+  # relative to the copy's PARENT, because the gate cds into the copy root and then
+  # resolves MAC_APP="../macos-app" from there. Without this the control copy prints
+  # FAIL where the same gate passes in place (macOS app/settings or project spec is
+  # missing) — a false accusation against the guard, caused by the harness. The list
+  # comes from the gate, so the next sibling it starts reading is followed automatically.
+  local sib
+  for sib in ${gate_siblings}; do
+    [ "$sib" = "$(basename "$IOSAPP")" ] && continue
+    if [ -d "${REPO}/${sib}" ]; then
+      # ONLY when the destination is absent. ln -s onto an existing symlink that
+      # resolves to a directory follows the link and creates the new link INSIDE the
+      # target — which is the real sibling project in the checkout. Measured: the second
+      # leg of one run left macos-app/macos-app -> <repo>/macos-app in the work tree, and
+      # both legs still printed green because ../macos-app resolved either way. Same
+      # family as cp onto a symlinked mirror: a link that lands somewhere else changes
+      # nothing and looks like a pass.
+      if [ ! -e "${WORKROOT}/${sib}" ] && [ ! -L "${WORKROOT}/${sib}" ]; then
+        ln -s "${REPO}/${sib}" "${WORKROOT}/${sib}"
+      fi
+      [ -e "${WORKROOT}/${sib}" ] || pfail "run_leg ${name}: could not expose sibling ${sib} to the copy — the control leg would then judge a tree the real gate never runs in, which is a harness fault, not a finding"
+    else
+      pnote "run_leg ${name}: the gate names ../${sib} but ${REPO}/${sib} is not a directory — the copy cannot see it, and neither can the real gate"
+    fi
+  done
   ln -s "${IOSAPP}/scripts/widget_settings_check.harness.golden" \
         "${root}/scripts/widget_settings_check.harness.golden" 2>/dev/null
   # The canonical, unmodified gate sits beside the copy ON PURPOSE: that is the
@@ -186,8 +303,16 @@ run_leg() {
 
 # classify <leg-name> <expect: refused|inert-ok|passing|report>
 classify() {
-  local name="$1" expect="$2" banners
+  local name="$1" expect="$2" banners fails missing
+  # Two different measures for two different jobs, deliberately. The loose count is
+  # for the REFUSAL legs, where under-counting is the dangerous direction: a run
+  # that exited non-zero while mentioning PASSED anywhere at all is not a clean
+  # refusal, so anything narrower than "any PASSED on stdout" could flatter a
+  # partial run. The PASS legs are judged the other way round, against the derived
+  # NAME set, where over-counting is the dangerous direction.
   banners=$(grep -c 'PASSED' "$OUT" 2>/dev/null); banners=${banners:-0}
+  fails=$(grep -c 'FAIL:' "$OUT" 2>/dev/null); fails=${fails:-0}
+  missing=$(missing_banners "$OUT")
   if [ "$expect" = "report" ]; then
     if [ "$ban_ok" != 1 ]; then
       pfail "$name: cannot report the uncovered span because the boundary anchor was rejected — a leg that cannot measure its own window must not report a number"
@@ -219,17 +344,30 @@ classify() {
       # stopped. Only the first is a property of the comment.
       if [ "$RC" -ne 0 ] && [ "$banners" -eq 0 ]; then
         pok "$name: REFUSED BY THE BAN (RC $RC, 0 banners) — the ban caught it before bash expanded anything; do not read this as the comment being inert"
-      elif [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
-        pok "$name: INERT (RC 0, 4 banners) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
+      elif [ "$RC" -eq 0 ] && [ "$banners_derived" = 1 ] && [ -z "$missing" ] && [ "$fails" -eq 0 ]; then
+        pok "$name: INERT (RC 0, all $expected_banners derived banner(s) present, 0 FAIL:) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
       else
-        pfail "$name: unexplained outcome (RC $RC, $banners banner(s)) — a comment leg must either be refused by the ban or run clean to four banners"
+        pfail "$name: unexplained outcome (RC $RC, $banners PASSED line(s), $fails FAIL: line(s), unprinted derived banner(s): ${missing:-none}) — a comment leg must either be refused by the ban or run clean to the full derived banner set ($expected_banners)"
       fi
       ;;
     passing)
-      if [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
-        pok "$name: unmodified copy still passes (RC 0, 4 banners, $(grep -c 'FAIL:' "$OUT" 2>/dev/null) FAIL:)"
+      # "It passed" is four things and the exit code is the weakest of them: RC 0,
+      # every derived banner printed, none missing, no FAIL line on the way. A copy
+      # that exited 0 without the last banner never reached the end of the gate; one
+      # that exited 0 over a FAIL line is the shape of the shipped defect this class
+      # descends from. All four are checked, against names read out of the gate.
+      if [ "$banners_derived" != 1 ]; then
+        pfail "$name: cannot judge a pass at all — no banner statement was derivable from $GATE (see the FAIL above), so this leg has no outside measure and will not guess from an exit code"
+      elif [ "$RC" -ne 0 ]; then
+        pfail "$name: unmodified copy exited $RC with $banners PASSED line(s), $fails FAIL: line(s), unprinted derived banner(s): ${missing:-none} — the control copy is cp'd from the canonical gate with nothing edited (the gate's own sha is verified unchanged below), so a refusal here is the guard refusing a legitimate run, not an attack"
+      elif [ -n "$missing" ]; then
+        pfail "$name: copy exited 0 but never printed ${missing#|} — of $expected_banners banner statement(s) derived from $GATE the run printed $banners, so it stopped short of the end of the gate while still exiting 0"
+      elif [ "$fails" -ne 0 ]; then
+        pfail "$name: copy exited 0 while printing $fails FAIL: line(s) alongside $banners PASSED line(s) — a green exit over a red assertion is the original defect's shape, never a pass"
+      elif [ "$banners" -ne "$expected_banners" ]; then
+        pfail "$name: every derived banner printed ($expected_banners) yet $banners line(s) carried PASSED — the gate prints that word somewhere no banner statement is; name it and account for it"
       else
-        pfail "$name: unmodified copy did NOT pass (RC $RC, $banners banner(s)) — the guard is refusing legitimate runs, not just attacks"
+        pok "$name: unmodified copy passes (RC 0, $banners/$expected_banners banners, names derived from $GATE, 0 FAIL:) — the expectation is derived, so a fifth section added to the gate cannot redden this leg again"
       fi
       ;;
   esac
@@ -304,6 +442,31 @@ classify "boundary (payload at line 2, above the ban's first executable statemen
 echo "control: the same copy mechanism, nothing mutated"
 run_leg "control" "-" slash
 classify "control (unmodified copy)" "passing"
+
+# Did anything land INSIDE the checkout? Exposing a sibling project to a copy is a new
+# way to write into it (ln -s onto an existing symlink follows the link and lands the new
+# link inside the real project — measured: macos-app/macos-app after a second leg), and
+# the whole point of the private work dir is that the audited tree is never the scratch.
+# Scoped to the blast radius: a new path under the audited project or under a sibling the
+# copies read fails by name; a dirty path elsewhere is disclosed, not blamed on this probe.
+repo_dirty_after="$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort)"
+stray="$(comm -13 <(printf '%s\n' "$repo_dirty_before") <(printf '%s\n' "$repo_dirty_after"))"
+if [ -n "$stray" ]; then
+  while IFS= read -r spath; do
+    [ -n "$spath" ] || continue
+    stop="${spath%%/*}"
+    shit=0
+    [ "$stop" = "$(basename "$IOSAPP")" ] && shit=1
+    for sib in ${gate_siblings}; do [ "$stop" = "$sib" ] && shit=1; done
+    if [ "$shit" = 1 ]; then
+      pfail "stray-artifact: this probe left $spath inside the checkout (under $stop/, a tree the copies read) — a copy writes to its own work dir, never to the tree it audits"
+    else
+      pnote "stray-artifact: $spath appeared in git status during the run, outside the audited tree — not this probe's subject, disclosed rather than ignored"
+    fi
+  done < <(printf '%s\n' "$stray")
+else
+  pok "stray-artifact: nothing new appeared inside the checkout (porcelain identical before and after every leg)"
+fi
 
 GATE_AFTER="$(shasum -a 256 "$GATE" | cut -d' ' -f1)"
 if [ "$GATE_BEFORE" = "$GATE_AFTER" ]; then
