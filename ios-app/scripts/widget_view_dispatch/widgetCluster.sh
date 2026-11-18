@@ -19,10 +19,21 @@
 set -uo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# Prove the REAL source checks `!configured` before `unreachable` (both bodies).
-count=$(grep -c 'if !entry.configured' Sources/HSCCWidgets/ClusterWidgetViews.swift)
-echo "source 'if !entry.configured' occurrences = $count (want 2: small+medium bodies)"
-[ "$count" -ge 2 ] || { echo "❌ source order regressed: unconfigured no longer checked first"; exit 1; }
+# Prove the REAL source still takes the unconfigured gate before anything else.
+# The gate moved into `ClusterEntry.text(for:)` (one owner for all six
+# families), so the check reads that rule where it lives and requires every
+# family to route through it.
+copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' Sources/HSCCWidgets/ClusterWidgetMetrics.swift)
+u=$(printf '%s\n' "$copy" | grep -n '!configured' | head -1 | cut -d: -f1)
+p=$(printf '%s\n' "$copy" | grep -n 'Paused' | head -1 | cut -d: -f1)
+if [ -n "$u" ] && [ -n "$p" ] && [ "$u" -lt "$p" ]; then
+  echo "source shortGateLabel checks !configured (line $u) before Paused (line $p)"
+else
+  echo "❌ source order regressed: unconfigured no longer checked first"; exit 1
+fi
+families=$(grep -c 'entry.text(for:' Sources/HSCCWidgets/ClusterWidgetViews.swift)
+echo "source family text routes = $families (want >= 6)"
+[ "$families" -ge 6 ] || { echo "❌ a cluster family bypasses the shared gate/text model"; exit 1; }
 
 cat > "$TMPDIR/widget_dispatch_$$.swift" <<'SWIFT'
 import Foundation

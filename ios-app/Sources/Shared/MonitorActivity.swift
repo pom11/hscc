@@ -35,6 +35,12 @@ struct MonitorActivityAttributes: ActivityAttributes {
         /// Daemon-host machine data (the machine HSCC runs on), or nil when the
         /// host section is hidden or the fetch failed.
         public var host: HostMetric?
+        /// Nodes the monitor listed / that answered — the CLI's host tally.
+        public var nodesUp: Int? = nil
+        public var nodesTotal: Int? = nil
+        /// Distinct models and the CLI total Gen t/s from the serving table.
+        public var models: Int? = nil
+        public var genTps: Double? = nil
         /// When the app last pushed a successful update — drives the staleDate
         /// and the honest age shown after a force-quit.
         public var updatedAt: Date
@@ -51,6 +57,13 @@ struct NodeMetric: Codable, Hashable {
     public var memPct: Double?      // mem_used_pct
     public var gpuName: String?     // gpu_name
     public var gpuUtilPct: Double?  // gpu_util_pct
+    /// The serving table's model for this node, CPU/GPU temperatures, and the
+    /// backend's run/wait counts. All `serving[]` / `sample` fields.
+    public var model: String? = nil
+    public var cpuTempC: Double? = nil
+    public var gpuTempC: Double? = nil
+    public var running: Int? = nil
+    public var waiting: Int? = nil
 }
 
 /// The daemon-host machine data the monitor activity surfaces.
@@ -62,4 +75,6 @@ struct HostMetric: Codable, Hashable {
     public var memPct: Double?      // memory.percent
     public var diskPct: Double?     // disk.percent
     public var daemonRunning: Bool
+    /// `daemon_uptime_seconds` — the daemon's own uptime (`hscc status`).
+    public var daemonUptimeSeconds: Int? = nil
 }

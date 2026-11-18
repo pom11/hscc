@@ -1,9 +1,12 @@
 # Widget coverage audit — iOS and macOS
 
-Measured on `origin/main` at `f8325093` (2026-11-18). This is a read-only
-audit: no widget code was changed. A family is counted as covered only when it
-is both listed in that widget's `supportedFamilies` **and** has a non-placeholder
-view in the family dispatch switch.
+Measured on `wt/oc-t_d3ee353c` (2026-11-18), rebased on `origin/main` after the
+cluster route parity fix. This revision refurbishes the Cluster and Monitor
+widgets and their Live Activities against `hscc-api/docs/WIDGET_ROUTES.md`; the
+family matrix below is unchanged. A family is counted as covered only when it is
+both listed in that widget's `supportedFamilies` **and** has a non-placeholder
+view in the family dispatch switch (or routes through the shared, gated text
+model the dispatch selects).
 
 Legend:
 
@@ -81,7 +84,7 @@ Commands, run in this worktree:
 
 ```text
 $ bash ios-app/scripts/build_check.sh
-HSCC: 69 files, 0 error(s), 0 warning(s)
+HSCC: 73 files, 0 error(s), 0 warning(s)
 HSCCWidgets: 18 files, 0 error(s), 0 warning(s)
 HSCCLiveActivity: 5 files, 0 error(s), 0 warning(s)
 HSCCLiveActivityMonitor: 13 files, 0 error(s), 0 warning(s)
@@ -90,7 +93,7 @@ full compile clean, 0 warnings (compile only — never built or run on a device)
 
 ```text
 $ bash macos-app/scripts/build_check.sh
-HSCCMac: 18 files, 0 error(s), 0 warning(s)
+HSCCMac: 20 files, 0 error(s), 0 warning(s)
 HSCCMacWidgets: 18 files, 0 error(s), 0 warning(s)
 full compile clean, 0 warnings (compile only — never built or run)
 ```
@@ -102,6 +105,34 @@ $ bash ios-app/scripts/model_decode_check.sh
 compiling real models + harness into a macOS CLI...
 ALL DECODE CHECKS PASSED — 93/93 checks (over 56 committed fixtures) decoded against the real models
 ```
+
+### Cluster/Monitor render check
+
+```text
+$ bash ios-app/scripts/cluster_widget_check.sh
+CLUSTER WIDGET CHECK PASSED — 56 checks: fixture rows, every family's lines, nil-is-not-zero, redaction
+$ bash ios-app/scripts/monitor_activity_check.sh
+PASS: real /v1/cluster/monitor + /v1/daemon/host decode + derive to a populated ContentState
+```
+
+The cluster fixture is a scrubbed capture of the live `/v1/cluster/monitor`
+body (documentation `192.0.2.x` addresses, generic node/model/workload names,
+`serving[]` present). The check asserts the exact lines each family draws:
+
+| Family | Headline | Detail | Rows |
+|---|---|---|---|
+| systemSmall | `4/4 up` | `2 models · 12.3 t/s` | none (one number) |
+| systemMedium | `4/4 up` | `2 models · 2 jobs · 12.3 t/s` | 4 compact node rows |
+| systemLarge / XL | `4/4 up` | models · jobs · t/s | every node, + CPU/GPU temp and run/wait |
+| accessoryInline | `4/4 up · 2 models · 12.3 t/s` | — | none |
+| accessoryCircular | `4/4` gauge | — | none |
+| accessoryRectangular | `4/4 up` | models · jobs · t/s | first node row |
+
+Every token maps to `WIDGET_ROUTES.md`: tally = `hosts[].error`,
+models/throughput = `serving[].model` / `serving[].gen_tps`, jobs =
+`workloads[].workload_id` (and `status.workloads.count`), temperatures =
+`sample.cpu_temp_c` / `sample.gpu_temp_c`, daemon health =
+`daemon_running` / `daemon_uptime_seconds`.
 
 ## 6. Shipped feature checklist
 
@@ -133,3 +164,9 @@ Non-gap coverage notes:
   four surfaces.
 - Four macOS widgets do not offer `systemExtraLarge`; the macOS feature
   intentionally reserves that family for Cluster and Monitor.
+- The Cluster tile no longer draws a kanban board row. That row was not
+  `hscc cluster monitor` / `hscc cluster status` output; the board surfaces own
+  it. The removed read also brings the tile back to two cluster requests.
+- The Monitor tile no longer computes a fleet CPU average for its circular
+  family. A circular now shows the answered/listed host tally; the per-node CPU
+  numbers remain on the node rows, exactly as the CLI prints them.

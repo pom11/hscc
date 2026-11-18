@@ -55,10 +55,17 @@ print("== Derived MonitorActivityAttributes.ContentState ==")
 print("state        : \(content.state)")
 print("updatedAt    : \(content.updatedAt)")
 print("nodes.count  : \(content.nodes.count)")
+print("nodesUp      : \(printIf("nodesUp=", content.nodesUp))")
+print("nodesTotal   : \(printIf("nodesTotal=", content.nodesTotal))")
+print("models       : \(printIf("models=", content.models))")
+print("genTps       : \(printIf("genTps=", content.genTps))")
 for n in content.nodes {
     var parts = ["\(n.label) -> CPU \(fmt(n.cpuPct))%"]
     parts.append("RAM \(fmt(n.memPct))%")
     if let g = n.gpuName { parts.append("GPU \(g) \(fmt(n.gpuUtilPct))%") }
+    if let model = n.model { parts.append("model \(model)") }
+    if let gpuTemp = n.gpuTempC { parts.append("GPU \(Int(gpuTemp.rounded()))°C") }
+    if let cpuTemp = n.cpuTempC { parts.append("CPU \(Int(cpuTemp.rounded()))°C") }
     print("  " + parts.joined(separator: ", "))
 }
 if let h = content.host {
@@ -73,6 +80,25 @@ if let h = content.host {
 var ok = true
 if content.nodes.isEmpty { print("WARN: no nodes derived (empty monitor hosts? section on)"); }
 if content.host == nil { print("WARN: host nil though section on (daemon host decode ok but make excluded?)") }
+
+// The pushed tally and serving totals must equal the fields the live wire
+// carried — not a second opinion computed by the extension.
+let expectedUp = monitor!.hosts.filter { $0.error == nil }.count
+let expectedServing = ServingSummary(rows: monitor!.serving)
+if content.nodesUp != expectedUp || content.nodesTotal != monitor!.hosts.count {
+    print("FAIL: tally \(String(describing: content.nodesUp))/\(String(describing: content.nodesTotal)) != wire \(expectedUp)/\(monitor!.hosts.count)")
+    ok = false
+}
+if content.models != expectedServing.models || content.genTps != expectedServing.genTps {
+    print("FAIL: serving totals != wire serving[]")
+    ok = false
+}
+let wireModels = Set((monitor!.serving ?? []).compactMap { $0.shortModel })
+let pushedModels = Set(content.nodes.compactMap { $0.model })
+if !pushedModels.isSubset(of: wireModels) {
+    print("FAIL: a pushed node model is not in serving[]")
+    ok = false
+}
 
 if ok {
     print("\nPASS: real /v1/cluster/monitor + /v1/daemon/host decode + derive to a populated ContentState")
