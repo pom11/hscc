@@ -119,6 +119,28 @@ Two honest notes for whoever enforces the stamp rule next:
 * Case counts in these tables are measurements at a sha, not invariants. The
   guard pins roster ↔ probe agreement; it deliberately does not pin counts.
 
+### A leg this audit never measured — `hscc-roles` (t_74141b24)
+
+The four surfaces above are `hscc-project`, `hscc-api`, `hscc_daemon` and
+`install.sh`. `hscc-roles` was never measured on the thin sibling, and when it was
+measured during t_0fd2c149's follow-up card it was **red**, not skipping:
+`5 failed, 255 passed, 5 skipped`, rc=1. Its refusals (a profile home inside the
+live root must be refused; a refused intent must write nothing) take hermes' own
+native root as their premise, and `rolelib.native_profiles_dir()` returns `None`
+without `hermes_cli` — so on a thin sibling there is nothing to aim at.
+
+It resolved one rung over from `hscc-api`, not by being folded into it: the leg now
+has `hscc-roles/tests/hermes_gap.py` (two capability probes — `hermes_cli.profiles`
+and `hermes_cli.config`, kept apart for the reason the table above already gives)
+and its own guard, `hscc-roles/tests/test_hermes_gap_single_posture.py`. Both are
+named in the runner's roster block, which is the live authority; the pin that
+enforces the roster now runs in both legs, one sweep each, because one leg's guard
+policing another plugin's fixtures is the failure mode t_0fd2c149 deliberately did
+not sign up for.
+
+Thin sibling after the change: `265 passed, 10 skipped`, rc=0 — 5 skips + 5
+failures became 10 skips and nothing else moved. Canonical: `275 passed, 0 skipped`.
+
 ## TL;DR
 
 `scripts/run_tests.sh` takes any interpreter through `HSCC_TEST_PY`. The
