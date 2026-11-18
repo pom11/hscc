@@ -95,6 +95,20 @@ PERIODIC_INTERVALS = {
     # max(600, 2*60+90) = the usual 600 s floor. Every tick stamps state, and
     # the tick always reports ok=True — this is visibility, not a failing gate.
     "stream_silence": 60,
+    # t_81af8884: the metrics HISTORY recorder (metrics_history.check_metrics_history).
+    # 2 s is deliberate and is NOT a new polling cadence invented here: it is
+    # ``cluster_live.DEFAULT_INTERVAL``, the cadence `hscc cluster monitor --live`
+    # already runs at, and the stream's own sources are that module's
+    # ``HostStream`` + ``ServingPoller`` — one long-running ``sparkrun cluster
+    # monitor`` child holding its ssh channels open, so a tick reads the newest
+    # frame that already arrived instead of opening anything (the operator's
+    # "one sampler at 2 s, persistent connections, no new ssh per tick"). The
+    # 2 s points land in a memory-only ring; the DISK sees one short sqlite
+    # transaction per closed minute, which is why a 2 s cadence is affordable.
+    # verify's per-stream rule widens it to max(600, 2*2+90) = the 600 s floor
+    # like every other stream, and the tick stamps on every path including the
+    # one where the sampler raised.
+    "metrics_history": 2,
 }
 
 
@@ -700,6 +714,7 @@ def run_daemon_loop():
     from . import kanban_pause
     from .proxy_stall import check_proxy_stall
     from .stream_silence import check_stream_silence
+    from .metrics_history import check_metrics_history
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -795,6 +810,14 @@ def run_daemon_loop():
         # Same supervised thread machinery as every stream above; the tick
         # stamps stream_silence.json on every path and never raises.
         "stream_silence": check_stream_silence,
+        # t_81af8884: the metrics history recorder. Same supervised machinery;
+        # the tick never raises (it swallows sampler failures into the state
+        # stamp, because a stream that goes dark is indistinguishable from one
+        # that died). It is the ONLY consumer of the monitor's sampling path
+        # inside the loop — it ticks cluster_live's HostStream/ServingPoller
+        # rather than adding a poller of its own, and every sample it takes goes
+        # to the tiered store under ~/.hscc/metrics.
+        "metrics_history": check_metrics_history,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the
@@ -936,6 +959,17 @@ def run_daemon_loop():
     except Exception as e:                          # pragma: no cover
         log(f"daemon lock release error (next claim adjudicates): {e}",
             "WARN")
+    # t_81af8884: the metrics sampler owns a long-running `sparkrun cluster
+    # monitor` child. Daemon threads die with the process but a SUBPROCESS does
+    # not — without this the child (and the ssh channels it holds) would be
+    # orphaned on every daemon restart, which is exactly the leak a "persistent
+    # connections" design has to pay for. Teardown is best-effort and never
+    # blocks the stop path.
+    try:
+        from . import metrics_history
+        metrics_history.close_sampler()
+    except Exception as e:                          # pragma: no cover
+        log(f"metrics sampler teardown error (ignored): {e}", "WARN")
 
 
 def run_autodown_loop(stop_event, interval=30):
