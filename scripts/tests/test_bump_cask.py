@@ -59,7 +59,7 @@ def test_render_carries_the_whole_cask_contract():
             'macos-widgets-v1.2.3/HSCC-Widgets-1.2.3.zip"') in text
     assert 'name "HSCC Widgets"' in text
     assert 'app "HSCC Widgets.app"' in text
-    assert 'depends_on macos: ">= :sonoma"' in text
+    assert 'depends_on macos: :sonoma' in text
 
 
 def test_render_zaps_the_app_group_container_and_preferences():
