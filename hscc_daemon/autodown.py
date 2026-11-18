@@ -673,7 +673,9 @@ def list_stale_tasks(kanban_db=None, now=None, board=None,
             # t_b014c2b8: same guard as _board_has_active_work — this is the
             # listing of that same board set, and the two must agree (see the
             # single-enumeration contract in the docstring).
-            with board_pin.open_board(kanban_db, b, multi=multi) as conn:
+            # Read-only door: a listing must work under the brew venv, which
+            # has no hermes_state for connect_closing()'s preflight.
+            with board_pin.open_board_ro(kanban_db, b, multi=multi) as conn:
                 rows = _all_non_terminal(conn)
         except Exception as e:
             result["errors"].append(f"board {label!r} unreadable: {e}")

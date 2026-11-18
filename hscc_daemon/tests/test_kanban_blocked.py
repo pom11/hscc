@@ -431,3 +431,77 @@ class TestBoardEnumerationSeam:
         assert out["boards"] == 2
         assert {t["board"] for t in out["tasks"]} == {"alpha", "beta"}
         assert kb.opened == ["alpha", "beta"]
+
+
+# ---------------------------------------------------------------------------
+# Listings use the read-only door (brew venv has no hermes_state)
+# ---------------------------------------------------------------------------
+
+class _FileKb:
+    """A kanban lib whose boards are real sqlite FILES and whose write door
+    fails the way the brew venv does: ``connect_closing`` raises
+    ``No module named 'hermes_state'`` while ``kanban_db_path`` still answers.
+    """
+
+    def __init__(self, tmp_path, boards):
+        self._paths = {}
+        for slug, tasks in boards.items():
+            path = tmp_path / f"{slug}.db"
+            conn = sqlite3.connect(path)
+            conn.execute(f"CREATE TABLE tasks ({_TASK_COLS})")
+            conn.execute(
+                "CREATE TABLE task_comments (id INTEGER PRIMARY KEY "
+                "AUTOINCREMENT, task_id TEXT, author TEXT, body TEXT, "
+                "created_at INTEGER)")
+            for t in tasks:
+                conn.execute(
+                    "INSERT INTO tasks (id, title, status, created_at) "
+                    "VALUES (?,?,?,?)",
+                    (t["id"], t.get("title", ""), t.get("status", "blocked"),
+                     t.get("created_at", _old_ts(10))))
+                for body in t.get("comments", []):
+                    conn.execute(
+                        "INSERT INTO task_comments (task_id, author, body, "
+                        "created_at) VALUES (?,?,?,?)",
+                        (t["id"], "orch", body, int(time.time())))
+            conn.commit()
+            conn.close()
+            self._paths[slug] = path
+
+    def list_boards(self):
+        return [{"slug": slug} for slug in self._paths]
+
+    def kanban_db_path(self, board=None):
+        return self._paths[board]
+
+    @contextlib.contextmanager
+    def connect_closing(self, board=None):
+        raise ModuleNotFoundError("No module named 'hermes_state'")
+        yield  # pragma: no cover
+
+
+class TestListingsReadOnlyDoor:
+    def test_blocked_listing_reads_without_the_write_door(self, tmp_path,
+                                                          monkeypatch):
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        kb = _FileKb(tmp_path, {
+            "a": [{"id": "t_1", "comments": ["waiting on operator"]}],
+            "b": [{"id": "t_2"}, {"id": "t_3", "status": "running"}],
+        })
+        out = kbx.list_blocked_tasks(kanban_db=kb)
+        assert out["errors"] == []
+        assert sorted(t["id"] for t in out["tasks"]) == ["t_1", "t_2"]
+        t1 = next(t for t in out["tasks"] if t["id"] == "t_1")
+        assert t1["comments"] == ["waiting on operator"]
+
+    def test_stale_listing_reads_without_the_write_door(self, tmp_path,
+                                                        monkeypatch):
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        kb = _FileKb(tmp_path, {
+            "a": [{"id": "t_old", "status": "todo",
+                   "created_at": _old_ts(30)}],
+        })
+        out = autodown.list_stale_tasks(kanban_db=kb)
+        assert not [e for e in out["errors"] if "hermes_state" in e]
+        assert "a" in out["boards"]
+        assert [t["id"] for t in out["tasks"]] == ["t_old"]
