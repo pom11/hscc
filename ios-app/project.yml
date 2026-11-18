@@ -459,6 +459,13 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The large / extra-large table layout (t_9e64d9d9): which of the CLI's
+      # columns and how many of its rows the two biggest monitor surfaces draw,
+      # plus the six fields only they print (VRAM, GPU clock, net, uptime, fan,
+      # load). Foundation-only for the same reason as the file above — the view
+      # files import WidgetKit, and a layout rule no gate can run is a layout
+      # rule that drifts.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.

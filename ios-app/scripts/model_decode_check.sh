@@ -46,12 +46,21 @@ real_models=(
   # file's formatters against goldens generated from hscc_daemon/cluster_live.py,
   # so the harness has to compile the real thing, not a copy of it.
   Sources/Shared/ClusterMonitorViewModel.swift
+  # The large/XL table layout (t_9e64d9d9): which columns and rows the two
+  # biggest monitor surfaces draw, and the six fields only they print. Layout
+  # lives outside the view files so this harness can RUN it. It names
+  # `FleetSurface` and `FleetFormat.dash`, so the file that owns them is
+  # compiled here too — a harness that skipped a dependency would either not
+  # compile or, worse, test a copy of the rule.
+  Sources/Shared/ClusterNodeTally.swift
+  Sources/Shared/ClusterMonitorTables.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
   # Declarations only (Swift forbids top-level statements outside main.swift),
   # so the monitor parity checks live here and main.swift calls them.
   scripts/model_decode_check/monitor_parity.swift
+  scripts/model_decode_check/monitor_tables.swift
   scripts/model_decode_check/main.swift
 )
 
