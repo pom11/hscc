@@ -117,6 +117,15 @@ targets:
       # fail to compile if a referenced file is missing; a file here that isn't
       # listed is simply not compiled).
       - path: Sources/HSCC/HSCCApp.swift
+      # In-app update check (t_2a1e5913), APP TARGET ONLY. The release pipeline
+      # publishes /ios/version.json; UpdateCheck.swift is the pure parse/order/
+      # dismissal half and UpdateChecker.swift fetches it over its own short-
+      # timeout URLSession (no token, never through the cluster). Neither file
+      # is listed in HSCCWidgets / HSCCLiveActivity / HSCCLiveActivityMonitor,
+      # and the extensions must never gain a check: scripts/update_check.sh
+      # proves the file lists stay that way.
+      - path: Sources/HSCC/UpdateCheck.swift
+      - path: Sources/HSCC/UpdateChecker.swift
       # Two-screen root (t_9664a1c8, pivot slice S1): the drawer shell (AppShell),
       # its rows (Sidebar) and the home dock (HomeView) are deleted with the
       # console; ConfigView is the only screen HSCCApp roots.
@@ -188,6 +197,9 @@ targets:
       - path: Sources/HSCC/BoardProgressActivityDriver.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
+      # The dismissible "Update <version> available" banner (t_2a1e5913),
+      # rendered at the top of ConfigView. App target only, like its checker.
+      - path: Sources/HSCC/Views/UpdateBanner.swift
       # Widget / Live Activity appearance editor (t_444519ae): the global style
       # plus a per-surface override, with the live small/medium/lock-screen
       # preview. The shared model lives in SharedStore.swift.

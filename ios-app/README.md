@@ -61,6 +61,15 @@ file-by-file disposition of the remaining console files is
 
 - `Sources/HSCC/` — Swift sources (SwiftUI, iOS 26+).
   - `HSCCApp.swift` — app entry point; roots `ConfigView`.
+  - `UpdateCheck.swift` / `UpdateChecker.swift` — the in-app update check
+    (t_2a1e5913). `UpdateCheck.swift` is the pure feed/version/dismissal rule;
+    `UpdateChecker.swift` fetches the public
+    `https://pom11.github.io/hscc/ios/version.json` on launch and at most every
+    six hours in the foreground over its own short-timeout session (no token,
+    never through the cluster). Both are app-target-only; the extensions never
+    check for updates. `Views/UpdateBanner.swift` renders the dismissible
+    banner, and Settings → **About** shows the version/build, the last result
+    and a manual check.
   - `Views/ConfigView.swift` — **the only screen** (t_9664a1c8). Its content is
     the former `SettingsView` moved byte-for-byte, plus `ConnectionBanner`
     (moved from the deleted `ContentView.swift`), the App-Group / token-save

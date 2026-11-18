@@ -87,6 +87,17 @@ override, presets, colour/typography/density controls and the live preview.
 Every write reloads the desktop timelines with `WidgetCenter.reloadAllTimelines`
 and refreshes the open menu bar dropdown.
 
+## Updates
+
+The app uses Sparkle 2 against
+<https://pom11.github.io/hscc/macos/appcast.xml>. Automatic checks run daily by
+default. **Check for Updates…** is in the menu bar dropdown and in Settings →
+**Menu Bar** → **Updates**, which also has the automatic-check and
+automatic-download toggles. When Sparkle finds a release, the dropdown shows an
+**Update &lt;version&gt; available** item. Installing replaces the whole signed
+app bundle — including the embedded `HSCCMacWidgets.appex` — and relaunches the
+menu bar app.
+
 ## Release
 
 **The supported entry point is [`../scripts/release_apps.sh`](../RELEASING.md).**

@@ -19,6 +19,9 @@ struct HSCCApp: App {
     @UIApplicationDelegateAdaptor(NotificationsAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var settings = SettingsStore()
+    /// In-app update check (t_2a1e5913). App target only: the extensions get
+    /// neither this object nor UpdateCheck.swift/UpdateChecker.swift.
+    @StateObject private var updates = UpdateChecker()
     /// Shared Widgets & Live Activities settings (t_dea36c48) — exposed to the
     /// Settings UI as an EnvironmentObject so it can read/write the App-Group
     /// store that every widget/Live Activity extension reads read-only.
@@ -51,6 +54,7 @@ struct HSCCApp: App {
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
                 .environmentObject(router)
+                .environmentObject(updates)
                 // Dark-only (operator request 2026-11-18): the black/orange
                 // palette has no light variants, so pin every scene to dark
                 // even if the device is set to light. The Info.plist
@@ -66,6 +70,10 @@ struct HSCCApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                // In-app update check (t_2a1e5913): launch + every foreground
+                // entry, throttled to one attempt per six hours by
+                // UpdatePreferences. Never touches the cluster connection.
+                Task { await updates.checkIfDue() }
                 // Re-hydrate leftover orphans + resume the foreground poll loop.
                 MonitorActivityDriver.sweepLeftoverMonitors()
                 MonitorActivityDriver.shared.sceneDidBecomeActive()

@@ -24,9 +24,9 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
 
-# Sparkle 2 drives the in-app update check (next card consumes the appcast the
-# release path publishes at /macos/appcast.xml). Pinned exactly: an update
-# framework is not a place for a floating minor version. The package also
+# Sparkle 2 drives the in-app update check (t_2a1e5913): the app consumes the
+# appcast the release path publishes at /macos/appcast.xml. Pinned exactly: an
+# update framework is not a place for a floating minor version. The package also
 # supplies the release tools (generate_keys / sign_update) after:
 #   xcodebuild -project HSCCMac.xcodeproj -scheme HSCCMac \
 #     -resolvePackageDependencies -derivedDataPath build/DerivedData
@@ -87,6 +87,10 @@ targets:
       - path: Sources/HSCCMac/DashboardView.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
+      # Sparkle 2 (t_2a1e5913): one SPUStandardUpdaterController owns daily
+      # automatic checks, the manual menu/Settings check and the update badge.
+      # App target only — the widget extension never updates itself.
+      - path: Sources/HSCCMac/SparkleUpdater.swift
       # AppIcon + the monochrome MenuBarIcon template image. The app icon PNGs
       # are generated from ios-app/assets-master/*.svg by scripts/make_appicon.sh
       # (never hand-dropped); the menu bar H is an SVG asset with a template

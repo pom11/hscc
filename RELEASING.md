@@ -119,9 +119,20 @@ build (`sparkle:version`), release date, notes link, and an enclosure with the
 notarized zip URL, its byte length and `sparkle:edSignature`. `sign_update` signs
 the exact zip that was uploaded.
 
-`version.json` and `appcast.xml` are what the in-app update checks will read
-(next card); they are published now so a release never depends on a later
-backfill.
+`version.json` and `appcast.xml` are what the in-app update checks read:
+
+* **iOS** (`UpdateChecker`) fetches `version.json` on launch and at most every
+  six hours in the foreground, over its own short-timeout `URLSession` with no
+  token and no cluster client. A newer version/build shows a dismissible
+  "Update &lt;version&gt; available" banner with **What's new** and **Install**;
+  Settings → About shows the running version/build, the last result and a
+  manual check.
+* **macOS** uses Sparkle 2 (`macos-app/Sources/HSCCMac/SparkleUpdater.swift`)
+  against `appcast.xml`. Automatic checks run daily by default; **Check for
+  Updates…** is in the menu bar dropdown and Settings, which also carries the
+  automatic-check and automatic-download toggles. Sparkle installs the signed
+  app bundle (including the embedded widget extension) and relaunches the menu
+  bar app.
 
 ## Add a device (iOS Ad Hoc)
 
@@ -168,14 +179,22 @@ stays under `/ios/manifests/`, and old notes stay under `/ios/notes/` and
 ```sh
 ios-app/scripts/build_check.sh        # 0 errors, 0 warnings
 macos-app/scripts/build_check.sh      # 0 errors, 0 warnings (swiftc-only;
-                                      #  SwiftPM is resolved separately for tools)
+                                      #  Sparkle is resolved separately)
+ios-app/scripts/update_check.sh       # feed rules + app-only target boundary
+macos-app/scripts/update_check.sh     # Sparkle wiring + extension boundary
 python3 -m pytest scripts/tests/test_apps_release.py scripts/tests/test_bump_cask.py
 scripts/release_apps.sh 1.1.0 --dry-run
 python3 scripts/address_guard.py --tracked
 ```
 
 `macos-app/scripts/build_check.sh` compiles the exact per-target file sets with
-`swiftc`, so it does not resolve SwiftPM packages; that is why Sparkle is a
-package dependency and not an `import` in app code yet. The package still
-resolves for the release tools with the `xcodebuild -resolvePackageDependencies`
-command above.
+`swiftc`, so it does not resolve SwiftPM packages. `SparkleUpdater.swift` guards
+its `import Sparkle` with `#if canImport(Sparkle)`: an Xcode build links the
+pinned package and compiles the real updater, while the package-less compile
+gate still checks the rest of the target. To compile the REAL Sparkle branch in
+the gate, point it at a resolved or prebuilt framework:
+
+```sh
+HSCC_SPARKLE_FRAMEWORK=/path/containing/Sparkle.framework \
+  macos-app/scripts/build_check.sh
+```

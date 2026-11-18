@@ -136,6 +136,8 @@ struct ConfigView: View {
     /// Deep-link router: the only entry point left that can navigate, and the
     /// only thing that can still report a failed link (t_136762f3).
     @EnvironmentObject private var router: DeepLinkRouter
+    /// In-app update feed (t_2a1e5913). Injected by HSCCApp; about/banner only.
+    @EnvironmentObject private var updates: UpdateChecker
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -186,6 +188,11 @@ struct ConfigView: View {
         NavigationStack {
             Form {
                 Section {
+                    // In-app update banner (t_2a1e5913) first: a newer release
+                    // is actionable, and dismissal is per version. The
+                    // connection banner stays below it as the screen's one
+                    // connection readout.
+                    UpdateBanner()
                     // First element of the screen's content, below the nav bar
                     // (never `.safeAreaInset(edge: .top)` — that draws over the bar).
                     ConnectionBanner()
@@ -406,6 +413,56 @@ struct ConfigView: View {
                     Text("Customise the colour, fonts, size, density and visible chrome of every widget and Live Activity — one global style, with an optional override per surface.")
                 }
 
+                // Settings → About (t_2a1e5913): the running version/build,
+                // the explicit check, and the honest result of the last one.
+                Section {
+                    LabeledContent("Version", value: updates.runningVersion.version)
+                    LabeledContent("Build", value: String(updates.runningVersion.build))
+
+                    Button {
+                        Task { await updates.checkNow() }
+                    } label: {
+                        if updates.isChecking {
+                            HStack {
+                                ProgressView()
+                                Text("Checking…")
+                            }
+                        } else {
+                            Label("Check for updates", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(updates.isChecking)
+
+                    if let lastResult = updates.lastResult {
+                        Label {
+                            Text(lastResult)
+                        } icon: {
+                            Image(systemName: lastResult.hasPrefix("Update ")
+                                  ? "arrow.down.circle.fill"
+                                  : (lastResult.hasPrefix("Up to date")
+                                     ? "checkmark.circle.fill"
+                                     : "questionmark.circle"))
+                        }
+                        .font(.footnote)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Not checked yet.")
+                            .font(.footnote)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+
+                    if let lastChecked = updates.lastChecked {
+                        Text("Last checked \(lastChecked.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("Checks the public release feed on launch and at most every six hours in the foreground. The check uses no cluster connection or token.")
+                }
+
                 Section {
                     if let tokenSaveFailure = settings.tokenSaveFailure {
                         Label(tokenSaveFailure, systemImage: "exclamationmark.triangle.fill")
@@ -429,6 +486,10 @@ struct ConfigView: View {
             .safeAreaInset(edge: .bottom) { saveBar }
             .navigationTitle("Settings")
             .onAppear(perform: rootDidAppear)
+            // Launch check (t_2a1e5913): the first foreground entry also goes
+            // through checkIfDue(), but .task guarantees one attempt even if
+            // the scene never reports a phase change.
+            .task { await updates.checkIfDue() }
             // MARK: QR-scan flow — camera sheet → confirm → apply → test.
             .sheet(isPresented: $showingScanner) {
                 QRScannerView(
