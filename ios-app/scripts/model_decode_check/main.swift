@@ -792,6 +792,17 @@ monitorParity(c, fixture: "v1_cluster_monitor_edge.json",
               text: "v1_cluster_monitor_edge.cli.txt")
 monitorSampleDecodeShape(c)
 
+// ---- The large / extra-large table layout (t_9e64d9d9). The checks are in
+// monitor_tables.swift; only the calls are here. Parity above owns the CELLS;
+// these own the SELECTION (which columns a width draws), the CLIP, and the six
+// fields only the two biggest monitor surfaces print (VRAM, GPU clock, net,
+// uptime, fan, load) — none of which the CLI's host table has a column for, so
+// they are pinned by rule and by fixture rather than by a CLI golden.
+monitorRateRules(c)
+monitorDetailRules(c)
+monitorPlans(c)
+monitorTablesFromFixtures(c)
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. The exit code is the guard; the words below only
