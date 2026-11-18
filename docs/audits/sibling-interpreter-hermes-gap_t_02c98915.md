@@ -91,6 +91,34 @@ a probe name, for the `try`/`except`-around-a-hermes-import shape, for a private
 skip reason, and for a file that imports the real `hermes_state` without the
 shared gate.
 
+### Re-measured (2026-11-18, thin sibling `~/miniconda3/envs/p313/bin/python`,
+one pytest process per dir exactly as the runner does)
+
+| leg | this page's "after (gated)" table (`3aca67dd`) | today, at `41cd7cdb` |
+|---|---|---|
+| `hscc-project` | 0 failed, 1458 passed, 4 skipped | 0 failed, 1458 passed, 4 skipped, rc=0 |
+| `hscc_daemon` | 0 failed, 3672 passed, 23 skipped | 0 failed, 3693 passed, 23 skipped, rc=0 |
+| `hscc-api` | 0 failed, 970 passed, 25 skipped | 0 failed, 1041 passed, 31 skipped, rc=0 |
+
+The `hscc-api` delta is fully accounted for: +7 tests are this card's guard, +6
+skips are the profile-library family from the reconciliation above, nothing else
+moved. Under the canonical interpreter the same command reports
+`1071 passed, 1 skipped`, rc=0 — the canonical skip count is precisely the number
+that must NOT move when a gate is added, and it did not.
+
+Two honest notes for whoever enforces the stamp rule next:
+
+* The thin `hscc_daemon` leg's 23 skips include two whose reasons are not a
+  missing hermes import (`test_orch_waker_wake_claim.py` — "deployed Hermes has
+  no §3.1 wake-claim helpers"; `test_kanban_monitor_deps.py` — "clean board-read
+  pass is not healthy on this machine"). They were already in the 23 this page
+  counted, so they are not drift; but read literally, the stamp rule's "a skip
+  that does not name that reason is a test that quietly stopped running" would
+  flag them. Different leg, not this card's call — recorded so the next reader
+  does not re-derive it.
+* Case counts in these tables are measurements at a sha, not invariants. The
+  guard pins roster ↔ probe agreement; it deliberately does not pin counts.
+
 ## TL;DR
 
 `scripts/run_tests.sh` takes any interpreter through `HSCC_TEST_PY`. The
