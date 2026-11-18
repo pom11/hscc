@@ -83,8 +83,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
-  git fetch --quiet "$REMOTE" "$BRANCH"
+if git -C "$REPO_ROOT" ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+  git -C "$REPO_ROOT" fetch --quiet "$REMOTE" "$BRANCH"
   # Detached on purpose: publishing pushes HEAD:$BRANCH, so nothing needs a
   # local branch named $BRANCH, and a local branch that another worktree has
   # checked out cannot make this run fail.

@@ -17,7 +17,7 @@
   --line: #2a2a2a;
   --ink: #fff;
   --muted: #9a9a9a;
-  --faint: #777;
+  --faint: #8a8a8a;   /* small print still clears 4.5:1 on black */
   --accent: #FF5722;
   --accent-down: #e64a19;
   --radius: 12px;
@@ -253,7 +253,8 @@ footer {
     clip-path: inset(50%);
   }
 
-  table.tpl, table.tpl tbody, table.tpl tr, table.tpl th, table.tpl td {
+  table.tpl, table.tpl caption, table.tpl tbody, table.tpl tr,
+  table.tpl th, table.tpl td {
     display: block;
     width: auto;
   }

@@ -215,6 +215,15 @@ def test_publish_site_script_never_uses_a_destructive_git_operation():
 
 # ── 2. the release scripts must keep the root page ───────────────────────────
 
+def _stub_gh(tmp_path: Path) -> Path:
+    """A `gh` that always succeeds: these tests must never reach GitHub."""
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (stub / "gh").chmod(0o755)
+    return stub
+
+
 def test_macos_release_script_keeps_the_root_page(tmp_path):
     """Behavioural: run the real publish_macos.sh against a throwaway remote.
 
@@ -246,11 +255,7 @@ def test_macos_release_script_keeps_the_root_page(tmp_path):
     git("commit", "--quiet", "-m", "release fixture", cwd=root)
     git("remote", "add", "origin", str(bare), cwd=root)
 
-    stub = tmp_path / "bin"
-    stub.mkdir()
-    (stub / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (stub / "gh").chmod(0o755)
-
+    stub = _stub_gh(tmp_path)
     import os
     env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
            "TMPDIR": str(tmp_path)}
@@ -269,6 +274,69 @@ def test_macos_release_script_keeps_the_root_page(tmp_path):
     # The release itself landed.
     assert after["macos/index.html"].startswith(b("<!doctype html>"))
     assert b("9.9.9") in after["macos/appcast.xml"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="publish_pages.sh renders icons with sips (macOS)")
+def test_ios_release_script_keeps_the_root_page(tmp_path):
+    """Same proof for the iOS leg: a real publish, a throwaway remote.
+
+    The iOS publisher writes the most files of the three (page, manifest,
+    versioned manifests, notes, feed, three icon sizes), so it is the leg most
+    likely to grow a `git add -A` one day.
+    """
+    for tool in ("gh", "sips", "unzip"):
+        if shutil.which(tool) is None:
+            pytest.skip(f"{tool} is not installed; the script's probe would abort")
+
+    root = tmp_path / "repo"
+    (root / "ios-app" / "scripts").mkdir(parents=True)
+    (root / "ios-app" / "site").mkdir(parents=True)
+    (root / "ios-app" / "Assets.xcassets" / "AppIcon.appiconset").mkdir(parents=True)
+    (root / "scripts").mkdir(parents=True)
+    (root / "apps").mkdir(parents=True)
+    shutil.copy(IOS_PUBLISH, root / "ios-app" / "scripts" / "publish_pages.sh")
+    shutil.copy(REPO / "ios-app" / "scripts" / "make_manifest.py",
+                root / "ios-app" / "scripts" / "make_manifest.py")
+    shutil.copy(REPO / "ios-app" / "site" / "index.html",
+                root / "ios-app" / "site" / "index.html")
+    shutil.copy(APP_ICON, root / "ios-app" / "Assets.xcassets"
+                / "AppIcon.appiconset" / "AppIcon.png")
+    for name in ("apps_release.py", "changelog_fragments.py"):
+        shutil.copy(SCRIPTS / name, root / "scripts" / name)
+    (root / "apps" / "BUILD_NUMBER").write_text("999\n", encoding="utf-8")
+    ipa = tmp_path / "HSCC-9.9.9.ipa"
+    ipa.write_bytes(b"fake-ipa-bytes")
+
+    planted = dict(PLANTED)
+    planted["index.html"] = "<!doctype html><title>the landing page</title>"
+    bare = make_remote_with_pages(tmp_path, planted)
+
+    git("init", "--quiet", str(root))
+    git("add", "-A", cwd=root)
+    git("commit", "--quiet", "-m", "release fixture", cwd=root)
+    git("remote", "add", "origin", str(bare), cwd=root)
+
+    stub = _stub_gh(tmp_path)
+    import os
+    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
+           "TMPDIR": str(tmp_path)}
+    proc = subprocess.run(
+        ["bash", str(root / "ios-app" / "scripts" / "publish_pages.sh"),
+         "9.9.9", str(ipa)],
+        capture_output=True, text=True, cwd=str(root), env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = remote_files(bare)
+    assert after["index.html"] == b(planted["index.html"]), (
+        "publish_pages.sh rewrote or dropped the landing page at the root")
+    assert after["macos/keep-marker.txt"] == b("macos-marker-4820")
+    assert after["ios/keep-marker.txt"] == b("ios-marker-9137")
+    # The release itself landed.
+    assert after["ios/index.html"].startswith(b("<!doctype html>"))
+    assert b("9.9.9") in after["ios/version.json"]
+    assert "ios/manifests/9.9.9.plist" in after
 
 
 @pytest.mark.parametrize("script", [IOS_PUBLISH, MACOS_PUBLISH],
@@ -510,6 +578,9 @@ def test_page_is_usable_at_phone_width():
     assert "max-width: 760px" in css
     assert "@media (max-width: 619px)" in css, (
         "the phone layout is what makes this readable at 360px")
+    # A `display: table-caption` inside the block-stacked table shrink-wraps to
+    # a few words per line, so the caption has to be switched too.
+    assert "table.tpl caption" in css
     # Nothing may be wider than a phone's content box minus padding.
     for width in re.findall(r"(?<![-\w])width:\s*(\d+)px", css):
         assert int(width) <= 112, f"fixed width {width}px overflows a 360px phone"
