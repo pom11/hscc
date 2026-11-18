@@ -5,26 +5,46 @@ The upstream patch (kanban_db._fire_kanban_lifecycle_hook) fires
 to decide if a resume note is needed. Tested against the real kanban_db with a
 spy on invoke_hook.
 
-Skipped where hermes_cli isn't installed.
+Every case asks hermes_gap which of its TWO capabilities this interpreter can
+reach before doing any work (t_b884497b): ``require_hermes_cli_plugins()`` for
+the registry the hook is registered in and spied through, ``require_hermes_kanban_board()``
+for the temp board the claim is driven on. They are asked apart because either
+can be missing alone — ``hermes_cli.plugins`` is a 400-line pure-python registry
+while ``kanban_db`` drags in the dispatcher and the state schema.
+
+This file used to answer both with one module-level
+``pytest.importorskip("hermes_cli.kanban_db", reason="hermes_cli not installed in
+this env")``: a collection-time answer (the thin sibling's importable-hermes state
+changes mid-run — ``workflow._active_profile_name`` puts ``~/.hermes/hermes-agent``
+on ``sys.path`` the first time it runs, workflow.py:523), a reason naming a
+capability but neither module nor import error, and one skip item for a whole
+module of cases. The hermes imports now happen inside ``_hermes()`` per case, so
+there is nothing at import time to freeze an answer into.
 """
 
 import tempfile
 from pathlib import Path
 
-import pytest
+import hermes_gap
 
-kb = pytest.importorskip("hermes_cli.kanban_db",
-                         reason="hermes_cli not installed in this env")
-# ``connect`` moved to ``hermes_cli.kanban_db_connect`` and ``_record_task_failure``
-# to ``hermes_cli.kanban_db_dispatch`` (2026-09-14); the old ``kanban_db`` paths
-# are removal-scheduled compat shims (or removed, for ``_record_task_failure``)
-# and must not be used here.
-from hermes_cli import kanban_db_connect as _kbc    # noqa: E402
-from hermes_cli import kanban_db_dispatch as _kbd   # noqa: E402
-import hermes_cli.plugins as plugins  # noqa: E402
+
+def _hermes():
+    """``(kanban_db, kanban_db_connect, kanban_db_dispatch, plugins)``, now.
+
+    ``connect`` lives in ``hermes_cli.kanban_db_connect`` and
+    ``_record_task_failure`` in ``hermes_cli.kanban_db_dispatch`` (2026-09-14);
+    the old ``kanban_db`` paths are removal-scheduled compat shims (or removed,
+    for ``_record_task_failure``) and must not be used here.
+    """
+    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli import kanban_db_dispatch as _kbd
+    import hermes_cli.plugins as plugins
+    return kb, _kbc, _kbd, plugins
 
 
 def _board():
+    kb, _kbc, _, _ = _hermes()
     d = tempfile.mkdtemp()
     dbp = Path(d) / "kanban.db"
     kb.init_db(dbp)
@@ -32,10 +52,23 @@ def _board():
 
 
 def test_hook_in_valid_hooks():
+    hermes_gap.require_hermes_cli_plugins()
+    _, _, _, plugins = _hermes()
     assert "kanban_task_claimed" in plugins.VALID_HOOKS
 
 
-def test_hook_fires_on_each_claim(monkeypatch):
+def test_hook_fires_on_the_first_claim(monkeypatch):
+    """A single claim fires ``kanban_task_claimed`` once.
+
+    NAME FIX (t_b884497b): this case used to be named
+    ``test_hook_fires_on_each_claim`` — the same name as the redispatch case
+    ~20 lines below, and Python binds the LAST definition, so pytest collected
+    only the other one and this contract was never exercised while the leg
+    reported it green. Renamed; the body is the original, untouched.
+    """
+    hermes_gap.require_hermes_kanban_board()
+    hermes_gap.require_hermes_cli_plugins()
+    kb, _, _, _ = _hermes()
     conn = _board()
     t = kb.create_task(conn, title="each claim", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
@@ -53,6 +86,9 @@ def test_hook_fires_on_each_claim(monkeypatch):
 
 
 def test_hook_fires_on_each_claim(monkeypatch):
+    hermes_gap.require_hermes_kanban_board()
+    hermes_gap.require_hermes_cli_plugins()
+    kb, _, _kbd, _ = _hermes()
     conn = _board()
     t = kb.create_task(conn, title="redispatch", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
@@ -83,6 +119,9 @@ def test_hook_fires_on_reclaim(monkeypatch, tmp_path):
     """Engineered crash→resume: a real task branch with committed work, a crash,
     then re-dispatch → the live hook posts a resume comment build_worker_context
     surfaces. Proves the full wiring, not just that the hook fires."""
+    hermes_gap.require_hermes_kanban_board()
+    hermes_gap.require_hermes_cli_plugins()
+    kb, _kbc, _kbd, _ = _hermes()
     import subprocess
     import workflow
 

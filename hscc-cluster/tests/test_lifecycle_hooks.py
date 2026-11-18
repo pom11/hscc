@@ -8,42 +8,60 @@ import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import workflow
 
 
 # ── Original tests from origin/main ────────────────────────────────────────
-# These require hermes_cli; skipped gracefully when unavailable.
+# These need hermes' own runtime. The answer to "does THIS interpreter have it?"
+# is ONE function per capability in ``tests/hermes_gap.py`` (t_b884497b) — not a
+# module-level flag: this file used to carry a ``_HAS_HERMES_CLI`` set by a
+# ``try``/``except ImportError`` and read by seven ``@pytest.mark.skipif`` marks,
+# which (a) answered once, at COLLECTION, so a case that could have run by the
+# time it ran stayed skipped, (b) skipped four cases (the two ``*Handler``
+# classes below) that touch no hermes code at all, and (c) said
+# ``"hermes_cli not installed in this env"`` — a capability, no module, no import
+# error, which is what the runner's stamp rule cannot read.
 
-_HAS_HERMES_CLI = True
-try:
-    import hermes_cli.kanban_db as kb  # noqa: E402
-    import hermes_cli.plugins as plugins  # noqa: E402
-except ImportError:
-    _HAS_HERMES_CLI = False
+import hermes_gap
 
 
 def _board():
+    """A real temp kanban board, built through hermes' own schema.
+
+    The imports live HERE, not at module scope: a module-scope import is exactly
+    what made this file's hermes answer a collection-time event. And ``connect``
+    binds from ``kanban_db_connect``, not from ``kanban_db`` — that attribute is
+    gone (the compat shim was removed), and the ``kb.connect`` this file used to
+    call only ever worked when another file had run first:
+    ``workflow.on_kanban_task_claimed`` binds it into the module ``__dict__``
+    (workflow.py:211-214), and ``test_dispatch_hook.py`` — which sorts before
+    this one — is what triggered that. Run alone on an interpreter WITH hermes the
+    six ``TestAutoUnblock`` cases failed with ``AttributeError``; the private flag
+    had them skipped on the thin sibling and the leg green here by ordering luck.
+    """
     d = tempfile.mkdtemp()
     dbp = Path(d) / "kanban.db"
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as _kbc
     kb.init_db(dbp)
-    return kb.connect(dbp)
+    return _kbc.connect(dbp)
 
 
-@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
 class TestHookRegistration:
-    """Hook registration checks — require hermes_cli."""
+    """Hook registration checks — need hermes' own hook registry."""
 
     def test_blocked_hook_in_valid_hooks(self):
+        hermes_gap.require_hermes_cli_plugins()
+        from hermes_cli import plugins
         assert "kanban_task_blocked" in plugins.VALID_HOOKS
 
     def test_completed_hook_in_valid_hooks(self):
+        hermes_gap.require_hermes_cli_plugins()
+        from hermes_cli import plugins
         assert "kanban_task_completed" in plugins.VALID_HOOKS
 
 
-@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
 class TestBlockedHandler:
     """on_kanban_task_blocked writes a JSON line to the blocked log."""
 
@@ -90,7 +108,6 @@ class TestBlockedHandler:
         assert None not in entry.values()
 
 
-@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
 class TestCompletedHandler:
     """on_kanban_task_completed writes a JSON line to the completion log."""
 
@@ -140,13 +157,22 @@ class TestCompletedHandler:
             assert entry[key] is not None
 
 
-@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
 class TestAutoUnblock:
     """_try_auto_unblock promotes a blocked task when its block comments
-    reference the completed parent task_id."""
+    reference the completed parent task_id.
+
+    Every case builds a real temp board, so every case asks
+    ``require_hermes_kanban_board()`` first (t_b884497b) — and each patches
+    ``hermes_cli.kanban_db.connect`` with ``raising=False`` because production
+    honours an explicitly-set ``connect`` (workflow.py:352-353) and that
+    attribute is no longer on the module at all, so a raising patch depended on
+    which other file had happened to run first.
+    """
 
     def test_auto_unblock_with_parent_reference(self, monkeypatch, tmp_path):
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         parent_tid = kb.create_task(conn, title="parent", assignee="coder")
@@ -166,7 +192,7 @@ class TestAutoUnblock:
 
         # Patch _kb.connect to return our test board.
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         result = wf._try_auto_unblock(child_tid, parent_tid)
         assert result is True
@@ -178,7 +204,9 @@ class TestAutoUnblock:
     def test_auto_unblock_no_match(self, monkeypatch):
         """_try_auto_unblock returns False when block comments don't reference
         the parent."""
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         child_tid = kb.create_task(conn, title="child", assignee="coder")
@@ -191,14 +219,16 @@ class TestAutoUnblock:
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         result = wf._try_auto_unblock(child_tid, "nonexistent-parent")
         assert result is False
 
     def test_two_deps_only_one_done_not_unblocked(self, monkeypatch, tmp_path):
         """(a) Two deps referenced, only one done -> NOT unblocked."""
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         parent_a = kb.create_task(conn, title="parent_a", assignee="coder")
@@ -213,7 +243,7 @@ class TestAutoUnblock:
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         result = wf._try_auto_unblock(child_tid, parent_a)
         assert result is False
@@ -224,7 +254,9 @@ class TestAutoUnblock:
 
     def test_two_deps_both_done_unblocked(self, monkeypatch, tmp_path):
         """(b) Two deps referenced, both done -> unblocked."""
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         parent_a = kb.create_task(conn, title="parent_a", assignee="coder")
@@ -240,7 +272,7 @@ class TestAutoUnblock:
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         result = wf._try_auto_unblock(child_tid, parent_a)
         assert result is True
@@ -251,7 +283,9 @@ class TestAutoUnblock:
     def test_substring_lookalike_does_not_trigger(self, monkeypatch, tmp_path):
         """(c) A task id that looks like a substring of another does not
         falsely match (e.g., t_aaaa inside t_aaaaaa)."""
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         real_parent = kb.create_task(conn, title="real_parent", assignee="coder")
@@ -268,7 +302,7 @@ class TestAutoUnblock:
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         # Calling with the real parent id should NOT unblock because
         # the comment references the fake id, not the real parent.
@@ -280,7 +314,9 @@ class TestAutoUnblock:
 
     def test_single_dep_done_unblocked(self, monkeypatch, tmp_path):
         """(d) Single dependency, now done -> unblocked (preserves happy path)."""
+        hermes_gap.require_hermes_kanban_board()
         import workflow as wf
+        from hermes_cli import kanban_db as kb
 
         conn = _board()
         parent_tid = kb.create_task(conn, title="parent", assignee="coder")
@@ -292,7 +328,7 @@ class TestAutoUnblock:
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
-                            lambda *a, **kw: conn)
+                            lambda *a, **kw: conn, raising=False)
 
         result = wf._try_auto_unblock(child_tid, parent_tid)
         assert result is True
@@ -459,15 +495,17 @@ class TestActiveProfileNameFence:
     observability one.
     """
 
-    @pytest.mark.skipif(not _HAS_HERMES_CLI,
-                        reason="hermes_cli not installed in this env")
     def test_real_lookup_names_the_active_profile(self, monkeypatch):
         """Against real hermes_cli: the name must be non-empty and stable.
 
         Hermes points HERMES_HOME at the profile dir, so the active profile is
         derivable in any profile session; the sentinel here would mean the fence
         silently lost hermes_cli (the failure mode this card is fixing).
+
+        Gated on the profile resolver ONLY — this is the one case in the file
+        that needs ``hermes_cli.profiles`` and nothing else (t_b884497b).
         """
+        hermes_gap.require_hermes_cli_profiles()
         from hermes_cli.profiles import get_active_profile_name
 
         expected = get_active_profile_name()
@@ -512,8 +550,6 @@ class TestActiveProfileNameFence:
             assert workflow.on_pre_tool_call(tool_name="terminal") is None
 
 
-@pytest.mark.skipif(not _HAS_HERMES_CLI,
-                    reason="hermes_cli not installed in this env")
 class TestPreToolCallThroughRealHermesBinder:
     """Bind through hermes' OWN callback binder with the real fire-site payload.
 
@@ -523,6 +559,11 @@ class TestPreToolCallThroughRealHermesBinder:
     ``plugins.py``'s ``invoke_lifecycle_hook("pre_tool_call", ...)`` call — means
     a payload drift fails in pytest instead of quietly re-deadening the
     per-profile tool view. Same precedent as #179's completion-binder test.
+
+    Gated on ``require_hermes_cli_plugin_dispatcher()`` — the binder, not the
+    registry it is reached through: they have different requirements and the
+    table in ``hermes_gap`` shows the registry needs two imports the binder does
+    not (t_b884497b).
     """
 
     # The kwargs hermes' pre_tool_call fire site actually passes
@@ -545,6 +586,7 @@ class TestPreToolCallThroughRealHermesBinder:
         If hermes ever starts sending it, this fails and the fallback above gets
         re-verified (and the live ledger's sentinel count stops growing).
         """
+        hermes_gap.require_hermes_cli_plugin_dispatcher()
         import inspect
 
         from hermes_cli.plugins_dispatch import PluginDispatchMixin as M
@@ -562,7 +604,13 @@ class TestPreToolCallThroughRealHermesBinder:
             "card premise; the kwarg branch must stay authoritative")
 
     def test_real_payload_row_carries_a_real_profile(self, tmp_path, monkeypatch):
-        """The live end-to-end shape: no profile_name in, a real name out."""
+        """The live end-to-end shape: no profile_name in, a real name out.
+
+        Two capabilities, asked for in the order the case uses them: the binder
+        it drives and the resolver whose answer it asserts (t_b884497b).
+        """
+        hermes_gap.require_hermes_cli_plugin_dispatcher()
+        hermes_gap.require_hermes_cli_profiles()
         from hermes_cli.profiles import get_active_profile_name
         from hermes_cli.plugins_dispatch import PluginDispatchMixin as M
 
@@ -761,8 +809,6 @@ class TestRealHermesPayloadShape:
         assert entry["task_id"] == "t_abc123"
         assert entry["reason"] == "needs_input"
 
-    @pytest.mark.skipif(not _HAS_HERMES_CLI,
-                        reason="hermes_cli not installed in this env")
     def test_dispatch_through_real_hermes_binding(self, tmp_path):
         """Drive the handler through hermes' OWN callback binder, not a hand-typed call.
 
@@ -773,6 +819,7 @@ class TestRealHermesPayloadShape:
         passthrough our handler relies on — the failure lands in pytest, not in
         ``~/.hscc/task_completions.jsonl``.
         """
+        hermes_gap.require_hermes_cli_plugin_dispatcher()
         import inspect
 
         from hermes_cli.plugins_dispatch import PluginDispatchMixin as M

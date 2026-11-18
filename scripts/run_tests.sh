@@ -50,12 +50,24 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 #                                        require_hermes_profile_library
 #                                        (``hermes_cli.profiles``: resolver +
 #                                        writer, test_profile_root.py)
+#   hscc-cluster  tests/hermes_gap.py    require_hermes_kanban_board (the board
+#                                        trio: schema + ``connect`` + dispatcher) /
+#                                        require_hermes_cli_plugins (VALID_HOOKS +
+#                                        invoke_hook) /
+#                                        require_hermes_cli_plugin_dispatcher
+#                                        (``plugins_dispatch``: hermes' own hook
+#                                        binder) / require_hermes_cli_profiles
+#                                        (the active-profile resolver) /
+#                                        require_child_ran_hermes (the same board
+#                                        capability asked of the CHILD a case
+#                                        spawns — not of this process)
 #
 # Enforced, not asserted: one guard per leg that has a probe —
-# hscc-api/tests/test_hermes_gap_single_posture.py and
-# hscc-roles/tests/test_hermes_gap_single_posture.py each sweep THEIR OWN leg for
+# hscc-api/tests/test_hermes_gap_single_posture.py,
+# hscc-roles/tests/test_hermes_gap_single_posture.py and
+# hscc-cluster/tests/test_hermes_gap_single_posture.py each sweep THEIR OWN leg for
 # a private copy of a probe (the shape this block exists to prevent was measured
-# in both of those legs) and fail if this roster and the probe modules disagree in
+# in each of those legs) and fail if this roster and the probe modules disagree in
 # either direction. THIS BLOCK is the live authority for which probes exist; the
 # audit page below is the dated measurement of record.
 #

@@ -65,11 +65,21 @@ SWEEP_ROOT = "hscc-roles/tests"
 
 #: The probe owners the runner's roster block claims, across the repo. Extended
 #: for this leg by t_74141b24; ``hscc-api/tests/test_hermes_gap_single_posture.py``
-#: carries the same list and both have to move together.
+#: carries the same list and both have to move together. t_b884497b added the
+#: hscc-cluster rows to the block and moved hscc-api's list only, which left THIS
+#: twin reading four of those advertised gates as gates "no probe owner defines"
+#: (the fifth, ``require_hermes_cli_profiles``, has hscc-roles' own owner behind it)
+#: — the drift the pair exists to catch, caught (t_979ec491).
 ALL_OWNERS = (OWNER,
               "hscc-api/tests/hermes_gap.py",
               "hscc_daemon/tests/real_hermes.py",
-              "hscc-project/tests/test_session_discovery.py")
+              "hscc-project/tests/test_session_discovery.py",
+              # hscc-cluster grew its own probe module and its own guard in
+              # t_b884497b, so its gates are advertised by the block and defined
+              # by ITS owner, not here. The pin stays roster-vs-owners, not a
+              # cross-leg sweep — t_0fd2c149 declined that folding, t_74141b24
+              # kept the rule, and hscc-api's twin words it the same way.
+              "hscc-cluster/tests/hermes_gap.py")
 
 #: Files whose cases the owner gates, and which cases. ``test_the_gated_cases_...``
 #: pins this against the source in BOTH directions: every name here really calls

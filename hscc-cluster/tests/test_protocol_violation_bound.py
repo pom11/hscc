@@ -24,7 +24,18 @@ set, and the kanban write path (``kanban_db._assert_not_delegated_child_mutation
 hard-fails any board mutation from such a context. A real dispatcher supervisor
 is NOT a delegated child. Stripping the marker in the spawned env reproduces
 the supervisor faithfully and lets the test build its own temp board with real
-writes. Skipped under interpreters where ``hermes_cli`` isn't installed.
+writes.
+
+Where it skips, and why the answer needs TWO questions (t_b884497b): it used to
+say ``pytest.importorskip("hermes_cli")`` at module scope — a collection-time
+answer, naming a capability and no import error. Now the case asks this process
+first (cheap: no subprocess needed when hermes is simply absent) and then asks
+the CHILD, whose answer is a different fact: the child gets ``sys.executable``
+plus its own script dir, and this process's ``sys.path`` — which
+``workflow._active_profile_name`` extends with ``~/.hermes/hermes-agent`` the
+first time it runs (workflow.py:523) — is not inherited. A child that died
+for any reason OTHER than a missing import is not environment: the case runs on
+and fails, which is the whole point.
 """
 
 import os
@@ -34,10 +45,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-HERMES_CLI = pytest.importorskip(
-    "hermes_cli", reason="hermes_cli not installed in this env; pin test skipped")
+import hermes_gap
 
 _PVB_SIM = Path(__file__).resolve().parent / "_pvb_sim.py"
 
@@ -45,6 +53,7 @@ _PVB_SIM = Path(__file__).resolve().parent / "_pvb_sim.py"
 def test_clean_rc0_without_terminal_call_is_bounded():
     """rc=0 no-terminal-call is surfaced distinctly and stops after the budget,
     never silently retried past ``kanban.failure_limit`` (3)."""
+    hermes_gap.require_hermes_kanban_board()
     # The subprocess payload must not be a delegated child: strip the marker so
     # the supervisor-side writable path is active (mirrors a real dispatcher).
     env = dict(os.environ)
@@ -72,6 +81,11 @@ def test_clean_rc0_without_terminal_call_is_bounded():
             shutil.rmtree(tmp_home, ignore_errors=True)
     out = proc.stdout or ""
     err = proc.stderr or ""
+    # The child's own verdict, asked before the assertions: if it could not import
+    # hermes this is the thin sibling's environment, and the reason carries the
+    # child's own error line. Anything else it died of falls through to the assert
+    # below and FAILS, which is what a real bug deserves.
+    hermes_gap.require_child_ran_hermes(proc.returncode, err)
     assert proc.returncode == 0, (
         f"pvb sim subprocess failed (rc={proc.returncode})\n"
         f"--- stdout ---\n{out}\n--- stderr ---\n{err}"
