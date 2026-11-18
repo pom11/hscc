@@ -739,6 +739,135 @@ cok "a surface with no sections shows no content group" "if !sectionRows(kind).i
 # route still gets its pickers.
 cok "the scope pickers appear only where the route honours a scope" 'if kind.supportsScope {'
 cok "a surface that cannot be scoped says so instead of printing a scope" 'guard kind.supportsScope else'
+cok "the screen renders one row per registry surface" "ForEach(WidgetSurfaceKind.allCases"
+cok "every surface row opens the one shared editor" "WidgetSurfaceEditor(kind: kind, store: widgetSettings)"
+cok "the shared editor offers the pause toggle" 'Toggle("Active", isOn: Binding('
+cok "the shared editor offers the refresh cadence picker" 'Picker("Refresh", selection: Binding('
+
+# ---- surface coverage (t_2b3084bb) -----------------------------------------
+# The rows above are driven by WidgetSurfaceKind.allCases, so a surface whose
+# kind never reaches that enum is the one way a shipped widget / Live Activity
+# can be ABSENT from Settings. These checks derive the surfaces from the code
+# that actually ships them — the widget bundle's Widget list and the Live
+# Activity extensions' ActivityConfiguration declarations — and require each to
+# have a registry case plus its display metadata in the screen. A new widget or
+# activity added without a Settings row therefore reddens this gate instead of
+# shipping a settings screen that silently omits it.
+sfail() { echo "  FAIL: $1"; grepfail=$((grepfail+1)); }
+sok() { echo "  ok: $1"; }
+norm_list() { printf '%s\n' "$1" | sed '/^$/d' | sort; }
+
+surface_cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$SRC" \
+  | sed -n 's/^    case \([A-Za-z][A-Za-z0-9]*\).*/\1/p')
+surface_case_count=$(printf '%s\n' "$surface_cases" | sed '/^$/d' | wc -l | tr -d ' ')
+if [ "$surface_case_count" -lt 1 ]; then
+  sfail "the registry enum could not be read from $SRC"
+fi
+
+# One row per case is not enough if the row has no name or icon: the shared
+# editor title and the list row both read displayName/displayIcon, and each
+# case must be present in both switches (two arms in ConfigView).
+meta_bad=0
+for c in $surface_cases; do
+  arms=$(grep -c "case \.$c:" "$CONFIG")
+  if [ "$arms" -lt 2 ]; then
+    sfail "surface $c has $arms displayName/displayIcon arm(s), expected 2"
+    meta_bad=$((meta_bad + 1))
+  fi
+done
+[ "$meta_bad" -eq 0 ] && sok "all $surface_case_count registry surfaces have a display name and icon"
+
+# Widgets: read the bundle, then each widget's own registry read. The read is
+# what proves the row's pause/cadence controls reach the surface rather than a
+# second switch the screen does not use.
+WIDGETS_DIR="Sources/HSCCWidgets"
+WIDGET_BUNDLE="$WIDGETS_DIR/HSCCWidgetsBundle.swift"
+widget_names=$(sed -n '/^struct HSCCWidgetsBundle: WidgetBundle {/,/^}/p' "$WIDGET_BUNDLE" \
+  | sed -n 's/^        \([A-Za-z][A-Za-z0-9]*\)()$/\1/p')
+widget_count=$(printf '%s\n' "$widget_names" | sed '/^$/d' | wc -l | tr -d ' ')
+sok "the widget bundle declares $widget_count widget surface(s)"
+# Bundle type -> registry case. Explicit because a widget can keep its struct
+# and its provider in different files (ClusterWidget does), so the name is the
+# stable link. A new bundle entry with no line here fails closed.
+widget_kind_for() {
+  case "$1" in
+    ClusterWidget) echo widgetCluster ;;
+    MonitorWidget) echo widgetMonitor ;;
+    CardsRunningWidget) echo widgetCardsRunning ;;
+    KanbanMonitorWidget) echo widgetKanbanMonitor ;;
+    ProjectsWidget) echo widgetProjects ;;
+    BoardStatusWidget) echo widgetBoardStatus ;;
+    *) echo "" ;;
+  esac
+}
+used_widget_kinds=""
+for w in $widget_names; do
+  if ! grep -rq "^struct $w: Widget" "$WIDGETS_DIR"; then
+    sfail "widget $w is in the bundle but its struct is not in $WIDGETS_DIR"
+    continue
+  fi
+  kind=$(widget_kind_for "$w")
+  if [ -z "$kind" ]; then
+    sfail "widget $w has no registry case, so the settings screen cannot list it"
+    continue
+  fi
+  printf '%s\n' "$surface_cases" | grep -qx "$kind" \
+    || sfail "widget $w maps to $kind, which is not a WidgetSurfaceKind case"
+  grep -rq "setting(for: .$kind)" "$WIDGETS_DIR" \
+    || sfail "widget $w never reads $kind, so its row cannot pause or pace it"
+  used_widget_kinds="$used_widget_kinds$kind
+"
+  sok "widget $w is wired to $kind"
+done
+registered_widget_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
+  grep -q "^    case $c = \"widget\." "$SRC" && printf '%s\n' "$c"
+done)
+if [ "$(norm_list "$used_widget_kinds")" != "$(norm_list "$registered_widget_kinds")" ]; then
+  sfail "the widget cases in the registry and the widgets in the bundle are not the same set"
+else
+  sok "every widget case has a widget and every widget has a widget case"
+fi
+
+# Live Activities: the extension targets are the shipped surface list. The
+# mapping to registry cases is explicit because an attributes type carries no
+# raw key of its own; a new ActivityConfiguration with no line here fails
+# closed rather than being skipped.
+la_case_for() {
+  case "$1" in
+    WakingActivityAttributes) echo liveActivityWake ;;
+    MonitorActivityAttributes) echo liveActivityMonitor ;;
+    ClusterHealthActivityAttributes) echo liveActivityClusterHealth ;;
+    CardsRunningActivityAttributes) echo liveActivityCards ;;
+    *) echo "" ;;
+  esac
+}
+la_types=$(grep -rhoE 'ActivityConfiguration\(for: [A-Za-z][A-Za-z0-9]*\.self\)' \
+  Sources/HSCCLiveActivity Sources/HSCCLiveActivityMonitor \
+  | sed -E 's/.*for: ([A-Za-z][A-Za-z0-9]*)\.self.*/\1/' | sort -u)
+la_count=$(printf '%s\n' "$la_types" | sed '/^$/d' | wc -l | tr -d ' ')
+sok "the Live Activity extensions declare $la_count activity surface(s)"
+used_la_kinds=""
+for t in $la_types; do
+  kind=$(la_case_for "$t")
+  if [ -z "$kind" ]; then
+    sfail "Live Activity $t has no registry case, so the settings screen cannot list it"
+    continue
+  fi
+  printf '%s\n' "$surface_cases" | grep -qx "$kind" \
+    || sfail "Live Activity $t maps to $kind, which is not a WidgetSurfaceKind case"
+  used_la_kinds="$used_la_kinds$kind
+"
+  sok "Live Activity $t is wired to $kind"
+done
+registered_la_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
+  grep -q "^    case $c = \"liveActivity\." "$SRC" && printf '%s\n' "$c"
+done)
+if [ "$(norm_list "$used_la_kinds")" != "$(norm_list "$registered_la_kinds")" ]; then
+  sfail "the Live Activity cases in the registry and the activities in the extensions are not the same set"
+else
+  sok "every Live Activity case has an activity and every activity has a Live Activity case"
+fi
+
 # Gate-integrity assertions (the generated harness): reported with the greps
 # because they are assertions about THIS gate rather than about the app, and
 # both must be clean before any PASSED banner may print.
@@ -748,7 +877,7 @@ if [ "$integrityfail" -gt 0 ]; then
   exit 1
 fi
 if [ "$grepfail" -gt 0 ]; then
-  echo "WIDGET SETTINGS CHECK FAILED — $grepfail intent + config-screen delegation assertion(s)"
+  echo "WIDGET SETTINGS CHECK FAILED — $grepfail intent + config-screen + surface-coverage assertion(s)"
   rm -rf "$WORK"
   exit 1
 fi
@@ -756,4 +885,5 @@ if [ "$rc" -ne 0 ]; then rm -rf "$WORK"; exit "$rc"; fi
 rm -rf "$WORK"
 echo "INTENT DELEGATION CHECK PASSED — the committed intent calls exactly the executed fold + apply, on the one storage key, with no second write path"
 echo "CONFIG SCREEN CHECK PASSED — the screen writes through WidgetSettingsStore.setScope, folds with the shared static, reads through the widgets' own scope(for:), and populates its pickers from the sheet's own queries"
+echo "SURFACE COVERAGE CHECK PASSED — every widget and Live Activity in the committed code has a registry case, display metadata, and the shared pause/cadence/scope editor"
 exit 0
