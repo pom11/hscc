@@ -13,6 +13,13 @@ metadata:
 
 # Hermes Spark Cluster Control (HSCC)
 
+**The cluster ships two apps.** `ios-app/` is a slim widgets + Live Activities
+app and `macos-app/` a menu bar app sharing the iOS widget sources; both release
+through `scripts/release_apps.sh` on their own `apps-v*` tag namespace, separate
+from the CLI's `VERSION`/`v*`/`Formula/hscc.rb` lane. Read
+[references/apps-fleet.md](references/apps-fleet.md) before touching either app,
+any app release, or anything under `gh-pages`.
+
 **Post-refactor (2026-06-08): HSCC is a thin cluster-PHYSICAL layer.** The duplicated agent pipeline (coordinator, projects, orchestrator, events, governance, MCP server) was archived. Agent work now runs on **native Hermes kanban**, not HSCC.
 
 Cluster: gateway/orchestrator node `192.0.2.10` (always-on vLLM serving all Hermes agents), worker GPU nodes `.246 / .247 / .248` (provisioned on demand), NAS `.249`. Controlled via `sparkrun`. State in `~/.hscc/`.
