@@ -1,13 +1,14 @@
 # Widget coverage audit — iOS and macOS
 
 Measured on the merged tree rebased on `origin/main` (2026-11-18), after the
-cluster route parity fix and the CARD B3 board/project refurbish. A family is
-counted as covered only when it is both listed in that widget's
-`supportedFamilies` **and** has a non-placeholder view in the family dispatch
-switch (or routes through the shared, gated text model the dispatch selects).
-The Cluster and Monitor surfaces were refurbished by the sibling card; the
-Kanban Monitor, Board Status and Projects widgets plus the Board Progress Live
-Activity were refurbished by CARD B3. Every surface reads the fields in
+cluster route parity fix, the CARD B3 board/project refurbish and the CARD B2
+running-cards refurbish. A family is counted as covered only when it is both
+listed in that widget's `supportedFamilies` **and** has a non-placeholder view
+in the family dispatch switch (or routes through the shared, gated text model
+the dispatch selects). The Cluster and Monitor surfaces were refurbished by the
+sibling card; the Kanban Monitor, Board Status and Projects widgets plus the
+Board Progress Live Activity were refurbished by CARD B3; the Cards widget and
+CardsRunning Live Activity by CARD B2. Every surface reads the fields in
 `hscc-api/docs/WIDGET_ROUTES.md`.
 
 Legend:
@@ -64,22 +65,22 @@ Sources: `ios-app/Sources/HSCCLiveActivityMonitor/{MonitorLiveActivity,CardsRunn
 
 The macOS extension (`HSCCMacWidgets` in `macos-app/project.yml`) compiles the
 six iOS widget files by path. On macOS the accessory families are unavailable,
-so they are not part of this table. `systemExtraLarge` is declared only by
-Cluster and Monitor.
+so they are not part of this table. `systemExtraLarge` is declared by Cluster,
+Monitor and CardsRunning.
 
 | Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
 |---|---|---|---|---|---|
 | Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 | Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | absent | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
-| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | absent | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
+| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`CardsRunningLargeView` — XL reuses the large renderer) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
 | KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
 
-The three remaining `absent` XL cells are the documented macOS family split, not
-a defect: all six widgets ship small/medium/large, and Cluster, Monitor and
-Kanban Monitor also ship `systemExtraLarge`. Kanban Monitor gained XL in CARD B3
-because the per-board table is the surface that benefits from the extra rows.
+The two remaining `absent` XL cells (Projects and Board Status) are the
+documented macOS family split, not a defect: all six widgets ship
+small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
+Running (CARD B2) also ship `systemExtraLarge`.
 
 ## 4. Compile results
 
@@ -90,9 +91,16 @@ $ bash ios-app/scripts/build_check.sh
 HSCC: 73 files, 0 error(s), 0 warning(s)
 HSCCWidgets: 18 files, 0 error(s), 0 warning(s)
 HSCCLiveActivity: 5 files, 0 error(s), 0 warning(s)
-HSCCLiveActivityMonitor: 13 files, 0 error(s), 0 warning(s)
+HSCCLiveActivityMonitor: 15 files, 0 error(s), 0 warning(s)
 full compile clean, 0 warnings (compile only — never built or run on a device)
 ```
+
+The Live Activity monitor target gained one file in B2
+(`Sources/Shared/CardsRunningProjection.swift`, 14 → 15 with its
+`WidgetDataClient.swift` dependency): the sliced `RunningCardMetric(row:)`
+mapping names the stored row type, and that type's failure vocabulary lives in
+the client file. Both are Foundation/Security-only; the extension still never
+fetches.
 
 ```text
 $ bash macos-app/scripts/build_check.sh
@@ -105,9 +113,14 @@ full compile clean, 0 warnings (compile only — never built or run)
 
 ```text
 $ bash ios-app/scripts/model_decode_check.sh
-compiling real models + harness into a macOS CLI...
-ALL DECODE CHECKS PASSED — 93/93 checks (over 56 committed fixtures) decoded against the real models
+ALL DECODE CHECKS PASSED — 97/97 checks (over 58 committed fixtures) decoded against the real models
 ```
+
+The two B2 fixtures add 4 checks and 2 files (`v1_kanban_running_cards.json`
+and `v1_kanban_running_contract.json`). The live-capture fixture is scrubbed at
+the value level only; the contract fixture is shape-faithful from
+`kanban_live.CARD_VIEW_FIELDS` because the deployed 2.15.11 server predates that
+route shape.
 
 ## 5a. Cluster/Monitor render check
 
@@ -148,6 +161,10 @@ PROJECTS WIDGET CHECK PASSED
 
 $ bash ios-app/scripts/kanban_monitor_widget_check.sh
 29 assertions, 0 failure(s)
+
+$ bash ios-app/scripts/cards_running_widget_check.sh
+CARDS WIDGET CHECK PASSED — every family's shown values equal the live fixture's fields, and no blind/stale state invents a number
+CARDS RUNNING WIDGET CHECK PASSED — every family, both platforms and the Live Activity draw the live fixture's own fields
 ```
 
 The board-status and projects counts are unchanged by CARD B3; the board harness
@@ -155,6 +172,15 @@ gained no assertions, only updated expectations for the renamed Done 24h tile
 and the ring's running/done fallback. The Kanban Monitor check is new: it decodes
 a scrubbed live capture of `GET /v1/mobile/summary` and asserts every drawn
 number equals its fixture field, including `done` = Done 24h.
+
+The Cards Running check is B2's: it compiles the real `SharedModels.swift`,
+`SharedStore.swift`, `WidgetDataClient.swift` and
+`CardsRunningProjection.swift`, plus the sliced `cards-row-metric` and
+`cards-reading-rules` blocks from
+`Sources/Shared/CardsRunningActivity.swift`. It asserts one section per family:
+iOS Small/Medium/Large and the three accessory families, macOS
+Small/Medium/Large/XL, the Live Activity's four surfaces, and the blind/stale
+rules (no `0 running` from a blind read, no fresh-looking cache).
 
 ## 6. Shipped feature checklist
 
@@ -168,8 +194,33 @@ number equals its fixture field, including `done` = Done 24h.
 | macOS desktop widgets | #376 | `a3da0180` | `HSCCMacWidgets` target in `macos-app/project.yml`; `ios-app/Sources/HSCCWidgets/WidgetRendering.swift` |
 | GitHub Pages OTA install | #377 | `b5691c09` | `ios-app/scripts/publish_pages.sh`, `ios-app/scripts/make_manifest.py` |
 | Notarized release and Homebrew cask | #379 | `f8325093` | `macos-app/scripts/release.sh`, `scripts/templates/hscc-widgets.cask.rb.tmpl`, `scripts/bump_cask.py` |
+| Cards widget + CardsRunning Live Activity refurbish | B2 `t_635bae56` | this PR | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift`, `ios-app/Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift`, `ios-app/Sources/Shared/CardsRunningProjection.swift`, `ios-app/scripts/cards_running_widget_check.sh` |
 
-## 7. Gaps
+## 7. Running-cards data mapping (B2)
+
+`hscc cards monitor --short` is the reference. Every number and row the Cards
+widget and the CardsRunning Live Activity draw is one field of
+`GET /v1/kanban/running` (or, for the secondary blocked figure, the documented
+`GET /v1/kanban/blocked`), which `hscc-api/docs/WIDGET_ROUTES.md` binds to
+`kanban_live.collect(registered_only=True)` — the same pass the CLI prints.
+
+| Shown value | Route field | CLI source |
+|---|---|---|
+| headline number / `accessoryCircular` | `count` | `len(collect().running)` — the `slots` number in `hscc cards monitor` |
+| row set + order | `tasks[]` (longest run first) | `collect().running`, sorted by `-run_s` |
+| title | `tasks[].title` | panel title |
+| board | `tasks[].board` | panel header `board` |
+| worker | `tasks[].worker`, else `assignee` | panel header `worker` (`r["profile"] or r["assignee"]`) |
+| age | `tasks[].run_s`, else `started_at` | panel header `run` |
+| secondary blocked warning | `/v1/kanban/blocked` `count` | `hscc kanban blocked` (never the cards headline) |
+| freshness | client read time / snapshot time | not a CLI field: rendered as "updated 3m ago" or "last known 3m ago · reason" |
+
+There is no current-step field on the route (`CARD_VIEW_FIELDS` has no step or
+tool column), so the widget does not invent one. `hb_s` is decoded and kept for
+a future heartbeat label but is not rendered, because the card specifies
+title/board/worker/age and `run_s` is the age the CLI draws.
+
+## 8. Gaps
 
 No GAP rows were found in the widget-family or Live Activity matrices. Every
 declared family has a dedicated non-placeholder renderer, every Live Activity
@@ -184,11 +235,6 @@ Non-gap coverage notes:
 - `WakingActivityAttributes` belongs to the separate `HSCCLiveActivity`
   extension rather than `HSCCLiveActivityMonitor`; it is still covered on all
   four surfaces.
-- The Cluster tile no longer draws a kanban board row. That row was not
-  `hscc cluster monitor` / `hscc cluster status` output; the board surfaces own
-  it. The removed read also brings the tile back to two cluster requests.
-- The Monitor tile no longer computes a fleet CPU average for its circular
-  family. A circular now shows the answered/listed host tally; the per-node CPU
-  numbers remain on the node rows, exactly as the CLI prints them.
-- Three macOS widgets (Projects, Cards Running, Board Status) do not offer
-  `systemExtraLarge`; Cluster, Monitor and Kanban Monitor do.
+- Two macOS widgets (Projects and Board Status) do not offer
+  `systemExtraLarge`; Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
+  Running (CARD B2) do.

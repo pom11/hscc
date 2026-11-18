@@ -25,6 +25,38 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
 
 
+## GET /v1/kanban/running
+
+Source: `hscc cards monitor` / `hscc kanban monitor` → the
+`kanban_live.collect(registered_only=True).running` list, projected by
+`kanban_live.card_rows()` (`CARD_VIEW_FIELDS`). A row is one running card; the
+route's `count` is `len(tasks)`, so it is exactly the number of running cards the
+CLI counts. Kill detail (`pid`, `host_local`, `killable`, `pin_conflict`) is
+merged onto the same rows by `routes_kanban.handle_kanban_running`; widgets do
+not declare it.
+
+| field | type | meaning |
+|---|---|---|
+| `tasks` | array | running cards, longest `run_s` first |
+| `tasks[].board` / `.id` / `.title` | string | the card's board slug, id and title |
+| `tasks[].worker` | string | `collect()`'s `profile or assignee` — the CLI panel header's `worker` |
+| `tasks[].assignee` | string/null | the card's assignment; the fallback for a server that predates `worker` |
+| `tasks[].status` | string | `running` for this route |
+| `tasks[].started_at` | string/null | ISO-8601 UTC start, also carried as `started_epoch` |
+| `tasks[].run_s` | number/null | seconds since the card started — the CLI's `run` column |
+| `tasks[].hb_s` | number/null | seconds since the worker's last heartbeat — the CLI's `heartbeat` column |
+| `tasks[].age_s` | number/null | seconds since the card was created |
+| `tasks[].priority` | integer | card priority |
+| `count` | integer | `len(tasks)`; the running-card count |
+| `errors` / `boards` | array | the collector's board-read errors and registered board names |
+| `speak` | string | one-line summary |
+
+The running-cards widget shows `title`, `board`, `worker` (falling back to
+`assignee`) and `run_s` (falling back to `started_at`), with `count` as its
+headline. Its secondary blocked figure is `/v1/kanban/blocked`'s `count` — the
+`hscc kanban blocked` number, never a headline for this surface.
+
+
 ## Card and board truth (CARD A2)
 
 The board scope is **registered projects only**: a board is served only when a

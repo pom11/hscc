@@ -177,6 +177,22 @@ fixture is a capture unless labelled otherwise:
     Kept **with** `boards`, `errors`, `pid` and `host_local`, because the point of
     the check is that the wire carries them and the type does not (§5.3 + the
     read-only pivot). Nothing here is a credential or an address.
+- **B2 cards-surface pair (t_635bae56, 2026-11-18)**:
+  - `v1_kanban_running_cards.json` — a **scrubbed live capture** of
+    `GET /v1/kanban/running` against the running API (read-only GET, token from
+    `~/.hscc/api-token`, base derived from `hscc api status`; 2026-11-18).
+    Shape, `count` and timestamps are the capture's; board names, card ids and
+    titles are generalized, and the live server's `pid`/`host_local` keys are
+    kept on the wire precisely so the Lite type's refusal to declare them stays
+    proven. The old server sends `assignee` + `started_at` only, which is the
+    fallback branch.
+  - `v1_kanban_running_contract.json` — **authored from the handler**, not a
+    live capture: the fixed route's `kanban_live.CARD_VIEW_FIELDS` shape
+    (`worker`, `run_s`, `hb_s`, `age_s`, `priority`, `started_epoch`), which no
+    deployed server answers yet. It proves the mapping prefers the CLI's
+    `worker` column and `run_s` while still tolerating a null clock.
+    `scripts/cards_running_widget_check.sh` drives the real projection and the
+    sliced Live Activity rules from both, one section per family.
 - **Authored from the handler** (the route is not deployed: `GET
   /v1/mobile/summary` returned 404 live on 2026-11-17, PR #310 being the server
   half). Shapes are read off `hscc-api/routes_mobile.py` — `_fold_counts`,

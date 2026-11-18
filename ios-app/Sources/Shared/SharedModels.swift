@@ -275,13 +275,45 @@ struct KanbanRunningLite: Decodable {
 }
 
 /// One running task (`handle_kanban_running`'s keys, minus `pid`/`host_local`).
+///
+/// `worker` / `run_s` / `hb_s` are the three fields `kanban_live.card_view()`
+/// sends from `CARD_VIEW_FIELDS` and `hscc cards monitor` draws:
+///
+///   * `worker` — `collect()`'s `r["profile"] or r["assignee"]`, the profile
+///     actually running the card (the CLI panel header's `worker` column).
+///     `assignee` is the card's assignment and is only the fallback for an
+///     older server, exactly the way `kanban_live.py` builds it.
+///   * `run_s` — seconds since the card started, the CLI's `run` column.
+///   * `hb_s` — seconds since the worker's last heartbeat, the CLI's `heartbeat`
+///     column. Decoded for completeness; the widget shows run time only.
+///
+/// All three are optional because the live 2.15.11 server predates the route
+/// fix and sends only `assignee` + `started_at`; a missing field is "the server
+/// did not send it", never zero.
 struct RunningCardLite: Decodable, Identifiable {
     let board: String?
     let id: String
     let title: String?
+    let worker: String?
     let assignee: String?
     let status: String?
+    let run_s: Double?
+    let hb_s: Double?
     let started_at: String?
+
+    init(board: String?, id: String, title: String?, worker: String? = nil,
+         assignee: String?, status: String?, run_s: Double? = nil,
+         hb_s: Double? = nil, started_at: String?) {
+        self.board = board
+        self.id = id
+        self.title = title
+        self.worker = worker
+        self.assignee = assignee
+        self.status = status
+        self.run_s = run_s
+        self.hb_s = hb_s
+        self.started_at = started_at
+    }
 }
 
 /// GET /v1/kanban/blocked — work stuck waiting: the widget's failure signal.
