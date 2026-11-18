@@ -55,16 +55,16 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$'; then
   echo "error: version must look like 1.2.3 (digits and dots, no leading 'v'): $VERSION" >&2
   exit 2
 fi
-if ! printf '%s' "$BUILD" | grep -Eq '^[0-9]+$'; then
-  echo "error: build number must be one integer (apps/BUILD_NUMBER): $BUILD" >&2
-  exit 2
-fi
 
 PREFIX="${HSCC_BUNDLE_PREFIX:-ro.parsec.hscc}"
 BUNDLE_ID="${HSCC_BUNDLE_ID:-${PREFIX}.ios}"
 APP_GROUP="group.${PREFIX}.ios"
 TEAM="${HSCC_DEVELOPMENT_TEAM:-}"
 BUILD="${HSCC_BUILD_NUMBER:-$(cat "$REPO_ROOT/apps/BUILD_NUMBER" 2>/dev/null || echo 1)}"
+if ! printf '%s' "$BUILD" | grep -Eq '^[0-9]+$'; then
+  echo "error: build number must be one integer (apps/BUILD_NUMBER): $BUILD" >&2
+  exit 2
+fi
 TAG="${HSCC_RELEASE_TAG:-apps-v${VERSION}}"
 
 KEY_ID="${ASC_KEY_ID:-}"
