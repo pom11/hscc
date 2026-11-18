@@ -121,12 +121,12 @@ struct MonitorTimelineProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (MonitorEntry) -> Void) {
-        Task { completion(await fetchEntry()) }
+        Task { completion(await fetchEntry(family: context.family)) }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MonitorEntry>) -> Void) {
         Task {
-            let entry = await fetchEntry()
+            let entry = await fetchEntry(family: context.family)
             // Refresh on the operator's configured cadence (t_dea36c48),
             // defaulting to 5 minutes. 0 = Off: no scheduled refresh — let the
             // OS refresh at its own discretion rather than a tight loop.
@@ -145,7 +145,11 @@ struct MonitorTimelineProvider: TimelineProvider {
 
     /// Fetch the live entry. Always returns a usable entry — unreachable and
     /// unconfigured are first-class states, never a blank widget.
-    private func fetchEntry() async -> MonitorEntry {
+    ///
+    /// `family` decides whether the daemon-host half is fetched at all: the
+    /// Lock Screen accessories draw per-node numbers only, so asking for the
+    /// host would spend a request on pixels that cannot exist (§2's budget).
+    private func fetchEntry(family: WidgetFamily) async -> MonitorEntry {
         // Honor the shared "Active" toggle (t_dea36c48). Default ON when the
         // store or this surface's entry is absent, so the widget keeps
         // rendering as it did before the settings existed.
@@ -165,17 +169,22 @@ struct MonitorTimelineProvider: TimelineProvider {
         }
 
         let client = ExtensionClient(config: config!)
-        // Fetch the per-node monitor metrics and the daemon-host machine data in
-        // parallel. Each is independent and best-effort — a failure degrades
-        // only its own section, never the whole widget.
+        // Fetch the per-node monitor metrics and, only for a family that draws
+        // it, the daemon-host machine data in parallel. Each is independent and
+        // best-effort — a failure degrades only its own section, never the whole
+        // widget.
+        let wantsHost = family.showsDaemonHost
         async let monitorTask = client.get("/v1/cluster/monitor", as: MonitorResponse.self)
-        async let hostTask = client.get("/v1/daemon/host", as: MonitorDaemonHost.self)
+        async let hostTask = Self.daemonHost(client: client, enabled: wantsHost)
         let (monitor, daemonHost) = await (monitorTask, hostTask)
 
-        // Determine what actually reached us.
+        // Determine what actually reached us. An accessory asked only the node
+        // route, so a successful answer there is data even when the fleet listed
+        // no hosts; for the Home Screen families the old rule still holds.
         let nodes = monitor?.nodes ?? []
         let hostReached = daemonHost != nil
-        let anyData = !nodes.isEmpty || hostReached
+        let monitorReached = monitor != nil
+        let anyData = !nodes.isEmpty || hostReached || (monitorReached && !wantsHost)
 
         guard anyData else {
             // Neither source reached us → unreachable. Fall back to the
@@ -216,8 +225,12 @@ struct MonitorTimelineProvider: TimelineProvider {
         // Record the last-known snapshot so a later unreachable window can show
         // this real data with its age. PROJECTED on the way in — the container
         // holds `MonitorNodeEntry`, never the wire node with its address (§7).
+        // A family that did not ask for the host keeps the host half already in
+        // the snapshot: its own refresh must not erase data a larger family
+        // fetched, and a new snapshot date over an old host block would be a lie.
+        let snapshotHost = wantsHost ? daemonHost : MonitorSnapshotStore.load()?.daemonHost
         MonitorSnapshotStore.save(nodes: MonitorSnapshotStore.project(nodes),
-                                  daemonHost: daemonHost)
+                                  daemonHost: snapshotHost)
 
         return MonitorEntry(date: .now,
                             state: state,
@@ -229,6 +242,15 @@ struct MonitorTimelineProvider: TimelineProvider {
                             showSections: showSections,
                             lastKnownAgeMinutes: nil,
                             lastKnownNodeCount: 0)
+    }
+
+    /// The daemon-host read, refused BEFORE a request when the family does not
+    /// draw it. Mirrors `ClusterWidget.boardWork`'s `enabled` guard so an
+    /// accessory refresh spends nothing on the host half (§2's budget).
+    private static func daemonHost(client: ExtensionClient,
+                                   enabled: Bool) async -> MonitorDaemonHost? {
+        guard enabled else { return nil }
+        return await client.get("/v1/daemon/host", as: MonitorDaemonHost.self)
     }
 
     // MARK: - Sample data (placeholder / first render)

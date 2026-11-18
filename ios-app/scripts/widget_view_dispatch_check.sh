@@ -45,6 +45,7 @@ MANIFEST=(
   widgetKanbanMonitor
   widgetCardsRunning
   widgetProjects
+  widgetMonitor
 )
 
 # One xcrun call for the whole run instead of one per surface, so a machine
