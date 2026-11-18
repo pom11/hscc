@@ -10,8 +10,14 @@
 #   * HSCCWidgets              — Home Screen cluster widget (systemSmall + systemMedium).
 #   * HSCCLiveActivity         — the fleet-wake Live Activity (ActivityKit).
 #   * HSCCLiveActivityMonitor  — the HSCC Monitor Live Activity (ActivityKit).
-# All four targets share the App Group `group.com.hscc.ios` so the widget and
-# Live Activities see the operator's connection settings and the cluster state.
+# All four targets share one App Group so the widget and Live Activities see the
+# operator's connection settings and the cluster state. The group is DERIVED
+# from the bundle-id prefix (`HSCC_BUNDLE_PREFIX`, default `com.hscc`) in one
+# place below; every target, entitlement and Info.plist reads that derivation
+# instead of naming a literal. A team releasing under its own reverse-DNS
+# prefix overrides the build setting (release_adhoc.sh does this from the env):
+#
+#     HSCC_BUNDLE_PREFIX=dev.example ios-app/scripts/release_adhoc.sh 1.0.0
 #
 # Note on Live Activity targets: a widget extension body can only contain ONE
 # ActivityConfiguration, so each Live Activity attribute type gets its own
@@ -57,6 +63,12 @@ settings:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"          # iPhone only (sideload onto owner's device)
     SWIFT_EMIT_LOC_STRINGS: YES
+    # ONE source of truth for the reverse-DNS family. Product bundle ids are
+    # `$(HSCC_BUNDLE_PREFIX).ios…` and the App Group is derived from the same
+    # setting, so overriding this on the xcodebuild command line (or through
+    # release_adhoc.sh's environment) moves all four targets together.
+    HSCC_BUNDLE_PREFIX: com.hscc
+    HSCC_APP_GROUP: group.$(HSCC_BUNDLE_PREFIX).ios
 
 # Shared source files compiled into the app AND both extensions, so every
 # surface reads the same settings / topology / cluster state. Each target's
@@ -273,9 +285,9 @@ targets:
       path: Sources/HSCC.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     dependencies:
       - target: HSCCWidgets
         embed: true
@@ -285,7 +297,7 @@ targets:
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).ios
         # The name of the AppIcon set inside Assets.xcassets (IOS_REDESIGN
         # 2026-10-14 §7). Without this the catalog compiles but xcodebuild does
         # not know which image set IS the app icon, and the home screen keeps
@@ -314,6 +326,10 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: HSCC
+        # The App Group every target reads at runtime (SharedStore.AppGroup).
+        # Derived from HSCC_BUNDLE_PREFIX above; Xcode expands the build setting
+        # into the final Info.plist, so Swift never names the group itself.
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         UILaunchScreen: {}
         # Dark-only app (operator request 2026-11-18): the black/orange palette
         # has no light variants. HSCCApp also pins preferredColorScheme(.dark);
@@ -426,15 +442,16 @@ targets:
       path: Sources/HSCCWidgets.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     info:
       path: Sources/HSCCWidgets/Info.plist
       properties:
         # A display name so the widget gallery / Home Screen shows a friendly
         # label instead of the raw target identifier "HSCCWidgets".
         CFBundleDisplayName: HSCC Widgets
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         # Same dark-only contract as the app (see the app's info block).
         UIUserInterfaceStyle: Dark
         NSExtension:
@@ -443,7 +460,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).ios.widgets
         # Per-TARGET, not just project-level: XcodeGen emits the SDK default
         # ("1,2") into each target's build settings, which silently overrode the
         # project-level value and made every target iPad-capable. That is what
@@ -478,15 +495,16 @@ targets:
       path: Sources/HSCCLiveActivity.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     info:
       path: Sources/HSCCLiveActivity/Info.plist
       properties:
         # A display name so the Live Activity / Lock Screen surfaces a friendly
         # label instead of the raw target identifier "HSCCLiveActivity".
         CFBundleDisplayName: HSCC Live Activity
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         # Same dark-only contract as the app (see the app's info block).
         UIUserInterfaceStyle: Dark
         NSExtension:
@@ -495,7 +513,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).ios.liveactivity
         # Per-TARGET, not just project-level: XcodeGen emits the SDK default
         # ("1,2") into each target's build settings, which silently overrode the
         # project-level value and made every target iPad-capable. That is what
@@ -554,15 +572,16 @@ targets:
       path: Sources/HSCCLiveActivityMonitor.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.hscc.ios
+          - $(HSCC_APP_GROUP)
         keychain-access-groups:
-          - $(AppIdentifierPrefix)group.com.hscc.ios
+          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
     info:
       path: Sources/HSCCLiveActivityMonitor/Info.plist
       properties:
         # A display name so the monitor Live Activity / Lock Screen surfaces a
         # friendly label instead of the raw target identifier "HSCCLiveActivityMonitor".
         CFBundleDisplayName: HSCC Monitor
+        HSCCAppGroup: $(HSCC_APP_GROUP)
         # Same dark-only contract as the app (see the app's info block).
         UIUserInterfaceStyle: Dark
         NSExtension:
@@ -571,7 +590,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity.monitor
+        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).ios.liveactivity.monitor
         # Per-TARGET, not just project-level (see sibling targets).
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES

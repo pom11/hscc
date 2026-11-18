@@ -150,6 +150,10 @@ run_leg() {
   local root="${WORKROOT}/${name}"
   mkdir -p "${root}/scripts"
   ln -s "${IOSAPP}/Sources" "${root}/Sources" 2>/dev/null
+  # The gate derives its bare-executable suite shim from project.yml's one
+  # HSCC_BUNDLE_PREFIX. Without this link the unmodified control copy fails to
+  # find it, so the probe would be refusing a legitimate gate (t_d1a9eeb6).
+  ln -s "${IOSAPP}/project.yml" "${root}/project.yml" 2>/dev/null
   ln -s "${IOSAPP}/scripts/widget_settings_check.harness.golden" \
         "${root}/scripts/widget_settings_check.harness.golden" 2>/dev/null
   # The canonical, unmodified gate sits beside the copy ON PURPOSE: that is the
@@ -215,15 +219,15 @@ classify() {
       # stopped. Only the first is a property of the comment.
       if [ "$RC" -ne 0 ] && [ "$banners" -eq 0 ]; then
         pok "$name: REFUSED BY THE BAN (RC $RC, 0 banners) — the ban caught it before bash expanded anything; do not read this as the comment being inert"
-      elif [ "$RC" -eq 0 ] && [ "$banners" -eq 3 ]; then
-        pok "$name: INERT (RC 0, 3 banners) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
+      elif [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
+        pok "$name: INERT (RC 0, 4 banners) — a '#' comment never expands and the gate ran anyway; the ban is what keeps that safe once the line stops being a comment"
       else
-        pfail "$name: unexplained outcome (RC $RC, $banners banner(s)) — a comment leg must either be refused by the ban or run clean to three banners"
+        pfail "$name: unexplained outcome (RC $RC, $banners banner(s)) — a comment leg must either be refused by the ban or run clean to four banners"
       fi
       ;;
     passing)
-      if [ "$RC" -eq 0 ] && [ "$banners" -eq 3 ]; then
-        pok "$name: unmodified copy still passes (RC 0, 3 banners, $(grep -c 'FAIL:' "$OUT" 2>/dev/null) FAIL:)"
+      if [ "$RC" -eq 0 ] && [ "$banners" -eq 4 ]; then
+        pok "$name: unmodified copy still passes (RC 0, 4 banners, $(grep -c 'FAIL:' "$OUT" 2>/dev/null) FAIL:)"
       else
         pfail "$name: unmodified copy did NOT pass (RC $RC, $banners banner(s)) — the guard is refusing legitimate runs, not just attacks"
       fi

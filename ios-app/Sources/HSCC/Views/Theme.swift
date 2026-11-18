@@ -427,7 +427,7 @@ struct HSConnectGate: View {
 // `HSEmpty`/`HSError`) is the only panel style in the app. Do not resurrect it;
 // the prose mentions of it in the views' doc comments and
 // docs/design/PHASE2_PROGRESS_t_25aed701.md are the record of what it used to
-// be, not a TODO.
+// be, not a pending task.
 
 /// The shared red inline error label under a section card.
 ///

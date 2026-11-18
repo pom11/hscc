@@ -1,7 +1,8 @@
 import Foundation
 
-// Minimal real shim: the suite name + storage key extracted verbatim from the
-// committed AppGroup enum (the model references these through it).
+// Minimal real shim: the suite name reconstructed from project.yml's one
+// HSCC_BUNDLE_PREFIX (what Info.plist carries in a real build), plus the
+// storage key extracted verbatim from the committed AppGroup enum.
 enum AppGroup {
 static let suiteName = "group.com.hscc.ios"
 static let widgetSettingsKey = "hscc.widgetSettings"

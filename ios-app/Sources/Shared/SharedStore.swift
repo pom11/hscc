@@ -18,10 +18,11 @@ import Security
 //
 // THE CONTRACT (binding on every surface that touches the group):
 //
-//   1. ONE IDENTIFIER. `AppGroup.suiteName` is the only App Group literal in
-//      Swift source; `SharedStore.appGroupID` delegates to it, and all five
-//      .entitlements files name the same group. `scripts/shared_store_check.sh`
-//      guards the discipline around it.
+//   1. ONE IDENTIFIER. `AppGroup.suiteName` is the only App Group reader in
+//      Swift source. It comes from the `HSCCAppGroup` Info.plist key, which
+//      project.yml derives ONCE from `HSCC_BUNDLE_PREFIX`; the four iOS
+//      entitlements and the macOS entitlement name the same build setting.
+//      `scripts/shared_store_check.sh` guards the discipline around it.
 //
 //   2. NO SECRETS IN THE STORE. Nothing credential-bearing is ever written to
 //      the suite. The bearer token lives in the app's own secure storage (the
@@ -52,7 +53,7 @@ import Security
 /// The App Group container and the shared read/write discipline.
 enum SharedStore {
     /// The App Group identifier every target shares. Delegates to
-    /// `AppGroup.suiteName` so the literal exists exactly once in Swift source.
+    /// `AppGroup.suiteName`, the one runtime reader of the Info.plist value.
     static let appGroupID = AppGroup.suiteName
 
     /// The shared suite, or nil when the App Group is unavailable.
@@ -172,7 +173,23 @@ enum ClusterHealth {
 /// connection settings and last-known cluster state.
 enum AppGroup {
     /// The shared UserDefaults suite / Keychain access group identifier.
-    static let suiteName = "group.com.hscc.ios"
+    ///
+    /// ONE runtime reader: the `HSCCAppGroup` key Xcode expands into every
+    /// target's Info.plist from project.yml's `HSCC_APP_GROUP`, itself derived
+    /// from `HSCC_BUNDLE_PREFIX`. Nothing in Swift names the group.
+    ///
+    /// The fallback exists for the headless swiftc harnesses (`scripts/*.sh`)
+    /// that compile this file as a bare executable with no Info.plist. An app
+    /// or extension always has the key; a bare harness has no bundle id either,
+    /// so it keeps the historical default group the gates have always used.
+    static var suiteName: String {
+        if let configured = Bundle.main.object(forInfoDictionaryKey: "HSCCAppGroup") as? String,
+           !configured.isEmpty,
+           !configured.hasPrefix("$(") {
+            return configured
+        }
+        return "group." + (Bundle.main.bundleIdentifier ?? "com.hscc.ios")
+    }
     /// Keychain item identity (service/account) shared by app + extensions.
     static let keychainService = "com.hscc.ios"
     /// The legacy "current" token account. This holds the ACTIVE cluster's
@@ -1070,7 +1087,7 @@ struct WidgetStyle: Codable, Equatable {
 enum KeychainShared {
     private static func accessGroup() -> String? {
         // The shared app group access group — resolved at build time from the
-        // entitlements (`$(AppIdentifierPrefix)group.com.hscc.ios`).
+        // entitlements (`$(AppIdentifierPrefix)$(HSCC_APP_GROUP)`).
         KeychainConstants.keychainAccessGroup
     }
 
@@ -1152,7 +1169,7 @@ enum KeychainConstants {
     /// When the access group is empty, `KeychainStore` omits
     /// `kSecAttrAccessGroup` and iOS uses the FIRST group in the
     /// `keychain-access-groups` entitlement — which is exactly
-    /// `<team prefix>group.com.hscc.ios`, already shared by the app and both
+    /// `<team prefix>group.<HSCC_BUNDLE_PREFIX>.ios`, already shared by the app and both
     /// extensions. Same sharing, correctly resolved, no hardcoded prefix.
     static let keychainAccessGroup = ""
 }
