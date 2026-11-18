@@ -31,10 +31,12 @@ import ActivityKit
 /// renders its failure label, never `0 running`.
 struct CardsRunningLiveActivity: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: CardsRunningActivityAttributes.self) { context in
+        let style = WidgetStyle.resolved(for: .liveActivityCards)
+        return ActivityConfiguration(for: CardsRunningActivityAttributes.self) { context in
             LockScreenCardsView(context: context)
-                .activityBackgroundTint(Theme.Palette.graphite)
-                .activitySystemActionForegroundColor(Theme.Semantic.onSurface)
+                .widgetStyle(style)
+                .activityBackgroundTint(style.backgroundColor)
+                .activitySystemActionForegroundColor(style.primaryTextColor)
         } dynamicIsland: { context in
             // The reading is decided once, then handed to every region, so the
             // compact and expanded forms of one state can never disagree.
@@ -45,43 +47,44 @@ struct CardsRunningLiveActivity: Widget {
             return DynamicIsland {
                 // Expanded UI.
                 DynamicIslandExpandedRegion(.leading) {
-                    CardsGlyph(state: state)
+                    CardsGlyph(state: state).widgetStyle(style)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(CardsRunningReading.headline(count: count,
                                                           blockedCount: state.blockedCount,
                                                           failureLabel: state.failureLabel))
-                            .font(.headline)
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.headline))
+                            .foregroundColor(style.primaryTextColor)
                             .lineLimit(1)
                         if let failureLabel = state.failureLabel, !failureLabel.isEmpty {
                             // Stale is not quiet: the rows below are real, and
                             // this says why the newest one is not.
                             Text("stale · \(failureLabel)")
-                                .font(.caption2)
-                                .foregroundColor(Theme.Semantic.warn)
+                                .font(style.font(.caption2))
+                                .foregroundColor(style.warnColor)
                                 .lineLimit(1)
                         }
                     }
+                    .widgetStyle(style)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text(CardsRunningReading.pushedAgeText(updatedAt: state.updatedAt, now: Date()))
-                        .font(.caption2)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .font(style.font(.caption2))
+                        .foregroundColor(style.secondaryTextColor)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    CardsRowList(state.rows, rowFont: .hsccMono(10, weight: .semibold))
+                    CardsRowList(state.rows, rowFont: style.font(size: 10, weight: .semibold))
                 }
             } compactLeading: {
-                CardsGlyph(state: state)
+                CardsGlyph(state: state).widgetStyle(style)
             } compactTrailing: {
                 Text(CardsRunningReading.compactTrailing(count: count,
                                                          failureLabel: state.failureLabel))
-                    .font(.hsccMono(11, weight: .semibold))
-                    .foregroundColor(CardsRunningReadingColour.state(state))
+                    .font(style.font(size: 11, weight: .semibold))
+                    .foregroundColor(CardsRunningReadingColour.state(state, style: style))
             } minimal: {
-                CardsGlyph(state: state)
+                CardsGlyph(state: state).widgetStyle(style)
             }
         }
     }
@@ -94,27 +97,29 @@ struct CardsRunningLiveActivity: Widget {
 /// free — a blind read is `bad`, a stale one `warn`, a live one `ok`, a real
 /// zero `neutral`.
 struct CardsGlyph: View {
+    @Environment(\.widgetStyle) private var style
     let state: CardsRunningActivityAttributes.ContentState
 
     var body: some View {
-        Image(systemName: "square.stack.3d.up")
-            .foregroundColor(CardsRunningReadingColour.state(state))
+        Image(systemName: "square.stack.3d.up").widgetIcon(style)
+            .foregroundColor(CardsRunningReadingColour.state(state, style: style))
     }
 }
 
 /// The colour a state earns. Kept beside the glyph so the Island's compact
 /// regions and the Lock Screen header cannot disagree about what green means.
 enum CardsRunningReadingColour {
-    static func state(_ state: CardsRunningActivityAttributes.ContentState) -> Color {
+    static func state(_ state: CardsRunningActivityAttributes.ContentState, style: WidgetStyle) -> Color {
         let blind = (state.failureLabel?.isEmpty == false)
-        if blind { return state.rows.isEmpty ? Theme.Semantic.bad : Theme.Semantic.warn }
-        return state.rows.isEmpty ? Theme.Semantic.neutral : Theme.Semantic.ok
+        if blind { return state.rows.isEmpty ? style.badColor : style.warnColor }
+        return state.rows.isEmpty ? style.secondaryTextColor : style.okColor
     }
 }
 
 /// The row list, clipped to `rowLimit` — a pushed ContentState is untrusted
 /// input to a fixed-height region, so the view caps as well as the driver.
 struct CardsRowList: View {
+    @Environment(\.widgetStyle) private var style
     let rows: [RunningCardMetric]
     let rowFont: Font
 
@@ -139,32 +144,33 @@ struct CardsRowList: View {
 /// the age is `—` when `started_at` was missing or unparseable — a row never
 /// claims a card started this instant.
 struct CardsRunningRowView: View {
+    @Environment(\.widgetStyle) private var style
     let row: RunningCardMetric
     let labelFont: Font
 
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(Theme.cardStatusColor(row.status ?? ""))
+                .fill(style.cardStatusColor(row.status ?? ""))
                 .frame(width: 6, height: 6)
             if let board = row.board, !board.isEmpty {
                 Text(board)
                     .font(labelFont)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .foregroundColor(style.secondaryTextColor)
                     .lineLimit(1)
             }
             Text(row.headline)
-                .font(.caption)
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.caption))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
             Spacer(minLength: 4)
             Text(row.workerText)
-                .font(.caption2)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
                 .lineLimit(1)
             Text(row.ageText)
                 .font(labelFont)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .foregroundColor(style.secondaryTextColor)
         }
     }
 }
@@ -173,6 +179,7 @@ struct CardsRunningRowView: View {
 
 /// The Lock Screen (and banner) presentation of the running-cards activity.
 struct LockScreenCardsView: View {
+    @Environment(\.widgetStyle) private var style
     let context: ActivityViewContext<CardsRunningActivityAttributes>
 
     var body: some View {
@@ -187,22 +194,23 @@ struct LockScreenCardsView: View {
                 Text(CardsRunningReading.headline(count: count,
                                                   blockedCount: state.blockedCount,
                                                   failureLabel: state.failureLabel))
-                    .font(.headline)
-                    .foregroundColor(Theme.Semantic.onSurface)
+                    .font(style.font(.headline))
+                    .foregroundColor(style.primaryTextColor)
                     .lineLimit(1)
                 Spacer()
                 Text(CardsRunningReading.pushedAgeText(updatedAt: state.updatedAt, now: Date()))
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(style.secondaryTextColor)
             }
+            .widgetHeader(style)
 
             // The rows, or the one sentence that replaces them.
             if state.rows.isEmpty {
                 Text(emptyLine(state))
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
             } else {
-                CardsRowList(state.rows, rowFont: .hsccMono(11, weight: .semibold))
+                CardsRowList(state.rows, rowFont: style.font(size: 11, weight: .semibold))
             }
         }
         .padding()

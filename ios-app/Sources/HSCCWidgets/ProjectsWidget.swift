@@ -502,12 +502,14 @@ struct ProjectsWidget: Widget {
     let kind = "ProjectsWidget"
 
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: kind,
+        let style = WidgetStyle.resolved(for: .widgetProjects)
+        return AppIntentConfiguration(kind: kind,
                               intent: ProjectFilterIntent.self,
                               provider: ProjectsTimelineProvider()) { entry in
             ProjectsWidgetView(entry: entry)
+                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    Theme.Semantic.surface
+                    style.backgroundColor
                 }
         }
         .configurationDisplayName("Projects")
@@ -530,6 +532,7 @@ struct ProjectsWidget: Widget {
 /// (unconfigured OR paused) → failure → nothing to draw → rows. The first step
 /// is one test, not two, so no family can gate one state and forget the other.
 struct ProjectsWidgetView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
     @Environment(\.widgetFamily) private var family
 
@@ -538,6 +541,7 @@ struct ProjectsWidgetView: View {
         #if os(iOS)
         case .accessoryInline:
             Text(entry.inlineLine)
+                .font(style.font(.caption2))
         case .accessoryCircular:
             ProjectsCircularView(entry: entry)
         case .accessoryRectangular:
@@ -557,23 +561,24 @@ struct ProjectsWidgetView: View {
 
 /// One project row: the name, and the board beside it when the family has room.
 private struct ProjectRowView: View {
+    @Environment(\.widgetStyle) private var style
     let row: ProjectRow
     var showsBoard = false
 
     var body: some View {
-        HStack(spacing: Theme.Spacing.sm.rawValue) {
-            Image(systemName: "folder")
-                .font(.system(size: 9))
-                .foregroundColor(Theme.Semantic.neutral)
+        HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
+            Image(systemName: "folder").widgetIcon(style)
+                .font(style.font(size: 9))
+                .foregroundColor(style.secondaryTextColor)
             Text(row.name)
-                .font(.caption)
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(.caption))
+                .foregroundColor(style.primaryTextColor)
                 .lineLimit(1)
             if showsBoard, let board = row.board, !board.isEmpty {
-                Spacer(minLength: Theme.Spacing.xs.rawValue)
+                Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
                 Text(board)
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(style.secondaryTextColor)
                     .lineLimit(1)
             }
         }
@@ -591,24 +596,32 @@ private struct ProjectRowView: View {
 /// the small family really does draw the tighter version of this pane, so it has
 /// two values in use.
 private struct ProjectsGateView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
     var compact = false
 
+    /// Accessory families are system-tinted: fonts still follow the style,
+    /// colours stay the system's.
+    var systemTinted = false
+    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
+    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
+    private var statusText: Color { systemTinted ? .primary : style.badColor }
+
     var body: some View {
-        VStack(alignment: compact ? .leading : .center, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape")
-                .font(.system(size: compact ? 12 : 20))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        VStack(alignment: compact ? .leading : .center, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
+                .font(style.font(size: compact ? 12 : 20))
+                .foregroundColor(secondaryText)
             Text(entry.gateLine)
-                .font(compact ? .caption2.weight(.semibold) : .footnote)
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(compact ? .caption2 : .footnote, weight: compact ? .semibold : nil))
+                .foregroundColor(primaryText)
                 .fixedSize(horizontal: false, vertical: true)
             if !compact {
                 Text(entry.paused
                      ? "Turn it back on under Widgets & Live Activities in the HSCC app."
                      : WidgetDataFailure.notConfigured.operatorLine)
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(secondaryText)
                     .multilineTextAlignment(.center)
             }
         }
@@ -620,6 +633,7 @@ private struct ProjectsGateView: View {
 /// an empty list. Those are different sentences and the caller has already told
 /// them apart by which initialiser it used.
 private struct ProjectsEmptyView: View {
+    @Environment(\.widgetStyle) private var style
     /// The failure, when there is one. nil means the read worked and returned no
     /// projects — an honest empty, not a zero dressed up as data.
     let failure: WidgetDataFailure?
@@ -627,19 +641,26 @@ private struct ProjectsEmptyView: View {
     var selectedName: String?
     var compact = false
 
+    /// Accessory families are system-tinted: fonts still follow the style,
+    /// colours stay the system's.
+    var systemTinted = false
+    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
+    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
+    private var statusText: Color { systemTinted ? .primary : style.badColor }
+
     var body: some View {
-        VStack(alignment: compact ? .leading : .center, spacing: Theme.Spacing.xs.rawValue) {
-            Image(systemName: iconName)
-                .font(.system(size: compact ? 12 : 20))
-                .foregroundColor(Theme.Semantic.neutral)
+        VStack(alignment: compact ? .leading : .center, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+            Image(systemName: iconName).widgetIcon(style)
+                .font(style.font(size: compact ? 12 : 20))
+                .foregroundColor(secondaryText)
             Text(title)
-                .font(compact ? .caption2.weight(.semibold) : .footnote)
-                .foregroundColor(Theme.Semantic.onSurface)
+                .font(style.font(compact ? .caption2 : .footnote, weight: compact ? .semibold : nil))
+                .foregroundColor(primaryText)
                 .fixedSize(horizontal: false, vertical: true)
             if !compact {
                 Text(detail)
-                    .font(.caption2)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2))
+                    .foregroundColor(secondaryText)
                     .multilineTextAlignment(.center)
             }
         }
@@ -669,30 +690,32 @@ private struct ProjectsEmptyView: View {
 /// The age + why footer a stale entry owes the operator. Absent when the entry
 /// is live, because "just now" is not an age.
 private struct ProjectsAgeLine: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
     var font: Font = .caption2
 
     var body: some View {
         if let minutes = entry.status.ageMinutes {
-            HStack(spacing: Theme.Spacing.xxs.rawValue) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 8))
+            HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+                Image(systemName: "clock.arrow.circlepath").widgetIcon(style)
+                    .font(style.font(size: 8))
                 Text("\(minutes)m ago · \(entry.status.staleReason?.shortLabel ?? "stale")")
             }
             .font(font)
-            .foregroundColor(Theme.Semantic.warn)
+            .foregroundColor(style.warnColor)
         }
     }
 }
 
 /// The dot that says whether what is on screen is live, stale, or nothing.
 private struct ProjectsStatusDot: View {
+    @Environment(\.widgetStyle) private var style
     let status: ProjectsStatus
 
     var body: some View {
         Circle()
-            .fill(status.failure != nil ? Theme.Semantic.bad
-                : (status.isStale ? Theme.Semantic.warn : Theme.Semantic.ok))
+            .fill(status.failure != nil ? style.badColor
+                : (status.isStale ? style.warnColor : style.okColor))
             .frame(width: 6, height: 6)
     }
 }
@@ -700,6 +723,7 @@ private struct ProjectsStatusDot: View {
 // MARK: accessoryCircular — how many projects this entry holds
 
 private struct ProjectsCircularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
 
     var body: some View {
@@ -708,57 +732,58 @@ private struct ProjectsCircularView: View {
             // would be the false zero §6 rule 1 refuses. The copy rule inside
             // `shortGateLabel` keeps the setup invite first.
             Text(entry.shortGateLabel)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
                 .accessibilityLabel(entry.shortGateLabel)
         } else {
             VStack(spacing: 0) {
                 Text(entry.circularNumber.map { "\($0)" } ?? "—")
-                    .font(.system(.body, design: .monospaced))
+                    .font(style.font(.body))
                     .fontWeight(.semibold)
                     .foregroundStyle(color)
                 Text("projects")
-                    .font(.system(size: 8))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
     private var color: Color {
-        if entry.status.failure != nil { return Theme.Semantic.bad }
-        if entry.status.isStale { return Theme.Semantic.warn }
-        return Theme.Semantic.onSurface
+        if entry.status.failure != nil { return .primary }
+        if entry.status.isStale { return .primary }
+        return .primary
     }
 }
 
 // MARK: accessoryRectangular — the top three names and their board
 
 private struct ProjectsRectangularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
-            ProjectsGateView(entry: entry, compact: true)
+            ProjectsGateView(entry: entry, compact: true, systemTinted: true)
         } else if let failure = entry.status.failure {
-            ProjectsEmptyView(failure: failure, compact: true)
+            ProjectsEmptyView(failure: failure, compact: true, systemTinted: true)
         } else if entry.rows.isEmpty {
-            ProjectsEmptyView(failure: nil, selectedName: entry.selectedName, compact: true)
+            ProjectsEmptyView(failure: nil, selectedName: entry.selectedName, compact: true, systemTinted: true)
         } else {
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(entry.rectangularRows()) { row in
-                    HStack(spacing: Theme.Spacing.xs.rawValue) {
-                        Text(row.name)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Theme.Semantic.onSurface)
+                    HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                        Text(row.name).widgetHeader(style)
+                            .font(style.font(.caption2, weight: .semibold))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Spacer(minLength: Theme.Spacing.xs.rawValue)
+                        Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
                         if let board = row.board, !board.isEmpty {
                             Text(board)
-                                .font(.caption2)
-                                .foregroundStyle(entry.status.isStale ? Theme.Semantic.warn
-                                                    : Theme.Semantic.onSurfaceMuted)
+                                .font(style.font(.caption2))
+                                .foregroundStyle(entry.status.isStale ? .primary
+                                                    : .secondary)
                                 .lineLimit(1)
                         }
                     }
@@ -771,6 +796,7 @@ private struct ProjectsRectangularView: View {
 // MARK: small — count + up to 3 names (§5.1)
 
 private struct SmallProjectsWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
 
     var body: some View {
@@ -788,14 +814,15 @@ private struct SmallProjectsWidget: View {
             } else if entry.rows.isEmpty {
                 ProjectsEmptyView(failure: nil, selectedName: entry.selectedName, compact: true)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-                    HStack(spacing: Theme.Spacing.xs.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                    HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                         ProjectsStatusDot(status: entry.status)
                         Text(headline)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2, weight: .semibold))
+                            .foregroundColor(style.secondaryTextColor)
                             .lineLimit(1)
                     }
+                    .widgetHeader(style)
                     ForEach(entry.rows.prefix(ProjectsEntry.rowLimit(for: .systemSmall))) { row in
                         ProjectRowView(row: row)
                     }
@@ -818,6 +845,7 @@ private struct SmallProjectsWidget: View {
 // MARK: medium — up to 6 rows of {name, board} (§5.1)
 
 private struct MediumProjectsWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
 
     var body: some View {
@@ -830,16 +858,17 @@ private struct MediumProjectsWidget: View {
             } else if entry.rows.isEmpty {
                 ProjectsEmptyView(failure: nil, selectedName: entry.selectedName)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
+                    HStack(spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
                         ProjectsStatusDot(status: entry.status)
                         Text(headline)
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(Theme.Semantic.onSurface)
+                            .font(style.font(.caption, weight: .semibold))
+                            .foregroundColor(style.primaryTextColor)
                             .lineLimit(1)
-                        Spacer(minLength: Theme.Spacing.xs.rawValue)
+                        Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
                         ProjectsAgeLine(entry: entry)
                     }
+                    .widgetHeader(style)
                     ForEach(entry.rows.prefix(ProjectsEntry.rowLimit(for: .systemMedium))) { row in
                         ProjectRowView(row: row, showsBoard: true)
                     }
@@ -860,6 +889,7 @@ private struct MediumProjectsWidget: View {
 // MARK: large — up to 8 rows with the board label (§5.1)
 
 private struct LargeProjectsWidget: View {
+    @Environment(\.widgetStyle) private var style
     let entry: ProjectsEntry
 
     var body: some View {
@@ -872,20 +902,21 @@ private struct LargeProjectsWidget: View {
             } else if entry.rows.isEmpty {
                 ProjectsEmptyView(failure: nil, selectedName: entry.selectedName)
             } else {
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
+                    HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.sm.rawValue)) {
+                        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
                             Text("Projects")
-                                .font(.headline)
-                                .foregroundColor(Theme.Semantic.onSurface)
+                                .font(style.font(.headline))
+                                .foregroundColor(style.primaryTextColor)
                             Text(subline)
-                                .font(.caption2)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .font(style.font(.caption2))
+                                .foregroundColor(style.secondaryTextColor)
                         }
-                        Spacer(minLength: Theme.Spacing.sm.rawValue)
+                        Spacer(minLength: style.spacing(Theme.Spacing.sm.rawValue))
                         ProjectsAgeLine(entry: entry, font: .caption2)
                     }
-                    Divider().background(Theme.Elevation.hairline)
+                    .widgetHeader(style)
+                    Divider().background(style.hairlineColor)
                     ForEach(entry.rows.prefix(ProjectsEntry.rowLimit(for: .systemLarge))) { row in
                         ProjectRowView(row: row, showsBoard: true)
                     }

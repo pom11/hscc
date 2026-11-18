@@ -53,7 +53,7 @@ import WidgetKit
 //                            this state exists to refuse.
 //   * read failed, nothing
 //     usable               → the failure, rendered: `exclamationmark.triangle.fill`
-//                            in `Theme.Semantic.bad` plus
+//                            in `style.badColor` plus
 //                            `WidgetDataFailure.shortLabel` / `.operatorLine`.
 //                            No count, no row, and above all no `0 running` —
 //                            `runningText` returns nil with no projection
@@ -61,7 +61,7 @@ import WidgetKit
 //                            read.
 //   * read failed, last-known
 //     snapshot             → the rows AND their age AND why this refresh did not
-//                            answer, in `Theme.Semantic.warn`. Stale is not quiet.
+//                            answer, in `style.warnColor`. Stale is not quiet.
 //
 // STORAGE (§7): `CardsRunningProjection` (in `Sources/Shared/CardsRunningProjection.swift`,
 // shared with the Live Activity driver) only — ids, board slugs, titles, worker
@@ -367,10 +367,12 @@ struct CardsRunningWidget: Widget {
     let kind = "CardsRunningWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: CardsRunningTimelineProvider()) { entry in
+        let style = WidgetStyle.resolved(for: .widgetCardsRunning)
+        return StaticConfiguration(kind: kind, provider: CardsRunningTimelineProvider()) { entry in
             CardsRunningWidgetView(entry: entry)
+                .widgetStyle(style)
                 .containerBackground(for: .widget) {
-                    Theme.Semantic.surface
+                    style.backgroundColor
                 }
         }
         .configurationDisplayName("Running Cards")
@@ -385,6 +387,7 @@ struct CardsRunningWidget: Widget {
 /// family body, so an app that was never configured never says "can't reach the
 /// cluster" (it is not the cluster's problem, and inviting setup is the fix).
 struct CardsRunningWidgetView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
     @Environment(\.widgetFamily) private var family
 
@@ -392,6 +395,7 @@ struct CardsRunningWidgetView: View {
         switch family {
         case .accessoryInline:
             Text(entry.inlineLine)
+                .font(style.font(.caption2))
         case .accessoryCircular:
             CardsRunningCircularView(entry: entry)
         case .accessoryRectangular:
@@ -409,6 +413,7 @@ struct CardsRunningWidgetView: View {
 // MARK: Accessory families
 
 struct CardsRunningCircularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
@@ -418,35 +423,35 @@ struct CardsRunningCircularView: View {
             // nothing was asked about (§6 rule 1), and the copy rule inside
             // `shortGateLabel` keeps the setup invite first.
             Text(entry.shortGateLabel)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(.caption2))
+                .foregroundStyle(.secondary)
                 .accessibilityLabel(entry.shortGateLabel)
         } else if entry.projection == nil {
             // The blind state: a glyph, not a zero. `0` in this ring would read
             // "nothing is running", which is the opposite of what is known.
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(Theme.Semantic.bad)
+            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                .font(style.font(.body))
+                .foregroundStyle(.primary)
         } else {
             VStack(spacing: 0) {
                 Text(entry.circularNumber.map { "\($0)" } ?? "—")
-                    .font(.system(.body, design: .monospaced))
+                    .font(style.font(.body))
                     .fontWeight(.semibold)
                     .foregroundStyle(Self.glanceColor(entry.circularGlance))
-                Text(Self.glanceLabel(entry.circularGlance))
-                    .font(.system(size: 8))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                Text(Self.glanceLabel(entry.circularGlance)).widgetHeader(style)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
     static func glanceColor(_ glance: CardsRunningEntry.Glance) -> Color {
         switch glance {
-        case .invite, .unreadable: return Theme.Semantic.neutral
-        case .stale: return Theme.Semantic.warn
-        case .stuck: return Theme.Semantic.bad
-        case .idle: return Theme.Semantic.neutral
-        case .working: return Theme.Semantic.ok
+        case .invite, .unreadable: return .secondary
+        case .stale: return .primary
+        case .stuck: return .primary
+        case .idle: return .secondary
+        case .working: return .primary
         }
     }
 
@@ -463,44 +468,46 @@ struct CardsRunningCircularView: View {
 }
 
 struct CardsRunningRectangularView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
-            CardsRunningGateView(entry: entry)
+            CardsRunningGateView(entry: entry, systemTinted: true)
         } else if entry.projection == nil {
             VStack(alignment: .leading, spacing: 1) {
                 Label(entry.failure?.shortLabel ?? "No data",
                       systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Theme.Semantic.bad)
+                    .labelStyle(.widget)
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(entry.failure?.operatorLine ?? "")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 9))
+                    .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
         } else if let row = entry.headlineRow {
             // §5.4's rectangular row: one row, `title≤20`, plus status — with
             // the worker and the run time this surface is named for.
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.headline(max: 20))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Theme.Semantic.onSurface)
+                Text(row.headline(max: 20)).widgetHeader(style)
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text("\(row.workerText) · \(row.ageText)")
-                    .font(.hsccMono(.caption2, weight: .medium))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2, weight: .medium))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         } else {
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.runningText ?? "—")
-                    .font(.hsccMono(.caption2, weight: .semibold))
-                    .foregroundStyle(Theme.Semantic.onSurface)
+                    .font(style.font(.caption2, weight: .semibold))
+                    .foregroundStyle(.primary)
                 Text(entry.blockedText ?? "blocked —")
-                    .font(.system(size: 9))
-                    .foregroundStyle(entry.isStuckGlance ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 9))
+                    .foregroundStyle(entry.isStuckGlance ? .primary : .secondary)
             }
         }
     }
@@ -509,6 +516,7 @@ struct CardsRunningRectangularView: View {
 // MARK: Home Screen families
 
 struct CardsRunningSmallView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
@@ -517,7 +525,7 @@ struct CardsRunningSmallView: View {
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: true)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                 CardsRunningHeaderView(entry: entry)
                 // §5.4's small family: 2-3 rows. Two here, because the small
                 // tile also carries the header count and the age footer, and a
@@ -532,6 +540,7 @@ struct CardsRunningSmallView: View {
 }
 
 struct CardsRunningMediumView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
@@ -540,7 +549,7 @@ struct CardsRunningMediumView: View {
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                 CardsRunningHeaderView(entry: entry)
                 // §5.4's medium family: 4 rows, with the board.
                 CardsRunningRowList(rows: entry.rows(limit: 4), showBoard: true, titleMax: 40)
@@ -552,6 +561,7 @@ struct CardsRunningMediumView: View {
 }
 
 struct CardsRunningLargeView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
@@ -560,7 +570,7 @@ struct CardsRunningLargeView: View {
         } else if entry.projection == nil {
             CardsRunningFailureView(entry: entry, compact: false)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                 CardsRunningHeaderView(entry: entry)
                 // §5.4's large family: 7-8 rows with board and age. 8, which is
                 // also the stored cap, so the footer's "showing N of M" and the
@@ -578,22 +588,24 @@ struct CardsRunningLargeView: View {
 /// The count line: `3 running · 1 blocked`, with the blocked half drawn `—`
 /// when its own read did not answer.
 struct CardsRunningHeaderView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs.rawValue) {
+        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
             Text(entry.runningText ?? "—")
-                .font(.hsccMono(.callout, weight: .semibold))
-                .foregroundStyle(Theme.Semantic.onSurface)
+                .font(style.font(.callout, weight: .semibold))
+                .foregroundStyle(style.primaryTextColor)
                 .lineLimit(1)
             if let blocked = entry.blockedText {
                 Text(blocked)
-                    .font(.hsccMono(.caption2, weight: .medium))
-                    .foregroundStyle(entry.isStuckGlance ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(.caption2, weight: .medium))
+                    .foregroundStyle(entry.isStuckGlance ? style.badColor : style.secondaryTextColor)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
+    .widgetHeader(style)
     }
 }
 
@@ -601,6 +613,7 @@ struct CardsRunningHeaderView: View {
 /// title, board when there is room for it — `hscc cards monitor --live`'s
 /// header order, dropped right-to-left exactly the way that view drops it.
 struct CardsRunningRowList: View {
+    @Environment(\.widgetStyle) private var style
     let rows: [CardsRunningRow]
     let showBoard: Bool
     let titleMax: Int
@@ -611,33 +624,34 @@ struct CardsRunningRowList: View {
             // and the only place "nothing is running" may be drawn. The blind
             // state never gets here — its family body takes the failure branch.
             Label("Nothing running", systemImage: "circle.dashed")
-                .font(.caption2)
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .labelStyle(.widget)
+                .font(style.font(.caption2))
+                .foregroundStyle(style.secondaryTextColor)
         } else {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+            VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
                 ForEach(rows) { row in
-                    HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs.rawValue) {
+                    HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
                         Circle()
-                            .fill(Theme.cardStatusColor(row.status ?? ""))
+                            .fill(style.cardStatusColor(row.status ?? ""))
                             .frame(width: 5, height: 5)
                         Text(row.headline(max: titleMax))
-                            .font(.caption2)
-                            .foregroundStyle(Theme.Semantic.onSurface)
+                            .font(style.font(.caption2))
+                            .foregroundStyle(style.primaryTextColor)
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         if showBoard, let board = row.board {
                             Text(board)
-                                .font(.hsccMono(.caption2, weight: .regular))
-                                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                                .font(style.font(.caption2, weight: .regular))
+                                .foregroundStyle(style.secondaryTextColor)
                                 .lineLimit(1)
                         }
                         Text(row.workerText)
-                            .font(.hsccMono(.caption2, weight: .medium))
-                            .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                            .font(style.font(.caption2, weight: .medium))
+                            .foregroundStyle(style.secondaryTextColor)
                             .lineLimit(1)
                         Text(row.ageText)
-                            .font(.hsccMono(.caption2, weight: .semibold))
-                            .foregroundStyle(row.ageMinutes == nil ? Theme.Semantic.warn : Theme.Semantic.onSurface)
+                            .font(style.font(.caption2, weight: .semibold))
+                            .foregroundStyle(row.ageMinutes == nil ? style.warnColor : style.primaryTextColor)
                     }
                 }
             }
@@ -648,19 +662,20 @@ struct CardsRunningRowList: View {
 /// The age / failure line. Warn-coloured whenever what is on screen is not from
 /// this refresh — a stale surface must not look like a live one at a glance.
 struct CardsRunningFooterView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xxs.rawValue) {
+        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
             if entry.ageMinutes != nil || entry.failure != nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(entry.ageMinutes != nil ? Theme.Semantic.warn : Theme.Semantic.bad)
+                Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
+                    .font(style.font(size: 8))
+                    .foregroundStyle(entry.ageMinutes != nil ? style.warnColor : style.badColor)
             }
             Text(entry.footerLine)
-                .font(.system(size: 9))
-                .foregroundStyle(entry.ageMinutes != nil ? Theme.Semantic.warn
-                                    : (entry.failure != nil ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted))
+                .font(style.font(size: 9))
+                .foregroundStyle(entry.ageMinutes != nil ? style.warnColor
+                                    : (entry.failure != nil ? style.badColor : style.secondaryTextColor))
                 .lineLimit(2)
             Spacer(minLength: 0)
         }
@@ -670,27 +685,29 @@ struct CardsRunningFooterView: View {
 /// The blind state for the home-screen families: loud, named, and with no
 /// number anywhere that could be read as "the fleet is quiet".
 struct CardsRunningFailureView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
     let compact: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
             Label(entry.failure?.shortLabel ?? "No data",
                   systemImage: "exclamationmark.triangle.fill")
-                .font(compact ? .subheadline.weight(.semibold) : .headline.weight(.semibold))
-                .foregroundStyle(Theme.Semantic.bad)
+                .labelStyle(.widget)
+                .font(style.font(compact ? .subheadline : .headline, weight: .semibold))
+                .foregroundStyle(style.badColor)
                 .lineLimit(2)
             Text(entry.failure?.operatorLine ?? "The cluster did not answer.")
-                .font(.caption)
-                .foregroundStyle(Theme.Semantic.onSurface)
+                .font(style.font(.caption))
+                .foregroundStyle(style.primaryTextColor)
             if !compact {
                 // The one thing an operator can still trust from a blind tile:
                 // what the last good read said, and how old it was. The rows
                 // themselves are gone (there is no snapshot), so say plainly
                 // that nothing here is current.
                 Text("No running cards are shown because this read did not answer. A count of zero would be a guess.")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                    .font(style.font(size: 9))
+                    .foregroundStyle(style.secondaryTextColor)
             }
             Spacer(minLength: 0)
         }
@@ -707,18 +724,27 @@ struct CardsRunningFailureView: View {
 /// itself (a paused complication showing a count would be the false zero §6
 /// rule 1 refuses), so the parameter had one value left and is gone.
 struct CardsRunningGateView: View {
+    @Environment(\.widgetStyle) private var style
     let entry: CardsRunningEntry
 
+    /// Accessory families are system-tinted: fonts still follow the style,
+    /// colours stay the system's.
+    var systemTinted = false
+    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
+    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
+    private var statusText: Color { systemTinted ? .primary : style.badColor }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
             Label("Running cards",
                   systemImage: entry.paused ? "pause.circle" : "square.stack.3d.up")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.Semantic.onSurface)
+                .labelStyle(.widget)
+                .font(style.font(.subheadline, weight: .semibold))
+                .foregroundStyle(primaryText)
                 .lineLimit(1)
             Text(entry.gateLine)
-                .font(.system(size: 9))
-                .foregroundStyle(Theme.Semantic.onSurfaceMuted)
+                .font(style.font(size: 9))
+                .foregroundStyle(secondaryText)
                 .lineLimit(2)
         }
     }

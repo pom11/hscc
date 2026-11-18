@@ -21,11 +21,11 @@ enum MonitorState {
     /// The operator paused this surface in Settings.
     case paused
 
-    var color: Color {
+    func color(_ style: WidgetStyle) -> Color {
         switch self {
-        case .monitoring: return Theme.Semantic.ok
-        case .degraded: return Theme.Semantic.warn
-        case .unreachable, .unconfigured, .paused: return Theme.Semantic.neutral
+        case .monitoring: return style.okColor
+        case .degraded: return style.warnColor
+        case .unreachable, .unconfigured, .paused: return style.secondaryTextColor
         }
     }
 
