@@ -188,6 +188,10 @@ def _cls(tok, oracle, readme=None, repo=None, names=None):
     "hermes -p <profile> chat",
     "sparkrun cluster list",
     "git clone",
+    # `ruby -c` is the tap syntax gate documented in scripts/README.md and
+    # actually run by bump_formula.py / bump_cask.py; pinned here so the
+    # allow-list entry cannot be pruned without a test going red.
+    "ruby -c",
     "python3 scripts/address_guard.py --tracked",
     "scripts/run_tests.sh",
     "changelog_fragments.py",                  # bare existing script name
