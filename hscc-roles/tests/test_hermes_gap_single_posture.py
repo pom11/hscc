@@ -19,7 +19,9 @@ What counts as a second posture (one test each):
     arm records the failure;
   * a second skip REASON for a capability the owner already words — a wording
     drift is how ``-rs`` stops naming the missing module, which is the one thing
-    the runner's stamp rule reads;
+    the runner's stamp rule reads; and its stronger sibling, that no ``pytest.skip``
+    outside the owner mentions hermes AT ALL (the original posture's wording was
+    not the owner's, so the exact-wording sweep alone walked past it);
   * a file that reaches for the real ``hermes_cli`` — in an import OR in the source
     of a child it spawns — without importing the owner: the inverse drift,
     where the case cannot run on a thin sibling and goes RED instead of saying so;
@@ -92,6 +94,9 @@ OWNER_MODULE = "".join(("hermes", "_gap"))
 #: The real runtime modules this leg's capabilities are about (assembled).
 REAL_CLI = "".join(("hermes", "_cli"))
 CHILD_IMPORT_SHAPE = f"from {REAL_CLI}"
+#: The wording every private hermes skip in this leg's history used, minus the
+#: module it names (assembled for the same reason as above).
+NOT_IMPORTABLE_PHRASE = " not importable on this " + "interpreter"
 
 
 def _tracked_py_files():
@@ -244,6 +249,43 @@ def test_no_other_file_skips_with_a_hermes_capability_reason():
     assert not hits, (
         f"a skip reason for a hermes capability was written outside {OWNER} "
         "(call the probe instead):\n" + "\n".join(hits))
+
+
+def test_no_file_outside_the_owner_skips_for_a_hermes_reason_at_all():
+    """The stronger sibling of the reason sweep, and the one that bites alone.
+
+    The reason sweep above matches the owner's EXACT wording, so a private copy
+    that words its skip differently walks past it — which is precisely the shape
+    this leg's original posture had (``"hermes_cli not importable on this
+    interpreter"``), and it is still a second posture when it sits *inside* a case
+    that also calls the gate: the gate then decides the capability and the stray
+    ``skip()`` decides anything else the case did not like, which is how a real
+    ``rolelib`` bug gets reported as "environment".
+
+    So outside the owner, no ``pytest.skip`` in this leg may mention hermes at all
+    — not the module, not the "not importable on this interpreter" phrasing. Today
+    the only such call in the leg is the owner's own, which is what makes this
+    assertion meaningful rather than decorative.
+    """
+    hits = []
+    for rel in _tracked_py_files():
+        if rel == OWNER:
+            continue
+        tree = ast.parse((REPO / rel).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Attribute) and f.attr == "skip"
+                    and isinstance(f.value, ast.Name) and f.value.id == "pytest"):
+                continue
+            text = ast.unparse(node)
+            if REAL_CLI in text or NOT_IMPORTABLE_PHRASE in text:
+                hits.append(f"{rel}:{node.lineno}: {text[:100]}")
+    assert not hits, (
+        f"a file skipped for a hermes reason instead of calling {OWNER} "
+        "(a stray skip() inside a gated case decides more than the gate does):\n"
+        + "\n".join(hits))
 
 
 def test_every_file_that_reaches_for_the_real_hermes_cli_gates_through_owner():
