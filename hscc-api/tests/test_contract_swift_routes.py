@@ -383,9 +383,11 @@ def test_every_required_query_param_is_sent():
 #   POST /v1/memory/{node}/delete    profile                routes_memory.handle_memory_delete
 #     -> still server-gated: test_routes_memory.py::test_delete_requires_profile_in_body
 #   POST /v1/memory/{node}/edit      profile, content       routes_memory.handle_memory_edit
-#     -> still server-gated: test_routes_memory.py::test_edit_requires_content
-#        (the edit-without-`profile` 400 the handler also raises has no test
-#         of its own — follow-up card filed from t_f09436f1)
+#     -> still server-gated, both halves: test_routes_memory.py::test_edit_requires_profile
+#        (the missing-`profile` 400) and ::test_edit_requires_content (the
+#        missing-`content` 400). The profile half was untested until t_7430b28a
+#        added it; before that this row was the only place the requirement was
+#        named in a test at all.
 #
 # (Path params like card_id / node_id / session_id are embedded in the URL the
 # client itself builds, so they are inherently transmitted — no gate needed.
