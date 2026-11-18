@@ -2,24 +2,22 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// Cluster widget views — small, medium, large, and the three Lock Screen
-// accessories.
+// Cluster widget views.
 //
-// One `ClusterEntry`, six layouts. The families differ only in how much of the
-// entry fits: the accessories get the node gauge, the models count and one line
-// of metrics; the small tile adds the topology glyph and the board row; the
-// medium adds the metric strip and the idle countdown; the large adds labelled
-// topology pairs and a metric card per token. Nothing here invents a number —
-// every token renders an entry field or the em dash.
+// Six families, one entry, and one text model (`ClusterEntry.text(for:)`).
+// The layout only decides how much of that text fits:
 //
-// The text rules are in `ClusterMetricText` (pure Foundation, no `Color`) so
-// `scripts/cluster_widget_check.sh` can execute them against the committed
-// monitor fixture and assert what a Lock Screen line actually says. The heat
-// bands are `ClusterMetricHeat`'s (in `ClusterWidget.swift`), mapped to
-// `WidgetStyle` here and nowhere else.
+//   small      — one headline tally + the models/throughput line
+//   medium     — the same line plus up to four node rows
+//   large      — every node row with CPU/GPU temps and run/wait
+//   inline     — the headline + detail on one Lock Screen line
+//   circular   — the up/total gauge
+//   rectangular— headline, detail, the first two node rows
+//
+// No view composes a number. `scripts/cluster_widget_check.sh` executes the
+// text model against the committed fixture and asserts each family's lines.
 // ---------------------------------------------------------------------------
 
-/// The Home Screen cluster widget.
 struct ClusterWidget: Widget {
     let kind = "ClusterWidget"
 
@@ -33,15 +31,7 @@ struct ClusterWidget: Widget {
                 .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Cluster")
-        .description("Nodes up, models served, GPU, temperature and load.")
-        // t_56b910c8 added the Lock Screen families; the large tile is the
-        // full-size layout of the same entry. `accessoryCorner` is not offered:
-        // it is the Smart Stack glance surface, and a 4-node topology glyph plus
-        // a gauge does not survive that renderer's constraints.
-        //
-        // The macOS desktop widget (t_1143c19b) offers systemExtraLarge as
-        // well: the topology + metric card layout is the one that benefits from
-        // the extra width, and the accessory families do not exist there.
+        .description("Nodes up, the model each node serves, throughput and temperatures.")
         #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryCircular, .accessoryRectangular,
@@ -53,7 +43,6 @@ struct ClusterWidget: Widget {
     }
 }
 
-/// The single view rendered for every widget family, choosing layout by size.
 struct ClusterWidgetView: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
@@ -71,6 +60,8 @@ struct ClusterWidgetView: View {
         case .accessoryRectangular:
             RectangularClusterWidget(entry: entry)
         #endif
+        case .systemMedium:
+            MediumClusterWidget(entry: entry)
         case .systemLarge:
             LargeClusterWidget(entry: entry)
         case .systemExtraLarge:
@@ -81,9 +72,7 @@ struct ClusterWidgetView: View {
     }
 }
 
-
 extension ClusterMetricHeat {
-    /// The one place a heat band becomes a colour.
     func color(_ style: WidgetStyle) -> Color {
         switch self {
         case .calm: return style.okColor
@@ -94,553 +83,202 @@ extension ClusterMetricHeat {
     }
 }
 
-/// One labelled metric token: "GPU 88%", coloured by its own heat band.
-private struct MetricToken: View {
+private struct ClusterHeadline: View {
     @Environment(\.widgetStyle) private var style
-    let text: String
-    let heat: ClusterMetricHeat
-    var dimmed = false
+    let entry: ClusterEntry
+    let size: CGFloat
 
     var body: some View {
-        Text(text)
-            .font(style.font(size: 10, weight: .semibold))
-            .foregroundColor(dimmed ? style.secondaryTextColor : heat.color(style))
+        Text(entry.text(for: .small).headline)
+            .font(style.font(size: size, weight: .bold))
+            .foregroundColor(entry.heat.color(style))
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
+            .accessibilityLabel(entry.text(for: .small).headline)
+    }
+}
+
+private struct ClusterDetail: View {
+    @Environment(\.widgetStyle) private var style
+    let entry: ClusterEntry
+    let surface: FleetSurface
+
+    var body: some View {
+        if let detail = entry.text(for: surface).detail {
+            Text(detail)
+                .font(style.font(.caption, weight: .medium))
+                .foregroundColor(style.primaryTextColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+        }
+    }
+}
+
+private struct ClusterFooter: View {
+    @Environment(\.widgetStyle) private var style
+    let entry: ClusterEntry
+    let surface: FleetSurface
+
+    var body: some View {
+        if let footer = entry.text(for: surface).footer {
+            Text(footer)
+                .font(style.font(.caption2))
+                .foregroundColor(style.secondaryTextColor)
+                .lineLimit(2)
+        }
+    }
+}
+
+/// One node: state dot, label/model title, and the metrics line.
+private struct ClusterNodeRowView: View {
+    @Environment(\.widgetStyle) private var style
+    let row: FleetRow
+    let node: FleetNodeLine?
+    var compact = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Circle()
+                .fill((node.map { ClusterMetricHeat.node($0) } ?? .unknown).color(style))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.title)
+                    .font(style.font(size: compact ? 10 : 11, weight: .semibold))
+                    .foregroundColor(style.primaryTextColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let detail = row.detail {
+                    Text(detail)
+                        .font(style.font(size: compact ? 9 : 10))
+                        .foregroundColor(style.secondaryTextColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+            Spacer(minLength: 0)
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Small — state + nodes/models + work + topology glyph
+// Small — one headline number, one supporting line.
 // ---------------------------------------------------------------------------
 
 struct SmallClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
-    @ViewBuilder
     var body: some View {
-        if !entry.configured || entry.paused {
-            gateView
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                stateLine
-                countsLine
-                smallWorkLine
-                Spacer(minLength: 2)
-                MiniTopologyView(pairs: entry.pairs, dimmed: entry.pairsAreStale)
-            }
-        }
-    }
-
-    private var showTopology: Bool { entry.showSections.contains("topology") }
-    private var showCounts: Bool { entry.showSections.contains("nodes") || entry.showSections.contains("models") }
-    private var showBoard: Bool { entry.showSections.contains("board") }
-
-    private var stateLine: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(style.clusterStateColor(entry.state))
-                .frame(width: 8, height: 8)
-            Text(entry.state.label)
-                .font(style.font(.subheadline, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Spacer(minLength: 0)
-            if let age = entry.lastKnownAgeMinutes {
-                Text("\(age)m")
-                    .font(style.font(.caption2))
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                    .font(style.font(size: 9))
+                    .foregroundColor(style.secondaryTextColor)
+                Text("CLUSTER")
+                    .font(style.font(size: 9, weight: .semibold))
                     .foregroundColor(style.secondaryTextColor)
             }
+            Spacer(minLength: 0)
+            ClusterHeadline(entry: entry, size: 32)
+            ClusterDetail(entry: entry, surface: .small)
+            Spacer(minLength: 0)
+            ClusterFooter(entry: entry, surface: .small)
         }
-    .widgetHeader(style)
-    }
-
-    /// The nodes-up / models-served line (t_56b910c8). Each side is nil-able and
-    /// drops out on its own — an unmeasured count is absent, not a dash, because
-    /// in a tile this small a dash reads as "zero of something".
-    @ViewBuilder
-    private var countsLine: some View {
-        if showCounts {
-            HStack(spacing: 6) {
-                if entry.showSections.contains("nodes"), let up = entry.nodesUp, let total = entry.nodesTotal {
-                    Text("\(up)/\(total) up")
-                        .font(style.font(.caption2, weight: .semibold))
-                        .foregroundColor(style.primaryTextColor)
-                }
-                if entry.showSections.contains("models"), let models = entry.modelCount {
-                    Text(ClusterMetricText.models(models))
-                        .font(style.font(.caption2))
-                        .foregroundColor(style.secondaryTextColor)
-                }
-                Spacer(minLength: 0)
-            }
-            metricLine
-        }
-    }
-
-    /// The GPU / temperature / load line, live-only (the store holds no metric
-    /// projection, so a failed monitor read shows no metric line at all).
-    @ViewBuilder
-    private var metricLine: some View {
-        let parts = ClusterMetricText.metricParts(gpuUtilPct: entry.gpuUtilPct,
-                                                  gpuTempC: entry.gpuTempC,
-                                                  cpuTempC: entry.cpuTempC,
-                                                  load1m: entry.load1m)
-        if entry.showSections.contains("nodes"), !parts.isEmpty {
-            Text(parts.joined(separator: " · "))
-                .font(style.font(size: 9, weight: .medium))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-    }
-
-    /// Compact one-line "what the fleet is DOING" strip for the small widget:
-    /// running + queue counts, with a red warning marker when there are blocked
-    /// cards. Omitted entirely when no kanban data is present, so the small
-    /// widget still fits its state + topology in a tight space.
-    @ViewBuilder
-    private var smallWorkLine: some View {
-        let hasWork = entry.runningCards != nil || entry.queueDepth != nil || (entry.blockedCards ?? 0) > 0
-        if showBoard && hasWork {
-            HStack(spacing: 10) {
-                if let running = entry.runningCards {
-                    HStack(spacing: 3) {
-                        Image(systemName: "play.fill").widgetIcon(style)
-                            .font(style.font(size: 7))
-                            .foregroundColor(style.okColor)
-                        Text("\(running)")
-                            .font(style.font(.caption2, weight: .semibold))
-                            .foregroundColor(style.primaryTextColor)
-                    }
-                }
-                if let queue = entry.queueDepth {
-                    HStack(spacing: 3) {
-                        Image(systemName: "square.stack.3d.up").widgetIcon(style)
-                            .font(style.font(size: 7))
-                            .foregroundColor(style.secondaryTextColor)
-                        Text("\(queue)")
-                            .font(style.font(.caption2, weight: .semibold))
-                            .foregroundColor(style.primaryTextColor)
-                    }
-                }
-                Spacer(minLength: 0)
-                if let blocked = entry.blockedCards, blocked > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
-                        .font(style.font(size: 8))
-                        .foregroundColor(style.badColor)
-                }
-            }
-        }
-    }
-
-    private var gateView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
-                .font(style.font(.title3))
-                .foregroundColor(style.secondaryTextColor)
-            Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-        }
+        .widgetHeader(style)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Medium — topology pairs + models + nodes + metrics + idle remaining
+// Medium — headline + up to four node rows.
 // ---------------------------------------------------------------------------
 
 struct MediumClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
-    @ViewBuilder
     var body: some View {
-        if !entry.configured || entry.paused {
-            gateView
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                // State + the counts that matter at a glance.
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(style.clusterStateColor(entry.state))
-                        .frame(width: 8, height: 8)
-                    Text(entry.state.label)
-                        .font(style.font(.headline))
-                        .foregroundColor(style.primaryTextColor)
-                    Spacer()
-                    if entry.showSections.contains("nodes"),
-                       let up = entry.nodesUp, let total = entry.nodesTotal {
-                        metricLabel(value: "\(up)/\(total)", label: "nodes up")
-                    }
-                    if entry.showSections.contains("models"), let models = entry.modelCount {
-                        metricLabel(value: ClusterMetricText.models(models), label: "served")
-                    }
-                    if let idle = entry.idleMinutesRemaining {
-                        metricLabel(value: "\(idle)m", label: "to autodown")
-                    }
-                }
-                .widgetHeader(style)
-                // GPU / temperature / load, each in its own heat band.
-                metricStrip
-                // The topology pairs with per-node colour.
-                HStack(spacing: 16) {
-                    if entry.showSections.contains("topology") {
-                        ForEach(entry.pairs) { pair in
-                            miniPair(pair, dimmed: entry.pairsAreStale)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-                // What the fleet is DOING: running cards, queue depth, and a
-                // failure indicator (blocked cards needing attention).
-                workMetricsRow
-                // The one honest sentence about a failed read, when there is one.
-                if let failure = entry.failure {
-                    Text(failure.operatorLine)
-                        .font(style.font(.caption2))
-                        .foregroundColor(style.secondaryTextColor)
-                        .lineLimit(2)
-                }
-            }
-        }
-    }
-
-    /// The GPU / temperature / load row (t_56b910c8). Sits above the topology so
-    /// a hot GPU is the second thing the eye reaches, and disappears entirely
-    /// when the monitor gave nothing — never a row of dashes.
-    @ViewBuilder
-    private var metricStrip: some View {
-        let tokens = ClusterMetricText.tokens(gpuUtilPct: entry.gpuUtilPct,
-                                              gpuTempC: entry.gpuTempC,
-                                              cpuTempC: entry.cpuTempC,
-                                              load1m: entry.load1m)
-        if entry.showSections.contains("nodes"), !tokens.isEmpty {
-            HStack(spacing: 10) {
-                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-                    MetricToken(text: token.label, heat: token.heat, dimmed: entry.isStale)
-                }
+        let text = entry.text(for: .medium)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                ClusterHeadline(entry: entry, size: 26)
                 Spacer(minLength: 0)
+                ClusterDetail(entry: entry, surface: .medium)
             }
-        }
-    }
-
-    /// The board work row: running cards + queue depth as neutral metrics, and
-    /// a red failure badge when blocked cards need attention. Each count is
-    /// optional — a failed kanban fetch simply omits that metric.
-    @ViewBuilder
-    private var workMetricsRow: some View {
-        if entry.showSections.contains("board") {
-            HStack(spacing: 12) {
-                if let running = entry.runningCards {
-                    HStack(spacing: 4) {
-                        Image(systemName: "play.circle.fill").widgetIcon(style)
-                            .font(style.font(size: 10))
-                            .foregroundColor(style.okColor)
-                        metricLabel(value: "\(running)", label: "running")
+            .widgetHeader(style)
+            if !text.rows.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
+                        ClusterNodeRowView(row: row, node: node(at: index), compact: true)
                     }
                 }
-                if let queue = entry.queueDepth {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.stack.3d.up").widgetIcon(style)
-                            .font(style.font(size: 10))
-                            .foregroundColor(style.secondaryTextColor)
-                        metricLabel(value: "\(queue)", label: "queued")
-                    }
-                }
-                Spacer(minLength: 0)
-                if let blocked = entry.blockedCards, blocked > 0 {
-                    failureBadge(count: blocked)
-                }
             }
+            Spacer(minLength: 0)
+            ClusterFooter(entry: entry, surface: .medium)
         }
     }
 
-    /// The failure indicator — a red badge the operator can see at a glance.
-    private func failureBadge(count: Int) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
-                .font(style.font(size: 10))
-                .foregroundColor(style.badColor)
-            Text("\(count)")
-                .font(style.font(.caption, weight: .semibold))
-                .foregroundColor(style.badColor)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Capsule().fill(style.badColor.opacity(0.14)))
-    }
-
-    private func miniPair(_ pair: TopologyPair, dimmed: Bool = false) -> some View {
-        HStack(spacing: 4) {
-            dot(pair.nodes[0], dimmed: dimmed)
-            Rectangle()
-                .fill(style.secondaryTextColor.opacity(0.5))
-                .frame(width: 12, height: 2)
-            dot(pair.nodes[1], dimmed: dimmed)
-        }
-        .overlay(alignment: .bottom) {
-            Text(pair.role)
-                .font(style.font(size: 9))
-                .foregroundColor(style.secondaryTextColor)
-                .offset(y: 12)
-        }
-        .padding(.bottom, 6)
-    }
-
-    private func dot(_ node: TopologyNode, dimmed: Bool = false) -> some View {
-        HStack(spacing: 3) {
-            Circle()
-                .fill(dimmed ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
-                .frame(width: 8, height: 8)
-            Text(node.label)
-                .font(style.font(size: 10, weight: .semibold))
-                .foregroundColor(dimmed ? style.secondaryTextColor : style.primaryTextColor)
-        }
-    }
-
-    private func metricLabel(value: String, label: String) -> some View {
-        VStack(spacing: 0) {
-            Text(value)
-                .font(style.font(.caption, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            Text(label)
-                .font(style.font(size: 9))
-                .foregroundColor(style.secondaryTextColor)
-        }
-    }
-
-    private var gateView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
-                .font(style.font(.title3))
-                .foregroundColor(style.secondaryTextColor)
-            Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-        }
+    private func node(at index: Int) -> FleetNodeLine? {
+        guard let nodes = entry.fleet?.nodes, nodes.indices.contains(index) else { return nil }
+        return nodes[index]
     }
 }
 
 // ---------------------------------------------------------------------------
-// Large — state + counts, every metric, labelled topology pairs, board work
+// Large / macOS XL — every node row, full metrics, failure/age line.
 // ---------------------------------------------------------------------------
 
 struct LargeClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
-    @ViewBuilder
     var body: some View {
-        if !entry.configured || entry.paused {
-            gateView
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                stateLine
-                summaryRow
-                metricStrip
-                topologySection
-                workRow
-                if let failure = entry.failure {
-                    Text(failure.operatorLine)
-                        .font(style.font(.caption2))
-                        .foregroundColor(style.secondaryTextColor)
-                        .lineLimit(2)
-                }
+        let text = entry.text(for: .large)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                ClusterHeadline(entry: entry, size: 30)
                 Spacer(minLength: 0)
+                ClusterDetail(entry: entry, surface: .large)
             }
-        }
-    }
-
-    private var showNodes: Bool { entry.showSections.contains("nodes") }
-    private var showModels: Bool { entry.showSections.contains("models") }
-    private var showTopology: Bool { entry.showSections.contains("topology") }
-    private var showBoard: Bool { entry.showSections.contains("board") }
-
-    private var stateLine: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(style.clusterStateColor(entry.state))
-                .frame(width: 10, height: 10)
-            Text(entry.state.label)
-                .font(style.font(.title3, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Spacer(minLength: 0)
-            if let age = entry.lastKnownAgeMinutes {
-                Text("last known \(age)m ago")
+            .widgetHeader(style)
+            if !text.rows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
+                        ClusterNodeRowView(row: row, node: node(at: index))
+                        if index < text.rows.count - 1 {
+                            Divider().opacity(0.25)
+                        }
+                    }
+                }
+            } else if entry.failure == nil {
+                Text("No node sample in this refresh.")
                     .font(style.font(.caption))
                     .foregroundColor(style.secondaryTextColor)
             }
-        }
-    .widgetHeader(style)
-    }
-
-    /// Nodes / models / idle, each present only when the entry actually carries
-    /// it and the operator left the section on — an absent count is not a dash.
-    @ViewBuilder
-    private var summaryRow: some View {
-        HStack(spacing: 20) {
-            if showNodes, let up = entry.nodesUp, let total = entry.nodesTotal {
-                metricLabel(value: "\(up)/\(total)", label: "nodes up")
-            }
-            if showModels, let models = entry.modelCount {
-                metricLabel(value: ClusterMetricText.models(models), label: "served")
-            }
-            if let idle = entry.idleMinutesRemaining {
-                metricLabel(value: "\(idle)m", label: "to autodown")
-            }
             Spacer(minLength: 0)
+            ClusterFooter(entry: entry, surface: .large)
         }
     }
 
-    /// The GPU / temperature / load strip, one card per reported token. A nil
-    /// metric drops its whole card (never a dash), and a stale tile dims them
-    /// so old numbers cannot read as live.
-    @ViewBuilder
-    private var metricStrip: some View {
-        let tokens = ClusterMetricText.tokens(gpuUtilPct: entry.gpuUtilPct,
-                                              gpuTempC: entry.gpuTempC,
-                                              cpuTempC: entry.cpuTempC,
-                                              load1m: entry.load1m)
-        if showNodes, !tokens.isEmpty {
-            HStack(spacing: 8) {
-                ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-                    Text(token.label)
-                        .font(style.font(size: 13, weight: .semibold))
-                        .foregroundColor(entry.isStale ? style.secondaryTextColor : token.heat.color(style))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8)
-                            .fill(style.raisedColor))
-                }
-            }
-        }
-    }
-
-    /// Each TP pair on its own row with the role named and both node labels —
-    /// the extra width the large family buys over the small glyph.
-    @ViewBuilder
-    private var topologySection: some View {
-        if showTopology, !entry.pairs.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(entry.pairs) { pair in
-                    HStack(spacing: 8) {
-                        Text(pair.role)
-                            .font(style.font(size: 11, weight: .medium))
-                            .foregroundColor(style.secondaryTextColor)
-                            .frame(width: 88, alignment: .leading)
-                        ForEach(pair.nodes) { node in
-                            nodeChip(node)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                }
-            }
-        }
-    }
-
-    private func nodeChip(_ node: TopologyNode) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(entry.pairsAreStale ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
-                .frame(width: 8, height: 8)
-            Text(node.label)
-                .font(style.font(size: 12, weight: .semibold))
-                .foregroundColor(entry.pairsAreStale ? style.secondaryTextColor : style.primaryTextColor)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(style.raisedColor))
-    }
-
-    /// Running / queued / blocked, each optional independently.
-    @ViewBuilder
-    private var workRow: some View {
-        let hasWork = entry.runningCards != nil || entry.queueDepth != nil || (entry.blockedCards ?? 0) > 0
-        if showBoard && hasWork {
-            HStack(spacing: 20) {
-                if let running = entry.runningCards {
-                    workMetric(icon: "play.fill", tint: style.okColor,
-                               value: running, label: "running")
-                }
-                if let queue = entry.queueDepth {
-                    workMetric(icon: "square.stack.3d.up", tint: style.secondaryTextColor,
-                               value: queue, label: "queued")
-                }
-                if let blocked = entry.blockedCards, blocked > 0 {
-                    workMetric(icon: "exclamationmark.triangle.fill", tint: style.badColor,
-                               value: blocked, label: "blocked")
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    private func workMetric(icon: String, tint: Color, value: Int, label: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon).widgetIcon(style)
-                .font(style.font(size: 11))
-                .foregroundColor(tint)
-            metricLabel(value: "\(value)", label: label)
-        }
-    }
-
-    private func metricLabel(value: String, label: String) -> some View {
-        VStack(spacing: 1) {
-            Text(value)
-                .font(style.font(.headline))
-                .foregroundColor(style.primaryTextColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            Text(label)
-                .font(style.font(size: 10))
-                .foregroundColor(style.secondaryTextColor)
-        }
-    }
-
-    private var gateView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
-                .font(style.font(.title3))
-                .foregroundColor(style.secondaryTextColor)
-            Text(entry.paused ? "Paused in Settings" : "Set up the app to see the cluster")
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-        }
+    private func node(at index: Int) -> FleetNodeLine? {
+        guard let nodes = entry.fleet?.nodes, nodes.indices.contains(index) else { return nil }
+        return nodes[index]
     }
 }
 
 // ---------------------------------------------------------------------------
-// Lock Screen accessories (t_56b910c8)
-//
-// Space is the design constraint: one line inline, a gauge circular, two lines
-// rectangular. All three share the rule that live data wins and the gate label
-// (which carries `WidgetDataFailure.shortLabel`) only appears when the entry has
-// nothing live to draw — a tile that lost ONE read keeps showing the rest.
+// Lock Screen accessories
 // ---------------------------------------------------------------------------
 
-/// The Lock Screen circular: nodes up over nodes listed, as a capacity gauge.
-/// The gauge is chosen over a plain number because the denominator is the point
-/// — "3/4" reads as a degraded fleet, "3" does not.
+/// One clear headline number: the up/total gauge.
 struct CircularClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
-        if !entry.configured || entry.paused {
-            Text(entry.shortGateLabel)
-                .font(style.font(size: 9, weight: .semibold))
-                .foregroundColor(.secondary)
-                .minimumScaleFactor(0.6)
-                .accessibilityLabel(entry.shortGateLabel)
-        } else if let up = entry.nodesUp, let total = entry.nodesTotal, total > 0 {
+        if let fleet = entry.fleet,
+           let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal, total > 0 {
             Gauge(value: Double(min(max(up, 0), total)), in: 0...Double(total)) {
                 Text("up")
             } currentValueLabel: {
@@ -649,148 +287,63 @@ struct CircularClusterWidget: View {
             }
             .gaugeStyle(.accessoryCircularCapacity)
             .tint(.primary)
-            .accessibilityLabel("\(up) of \(total) nodes up, \(entry.state.label)")
-        } else if entry.state != .unknown {
-            // No host list (the monitor degraded or the fleet is off) but the
-            // state read answered: say the state, which IS the fact.
-            Text(entry.state.label)
-                .font(style.font(size: 10, weight: .semibold))
-                .foregroundColor(.primary)
-                .minimumScaleFactor(0.6)
-                .multilineTextAlignment(.center)
-                .accessibilityLabel(entry.state.label)
+            .accessibilityLabel("\(up) of \(total) nodes up")
         } else {
-            Text(entry.shortGateLabel)
+            Text(entry.text(for: .circular).headline)
                 .font(style.font(size: 9, weight: .semibold))
                 .foregroundColor(.secondary)
                 .minimumScaleFactor(0.6)
-                .accessibilityLabel(entry.shortGateLabel)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(entry.text(for: .circular).headline)
         }
     }
 }
 
-/// The Lock Screen rectangular: state + nodes + models on line one, the GPU /
-/// temperature / load strip on line two.
+/// Two lines: the tally + models, then throughput or the failure reason.
 struct RectangularClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
+        let text = entry.text(for: .rectangular)
         VStack(alignment: .leading, spacing: 2) {
-            if !entry.configured || entry.paused {
-                Text(entry.shortGateLabel)
-                    .font(style.font(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary)
+            Text(text.headline)
+                .font(style.font(size: 12, weight: .semibold))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+            if let detail = text.detail {
+                Text(detail)
+                    .font(style.font(size: 10, weight: .medium))
+                    .foregroundColor(.primary)
                     .lineLimit(1)
-                Text("Open HSCC to configure the cluster")
+                    .minimumScaleFactor(0.7)
+            }
+            ForEach(Array(text.rows.prefix(1).enumerated()), id: \.offset) { _, row in
+                Text(row.title + (row.detail.map { " · \($0)" } ?? ""))
                     .font(style.font(size: 9))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-            } else {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(.primary)
-                        .frame(width: 6, height: 6)
-                    Text(lineOne).widgetHeader(style)
-                        .font(style.font(size: 11, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
-                .accessibilityLabel(lineOne)
-                Text(lineTwo)
-                    .font(style.font(size: 10, weight: .medium))
-                    .foregroundColor(lineTwoColor)
-                    .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .accessibilityLabel(lineTwo)
+            }
+            if let footer = text.footer {
+                Text(footer)
+                    .font(style.font(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
     }
-
-    /// "Serving · 3/4 up · 2 models" — whatever the entry actually has.
-    private var lineOne: String {
-        var parts: [String] = []
-        if entry.state != .unknown, entry.showSections.contains("state") { parts.append(entry.state.label) }
-        if entry.showSections.contains("nodes") {
-            let nodeText = ClusterMetricText.nodes(up: entry.nodesUp, total: entry.nodesTotal)
-            if nodeText != ClusterMetricText.dash { parts.append(nodeText + " up") }
-        }
-        if entry.showSections.contains("models"), let models = entry.modelCount {
-            parts.append(ClusterMetricText.models(models))
-        }
-        return parts.isEmpty ? entry.shortGateLabel : parts.joined(separator: " · ")
-    }
-
-    /// The metric strip, or the failure's one-line explanation.
-    private var lineTwo: String {
-        let parts = ClusterMetricText.metricParts(gpuUtilPct: entry.gpuUtilPct,
-                                                  gpuTempC: entry.gpuTempC,
-                                                  cpuTempC: entry.cpuTempC,
-                                                  load1m: entry.load1m)
-        if !parts.isEmpty, entry.showSections.contains("nodes") { return parts.joined(separator: " · ") }
-        if let age = entry.lastKnownAgeMinutes { return "last known \(age) min ago" }
-        return entry.failure?.shortLabel ?? ClusterMetricText.dash
-    }
-
-    private var lineTwoColor: Color {
-        ClusterMetricHeat.percent(entry.gpuUtilPct).color(style)
-    }
 }
 
-/// The Lock Screen inline: one line, text only — nodes up, models served, GPU.
+/// One line: headline and detail, nothing truncated into soup.
 struct InlineClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
-        Text(ClusterMetricText.inlineLine(nodesUp: entry.nodesUp,
-                                         nodesTotal: entry.nodesTotal,
-                                         models: entry.showSections.contains("models") ? entry.modelCount : nil,
-                                         gpuUtilPct: entry.showSections.contains("nodes") ? entry.gpuUtilPct : nil,
-                                         gateLabel: entry.shortGateLabel))
-            .accessibilityLabel(ClusterMetricText.inlineLine(nodesUp: entry.nodesUp,
-                                                            nodesTotal: entry.nodesTotal,
-                                                            models: entry.modelCount,
-                                                            gpuUtilPct: entry.gpuUtilPct,
-                                                            gateLabel: entry.shortGateLabel))
+        Text(entry.inlineLine)
             .font(style.font(.caption))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Compact topology glyph
-// ---------------------------------------------------------------------------
-
-/// The compact topology glyph — the four nodes as two dotted TP pairs. Used by
-/// the small widget and (with `dimmed`) the unreachable small widget so a
-/// stale topology is clearly not-live.
-struct MiniTopologyView: View {
-    @Environment(\.widgetStyle) private var style
-    let pairs: [TopologyPair]
-    /// When true, render the topology in a muted state (the data is stale —
-    /// these dots came out of the last-known snapshot, not this refresh).
-    var dimmed = false
-
-    var body: some View {
-        HStack(spacing: 14) {
-            ForEach(pairs) { pair in
-                HStack(spacing: 4) {
-                    dot(pair.nodes[0])
-                    Rectangle()
-                        .fill(style.secondaryTextColor.opacity(0.4))
-                        .frame(width: 8, height: 2)
-                    dot(pair.nodes[1])
-                }
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func dot(_ node: TopologyNode) -> some View {
-        Circle()
-            .fill(dimmed ? style.secondaryTextColor.opacity(0.55) : style.nodeStateColor(node.state))
-            .frame(width: 7, height: 7)
+            .accessibilityLabel(entry.inlineLine)
     }
 }

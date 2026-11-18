@@ -55,14 +55,13 @@ for fam in systemSmall accessoryInline accessoryCircular accessoryRectangular; d
   fi
 done
 
-# (3) One gate step per family body. Six = small, medium, large, inline,
-# circular, rectangular. Two branches is how a body gates the invite and
-# forgets the pause.
-n=$(grep -c 'if !entry.configured || entry.paused' "$VIEWS")
+# (3) One gate owner, not six copies: every family routes through
+# `MonitorEntry.text(for:)`, and that entry checks !configured before paused.
+n=$(grep -c 'entry.text(for:' "$VIEWS")
 if [ "$n" -ge 6 ]; then
-  wok "$n bodies gate on !configured||paused (want >= 6)"
+  wok "$n family sites route through the entry's gated text model (want >= 6)"
 else
-  wbad "only $n bodies gate on !configured||paused (want >= 6) — a family can draw data on a paused surface"
+  wbad "only $n family sites route through entry.text(for:) (want >= 6) — a family can draw data on a paused surface"
 fi
 
 # (4) The paused copy has exactly one CODE owner (MonitorState.label). The gate
@@ -75,14 +74,14 @@ else
 fi
 
 # (5) The accessory label rule, and the invite-first order inside it.
-if grep -q 'var shortGateLabel: String' "$VIEWS"; then
+if grep -q 'var shortGateLabel: String' "$SUBJECT"; then
   wok "the entry owns the accessory shortGateLabel"
 else
   wbad "no shortGateLabel on the entry — a Lock Screen gate has no copy of its own"
 fi
-copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' "$VIEWS")
+copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' "$SUBJECT")
 if [ -z "$copy" ]; then
-  wbad "could not locate var shortGateLabel in $VIEWS — the invite-first rule is not being measured"
+  wbad "could not locate var shortGateLabel in $SUBJECT — the invite-first rule is not being measured"
 else
   u=$(printf '%s\n' "$copy" | grep -n '!configured' | head -1 | cut -d: -f1)
   p=$(printf '%s\n' "$copy" | grep -n 'Paused' | head -1 | cut -d: -f1)
@@ -92,33 +91,34 @@ else
     wbad "shortGateLabel does NOT check !configured first (configured-check line=$u paused-copy line=$p)"
   fi
 fi
-n=$(grep -c 'entry\.shortGateLabel' "$VIEWS")
+n=$(grep -cE 'entry\.text\(for: \.(inline|circular|rectangular)\)' "$VIEWS")
 if [ "$n" -ge 2 ]; then
-  wok "accessory families draw shortGateLabel ($n sites)"
+  wok "accessory families route through the entry's gated text ($n sites)"
 else
-  wbad "only $n accessory sites route through shortGateLabel (want >= 2 — inline and circular)"
+  wbad "only $n accessory sites route through the gate (want >= 2 — inline and circular)"
 fi
 
-# (6) The compact families draw a subset of the medium data, not a new route.
-for helper in headlineNode averageCPU inlineLine; do
-  if grep -q "var $helper" "$VIEWS"; then
-    wok "the compact families share the entry's $helper rule"
+# (6) The compact families draw a subset of the same entry text, not a new
+# route and not an invented average: every family renders `text(for:)`, whose
+# headline is the host tally and whose rows are the CLI node rows.
+for helper in 'func text(for surface: FleetSurface)' 'var inlineLine' 'func daemonLine'; do
+  if grep -q "$helper" "$SUBJECT"; then
+    wok "the entry owns '$helper'"
   else
-    wbad "missing $helper on the entry — a compact family is inventing its own numbers"
+    wbad "missing '$helper' on the entry — a compact family is inventing its own numbers"
   fi
 done
 small_range=$(awk '/^struct SmallMonitorWidget/,/^}/' "$VIEWS")
-if printf '%s\n' "$small_range" | grep -q 'headlineNode'; then
-  wok "the small family draws the first node the medium grid already has"
+if printf '%s\n' "$small_range" | grep -q 'MonitorHeadline(entry:'; then
+  wok "the small family draws the entry's tally + serving line"
 else
-  wbad "the small family does not use headlineNode"
+  wbad "the small family bypasses the entry text model"
 fi
 accessory_range=$(awk '/^struct InlineMonitorWidget/,0' "$VIEWS")
-if printf '%s\n' "$accessory_range" | grep -q 'cpuUsagePct\|memUsedPct\|averageCPU\|inlineLine' \
-   && printf '%s\n' "$accessory_range" | grep -q 'gpuUtilPct\|headlineNode\|inlineLine'; then
-  wok "the accessory families draw only the medium view's node numbers"
+if printf '%s\n' "$accessory_range" | grep -q 'entry.inlineLine'; then
+  wok "the accessory families draw the same gated text"
 else
-  wbad "an accessory family does not draw the medium view's node numbers"
+  wbad "an accessory family bypasses the entry text model"
 fi
 if printf '%s\n' "$accessory_range" | grep -q 'daemonHost\|HostStrip\|HostBlock\|"host"'; then
   wbad "an accessory body reads the daemon-host half it will not draw"
@@ -126,18 +126,19 @@ else
   wok "the accessory bodies never read the daemon-host half"
 fi
 
-# (7) No new network call: one node route, one host route, both in the provider.
-n=$(grep -c '"/v1/cluster/monitor"' "$SUBJECT")
+# (7) No new network call: one named monitor method and one named host method,
+# both through WidgetDataClient (the closed GET allowlist), in the provider.
+n=$(grep -c '\$0.clusterMonitor()' "$SUBJECT")
 if [ "$n" -eq 1 ]; then
-  wok "exactly one /v1/cluster/monitor read"
+  wok "exactly one clusterMonitor() read"
 else
-  wbad "expected exactly 1 /v1/cluster/monitor read, got $n"
+  wbad "expected exactly 1 clusterMonitor() read, got $n"
 fi
-n=$(grep -c '"/v1/daemon/host"' "$SUBJECT")
+n=$(grep -c '\$0.daemonHost()' "$SUBJECT")
 if [ "$n" -eq 1 ]; then
-  wok "exactly one /v1/daemon/host read"
+  wok "exactly one daemonHost() read"
 else
-  wbad "expected exactly 1 /v1/daemon/host read, got $n"
+  wbad "expected exactly 1 daemonHost() read, got $n"
 fi
 if grep -q '"/v1/' "$VIEWS"; then
   wbad "a route literal appears in the view file — reads belong in the provider"
@@ -169,7 +170,7 @@ else
   wbad "showsDaemonHost is not the positive list the gate can execute"
 fi
 guard_line=$(grep -n 'guard enabled else' "$SUBJECT" | head -1 | cut -d: -f1)
-host_line=$(grep -n '"/v1/daemon/host"' "$SUBJECT" | head -1 | cut -d: -f1)
+host_line=$(grep -n '\$0.daemonHost()' "$SUBJECT" | head -1 | cut -d: -f1)
 if [ -n "$guard_line" ] && [ -n "$host_line" ] && [ "$guard_line" -lt "$host_line" ]; then
   wok "the host-refusal guard (line $guard_line) precedes the host request (line $host_line)"
 else
@@ -183,7 +184,7 @@ if [ -z "$region" ]; then
   wbad "could not locate fetchEntry(family:) — the pause-before-client order is not being measured"
 else
   a=$(printf '%s\n' "$region" | grep -n 'if let surface, !surface.isActive' | head -1 | cut -d: -f1)
-  c=$(printf '%s\n' "$region" | grep -n 'APIConfig.load()' | head -1 | cut -d: -f1)
+  c=$(printf '%s\n' "$region" | grep -n 'WidgetDataClient.makeIfConfigured()' | head -1 | cut -d: -f1)
   if [ -n "$a" ] && [ -n "$c" ] && [ "$a" -lt "$c" ]; then
     wok "inside the fetch: paused decided (line $a) before the client exists (line $c) — zero requests when paused"
   else

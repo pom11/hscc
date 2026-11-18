@@ -61,6 +61,13 @@ struct ClusterHealthLiveActivity: Widget {
                                 .foregroundColor(style.warnColor)
                                 .lineLimit(1)
                         }
+                        if let feed = ClusterHealthReading.feedText(model: signals.modelLabel,
+                                                                    genTps: signals.genTps) {
+                            Text(feed)
+                                .font(style.font(.caption2))
+                                .foregroundColor(style.secondaryTextColor)
+                                .lineLimit(1)
+                        }
                     }
                     .widgetStyle(style)
                 }
@@ -195,6 +202,14 @@ struct LockScreenClusterHealthView: View {
             ClusterHealthDetail(signals: signals,
                                 limit: ClusterHealthActivityAttributes.downNodeLimit,
                                 labelFont: style.font(size: 11, weight: .semibold))
+
+            if let feed = ClusterHealthReading.feedText(model: signals.modelLabel,
+                                                        genTps: signals.genTps) {
+                Text(feed)
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
+                    .lineLimit(1)
+            }
 
             if let downLine = emptyLine(signals) {
                 Text(downLine)

@@ -99,12 +99,19 @@ struct ClusterHealthSignals: Codable, Hashable {
     /// "nothing is down" (`nodesDown == 0`) or "not told" (`nodesDown == nil`) —
     /// the two render differently, so `nodesDown` stays beside this.
     var downNodes: [String]
+    /// The first model the serving table names (`serving[].model`, shortened
+    /// the way the CLI does). Nil when the route sent no serving section.
+    var modelLabel: String? = nil
+    /// The CLI total "Gen t/s" — the sum of `serving[].gen_tps`. Nil when no
+    /// row had a rate yet (the CLI prints "-" on a first sample).
+    var genTps: Double? = nil
 
     /// A state with no signal in it at all: nothing answered, so there is
     /// nothing to show. Used by the orphan rule and by the empty-state line.
     var isEmpty: Bool {
         if servingState != "unknown" { return false }
         if nodesUp != nil || nodesDown != nil || nodesTotal != nil { return false }
+        if modelLabel != nil || genTps != nil { return false }
         if let failureLabel, !failureLabel.isEmpty { return false }
         return true
     }
@@ -228,6 +235,16 @@ enum ClusterHealthReading {
             return .ok
         default: return .neutral
         }
+    }
+
+    /// The serving line the CLI prints beside the host table: model and the
+    /// total generation rate. Both are `serving[]` fields; a row that has no
+    /// rate yet contributes nothing, so this is nil rather than "0.0 t/s".
+    static func feedText(model: String?, genTps: Double?) -> String? {
+        var parts: [String] = []
+        if let model, !model.isEmpty { parts.append(model) }
+        if let genTps { parts.append(String(format: "%.1f t/s", genTps)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// How long ago the app last pushed — the honest "this may be old" line.
@@ -368,6 +385,7 @@ enum ClusterHealthProjection {
                         monitorLabel: String?,
                         showNodeTally: Bool) -> ClusterHealthSignals {
         let tally = showNodeTally ? ClusterNodeTally.project(monitor) : .noAnswer
+        let serving = ServingSummary(rows: monitor?.serving)
         return ClusterHealthSignals(
             servingState: servingState(from: autodown),
             nodesUp: tally.nodesUp,
@@ -375,7 +393,9 @@ enum ClusterHealthProjection {
             nodesTotal: tally.nodesTotal,
             failureLabel: failureLabel(autodownLabel: autodownLabel,
                                        monitorLabel: showNodeTally ? monitorLabel : nil),
-            downNodes: tally.downLabels)
+            downNodes: tally.downLabels,
+            modelLabel: serving.modelNames.first,
+            genTps: serving.genTps)
     }
 }
 // GATE-SLICE-END: cluster-health-projection-rules
