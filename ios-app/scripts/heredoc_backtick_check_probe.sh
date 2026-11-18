@@ -17,6 +17,8 @@
 # same marker. A refusal of a position that was never live proves nothing.
 #
 # LEGS
+#   self-audit       this file must contain ZERO bytes of the character it plants
+#                    (printf octal only). It fails fast, before any attack is scored.
 #   control          the unmutated mirrored tree must PASS, must scan the same
 #                    NUMBER of scripts as the real tree, and must report at least
 #                    as many splice-capable scripts as this probe independently
@@ -34,6 +36,14 @@
 #                    nothing until the same position is shown to be live there.
 #   depth-scan       the identical fixture, SCANNED: refused by path and listed in the
 #                    scanned population by path.
+#   link-edge        a DANGLING symlink named *.sh in the tree must be REFUSED as
+#                    unreadable (it yields zero records, and zero records must not read
+#                    as clean), while a symlink to a real script must appear in the
+#                    population — the one-level glob the gate replaced matched links, so
+#                    a regular-file predicate would be a new silent exemption.
+#   samename         two files called common.sh in different directories: the clean one
+#                    listed and the offending one refused, each BY PATH. A finding that
+#                    printed only a leaf name would not say which file it refused.
 #   live-body        payload in an unquoted heredoc body, EXECUTED: marker required.
 #   live-shell       payload in shell position, EXECUTED: marker required.
 #   live-comment     payload inside a real '#' comment, EXECUTED: marker FORBIDDEN.
@@ -135,6 +145,23 @@ else
 fi
 
 WORKROOT="$(mktemp -d "${TMPDIR:-/tmp}/hbcprobe.XXXXXX")"
+
+# ---- self-audit: this file carries ZERO bytes of the character it plants -------
+# Rule of the class (hscc-probe-harness-pitfalls): verify, do not trust. This leg is
+# not decoration — the first draft of the enumeration-edges legs below spelled a
+# find(1) predicate in backticks inside a comment of THIS file, and because this file
+# has an unquoted heredoc of its own, R2 made every one of those bytes a finding: the
+# meta-gate went red on a tree that looked untouched and the control leg went red
+# before any attack was scored. A probe carrying the byte cannot certify anything,
+# because its own green would itself be the false green.
+SELF_NAME="$(basename "${BASH_SOURCE[0]}")"
+self_bytes=$(tr -dc "$BT" < "${SELF_DIR}/${SELF_NAME}" | wc -c | tr -d ' ')
+if [ "$self_bytes" = "0" ]; then
+  pok "self-audit: $SELF_NAME carries 0 bytes of the character it plants (printf octal only)"
+else
+  pfail "self-audit: $SELF_NAME carries $self_bytes byte(s) of the character it plants — this probe is disqualified by the rule it tests, and R2 refuses it as a splice-capable file. Quote the word or reword it (measured: two bytes in one comment did exactly that)"
+  exit 1
+fi
 
 # ---- harness ---------------------------------------------------------------
 mk_tree() {   # mk_tree <leg>: private ios-app dir; scripts/ mirrored, Sources/ symlinked
@@ -372,6 +399,45 @@ if grep -q "scanned ${d2file}" "$OUT" || grep -qE "^scanned +${d2file}" "$OUT"; 
   pok "depth-scan: the file appears in the scanned population by PATH, so a future surface file cannot hide one directory down"
 else
   pfail "depth-scan: rc was $G_RC but $d2file never reached a scanned line — the walk did not enter the directory it claims to cover"
+fi
+
+# ---- enumeration edges: the two things '! -type d' buys, and what it must not --
+# Every leg above already runs against a scripts/ tree made ENTIRELY of symlinks, so
+# the moment the walk grows a '-type f' predicate every leg goes red at once — that
+# property is structural, not asserted here. These two are not: a dangling symlink
+# produces zero records, and two same-named files in different directories produce
+# identical basenames. Both are silent-green shapes if the enumeration is wrong.
+echo "enumeration edges: a dangling symlink refuses, and same-named files are told apart by path"
+mk_tree link-edge
+mkdir -p "${TREE}/scripts/zz_link_check"
+ln -s "${IOSAPP}/scripts/build_check.sh" "${TREE}/scripts/zz_link_check/zz_clean_link.sh" 2>/dev/null
+ln -s /nonexistent/definitely-not-here.sh "${TREE}/scripts/zz_link_check/zz_dangling.sh" 2>/dev/null
+scan "$TREE"
+if [ "$G_RC" -ne 0 ] && [ "$BANNERS" -eq 0 ] && grep -q 'zz_link_check/zz_dangling.sh' "$OUT" \
+   && grep -q 'not readable' "$OUT"; then
+  pok "link-edge: the dangling symlink is REFUSED by path as unreadable (rc $G_RC) — zero records from a listed entry is never reportable as clean"
+else
+  pfail "link-edge: rc=$G_RC banners=$BANNERS named-it=$(grep -c 'zz_link_check/zz_dangling.sh' "$OUT") — an unreadable entry scanned as if it were empty"
+fi
+if grep -q "^scanned zz_link_check/zz_clean_link.sh" "$OUT" || grep -qE "^scanned +zz_link_check/zz_clean_link.sh" "$OUT"; then
+  pok "link-edge: the symlink to a real script has its own scanned line — a regular-file predicate would have dropped it, and the glob this gate replaced did not"
+else
+  pfail "link-edge: a symlinked .sh never reached a scanned line — the walk now excludes links, which the one-level glob it replaced included"
+fi
+
+mk_tree samename
+mkdir -p "${TREE}/scripts/zz_same_a" "${TREE}/scripts/zz_same_b"
+printf '%s\n' '#!/bin/bash' 'echo clean, no byte here' > "${TREE}/scripts/zz_same_a/common.sh"
+{ printf '%s\n' '#!/bin/bash' 'cat > /dev/null <<BODY' "$(payload_for '//')" 'BODY'
+  printf '%s\n' 'echo done'; } > "${TREE}/scripts/zz_same_b/common.sh"
+chmod +x "${TREE}/scripts/zz_same_a/common.sh" "${TREE}/scripts/zz_same_b/common.sh"
+scan "$TREE"
+if [ "$G_RC" -ne 0 ] && [ "$BANNERS" -eq 0 ] \
+   && grep -q 'zz_same_b/common.sh' "$OUT" && grep -q 'zz_same_a/common.sh' "$OUT" \
+   && ! grep -qE 'FINDING  common.sh' "$OUT"; then
+  pok "samename: the two common.sh files are reported as distinct paths (the clean one listed, the offending one refused) — a bare leaf name in a finding would conflate them"
+else
+  pfail "samename: rc=$G_RC banners=$BANNERS a=$(grep -c 'zz_same_a/common.sh' "$OUT") b=$(grep -c 'zz_same_b/common.sh' "$OUT") — findings are not addressing files uniquely"
 fi
 
 # ---- liveness --------------------------------------------------------------
