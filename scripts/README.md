@@ -208,6 +208,26 @@ operator must create. It ships inert (`.disabled` extension, plus a
 rename the file while the release card still runs the script locally, or every
 release grows a red X.
 
+## Tap cask (`bump_cask.py`) — the macOS Widgets install step
+
+`pom11/homebrew-hscc` also carries `Casks/hscc-widgets.rb`, which installs the
+notarized `HSCC Widgets.app` from a `macos-widgets-v<version>` release asset.
+`macos-app/scripts/release.sh` builds and uploads that asset; the cask pins its
+url and sha256:
+
+```bash
+python3 scripts/bump_cask.py --version 0.1.0 --zip dist/HSCC-Widgets-0.1.0.zip
+python3 scripts/bump_cask.py --version 0.1.0 --zip dist/HSCC-Widgets-0.1.0.zip --push
+```
+
+The digest is computed from the local zip (no hand-typed value), and the render
+is gated by `ruby -c` and this repo's `address_guard.py`. `--push` creates or
+updates the file through `gh api` (contents API, blob sha on update), so the
+release host needs no tap checkout; an identical remote file is reported
+`up to date` without a PUT. `release.sh --push-cask` runs the push after a
+successful upload. Exit codes match `bump_formula.py`: `0` pushed or up to date,
+`1` a gate/API rejection, `2` malformed version / missing zip / no gh / no ruby.
+
 ## README lint (`readme_lint.py`) — R7 gate (audit §3)
 
 `readme_lint.py` enforces the two rules `docs/audits/README_REVIEW_2026-10-15.md`
