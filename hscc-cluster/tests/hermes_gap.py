@@ -62,7 +62,8 @@ Both facts are in ``-rs`` today because both were measured, and one of them is a
 defect the flag was hiding: 6 of the gated cases (``TestAutoUnblock``) pass on an
 interpreter that HAS hermes only because ``workflow.on_kanban_task_claimed``
 binds ``hermes_cli.kanban_db.connect = kanban_db_connect.connect`` into the
-module ``__dict__`` (workflow.py:211-214) — and the file that triggers that
+module ``__dict__`` (workflow.py:213-216, the
+``if "connect" not in _kb.__dict__`` bind) — and the file that triggers that
 binding, ``test_dispatch_hook.py``, sorts before this one. Run this file alone on
 the canonical interpreter the six fail with ``AttributeError: module
 'hermes_cli.kanban_db' has no attribute 'connect'``. The probe cannot fix that
@@ -238,8 +239,11 @@ def require_hermes_cli_plugin_dispatcher():
 def hermes_cli_profiles_import_error():
     """``None`` when ``hermes_cli.profiles`` imports here, else the error as text.
 
-    Keyed on the import production performs (``workflow._active_profile_name``,
-    workflow.py:513: ``from hermes_cli.profiles import get_active_profile_name``).
+    Keyed on the import production performs — ``from hermes_cli.profiles import
+    get_active_profile_name``, which sits in ``workflow._active_profile_name``'s
+    inner ``_resolve()`` (named by symbol, not by line number: t_847ab03b / PR #364
+    moved it when it put the call inside the import window, and a number quoted here
+    would drift again the next time that function is edited).
     Same capability name as ``hscc-roles/tests/hermes_gap.py`` on purpose: an
     operator reading ``-rs`` across legs should see one wording per capability.
     """
@@ -291,14 +295,20 @@ def require_child_ran_hermes(returncode, stderr):
     ``test_protocol_violation_bound.py`` never uses hermes in this process — it
     runs ``_pvb_sim.py`` with ``sys.executable`` and an env that only drops
     ``HERMES_DELEGATED_CHILD_CONTEXT``. So this process's ``sys.path`` says nothing
-    about the child's: ``workflow._active_profile_name()`` inserts
+    about the child's: the child gets ``sys.executable`` plus its own script dir,
+    never the parent's path. That conclusion does not depend on what this process's
+    path holds, and when this probe was written it held something that made the
+    difference loud — ``workflow._active_profile_name()`` used to insert
     ``~/.hermes/hermes-agent`` into *this* process's ``sys.path`` the first time it
-    runs (workflow.py:523, production's documented import fence), and a child
-    started afterwards does not inherit it. Measured on the thin sibling: the
-    in-process gate passes after that fence and the child still cannot import
-    hermes — which is why the case has to ask the child, and why asking it from
-    the child's own stderr is stronger than a second probe here: the answer comes
-    from the run that happened, not from a guess about the env.
+    ran and leave it there (production's hand-rolled import fence, until
+    t_847ab03b / PR #364 made the fence restore it;
+    ``test_hermes_fence_sys_path.py`` is what pins that now). Either way the child
+    started afterwards did not inherit it. Measured on the thin sibling when this
+    probe was written (t_b884497b): the in-process gate passed after that fence and
+    the child still could not import hermes — which is why the case has to ask the
+    child, and why asking it from the child's own stderr is stronger than a second
+    probe here: the answer comes from the run that happened, not from a guess about
+    the env.
     """
     error = child_import_error(returncode, stderr)
     if error is not None:
