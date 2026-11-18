@@ -68,16 +68,20 @@ def git(*args, cwd=None, check=True) -> str:
     return out.stdout
 
 
-def make_remote_with_pages(tmp_path: Path, pages: dict[str, str]) -> Path:
+def make_remote_with_pages(tmp_path: Path, pages: dict[str, str],
+                           name: str = "remote.git") -> Path:
     """A bare 'remote' whose gh-pages branch already holds `pages`.
 
     This is the state the task calls CRITICAL: /ios/ and /macos/ are already
     being served when the root page is published.
+
+    `name` exists so one test can hold two independent remotes — the real one
+    and the decoy a publisher must not be able to reach (decoy_caller_repo).
     """
-    bare = tmp_path / "remote.git"
+    bare = tmp_path / name
     bare.mkdir()
     git("init", "--quiet", "--bare", str(bare))
-    seed = tmp_path / "seed"
+    seed = tmp_path / f"{name}.seed"
     seed.mkdir()
     git("init", "--quiet", str(seed))
     for rel, body in pages.items():
@@ -112,9 +116,12 @@ def run_publish(bare: Path, env_extra: dict[str, str] | None = None):
     env.update(env_extra or {})
     import os
     full = {**os.environ, **env}
+    # cwd is the tmp dir, NOT the repo: publish_site.sh pins every git call to
+    # its own $REPO_ROOT, so running it from somewhere else is the point (see
+    # decoy_caller_repo for what an unpinned call would do).
     return subprocess.run(
         ["bash", str(PUBLISH_SITE)], capture_output=True, text=True,
-        cwd=str(REPO), env=full,
+        cwd=str(bare.parent), env=full,
     )
 
 
@@ -224,16 +231,40 @@ def _stub_gh(tmp_path: Path) -> Path:
     return stub
 
 
-def test_macos_release_script_keeps_the_root_page(tmp_path):
-    """Behavioural: run the real publish_macos.sh against a throwaway remote.
+DECOY_MARKER = "decoy-must-never-ship.txt"
 
-    `gh` is stubbed (the script only needs `gh auth status` to succeed) so no
-    GitHub call happens; everything else — the worktree, the subtree staging,
-    the push — is the production code path.
+
+def decoy_caller_repo(tmp_path: Path) -> Path:
+    """A *different*, already-fetched repository to invoke a publisher from.
+
+    The publishers have to run from here, not from their own repo, for the leg
+    to mean anything. A `git ls-remote origin` / `git fetch origin` that is not
+    pinned with `-C "$REPO_ROOT"` resolves the remote and writes FETCH_HEAD in
+    whichever repo owns the current working directory — so an unpinned publisher
+    either dies on "fatal: invalid reference 'FETCH_HEAD'" here, or, when the
+    caller's repo has a FETCH_HEAD lying around (as this one does), feeds the
+    worktree the CALLER's commit and pushes it onto the branch that serves the
+    install pages. DECOY_MARKER is how the second outcome gets caught.
     """
-    if shutil.which("gh") is None:
-        pytest.skip("gh is not installed; the script's tool probe would abort")
+    make_remote_with_pages(tmp_path, {DECOY_MARKER: "decoy-marker-7731"},
+                           name="decoy.git")
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    git("init", "--quiet", str(caller))
+    (caller / "unrelated.txt").write_text("unrelated work\n", encoding="utf-8")
+    git("add", "-A", cwd=caller)
+    git("commit", "--quiet", "-m", "unrelated work", cwd=caller)
+    git("remote", "add", "origin", str(tmp_path / "decoy.git"), cwd=caller)
+    git("fetch", "--quiet", "origin", "gh-pages", cwd=caller)   # leaves FETCH_HEAD
+    return caller
 
+
+def _macos_release_fixture(tmp_path: Path, bare: Path) -> tuple[Path, list[str]]:
+    """A throwaway repository holding the real publish_macos.sh, + its argv.
+
+    Committed, because the branch-missing path forks off HEAD, and `origin`
+    points at `bare` so the publish lands on a remote nobody serves.
+    """
     root = tmp_path / "repo"
     (root / "macos-app" / "scripts").mkdir(parents=True)
     (root / "macos-app" / "site").mkdir(parents=True)
@@ -246,27 +277,45 @@ def test_macos_release_script_keeps_the_root_page(tmp_path):
     zip_path = tmp_path / "HSCC-Widgets-9.9.9.zip"
     zip_path.write_bytes(b"zip-bytes-for-the-length-field")
 
-    planted = dict(PLANTED)
-    planted["index.html"] = "<!doctype html><title>the landing page</title>"
-    bare = make_remote_with_pages(tmp_path, planted)
-
     git("init", "--quiet", str(root))
     git("add", "-A", cwd=root)
     git("commit", "--quiet", "-m", "release fixture", cwd=root)
     git("remote", "add", "origin", str(bare), cwd=root)
+    return root, ["9.9.9", "999", str(zip_path), "dummysignature"]
 
+
+def test_macos_release_script_keeps_the_root_page(tmp_path):
+    """Behavioural: run the real publish_macos.sh against a throwaway remote.
+
+    `gh` is stubbed (the script only needs `gh auth status` to succeed) so no
+    GitHub call happens; everything else — the worktree, the subtree staging,
+    the push — is the production code path. And it runs from a DECOY repo, so a
+    fetch that is not pinned to the script's own repo cannot slip through.
+    """
+    if shutil.which("gh") is None:
+        pytest.skip("gh is not installed; the script's tool probe would abort")
+
+    planted = dict(PLANTED)
+    planted["index.html"] = "<!doctype html><title>the landing page</title>"
+    bare = make_remote_with_pages(tmp_path, planted)
+    root, args = _macos_release_fixture(tmp_path, bare)
+
+    caller = decoy_caller_repo(tmp_path)
     stub = _stub_gh(tmp_path)
     import os
     env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
            "TMPDIR": str(tmp_path)}
     proc = subprocess.run(
-        ["bash", str(root / "macos-app" / "scripts" / "publish_macos.sh"),
-         "9.9.9", "999", str(zip_path), "dummysignature"],
-        capture_output=True, text=True, cwd=str(root), env=env,
+        ["bash", str(root / "macos-app" / "scripts" / "publish_macos.sh"), *args],
+        capture_output=True, text=True, cwd=str(caller), env=env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     after = remote_files(bare)
+    assert DECOY_MARKER not in after, (
+        "publish_macos.sh read the CALLER's repo (cwd) instead of its own: "
+        "an unpinned `git fetch` writes FETCH_HEAD into whatever repo owns the "
+        "cwd, and the worktree was built from that commit")
     assert after["index.html"] == b(planted["index.html"]), (
         "publish_macos.sh rewrote or dropped the landing page at the root")
     assert after["ios/keep-marker.txt"] == b("ios-marker-9137")
@@ -274,6 +323,53 @@ def test_macos_release_script_keeps_the_root_page(tmp_path):
     # The release itself landed.
     assert after["macos/index.html"].startswith(b("<!doctype html>"))
     assert b("9.9.9") in after["macos/appcast.xml"]
+
+
+def test_macos_release_script_branch_missing_path_survives_a_lingering_branch(tmp_path):
+    """The orphan path, which the happy leg above can never reach.
+
+    It holds two hazards. `git checkout --orphan gh-pages` is fatal if the
+    repository holds ANY local branch of that name — a developer's, or a stale
+    one from before this script existed — even though the remote has no
+    gh-pages at all. And the path empties the tree, so when it does run it must
+    publish only its own subtree: with no branch there is nothing of anyone
+    else's to preserve, and it must not invent any either.
+    """
+    if shutil.which("gh") is None:
+        pytest.skip("gh is not installed; the script's tool probe would abort")
+
+    bare = tmp_path / "empty.git"               # a remote with NO gh-pages branch
+    bare.mkdir()
+    git("init", "--quiet", "--bare", str(bare))
+    root, args = _macos_release_fixture(tmp_path, bare)
+    # The hazard itself: a local branch that has nothing to do with the remote.
+    git("branch", "gh-pages", cwd=root)
+
+    caller = decoy_caller_repo(tmp_path)
+    stub = _stub_gh(tmp_path)
+    import os
+    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
+           "TMPDIR": str(tmp_path)}
+    proc = subprocess.run(
+        ["bash", str(root / "macos-app" / "scripts" / "publish_macos.sh"), *args],
+        capture_output=True, text=True, cwd=str(caller), env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "creating orphan gh-pages" in proc.stdout, (
+        "the branch-missing path was not taken; the leg proves nothing")
+
+    after = remote_files(bare)
+    assert DECOY_MARKER not in after
+    assert after["macos/index.html"].startswith(b("<!doctype html>"))
+    assert b("9.9.9") in after["macos/appcast.xml"]
+    # Nothing else was invented: no root page, no sibling subtree.
+    assert "index.html" not in after
+    assert not [p for p in after if p.startswith("ios/")]
+    # The throwaway orphan branch is gone, and the lingering one is untouched.
+    branches = git("branch", "--format=%(refname:short)", cwd=root).split()
+    assert [b for b in branches if b.startswith("hscc-macos-publish-")] == []
+    assert "gh-pages" in branches, (
+        "the release deleted a local branch that was never its own")
 
 
 @pytest.mark.skipif(sys.platform != "darwin",
@@ -317,6 +413,7 @@ def test_ios_release_script_keeps_the_root_page(tmp_path):
     git("commit", "--quiet", "-m", "release fixture", cwd=root)
     git("remote", "add", "origin", str(bare), cwd=root)
 
+    caller = decoy_caller_repo(tmp_path)
     stub = _stub_gh(tmp_path)
     import os
     env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}",
@@ -324,11 +421,15 @@ def test_ios_release_script_keeps_the_root_page(tmp_path):
     proc = subprocess.run(
         ["bash", str(root / "ios-app" / "scripts" / "publish_pages.sh"),
          "9.9.9", str(ipa)],
-        capture_output=True, text=True, cwd=str(root), env=env,
+        capture_output=True, text=True, cwd=str(caller), env=env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     after = remote_files(bare)
+    assert DECOY_MARKER not in after, (
+        "publish_pages.sh read the CALLER's repo (cwd) instead of its own: "
+        "an unpinned `git fetch` writes FETCH_HEAD into whatever repo owns the "
+        "cwd, and the worktree was built from that commit")
     assert after["index.html"] == b(planted["index.html"]), (
         "publish_pages.sh rewrote or dropped the landing page at the root")
     assert after["macos/keep-marker.txt"] == b("macos-marker-4820")
@@ -351,11 +452,40 @@ def test_release_scripts_share_the_preservation_mechanism(script):
     starts getting wiped on release.
     """
     text = script.read_text(encoding="utf-8")
-    assert "git ls-remote --exit-code --heads origin gh-pages" in text, (
+    # The header comments say out loud what the scripts refuse to do, so the
+    # pins below scan only the lines that can actually run.
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+    assert 'git -C "$REPO_ROOT" ls-remote --exit-code --heads origin gh-pages' in code, (
         f"{script.name} no longer checks whether gh-pages exists before "
         "choosing the orphan path")
     assert "reusing existing gh-pages" in text
-    assert "checkout --quiet --orphan gh-pages" in text
+
+    # The trap this card exists for: a git call without `-C "$REPO_ROOT"` reads
+    # and writes the repository that owns the CWD, so whoever invoked the
+    # release gets to decide which commit lands on the install branch.
+    for verb in ("ls-remote", "fetch"):
+        lines = [l for l in code.splitlines() if verb in l]
+        assert lines, f"{script.name} no longer does a {verb} of the pages branch"
+        for line in lines:
+            assert '-C "$REPO_ROOT"' in line, (
+                f'{script.name}: `{line.strip()}` resolves the remote and writes '
+                'FETCH_HEAD in the CALLER\'s repo, not this one — pin it with '
+                '-C "$REPO_ROOT"')
+
+    assert 'worktree add --quiet --detach "$PAGES_DIR" FETCH_HEAD' in code
+    assert "checkout --quiet -B gh-pages" not in code, (
+        f"{script.name} must stay detached and push HEAD:gh-pages; `checkout -B "
+        "gh-pages` resets, or fails on, a gh-pages branch another worktree holds")
+    assert 'push --quiet origin HEAD:gh-pages' in code
+
+    assert re.search(r'TMP_BRANCH="hscc-[a-z]+-publish-\$\$-\$\{RANDOM\}"', code), (
+        f"{script.name} must create the orphan on a unique throwaway name: any "
+        "local gh-pages branch makes `--orphan gh-pages` fatal")
+    assert re.search(r'checkout --quiet --orphan "\$TMP_BRANCH"', code), (
+        f"{script.name} does not check out the throwaway orphan branch")
+    assert 'git -C "$REPO_ROOT" branch -D "$TMP_BRANCH"' in code, (
+        f"{script.name} must delete its throwaway orphan branch on cleanup")
 
     before_orphan = text.split("git rm -rf")[0]
     assert "checkout --quiet --orphan" in before_orphan, (
