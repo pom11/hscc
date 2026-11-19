@@ -1,8 +1,17 @@
 # Widget coverage audit — iOS and macOS
 
-Measured on the merged tree rebased on `origin/main` (2026-11-18), after the
-cluster route parity fix, the CARD B3 board/project refurbish and the CARD B2
-running-cards refurbish. A family is counted as covered only when it is both
+Two measurement passes live on this page, and they are labelled separately
+because they were taken at different commits.
+
+- **Sections 1–8** (do the families exist and render at all) were measured on
+  the merged tree rebased on `origin/main` (2026-11-18), after the cluster route
+  parity fix, the CARD B3 board/project refurbish and the CARD B2 running-cards
+  refurbish.
+- **Sections 9–13** (which field does which surface draw) were measured later on
+  a clean `origin/main` worktree, from the source files named in each cell — see
+  section 13 for the commit and what is deliberately excluded.
+
+A family is counted as covered only when it is both
 listed in that widget's `supportedFamilies` **and** has a non-placeholder view
 in the family dispatch switch (or routes through the shared, gated text model
 the dispatch selects). The Cluster and Monitor surfaces were refurbished by the
@@ -667,8 +676,10 @@ as the CLI prints them, so a comparison line-by-line against the CLI fails:
 
 ## 13. Provenance and what would falsify this page
 
-Measured at `origin/main` `af6e0c61` in a scratch worktree; no code changed, so
-the matrices describe merged behaviour only. Three PRs in this family are open
+Measured at `origin/main` `af6e0c61` in a scratch worktree (the branch was then
+rebased onto a newer `origin/main` with no conflict and no code change, so every
+cell still describes merged behaviour), and no code changed — so the matrices
+describe merged behaviour only. Three PRs in this family are open
 and are therefore **not** in the matrices above as merged behaviour — where the
 handoff for one of them claims a surface draws CLI cells, this page follows the
 code on `main` instead: #409 (large/XL — its content reached `main` through the
@@ -677,7 +688,8 @@ rewritten onto `CLILockScreenMetrics` — until it merges, the accessories are t
 `Fleet` app-formatted cells this page records), and #423 (Monitor Live Activity
 onto `MonitorActivityMetrics` — until it merges, the Monitor activity's four
 surfaces are the `app`/glyph rows recorded here, and its minimal region shows no
-metric at all).
+metric at all). If any of those three merges, sections 10b, 10c and 12 need a
+re-read: the `app` and `—` cells they name are the ones that change.
 
 The gate outputs for this pass — both `build_check.sh` runs and the
 `model_decode_check.sh` banner — are in the PR body, not here: those numbers are
