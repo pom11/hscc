@@ -500,6 +500,11 @@ targets:
       # files import WidgetKit, and a layout rule no gate can run is a layout
       # rule that drifts.
       - path: Sources/Shared/ClusterMonitorTables.swift
+      # What each graph-widget size draws (t_f4551339): the density rules, the
+      # per-node panel, the served-resolution sentence and the threshold bands.
+      # Foundation-only for the same reason as the line above, and it is the
+      # half `scripts/cluster_graph_check.sh` compiles and RUNS.
+      - path: Sources/Shared/ClusterGraphReading.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
