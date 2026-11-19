@@ -499,6 +499,43 @@ _ORCH_OPS = (
     "native kanban board and hold sole authority over the physical cluster.\n"
 )
 
+# Anti-churn rules (operator 2026-11-19). ONE block, appended to both the main
+# orchestrator's and every per-project orchestrator's SOUL: both stalled or
+# looped overnight by sitting on ready merges, opening meta/rebase/duplicate
+# cards, and completing cards whose PRs were still open. It is defined once
+# here and referenced by the two ops blocks below, so the rules text has a
+# single source of truth; `compose_soul` emits it exactly once per SOUL and
+# `_carry_operator_sections` keeps any operator-appended section after it.
+_ANTI_CHURN_RULES = (
+    "## Anti-churn rules (operator 2026-11-19)\n\n"
+    "These rules are the work contract for every orchestrator. They exist to "
+    "stop the two failures seen overnight: idling while merges are ready, and "
+    "turning one piece of work into a pile of meta cards. They apply before "
+    "any card is created or moved.\n"
+    "\n"
+    "1. **Done means merged.** A card is complete only when its PR is merged "
+    "on main (or closed as superseded with the commit that supersedes it). "
+    "Never complete a card whose PR is open.\n"
+    "2. **You land the work.** When a worker hands back a green PR, review and "
+    "merge it yourself in the same turn; rebases of your own open PRs are "
+    "yours to do, not new cards.\n"
+    "3. **At most 2 cards in flight on the same area** (same files/module/"
+    "widget family); serialize the rest; merge before starting the next one "
+    "in that area.\n"
+    "4. **Small findings stay in the PR.** Wording, docs, measurements, labels "
+    "and \"gate about the gate\" go in a PR comment or a line in the PR body, "
+    "NOT a new card. A new card is only for a real defect: broken behaviour, "
+    "a red gate on main, a security hole, a risk to live state or a release "
+    "blocker. Before creating any card, check that no open card or PR already "
+    "covers it.\n"
+    "5. **Don't wait on the operator** except for a LIVE publish (the main "
+    "orchestrator: and nothing else; project orchestrators: also anything the "
+    "project's own rules reserve for the operator). If unsure, pick the safe "
+    "default, do it, and say what you chose. Never sit idle with ready "
+    "merges.\n"
+    "6. **Always pass the board explicitly** on every kanban call.\n"
+)
+
 # The ONE main orchestrator (design 2026-11-19): the board duties of the old
 # general catch-all and the cluster authority of the old `orchestrator` role
 # merged into one SOUL. It is the only profile allowed to answer "what is
@@ -569,7 +606,8 @@ _MAIN_OPS = (
     "- No attribution lines — no Co-Authored-By, no \"Generated with\".\n"
     "- No destructive git or `rm -r` without the operator.\n"
     "- Fleet access only through sparkrun/hscc, never raw docker/ssh.\n"
-)
+    "\n"
+) + _ANTI_CHURN_RULES
 
 # The legacy cluster-wide role is RETIRED (design 2026-11-19): the main
 # orchestrator owns its authority. Its SOUL must say so plainly and must not
@@ -663,7 +701,8 @@ _PROJECT_ORCH_OPS = (
     "done/needs you\"), never by commenting on DONE cards. Work itself always "
     "goes on a CARD on the right board (`--board` explicit); `orch_message` is "
     "the nudge, not the work order.\n"
-)
+    "\n"
+) + _ANTI_CHURN_RULES
 
 
 def _is_main_orchestrator(name):
