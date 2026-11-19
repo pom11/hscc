@@ -101,4 +101,22 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
         }
         return true
     }
+
+    // MARK: - APNs device token (card N3)
+
+    /// iOS answered `registerForRemoteNotifications` with this device's token.
+    /// PushRegistrar stores it and POSTs it to /v1/devices on every saved
+    /// cluster through the normal failover client. The token is never logged.
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushRegistrar.shared.didRegister(deviceToken: deviceToken)
+    }
+
+    /// Registration failed (usually a missing/mismatched aps-environment
+    /// entitlement or a provisioning profile without Push Notifications).
+    /// Surface the reason in Settings; this never crashes the app.
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        PushRegistrar.shared.didFailToRegister(error)
+    }
 }

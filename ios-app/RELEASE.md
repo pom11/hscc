@@ -42,7 +42,18 @@ Only iPhones registered in the team's Ad Hoc provisioning profile can install.
    `-authenticationKeyPath/-authenticationKeyID/-authenticationKeyIssuerID`.
    When none are set, Xcode's signed-in account is used. A partial set is a
    hard error.
-5. **GitHub Pages.** The first publish enables Pages from the `gh-pages` branch
+5. **Enable push notifications (one-time).** In
+   [developer.apple.com → Identifiers](https://developer.apple.com/account/resources/identifiers/list),
+   open the app id (`ro.parsec.hscc.ios` for the shipped identity, plus
+   `com.hscc.ios` if you install Debug builds on a phone) and tick **Push
+   Notifications**. Apple automatic signing with `-allowProvisioningUpdates`
+   then adds `aps-environment` to the Ad Hoc profile; if the archive still
+   fails to sign, open the profile and regenerate it, or let Xcode's
+   **Certificates, Identifiers & Profiles** page recreate it. The Release
+   build declares `aps-environment=production`; do not set it to development
+   for an Ad Hoc IPA. The sender also needs the operator-side APNs key and
+   `~/.hscc/apns.json` described by `hscc doctor` — nothing in the repo.
+6. **GitHub Pages.** The first publish enables Pages from the `gh-pages` branch
    through `gh api`. The account running the release needs admin on
    `pom11/hscc`.
 

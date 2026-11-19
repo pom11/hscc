@@ -156,6 +156,10 @@ targets:
       - path: Sources/HSCC/Notify/NeedsOperatorNotifier.swift
       - path: Sources/HSCC/Notify/NotificationCoordinator.swift
       - path: Sources/HSCC/Notify/NotificationsAppDelegate.swift
+      # APNs registration (card N3): device token -> POST /v1/devices on every
+      # saved cluster through the normal failover client; Settings status and
+      # the "Send test" route live here too.
+      - path: Sources/HSCC/Notify/PushRegistrar.swift
       # The session Live Activity's whole input path is gone. StreamingTranscript
       # went first (t_bd6e7c0a), then SessionActivitySummary +
       # SessionActivityDriver with the activity itself (t_3b15b8c9), then the
@@ -324,6 +328,11 @@ targets:
           - $(HSCC_APP_GROUP)
         keychain-access-groups:
           - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
+        # APNs (card N3). Release/Ad Hoc signs with a distribution profile that
+        # carries aps-environment=production; Debug uses development. The
+        # operator must enable Push Notifications on the App ID (and re-create
+        # the Ad Hoc profile) before a release archive can sign this.
+        aps-environment: $(HSCC_APS_ENVIRONMENT)
     dependencies:
       - target: HSCCWidgets
         embed: true
@@ -358,6 +367,14 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCC.entitlements
+        # APNs environment written into the entitlement above. Debug (direct
+        # Xcode installs) uses Apple's development APNs; the Ad Hoc Release
+        # build must use production, which is what the distribution profile
+        # carries. Keep these in step with the profile or signing fails.
+        HSCC_APS_ENVIRONMENT: development
+      configs:
+        Release:
+          HSCC_APS_ENVIRONMENT: production
     info:
       path: Sources/Info.plist
       properties:
