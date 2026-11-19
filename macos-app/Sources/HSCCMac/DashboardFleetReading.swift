@@ -174,22 +174,18 @@ enum DashboardFleetReading {
     static let hostRowLimit = 6
     static let servingRowLimit = 6
 
-    /// The CLI's own copy, quoted from `cluster_live.py`. Anything here that is
-    /// NOT the CLI's is named below.
+    /// The pane's own words. The note lines that used to live here are GONE:
+    /// they moved to `CLIMonitorNote`
+    /// (`ios-app/Sources/Shared/ClusterMonitorViewModel.swift`) when the iOS
+    /// tables block gained the note the dropdown had always drawn, and this pane
+    /// now prints `view.note?.text` — the shared owner's sentence, so the phone
+    /// and the desktop cannot re-word the same failure differently. `tokensNote`
+    /// stays as an alias because the header below still names it.
     enum Copy {
         /// `render`'s title line: `hscc cluster monitor — N host(s) — …`.
         static func hosts(_ count: Int) -> String { "\(count) host(s)" }
-        /// `render`'s dim note beside the serving header.
-        static let tokensNote = "In/Out = tokens since each engine started"
-        /// `render`'s line when the serving table has no rows at all.
-        static let noBackends = "no backends behind the proxy"
-        /// `render`'s `warn` line for a proxy route map that could not refresh.
-        static func proxyUnreachable(_ error: String) -> String {
-            "proxy /v1/model/info unreachable: \(error)"
-        }
-        /// Not the CLI's: `serving_error` has no line in `render` (the live
-        /// view just keeps the last rows), so this one sentence is the app's.
-        static func servingPollFailed(_ error: String) -> String { "serving poll failed: \(error)" }
+        /// `render`'s dim note beside the serving header — the shared owner's.
+        static var tokensNote: String { CLIMonitorNote.tokensNote }
     }
 
     struct Tile: Equatable {
@@ -245,15 +241,11 @@ enum DashboardFleetReading {
         let shownBackends = Array(backends.prefix(servingRowLimit))
         let servingRows = shownBackends + totals
 
-        var note: String?
-        if let proxyError = view.proxyError {
-            note = Copy.proxyUnreachable(proxyError)
-                + (view.backendRows.isEmpty ? "" : " (showing last known routes)")
-        } else if let servingError = view.servingError {
-            note = Copy.servingPollFailed(servingError)
-        } else if view.hasServingSection && view.servingRows.isEmpty {
-            note = Copy.noBackends
-        }
+        // One owner for the sentence AND its precedence: the shared
+        // `CLIMonitorNote` the iOS tables block now draws too. The CLI prints
+        // two lines here when the map is stale and the table empty; a pane with
+        // one line of room prints the first, as the dropdown always has.
+        let note = view.note
 
         return Tile(rows: shownHosts,
                     hiddenHosts: max(0, paired.count - hostRowLimit),
@@ -262,7 +254,7 @@ enum DashboardFleetReading {
                     hiddenServingRows: backends.count - shownBackends.count,
                     totals: ClusterSmallGrid.ServingTotals.summing(
                         view.totalRows, hasServingSection: view.hasServingSection),
-                    note: note,
+                    note: note?.text,
                     hasServingSection: view.hasServingSection)
     }
 }

@@ -382,6 +382,18 @@ struct ClusterMonitorTables: Equatable {
     /// exist because one file is layout and one is cells, not to disagree.
     var hasServingSection: Bool { toldServingSection }
 
+    /// The CLI's one note line under the serving header, or nil when the CLI
+    /// prints none — the same `CLIMonitorNote` the cell view-model and the macOS
+    /// dropdown answer from, so the two apps report one sentence for one failure.
+    /// `MonitorServingColumn` draws it OUTSIDE the `hasServingSection` test: a
+    /// proxy failure is worth printing even when the section itself is absent,
+    /// which is precisely the case this file used to leave silent.
+    var note: CLIMonitorNote? {
+        CLIMonitorNote.servingBlock(proxyError: proxyError, servingError: servingError,
+                                    hasServingSection: hasServingSection,
+                                    backendRows: backendRows.count)
+    }
+
     static func project(_ response: MonitorResponse?) -> ClusterMonitorTables? {
         guard let response, let hosts = response.json?.hosts, !hosts.isEmpty else {
             return nil
