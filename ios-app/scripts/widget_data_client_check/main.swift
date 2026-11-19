@@ -160,6 +160,17 @@ let errorBody = Data(#"""
 
 let garbageBody = Data("<html><body>502 Bad Gateway</body></html>".utf8)
 
+/// `/v1/alerts?since=6&limit=20` (card N4): the public alert fields, an
+/// exclusive cursor and a `next_since` cursor. `acked_at` is null on an
+/// unacknowledged row and must decode as nil, not as an empty timestamp.
+let alertBody = Data(#"""
+{"alerts":[{"id":7,"ts":"2026-11-19T10:00:00Z","title":"Deploy waiting",
+ "body":"Approve the LIVE publish","level":"action","key":"live-publish",
+ "acked":false,"acked_at":null}],
+ "count":1,"since":6,"limit":20,"oldest_id":7,"latest_id":7,
+ "next_since":7,"has_more":false,"speak":"1 alert."}
+"""#.utf8)
+
 /// `/v1/kanban/running`'s envelope (§4.3): `tasks[]` + `count` + `speak`, and the
 /// `pid`/`host_local`/`boards[]` keys the narrowed model does not declare.
 let kanbanRunningBody = Data(#"""
@@ -270,6 +281,10 @@ func runAll() async {
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
         "/v1/metrics/history",
+        // Card N4: the app-only alert feed the macOS menu bar app polls. It is
+        // NOT a widget dataset (the phone gets these over APNs), but it is a
+        // read and the one client must name every read it can make.
+        "/v1/alerts",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
@@ -589,6 +604,28 @@ func runAll() async {
     } else {
         check("an empty tier-0 response should still decode", false)
     }
+
+    // 10b. The app-only alert feed (card N4): `since` must travel as a query
+    //      item (not be baked into the path), and the paging cursors must
+    //      survive decoding or the Mac poll would replay or skip alerts.
+    StubTransport.arm(.http(status: 200, body: alertBody))
+    let alertRead = await client.alertFeed(since: 6, limit: 20)
+    if case .success(let feed) = alertRead {
+        check("alert feed decodes the public alert fields",
+              feed.alerts.count == 1 && feed.alerts[0].id == 7
+                && feed.alerts[0].level == "action")
+        check("alert feed keeps a null acked_at as nil",
+              feed.alerts[0].ackedAt == nil && feed.alerts[0].acked == false)
+        check("alert feed carries next_since and latest_id",
+              feed.nextSince == 7 && feed.latestId == 7 && !feed.hasMore)
+    } else {
+        check("alert feed should decode, got \(String(reflecting: alertRead))", false)
+    }
+    let alertRequest = StubTransport.requests.last
+    check("alert feed's since/limit are real query items on /v1/alerts",
+          alertRequest?.url?.path == "/v1/alerts"
+            && alertRequest?.url?.query?.contains("since=6") == true
+            && alertRequest?.url?.query?.contains("limit=20") == true)
 
     // 11. The nil-shim the two pre-pivot providers still use keeps working.
     StubTransport.arm(.http(status: 200, body: kanbanRunningBody))

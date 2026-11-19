@@ -95,6 +95,14 @@ targets:
       - path: Sources/HSCCMac/DashboardFleetSection.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
+      # Operator alerts (card N4): `AlertFeed` is the Foundation-only row
+      # projection + cursor policy (the executed gate compiles it on its own),
+      # and `AlertFeedMonitor` is the 5 s `GET /v1/alerts` poll, per-cluster
+      # cursor and local UNUserNotificationCenter delivery. Polling rather than
+      # APNs keeps the Developer ID + notarized build on its current
+      # entitlements — no `aps-environment`, no device token on the Mac.
+      - path: Sources/HSCCMac/AlertFeed.swift
+      - path: Sources/HSCCMac/AlertFeedMonitor.swift
       # Sparkle 2 (t_2a1e5913): one SPUStandardUpdaterController owns daily
       # automatic checks, the manual menu/Settings check and the update badge.
       # App target only — the widget extension never updates itself.

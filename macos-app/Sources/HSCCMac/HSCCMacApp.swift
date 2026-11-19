@@ -21,6 +21,9 @@ struct HSCCMacApp: App {
     @StateObject private var settings = SettingsStore()
     @StateObject private var preferences = MacPreferences()
     @StateObject private var dashboard = DashboardMonitor()
+    /// Operator alerts (card N4): a 5 s `GET /v1/alerts` poll, local banners,
+    /// and the unseen badge in the menu bar dropdown.
+    @StateObject private var alerts = AlertFeedMonitor()
     /// The shared widget/Live Activity registry and Appearance store. Same
     /// App Group blob the widget extension reads; writes reload timelines.
     @StateObject private var widgetSettings = WidgetSettingsStore()
@@ -34,8 +37,9 @@ struct HSCCMacApp: App {
                 .environmentObject(settings)
                 .environmentObject(preferences)
                 .environmentObject(updates)
+                .environmentObject(alerts)
         } label: {
-            MenuBarLabel(dashboard: dashboard, preferences: preferences)
+            MenuBarLabel(dashboard: dashboard, preferences: preferences, alerts: alerts)
         }
         .menuBarExtraStyle(.window)
 

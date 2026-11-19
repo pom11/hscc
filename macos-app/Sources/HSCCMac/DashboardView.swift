@@ -14,6 +14,8 @@ struct DashboardView: View {
     @EnvironmentObject private var preferences: MacPreferences
     /// Sparkle state (t_2a1e5913): the update badge/item and the manual check.
     @EnvironmentObject private var updates: SparkleUpdater
+    /// Operator alerts (card N4): the feed's newest rows and unseen count.
+    @EnvironmentObject private var alerts: AlertFeedMonitor
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
@@ -40,6 +42,7 @@ struct DashboardView: View {
             if !dashboard.snapshot.configured {
                 setupInvite
             } else {
+                alertsSection
                 clusterSection
                 clusterMonitorSection
                 clusterStatusSection
@@ -67,6 +70,12 @@ struct DashboardView: View {
         // instead of waiting for the menu bar loop's next tick.
         .onAppear {
             Task { await dashboard.refresh() }
+        }
+        // The open dropdown is the "I saw them" moment: the rows and the count
+        // stay visible while it is open, then clear on close. The banners
+        // already fired, so this is local state only — no /ack is sent.
+        .onDisappear {
+            alerts.markViewed()
         }
     }
 
@@ -117,6 +126,84 @@ struct DashboardView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.Semantic.accent)
+        }
+    }
+
+    // MARK: - Alerts (card N4)
+
+    /// The newest rows from `GET /v1/alerts`, with the unseen count beside the
+    /// header. A banner is transient; this list is what the operator can still
+    /// read when they open the menu bar afterwards.
+    private var alertsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            HStack(spacing: Theme.Spacing.sm.rawValue) {
+                sectionTitle("Alerts")
+                if alerts.unseenCount > 0 {
+                    Text("\(alerts.unseenCount) new")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(Theme.Semantic.onAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.Semantic.accent))
+                }
+                Spacer()
+            }
+
+            if alerts.rows.isEmpty {
+                Text("No alerts yet")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            } else {
+                ForEach(alerts.rows) { row in
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                        Image(systemName: row.levelKind.symbolName)
+                            .font(.caption)
+                            .foregroundColor(alertColor(row.levelKind))
+                            .frame(width: 14)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row.titleText)
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurface)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 4) {
+                                Text(row.levelKind.label.uppercased())
+                                let age = row.ageText()
+                                if !age.isEmpty {
+                                    Text("·")
+                                    Text(age)
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+
+            if alerts.notificationsDenied {
+                HStack(spacing: 4) {
+                    Image(systemName: "bell.slash")
+                    Text("Notifications are off in System Settings.")
+                    Button("Open") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.link)
+                }
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+
+    private func alertColor(_ level: AlertFeedLevel) -> Color {
+        switch level {
+        case .info: return Theme.Semantic.onSurfaceMuted
+        case .action: return Theme.Semantic.warn
+        case .critical: return Theme.Semantic.bad
         }
     }
 
@@ -280,7 +367,10 @@ struct DashboardView: View {
             .foregroundColor(Theme.Semantic.onSurface)
 
             Button {
-                Task { await dashboard.refresh() }
+                Task {
+                    await dashboard.refresh()
+                    await alerts.refreshNow()
+                }
             } label: {
                 Label("Refresh now", systemImage: "arrow.clockwise")
             }
