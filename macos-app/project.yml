@@ -109,6 +109,10 @@ targets:
       # as the CLI formats it, so the menu bar app draws the same strings the
       # iOS widgets draw and the terminal prints (t_61ed3f5e). Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+      # The history chart layer (t_b6512c2e): the requestable metric set and the
+      # pixel reduction that preserves every column's min and max. Shared with
+      # iOS so the desktop draws the same series from the same bytes.
+      - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system, so the menu bar app and the iOS widgets share
       # the black + #FF5722 palette and spacing rather than growing a second.
@@ -237,6 +241,10 @@ targets:
       # The monitor view-model (t_61ed3f5e): the widget cards draw the CLI's
       # own host and serving cells rather than re-deriving units and rounding.
       - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+      # The history chart layer (t_b6512c2e): the metric set a history surface
+      # may request, and the reduction that keeps every pixel column's min and
+      # max, so a desktop sparkline cannot draw a peak the data never had.
+      - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift

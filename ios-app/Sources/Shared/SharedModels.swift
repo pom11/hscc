@@ -928,10 +928,22 @@ struct ClusterHistoryPoint: Decodable {
     let gpu_temp_c_max: Double?
     let cpu_temp_c_max: Double?
     let mem_used_pct: Double?
+    /// VRAM as the recorder actually stores it: a megabyte figure. There is no
+    /// `gpu_mem_total_mb` column, so no percentage of VRAM exists to draw — a
+    /// surface that shows "VRAM" shows MB, never a share of a total the route
+    /// never sends (`ClusterHistoryMetric.vramUsedMb` is the one place that
+    /// spelling is allowed, and `cluster_history_chart_check.sh` holds it).
+    let gpu_mem_used_mb: Double?
     let run: Int?
     let wait: Int?
     let kv: Double?
     let gen_tps: Double?
+    /// Prompt-side throughput. The recorder keeps `run`/`wait`/`kv`/`gen_tps`
+    /// AND `prompt_tps` (its `ENGINE_FIELDS`), and the store's columns are
+    /// sqlite `REAL`, so this route answers `2.0` for a count of 2 — the integer
+    /// fields above only decode because JSONDecoder converts an integral number
+    /// losslessly, which the committed `v1_cluster_history_6h.json` now pins.
+    let prompt_tps: Double?
 }
 
 /// GET /v1/cluster/history — the recorder's stored series over three tiers.
