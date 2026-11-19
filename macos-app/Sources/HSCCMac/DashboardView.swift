@@ -44,6 +44,7 @@ struct DashboardView: View {
                 clusterSection
                 clusterMonitorSection
                 clusterStatusSection
+                graphsSection
                 runningSection
                 boardSection
                 projectsSection
@@ -363,11 +364,12 @@ struct DashboardView: View {
 
     // MARK: - Small pieces
 
-    /// The section header style, shared by the sections in this file AND the
-    /// two CLI-surface sections in `DashboardFleetSection.swift`. It is
-    /// internal on purpose: `private` in Swift is file-scoped, so a second file
-    /// extending this view could not reuse it, and a second copy of the header
-    /// style would be a second design system.
+    /// The section header style, shared by the sections in this file, the two
+    /// CLI-surface sections in `DashboardFleetSection.swift` AND the graphs
+    /// section in `DashboardGraphsView.swift`. It is internal on purpose:
+    /// `private` in Swift is file-scoped, so a second file extending this view
+    /// could not reuse it, and a second copy of the header style would be a
+    /// second design system.
     func sectionTitle(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.caption2.weight(.semibold))

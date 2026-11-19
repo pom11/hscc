@@ -95,22 +95,24 @@ done <<< "$mac_list"
 # ---------------------------------------------------------------------------
 echo "macOS families — declared, dispatched, and distinguishable"
 
-# mac_families <file> — the supportedFamilies list inside the #else (non-iOS)
-# arm of the entry. Reading the whole file instead of that arm is what lets a
-# family offered ONLY on iOS satisfy a macOS assertion.
+# mac_families <file> — the supportedFamilies list that reaches macOS: the
+# #else (non-iOS) arm, or an unguarded/shared call. Reading the whole file
+# instead of that list is what lets a family offered ONLY on iOS satisfy a
+# macOS assertion. Since t_4311500c the graph widget has ONE shared list, so
+# an unguarded call is a macOS declaration too rather than a missing one.
 mac_families() {
   awk '
-    /#if os\(iOS\)/  { state = "ios" }
+    /^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { state = "ios" }
     /^[[:space:]]*#else/ { state = "mac" }
     /#endif/          { state = "" }
-    state == "mac" && /\.supportedFamilies\(/ { f = 1 }
+    state != "ios" && /\.supportedFamilies\(/ { f = 1 }
     f { print }
     f && /\]\)/ { f = 0 }
   ' "$1"
 }
 # ios_only_region <file> — the lines between #if os(iOS) and its #endif.
 ios_only_region() {
-  awk '/#if os\(iOS\)/ { f = 1; next } /#endif/ { f = 0 } f { print }' "$1"
+  awk '/^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { f = 1; next } /^[[:space:]]*#endif/ { f = 0 } f { print }' "$1"
 }
 # ios_families <file> — the supportedFamilies list inside the #if os(iOS) arm.
 # The mirror of mac_families: a family may be added on the phone and forgotten on
@@ -118,7 +120,7 @@ ios_only_region() {
 # meant to change the desktop list. Both directions are checked below.
 ios_families() {
   awk '
-    /#if os\(iOS\)/  { state = "ios" }
+    /^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { state = "ios" }
     /^[[:space:]]*#else/ { state = "mac" }
     /#endif/          { state = "" }
     state == "ios" && /\.supportedFamilies\(/ { f = 1 }
@@ -224,9 +226,114 @@ need "the layout model is compiled by the iOS widget target as well" "$IOS/proje
      "- path: Sources/Shared/ClusterMonitorTables.swift"
 
 # ---------------------------------------------------------------------------
+echo "cluster graph tile — every desktop size declared+dispatched, and the marks the dropdown embeds"
+#
+# The graph tile had no desktop assertion at all: the loop above pins Cluster and
+# Monitor, and the graph widget's own gate (ios-app/scripts/cluster_graph_check.sh)
+# iterates the iOS family list, so a macOS arm that quietly offered three of the
+# four sizes was invisible to both gates. The graph marks are also the ONLY thing
+# the menu bar dropdown draws for history (t_be4e1a48), and they live in the
+# WIDGET's view file — so the app target has to compile them by path, and dropping
+# that line takes the charts out of the dropdown while both build gates stay green
+# (the widget target compiles the same file either way).
+
+GRAPH=../ios-app/Sources/HSCCWidgets/GraphWidget.swift
+GRAPH_METRICS=../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
+GRAPH_VIEWS=../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
+GRAPH_ENTRY=../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
+GRAPH_READING=../ios-app/Sources/Shared/ClusterGraphReading.swift
+
+if [ ! -f "$GRAPH" ] || [ ! -f "$GRAPH_VIEWS" ] || [ ! -f "$GRAPH_ENTRY" ] || [ ! -f "$GRAPH_READING" ]; then
+  bad "a graph widget source is absent — the graph tile cannot be asserted"
+else
+  gdeclared=$(mac_families "$GRAPH" | tr -d '[:space:]')
+  # The shared list is named (`WidgetFamily.clusterGraphFamilies`), not a
+  # literal, since t_4311500c. Resolve it to its members so the per-family
+  # assertions below still measure the sizes the desktop actually offers.
+  case "$gdeclared" in
+    *clusterGraphFamilies*)
+      gdeclared="$gdeclared$(sed -n '/static let clusterGraphFamilies/,/]/p' "$GRAPH_METRICS" | tr -d '[:space:]')"
+      ;;
+  esac
+  if [ -z "$gdeclared" ]; then
+    bad "ClusterGraphWidget: no macOS-arm supportedFamilies list in $GRAPH"
+  else
+    echo "  ClusterGraphWidget macOS list: $(mac_families "$GRAPH" | grep -o '\.[a-zA-Z][A-Za-z]*' | tr '\n' ' ')"
+    for fam in $DESKTOP_FAMILIES; do
+      case "$gdeclared" in
+        *".$fam"*)
+          ok "ClusterGraphWidget declares .$fam on macOS"
+          if grep -q "case \.$fam:" "$GRAPH_VIEWS"; then
+            ok "ClusterGraphWidget dispatches .$fam to its own arm"
+          else
+            bad "ClusterGraphWidget declares .$fam but has no 'case .$fam:' arm in the graph dispatch"
+          fi
+          ;;
+        *) bad "ClusterGraphWidget no longer declares .$fam on macOS (the desktop lost a size)" ;;
+      esac
+    done
+    # Both small-multiple sizes draw the SAME struct on purpose (the tile's own
+    # density map puts large and extra-large on one layout), so what must differ
+    # is the family the arm hands the layout — that is the number the size reads
+    # its mini height from. A dropped argument is how XL would quietly become a
+    # stretched large.
+    if grep -q -- "family: .systemExtraLarge" "$GRAPH_VIEWS"; then
+      ok "the extra-large arm carries .systemExtraLarge into the panel layout"
+    else
+      bad "the extra-large arm does not pass family: .systemExtraLarge — XL draws the large size's numbers"
+    fi
+    # The mirror of the accessory rule: the four home sizes are desktop sizes, so
+    # none of them may live behind an iOS-only guard.
+    gguarded=$(ios_only_region "$GRAPH" | grep -c 'case \.system' || true)
+    if [ "$gguarded" -eq 0 ]; then
+      ok "ClusterGraphWidget: no system* family is hidden behind #if os(iOS)"
+    else
+      bad "ClusterGraphWidget: $gguarded system* arm(s) sit inside an #if os(iOS) region"
+    fi
+    gios=$(ios_families "$GRAPH" | tr -d '[:space:]')
+    if [ -z "$gios" ]; then
+      # t_4311500c deleted the two per-platform arms in favour of one shared
+      # list, so there is no second list to mirror; the macOS assertions above
+      # already read the list both platforms use.
+      ok "ClusterGraphWidget: one shared supportedFamilies list serves iOS and macOS"
+    else
+      gios_missing=""
+      for fam in $DESKTOP_FAMILIES; do
+        case "$gios" in
+          *".$fam"*) ;;
+          *) gios_missing="$gios_missing .$fam" ;;
+        esac
+      done
+      if [ -z "$gios_missing" ]; then
+        ok "ClusterGraphWidget: the iOS list still offers all four desktop families"
+      else
+        bad "ClusterGraphWidget: iOS no longer offers$gios_missing — a desktop-side edit took a phone family away"
+      fi
+    fi
+  fi
+
+  # The dropdown's charts are the widget's marks, compiled into the APP target.
+  # These four are the chart itself and what it needs to be a chart: the shared
+  # projection, the marks, the entry type the marks' file draws, and the family
+  # map that file reads. Drop one and the graphs section becomes a list of
+  # numbers again — with both build gates green, because the widget extension
+  # compiles the same paths either way.
+  app_list=$(spec_paths project.yml HSCCMac)
+  for p in Sources/Shared/ClusterGraphReading.swift \
+           Sources/HSCCWidgets/GraphWidgetViews.swift \
+           Sources/HSCCWidgets/GraphWidgetEntry.swift \
+           Sources/HSCCWidgets/GraphWidgetMetrics.swift; do
+    case "$app_list" in
+      *"$p"*) ok "the menu bar app compiles $p (the dropdown draws its marks)" ;;
+      *) bad "the menu bar app does not compile $p — the graphs section would show numbers with no chart" ;;
+    esac
+  done
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 if [ "$rc" -eq 0 ]; then
-  echo "MACOS WIDGET PARITY CHECK PASSED — $mac_n shared sources equal on both targets, four desktop families declared+dispatched+distinct, extra-large routes through the shared CLI tables with its six extra fields"
+  echo "MACOS WIDGET PARITY CHECK PASSED — $mac_n shared sources equal on both targets, four desktop families declared+dispatched+distinct for every tile including the graph, extra-large routes through the shared CLI tables with its six extra fields, and the menu bar app compiles the graph marks the dropdown draws"
   exit 0
 fi
 echo "MACOS WIDGET PARITY CHECK FAILED"

@@ -44,6 +44,81 @@ struct BoardTotals {
     }
 }
 
+/// The graphs section's ONE history read (t_be4e1a48). The window default is
+/// the operator's amendment: the menu bar refreshes faster than a home-screen
+/// widget, so the dropdown asks for `15m` — the recorder's 2-second tier —
+/// and SHOWS the resolution the route reports back, because the same rows
+/// mean different charts at 2 s, 1 m and 5 m. The route is the canonical
+/// `GET /v1/cluster/history` (DECISION-t_447cc7fc); the retired
+/// `/v1/metrics/history` is never read from this app.
+enum DashboardGraphPlan {
+    /// `15m` — the recorder's 2-second tier, the operator's amendment for every
+    /// fast-refreshing surface. A `ClusterGraphWindow` rather than a string so
+    /// the request, the axis tick format and the shared captions all read the
+    /// same value; the fetch sends `.requestValue`.
+    static let window: ClusterGraphWindow = .fifteenMinutes
+
+    /// Per-node temperature and utilisation — the card's ask, in ONE request.
+    /// None of these is a `*_max` column, so all four stay requestable at
+    /// every tier, `15m` included (`ClusterHistoryMetric.requestable(atTier:)`).
+    static let metrics: [ClusterHistoryMetric] = [.cpuTempC, .gpuTempC, .gpuUtilPct, .cpuUtilPct]
+}
+
+/// One node's drawn history: the shared chart layer's panel (its lines, each
+/// carrying the true current and the window's true min/max) and the unit groups
+/// those lines fold into for the marks. Both come from `ClusterGraphReading` at
+/// the width the dropdown actually draws at — this app derives no series, no
+/// min/max, no unit group and no tier of its own.
+struct DashboardGraphNode: Identifiable {
+    let panel: ClusterGraphPanel
+    let minis: [ClusterGraphMini]
+
+    var id: String { panel.host }
+}
+
+/// The graphs section's view of one `GET /v1/cluster/history` answer. Series
+/// building and projection go through the shared chart layer
+/// (`ClusterGraphReading.panels`, which calls `ClusterHistorySeriesSet.make`) —
+/// this file keeps the route's stated window and step next to the panels so the
+/// dropdown can show what the points mean.
+struct DashboardHistory {
+    let window: String
+    let resolutionS: Int
+    /// The window the axis prints its ticks for: the PAYLOAD's own window when
+    /// the route named one this app recognises (`since`/`until` reads answer with
+    /// a derived span label), otherwise what this app asked for.
+    let axisWindow: ClusterGraphWindow
+    let nodes: [DashboardGraphNode]
+    /// Why there is nothing to draw, in whoever already knew's words.
+    let emptyLine: String
+
+    init(response: ClusterHistoryResponse) {
+        window = response.window
+        resolutionS = response.resolution_s
+        axisWindow = ClusterGraphWindow(rawValue: response.window) ?? DashboardGraphPlan.window
+        let panels = ClusterGraphReading.panels(response: response,
+                                                metrics: DashboardGraphPlan.metrics,
+                                                pixelWidth: DashboardGraphLayout.miniPixelWidth)
+        nodes = panels.map {
+            DashboardGraphNode(panel: $0, minis: ClusterGraphReading.minis(from: $0.lines))
+        }
+        emptyLine = Self.reason(for: response, axisWindow: axisWindow)
+    }
+
+    /// The payload's own sentence when it sent one; otherwise the shared
+    /// layer's reason for the lead metric, which separates "the `metrics=` filter
+    /// named no field of this series" from "nothing is stored at this tier" from
+    /// "the 2 s ring lives in the daemon process". A gap with a cause, never a
+    /// quiet fleet.
+    private static func reason(for response: ClusterHistoryResponse,
+                               axisWindow: ClusterGraphWindow) -> String {
+        if let note = response.note ?? response.error, !note.isEmpty { return note }
+        let lead = DashboardGraphPlan.metrics[0]
+        return ClusterGraphCaption.emptyReason(for: ClusterHistorySeriesSet.make(response, for: lead),
+                                               window: axisWindow)
+    }
+}
+
 /// Everything the menu bar label and the dropdown draw from one refresh.
 struct DashboardSnapshot {
     var configured = true
@@ -61,6 +136,9 @@ struct DashboardSnapshot {
     /// Why the alert read failed, already reduced to the shared client's
     /// address-free vocabulary. nil on a successful read.
     var needsMeFailure: String?
+    /// Per-node history for the graphs section — the ONE `/v1/cluster/history`
+    /// read this app makes, projected through the shared chart layer.
+    var history: DashboardHistory?
     var lastRefresh: Date?
     /// The first honest failure from this refresh, already reduced to the
     /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
@@ -213,6 +291,20 @@ final class DashboardMonitor: ObservableObject {
         case .failure(let failure):
             next.statusPanel = nil
             next.statusError = failure.shortLabel
+            failures.append(failure.shortLabel)
+        }
+
+        // The graphs section's series: ONE request for all nodes and all four
+        // planned metrics (canonical /v1/cluster/history — DECISION-t_447cc7fc),
+        // projected by the shared layer. An empty answer is kept, reason and
+        // all; a failed read keeps the last good history rather than claiming
+        // zero, like every other stat in this loop.
+        switch await client.clusterHistory(window: DashboardGraphPlan.window.requestValue,
+                                           metrics: DashboardGraphPlan.metrics.map(\.rawValue)) {
+        case .success(let response):
+            next.history = DashboardHistory(response: response)
+            anySuccess = true
+        case .failure(let failure):
             failures.append(failure.shortLabel)
         }
 
