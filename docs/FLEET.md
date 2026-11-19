@@ -14,7 +14,8 @@ The full "why" behind this shape (what stock Hermes lacks) is in
 A role is a single spec file (`hscc-roles/roles/<name>.yaml`). A generator
 builds it into a Hermes profile with a **layered SOUL** (shared base character
 + role disposition + thin operational facts) and the full Hermes toolset
-**minus cluster control** — only the orchestrator can change the cluster.
+**minus cluster control** — only the ONE main orchestrator (named at bootstrap,
+default `general`) can change the cluster.
 
 ```
 hscc.py generate            # build all profiles from specs → ~/.hermes/profiles/

@@ -241,7 +241,7 @@ like every other mutating endpoint.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `project` | string \| null | no | Project name; absent/`null` → the catch-all **`general`** orchestrator. Unknown project → `400 unknown_project`. |
+| `project` | string \| null | no | Project name; absent/`null` → the ONE **main orchestrator** (named at bootstrap, default `general`). Unknown project → `400 unknown_project`. |
 | `prompt` | string | yes | What to ask the orchestrator. Missing/empty → `400 bad_request`. |
 | `confirm` | bool | yes | Must be `true`, else `409 confirm_required`. |
 
@@ -348,7 +348,7 @@ on a bad orchestrator call:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `unknown_project` | `project` is neither a registry project nor `general` |
+| 400 | `unknown_project` | `project` is neither a registry project nor the main orchestrator's name |
 | 502 | `orchestrator_error` | the hermes invocation failed (empty reply / bad exit) |
 | 503 | `orchestrator_unavailable` | the orchestrator profile/session is not reachable (e.g. the named session hasn't been created yet) |
 | 504 | `orchestrator_timeout` | the orchestrator did not reply within the configured timeout (default 600 s) — the reported `elapsed` equals the seconds it actually ran |
@@ -366,7 +366,7 @@ Every error response shares one shape:
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | malformed/missing field, non-object body, body > 1 MiB |
-| 400 | `unknown_project` | orchestrator chat `project` is neither a registry project nor `general` |
+| 400 | `unknown_project` | orchestrator chat `project` is neither a registry project nor the main orchestrator's name |
 | 401 | `unauthorized` | missing or invalid bearer token |
 | 404 | `not_found` | unknown route, unknown card, card not reviewable |
 | 405 | `method_not_allowed` | valid path, wrong HTTP method |

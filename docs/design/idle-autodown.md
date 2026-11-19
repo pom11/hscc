@@ -472,8 +472,9 @@ stale instruction against a changed cluster:
   full orchestrator round-trip through components that exist on this host:
     1. **Map** the message's chat/topic to an orchestrator profile+session
        (the `<project>-orch` / session `<project>` convention from
-       `hscc-roles/orchestrators.py`, catch-all `general-orch` / `general`),
-       resolved via the flightdeck registry's per-project `topic` binding.
+       `hscc-roles/orchestrators.py`; the catch-all is the ONE main
+       orchestrator named at bootstrap, default `general`), resolved via the
+       flightdeck registry's per-project `topic` binding.
     2. **Invoke** that orchestrator exactly the way the HSCC API does
        (`hscc-api/routes_orchestrator.py`): `hermes -p <profile> chat -Q
        --continue <session> -q <text>` (argv as a LIST — never shell-
@@ -488,8 +489,9 @@ stale instruction against a changed cluster:
   and is reported loudly, never guessed. A telegram message whose thread/topic
   matches a registry project's `topic` goes to that project's orchestrator; a
   telegram message with no matching topic (General topic, direct chat, or an
-  unbound topic) goes to the `general` catch-all (which exists precisely for
-  that). No runtime webhook configuration is required — the daemon reads the
+  unbound topic) goes to the ONE main orchestrator (named at bootstrap, default
+  `general`, which exists precisely for that). No runtime webhook configuration
+  is required — the daemon reads the
   registry file (`~/.flightdeck/registry.yaml`, overridable via `HSCC_REGISTRY`)
   and shells `hermes` (`HSCC_HERMES_BIN`) directly.
   **Failure contract:** `default_deliver_message` returns True only on the FULL

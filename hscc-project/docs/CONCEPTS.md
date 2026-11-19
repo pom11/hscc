@@ -18,9 +18,11 @@ to prevent.
 
 ## Cards are attributed to projects by repo path, never by board slug
 
-Many projects share the `default` Hermes kanban board. So a card's project is
-resolved by walking card → branch (`wt/<card>`) → worktree → **repo path** →
-registry entry. Treating board slug as the project is wrong: it
+Projects have historically shared the legacy `default` Hermes kanban board,
+and cards created without an explicit `board=` now land on the main
+orchestrator's board (named at bootstrap, default `general`). Either way, a
+card's project is resolved by walking card → branch (`wt/<card>`) → worktree →
+**repo path** → registry entry. Treating board slug as the project is wrong: it
 misattributes every card on a shared board. This caused real misattribution
 before, and every card-facing command (qa, review, standup, reconcile,
 hygiene) now resolves the project from the repo path.
