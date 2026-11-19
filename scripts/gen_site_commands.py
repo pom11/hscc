@@ -159,15 +159,27 @@ def command_tokens(signature: str) -> list[str]:
     extend the command path only until the first argument token, and from there
     only argument-shaped tokens keep extending it. A description's first word
     is neither, so it stops the scan.
+
+    An entry that is too long for one column pair is rendered as the usage
+    alone, and the CLI writes a multi-verb alternation with spaced pipes
+    (`notify <title> <body> | list | ack <id>`), so a `|` and the word after
+    it are both command, not prose.
     """
     out: list[str] = []
     args_seen = False
+    after_bar = False
     for tok in signature.split():
         if ARG.match(tok):
             args_seen = True
+            after_bar = False
             out.append(tok)
-        elif WORD.match(tok) and not args_seen:
+        elif tok == "|":
+            args_seen = True
+            after_bar = True
             out.append(tok)
+        elif WORD.match(tok) and (not args_seen or after_bar):
+            out.append(tok)
+            after_bar = False
         else:
             break
     return out
