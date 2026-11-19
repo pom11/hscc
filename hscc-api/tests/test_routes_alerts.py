@@ -92,10 +92,11 @@ def test_post_creates_a_persisted_alert(running, token):
     assert alert["acked"] is False and alert["acked_at"] is None
     assert alert["ts"].endswith("Z")
 
-    # The sender seam is a no-op today, and the response says so rather than
-    # implying a push happened.
+    # The sender is real (card N2) but this server's hscc root has no APNs
+    # config, so the response says push was not attempted rather than implying
+    # it happened.
     assert payload["push"]["sent"] is False
-    assert payload["push"]["reason"] == "no_transport"
+    assert payload["push"]["reason"] == "no_config"
 
     status, feed = get(running, token)
     assert status == 200

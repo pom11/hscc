@@ -250,7 +250,7 @@ def test_push_sender_is_called_once_per_created_alert(store, monkeypatch):
 
     seen = []
     monkeypatch.setattr(alert_push, "send",
-                        lambda alert: seen.append(alert["id"])
+                        lambda alert, hscc_dir=None: seen.append(alert["id"])
                         or {"sent": True, "reason": "test"})
 
     created = post(store, key="k")
@@ -259,10 +259,24 @@ def test_push_sender_is_called_once_per_created_alert(store, monkeypatch):
     assert created["push"] == {"sent": True, "reason": "test"}
 
 
+def test_single_argument_push_hook_still_works(store, monkeypatch):
+    """N1's seam contract was ``send(alert)``; keep that hook shape working."""
+    from hscc_daemon import alert_push
+
+    seen = []
+    monkeypatch.setattr(alert_push, "send",
+                        lambda alert: seen.append(alert["id"])
+                        or {"sent": True, "reason": "old_hook"})
+    result = post(store)
+    assert result["created"] is True
+    assert result["push"] == {"sent": True, "reason": "old_hook"}
+    assert seen == [result["alert"]["id"]]
+
+
 def test_push_failure_never_fails_the_alert(store, monkeypatch):
     from hscc_daemon import alert_push
 
-    def boom(alert):
+    def boom(alert, hscc_dir=None):
         raise RuntimeError("transport down")
 
     monkeypatch.setattr(alert_push, "send", boom)

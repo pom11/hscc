@@ -43,6 +43,7 @@ CHECK_NAMES = [
     "daemon supervision (service manager owns the pid)",
     "kanban enforce (paused-board hold)",
     "worker budget hook ([budget] note)",
+    "APNs push (operator notifications)",
 ]
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
@@ -81,7 +82,8 @@ def _doctor(tmp_path, monkeypatch, **kw):
 def test_registry_exists_and_covers_the_five_feature_rows():
     keys = [r.key for r in doctor.FEATURE_CHECK_ROWS]
     assert keys == ["orch_waker", "cron_watchers", "supervision",
-                    "kanban_enforce", "budget_hook"], "registry order is row order"
+                    "kanban_enforce", "budget_hook",
+                    "apns"], "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -108,12 +110,15 @@ def test_every_registry_entry_is_well_formed():
 def test_registry_seam_names_match_the_run_doctor_signature():
     """The four pre-registry seams are explicit keywords AND registry entries;
     if the two ever disagree, run_doctor() rejects a seam its own signature
-    advertises (that is the mutation this pins)."""
+    advertises (that is the mutation this pins). Rows added through the registry
+    (``_apns_check``) arrive via ``**feature_rows`` instead."""
     import inspect
     params = inspect.signature(doctor.run_doctor).parameters
     declared = {p for p in params if p.startswith("_")
                 and p.endswith("_check")}
-    assert declared == set(doctor._FEATURE_SEAM_NAMES)
+    registered = set(doctor._FEATURE_SEAM_NAMES)
+    assert declared <= registered
+    assert registered - declared == {"_apns_check"}
 
 
 # ── the anti-hotspot property ──────────────────────────────────────────────
