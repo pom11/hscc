@@ -10,10 +10,10 @@ Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, deco
 
 [![v2.15.13](https://img.shields.io/badge/version-2.15.13-blue.svg)](CHANGELOG.md)
 [![MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![3 pinned deps](https://img.shields.io/badge/python-3%20pinned%20deps-orange.svg)](requirements.txt)
+[![pinned deps](https://img.shields.io/badge/python-pinned%20deps-orange.svg)](requirements.txt)
 [![5,000+ tests](https://img.shields.io/badge/tests-5%2C000%2B-brightgreen.svg)](scripts/README.md)
 
-HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a pure-Python plugin set with three pinned dependencies (PyYAML, rich, psutil — see `requirements.txt`). Install it with Homebrew (or clone the repo, if you are editing it); `hscc bootstrap` then copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
+HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a pure-Python plugin set with pinned dependencies (see `requirements.txt`). Install it with Homebrew (or clone the repo, if you are editing it); `hscc bootstrap` then copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
 
 The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher and git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships, adding the thin physical layer (cluster control, monitoring, model lifecycle), a role framework for specialized workers, and a review gate on the dispatch path. Why this shape (what stock Hermes lacks and HSCC adds): [docs/WHY.md](docs/WHY.md).
 
@@ -38,7 +38,7 @@ hscc api :8787/8788 (bearer token, tailnet) ── iOS app (QR pair)
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
 - A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3
 - [Homebrew](https://brew.sh/) on that host, for the install path above (a source checkout needs none of it)
-- Python deps: three pinned packages (PyYAML, rich, psutil) — the brew formula builds them into the keg's own venv; from source, bootstrap installs them
+- Python deps: the packages pinned in `requirements.txt` — the brew formula builds them into the keg's own venv; from source, bootstrap installs them
 - tmux — REQUIRED for the iOS chat path: the app delivers chat by typing into the project's REPL pane; a REPL outside tmux is invisible to it. Delivery matrix: [hscc-api/README.md](hscc-api/README.md)
 
 ## Quick start
@@ -51,7 +51,7 @@ brew install hscc
 hscc bootstrap --yes
 ```
 
-`brew install` keeps everything inside its own keg — the release tree plus a brew-managed Python venv — and deliberately writes nothing into `~/.hermes` or `~/.hscc`. `hscc bootstrap --yes` is the step that does: it detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the two-question interview, and `--dry-run` prints every planned write while performing none. `hscc --version` and `hscc --help` already work before bootstrap.
+`brew install` keeps everything inside its own keg — the release tree plus a brew-managed Python venv — and deliberately writes nothing into `~/.hermes` or `~/.hscc`. `hscc bootstrap --yes` is the step that does: it detects your cluster from `sparkrun cluster list`, then installs skills, role profiles, `~/.hscc` state, and the monitoring daemon. It does **not** start vLLM models. Drop `--yes` for the short interview (orchestrator node when needed, **main orchestrator name**, recipe), and `--dry-run` prints every planned write while performing none. `hscc --version` and `hscc --help` already work before bootstrap.
 
 If your keg predates the `bootstrap` verb (v2.12.0 and earlier), run the installer from the installed tree instead — `brew install` prints this as its next step and `brew info hscc` reprints it:
 
@@ -71,6 +71,94 @@ hscc api start --tailscale                  # HTTP API for external apps (prints
 ```
 
 Then open the iOS app and scan the QR (`hscc api status` reprints it) — [ios-app/README.md](ios-app/README.md).
+
+## The main orchestrator
+
+Bootstrap creates **one main orchestrator** — the agent that knows every project
+and the whole cluster. It replaces the two old cluster-wide identities
+(`general-orch` and the `orchestrator` role) with one profile that has both the
+board duties and the cluster authority. Design:
+[docs/design/2026-11-19-main-orchestrator-design.md](docs/design/2026-11-19-main-orchestrator-design.md).
+
+**Name.** The interview asks once:
+
+```
+Main orchestrator name [general]:
+```
+
+`--yes` takes `general`; an interactive install accepts any lowercase slug that
+does not collide with a role or project profile. The answer is stored in
+`~/.hscc/main-orchestrator.json` and every component reads it from there —
+re-running bootstrap never changes it. Its profile, its session and its kanban
+board all use the same name.
+
+**Its board is the default.** Bootstrap creates the board and makes it the
+machine-wide kanban **current** board, so a card created without an explicit
+`board=` lands there instead of on whichever project board was switched to
+last. The old `default` board keeps its history and cards; it simply stops
+being the default. The bootstrap doctor warns (never fatally) if the current
+pointer drifts, with the one-line `hermes kanban boards switch <name>` fix.
+
+**It runs in its own pane.** `hscc main start` ensures one tmux pane runs the
+main orchestrator's REPL; `hscc main status` reports it and `hscc orch inject`
+resolves that pane like any other orchestrator. With no tmux server running,
+bootstrap prints the command rather than starting a server behind your back.
+
+**It wakes itself.** The hscc daemon owns four editable wake-ups, delivered into
+the same running session you talk to (queued while it is busy, never
+interrupting a turn):
+
+| Wake-up | Default | What it does |
+|---|---|---|
+| `health` | every 2 h | nodes, serving, proxy errors, daemon, autodown, kanban caps |
+| `sweep` | every 3 h | every orchestrator's board and pane, standing watch cards |
+| `memory` | daily 07:00 | refresh its per-project state note from live boards/PRs |
+| `settings` | weekly Monday 07:30 | review its own skills, config and schedules |
+
+```
+hscc main wakeups list
+hscc main wakeups set sweep "every 4h"
+hscc main wakeups disable health
+```
+
+**Authority.** Everything except a LIVE publish: start/stop models, steer any
+orchestrator, card any board, review and merge PRs, change settings and ship
+releases. A production/LIVE deploy asks you first.
+
+**How it reaches you.** `hscc notify <title> <body>` writes the durable alert
+feed (`GET /v1/alerts`). The iOS app registers for APNs and buzzes within
+seconds even when closed; the macOS menu bar app polls the same feed and shows
+a local notification. Alerts are notification-only — answer in the main
+orchestrator's pane. They are deduplicated and rate-limited, so the same
+condition does not re-alert until it changes. `hscc notify test` sends one test
+push to every registered device.
+
+**One-time APNs setup.** The key never goes in the repo:
+
+1. In [developer.apple.com → Identifiers](https://developer.apple.com/account/resources/identifiers/list),
+   enable **Push Notifications** on the app id (`ro.parsec.hscc.ios`, plus
+   `com.hscc.ios` if you install Debug builds).
+2. In **Keys**, create an **APNs** auth key, download the `.p8` once, and note
+   the key id and your team id.
+3. On the cluster host, put the key at `~/.hscc/AuthKey_<KEYID>.p8`
+   (`chmod 600`) and write `~/.hscc/apns.json`:
+
+   ```json
+   {
+     "key_id": "ABCDE12345",
+     "team_id": "TEAM123456",
+     "key_path": "~/.hscc/AuthKey_ABCDE12345.p8"
+   }
+   ```
+
+   (`keychain_service`/`keychain_account` can replace `key_path`; see
+   `hscc_daemon/apns.py`.) The bootstrap doctor reports the APNs row, and
+   `hscc notify test` proves the path end to end. iOS release details:
+   [ios-app/RELEASE.md](ios-app/RELEASE.md).
+
+Existing installs upgrade in place: bootstrap creates the main profile, copies
+(never moves) the legacy catch-all's memories and sessions where the main has
+none, and marks both old profiles retired in their SOUL. Nothing is deleted.
 
 ## Install from source (development)
 
@@ -162,13 +250,13 @@ It never tears down while kanban work is running/ready/in-review, while an agent
 
 ## The fleet
 
-Work flows through native Hermes kanban: the orchestrator decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (27 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
+Work flows through native Hermes kanban: the main orchestrator (or a project's own orchestrator) decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (27 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
 
 ## Components
 
 | Component | What it is |
 |---|---|
-| [hscc-cluster](hscc-cluster/README.md) | cluster-control toolset (orchestrator-only) + template engine ([templates/](hscc-cluster/templates/README.md)) |
+| [hscc-cluster](hscc-cluster/README.md) | cluster-control toolset (main-orchestrator-only) + template engine ([templates/](hscc-cluster/templates/README.md)) |
 | [hscc-roles](hscc-roles/README.md) | role framework: author + generate profiles; autonomy flag |
 | [hscc_daemon](hscc_daemon/README.md) | monitoring + self-heal daemon (launchd / systemd --user) |
 | [hscc-commands](hscc-commands/README.md) | operator slash commands (`/cluster`, `/status`, `/heal`, `/template`, …) |
@@ -201,7 +289,7 @@ Also: [changelog.d/](changelog.d/README.md) — per-card changelog fragments (ne
 
 ## Conventions
 
-- Pure-Python with the three pinned deps above; cluster control is orchestrator-only.
+- Pure-Python with the pinned deps above; cluster control belongs to the main orchestrator only.
 - State is read from live sources (`sparkrun status`, `serving.json`), never stale caches.
 - "Strip/archive" means move to `_archive/<date>/`, never delete.
 - Restart the gateway after prompt/plugin/config edits — command in [docs/FLEET.md](docs/FLEET.md).

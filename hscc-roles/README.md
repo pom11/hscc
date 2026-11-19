@@ -3,7 +3,7 @@
 The role framework. Each role is a spec file (`roles/<name>.yaml`); a generator
 builds it into a Hermes profile with a **layered SOUL** (shared base character +
 role disposition + thin operational facts) and the full Hermes toolset **minus
-cluster control** — only the orchestrator can change cluster shape.
+cluster control** — only the main orchestrator can change cluster shape.
 
 ## When you touch it
 
@@ -19,11 +19,11 @@ hscc.py create <name> "…"   # author a new role on demand
 hscc.py list                # roles + whether a profile exists
 hscc.py validate            # validate every role spec (load + required fields)
 hscc.py autonomy [on|off]   # the ~/.hscc/autonomy master flag
-hscc.py orch <project|general> [--registry P] [--hermes-home DIR]
+hscc.py orch <project|main-name> [--registry P] [--hermes-home DIR]
                             # ensure a project's orchestrator profile exists
 hscc.py orch-all [--registry P] [--hermes-home DIR]
                             # ensure an orchestrator for EVERY registry
-                            # project + the `general` catch-all (idempotent, bulk)
+                            # project + the ONE main orchestrator (idempotent, bulk)
 hscc.py orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
                   [--hermes-home DIR]
                             # re-render every live <project>-orch SOUL + add the

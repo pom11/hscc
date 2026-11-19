@@ -66,8 +66,8 @@ read (`read N projects | M boards | K cards | ...`) plus two trust signals:
   M card(s) — run legacy-cards` appears only when a board outside the registry
   mapping holds cards standup does NOT otherwise surface (cards whose
   workspace resolves to no registered project). It reuses `legacy-cards`' own
-  board-attribution rule, so the two commands always agree. The shared
-  `default` board's cards — attributed by workspace — are surfaced normally and
+  board-attribution rule, so the two commands always agree. Cards on the
+  legacy `default` board — attributed by workspace — are surfaced normally and
   never trigger this. When nothing is hidden, no line is printed.
 - **Version-drift notice** — when flightdeck's own installed version is behind
   its git remote's newest tag, one line is printed:

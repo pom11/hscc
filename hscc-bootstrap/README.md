@@ -8,7 +8,10 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    cluster / Hermes / NAS / disk and explains failures in plain language; a fatal
    miss hard-stops.
 2. **Detect + Configure** — reads the cluster from `sparkrun cluster list`; picks
-   orchestrator + recipe (defaults under `--yes`); suggests a node-count template.
+   orchestrator + recipe (defaults under `--yes`), asks the ONE main
+   orchestrator name (`Main orchestrator name [general]:`, stored once in
+   `~/.hscc/main-orchestrator.json` and never changed by a re-run); suggests a
+   node-count template.
 3. **Install: plugin files** — copies the plugin tree into `~/.hermes/plugins/`
    (backup-then-overwrite; `--no-backup` to overwrite in place). Deployed files
    that differ from the payload (operator patches) are preserved to
@@ -89,12 +92,15 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    With the service loaded that restart goes through the supervisor — `launchctl
    kickstart -k` on macOS, `systemctl --user restart` on Linux — the only restart
    that keeps the service's interpreter and supervisor, and the PID is verified
-   from the supervisor itself; a failed restart warns, never aborts.
+   from the supervisor itself; a failed restart warns, never aborts. The daemon
+   also owns the main orchestrator's four default wake-ups (health / sweep /
+   memory / settings), delivered through `hscc orch inject --mode auto` into the
+   same running session; list and edit them with `hscc main wakeups`.
 
 ## Files
 | File | Role |
 |------|------|
-| `bootstrap.sh` | the orchestrator script |
+| `bootstrap.sh` | the installer script |
 | `doctor.py` | preflight checks; the feature rows it runs come from its `FEATURE_CHECK_ROWS` registry (one entry per row), not from code in `run_doctor()` |
 | `doctor_rows.py` | the machinery behind that registry: a `FeatureCheckRow` record (key, seam keyword, the hooks that build its verdict, the per-row context it reads), the shared five-field `Check` adapter, and `render_rows()` which resolves each hook on the doctor module **per call** so the row suites can patch them. Adding a doctor row = one entry in `doctor.py::FEATURE_CHECK_ROWS`; see `docs/design/doctor-row-registry-t_32a06db9.md` |
 | `doctor_node_recovery.py` | the doctor's per-node node-recovery check (watchdog armed + panic sysctls in sync), read-only over sparkrun ssh; reuses `hscc-cluster/node_recovery.py` + `install_autoreboot.py` as its single source of truth |

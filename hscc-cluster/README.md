@@ -1,11 +1,12 @@
 # hscc-cluster
 
-The cluster-control plugin: the **orchestrator-only** toolset Hermes uses to see
-and shape the DGX Spark cluster, plus the topology-free template engine and the
-agentic work-flow helpers.
+The cluster-control plugin: the **main-orchestrator-only** toolset Hermes uses
+to see and shape the DGX Spark cluster, plus the topology-free template engine
+and the agentic work-flow helpers.
 
 > Loaded by Hermes via `register(ctx)` in `__init__.py`. Worker roles never get
-> this toolset — only the orchestrator can change cluster shape.
+> this toolset — only the ONE main orchestrator (named at bootstrap, default
+> `general`) can change cluster shape.
 
 ## When you touch it
 

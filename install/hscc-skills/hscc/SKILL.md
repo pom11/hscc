@@ -27,10 +27,10 @@ Cluster: gateway/orchestrator node `192.0.2.10` (always-on vLLM serving all Herm
 ## Two responsibilities, two surfaces
 
 ### 1. Agent work = native Hermes kanban (NOT HSCC)
-Drive all project work through the kanban tools / `hermes kanban`. Create a task (`kanban_create` or `hermes kanban create "<task>"`) → it lands in triage → auto-decomposes into todo cards (`kanban.auto_decompose`) → the gateway's **embedded dispatcher** (`kanban.dispatch_in_gateway: true`, 60s tick) runs each ready card in its own git worktree as a worker agent → moves it to review. `default_assignee: worker` (the catch-all role; all worker roles serve from the load-balanced sparkrun proxy, which spreads inference across every worker GPU). Inspect with `hermes kanban boards`. **Do NOT hand-manage worktrees or dispatch** — the gateway does it. There is no more `dispatch-task`/`release-task`/`merge-worktree` CLI.
+Drive all project work through the kanban tools / `hermes kanban`. Create a task (`kanban_create` or `hermes kanban create "<task>"`) → it lands in triage → auto-decomposes into todo cards (`kanban.auto_decompose`) → the gateway's **embedded dispatcher** (`kanban.dispatch_in_gateway: true`, 60s tick) runs each ready card in its own git worktree as a worker agent → moves it to review. `default_assignee: worker` (the catch-all role; all worker roles serve from the load-balanced sparkrun proxy, which spreads inference across every worker GPU). Inspect with `hermes kanban boards`. The machine-wide current board is the ONE main orchestrator's board (named at bootstrap, default `general`), so a card without an explicit `board=` lands there; the legacy `default` board keeps its history. **Do NOT hand-manage worktrees or dispatch** — the gateway does it. There is no more `dispatch-task`/`release-task`/`merge-worktree` CLI.
 
 ### 2. Cluster physical ops = hscc-cluster toolset
-Change cluster shape via the toolset (orchestrator profile only). See the **`hscc-cluster`** skill. Tools:
+Change cluster shape via the toolset (the ONE main orchestrator only). See the **`hscc-cluster`** skill. Tools:
 - **reads**: `cluster_status`, `model_health`, `list_recipes`, `vllm_logs`, `node_diagnostics`, `nas_diagnose`
 - **ops** (confirm-gated): `provision_model` (node='auto' picks idle worker, returns live base_url), `stop_model`, `restart_model`
 - **heal** (confirm-gated): `remount_nas`, `repair_nas_export`, `reap_orphans`
