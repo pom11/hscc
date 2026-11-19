@@ -20,6 +20,10 @@
 #     (`showsDaemonHost`, the same positive-list decision `ClusterWidget` uses
 #     for its board row), so a Lock Screen family never pays for a block it
 #     cannot draw;
+#   * the ring and the row draw `hscc cluster monitor`'s four Lock Screen
+#     numbers — hottest temperature, GPU load, watts, running/waiting — through
+#     the shared copy rule, from the SAME monitor read as their fleet rows, and
+#     derive or format no number themselves;
 #   * a family that does not fetch the host leaves the stored host half alone
 #     instead of erasing it from the last-known snapshot.
 #
@@ -124,6 +128,59 @@ if printf '%s\n' "$accessory_range" | grep -q 'daemonHost\|HostStrip\|HostBlock\
   wbad "an accessory body reads the daemon-host half it will not draw"
 else
   wok "the accessory bodies never read the daemon-host half"
+fi
+
+# (6b) The Lock Screen's four numbers (t_314a3811). The ring and the row draw
+# them through the shared copy rule — `ClusterLockScreen.swift`, executed by
+# `cluster_widget_check.sh` — so the Monitor tile cannot word them differently
+# from the Cluster tile, and no accessory formats a number of its own. The old
+# up/total gauge is gone from both: a Lock Screen ring that fills to a node
+# count says nothing about hot or working.
+for family in CircularMonitorWidget RectangularMonitorWidget; do
+  body=$(awk "/^struct $family/,/^}/" "$VIEWS")
+  if [ -z "$body" ]; then
+    wbad "$family not found in $VIEWS"
+    continue
+  fi
+  if printf '%s\n' "$body" | grep -q 'entry.lockScreen'; then
+    wok "$family reads the projected Lock Screen numbers"
+  else
+    wbad "$family does not read the entry's projected Lock Screen numbers"
+  fi
+  if printf '%s\n' "$body" | grep -q 'entry.text(for: .'; then
+    wok "$family draws its strings from the entry text model"
+  else
+    wbad "$family composes its own strings"
+  fi
+  if printf '%s\n' "$body" | grep -q 'tally\|String(format:\|Double(min(max'; then
+    wbad "$family recomputes or re-formats a number a view has no business deriving"
+  else
+    wok "$family derives no number and formats no number"
+  fi
+done
+if grep -q 'CLILockScreenMetrics(monitorOutcome.value)' "$SUBJECT"; then
+  wok "the four numbers come from the SAME monitor read as the fleet rows"
+else
+  wbad "the entry's Lock Screen numbers are not projected from the monitor outcome"
+fi
+if grep -q 'lockScreen: lockScreen' "$SUBJECT"; then
+  wok "the live entry carries the projected numbers"
+else
+  wbad "the provider never hands the projected numbers to the entry"
+fi
+if grep -q 'let wantsHost = family.showsDaemonHost' "$SUBJECT"; then
+  wok "the daemon-host read is refused before it is sent for a Lock Screen family"
+else
+  wbad "an accessory refresh may still pay for the daemon-host request it cannot draw"
+fi
+# The refusal is one shared positive list, not a per-widget rule that can drift:
+# a `showsDaemonHost` that ever names an accessory family would put a second
+# machine's health on the Lock Screen, where only the fleet's numbers belong.
+host_list=$(awk '/var showsDaemonHost/,/^    }/' "$VIEWS")
+if printf '%s\n' "$host_list" | grep -q 'accessory'; then
+  wbad "showsDaemonHost names an accessory family — the host block would reach the Lock Screen"
+else
+  wok "showsDaemonHost stays a positive list of the system families"
 fi
 
 # (7) No new network call: one named monitor method and one named host method,
