@@ -39,7 +39,12 @@
 # to a driver that no gate can run. `Sources/Shared/ClusterNodeTally.swift`
 # compiles alongside because the projection calls it: that file is the ONE host
 # tally, and the cluster widget runs the same call (`cluster_widget_check.sh`
-# executes it from the widget's side).
+# executes it from the widget's side). Since t_b009f32d the same is true of
+# `Sources/Shared/ClusterMonitorViewModel.swift`: the activity's per-host lines,
+# total draw and peak GPU ARE that file's CLI-formatted cells and thresholds, so
+# this table executes the shipped formatting rather than a copy of it — and
+# dropping that file from the list fails the compile, rather than quietly
+# narrowing what is proved.
 #
 # PART 5 — the running-cards FEED rule (t_71deac83). A THIRD block in the cards
 # file (`…: cards-feed-decision`) holds the driver's decision — push, end, or
@@ -111,6 +116,7 @@ swiftc -o "$OUT/check" \
   Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   Sources/Shared/CardsRunningProjection.swift \
+  Sources/Shared/ClusterMonitorViewModel.swift \
   scripts/model_decode_check/ThemeStub.swift 2>&1 || {
   echo "compile failed" >&2; exit 1; }
 

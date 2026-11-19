@@ -514,6 +514,312 @@ check("a read that did not answer is — up; a stated zero is 0/4 up",
       ClusterHealthReading.tallyText(up: nil, total: nil) == "— up"
       && ClusterHealthReading.tallyText(up: 0, total: 4) == "0/4 up")
 // ===========================================================================
+// PART 4b — the LOAD signals the push carries (t_b009f32d).
+//
+// The per-host rows, the fleet's total draw, the peak GPU and the serving
+// run/wait totals are decided by the SAME sliced `ClusterHealthProjection` as
+// the tally above, and drawn by the Lock Screen and all three Island regions.
+// Two things make this section worth its rows:
+//
+//   1. It runs against the COMMITTED `/v1/cluster/monitor` fixture — the same
+//      bytes `model_decode_check` decodes and the same bytes
+//      `cluster_monitor_cli_parity.py` generated the CLI's goldens from. So the
+//      cell strings asserted below are the CLI's own cells, checked as literals
+//      rather than restated from the code under test, and a fixture the file
+//      cannot be read for fails the run BY NAME instead of skipping quietly.
+//   2. Every case that can lie is asserted on both sides: what a told zero
+//      draws, and what a not-told draws.
+//
+// Host strings here are 192.0.2.N (RFC 5737 TEST-NET-1) like the fixture, so no
+// real address can reach this file either.
+// ===========================================================================
+
+print("\nCluster health — the per-host load signals (sliced, run against the committed fixture)\n")
+
+/// The committed live-fleet payload. Read relative to `ios-app`, which is the
+/// directory the .sh has already cd'd into.
+func loadFixtureData(_ name: String) -> Data? {
+    try? Data(contentsOf: URL(fileURLWithPath: "scripts/model_decode_check/fixtures/" + name))
+}
+func checkLevel(_ name: String, _ got: ClusterMetricLevel?, _ want: ClusterMetricLevel?) {
+    check(name, got == want, "got \(String(describing: got)), want \(String(describing: want))")
+}
+func checkGlance(_ name: String, _ got: ClusterHealthGlance,
+                 _ text: String, _ kind: ClusterHealthGlance.Kind,
+                 _ level: ClusterMetricLevel? = nil, _ secondary: String? = nil) {
+    check(name, got.text == text && got.kind == kind && got.level == level && got.secondary == secondary,
+          "got (text: \(got.text), kind: \(got.kind.rawValue), level: \(String(describing: got.level)), secondary: \(String(describing: got.secondary))), want (\(text), \(kind.rawValue), \(String(describing: level)), \(String(describing: secondary)))")
+}
+
+let liveFixtureData = loadFixtureData("v1_cluster_monitor_live.json")
+check("the committed cluster-monitor fixture is readable (a skipped fixture is not a passing one)",
+      liveFixtureData != nil)
+
+/// A host with a sample, built the way the route sends it: every sparkrun metric
+/// is a STRING, so an empty one is the node's own "could not read", not a zero.
+func sampleHost(_ tail: String, util: String? = nil, gpuTemp: String? = nil,
+                power: String? = nil, limit: String? = nil, error: String? = nil) -> String {
+    var fields: [String] = []
+    if let util { fields.append("\"gpu_util_pct\":\"\(util)\"") }
+    if let gpuTemp { fields.append("\"gpu_temp_c\":\"\(gpuTemp)\"") }
+    if let power { fields.append("\"gpu_power_w\":\"\(power)\"") }
+    if let limit { fields.append("\"gpu_power_limit_w\":\"\(limit)\"") }
+    let sample = fields.isEmpty ? "null" : "{\(fields.joined(separator: ","))}"
+    let err = error.map { "\"error\":\"\($0)\"" } ?? "\"error\":null"
+    return "{\"host\":\"192.0.2.\(tail)\",\(err),\"sample\":\(sample)}"
+}
+func monitorHosts(_ hosts: [String], serving: [String]? = nil) -> MonitorResponse? {
+    var body = "{\"speak\":\"ok\",\"json\":{\"hosts\":[\(hosts.joined(separator: ","))]"
+    if let serving { body += ",\"serving\":[\(serving.joined(separator: ","))]" }
+    body += "}}"
+    return try? JSONDecoder().decode(MonitorResponse.self, from: Data(body.utf8))
+}
+func servingRow(node: String, model: String, running: Int?, waiting: Int?) -> String {
+    var fields = ["\"node\":\"\(node)\"", "\"model\":\"\(model)\""]
+    if let running { fields.append("\"running\":\(running)") }
+    if let waiting { fields.append("\"waiting\":\(waiting)") }
+    return "{\(fields.joined(separator: ","))}"
+}
+
+// -- the committed fixture: the CLI's own cells, on the activity's own surface --
+if let liveBytes = liveFixtureData,
+   let liveMonitor = try? JSONDecoder().decode(MonitorResponse.self, from: liveBytes) {
+    let fromFixture = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                     monitor: liveMonitor, monitorLabel: nil,
+                                                     showNodeTally: true)
+    let rows = ClusterHealthReading.hostLineList(fromFixture.hostLines, limit: 4)
+    // The fixture's hosts carry `hostname` INSIDE the sample, so the view-model's
+    // `displayLabel` — which the CLI's `host_label` also prefers — is the reported
+    // name, not the `.NNN` tail of the address.
+    checkList("one line per host the route listed, in the route's order",
+              rows.map { $0.label }, ["node-1", "node-2", "node-3", "node-4"])
+    check("a host line is never an address (§7)", !rows.contains { $0.label.contains("192.0.2") })
+    // These literals are `v1_cluster_monitor_live.cli.json`'s `GPU%`, `GPU Temp`
+    // and `GPU Power` cells for the same bytes — the CLI's own output, generated
+    // by cluster_monitor_cli_parity.py, not transcribed from this view-model.
+    checkText("the first line's GPU% cell is the CLI's", rows.first?.gpuPct ?? "", "93")
+    checkText("the first line's GPU Temp cell is the CLI's (a space and a C, never a degree)",
+              rows.first?.gpuTemp ?? "", "49 C")
+    checkText("the first line's GPU Power cell is the CLI's (two decimals, W)",
+              rows.first?.gpuPower ?? "", "9.49 W")
+    let viewRows = ClusterMonitorViewModel.project(liveMonitor)?.hostRows ?? []
+    check("every cell IS ClusterMonitorViewModel's, not a re-formatting of the number",
+          rows.count == viewRows.count
+          && zip(rows, viewRows).allSatisfy { line, row in
+              line.gpuPct == row.gpuPct && line.gpuTemp == row.gpuTemp
+              && line.gpuPower == row.gpuPower && line.label == row.displayLabel
+          })
+    check("none of the four hosts answered badly", !rows.contains { $0.isDown })
+    checkText("total draw is the sum of the four hosts that reported one, in the CLI's power format",
+              ClusterHealthReading.totalPowerText(fromFixture.totalPowerW) ?? "nil", "79.63 W")
+    checkLevel("watts with NO limit read is .unknown, never .ok", fromFixture.powerLevel, .unknown)
+    check("and specifically not green", fromFixture.powerLevel != .ok)
+    check("the compact's load number is the BUSIEST host (94), not the first (93)",
+          fromFixture.peakGpuPct == 94)
+    checkGlance("so the compact leads with 94%", ClusterHealthReading.glance(fromFixture),
+                "94%", .load, nil, "4/4")
+    check("the hottest GPU is the hottest host's (62), and its verdict is its own",
+          fromFixture.peakGpuTempC == 62 && fromFixture.peakGpuTempLevel == .ok)
+    checkText("serving totals are the CLI total row's run/wait",
+              ClusterHealthReading.servingLoadText(running: fromFixture.servingRunning,
+                                                   waiting: fromFixture.servingWaiting) ?? "nil",
+              "6 run · 0 wait")
+    check("a queue with work in it is the CLI's warn; an idle busy engine is ok",
+          CLIMonitorFormat.loadLevel(running: fromFixture.servingRunning ?? 0,
+                                     waiting: fromFixture.servingWaiting ?? 0) == .ok)
+    checkOpt("4 of 4 drawn -> no +n",
+             ClusterHealthReading.hostsMoreText(shown: 4, listed: fromFixture.nodesTotal), nil)
+}
+
+// -- what silence looks like: every case that must NOT draw a zero -------------
+let speakOnly = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                monitor: monitor(nil), monitorLabel: nil,
+                                                showNodeTally: true)
+check("a route that degraded to {speak} carries no host lines (nil, not an empty table)",
+      speakOnly.hostLines == nil)
+check("... and no total draw, no verdict, no peaks",
+      speakOnly.totalPowerW == nil && speakOnly.powerLevel == nil
+      && speakOnly.peakGpuPct == nil && speakOnly.peakGpuTempC == nil)
+checkOpt("... and no total line at all",
+         ClusterHealthReading.totalPowerText(speakOnly.totalPowerW), nil)
+checkGlance("the compact falls back to the gap mark, not to 0%",
+            ClusterHealthReading.glance(speakOnly), "—", .mark)
+let emptyHosts = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                 monitor: monitorHosts([]), monitorLabel: nil,
+                                                 showNodeTally: true)
+check("an empty host list is the powered-off fleet's silence, exactly as ClusterNodeTally reads it",
+      emptyHosts.hostLines == nil && emptyHosts.totalPowerW == nil)
+
+let idleFleet = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: monitorHosts([sampleHost("1", util: "0", power: "0.005", limit: "200"),
+                           sampleHost("2", util: "0", power: "0.005", limit: "200")]),
+    monitorLabel: nil, showNodeTally: true)
+checkText("an idle fleet that DID report draws its real zero, not an em dash",
+          ClusterHealthReading.totalPowerText(idleFleet.totalPowerW) ?? "nil", "0.01 W")
+checkLevel("... and the verdict belongs to the wattage against its own limit",
+           idleFleet.powerLevel, .ok)
+
+let oneDown = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: monitorHosts([sampleHost("1", util: "40", power: "10.00", limit: "200"),
+                           sampleHost("2", error: "ssh: connection refused")]),
+    monitorLabel: nil, showNodeTally: true)
+let downRows = ClusterHealthReading.hostLineList(oneDown.hostLines, limit: 4)
+check("the host that never sampled is named as down, not dropped",
+      downRows.count == 2 && downRows[1].isDown && !downRows[0].isDown)
+checkText("and its cells are the CLI's dashes", downRows.count > 1 ? downRows[1].gpuPower : "?", "-")
+checkLevel("a dash carries no verdict — .unknown, never .ok",
+           downRows.count > 1 ? downRows[1].gpuPowerLevel : .ok, .unknown)
+checkText("the total is the sum of the hosts that ANSWERED: 10.00 W, never 10.00 + nothing",
+          ClusterHealthReading.totalPowerText(oneDown.totalPowerW) ?? "nil", "10.00 W")
+
+// -- thresholds: the number and its colour must come from the same host --------
+let hotFleet = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: monitorHosts([sampleHost("1", gpuTemp: "50"), sampleHost("2", gpuTemp: "95")]),
+    monitorLabel: nil, showNodeTally: true)
+check("the hottest GPU's verdict is the verdict of the host that IS the hottest",
+      hotFleet.peakGpuTempC == 95 && hotFleet.peakGpuTempLevel == .critical)
+checkGlance("and with no utilisation told, the compact draws that temperature in its own "
+            + "colour, keeping the tally it was told",
+            ClusterHealthReading.glance(hotFleet), "95 C", .heat, .critical, "2/2")
+let hotNoTally = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: nil, monitorLabel: nil, showNodeTally: true)
+checkGlance("with no tally either, a heat glance carries no secondary",
+            ClusterHealthReading.glance(
+                ClusterHealthSignals(servingState: "serving", nodesUp: nil, nodesDown: nil,
+                                     nodesTotal: nil, failureLabel: nil, downNodes: [],
+                                     peakGpuTempC: 95, peakGpuTempLevel: .critical)),
+            "95 C", .heat, .critical, nil)
+_ = hotNoTally
+let warnPower = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: monitorHosts([sampleHost("1", power: "80", limit: "100"),    // 80% -> warn
+                           sampleHost("2", power: "50", limit: "200")]),  // 25% -> ok
+    monitorLabel: nil, showNodeTally: true)
+checkLevel("the fleet's power colour is the WORST per-host verdict, not the average",
+           warnPower.powerLevel, .warn)
+checkLevel("and a critical anywhere is critical everywhere it is drawn",
+           ClusterHealthProjection.powerLevel(from: ClusterMonitorViewModel.project(
+            monitorHosts([sampleHost("1", power: "80", limit: "100"),
+                          sampleHost("2", power: "106", limit: "110")]))!.hostRows), .critical)
+
+// -- the clip: the drawn list must never move the headline numbers -------------
+let sixHosts = (1...5).map { sampleHost("\($0)", util: "40", gpuTemp: "50", power: "10.00", limit: "200") }
+       + [sampleHost("6", util: "99", gpuTemp: "88", power: "180.00", limit: "200")]
+let sixSignals = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                 monitor: monitorHosts(sixHosts), monitorLabel: nil,
+                                                 showNodeTally: true)
+check("a push carries the Lock Screen's budget and no more",
+      ClusterHealthReading.hostLineList(sixSignals.hostLines,
+                                        limit: ClusterHealthProjection.hostLineLimit).count == 4)
+checkOpt("and counts what it left out against the route's own host count",
+         ClusterHealthReading.hostsMoreText(shown: 4, listed: sixSignals.nodesTotal), "+2 more")
+check("the busiest GPU is still the busiest even though the clip hid it",
+      sixSignals.peakGpuPct == 99
+      && ClusterHealthReading.glance(sixSignals).text == "99%")
+check("the hottest GPU too, and it carries the warn band the view-model gives 88 C",
+      sixSignals.peakGpuTempC == 88 && sixSignals.peakGpuTempLevel == .warn)
+checkText("the total is over all six hosts (50.00 + 180.00), not over the four drawn",
+          ClusterHealthReading.totalPowerText(sixSignals.totalPowerW) ?? "nil", "230.00 W")
+check("the expanded Island clips tighter and still says what it hid",
+      ClusterHealthReading.hostLineList(sixSignals.hostLines,
+                                        limit: ClusterHealthProjection.islandHostLineLimit).count == 3
+      && ClusterHealthReading.hostsMoreText(shown: 3,
+                                            listed: sixSignals.nodesTotal) == "+3 more")
+
+// -- serving totals: absence, zero and a switched-off section ------------------
+let noServing = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                monitor: monitorHosts([sampleHost("1", util: "5")]),
+                                                monitorLabel: nil, showNodeTally: true)
+check("no serving section -> no run/wait, not 0/0",
+      noServing.servingRunning == nil && noServing.servingWaiting == nil)
+checkOpt("and no line",
+         ClusterHealthReading.servingLoadText(running: nil, waiting: nil), nil)
+checkText("an EMPTY serving section is the route telling us there are no backends: a real zero",
+          ClusterHealthReading.servingLoadText(running: 0, waiting: 0) ?? "nil", "0 run · 0 wait")
+checkText("a queue that is told without a running count draws only what was told",
+          ClusterHealthReading.servingLoadText(running: nil, waiting: 3) ?? "nil", "3 wait")
+let tallyOffLoad = ClusterHealthProjection.signals(
+    autodown: autodown("up"), autodownLabel: nil,
+    monitor: monitorHosts([sampleHost("1", util: "40", power: "10.00", limit: "200")],
+                          serving: [servingRow(node: "192.0.2.1", model: "M", running: 2, waiting: 1)]),
+    monitorLabel: "Timed out", showNodeTally: false)
+check("tally switched off: the host data goes nil with the counts, it is not zeroed",
+      tallyOffLoad.hostLines == nil && tallyOffLoad.totalPowerW == nil
+      && tallyOffLoad.peakGpuPct == nil && tallyOffLoad.peakGpuTempC == nil)
+check("and the monitor's failure label goes with it",
+      tallyOffLoad.failureLabel == nil)
+
+// -- the empty / orphan boundary, moved by the new signals --------------------
+let onlyRows = ClusterHealthSignals(servingState: "unknown", nodesUp: nil, nodesDown: nil,
+                                    nodesTotal: nil, failureLabel: nil, downNodes: [],
+                                    hostLines: [ClusterHealthHostLine(label: ".1", gpuPct: "40",
+                                                                       gpuTemp: "50 C",
+                                                                       gpuPower: "10.00 W",
+                                                                       gpuTempLevel: .ok,
+                                                                       gpuPowerLevel: .ok,
+                                                                       isDown: false)])
+check("a bubble carrying ONLY a host line is not the empty one the launch sweep ends",
+      !onlyRows.isEmpty
+      && !ClusterHealthOrphanRule.isOrphan(onlyRows, updatedAt: Date(), now: Date()))
+check("and it still has no tally to draw, so the compact falls back to the gap mark",
+      ClusterHealthReading.glance(onlyRows).kind == .mark)
+check("the stateless, numberless, rowless bubble is still the one the sweep ends",
+      ClusterHealthOrphanRule.isOrphan(ClusterHealthSignals(servingState: "unknown", nodesUp: nil,
+                                                            nodesDown: nil, nodesTotal: nil,
+                                                            failureLabel: nil, downNodes: []),
+                                       updatedAt: Date(), now: Date()))
+
+// -- the payload that crosses the process boundary ------------------------------
+// The extension is a separate binary that decodes JSON the app encoded. `hostLines`
+// and the peaks are declared `var … ? = nil` on purpose: a `let` with an initial
+// value is dropped from the synthesized CodingKeys (the compiler warns and silently
+// never decodes it) and a NON-optional with a default makes the key REQUIRED, so an
+// activity pushed by an older app version would fail to decode at all. Both
+// directions are asserted rather than argued. `ContentState` is these signals plus
+// the push date, so the signals are where the keys live.
+let roundTrip = ClusterHealthProjection.signals(autodown: autodown("up"), autodownLabel: nil,
+                                                monitor: liveFixtureData.flatMap {
+                                                    try? JSONDecoder().decode(MonitorResponse.self, from: $0)
+                                                },
+                                                monitorLabel: nil, showNodeTally: true)
+let encoded = try? JSONEncoder().encode(roundTrip)
+let decoded = encoded.flatMap { try? JSONDecoder().decode(ClusterHealthSignals.self, from: $0) }
+check("a pushed payload with the load signals survives encode -> decode intact",
+      decoded == roundTrip)
+check("and the host lines and the peaks are still there after the trip",
+      decoded?.hostLines?.count == 4 && decoded?.peakGpuPct == 94)
+let preLoadPayload = ("{\"servingState\":\"serving\",\"nodesUp\":3,\"nodesDown\":0,"
+    + "\"nodesTotal\":3,\"downNodes\":[]}").data(using: .utf8)!
+let oldState = try? JSONDecoder().decode(ClusterHealthSignals.self, from: preLoadPayload)
+check("an OLD payload without any of the new keys still decodes (the app and the "
+      + "extension are separate binaries; a required new key would drop the bubble)",
+      oldState != nil && oldState?.hostLines == nil && oldState?.peakGpuPct == nil)
+check("and the keys the new payload DOES carry are the ones declared (no silent drop)",
+      String(data: try! JSONEncoder().encode(ClusterHealthSignals(
+        servingState: "serving", nodesUp: nil, nodesDown: nil, nodesTotal: nil,
+        failureLabel: nil, downNodes: [], hostLines: [], totalPowerW: 1,
+        powerLevel: .warn, peakGpuPct: 2, peakGpuTempC: 3, peakGpuTempLevel: .ok,
+        servingRunning: 4, servingWaiting: 5)), encoding: .utf8)!
+      .contains("\"peakGpuTempLevel\":\"ok\""))
+
+// -- the clipping and ranking primitives, at their edges ----------------------
+check("hostLineList: nothing told draws nothing", ClusterHealthReading.hostLineList(nil, limit: 4).isEmpty)
+check("hostLineList: a zero or negative limit cannot crash the view",
+      ClusterHealthReading.hostLineList(roundTrip.hostLines, limit: 0).isEmpty
+      && ClusterHealthReading.hostLineList(roundTrip.hostLines, limit: -3).isEmpty)
+checkLevel("worstLevel of nothing is no verdict", ClusterHealthReading.worstLevel([]), nil)
+checkLevel("an unknown verdict loses to a warn", ClusterHealthReading.worstLevel([.unknown, .warn]), .warn)
+checkLevel("a critical beats a warn", ClusterHealthReading.worstLevel([.warn, .critical]), .critical)
+checkLevel("and a lone unknown stays unknown — it is not evidence of health",
+           ClusterHealthReading.worstLevel([.unknown]), .unknown)
+checkText("the total power renders 0 as a fact, in the CLI's two-decimal format",
+          ClusterHealthReading.totalPowerText(0) ?? "nil", "0.00 W")
+
+// ===========================================================================
 // PART 5 — the running-cards FEED rule (t_71deac83), sliced, plus the
 // projection the driver pushes FROM (compiled from the same source file).
 //
