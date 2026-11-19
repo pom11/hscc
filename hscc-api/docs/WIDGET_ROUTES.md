@@ -20,6 +20,7 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/kanban/blocked` | Cluster, running-cards, kanban monitor | `routes_kanban.handle_kanban_blocked` | `hscc_daemon.kanban_blocked.list_blocked_tasks(registered_only=True)` (`hscc kanban blocked`) |
 | `GET /v1/kanban/stale` | Cluster, kanban monitor, running-cards | `routes_kanban.handle_kanban_stale` | `hscc_daemon.autodown.list_stale_tasks(registered_only=True)` (`hscc kanban stale`) |
 | `GET /v1/cluster/monitor` | Cluster + monitor widgets, monitor Live Activity | `routes_cluster.handle_cluster_monitor` | `hscc-cluster` engine `cmd_monitor` (`hscc cluster monitor`) |
+| `GET /v1/cluster/history` | cluster-history chart (the only route here that answers about the past) | `routes_cluster.handle_cluster_history` | none — and that is the point: it reads the daemon's recorder (`hscc_daemon/metrics_history.py`) through its own read API and never runs the live monitor path |
 | `GET /v1/cluster/status` | Cluster widget | `routes_cluster.handle_cluster_status` | `hscc-cluster` engine `cmd_cluster_status` (`hscc cluster status`) |
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
@@ -169,6 +170,80 @@ CLI's one-shot view.
 | `speak` | string | `"Fleet snapshot: N hosts sampled."` |
 
 `serving` is additive: older clients decode only `json` and are unaffected.
+
+---
+
+## GET /v1/cluster/history
+
+Source: **the recorder, not the fleet.** `hscc_daemon/metrics_history.py` is the
+only thing that has ever kept cluster telemetry (the widgets refresh ~every
+15 minutes, so everything between two refreshes used to be gone), and this route
+is its read side: `MetricsStore.host_rows` / `engine_rows` for the durable tiers
+and `MetricsRecorder.tier0_points` for the in-memory ring. Every other cluster
+route here runs a live read that ssh-es; a request here must not — it triggers no
+sample, no ssh call and no sparkrun child, and
+`hscc-api/tests/test_cluster_history_parity.py` guards that with an AST sweep of
+the handler, every live backing poisoned, and a store that must still be missing
+after a read against a fresh install.
+
+`?window=` picks the tier, and the response says which one it served — a chart
+must never have to guess whether a point is 2 seconds or 5 minutes wide:
+
+| window | tier | resolution | where it lives | peaks |
+|---|---|---|---|---|
+| `15m` | 0 | 2 s | the sampler's memory only | none (raw samples) |
+| `1h`, `6h`, `24h` | 1 | 1 min | `~/.hscc/metrics/history.db` | `cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max` |
+| `7d` | 2 | 5 min | the same file | the same three |
+
+| field | type | meaning |
+|---|---|---|
+| `window` / `window_s` | string / integer | the requested window and its length in seconds |
+| `tier` | integer | 0, 1 or 2 — the tier that answered |
+| `resolution_s` / `resolution` | integer / string | 2/60/300 and `"2s"`/`"60s"`/`"300s"` |
+| `tier_summary` | string | what that tier is, in words ("1-minute averages, with peaks for …") |
+| `max_fields` | array | the peak columns this response carries — `[]` at tier 0, which stores no peak |
+| `since` / `until` | integer | epoch seconds; both inclusive, and the store's bucket starts are what they filter |
+| `node` | string | the echo of `?node=` (`all` by default) |
+| `metrics` | array | the effective field names, taken from the recorder's own vocabulary |
+| `hosts_included` / `engines_included` | bool | `false` means this `metrics=` filter named no field of that series — it is excluded, not empty |
+| `hosts` | array | the recorder's `host_rollup` rows, key names unchanged: `tier`, `ts`, `host`, the `HOST_KEYS` averages, the three `*_max`, `n`, `error` |
+| `engines` | array | the recorder's `engine_rollup` rows: `tier`, `ts`, `node`, `port`, `model`, `run`, `wait`, `kv`, `gen_tps`, `prompt_tps`, `n`, `error` |
+| `counts` | object | `{hosts, engines}` — the row counts served |
+| `store` | object | `{path, exists, db_bytes, tier0_resident, error}` |
+| `note` | string | why the answer is empty when it is (fresh install, ring not resident) |
+| `error` | string | present only when the store read failed, with the real reason |
+| `speak` | string | window + resolution + how much data came back |
+
+**A `null` is a missing reading, never a zero.** The recorder stores `None` for
+a field a node did not report (an empty CSV string would otherwise draw "GPU
+idle, 0 W" for a node that never answered), and this route forwards it
+untouched. `metrics=` is a projection of those rows, not a second query: it
+drops columns, it never recomputes a mean.
+
+**`window=15m` is honest about where tier 0 lives.** The 2 s ring is
+memory-only, and the API server is its own process
+(`hscc_daemon/api_launchd.py` starts `python -m api_server serve`), so in the
+deployed topology the API cannot see the daemon's ring. The route then answers
+`store.tier0_resident: false` with an empty series and a `note`/`speak` that say
+so and point at `window=1h` — it does not return an empty list as if the fleet
+had been quiet. When the route *does* own the ring (a test, or any process that
+hosts the sampler) it serves it verbatim.
+
+Rejected with `400 bad_request` (message + `speak`), never a silent empty
+answer: an unknown `window`; a `metrics` name the recorder does not store for
+that tier — including any `*_max` at `window=15m`, which has no peak column to
+give; `metrics` naming no field; a `node` that is not a host name; and any
+parameter other than `node`, `metrics` and `window`. A well-formed node with no
+samples in the window is *not* an error — it answers `200` with empty `hosts`
+and `engines`, because a node that was down for the whole window is a fact
+about the window.
+
+Parity: `hscc-api/tests/test_cluster_history_parity.py` drives the recorder's
+own `tick()` to build one store, serves it over HTTP and reads the same store
+back through the recorder's own read API, then asserts row-for-row equality for
+every tier (1, 1, 1 and 2 — i.e. all four durable windows) plus the tier-0 ring.
+The oracle is always the recorder; the aggregation is never re-derived in the
+test.
 
 ---
 

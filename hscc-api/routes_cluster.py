@@ -29,6 +29,7 @@ import importlib.util
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Resolve the repo root: hscc-api is a sibling of hscc-cluster and hscc_daemon.
@@ -615,6 +616,384 @@ def handle_autoscale(server, ctx, query, body):
 
 
 # ---------------------------------------------------------------------------
+# GET /v1/cluster/history — the recorder's stored series, READ-ONLY
+# ---------------------------------------------------------------------------
+#
+# WHY THIS ROUTE DOES NOT LOOK AT THE FLEET. Every other route here runs a live
+# read (`cmd_monitor` ssh-es to every host). This one answers "what did the
+# fleet look like at 14:05", and the only thing that knows is the recorder
+# (``hscc_daemon/metrics_history.py``). So the entire data path is the
+# recorder's OWN read API — ``MetricsStore.host_rows`` / ``engine_rows`` for
+# tiers 1-2, ``MetricsRecorder.tier0_points`` for tier 0 — and nothing else: no
+# sampling, no ssh, no sparkrun, and deliberately no ``get_sampler()``, which
+# constructs a Sampler on first use and would spawn a
+# ``sparkrun cluster monitor`` child from a GET.
+# tests/test_cluster_history_parity.py pins that three ways (AST sweep of this
+# handler, every live-backing seam poisoned, and a missing store left missing).
+#
+# THE TIER IS PART OF THE ANSWER, NOT AN IMPLEMENTATION DETAIL. The three tiers
+# have different resolutions (2 s / 1 min / 5 min) and different columns (a
+# peak only exists after a roll-up), so a response that just said "here is your
+# series" would leave a chart guessing whether a point is 2 seconds or 5 minutes
+# wide. Every response therefore states `tier`, `resolution_s`, `resolution`,
+# `tier_summary` and `max_fields` — the same fields for every window.
+
+#: A host name as the recorder keys it: sparkrun host, DNS name, or a
+#: tailnet/IPv6 address. Anything with a space, a slash or a `?` is a client
+#: bug rather than a host, and gets a 400 naming the rule.
+_HISTORY_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,253}")
+
+#: the window a client may ask for, mapped to the recorder's own (tier,
+#: bucket_s, span_s). Built from ``metrics_history``'s constants rather than
+#: literals so this route cannot drift from the cadence that produced the data:
+#: a client asking for 1 h is being served tier 1's 1-minute buckets because
+#: that is what tier 1 IS.
+def _history_windows(mh) -> dict:
+    return {
+        "15m": (0, mh.TIER0_INTERVAL_S, mh.TIER0_WINDOW_S),
+        "1h": (1, mh.TIER1_BUCKET_S, 60 * 60),
+        "6h": (1, mh.TIER1_BUCKET_S, 6 * 60 * 60),
+        "24h": (1, mh.TIER1_BUCKET_S, mh.TIER1_WINDOW_S),
+        "7d": (2, mh.TIER2_BUCKET_S, mh.TIER2_WINDOW_S),
+    }
+
+
+#: Keys that identify a row and are never dropped by `metrics=`.
+_HISTORY_HOST_IDENTITY = ("tier", "ts", "host", "res", "n", "error")
+_HISTORY_ENGINE_IDENTITY = ("tier", "ts", "node", "port", "model", "res", "n",
+                            "error")
+
+
+def _metrics_history():
+    """The recorder module, imported on first use (never at import time)."""
+    _ensure_repo_root_on_path()
+    from hscc_daemon import metrics_history
+    return metrics_history
+
+
+def _history_now() -> float:
+    """The wall clock for a window's edge — the seam the parity test pins."""
+    return time.time()
+
+
+def _history_vocab(mh, tier: int) -> tuple:
+    """(host field names, engine field names) this tier actually stores.
+
+    Tier 0 holds raw samples, so it has no ``<field>_max`` column: a peak only
+    exists once a bucket has been rolled up. Asking for `gpu_temp_c_max` at
+    window=15m is therefore a 400, not an empty column.
+    """
+    host_vocab = tuple(mh.HOST_KEYS) if tier == 0 else tuple(mh.HOST_COLUMNS)
+    return host_vocab, tuple(mh.ENGINE_KEYS)
+
+
+def _history_tier_summary(mh, tier: int, bucket_s: int) -> str:
+    """What the served tier is, in the client's own terms."""
+    if tier == 0:
+        return (f"raw {bucket_s} s samples from the recorder's in-memory ring — "
+                "no averaging, and no peak columns")
+    step = f"{bucket_s // 60}-minute" if bucket_s % 60 == 0 else f"{bucket_s} s"
+    peaks = ", ".join(f"{k}_max" for k in mh.MAX_KEYS)
+    return f"{step} averages, with peaks for {peaks}"
+
+
+def _parse_history_window(query, mh) -> tuple:
+    """?window= -> (window, tier, bucket_s, span_s). 400 on anything else."""
+    from api_server import ApiError
+    windows = _history_windows(mh)
+    raw = (query.get("window") or "1h").strip()
+    if raw not in windows:
+        raise ApiError(
+            400, "bad_request",
+            f"window must be one of {', '.join(windows)} (got {raw!r}); each "
+            "serves a different tier, and the response states which one",
+            "window must be 15m, 1 hour, 6 hours, 24 hours or 7 days.",
+        )
+    tier, bucket_s, span_s = windows[raw]
+    return raw, tier, bucket_s, span_s
+
+
+def _parse_history_node(query) -> str:
+    """?node= -> a host name, or 'all'. 400 on an empty or impossible name."""
+    from api_server import ApiError
+    node = (query.get("node") or "all").strip()
+    if not node:
+        raise ApiError(400, "bad_request",
+                       "node must be 'all' or one host name (an empty value is "
+                       "not a request for every host)",
+                       "node must be all or one host name.")
+    if node != "all" and not _HISTORY_NODE_RE.fullmatch(node):
+        raise ApiError(
+            400, "bad_request",
+            f"node {node!r} is not a host name: use 'all' or a single sparkrun "
+            "host / DNS name / tailnet address (letters, digits, . - _ :)",
+            "node must be all or a single host name.",
+        )
+    return node
+
+
+def _parse_history_metrics(query, mh, tier: int):
+    """?metrics=a,b -> the ordered, de-duplicated names to keep, or None for all.
+
+    The vocabulary is the recorder's own (``HOST_KEYS`` / ``HOST_COLUMNS`` /
+    ``ENGINE_KEYS``) rather than a list copied into this module, so a rename in
+    the recorder shows up here as a rejected name rather than as a silently
+    missing column — and a client that asks for a peak at tier 0 is told why,
+    instead of receiving a hole.
+    """
+    from api_server import ApiError
+    raw = query.get("metrics")
+    if raw is None:
+        return None
+    names: list = []
+    for part in str(raw).split(","):
+        name = part.strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        raise ApiError(
+            400, "bad_request",
+            "metrics must name at least one field (e.g. "
+            "metrics=gpu_util_pct,gpu_temp_c); an empty list is not a request "
+            "for all of them",
+            "metrics must name at least one field.",
+        )
+    host_vocab, engine_vocab = _history_vocab(mh, tier)
+    valid = ", ".join(sorted(set(host_vocab) | set(engine_vocab)))
+    for name in names:
+        if name in host_vocab or name in engine_vocab:
+            continue
+        if name in mh.HOST_COLUMNS:      # a peak, valid only once rolled up
+            raise ApiError(
+                400, "bad_request",
+                f"{name} is not stored for a 15 m window: tier 0 keeps raw 2 s "
+                "samples, so a peak column exists only after a roll-up "
+                "(window=1h, 6h, 24h or 7d)",
+                f"{name} is only available for rolled-up windows.",
+            )
+        raise ApiError(
+            400, "bad_request",
+            f"unknown metric {name!r} for this window; the recorder stores: "
+            f"{valid}",
+            f"{name} is not a metric the recorder stores.",
+        )
+    return names
+
+
+def _history_host_rows_from_points(points, node: str) -> list:
+    """Tier-0 records -> per-node rows, key names unchanged.
+
+    One ring record is one 2 s tick carrying EVERY host, while tiers 1 and 2
+    store one row per (tier, ts, host). A chart cannot consume two shapes, so
+    the ring is transposed into the row shape — and it is only a transpose:
+    every metric key and value comes out as the recorder holds it (a ``None``
+    stays ``None``, nothing is averaged, summed or otherwise re-derived), with
+    `tier`/`ts`/`n` from the same record.
+    """
+    rows = []
+    for p in points or []:
+        for host, metrics in (p.get("hosts") or {}).items():
+            if node != "all" and host != node:
+                continue
+            row = {"tier": 0, "ts": p.get("ts"), "res": p.get("res")}
+            row.update(metrics)
+            row["host"] = host
+            row.setdefault("n", p.get("n", 1))
+            rows.append(row)
+    return rows
+
+
+def _history_engine_rows_from_points(points, node: str) -> list:
+    """Tier-0 records -> per-engine rows, keyed (node, port) as the recorder keys them."""
+    rows = []
+    for p in points or []:
+        for e in p.get("engines") or []:
+            if node != "all" and e.get("node") != node:
+                continue
+            row = {"tier": 0, "ts": p.get("ts"), "res": p.get("res")}
+            row.update(e)
+            row.setdefault("n", p.get("n", 1))
+            rows.append(row)
+    return rows
+
+
+def _history_project(rows, identity, keep):
+    """Keep the row's identity keys plus the requested metrics (None = all)."""
+    if keep is None:
+        return rows
+    allowed = set(identity) | set(keep)
+    return [{k: v for k, v in row.items() if k in allowed} for row in rows]
+
+
+def _backing_history_tier0(node):
+    """Tier 0 — the in-memory ring, but ONLY if this process owns it.
+
+    None means "this process is not the sampler's" (the deployed case: the API
+    runs as its own ``python -m api_server serve``, so the daemon's ring is
+    unreachable from here) and an empty list means "this process does sample and
+    holds nothing yet" (the stated post-restart state). The route reports both
+    distinctly — an empty list answered as if it were data is how a chart draws
+    "nothing happened" over "we cannot see".
+    """
+    recorder = _metrics_history().resident_recorder()
+    if recorder is None:
+        return None
+    return recorder.tier0_points(None if node == "all" else node)
+
+
+def _backing_history_rows(hscc_dir, tier, since, until, node):
+    """Tiers 1 and 2 — straight out of the recorder's store.
+
+    Returns ``(host_rows, engine_rows, store_info)``. The store is opened only
+    when the file already exists: the recorder owns that file, and a widget poll
+    against a fresh install must not leave an empty database behind (an empty
+    file looks like a data source; a missing one says what it means).
+    """
+    mh = _metrics_history()
+    store = mh.MetricsStore(hscc_dir=hscc_dir)
+    exists = os.path.exists(store.path)
+    info = {"path": store.path, "exists": exists,
+            "db_bytes": os.path.getsize(store.path) if exists else 0}
+    if not exists:
+        return [], [], info
+    name = None if node == "all" else node
+    try:
+        host_rows = store.host_rows(tier, since=since, until=until, host=name)
+        engine_rows = store.engine_rows(tier, since=since, until=until, node=name)
+    finally:
+        store.close()
+    info["error"] = store.error
+    return host_rows, engine_rows, info
+
+
+def _speak_cluster_history(payload) -> str:
+    """One sentence naming the window, the resolution and how much is there."""
+    if payload.get("error"):
+        return f"Cluster history failed: {payload['error']}"
+    if payload["tier"] == 0 and not payload["store"]["tier0_resident"]:
+        return ("The 15 m window is the daemon's in-memory ring and this server "
+                "process does not own it. Ask for window=1h for 1-minute points.")
+    counts = payload["counts"]
+    return (f"Last {payload['window']} at {payload['resolution']} resolution: "
+            f"{counts['hosts']} node point{'s' if counts['hosts'] != 1 else ''}, "
+            f"{counts['engines']} engine point{'s' if counts['engines'] != 1 else ''}.")
+
+
+def handle_cluster_history(server, ctx, query, body):
+    """GET /v1/cluster/history?node=<host|all>&metrics=a,b&window=15m|1h|6h|24h|7d
+
+    The recorder's stored per-node and per-engine series, read-only: a request
+    here never triggers a sample, an ssh call or a sparkrun child. `window`
+    picks the tier (15m -> tier 0's 2 s ring; 1h/6h/24h -> tier 1's 1-minute
+    roll-ups; 7d -> tier 2's 5-minute roll-ups) and the response says which tier
+    and resolution it served, plus which peak columns it carries.
+
+    Rows come back with the recorder's own field names and its ``None``s
+    intact — ``None`` means "not reported", and coercing it to 0 would draw a
+    node that never answered as an idle one.
+    """
+    from api_server import ApiError
+    mh = _metrics_history()
+    for unsupported in sorted(set(query) - {"node", "metrics", "window"}):
+        raise ApiError(
+            400, "bad_request",
+            f"'{unsupported}' is not supported by /v1/cluster/history: it "
+            "accepts 'node', 'metrics' and 'window' only",
+            f"{unsupported} is not supported by the cluster history route.",
+        )
+    window, tier, bucket_s, span_s = _parse_history_window(query, mh)
+    node = _parse_history_node(query)
+    metrics = _parse_history_metrics(query, mh, tier)
+
+    until = int(_history_now())
+    since = until - span_s
+    host_vocab, engine_vocab = _history_vocab(mh, tier)
+    keep_host = keep_engine = None
+    if metrics is not None:
+        keep_host = [m for m in metrics if m in host_vocab]
+        keep_engine = [m for m in metrics if m in engine_vocab]
+    # A series with no requested field is REPORTED as excluded rather than
+    # returned as an empty list, so a client cannot read "no engine points" as
+    # "the fleet served nothing".
+    hosts_included = keep_host is None or bool(keep_host)
+    engines_included = keep_engine is None or bool(keep_engine)
+
+    payload = {
+        "window": window,
+        "window_s": span_s,
+        "tier": tier,
+        "resolution_s": bucket_s,
+        "resolution": mh.RES_TIER0 if tier == 0 else f"{bucket_s}s",
+        "tier_summary": _history_tier_summary(mh, tier, bucket_s),
+        "max_fields": [c for c in host_vocab
+                       if c.endswith("_max")
+                       and (metrics is None or c in metrics)],
+        "since": since,
+        "until": until,
+        "node": node,
+        "metrics": list(metrics) if metrics is not None else list(host_vocab) + list(engine_vocab),
+        "hosts_included": hosts_included,
+        "engines_included": engines_included,
+    }
+
+    tier0_resident = True
+    error = None
+    try:
+        if tier == 0:
+            points = _backing_history_tier0(node)
+            tier0_resident = points is not None
+            host_rows = _history_host_rows_from_points(points, node)
+            engine_rows = _history_engine_rows_from_points(points, node)
+            store_info = {"path": mh.db_path(ctx.hscc_dir),
+                          "exists": os.path.exists(mh.db_path(ctx.hscc_dir)),
+                          "db_bytes": 0}
+            store_info["db_bytes"] = (os.path.getsize(store_info["path"])
+                                      if store_info["exists"] else 0)
+        else:
+            host_rows, engine_rows, store_info = _backing_history_rows(
+                ctx.hscc_dir, tier, since, until, node)
+    except Exception as exc:
+        host_rows, engine_rows = [], []
+        store_info = {"path": mh.db_path(ctx.hscc_dir), "exists": False,
+                      "db_bytes": 0}
+        error = _failure_detail(exc=exc)
+
+    if not hosts_included:
+        host_rows = []
+    if not engines_included:
+        engine_rows = []
+    host_rows = _history_project(host_rows, _HISTORY_HOST_IDENTITY, keep_host)
+    engine_rows = _history_project(engine_rows, _HISTORY_ENGINE_IDENTITY,
+                                   keep_engine)
+
+    store_info["tier0_resident"] = tier0_resident
+    payload["store"] = store_info
+    payload["hosts"] = host_rows
+    payload["engines"] = engine_rows
+    payload["counts"] = {"hosts": len(host_rows), "engines": len(engine_rows)}
+    if error:
+        payload["error"] = error
+    payload["note"] = _history_note(tier, tier0_resident, store_info, error)
+    payload["speak"] = _speak_cluster_history(payload)
+    return 200, payload
+
+
+def _history_note(tier, tier0_resident, store_info, error) -> str:
+    """What the payload says about its own emptiness, so a gap explains itself."""
+    if error:
+        return f"history read failed: {error}"
+    if tier == 0 and not tier0_resident:
+        return ("tier 0 is the sampler's in-memory ring and lives in the daemon "
+                "process; this server process cannot read it, so no 2 s points "
+                "are served here. Use window=1h for the durable 1-minute tier.")
+    if tier != 0 and not store_info.get("exists"):
+        return ("the recorder has not written its store yet "
+                f"({store_info['path']}); the durable tiers are empty until it "
+                "closes its first minute")
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Route registration (import side-effect; loaded by api_server.py)
 # ---------------------------------------------------------------------------
 
@@ -633,6 +1012,7 @@ def load():
         ("GET", r"^/v1/cluster/status$", handle_cluster_status),
         ("GET", r"^/v1/cluster/hosts$", handle_cluster_hosts),
         ("GET", r"^/v1/cluster/monitor$", handle_cluster_monitor),
+        ("GET", r"^/v1/cluster/history$", handle_cluster_history),
         ("GET", r"^/v1/cluster/jobs$", handle_cluster_jobs),
         ("GET", r"^/v1/cluster/info$", handle_cluster_info),
         ("GET", r"^/v1/health$", handle_health),
