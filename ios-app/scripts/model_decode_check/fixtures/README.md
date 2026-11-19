@@ -233,7 +233,7 @@ blob rather than a route response.
 
 ## Cluster-history additions (t_b6512c2e, 2026-11-19)
 
-Four fixtures for `GET /v1/cluster/history`, and these four are neither captures
+The fixtures for `GET /v1/cluster/history`, and none of them are captures
 nor hand-typed shapes: `scripts/make_cluster_history_fixture.py` fills a store
 through the recorder's own write path (`MetricsRecorder.tick`, which rolls tiers
 1 and 2 with its own `rollup`), pins the route's clock seam, and calls
@@ -263,4 +263,7 @@ against `hscc_daemon/metrics_history.py`'s own column tuples.
 - `v1_cluster_history_15m.json` — tier 0 as the deployed topology answers it: the
   2 s ring lives in the daemon process, so `store.tier0_resident` is false, both
   series are empty, and `note`/`speak` say why. A chart must draw that as a gap
-  with a reason, never as a flat line at zero.
+  with a reason, never as a flat line at zero. Read the reason from `note`, not
+  from the flag: the route initialises `tier0_resident` to `True` and only asks
+  the recorder seam when the served tier is 0, which is why the tier-1 and tier-2
+  fixtures above both say `true` regardless of what this process could read.
