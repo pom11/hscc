@@ -105,45 +105,6 @@ let summaryBody = Data(#"""
  "speak":"hscc: 20 open, 3 running, 750 done."}
 """#.utf8)
 
-/// The real `GET /v1/metrics/history?tier=1` shape (t_5ae8cfcf), built the way
-/// the recorder writes it: two node buckets where the first answered twice
-/// (so the bucket has a mean AND a peak) and the second host did not answer at
-/// all (so every metric is null and `error` carries why), plus one engine row.
-/// Nothing REQUESTS this route any more — t_0c99b017 folded every history read
-/// onto `/v1/cluster/history` — but the endpoint is still live and its row keys
-/// are still contract-checked against these decoders, so the payload stays
-/// compiled and decoded here rather than standing untested until it is deleted.
-let metricsHistoryBody = Data(#"""
-{"tier":1,"tier_meta":{"tier":1,"resolution_s":60,"window_s":86400,"capacity":1440},
- "since":null,"until":null,"host":null,"node":null,"source":"sqlite_store",
- "hosts":[{"tier":1,"ts":1795000060,"host":"dgx-01","n":2,"error":null,
-           "cpu_usage_pct":30.0,"cpu_temp_c":null,"gpu_util_pct":80.0,
-           "gpu_temp_c":75.0,"gpu_power_w":160.0,"mem_used_pct":40.0,
-           "swap_used_mb":null,"swap_total_mb":null,"swap_used_pct":null,
-           "gpu_mem_used_mb":30000.0,"gpu_clock_mhz":1900.0,
-           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":3.0,
-           "cpu_temp_c_max":null,"gpu_temp_c_max":90.0,"gpu_power_w_max":200.0},
-          {"tier":1,"ts":1795000120,"host":"dgx-02","n":1,
-           "error":"ssh: collect failed","cpu_usage_pct":null,"cpu_temp_c":null,
-           "gpu_util_pct":null,"gpu_temp_c":null,"gpu_power_w":null,
-           "mem_used_pct":null,"swap_used_mb":null,"swap_total_mb":null,
-           "swap_used_pct":null,"gpu_mem_used_mb":null,"gpu_clock_mhz":null,
-           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":null,
-           "cpu_temp_c_max":null,"gpu_temp_c_max":null,"gpu_power_w_max":null}],
- "engines":[{"tier":1,"ts":1795000060,"node":"dgx-01","port":"8000",
-             "model":"qwen3-coder","n":2,"error":null,"run":2.0,"wait":0.0,
-             "kv":61.5,"gen_tps":31.0,"prompt_tps":120.0}],
- "counts":{"host_rows":2,"engine_rows":1},
- "fields":{"host":["cpu_usage_pct","gpu_temp_c"],"host_peaks":["gpu_temp_c_max"],
-           "engine":["run","kv"],"engine_key":["node","port"],
-           "engine_identity":"(node, port)"},
- "tier0":{"points":450,"capacity":450,"readable_here":false,
-          "source":"recorder_ring_absent",
-          "reason":"the 2-second ring lives in the daemon process, which is not this one"},
- "stats":{"path":"/Users/op/.hscc/metrics/history.db","db_bytes":3355443,
-          "bound_bytes":10485760,"tier1_rows":5760,"tier2_rows":2016,"exists":true},
- "speak":"1-minute metrics history: 2 node rows, 1 engine row."}
-"""#.utf8)
 
 /// The same payload with `done` removed — §6 rule 1 says this must NOT be
 /// readable as zero.
@@ -303,6 +264,12 @@ func runAll() async {
 
     // 1. The read allowlist is exactly the audited routes, and it is a closed
     //    set: adding one has to be a deliberate act in this file too.
+    //
+    //    Exactly ONE history read (t_447cc7fc, retired by t_2c629557). The
+    //    recorder used to be reachable through `/v1/cluster/history` AND
+    //    `/v1/metrics/history`, and a closed audited set with both in it would
+    //    have made this list lie about the surface — and made the §2 budget of
+    //    ≤ 2 requests per surface per refresh undecidable for a history card.
     let audited: Set<String> = [
         "/v1/projects", "/v1/mobile/summary",
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
@@ -591,48 +558,6 @@ func runAll() async {
         check("alerts should decode, got \(String(reflecting: alertRead))", false)
     }
 
-    // 10b. The retired `GET /v1/metrics/history` payload (t_5ae8cfcf) still
-    //      decodes into the model the route's contract says must exist. The READ
-    //      is gone from this client — t_0c99b017 folded every history read onto
-    //      the canonical route, and `history_route_guard_check.sh` keeps a second
-    //      one from coming back — but the endpoint stays live until the API-side
-    //      card retires it, and `test_contract_swift_routes.py` still holds that
-    //      its row keys are declared in Swift. So the decoder is compiled and
-    //      exercised here. Directly: this is a payload check, not a request.
-    if let payload = try? JSONDecoder().decode(MetricsHistoryResponse.self,
-                                               from: metricsHistoryBody) {
-        check("the retired route still decodes its node rows",
-              payload.hosts.count == 2 && payload.tier == 1)
-        check("an unreported metric is nil, never 0",
-              payload.hosts[1].gpu_temp_c == nil
-                && payload.hosts[1].error == "ssh: collect failed")
-        check("the peak rides beside the average",
-              payload.hosts[0].gpu_temp_c == 75.0 && payload.hosts[0].gpu_temp_c_max == 90.0)
-        check("engine identity is node+port, model is not the key",
-              payload.engines.first?.engineKey == "dgx-01:8000"
-                && payload.engines.first?.model == "qwen3-coder")
-        check("rows from the store read as a stored window", payload.hasStoredRows)
-        check("a ring in another process is not a live window",
-              payload.tier0?.readable_here == false && !payload.hasLiveTier0)
-        check("the field vocabulary comes from the server, not a hardcoded list",
-              payload.fields?.host_peaks == ["gpu_temp_c_max"])
-    } else {
-        check("the retired route's payload should still decode", false)
-    }
-    // A tier-0 answer with nothing in it must not be able to claim a live window:
-    // `points: 0` with `readable_here: true` is the recorder reporting an empty
-    // ring, and drawing that as "the last 15 minutes were flat" is a lie.
-    if let empty = try? JSONDecoder().decode(MetricsHistoryResponse.self, from: Data(#"""
-    {"tier":0,"hosts":[],"engines":[],"tier0":{"points":0,"capacity":450,
-     "readable_here":true,"source":"recorder_ring"},"speak":"empty"}
-    """#.utf8)) {
-        check("an empty ring is not a live window",
-              !empty.hasLiveTier0 && !empty.hasStoredRows)
-    } else {
-        check("an empty tier-0 response should still decode", false)
-    }
-
-    // 10c. The trend projection, driven off the CANONICAL read. The two rules it
     //      owns are the reason it exists: a metric the node never reported stays
     //      a gap a surface can count and caption (never a flattening to 0), and a
     //      peak rides beside the average it was averaged away by — including the

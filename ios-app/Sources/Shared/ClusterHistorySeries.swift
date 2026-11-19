@@ -28,6 +28,24 @@ import Foundation
 //      ONE response (one tier, one `resolution_s`) and the only combining
 //      helper REFUSES a mixed set rather than averaging across tiers.
 //
+//   3. AN AVERAGE IS NEVER DRAWN ALONE WHERE THE TIER SERVED A PEAK, AND A
+//      MISSING READING STAYS MISSING. `gpu_temp_c` is a bucket MEAN and
+//      `gpu_temp_c_max` is that bucket's PEAK: a chart that draws only the mean
+//      of a GPU that touched 91 C for one bucket looks calm, which is the
+//      excursion an operator opens the widget to see. `max_fields` is what says
+//      whether the peak was served (`[]` at tier 0, where a raw 2 s sample has
+//      never been rolled up), and `historyPair(for:)` below is the only way a
+//      surface is meant to ask. A metric the payload reported as `null` stays
+//      `nil` in `ClusterHistorySample.value` — never a `0.0`, because "idle at
+//      zero" and "this node never answered" are different facts and a gap must
+//      stay countable (`missingCount`, `gapColumns`, `segments()`).
+//
+//      Rules 3's wording is not native to this file: it came from
+//      `MetricsHistoryTrend.swift`, the projection over the duplicate
+//      `GET /v1/metrics/history`, when t_2c629557 retired that route behind
+//      this one (the ruling is t_447cc7fc). The endpoint went; the contract it
+//      encoded did not.
+//
 // Everything here is derived from the payload's own fields; no number is
 // invented and no field is re-derived. A `nil` value is the recorder's own
 // "this node never reported it" and stays nil — never 0, never interpolated —
@@ -117,6 +135,34 @@ enum ClusterHistoryMetric: String, CaseIterable, Equatable {
 
     /// The three peak columns only exist once a bucket has been rolled up.
     var isPeakField: Bool { rawValue.hasSuffix("_max") }
+
+    /// The field carrying THIS one's peak, or nil when the recorder keeps none.
+    ///
+    /// The pairing is the recorder's, not a preference: `hscc_daemon/
+    /// metrics_history.py` rolls up `max(cpu_temp_c)`, `max(gpu_temp_c)` and
+    /// `max(gpu_power_w)` into the three `*_max` columns and keeps no peak for
+    /// anything else, which is why `max_fields` can only ever name these three.
+    /// A surface asks a metric for its companion instead of guessing from a
+    /// suffix, because `cpu_usage_pct` has no peak and a name-based rule would
+    /// draw a chart a roll-up never produced.
+    var peakCompanion: ClusterHistoryMetric? {
+        switch self {
+        case .cpuTempC: return .cpuTempCMax
+        case .gpuTempC: return .gpuTempCMax
+        case .gpuPowerW: return .gpuPowerWMax
+        default: return nil
+        }
+    }
+
+    /// The average a peak field belongs to — the inverse of `peakCompanion`, so
+    /// a legend can label `gpu_temp_c_max` as the excursion of `gpu_temp_c`.
+    var averageCompanion: ClusterHistoryMetric? {
+        guard isPeakField else { return nil }
+        guard let average = ClusterHistoryMetric(rawValue: String(rawValue.dropLast(4))) else {
+            return nil
+        }
+        return average.peakCompanion == self ? average : nil
+    }
 
     /// Whether this metric can go into a `metrics=` list for a served tier.
     /// Tier 0 is raw 2 s samples and stores no peak, and the route says so with
@@ -316,6 +362,45 @@ struct ClusterHistorySeriesSet: Equatable {
     /// Nothing to draw, and the reason is the payload's, not ours.
     var isEmptyBecauseNothingServed: Bool { !excluded && !hasData }
     var identities: [String] { series.map { $0.identity } }
+}
+
+// MARK: - The average/peak pairing (rule 3)
+
+extension ClusterHistoryResponse {
+    /// The peak columns THIS answer actually served, as metrics.
+    ///
+    /// `max_fields` is the payload's own word for it, and an empty list is a real
+    /// answer rather than a missing decode: tier 0 is raw 2 s samples, which have
+    /// never been rolled up, so no peak exists to name — which is also why
+    /// `ClusterHistoryMetric.requestable(atTier:)` refuses a peak there. Unknown
+    /// names are dropped rather than guessed; a peak column the decoder has never
+    /// heard of is caught by the Python contract gate
+    /// (`test_history_peak_halves_survive_the_decoder`), which reads the peaks out
+    /// of `SharedModels.swift` and compares them with what the route serves.
+    var servedPeakFields: Set<ClusterHistoryMetric> {
+        Set((max_fields ?? []).compactMap { ClusterHistoryMetric(rawValue: $0) })
+    }
+
+    /// The lines for `metric` together with the peak lines they must be drawn
+    /// with — rule 3 above, and the reason a surface asks for a PAIR rather than
+    /// for an average.
+    ///
+    /// `peak` is nil in exactly two cases, and both of them are the payload's
+    /// answer and not the caller's oversight: the recorder keeps no `*_max`
+    /// column for this metric, or `max_fields` did not name it. Everywhere else a
+    /// surface that drew the average alone would be hiding the excursion an
+    /// operator opened the widget to see.
+    ///
+    /// The peak is read from the SAME response, so it cannot come from another
+    /// tier: a mean and a max from different resolutions are not one chart
+    /// (rule 2).
+    func historyPair(for metric: ClusterHistoryMetric)
+        -> (average: ClusterHistorySeriesSet, peak: ClusterHistorySeriesSet?) {
+        let average = ClusterHistorySeriesSet.make(self, for: metric)
+        guard let peakMetric = metric.peakCompanion,
+              servedPeakFields.contains(peakMetric) else { return (average, nil) }
+        return (average, ClusterHistorySeriesSet.make(self, for: peakMetric))
+    }
 }
 
 // MARK: - Building series off the payload

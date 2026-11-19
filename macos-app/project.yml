@@ -320,11 +320,12 @@ targets:
       # The large / extra-large table layout (t_9e64d9d9), same file the iOS
       # widget target compiles. Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
-      # The history-trend projection (t_5ae8cfcf): the iOS widget target compiles
-      # it, so the desktop target compiles it too. Foundation-only, and the rule
-      # it owns — a metric the route did not report stays a gap and never becomes
-      # 0.0 — is the same rule the desktop tiles are held to, so leaving it out
-      # would give one platform a chart rule the other cannot reach.
+      # The history-trend projection (t_5ae8cfcf, re-pointed at the canonical
+      # route by t_0c99b017): the iOS widget target compiles it, so the desktop
+      # target compiles it too. Foundation-only, and the rule it owns — a metric
+      # the route did not report stays a gap and never becomes 0.0 — is the same
+      # rule the desktop tiles are held to, so leaving it out would give one
+      # platform a chart rule the other cannot reach.
       - path: ../ios-app/Sources/Shared/ClusterHistoryTrend.swift
       # The Lock Screen's four numbers + the one copy rule its three families
       # share (t_314a3811), so the desktop extension words them identically.

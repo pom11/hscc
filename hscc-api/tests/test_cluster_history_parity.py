@@ -509,6 +509,10 @@ def test_the_clamp_still_fires_where_a_tier_0_span_is_deeper_than_900_s(
     assert "deeper than tier 0 keeps (900 s)" in api["note"], api["note"]
 
 
+# The last four cases are ported from the retired `GET /v1/metrics/history`
+# (`test_routes_metrics.py::test_bad_tier_400` / `::test_bad_epoch_400`,
+# t_5ae8cfcf), which t_2c629557 deletes with its route. The span validation is
+# this route's own rule now, so it lives in this matrix and nowhere else.
 @pytest.mark.parametrize("path,needle", [
     ("/v1/cluster/history?window=1h&tier=1", "cannot be asked together"),
     ("/v1/cluster/history?window=1h&tier=1&since=1", "cannot be asked together"),
@@ -517,9 +521,13 @@ def test_the_clamp_still_fires_where_a_tier_0_span_is_deeper_than_900_s(
     ("/v1/cluster/history?until=1795000000", "'since'/'until' need 'tier'"),
     ("/v1/cluster/history?tier=3", "tier must be 0, 1 or 2"),
     ("/v1/cluster/history?tier=one", "tier must be 0, 1 or 2"),
+    ("/v1/cluster/history?tier=-1", "tier must be 0, 1 or 2"),
+    ("/v1/cluster/history?tier=1.5", "tier must be 0, 1 or 2"),
     ("/v1/cluster/history?tier=1&since=abc", "since must be epoch seconds"),
     ("/v1/cluster/history?tier=1&until=1795000000&since=abc",
      "since must be epoch seconds"),
+    ("/v1/cluster/history?tier=1&since=1795000000&until=yesterday",
+     "until must be epoch seconds"),
 ])
 def test_the_axes_are_mutually_exclusive_and_the_span_is_validated(
         running, token, pinned_clock, store_dir, path, needle):
@@ -704,6 +712,24 @@ def test_a_blank_param_is_the_same_request_as_no_param(running, token,
     assert api["node"] == "all"
     assert set(api["metrics"]) == set(mh.HOST_COLUMNS) | set(mh.ENGINE_KEYS)
     assert api["hosts"] and api["engines"]
+    # Ported from the retired route's `test_bad_tier_400`, which asserted
+    # `tier=" "` was a 400. It is not one HERE, and that is a decision rather
+    # than a hole: `tier` is not required on this route (`window=1h` is the
+    # default), so a blank tier is the same request as no tier — the blank-param
+    # rule above, applied to the keys the tier axis added. A space that silently
+    # became `tier 0` would be the bug; it must stay the default axis. A blank
+    # `since`/`until` alongside a real `tier` is the same rule on the other half
+    # of the axis: the span defaults to the tier's own depth, and `tier` — the
+    # one key that was not blank — still decides it.
+    for blank in ("/v1/cluster/history?tier=", "/v1/cluster/history?tier=%20"):
+        status, api = get(running, token, blank)
+        assert status == 200, (blank, api)
+        assert api["axis"] == "window" and api["window"] == "1h", (blank, api)
+    status, api = get(running, token,
+                      "/v1/cluster/history?tier=1&since=&until=")
+    assert status == 200, api
+    assert api["axis"] == "tier" and api["tier"] == 1
+    assert (api["until"], api["since"]) == (NOW, NOW - mh.TIER1_WINDOW_S)
 
 
 def test_the_unknown_metric_error_names_the_recorders_own_vocabulary(
@@ -829,3 +855,191 @@ def test_every_window_states_the_resolution_and_the_peaks_it_carries(
     assert seen["15m"] == (0, 2, [])
     assert seen["1h"][0] == seen["6h"][0] == seen["24h"][0] == 1
     assert seen["1h"][1] == 60 and seen["7d"] == (2, 300, seen["1h"][2])
+
+
+# ── ported from the retired `GET /v1/metrics/history` (t_2c629557) ─────────
+#
+# t_447cc7fc ruled this route canonical and retired the other, and its ruling
+# promised the removal would not open a coverage hole. So `test_routes_metrics.py`
+# — 24 tests for a route that stops existing — is deleted with it, and the
+# properties below, which are still properties of THIS route and were pinned
+# nowhere else, move in first. Each names the loser test it came from.
+#
+# What did NOT move, and why, is recorded test by test in t_2c629557: either
+# this file already gated the property (rows verbatim, nulls preserved, peak vs
+# average, inclusive span, read-only, store never created, resolution from the
+# recorder), or the loser asserted a key this route does not carry
+# (`tier0{points,capacity,readable_here,reason,stamp_age_s}`, `fields`, `stats`)
+# — the ruling's "not imported" list. Porting one of those would have meant
+# adding a field to the canonical contract, which is not what a retirement does.
+
+def test_node_filters_both_series_at_once_and_says_which_half_is_empty(
+        running, token, pinned_clock, store_dir):
+    """Ported from `test_host_and_node_filter_their_own_tables` (t_5ae8cfcf).
+
+    The loser had two machine keys — `host` for the node series, `node` for the
+    engine series — because `host_rollup.host` and `engine_rollup.node` are two
+    column names for one identity. This route has ONE (`node=`), so the property
+    worth pinning is not "each key filters its own table" but "the one key
+    filters BOTH series, and a series that comes back empty because of the
+    machine — not because of a `metrics=` filter — is still honest". The empty
+    half is the part a client can misread as 'the fleet served nothing', which is
+    why `engines_included` has to stay true here.
+    """
+    status, api = get(running, token, f"/v1/cluster/history?window=1h&node={HOST_A}")
+    assert status == 200, api
+    assert api["node"] == HOST_A
+    assert api["hosts"] and {r["host"] for r in api["hosts"]} == {HOST_A}
+    assert api["engines"] and {e["node"] for e in api["engines"]} == {HOST_A}
+    assert api["counts"] == {"hosts": len(api["hosts"]),
+                             "engines": len(api["engines"])}
+
+    # HOST_B never served a backend: an empty engine half, said as a fact about
+    # the node and not as a filter that excluded the series.
+    status, api = get(running, token, f"/v1/cluster/history?window=1h&node={HOST_B}")
+    assert status == 200, api
+    assert api["hosts"] and {r["host"] for r in api["hosts"]} == {HOST_B}
+    assert api["engines"] == [] and api["counts"]["engines"] == 0
+    assert api["engines_included"] is True, (
+        "the engine series was not excluded by a metrics filter, so an empty "
+        "list must stay a fact about this node rather than a filter artifact")
+
+    # The other machine key the retired route carried is still refused, and the
+    # refusal names it: a silent `host=` would be a second way to ask one
+    # question, and two ways to ask it is how they drifted apart there.
+    status, api = get(running, token,
+                      f"/v1/cluster/history?window=1h&host={HOST_A}")
+    assert status == 400 and "'host' is not supported" in api["error"]["message"]
+
+
+def test_the_ring_is_filtered_by_node_too(running, token, pinned_clock, ring):
+    """Ported from `test_tier0_host_filter_applies_to_the_ring` (t_5ae8cfcf).
+
+    Tier 0 answers from the in-memory ring through a different code path
+    (`_history_host_rows_from_points`) than the durable tiers, so a filter that
+    works on the store's SQL does not prove it works there — the transpose has
+    its own `node` comparison, and this is the only test that exercises it.
+    """
+    status, api = get(running, token, f"/v1/cluster/history?window=15m&node={HOST_B}")
+    assert status == 200, api
+    assert api["tier"] == 0 and api["store"]["tier0_resident"] is True
+    assert api["hosts"], "the ring holds HOST_B points, so the filter emptied them"
+    assert {r["host"] for r in api["hosts"]} == {HOST_B}
+    assert api["engines"] == [] and api["engines_included"] is True
+    status, api = get(running, token, f"/v1/cluster/history?window=15m&node={HOST_A}")
+    assert status == 200 and api["engines"], "HOST_A served backends; they vanished"
+
+
+def test_a_resident_ring_with_nothing_in_it_says_here_and_empty(
+        running, token, pinned_clock, store_dir):
+    """Ported from `test_tier0_fresh_recorder_says_the_ring_is_empty`.
+
+    The distinction the loser spelled `tier0.readable_here`; here it is
+    `source` + `store.tier0_resident`, which the ruling kept. Empty right after
+    a restart is BY DESIGN — the ring is this process's and holds no tick yet —
+    and the answer must not be able to read as the deployed case (`the ring is
+    not in this process`) nor as a store read. `note` staying empty is part of
+    the assertion: an honest empty needs no apology, and a note here would be
+    the route claiming a cause it did not measure.
+    """
+    mh.close_sampler()
+    rec = mh.MetricsRecorder(hscc_dir=str(store_dir))
+    mh.set_sampler(mh.Sampler(host_stream=FakeStream(mh.TIER0_INTERVAL_S),
+                              serving=FakePoller(), recorder=rec))
+    try:
+        assert rec.tier0_points() == [], "fixture must be an empty resident ring"
+        status, api = get(running, token, "/v1/cluster/history?window=15m")
+    finally:
+        mh.close_sampler()
+    assert status == 200, api
+    assert api["source"] == "recorder_ring", "an empty ring is still THIS ring"
+    assert api["store"]["tier0_resident"] is True
+    assert api["hosts"] == [] and api["engines"] == []
+    assert api["counts"] == {"hosts": 0, "engines": 0}
+    assert api["note"] == "" and api["speak"].startswith("Last 15m")
+    assert "0 node points" in api["speak"], api["speak"]
+
+
+def test_rows_come_back_oldest_first(running, token, pinned_clock, store_dir):
+    """Ported from `test_rows_come_back_oldest_first` (t_5ae8cfcf).
+
+    The parity tests above compare against `host_rows` row for row, which pins
+    the route to the store's order but not that the order is ASCENDING — a flip
+    in the store's ORDER BY would keep both sides equal and put the newest point
+    at the left of every widget. So the route states its own ordering here, on
+    the wire, at both durable tiers.
+    """
+    for window in ("1h", "7d"):
+        status, api = get(running, token, f"/v1/cluster/history?window={window}")
+        assert status == 200, (window, api)
+        for series in ("hosts", "engines"):
+            ts = [r["ts"] for r in api[series]]
+            assert ts == sorted(ts), (window, series, ts)
+        buckets = [r["ts"] for r in api["hosts"]]
+        assert len(buckets) > 1 and len(set(buckets)) < len(buckets), (
+            "the fixture stopped producing several hosts per bucket, so the "
+            "ordering assertion above could be satisfied by one row")
+
+
+def test_a_broken_store_degrades_in_the_payload_not_a_500(
+        running, token, pinned_clock, store_dir, monkeypatch):
+    """Ported from `test_store_failure_degrades_in_the_payload_not_a_500`.
+
+    A widget's rule is stale-while-error: it keeps its last snapshot when a read
+    FAILS, and it needs a failure to be a failure. A 500 here is survivable
+    (the client maps it), but a 200 that silently carries no rows and no reason
+    is not — that reads as a fleet that was quiet while the disk is gone. So the
+    degraded answer has to carry the cause in the payload, and the row counts
+    have to say `None` rather than `0` for a read that counted nothing.
+    """
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(routes_cluster, "_backing_history_rows", boom)
+    status, api = get(running, token, "/v1/cluster/history?window=1h")
+    assert status == 200, api
+    assert api["error"] == "RuntimeError: disk gone", api["error"]
+    assert api["hosts"] == [] and api["engines"] == []
+    assert api["source"] is None, (
+        "no source code: nothing was read, and a code would name a place")
+    assert api["store"]["exists"] is False
+    assert api["store"]["tier1_rows"] is None and api["store"]["tier2_rows"] is None
+    assert api["note"].startswith("history read failed:"), api["note"]
+    assert api["speak"].startswith("Cluster history failed:"), api["speak"]
+
+
+def test_both_axes_answer_with_one_shape(running, token, pinned_clock,
+                                        store_dir):
+    """Ported from `test_response_shape_is_stable_across_tiers`.
+
+    One Swift decoder serves this route, so a key that appears on one axis or
+    one tier and not another is a hole in the widget rather than a saving. The
+    loser pinned it across its three tiers; here the same rule has to hold ACROSS
+    THE TWO AXES as well, because the tier axis is the newer half and the easy
+    way to break a client is to add a key to one branch of one axis. The one
+    honest exception is the `store` block's `error` key, which only a branch that
+    opened the file can have — asserted as a stated difference below rather than
+    smoothed over, because `ClusterHistoryStore.error` is optional in Swift and
+    both shapes have to decode into it.
+    """
+    mh.close_sampler()                              # the deployed topology
+    shapes = {}
+    for path in ("window=15m", "window=1h", "window=7d",
+                 "tier=0", "tier=1", "tier=2"):
+        status, api = get(running, token, f"/v1/cluster/history?{path}")
+        assert status == 200, (path, api)
+        assert "error" not in api, (path, api)
+        shapes[path] = set(api)
+    reference = shapes["window=1h"]
+    for path, keys in shapes.items():
+        assert keys == reference, (path, sorted(keys ^ reference))
+    for key in ("axis", "source", "tier", "resolution_s", "resolution",
+                "max_fields", "since", "until", "hosts", "engines", "counts",
+                "store", "note", "speak"):
+        assert key in reference, key
+
+    status, ring_api = get(running, token, "/v1/cluster/history?window=15m")
+    status, store_api = get(running, token, "/v1/cluster/history?window=1h")
+    ring_keys, store_keys = set(ring_api["store"]), set(store_api["store"])
+    assert ring_keys <= store_keys, sorted(ring_keys - store_keys)
+    assert store_keys - ring_keys == {"error"}, sorted(store_keys - ring_keys)
+

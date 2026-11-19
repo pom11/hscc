@@ -252,6 +252,12 @@ def test_every_swift_route_is_registered():
 #: daemon-host sidecar + the recorder's history read). Kept explicit so deleting
 #: a path from the Swift source is a visible change here, and adding one without
 #: registering it fails the register gate above.
+#:
+#: Exactly ONE history read is in this set. The recorder used to be reachable
+#: through two routes (`/v1/cluster/history` and `/v1/metrics/history`);
+#: t_447cc7fc ruled the first canonical and t_2c629557 deleted the second, and a
+#: closed audited set with two history paths in it would both lie about the
+#: surface and make the §2 per-surface request budget undecidable.
 EXPECTED_EXTENSION_ROUTES = {
     ("GET", "/v1/projects"),
     ("GET", "/v1/mobile/summary"),
@@ -267,8 +273,8 @@ EXPECTED_EXTENSION_ROUTES = {
     # retired (DECISION-t_447cc7fc), and since t_0c99b017 no Swift source under
     # ios-app/Sources or macos-app/Sources asks for it, so the derived set
     # cannot contain it. `history_route_guard_check.sh` is the trip-wire that
-    # keeps it derived-empty; the route itself stays live until the API-side
-    # retirement card deletes it, its doc section and its own server tests.
+    # keeps it derived-empty; the API-side retirement (t_2c629557) deletes the
+    # route, its doc section and its own server tests.
     # Card R3: the "Needs me" widget and macOS dropdown read the alert feed.
     # Writes/acks stay CLI-only; the extension client is GET-only.
     ("GET", "/v1/alerts"),
@@ -1081,27 +1087,36 @@ def test_no_legacy_projects_name_chat_404_shape():
 
 
 # --------------------------------------------------------------------------- #
-# The metrics-history route's shape (t_5ae8cfcf)
+# The history route's shape — the canonical one (t_b611b56e, sole survivor of
+# the t_447cc7fc ruling)
 # --------------------------------------------------------------------------- #
 #
 # The register gate above proves the route EXISTS; it cannot prove the SHAPE.
 # That gap is the expensive one here: every metric on this route is optional in
 # Swift by design (the server writes `null` for "this node did not report it"),
 # so a key the route renames, drops or adds decodes to `nil` on the phone and
-# the chart quietly draws a hole — no exception, no failed test, no 4xx. The
-# three assertions below are what close it:
+# the chart quietly draws a hole — no exception, no failed test, no 4xx. Three
+# assertions close it:
 #
-#   1. every key the route emits in a row is declared by the Swift struct,
-#   2. every field sparkrun's `MonitorSample` carries survives the route
-#      (a drop here is a chart that silently lacks a metric),
-#   3. the peak columns ride alongside their averages, and the widget client
-#      sends `tier` as a real URLQueryItem — the same defect class
-#      `test_every_required_query_param_is_sent` exists for, applied to the
-#      widget client, which that matrix does not cover (it parses HSCCClient).
+#   1. every key the route emits for a row is declared by the Swift decoder (or
+#      provably unrequestable),
+#   2. a bucket's average and its peak are different numbers, and a host that
+#      never answered is null and not zero,
+#   3. `clusterHistory()` transmits every parameter it supports as a real
+#      `URLQueryItem` through the allowlisted path constant — welding a query into
+#      the path is the defect class that hid the `/v1/sessions` `profile` filter,
+#      and it compiles fine while every refresh 400s.
+#
+# They are deliberately self-contained: nothing here imports another test file or
+# names another route's fixtures, because these three are the gate for the one
+# history contract.
 
-METRICS_SHARED_MODELS = Path(_REPO_ROOT) / "ios-app/Sources/Shared/SharedModels.swift"
-METRICS_WIDGET_CLIENT = Path(_REPO_ROOT) / "ios-app/Sources/Shared/WidgetDataClient.swift"
-_METRICS_STRUCT_RE = re.compile(
+#: The two Swift files this section reads as SOURCE rather than as a copy: a
+#: field deleted from the decoder narrows the set derived here and the route's
+#: key becomes undeclared, which is exactly what a hand-copied list cannot do.
+SHARED_MODELS_SWIFT = Path(_REPO_ROOT) / "ios-app/Sources/Shared/SharedModels.swift"
+WIDGET_CLIENT_SWIFT = Path(_REPO_ROOT) / "ios-app/Sources/Shared/WidgetDataClient.swift"
+_DECODABLE_STRUCT_RE = re.compile(
     r"struct\s+(\w+):\s*Decodable[^{]*\{(.*?)\n\}", re.S)
 
 
@@ -1113,170 +1128,11 @@ def _swift_decodable_fields(source):
     the decoder narrows the set here and the route's key becomes undeclared.
     """
     out = {}
-    for name, body in _METRICS_STRUCT_RE.findall(source):
+    for name, body in _DECODABLE_STRUCT_RE.findall(source):
         out[name] = {m.group(1) for m in
                      re.finditer(r"^\s*let\s+(\w+)\s*:", body, re.M)}
     return out
 
-
-def _metrics_history_rows():
-    """Populate the store through the production writer path, then read tier 1
-    back through the route. Returns the response payload.
-
-    The ticks are the ones `test_routes_metrics.py::populated` uses: host A
-    answers twice inside the :60 bucket at 60 °C then 90 °C (so the bucket's
-    average and its peak are different numbers), host B fails in the :120
-    bucket (so its row is nulls + an error, not zeros), and the tick at 200 s
-    closes both buckets. Rows therefore arrive via
-    `MetricsRecorder.tick` -> `rollup` -> `write_rollup`, as in production.
-    """
-    import sys
-    daemon = Path(_REPO_ROOT) / "hscc_daemon"
-    if str(daemon) not in sys.path:
-        sys.path.insert(0, str(daemon))
-    import metrics_history as mh
-    import routes_metrics
-    from test_routes_metrics import HOST_A, HOST_B, _frame, _serving_rows
-
-    rec = mh.MetricsRecorder()          # call-time HOME, redirected by conftest
-    rec.tick(_frame(100), _serving_rows(100), 100)
-    rec.tick(_frame(100, host=HOST_B, cpu=20.0, gpu_temp=70.0,
-                    gpu_power=140.0), None, 100)
-    rec.tick(_frame(118, gpu_temp=90.0, gpu_power=200.0), _serving_rows(118), 118)
-    rec.tick(_frame(130, host=HOST_B, error="collect failed", sample=False),
-             None, 130)
-    rec.tick(_frame(200), _serving_rows(200), 200)     # closes :60 and :120
-
-    # The handler reads a FLAT query dict (`_parse_tier` takes `query["tier"]`
-    # as a scalar — api_server flattens parse_qs to its last value at
-    # api_server.py:806) and answers `(status, payload)` like every other route.
-    status, payload = routes_metrics.handle_metrics_history(
-        None, None, {"tier": "1"}, b"")
-    assert status == 200, payload
-    return payload, HOST_A, HOST_B
-
-
-def _host_row(payload, host, ts):
-    rows = [r for r in payload["hosts"] if r.get("host") == host and r.get("ts") == ts]
-    assert rows, f"no {host} row at bucket {ts} in %r" % (payload["hosts"],)
-    return rows[0]
-
-
-def test_metrics_history_row_keys_are_declared_in_swift():
-    """Every key the route puts in a row must exist in the Swift decoder."""
-    structs = _swift_decodable_fields(METRICS_SHARED_MODELS.read_text())
-    host_fields = structs.get("MetricsHostRow", set())
-    engine_fields = structs.get("MetricsEngineRow", set())
-    assert host_fields and engine_fields, (
-        "the metrics-history decoders vanished from SharedModels.swift — the "
-        "widget can no longer decode the route at all")
-
-    payload, host_a, host_b = _metrics_history_rows()
-    assert payload["hosts"] and payload["engines"], (
-        "fixture produced no rows, so this test would pass on nothing: %r" % payload)
-
-    undeclared = sorted({k for row in payload["hosts"] for k in row
-                         if k not in host_fields})
-    assert not undeclared, (
-        "the route emits host key(s) the Swift decoder does not declare, so "
-        "they decode to nil on the phone and the chart draws a hole with no "
-        "error anywhere: %s" % ", ".join(undeclared))
-    undeclared_engines = sorted({k for row in payload["engines"] for k in row
-                                 if k not in engine_fields})
-    assert not undeclared_engines, (
-        "undeclared engine key(s): %s" % ", ".join(undeclared_engines))
-
-
-def test_metrics_history_keeps_every_sparkrun_field_and_both_peak_halves():
-    """No metric is dropped on the way out, and a temperature/power row carries
-    its peak next to its average.
-
-    The peak half is the one that matters: a bucket's mean is exactly what hides
-    a throttle spike, which is why the recorder stores `*_max` at all. A route
-    that folded peaks away would still return valid-looking rows.
-    """
-    import sys
-    daemon = Path(_REPO_ROOT) / "hscc_daemon"
-    if str(daemon) not in sys.path:
-        sys.path.insert(0, str(daemon))
-    import metrics_history as mh
-
-    payload, host_a, host_b = _metrics_history_rows()
-    row = _host_row(payload, host_a, 60)
-    # `HOST_KEYS` / `ENGINE_KEYS` are the recorder's own vocabulary — the
-    # sparkrun `MonitorSample` names it stores under. Asserting against THOSE
-    # (rather than a list copied into this file) is what makes the gate
-    # two-sided: a field the recorder starts keeping, or a route that stops
-    # passing one through, fails here instead of showing up as a hole in a chart.
-    missing = sorted(k for k in mh.HOST_KEYS if k not in row)
-    assert not missing, "route dropped host field(s): %s" % ", ".join(missing)
-    engine = payload["engines"][0]
-    missing_engine = sorted(k for k in mh.ENGINE_KEYS if k not in engine)
-    assert not missing_engine, "route dropped engine field(s): %s" % ", ".join(
-        missing_engine)
-
-    for key in mh.MAX_KEYS:
-        peak = f"{key}_max"
-        assert peak in row, f"peak column {peak} is missing from the row"
-        assert peak in payload["fields"]["host_peaks"], (
-            f"{peak} is in the rows but not named by fields.host_peaks, so a "
-            "surface checking the vocabulary would not draw it")
-    assert payload["fields"]["host_peaks"] == [f"{k}_max" for k in mh.MAX_KEYS]
-    # The two halves are DISTINCT facts, and the fixture makes them differ (two
-    # samples at 60 °C then 90 °C): a route that copied the average into the
-    # peak column, or dropped the peak, fails here — not merely here:
-    assert row["gpu_temp_c"] == 75.0, row["gpu_temp_c"]
-    assert row["gpu_temp_c_max"] == 90.0, row["gpu_temp_c_max"]
-    assert row["gpu_power_w"] == 160.0 and row["gpu_power_w_max"] == 200.0
-    # ...and a host that never answered stays null-valued, never zero-valued.
-    failed = _host_row(payload, host_b, 120)
-    assert failed["error"] == "collect failed"
-    assert failed["gpu_temp_c"] is None and failed["cpu_usage_pct"] is None
-
-
-def test_metrics_history_route_still_answers_off_the_store():
-    """The retired route must keep answering while anything can still call it.
-
-    Its Swift read was deleted by t_0c99b017 (one canonical history path), and
-    the client-side half of its contract went with it — `tier` reaching the
-    server as a real `URLQueryItem` is now asserted where the read actually
-    lives, in `test_cluster_history_sends_every_parameter_as_a_real_query_item`.
-    What stays here is the server's own behaviour: `GET /v1/metrics/history` is
-    retired, not removed, so a caller that still points at it must get real rows
-    until the retirement card deletes the handler.
-    """
-    payload, host_a, host_b = _metrics_history_rows()
-    assert payload["tier"] == 1 and payload["source"] == "sqlite_store", payload
-    row = _host_row(payload, host_a, 60)
-    assert row["gpu_temp_c"] == 75.0 and row["gpu_temp_c_max"] == 90.0, row
-    assert payload["tier_meta"]["resolution_s"] == 60, payload
-
-
-# --------------------------------------------------------------------------- #
-# The CANONICAL history route's shape (t_b611b56e)
-# --------------------------------------------------------------------------- #
-#
-# The same three assertions as the section above, re-expressed against
-# `ClusterHistory*` — which is what `t_447cc7fc` ruled canonical and what
-# `t_2c629557` leaves standing. They are deliberately independent of
-# `test_routes_metrics.py` and of the metrics-history fixtures: the day the
-# losing route's tests are deleted, these must still be the gate, so nothing here
-# imports from that file or names its path.
-#
-# Why the same three, and not new ones: a metric on this route is optional in
-# Swift by design (the server writes `null` for "this node did not report it"),
-# so a key the route renames, drops or adds decodes to `nil` on the phone. No
-# exception, no 4xx, no red test — just a chart with a hole in it. These three
-# are what make that class of drift fail loudly:
-#
-#   1. every key the route emits for a row is declared by the Swift decoder (or
-#      provably unrequestable),
-#   2. a bucket's average and its peak are different numbers, and a host that
-#      never answered is null and not zero,
-#   3. `clusterHistory()` transmits every parameter it supports as a real
-#      `URLQueryItem` through the allowlisted path constant — welding a query into
-#      the path is the defect class that hid the `/v1/sessions` `profile` filter,
-#      and it compiles fine while every refresh 400s.
 
 CLUSTER_HISTORY_BASE = 1_794_999_900        # aligned to 2 s, 60 s AND 300 s
 CH_HOST_A, CH_HOST_B = "192.0.2.10", "192.0.2.11"    # TEST-NET-1, never a node
@@ -1394,7 +1250,7 @@ def _swift_struct_field_types(source, struct):
     Derived rather than copied so the gate cannot drift, and it answers the
     question `_swift_decodable_fields` cannot: whether a field is optional.
     """
-    for name, body in _METRICS_STRUCT_RE.findall(source):
+    for name, body in _DECODABLE_STRUCT_RE.findall(source):
         if name == struct:
             return {m.group(1): m.group(2).strip()
                     for m in re.finditer(r"^\s*let\s+(\w+)\s*:\s*([^{;\n]+)",
@@ -1420,7 +1276,7 @@ def test_cluster_history_row_keys_are_declared_in_swift(tmp_path):
         sys.path.insert(0, str(daemon))
     import metrics_history as mh
 
-    structs = _swift_decodable_fields(METRICS_SHARED_MODELS.read_text())
+    structs = _swift_decodable_fields(SHARED_MODELS_SWIFT.read_text())
     declared = structs.get("ClusterHistoryPoint", set())
     assert declared, (
         "ClusterHistoryPoint vanished from SharedModels.swift — the graph widget "
@@ -1492,7 +1348,7 @@ def test_cluster_history_average_is_not_its_peak_and_a_silent_host_stays_null(
     # legitimately leave null is declared OPTIONAL. A non-optional `Double` there
     # is worse than a missing key — it either fails the decode for the whole
     # payload or, with a default, turns "no answer" into a plotted 0.
-    declared = _swift_struct_field_types(METRICS_SHARED_MODELS.read_text(),
+    declared = _swift_struct_field_types(SHARED_MODELS_SWIFT.read_text(),
                                          "ClusterHistoryPoint")
     assert declared, "ClusterHistoryPoint has no fields to inspect"
     for field in ("gpu_temp_c", "gpu_temp_c_max", "gpu_power_w",
@@ -1516,7 +1372,7 @@ def test_cluster_history_sends_every_parameter_as_a_real_query_item():
     the path is percent-encoded by URLComponents into `%3F`, the handler never
     sees it, and the call compiles and 400s on every refresh forever.
     """
-    src = METRICS_WIDGET_CLIENT.read_text()
+    src = WIDGET_CLIENT_SWIFT.read_text()
     assert 'static let clusterHistory = "/v1/cluster/history"' in src, (
         "the canonical history path must stay a bare path with no query welded "
         "into it")
