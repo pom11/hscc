@@ -15,9 +15,11 @@ import BackgroundTasks
 // WHAT IT READS, and nothing else (docs/WIDGET_DATA_CONTRACT.md §3 dataset 5):
 //
 //   * `GET /v1/autodown/status`  → the serving state (`up` / `waking` / `down`).
-//   * `GET /v1/cluster/monitor`  → the node tally, via `ClusterNodeTally` — the
-//     SAME projection the cluster widget runs, so the widget and this bubble can
-//     never disagree about how many nodes are answering.
+//   * `GET /v1/cluster/monitor`  → the node tally, via `ClusterNodeTally`, and
+//     the per-host load cells plus the serving run/wait totals, via
+//     `ClusterMonitorViewModel` — the SAME projections the widget tiles run, so
+//     the widget and this bubble can never disagree about how many nodes are
+//     answering, nor about what a GPU% or a wattage cell says.
 //
 // Both go through `WidgetData.read(using: WidgetDataClient.makeIfConfigured(),
 // lastKnown:)`, which is the app's one stale-while-error rule: a live read is
@@ -33,6 +35,12 @@ import BackgroundTasks
 // (`ClusterHealthProjection` + `ClusterHealthReading`) that
 // `live_activity_rehydration_check.sh` executes. The driver's own decisions are
 // scheduling ones — when to poll, whether to push, when to end.
+//
+// The pushed payload GREW for `t_b009f32d` (per-host load lines, the fleet's
+// total draw, the peak GPU, the serving run/wait totals) and this file did not
+// change beyond this comment, on purpose: the driver hands the same two
+// responses to `ClusterHealthProjection.signals`, which is where every one of
+// those fields is decided, and it still owns nothing but the schedule.
 //
 // THE TOGGLE lives here, in the one place a settings read is allowed for this
 // surface: `ClusterHealthActivitySweep` stays a pure rule with no store

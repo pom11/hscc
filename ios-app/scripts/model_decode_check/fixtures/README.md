@@ -263,11 +263,7 @@ against `hscc_daemon/metrics_history.py`'s own column tuples.
 - `v1_cluster_history_15m.json` — tier 0 as the deployed topology answers it: the
   2 s ring lives in the daemon process, so `store.tier0_resident` is false, both
   series are empty, and `note`/`speak` say why. A chart must draw that as a gap
-  with a reason, never as a flat line at zero. Since t_5cfd5bda the flag is a
-  measurement rather than an initialisation — `false` here, where tier 0 was asked
-  and the ring was not resident, and `null` in the tier-1 and tier-2 fixtures,
-  where nobody read the ring at all — so those fixtures no longer claim a residency
-  this process could not have. Branch on `source`
+  with a reason, never as a flat line at zero. Branch on `source`
   (`recorder_ring_absent` here) for the decision and read `note` for the sentence.
 - `v1_cluster_history_tier_axis.json` — `?tier=1&since=&until=` (t_b611b56e), the
   second request axis: an explicit span instead of a preset anchored to `now`.
@@ -275,3 +271,15 @@ against `hscc_daemon/metrics_history.py`'s own column tuples.
   preset name, and `since`/`until` are the pair the server served *after* clamping
   to the tier's retention — so a surface draws the span it was given rather than
   the one it asked for.
+
+`store.tier0_resident` is a **tier-0 measurement only**, so read the reason for an
+empty history answer from `note` (or `speak`), never from that flag. The route asks
+the recorder seam — `tier0_resident = points is not None` — inside its tier-0 branch
+and nowhere else (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`), because
+the 2 s ring is memory in the daemon process and a durable-window read cannot see it.
+The key is on the wire at every tier, but at tiers 1-2 its value is `null`: a tier the
+route never read cannot report residency. That is why the tier-1 and tier-2 fixtures
+above say `null` and the tier-0 one says `false` — measured from one generator in one
+process, not chosen per file. Before PR #417 the flag defaulted to `True`, so all
+three durable fixtures claimed a residency nothing had checked; a fixture that says
+`true` at tier 1 or 2 is a regression, not a value to restore.

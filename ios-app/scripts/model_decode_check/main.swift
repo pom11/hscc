@@ -843,31 +843,38 @@ c.assertions("v1_cluster_history_6h.json", "the history decode shape the chart r
     // The two keys t_b611b56e added to the model: which axis answered, and where
     // the rows came from, as a code.
     ok = ok && payload.axis == "window" && payload.source == "sqlite_store"
+    // `tier0_resident` is a measurement of the 2 s ring taken inside the route's
+    // tier-0 branch alone (hscc-api/routes_cluster.py, PR #417), so a tier-1
+    // answer is null: a tier the route never read cannot report residency. A
+    // `true` committed here would be a hand-edit rather than a regeneration.
+    ok = ok && payload.tier == 1 && payload.tier0Resident == nil
     c.expect("v1_cluster_history_6h.json",
-             "tier + resolution stated, peaks named, nulls kept, VRAM MB and prompt tok/s decode, no server path",
-             ok, "tier=\(payload.tier) res=\(payload.resolution) max=\(payload.max_fields ?? [])")
+             "tier + resolution stated, peaks named, nulls kept, VRAM MB and prompt tok/s decode, no server path, tier-1 ring unmeasured",
+             ok, "tier=\(payload.tier) res=\(payload.resolution) max=\(payload.max_fields ?? []) resident=\(String(describing: payload.tier0Resident))")
 }
 
 c.assertions("v1_cluster_history_7d.json", "the 7d tier is stated, not guessed") {
     let payload = try JSONDecoder().decode(
         ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_7d.json"))
     c.expect("v1_cluster_history_7d.json",
-             "tier 2 at 300 s, with the same three peak columns available",
+             "tier 2 at 300 s, with the same three peak columns available and no tier-0 residency claim",
              payload.tier == 2 && payload.resolution_s == 300 && payload.resolution == "300s"
                 && payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"]
-                && !payload.hosts.isEmpty && !payload.engines.isEmpty,
-             "tier=\(payload.tier) res=\(payload.resolution) hosts=\(payload.hosts.count)")
+                && !payload.hosts.isEmpty && !payload.engines.isEmpty
+                && payload.tier0Resident == nil,
+             "tier=\(payload.tier) res=\(payload.resolution) hosts=\(payload.hosts.count) resident=\(String(describing: payload.tier0Resident))")
 }
 
 c.assertions("v1_cluster_history_6h_engine_only.json", "an excluded series is reported as excluded") {
     let payload = try JSONDecoder().decode(
         ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_6h_engine_only.json"))
     c.expect("v1_cluster_history_6h_engine_only.json",
-             "hosts_included=false with empty hosts, while the engine series still carries data",
+             "hosts_included=false with empty hosts, while the engine series still carries data, and no tier-0 residency claim",
              payload.hosts_included == false && payload.hosts.isEmpty
                 && payload.engines_included == true && !payload.engines.isEmpty
-                && payload.engines.first?.kv == nil,
-             "hosts_included=\(String(describing: payload.hosts_included)) engines=\(payload.engines.count)")
+                && payload.engines.first?.kv == nil
+                && payload.tier == 1 && payload.tier0Resident == nil,
+             "hosts_included=\(String(describing: payload.hosts_included)) engines=\(payload.engines.count) resident=\(String(describing: payload.tier0Resident))")
 }
 
 c.assertions("v1_cluster_history_15m.json", "an empty tier 0 explains itself") {

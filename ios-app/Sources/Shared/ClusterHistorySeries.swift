@@ -292,11 +292,13 @@ struct ClusterHistorySeries: Equatable {
 /// distinction is carried on the type instead of being re-guessed at the view.
 ///
 /// `reason` is that explanation, and it is read from `note` deliberately rather
-/// than from `store.tier0_resident`: the route initialises that flag to `True`
-/// and only consults the recorder seam when the served tier IS 0
+/// than from `store.tier0_resident`. That flag is a MEASUREMENT of the 2 s ring,
+/// and the route takes it only when the served tier IS 0
 /// (`hscc-api/routes_cluster.py`, `tier0_resident = points is not None` inside
-/// `if tier == 0`), so a `true` on a tier-1 or tier-2 payload is a default and
-/// not a measurement of what this process can read.
+/// `if tier == 0`). At tiers 1-2 the key is on the wire and its value is `null` —
+/// a tier the route never read cannot report residency — and even where it does
+/// answer, it speaks for one server process rather than for the fleet. Neither is
+/// a reason a chart can draw; `note` is.
 struct ClusterHistorySeriesSet: Equatable {
     let metric: ClusterHistoryMetric
     let kind: ClusterHistorySeriesKind

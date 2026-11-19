@@ -223,10 +223,13 @@ struct WidgetDataClient {
     /// `1h`/`6h`/`24h` the 1-minute roll-ups, `7d` the 5-minute ones — and the
     /// response carries `tier`, `resolution_s`, `resolution`, `tier_summary` and
     /// `max_fields`, because a 2-second point and a 5-minute point must never be
-    /// plotted as if they were the same width. `15m` additionally carries
-    /// `store.tier0_resident`: that ring is memory-only and belongs to the daemon
-    /// process, so a `false` there means "this server cannot see it", which a
-    /// chart must render as a gap with a reason, not as a quiet fleet.
+    /// plotted as if they were the same width. `store.tier0_resident` is answered
+    /// only for `15m`: the key is on the wire at every tier, but the route reads
+    /// the ring inside its tier-0 branch alone, so a durable window answers `null`
+    /// for it. That ring is memory-only and belongs to the daemon process, so a
+    /// `false` at tier 0 means "this server cannot see it", which a chart must
+    /// render as a gap with a reason, not as a quiet fleet — and `note` is where
+    /// that reason is written, not the flag.
     ///
     /// TWO AXES, exactly one per call. `window` is a preset anchored to `now`;
     /// `tier` + `since`/`until` is a raw tier over an explicit span, for "the hour
