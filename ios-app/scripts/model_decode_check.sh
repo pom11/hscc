@@ -11,6 +11,7 @@
 #   Sources/HSCC/Models.swift
 #   Sources/Shared/SharedModels.swift
 #   Sources/Shared/SharedStore.swift
+#   Sources/Shared/WidgetSurfaceKind.generated.swift
 #   Sources/HSCC/APIError.swift
 # The only non-model shim (ThemeStub.swift — a UI design token, not a model)
 # exists because SharedModels.swift references Theme.Semantic.* colors, which on
@@ -41,6 +42,7 @@ real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/HSCC/APIError.swift
   # The monitor view-model (t_61ed3f5e): the parity checks below run THIS
   # file's formatters against goldens generated from hscc_daemon/cluster_live.py,
@@ -88,6 +90,10 @@ harness=(
   scripts/model_decode_check/cluster_small_grid.swift
   scripts/model_decode_check/monitor_tables.swift
   scripts/model_decode_check/monitor_surfaces.swift
+  # Per-widget decode blocks: one file per widget + the generated call roster.
+  # A widget card adds its own file and manifest; main.swift is not edited.
+  scripts/model_decode_check/widgets.generated.swift
+  scripts/model_decode_check/widgets/*.swift
   scripts/model_decode_check/main.swift
 )
 

@@ -27,6 +27,7 @@
 SWIFT_GROUP_WIDGET_CLIENT=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/NeedsMeReading.swift
   Sources/Shared/MergeQueueReading.swift

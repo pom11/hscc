@@ -100,6 +100,7 @@ PY
 real_sources=(
   "$TMP/SharedModels.swift"
   "Sources/Shared/SharedStore.swift"   # the App Group stores (AppGroup, APIConfig,
+  "Sources/Shared/WidgetSurfaceKind.generated.swift"
                                        # SavedCluster) SettingsStore depends on; no
                                        # Theme/UIKit in it, so it needs no slice
   "Sources/HSCC/KeychainStore.swift"

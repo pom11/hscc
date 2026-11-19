@@ -299,6 +299,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$NEEDS" \
   "$MERGE" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
+  Sources/Shared/WidgetSurfaceKind.generated.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \
   scripts/cluster_widget_check/main.swift \

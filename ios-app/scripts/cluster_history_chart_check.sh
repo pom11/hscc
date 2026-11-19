@@ -42,6 +42,7 @@ subject="Sources/Shared/ClusterHistorySeries.swift"
 real_models=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
 )
 harness="scripts/cluster_history_chart_check/main.swift"
 theme_stub="scripts/model_decode_check/ThemeStub.swift"

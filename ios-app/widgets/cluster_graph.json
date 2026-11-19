@@ -1,0 +1,32 @@
+{
+  "order": 8,
+  "bundle_order": 8,
+  "kind": "widget",
+  "surface_case": "widgetClusterGraph",
+  "surface_raw": "widget.clusterGraph",
+  "display_name": "Cluster Graph Widget",
+  "icon": "chart.xyaxis.line",
+  "widget_type": "ClusterGraphWidget",
+  "sources": [
+    "Sources/HSCCWidgets/GraphWidget.swift",
+    "Sources/HSCCWidgets/GraphWidgetEntry.swift",
+    "Sources/HSCCWidgets/GraphWidgetMetrics.swift",
+    "Sources/HSCCWidgets/GraphWidgetViews.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`ClusterGraphSmallWidget`)",
+    "declared-and-renders (`ClusterGraphMediumWidget`)",
+    "declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`)",
+    "absent \u2014 gated home-screen-only",
+    "absent \u2014 gated home-screen-only",
+    "absent \u2014 gated home-screen-only"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`ClusterGraphSmallWidget`)",
+    "declared-and-renders (`ClusterGraphMediumWidget`)",
+    "declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`)",
+    "declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemExtraLarge`)"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch), `GraphWidgetViews.swift` (bodies)",
+  "id": "cluster_graph"
+}

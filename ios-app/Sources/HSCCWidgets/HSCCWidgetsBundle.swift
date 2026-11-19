@@ -40,15 +40,10 @@ import WidgetKit
 /// timeline refreshes sparingly (well within the widget refresh budget).
 @main
 struct HSCCWidgetsBundle: WidgetBundle {
+    // The widget list is GENERATED from ios-app/widgets/*.json into
+    // HSCCWidgetList.generated.swift. Adding a widget edits its own manifest,
+    // not this shared bundle body.
     var body: some Widget {
-        ClusterWidget()
-        MonitorWidget()
-        CardsRunningWidget()
-        KanbanMonitorWidget()
-        ProjectsWidget()
-        BoardStatusWidget()
-        NeedsMeWidget()
-        ClusterGraphWidget()
-        MergeQueueWidget()
+        HSCCWidgetList().body
     }
 }

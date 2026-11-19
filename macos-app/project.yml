@@ -115,6 +115,7 @@ targets:
       # copies: one decoder, one App Group store, one failover loop.
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
       # The alert-feed projection ("Needs me", card R3): the same Foundation-only
       # order/filter/age rules the iOS widget draws, so the dropdown and the
@@ -180,6 +181,7 @@ targets:
       - path: ../ios-app/Sources/HSCC/WidgetSettingsStore.swift
       - path: ../ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift
       - path: ../ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.swift
+      - path: ../ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift
       # SettingsStore clears the shared last-known read cache on a cluster
       # switch. Foundation-only.
       - path: ../ios-app/Sources/HSCC/StateCache.swift
@@ -257,39 +259,22 @@ targets:
     platform: macOS
     deploymentTarget: "14.0"
     sources:
+      - path: ../ios-app/Sources/HSCCWidgets
       # The shared @main WidgetBundle: Cluster, Monitor, Cards Running,
       # Kanban Monitor, Projects, Board Status and Needs Me.
-      - path: ../ios-app/Sources/HSCCWidgets/HSCCWidgetsBundle.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetMetrics.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift
       # The `systemMedium` CLI host table (t_2d1c12dc), reused BY PATH exactly
       # like the widget that draws it: the desktop's medium tile is the same
       # nine CLI columns, not a macOS re-implementation of them.
-      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorTableReading.swift
-      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorHostTableView.swift
       # The systemSmall grid (t_9e110d88). Both halves are needed here: the tile's
       # Foundation-only cell model (also compiled into the decode harness) and the
       # SwiftUI view that draws it, which `ClusterWidgetViews.swift` and
       # `MonitorViews.swift` both reference.
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
       # The host / serving tables and the XL detail block (t_9e64d9d9), the same
       # file the iOS widget target compiles.
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterMonitorTableViews.swift
-      - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusReading.swift
       # The main orchestrator's alert feed ("Needs me", card R3), the same file
       # the iOS widget extension compiles.
-      - path: ../ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift
       # The local merge queue (MQ5): the same file the iOS widget extension
       # compiles, so the desktop tile draws the CLI's rows and cells.
-      - path: ../ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift
       # The history graph widget (t_f4551339). REQUIRED here, not optional: this
       # target compiles `HSCCWidgetsBundle.swift` by path, and that bundle declares
       # `ClusterGraphWidget()`, so leaving these four out is a "cannot find
@@ -302,17 +287,13 @@ targets:
       # copy. Nothing in these files declares a second history read: the fetch is
       # `WidgetDataClient.clusterHistory` = `GET /v1/cluster/history`.
       - path: ../ios-app/Sources/Shared/ClusterGraphReading.swift
-      - path: ../ios-app/Sources/HSCCWidgets/GraphWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
-      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
-      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
       # The one rendering-mode adapter (fullColor / accented / vibrant), shared
       # with the iOS extension rather than reimplemented for macOS.
-      - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
       # One data path: the same App Group store and WidgetDataClient (GET-only,
       # multi-address failover) the iOS widget and the menu bar app use.
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
       - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
       # The client's `mergeQueue()` names `MergeQueueLite` (MQ5); the widget

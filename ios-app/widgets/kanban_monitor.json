@@ -1,0 +1,29 @@
+{
+  "order": 5,
+  "bundle_order": 4,
+  "kind": "widget",
+  "surface_case": "widgetKanbanMonitor",
+  "surface_raw": "widget.kanbanMonitor",
+  "display_name": "Kanban Monitor Widget",
+  "icon": "list.bullet.rectangle",
+  "widget_type": "KanbanMonitorWidget",
+  "sources": [
+    "Sources/HSCCWidgets/KanbanMonitorWidget.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`SmallKanbanMonitor`)",
+    "declared-and-renders (`MediumKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor`)",
+    "declared-and-renders (`KanbanMonitorInline`)",
+    "declared-and-renders (`KanbanMonitorCircular`)",
+    "declared-and-renders (`KanbanMonitorRectangular`)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`SmallKanbanMonitor`)",
+    "declared-and-renders (`MediumKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor`)"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift`",
+  "id": "kanban_monitor"
+}

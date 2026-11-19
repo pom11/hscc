@@ -205,6 +205,7 @@ targets:
       # Surface names + row glyphs, shared with the macOS Settings window
       # (t_1143c19b) instead of a second copy of the same switches.
       - path: Sources/HSCC/Views/WidgetSurfaceLabels.swift
+      - path: Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       # ClusterView.swift retired as a screen (t_65d791da, spec §5 + §8): its
@@ -265,6 +266,7 @@ targets:
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/MonitorActivity.swift
       # The Monitor Live Activity's surface payload + its "what shows where"
       # rules (t_1685f884). Foundation-only, which is what lets
@@ -447,53 +449,35 @@ targets:
     platform: iOS
     deploymentTarget: "26.0"
     sources:
-      - path: Sources/HSCCWidgets/HSCCWidgetsBundle.swift
-      - path: Sources/HSCCWidgets/ClusterWidget.swift
-      - path: Sources/HSCCWidgets/ClusterWidgetMetrics.swift
-      - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
+      - path: Sources/HSCCWidgets
       # The `systemMedium` CLI host table (t_2d1c12dc). Split in two on purpose:
       # the reading half is Foundation-only so `cluster_widget_check.sh` can
       # compile and RUN the column/cell/threshold rules against the fixture, and
       # the view half is the only file that names a Colour.
-      - path: Sources/HSCCWidgets/CLIMonitorTableReading.swift
-      - path: Sources/HSCCWidgets/CLIMonitorHostTableView.swift
       # The systemSmall grid (t_9e110d88): the tile's data half on Foundation
       # only, so scripts/model_decode_check.sh compiles and RUNS the exact rows
       # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
-      - path: Sources/HSCCWidgets/ClusterSmallGrid.swift
-      - path: Sources/HSCCWidgets/ClusterSmallGridView.swift
       # The host / serving tables and the XL detail block the large + extra-large
       # monitor surfaces draw (t_9e64d9d9). Shared by the cluster and monitor
       # widgets so the two tiles cannot drift apart.
-      - path: Sources/HSCCWidgets/ClusterMonitorTableViews.swift
-      - path: Sources/HSCCWidgets/MonitorWidget.swift
-      - path: Sources/HSCCWidgets/MonitorViews.swift
       # Projects surface (small + medium + large), t_d739d163. Its configuration
       # intent and entity query live in the same file as the widget they configure.
-      - path: Sources/HSCCWidgets/ProjectsWidget.swift
       # Running cards with worker and age (`hscc cards monitor --live` on the
       # Home Screen), read through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/CardsRunningWidget.swift
       # `hscc kanban monitor --live`'s running / ready / blocked, read-only
       # through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/KanbanMonitorWidget.swift
       # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
       # through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/BoardStatusWidget.swift
       # The main orchestrator's alert feed ("Needs me", card R3): one read of
       # GET /v1/alerts through WidgetDataClient, projected by NeedsMeReading.swift.
-      - path: Sources/HSCCWidgets/NeedsMeWidget.swift
       # The local merge queue (card MQ5): the per-project tables `hscc kanban
       # monitor` draws, read-only through WidgetDataClient. Its cells are the
       # CLI's own column strings, projected by MergeQueueReading.swift.
-      - path: Sources/HSCCWidgets/MergeQueueWidget.swift
       # Rendering-mode adaptation (t_1143c19b): one shared palette swap for
       # WidgetKit's fullColor / accented / vibrant modes, used by the iOS
       # widgets and the macOS desktop extension alike.
-      - path: Sources/HSCCWidgets/WidgetRendering.swift
       # The widget's count rules on Foundation only, so
       # scripts/board_status_widget_check.sh can compile and execute them.
-      - path: Sources/HSCCWidgets/BoardStatusReading.swift
       # The history graph widget (t_f4551339): Swift Charts over
       # `GET /v1/cluster/history`. Four files on purpose — the projection rules
       # live in `Sources/Shared/ClusterGraphReading.swift` (Foundation-only, so a
@@ -502,13 +486,10 @@ targets:
       # `GraphWidgetEntry.swift`, and the configuration intent, provider and
       # `Widget` in `GraphWidget.swift`. Home-screen families only; the dispatch
       # gives each declared size its own arm.
-      - path: Sources/HSCCWidgets/GraphWidget.swift
-      - path: Sources/HSCCWidgets/GraphWidgetEntry.swift
-      - path: Sources/HSCCWidgets/GraphWidgetMetrics.swift
-      - path: Sources/HSCCWidgets/GraphWidgetViews.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/WidgetDataClient.swift
       # The alert-feed projection and its last-known snapshot (card R3),
       # Foundation-only so the decode gate executes the same order/filter/age
@@ -604,6 +585,7 @@ targets:
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/WakingActivity.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
@@ -674,6 +656,7 @@ targets:
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/MonitorActivity.swift
       # The payload the app pushes and the rules deciding which metric each
       # surface draws (t_1685f884). The extension draws those strings and maps

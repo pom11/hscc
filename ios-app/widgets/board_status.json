@@ -1,0 +1,30 @@
+{
+  "order": 3,
+  "bundle_order": 6,
+  "kind": "widget",
+  "surface_case": "widgetBoardStatus",
+  "surface_raw": "widget.boardStatus",
+  "display_name": "Board Status Widget",
+  "icon": "square.stack.3d.up",
+  "widget_type": "BoardStatusWidget",
+  "sources": [
+    "Sources/HSCCWidgets/BoardStatusWidget.swift",
+    "Sources/HSCCWidgets/BoardStatusReading.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`BoardStatusSmallView`)",
+    "declared-and-renders (`BoardStatusMediumView`)",
+    "declared-and-renders (`BoardStatusLargeView`)",
+    "declared-and-renders (`Text(entry.inlineLine)`)",
+    "declared-and-renders (`BoardStatusCircularView`)",
+    "declared-and-renders (`BoardStatusRectangularView`)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`BoardStatusSmallView`)",
+    "declared-and-renders (`BoardStatusMediumView`)",
+    "declared-and-renders (`BoardStatusLargeView`)",
+    "absent"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift`",
+  "id": "board_status"
+}

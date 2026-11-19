@@ -565,149 +565,6 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
              "the daemon-host sidecar stopped decoding")
 }
 
-// ---- The "Needs me" alert feed (card R3) ----
-//
-// `v1_alerts.json` is the route's own shape with placeholder text: the live feed
-// is operator-private, so the fixture carries the shape and no real alert. The
-// assertions are the surface's contract: newest first like `hscc notify list`,
-// acknowledged rows excluded, the CLI's age vocabulary, and only the first body
-// line on a row.
-c.check(AlertsLite.self, "v1_alerts.json", "AlertsLite (GET /v1/alerts)")
-c.assertions("v1_alerts.json", "the Needs me projection keeps unacknowledged rows newest first") {
-    let payload = try JSONDecoder().decode(AlertsLite.self,
-                                           from: try c.load("v1_alerts.json"))
-    let feed = NeedsMeFeed.from(payload)
-    c.expect("v1_alerts.json", "4 alerts decode, 3 unacknowledged rows remain",
-             payload.alerts.count == 4 && feed.count == 3,
-             "alerts=\(payload.alerts.count) items=\(feed.count)")
-    c.expect("v1_alerts.json", "newest first: ids 44, 43, 41",
-             feed.items.map(\.id) == [44, 43, 41],
-             "ids=\(feed.items.map(\.id))")
-    c.expect("v1_alerts.json", "the acknowledged row is excluded",
-             !feed.items.contains { $0.id == 42 },
-             "acked id 42 reached the surface")
-    let now = ISO8601DateFormatter().date(from: "2026-11-19T12:30:00Z")!
-    c.expect("v1_alerts.json", "ages use the CLI vocabulary (2m / 30m / 2h)",
-             feed.items[0].ageLabel(now: now) == "2m"
-                && feed.items[1].ageLabel(now: now) == "30m"
-                && feed.items[2].ageLabel(now: now) == "2h",
-             "ages=\(feed.items.map { $0.ageLabel(now: now) })")
-    c.expect("v1_alerts.json", "levels normalise to action / info / critical",
-             feed.items.map(\.level) == [.action, .info, .critical],
-             "levels=\(feed.items.map(\.level))")
-    c.expect("v1_alerts.json", "a row carries only the first body line",
-             feed.items[2].bodyFirstLine == "Example body line one."
-                && !feed.items[2].bodyFirstLine.contains("\n"),
-             "body line=\(feed.items[2].bodyFirstLine)")
-    c.expect("v1_alerts.json", "the inline copy is N need you / nothing needs you",
-             NeedsMeReading.inlineLine(count: 3) == "3 need you"
-                && NeedsMeReading.inlineLine(count: 0) == "nothing needs you"
-                && NeedsMeReading.nothingNeedsYou == "Nothing needs you",
-             "inline=\(NeedsMeReading.inlineLine(count: 3))")
-}
-
-// ---- The merge-queue widget (card MQ5) ----
-//
-// `v1_merge_queue.json` is the route's own envelope shape with placeholder
-// project/card text (the queue is operator-private). `v1_merge_queue.cli.json`
-// is not transcribed: `ios-app/scripts/merge_queue_cli_parity.py` builds it by
-// feeding this fixture's rows into the REAL `merge_queue_table`, so these
-// checks prove the widget's cells are the CLI's cells, not a reading of them.
-c.check(MergeQueueLite.self, "v1_merge_queue.json", "MergeQueueLite (GET /v1/merge-queue)")
-c.assertions("v1_merge_queue.json", "the merge-queue projection keeps the CLI's rows, order and cells") {
-    struct CLIGolden: Decodable {
-        struct Table: Decodable {
-            let header: [String]
-            let rows: [[String]]
-        }
-        let tables: [String: Table]
-    }
-    let payload = try JSONDecoder().decode(MergeQueueLite.self,
-                                           from: try c.load("v1_merge_queue.json"))
-    let golden = try JSONDecoder().decode(CLIGolden.self,
-                                          from: try c.load("v1_merge_queue.cli.json"))
-    let feed = MergeQueueFeed.from(payload)
-
-    c.expect("v1_merge_queue.json", "7 rows decode, 3 queued, route count preserved",
-             feed.rows.count == 7 && feed.queued == 3 && feed.count == 7,
-             "rows=\(feed.rows.count) queued=\(feed.queued) count=\(feed.count)")
-    c.expect("v1_merge_queue.json",
-             "order is the route's: alpha 101,102,103,99 then beta 201,198 then gamma 301",
-             feed.rows.map(\.pr) == [101, 102, 103, 99, 201, 198, 301],
-             "prs=\(feed.rows.map { String(describing: $0.pr) })")
-    c.expect("v1_merge_queue.json", "ages use the CLI vocabulary (1m / 1h02m / 45s / 2h00m / 1d2h / 1d0h)",
-             feed.rows.map(\.ageLabel) == ["1m", "1h02m", "45s", "2h00m",
-                                           "1d2h", "1d0h", "1m"],
-             "ages=\(feed.rows.map(\.ageLabel))")
-
-    let groups = feed.groups
-    c.expect("v1_merge_queue.json", "three project tables, in registry order",
-             groups.map(\.project) == ["alpha", "beta", "gamma"],
-             "projects=\(groups.map(\.project))")
-    var cellMismatch = ""
-    for group in groups {
-        guard let table = golden.tables[group.project] else {
-            cellMismatch = "no CLI table for \(group.project)"
-            break
-        }
-        if table.header != MergeQueueTableReading.columns {
-            cellMismatch = "\(group.project) header CLI \(table.header) vs widget \(MergeQueueTableReading.columns)"
-            break
-        }
-        let cells = group.rows.map(\.cells)
-        if cells != table.rows {
-            cellMismatch = "\(group.project) cells widget \(cells) vs CLI \(table.rows)"
-            break
-        }
-    }
-    c.expect("v1_merge_queue.json",
-             "every project's columns and cells are the CLI table's own strings",
-             cellMismatch.isEmpty, cellMismatch)
-
-    let stateCells = feed.rows.map { $0.cells[4] }
-    c.expect("v1_merge_queue.json",
-             "state cells are the route's raw states, in order",
-             stateCells == ["queued", "queued", "gating", "merged",
-                            "queued", "resolve", "failed"],
-             "states=\(stateCells)")
-
-    c.expect("v1_merge_queue.json", "the live claim is gating #103; the next FIFO row is #101",
-             feed.current?.pr == 103 && feed.current?.state == "gating"
-                && feed.nextQueued?.pr == 101,
-             "current=\(String(describing: feed.current?.pr)) next=\(String(describing: feed.nextQueued?.pr))")
-    c.expect("v1_merge_queue.json", "last merged is the smallest-age merged row (#99, 2h ago)",
-             feed.lastMerged?.pr == 99 && feed.lastMerged?.ageLabel == "2h00m",
-             "lastMerged=\(String(describing: feed.lastMerged?.pr)) age=\(String(describing: feed.lastMerged?.ageLabel))")
-
-    c.expect("v1_merge_queue.json",
-             "small/medium/large clips are 3 and 8, and hidden rows are counted",
-             MergeQueueTableReading.visibleRows(feed.rows, limit: 3).count == 3
-                && MergeQueueTableReading.hiddenRowCount(feed.rows, limit: 3) == 4
-                && MergeQueueTableReading.visibleRows(feed.rows, limit: 8).count == 7
-                && MergeQueueTableReading.hiddenRowCount(feed.rows, limit: 8) == 0,
-             "visible3/hidden3 = \(MergeQueueTableReading.visibleRows(feed.rows, limit: 3).count)/\(MergeQueueTableReading.hiddenRowCount(feed.rows, limit: 3))")
-    c.expect("v1_merge_queue.json",
-             "the inline copy names the queued count and the live stage",
-             feed.inlineLine == "3 queued · gating #103"
-                && MergeQueueFeed.empty.inlineLine == "merge queue empty"
-                && MergeQueueFeed.empty.currentLine == "nothing queued",
-             "inline=\(feed.inlineLine) empty=\(MergeQueueFeed.empty.inlineLine)")
-
-    // The CLI flattens newlines in Last result; a retry row's detail is not
-    // printed beside its result, which is the CLI's own rule (its fallback is
-    // reachable only when the result is empty).
-    let newlineRow = MergeQueueRow(lite: MergeQueueRowLite(
-        project: "alpha", position: nil, pr: 7, card: nil, branch: nil,
-        state: "resolve", ageS: nil, lastResult: "conflict\nshared.txt",
-        detail: "ignored while a result exists", isLast: true))
-    let newlineCells = MergeQueueTableReading.cells(for: newlineRow)
-    c.expect("v1_merge_queue.json",
-             "Last result flattens newlines and missing fields render '-' like the CLI",
-             newlineCells == ["-", "#7", "-", "-", "resolve", "-",
-                              "conflict shared.txt"],
-             "cells=\(newlineCells)")
-}
-
 // ---- SavedCluster: old blobs keep working, new blobs keep the order ----
 //
 // The multi-address model added `fallbackHosts` AFTER operators already had
@@ -1073,6 +930,9 @@ c.assertions("v1_cluster_history_tier_axis.json",
 monitorActivitySurfaces(c)
 monitorActivityEdgeSurfaces(c)
 monitorActivityGlanceLadder(c)
+
+// ---- Per-widget decode blocks (one file per widget).
+checkWidgetDecodeFixtures(c)
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes

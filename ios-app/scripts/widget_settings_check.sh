@@ -124,9 +124,14 @@ INTENT="Sources/HSCC/Intents/WidgetScopePickerIntent.swift"
 
 # Extract the model block verbatim (WidgetSurfaceKind .. end of the availableSections
 # extension). Line-anchored on stable markers; no hand-copy -> no drift.
+ENUM="Sources/Shared/WidgetSurfaceKind.generated.swift"
 start=$(grep -n "^// Widgets & Live Activities shared settings" "$SRC" | head -1 | cut -d: -f1)
 end=$(grep -n "^/// A lightweight read of the token" "$SRC" | head -1 | cut -d: -f1)
-model=$(sed -n "${start},$((end-1))p" "$SRC")
+# The enum case list is generated into its own file (one JSON per surface).
+# Prepend it so the harness still compiles the REAL enum + the REAL settings
+# structs/extension extracted from SharedStore.swift.
+model="$(cat "$ENUM")
+$(sed -n "${start},$((end-1))p" "$SRC")"
 
 # The storage key comes from the real AppGroup enum (verbatim). The suite no
 # longer exists there as a literal: SharedStore reads HSCCAppGroup from the
@@ -880,7 +885,8 @@ if [ -f "$MAC_SETTINGS" ] && [ -f "$MAC_SPEC" ]; then
   grep -q "WidgetCenter.shared.reloadAllTimelines()" "$MAC_SETTINGS" \
     && echo "  ok: macOS settings writes reload desktop widget timelines" \
     || gfail "macOS settings writes reload desktop widget timelines"
-  for reused in WidgetSettingsStore.swift Views/WidgetAppearanceView.swift Views/WidgetSurfaceLabels.swift; do
+  for reused in WidgetSettingsStore.swift Views/WidgetAppearanceView.swift \
+                Views/WidgetSurfaceLabels.swift Views/WidgetSurfaceLabels.generated.swift; do
     grep -qF -- "- path: ../ios-app/Sources/HSCC/$reused" "$MAC_SPEC" \
       && echo "  ok: macOS app compiles $reused by path" \
       || gfail "macOS app does not compile $reused by path"
@@ -908,11 +914,11 @@ sfail() { echo "  FAIL: $1"; grepfail=$((grepfail+1)); }
 sok() { echo "  ok: $1"; }
 norm_list() { printf '%s\n' "$1" | sed '/^$/d' | sort; }
 
-surface_cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$SRC" \
+surface_cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$ENUM" \
   | sed -n 's/^    case \([A-Za-z][A-Za-z0-9]*\).*/\1/p')
 surface_case_count=$(printf '%s\n' "$surface_cases" | sed '/^$/d' | wc -l | tr -d ' ')
 if [ "$surface_case_count" -lt 1 ]; then
-  sfail "the registry enum could not be read from $SRC"
+  sfail "the registry enum could not be read from $ENUM"
 fi
 
 # One row per case is not enough if the row has no name or icon: the shared
@@ -920,7 +926,7 @@ fi
 # case must be present in both switches. The switches moved out of ConfigView
 # into WidgetSurfaceLabels.swift (t_1143c19b) so the macOS Settings window
 # compiles the same metadata instead of a second copy.
-META="Sources/HSCC/Views/WidgetSurfaceLabels.swift"
+META="Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift"
 [ -f "$META" ] || { echo "surface display metadata missing: $META" >&2; exit 1; }
 meta_bad=0
 for c in $surface_cases; do
@@ -936,27 +942,25 @@ done
 # what proves the row's pause/cadence controls reach the surface rather than a
 # second switch the screen does not use.
 WIDGETS_DIR="Sources/HSCCWidgets"
-WIDGET_BUNDLE="$WIDGETS_DIR/HSCCWidgetsBundle.swift"
-widget_names=$(sed -n '/^struct HSCCWidgetsBundle: WidgetBundle {/,/^}/p' "$WIDGET_BUNDLE" \
+WIDGET_BUNDLE="$WIDGETS_DIR/HSCCWidgetList.generated.swift"
+widget_names=$(sed -n '/^struct HSCCWidgetList: WidgetBundle {/,/^}/p' "$WIDGET_BUNDLE" \
   | sed -n 's/^        \([A-Za-z][A-Za-z0-9]*\)()$/\1/p')
 widget_count=$(printf '%s\n' "$widget_names" | sed '/^$/d' | wc -l | tr -d ' ')
 sok "the widget bundle declares $widget_count widget surface(s)"
-# Bundle type -> registry case. Explicit because a widget can keep its struct
-# and its provider in different files (ClusterWidget does), so the name is the
-# stable link. A new bundle entry with no line here fails closed.
+# Bundle type -> registry case comes from the per-widget JSON manifests, so a
+# new widget does not edit this gate either.
+widget_kind_map=$(python3 - <<'PY'
+import glob, json
+for path in sorted(glob.glob("widgets/*.json")):
+    if path.rsplit("/", 1)[-1].startswith("_"):
+        continue
+    d = json.load(open(path))
+    if d.get("widget_type"):
+        print(d["widget_type"], d["surface_case"])
+PY
+)
 widget_kind_for() {
-  case "$1" in
-    ClusterWidget) echo widgetCluster ;;
-    MonitorWidget) echo widgetMonitor ;;
-    CardsRunningWidget) echo widgetCardsRunning ;;
-    KanbanMonitorWidget) echo widgetKanbanMonitor ;;
-    ProjectsWidget) echo widgetProjects ;;
-    BoardStatusWidget) echo widgetBoardStatus ;;
-    NeedsMeWidget) echo widgetNeedsMe ;;
-    ClusterGraphWidget) echo widgetClusterGraph ;;
-    MergeQueueWidget) echo widgetMergeQueue ;;
-    *) echo "" ;;
-  esac
+  printf '%s\n' "$widget_kind_map" | awk -v t="$1" '$1 == t { print $2; exit }'
 }
 used_widget_kinds=""
 for w in $widget_names; do
@@ -978,7 +982,7 @@ for w in $widget_names; do
   sok "widget $w is wired to $kind"
 done
 registered_widget_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
-  grep -q "^    case $c = \"widget\." "$SRC" && printf '%s\n' "$c"
+  grep -q "^    case $c = \"widget\." "$ENUM" && printf '%s\n' "$c"
 done)
 if [ "$(norm_list "$used_widget_kinds")" != "$(norm_list "$registered_widget_kinds")" ]; then
   sfail "the widget cases in the registry and the widgets in the bundle are not the same set"
@@ -1019,7 +1023,7 @@ for t in $la_types; do
   sok "Live Activity $t is wired to $kind"
 done
 registered_la_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
-  grep -q "^    case $c = \"liveActivity\." "$SRC" && printf '%s\n' "$c"
+  grep -q "^    case $c = \"liveActivity\." "$ENUM" && printf '%s\n' "$c"
 done)
 if [ "$(norm_list "$used_la_kinds")" != "$(norm_list "$registered_la_kinds")" ]; then
   sfail "the Live Activity cases in the registry and the activities in the extensions are not the same set"
@@ -1028,7 +1032,7 @@ else
 fi
 # A raw value IS the App Group key: pin the newest one to its literal for the
 # same reason every older surface is pinned in the executed harness.
-grep -q 'case liveActivityBoardProgress = "liveActivity.boardProgress"' "$SRC" \
+grep -q 'case liveActivityBoardProgress = "liveActivity.boardProgress"' "$ENUM" \
   && sok "liveActivity.boardProgress registry key" \
   || sfail "liveActivity.boardProgress registry key"
 grep -q 'setting(for: .liveActivityBoardProgress)' Sources/HSCC/BoardProgressActivityDriver.swift \

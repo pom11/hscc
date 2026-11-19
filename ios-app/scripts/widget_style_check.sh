@@ -75,7 +75,7 @@ for f in "${WIDGET_VIEWS[@]}"; do
 done
 
 # 3. Every registry surface resolves exactly one style, by its own kind.
-SRC="Sources/Shared/SharedStore.swift"
+SRC="Sources/Shared/WidgetSurfaceKind.generated.swift"
 cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$SRC" \
   | sed -n 's/^    case \([A-Za-z][A-Za-z0-9]*\).*/\1/p')
 case_count=$(printf '%s\n' "$cases" | sed '/^$/d' | wc -l | tr -d ' ')

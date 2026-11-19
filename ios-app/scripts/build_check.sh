@@ -36,8 +36,15 @@ spec = open('project.yml').read()
 spec = '\n' + spec.split('\ntargets:\n', 1)[1]  # keep a leading \n: first target has none
 blk = spec.split(f'\n  {name}:', 1)[1]
 blk = re.split(r'\n  [A-Za-z]\w*:\n', blk, maxsplit=1)[0]
-for m in re.findall(r'- path: (Sources/[^\s]+\.swift)', blk):
-    print(m)
+import os
+for path in re.findall(r'- path: ([^\s]+)', blk):
+    if path.endswith('.swift'):
+        print(path)
+    elif os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for f in sorted(files):
+                if f.endswith('.swift'):
+                    print(os.path.join(root, f))
 PY
 }
 

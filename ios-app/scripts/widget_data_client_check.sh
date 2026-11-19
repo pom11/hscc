@@ -84,6 +84,7 @@ real_sources=(
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   # The history trend projection compiles here too: its whole job is two
   # rules — a not-reported metric stays a gap, and a peak rides beside its
   # average — and a rule nobody compiles is a rule nobody keeps. It reads only
