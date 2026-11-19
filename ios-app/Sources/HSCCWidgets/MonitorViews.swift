@@ -11,6 +11,9 @@ import WidgetKit
 // the rows are the CLI's per-node host/serving rows, except on `systemMedium`,
 // which draws `hscc cluster monitor`'s host table itself
 // (`CLIMonitorHostTableView`); the footer is the daemon host's health block.
+// The three Lock Screen families draw that command's four glance numbers
+// (hottest temperature, fleet GPU load, fleet watts, running/waiting) through
+// `CLILockScreenCopy`, and never the daemon-host half.
 // ---------------------------------------------------------------------------
 
 struct MonitorWidget: Widget {
@@ -307,34 +310,53 @@ struct ExtraLargeMonitorWidget: View {
     }
 }
 
-/// One clear headline number: nodes up over nodes listed.
+/// The Lock Screen ring: the fleet's GPU load as a capacity gauge (a percentage
+/// is a ring's own shape), with the wattage it costs underneath as the
+/// secondary — the same two numbers the Cluster tile's ring draws, from the same
+/// projection, because it is the same route. The daemon host has no pixels here:
+/// an accessory refresh refuses that request, and a ring has no room for a second
+/// machine's health. A ring with no measured percentage draws the gated line,
+/// never an empty ring (which would read as an idle fleet).
 struct CircularMonitorWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: MonitorEntry
 
     var body: some View {
-        if let fleet = entry.fleet,
-           let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal, total > 0 {
-            Gauge(value: Double(min(max(up, 0), total)), in: 0...Double(total)) {
-                Text("up")
-            } currentValueLabel: {
-                Text("\(up)/\(total)")
-                    .font(style.font(size: 11, weight: .semibold))
+        let text = entry.text(for: .circular)
+        if let fill = entry.lockScreenGaugeValue {
+            VStack(spacing: 0) {
+                Gauge(value: min(max(fill, 0), 100), in: 0...100) {
+                    Text(CLILockScreenCopy.gaugeLabel)
+                } currentValueLabel: {
+                    Text(text.headline)
+                        .font(style.font(size: 11, weight: .semibold))
+                }
+                .gaugeStyle(.accessoryCircularCapacity)
+                .tint(.primary)
+                if let watts = text.detail {
+                    Text(watts)
+                        .font(style.font(size: 8))
+                        .foregroundStyle(.secondary)
+                }
             }
-            .gaugeStyle(.accessoryCircularCapacity)
-            .tint(.primary)
-            .accessibilityLabel("\(up) of \(total) nodes up")
+            .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
         } else {
-            Text(entry.text(for: .circular).headline)
+            Text(text.headline)
                 .font(style.font(size: 9, weight: .semibold))
                 .foregroundColor(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
-                .accessibilityLabel(entry.text(for: .circular).headline)
+                .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
         }
     }
 }
 
+/// The Lock Screen row: the CLI's metrics (hottest temperature, fleet GPU load,
+/// fleet watts, each with its `n/N` coverage when only some hosts reported),
+/// then the queue and the host count it covers, then the age or the failure.
+/// The daemon-host half never reaches this line — see the provider's family
+/// rule — and every string is `entry.text(for:)`, so the two tiles cannot
+/// disagree about the same fleet.
 struct RectangularMonitorWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: MonitorEntry
@@ -346,6 +368,7 @@ struct RectangularMonitorWidget: View {
                 .font(style.font(size: 12, weight: .semibold))
                 .foregroundColor(.primary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.7)
             if let detail = text.detail {
                 Text(detail)
                     .font(style.font(size: 10, weight: .medium))
@@ -368,6 +391,7 @@ struct RectangularMonitorWidget: View {
             }
             Spacer(minLength: 0)
         }
+        .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
     }
 }
 

@@ -330,6 +330,146 @@ expect(tableGroup, "no host list is nil, not an empty table",
 expect(tableGroup, "the gallery sample carries the CLI table",
        ClusterEntry.placeholder.cliHostRows?.count == 4)
 
+// ---------------------------------------------------------------------------
+// 7 — the Lock Screen's four numbers: projected by `ClusterLockScreen` from the
+// CLI view-model and worded by its one copy rule (t_314a3811). Executed here so
+// the ring's bounds and the two reductions (a MEAN percentage, a SUMMED wattage)
+// are measured, not asserted in prose.
+// ---------------------------------------------------------------------------
+
+let lockGroup = "lock-screen"
+guard let lock = CLILockScreenMetrics(response) else {
+    print("FATAL: the committed fixture did not project to Lock Screen metrics")
+    exit(2)
+}
+
+expect(lockGroup, "the hottest reading anywhere is node-3's CPU at 87.1 C, and says whose",
+       lock.hottest?.celsius == 87.1 && lock.hottest?.sensor == .cpu
+        && lock.hottest?.host == "node-3")
+expect(lockGroup, "it scans BOTH sensors — no GPU here is that hot (max 78 C)",
+       lock.hottest?.cell == "87.1 C"
+        && (ClusterMonitorViewModel.project(response)?.hostRows.compactMap { $0.gpuTempC }
+             .max() ?? 0) == 78)
+expect(lockGroup, "its text IS the view-model's CPU Temp cell for that host",
+       lock.hottest?.cell == ClusterMonitorViewModel.project(response)?.hostRows[2].cpuTemp)
+expect(lockGroup, "87.1 C is past the view-model's warn mark but not its critical one",
+       lock.hottest?.level == .warn)
+expect(lockGroup, "GPU load is a MEAN, not a sum (0+0+96+96 over 4 hosts = 48%)",
+       lock.gpuUtil?.rule == .mean && abs((lock.gpuUtil?.value ?? -1) - 48.0) < 0.001)
+expect(lockGroup, "watts ARE summed (26.44 + 28.00 + 71.06 + 69.42 = 194.92 W)",
+       lock.gpuPower?.rule == .sum && abs((lock.gpuPower?.value ?? -1) - 194.92) < 0.01)
+expect(lockGroup, "every host reported both, so neither number is partial",
+       lock.gpuUtil?.isPartial == false && lock.gpuPower?.isPartial == false)
+expect(lockGroup, "running/waiting come from the CLI's total rows (5 run, 0 wait)",
+       lock.running == 5 && lock.waiting == 0)
+expect(lockGroup, "over the 4 live backends the totals are made of",
+       lock.backendsReporting == 4)
+expect(lockGroup, "with every backend answering, none is reported down",
+       lock.backendsDown == 0 && lock.servingReported)
+expect(lockGroup, "and the read covers all 4 listed hosts", lock.hostCount == 4)
+
+let lockInline = CLILockScreenCopy.text(for: .inline, lock)
+expect(lockGroup, "inline is one honest line: the hottest temperature + the queue",
+       lockInline?.headline == "87.1 C · 5 run")
+expect(lockGroup, "and it stays short enough for a Lock Screen line",
+       (lockInline?.headline.count ?? 99) <= 24)
+
+let lockRing = CLILockScreenCopy.text(for: .circular, lock)
+expect(lockGroup, "the ring's primary metric is the GPU load", lockRing?.headline == "48%")
+expect(lockGroup, "its secondary is what that load costs", lockRing?.detail == "195 W")
+expect(lockGroup, "both fit the ring's character bounds",
+       (lockRing?.headline.count ?? 99) <= CLILockScreenCopy.ringValueLimit
+        && (lockRing?.detail?.count ?? 99) <= CLILockScreenCopy.ringCaptionLimit)
+expect(lockGroup, "the coverage marker never enters the ring (it would clip)",
+       !(lockRing?.headline ?? "").contains("/") && !(lockRing?.detail ?? "").contains("/"))
+expect(lockGroup, "the ring's label says avg, because its number is a mean",
+       CLILockScreenCopy.gaugeLabel.contains("avg"))
+
+let lockRect = CLILockScreenCopy.text(for: .rectangular, lock)
+expect(lockGroup, "the row carries all three host metrics with their units",
+       lockRect?.headline == "87.1 C · GPU avg 48% · 195 W")
+expect(lockGroup, "then the whole queue and how many hosts it covers",
+       lockRect?.detail == "5 run · 0 wait · 4 hosts")
+
+let lockVoice = CLILockScreenCopy.voice(lock)
+expect(lockGroup, "the voice sentence names all four numbers",
+       lockVoice.contains("87.1 degrees C") && lockVoice.contains("48%")
+        && lockVoice.contains("195 W") && lockVoice.contains("5 running, 0 waiting"))
+expect(lockGroup, "it says the GPU number is a mean over the reporting hosts",
+       lockVoice.contains("average over 4 of 4 hosts"))
+expect(lockGroup, "and it says the thermal verdict, which no accessory may colour",
+       lockVoice.contains("warn"))
+expect(lockGroup, "a Home Screen family gets no copy from this file at all",
+       CLILockScreenCopy.text(for: .large, lock) == nil
+        && CLILockScreenCopy.text(for: .medium, lock) == nil)
+
+// The entry, not only the copy: what the ring fills to and what is read out.
+let lockEntry = ClusterEntry(date: .now, fleet: fleet, configured: true,
+                             paused: false, lockScreen: lock)
+expect(lockGroup, "the ring fills to the measured percentage",
+       lockEntry.lockScreenGaugeValue == 48.0)
+expect(lockGroup, "and every family reads the same voice sentence",
+       lockEntry.lockScreenVoice == lockVoice)
+expect(lockGroup, "the gate states still win over any metric",
+       ClusterEntry(date: .now, fleet: fleet, configured: false, paused: false,
+                    lockScreen: lock).text(for: .inline).headline == "Set up in HSCC"
+        && ClusterEntry(date: .now, fleet: fleet, configured: true, paused: true,
+                        lockScreen: lock).text(for: .circular).headline == "Paused")
+expect(lockGroup, "a failed read with no metrics falls back to the reason, never dashes",
+       timedOut.text(for: .inline).headline == "Timed out"
+        && timedOut.lockScreenVoice == nil)
+
+// A read where only one of three listed hosts reported: the denominators have to
+// show, because a partial sum is too small and a partial mean can be too high.
+func metricSample(_ hostname: String, gpu: String? = nil, gpuTemp: String? = nil,
+                  cpuTemp: String? = nil, powerW: String? = nil) -> MonitorSample {
+    MonitorSample(hostname: hostname, uptime_sec: nil, cpu_usage_pct: nil,
+                  mem_used_pct: nil, mem_total_mb: nil, mem_used_mb: nil,
+                  gpu_name: nil, gpu_util_pct: gpu, gpu_mem_used_pct: nil,
+                  cpu_temp_c: cpuTemp, gpu_temp_c: gpuTemp, cpu_load_1m: nil,
+                  gpu_power_w: powerW)
+}
+let partialHosts = MonitorResponse(
+    json: MonitorPayload(timestamp: nil, hosts: [
+        MonitorNode(host: "192.0.2.11", error: nil,
+                    sample: metricSample("node-1", gpu: "50", gpuTemp: "70", powerW: "100"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+        MonitorNode(host: "192.0.2.12", error: "collect failed", sample: nil,
+                    used_slots: nil, free_slots: nil, workloads: nil),
+        MonitorNode(host: "192.0.2.13", error: nil, sample: metricSample("node-3"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+    ]), serving: nil, serving_error: nil, serving_proxy_error: nil, speak: "")
+let part = CLILockScreenMetrics(partialHosts)
+expect(lockGroup, "a host that reported nothing stays in the denominator",
+       part?.gpuUtil?.hostsReporting == 1 && part?.gpuUtil?.hostsListed == 3)
+expect(lockGroup, "so the GPU load says 1/3 rather than reading as the fleet's",
+       part.map { CLILockScreenCopy.gpuToken($0) } == "GPU avg 50% 1/3")
+expect(lockGroup, "and a partial sum of watts says 1/3 too",
+       part.map { CLILockScreenCopy.wattsToken($0) } == "100 W 1/3")
+expect(lockGroup, "the temperature is still the one host that measured it",
+       part?.hottest?.cell == "70 C" && part?.hottest?.host == "node-1")
+expect(lockGroup, "an unanswered serving poll is a dash, never a 0 queue",
+       part?.running == nil && part?.waiting == nil
+        && part.map { CLILockScreenCopy.queueHeadline($0) } == "— run")
+expect(lockGroup, "and the ring still fits its bounds with the marker removed",
+       part.map { CLILockScreenCopy.text(for: .circular, $0)?.headline ?? "" } == "50%")
+
+let nothingHosts = MonitorResponse(
+    json: MonitorPayload(timestamp: nil, hosts: [
+        MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                    used_slots: nil, free_slots: nil, workloads: nil),
+    ]), serving: nil, serving_error: nil, serving_proxy_error: nil, speak: "")
+let none = CLILockScreenMetrics(nothingHosts)
+expect(lockGroup, "a read with no temp, no GPU, no watts and no queue has nothing",
+       none == nil || none!.hasNothing)
+expect(lockGroup, "and the entry keeps its own copy instead of a row of dashes",
+       ClusterEntry(date: .now, fleet: nil, failure: .timeout(seconds: 8),
+                    configured: true, paused: false,
+                    lockScreen: none).text(for: .rectangular).headline == "Timed out")
+expect(lockGroup, "the sample entry draws the same four numbers as its own rows",
+       ClusterEntry.placeholder.lockScreen?.hostCount
+        == ClusterEntry.placeholder.fleet?.tally.nodesTotal)
+
 print("")
 if failures.isEmpty {
     print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")

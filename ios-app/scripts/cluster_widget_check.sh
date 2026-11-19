@@ -12,7 +12,12 @@
 #   * the old hard-coded `.244/.246/.247/.248` topology glyph is gone — four
 #     invented node identities were the biggest "does not match the CLI" bug;
 #   * the kanban board row is gone from the cluster tile; it is not cluster
-#     monitor output (the board widgets own that data).
+#     monitor output (the board widgets own that data);
+#   * the three Lock Screen accessories draw the four numbers the CLI's rows add
+#     up to — hottest temperature, GPU load (a MEAN over the hosts that
+#     reported), fleet watts (a SUM) and running/waiting — projected from the
+#     same view-model by Sources/Shared/ClusterLockScreen.swift, so a Lock
+#     Screen temperature is the CLI's own cell and not a second rounding.
 #
 # Reads are named methods on WidgetDataClient, so the closed GET allowlist stays
 # the gate. Structural greps pin the family dispatch and the removal of the
@@ -45,8 +50,12 @@ TALLY=Sources/Shared/ClusterNodeTally.swift
 # compiled here; the view-model it reads is already `$MODEL`.
 GRID=Sources/HSCCWidgets/ClusterSmallGrid.swift
 STORE=Sources/Shared/SharedStore.swift
+# The Lock Screen's four numbers + the one copy rule its three families share
+# (t_314a3811). Foundation-only like $MODEL above, which is what lets the
+# harness execute them: every number here is projected from that view-model.
+LOCK=Sources/Shared/ClusterLockScreen.swift
 for f in "$SUBJECT" "$VIEWS" "$TABLE_VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" \
-         "$MODEL" "$TALLY" "$GRID" "$STORE" \
+         "$MODEL" "$TALLY" "$GRID" "$STORE" "$LOCK" \
          Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
@@ -200,6 +209,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$READING" \
   "$GRID" \
   Sources/Shared/ClusterMonitorTables.swift \
+  "$LOCK" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

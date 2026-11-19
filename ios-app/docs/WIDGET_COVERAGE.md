@@ -135,14 +135,15 @@ route shape.
 
 ```text
 $ bash ios-app/scripts/cluster_widget_check.sh
-CLUSTER WIDGET CHECK PASSED — 56 checks: fixture rows, every family's lines, nil-is-not-zero, redaction
+CLUSTER WIDGET CHECK PASSED — the run prints its own check tally
 $ bash ios-app/scripts/monitor_activity_check.sh
 PASS: real /v1/cluster/monitor + /v1/daemon/host decode + derive to a populated ContentState
 ```
 
 The cluster fixture is a scrubbed capture of the live `/v1/cluster/monitor`
 body (documentation `192.0.2.x` addresses, generic node/model/workload names,
-`serving[]` present). The check asserts the exact lines each family draws:
+`serving[]` present). The check asserts the exact lines each family draws —
+the tally is the run's own output, not this page's:
 
 | Family | Headline | Detail | Rows |
 |---|---|---|---|
@@ -150,14 +151,25 @@ body (documentation `192.0.2.x` addresses, generic node/model/workload names,
 | systemMedium | `4/4 up` | `2 models · 2 jobs · 12.3 t/s` | 4 compact node rows |
 | systemLarge | `4/4 up` | models · jobs · t/s | the CLI's host table, then its serving table (Node Port Model Run Wait KV% In Out + the per-model `total (n)` rows), each clipped to the plan with a `+N more` line |
 | systemExtraLarge | `4/4 up` | models · jobs · t/s | the same two tables side by side, plus one detail line per host — VRAM used/total, GPU clock, net ↓/↑ per second, uptime, fan %, load 1/5/15 |
-| accessoryInline | `4/4 up · 2 models · 12.3 t/s` | — | none |
-| accessoryCircular | `4/4` gauge | — | none |
-| accessoryRectangular | `4/4 up` | models · jobs · t/s | first node row |
+| accessoryInline | the hottest temperature + the one queue fact that matters | — | none |
+| accessoryCircular | fleet GPU load as a capacity ring | what that load costs, in watts | none |
+| accessoryRectangular | hottest temp · GPU load · fleet watts | the whole queue + how many hosts the read covers | none |
+
+The three Lock Screen families take their numbers from
+`ios-app/Sources/Shared/ClusterLockScreen.swift`, which projects the same CLI
+view-model the Home Screen rows do: GPU load is a mean over the hosts that
+reported it (so it is labelled `avg` wherever it appears), watts are summed, and
+both carry their `n/N` coverage when only part of the fleet reported — except in
+the ring, which has no characters to spare, so there the marker survives only in
+the VoiceOver sentence and the rectangular row. The strings are that file's, not
+this page's: read the `lock-screen` group of the check for what is actually
+asserted.
 
 Every token maps to `WIDGET_ROUTES.md`: tally = `hosts[].error`,
 models/throughput = `serving[].model` / `serving[].gen_tps`, jobs =
 `workloads[].workload_id` (and `status.workloads.count`), temperatures =
-`sample.cpu_temp_c` / `sample.gpu_temp_c`, daemon health =
+`sample.cpu_temp_c` / `sample.gpu_temp_c`, power = `sample.gpu_power_w`,
+running/waiting = `serving[].running` / `serving[].waiting`, daemon health =
 `daemon_running` / `daemon_uptime_seconds`.
 
 Who owns what on the two table surfaces (t_9e64d9d9): the **cells** are
