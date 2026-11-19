@@ -90,6 +90,10 @@ enum WidgetDataPath {
     /// surface's own projection applies the newest-first order and the
     /// unacknowledged filter (`NeedsMeReading.swift`).
     static let alerts = "/v1/alerts"
+    /// Dataset 8 — the local merge queue's read-only rows
+    /// (`GET /v1/merge-queue`, card MQ4). The daemon owns the queue; this is
+    /// the same projection `hscc kanban monitor` draws.
+    static let mergeQueue = "/v1/merge-queue"
 
     /// Every path this client will fetch. Additive only, and only for a read.
     static let all: Set<String> = [
@@ -97,7 +101,7 @@ enum WidgetDataPath {
         kanbanRunning, kanbanBlocked, kanbanStale,
         clusterMonitor, clusterStatus, clusterHistory,
         daemonHost, autodownStatus,
-        metricsHistory, alerts,
+        metricsHistory, alerts, mergeQueue,
     ]
 
     static func isReadPath(_ path: String) -> Bool { all.contains(path) }

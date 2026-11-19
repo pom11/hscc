@@ -261,7 +261,16 @@ def handle_review_queue(server, ctx, query, body):
     try:
         projects = _registry.load_registry(registry_path)
         enriched = _review_cmd._enrich_project_cards(projects, _run=None)
+        try:
+            from hscc_daemon import merge_queue
+            merge_states = merge_queue.card_states(registry_path=registry_path)
+        except Exception:
+            merge_states = {}
         rows = _review_core.review_queue(enriched, now=None)
+        for row in rows:
+            state = merge_states.get(str(row.get("card_id"))) or {}
+            row["merge_state"] = state.get("state")
+            row["merge_pr"] = state.get("pr")
     except Exception:
         queue, degraded = [], True
         rows = []

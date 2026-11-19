@@ -694,10 +694,28 @@ def _enrich_project_cards(projects, _run) -> list[dict]:
     return enriched
 
 
+def _merge_states(registry_path=None):
+    """``{card_id: merge-queue row}``, or ``{}`` without hscc_daemon.
+
+    The queue lives in the daemon (``~/.hscc/merge-queue-state.json``);
+    flightdeck only reads its row projection. A standalone install without the
+    peer package keeps the old review queue with a ``-`` column.
+    """
+    try:
+        from hscc_daemon import merge_queue
+    except Exception:
+        return {}
+    try:
+        return merge_queue.card_states(registry_path=registry_path)
+    except Exception:
+        return {}
+
+
 def cmd_queue(args: argparse.Namespace) -> int:
     projects = registry.load_registry(args.registry)
     enriched = _enrich_project_cards(projects, args.run)
-    rows = review.review_queue(enriched, now=args.now)
+    rows = review.review_queue(
+        enriched, now=args.now, merge_states=_merge_states(args.registry))
 
     if args.json:
         import json
@@ -711,6 +729,8 @@ def cmd_queue(args: argparse.Namespace) -> int:
                         "branch": r["branch"],
                         "age_seconds": r["age_seconds"],
                         "title": r["title"],
+                        "merge_state": r.get("merge_state"),
+                        "merge_pr": r.get("merge_pr"),
                     }
                     for r in rows
                 ]
@@ -725,11 +745,15 @@ def cmd_queue(args: argparse.Namespace) -> int:
         return 0
 
     lines = []
+    lines.append(
+        f"{'project':<20} {'card':<16} {'branch':<28} {'age':>7}  "
+        f"{'merge':<9} title")
     for r in rows:
         age = _format_age(r["age_seconds"])
+        state = r.get("merge_state") or "-"
         lines.append(
             f"{r['project']:<20} {r['card_id']:<16} {r['branch']:<28} "
-            f"{age:>7}  {escape(r['title'])}"
+            f"{age:>7}  {state:<9} {escape(r['title'])}"
         )
     lines.append(f"")
     lines.append(f"{len(rows)} card(s) awaiting review.")

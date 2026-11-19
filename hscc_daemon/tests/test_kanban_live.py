@@ -1308,3 +1308,27 @@ def test_outcomes_answer_for_every_card_not_just_the_panels_slice():
     # board-keyed, string keys: `hscc kanban monitor --json` must still serialise
     assert json.loads(json.dumps(d))["outcomes"]["many"]["t_01"] == "completed"
 
+
+
+# ── merge queue section (MQ4) ──────────────────────────────────────────────
+
+def test_attach_merge_queue_renders_a_table_per_project(tmp_path):
+    from hscc_daemon import merge_queue as mq
+    state = str(tmp_path / "merge-queue-state.json")
+    mq.add_to_queue("alpha", 7, card="t_a", branch="wt/t_a", path=state)
+    mq.add_to_queue("alpha", 8, card="t_b", branch="wt/t_b", path=state)
+
+    d = {"caps": (None, None), "running": [], "ready": [], "boards": [],
+         "events": [], "errors": [], "at": NOW}
+    kanban_live.attach_merge_queue(
+        d, registry_path=str(tmp_path / "none.yaml"), state_path=state,
+        now=NOW)
+
+    assert d["merge_queue"]["rows"][0]["pr"] == 7
+    buf = io.StringIO()
+    make_console(file=buf, width=160, color_system=None).print(
+        kanban_live.render(d, snapshot=True))
+    out = buf.getvalue()
+    assert "merge queue — alpha" in out
+    assert "#7" in out and "#8" in out
+    assert "queued" in out

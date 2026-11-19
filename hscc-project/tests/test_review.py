@@ -1408,3 +1408,41 @@ class TestNoAnsiReview:
         # produced by print(json.dumps) must never carry ANSI or a panel border.
         assert not got.startswith("╭") and not got.startswith("┌")
 
+
+
+# --------------------------------------------------------------------------- #
+# merge queue state column (MQ4)
+# --------------------------------------------------------------------------- #
+
+def test_queue_rows_carry_the_merge_queue_state_when_given():
+    cards = [
+        dict(_qcard("open", status="review", branch="wt/open", created_at=4500),
+             project="hscc", branch_exists=True, is_merged=False),
+    ]
+    rows = core_review.review_queue(
+        cards, now=NOW,
+        merge_states={"open": {"state": "gating", "pr": 8}})
+    assert rows[0]["merge_state"] == "gating"
+    assert rows[0]["merge_pr"] == 8
+
+
+def test_review_queue_human_view_shows_the_merge_column(capsys, monkeypatch):
+    from flightdeck.commands import review as cmd_review
+
+    monkeypatch.setattr(
+        cmd_review, "_enrich_project_cards",
+        lambda projects, _run: [
+            dict(_qcard("c1", status="review", branch="wt/c1"),
+                 project="hscc", branch_exists=True, is_merged=False),
+        ])
+    monkeypatch.setattr(
+        cmd_review.kanban, "list_board_watermarks", lambda **kw: {})
+    monkeypatch.setattr(
+        cmd_review, "_merge_states",
+        lambda registry=None: {"c1": {"state": "queued", "pr": 7}})
+
+    out = _no_ansi(lambda: cmd_review.cmd_queue(argparse.Namespace(
+        registry="/tmp/r.yaml", json=False, now=NOW, run=None)))
+    assert "c1" in out
+    assert "queued" in out
+    assert "merge" in out

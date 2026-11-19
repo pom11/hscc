@@ -271,6 +271,9 @@ EXPECTED_EXTENSION_ROUTES = {
     # Card R3: the "Needs me" widget and macOS dropdown read the alert feed.
     # Writes/acks stay CLI-only; the extension client is GET-only.
     ("GET", "/v1/alerts"),
+    # Card MQ4: the local merge queue's read-only rows, the same projection
+    # `hscc kanban monitor` draws. Queue steering stays CLI-only.
+    ("GET", "/v1/merge-queue"),
 }
 
 
