@@ -212,6 +212,12 @@ targets:
       # nine CLI columns, not a macOS re-implementation of them.
       - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorTableReading.swift
       - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorHostTableView.swift
+      # The systemSmall grid (t_9e110d88). Both halves are needed here: the tile's
+      # Foundation-only cell model (also compiled into the decode harness) and the
+      # SwiftUI view that draws it, which `ClusterWidgetViews.swift` and
+      # `MonitorViews.swift` both reference.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
       - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift

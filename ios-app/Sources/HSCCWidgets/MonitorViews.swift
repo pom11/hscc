@@ -159,11 +159,35 @@ private func node(of entry: MonitorEntry, at index: Int) -> FleetNodeLine? {
     return nodes[index]
 }
 
+// The dense grid (t_9e110d88): the same tile the cluster widget draws, because
+// both families surface the same `/v1/cluster/monitor` rows. MONITOR stays
+// spelled with the CLI's own word and the daemon's health keeps its colour.
+//
+// With nothing to grid — unconfigured, paused, or a read with no host rows —
+// `entry.smallTile` is nil and the family falls back to the daemon pane, whose
+// copy `entry.text(for:)` owns (so the setup invite is checked before any
+// paused or failed line, on every surface).
+
 struct SmallMonitorWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: MonitorEntry
 
     var body: some View {
+        if let tile = entry.smallTile {
+            let text = entry.text(for: .small)
+            ClusterSmallGridView(tile: tile,
+                                 headerIcon: "gauge.with.dots.needle.bottom.50percent",
+                                 headerWord: "MONITOR",
+                                 tally: text.headline,
+                                 tallyColor: entry.state.color(style),
+                                 footer: text.footer)
+        } else {
+            daemonPane
+        }
+    }
+
+    /// No host rows to grid: the daemon host's own health line.
+    private var daemonPane: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Image(systemName: "gauge.with.dots.needle.bottom.50percent").widgetIcon(style)
@@ -174,7 +198,7 @@ struct SmallMonitorWidget: View {
                     .foregroundColor(style.secondaryTextColor)
             }
             Spacer(minLength: 0)
-            MonitorHeadline(entry: entry, size: 32)
+            MonitorHeadline(entry: entry, size: 20)
             MonitorDetail(entry: entry, surface: .small)
             Spacer(minLength: 0)
             MonitorFooter(entry: entry, surface: .small)

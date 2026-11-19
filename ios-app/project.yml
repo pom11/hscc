@@ -431,6 +431,11 @@ targets:
       # the view half is the only file that names a Colour.
       - path: Sources/HSCCWidgets/CLIMonitorTableReading.swift
       - path: Sources/HSCCWidgets/CLIMonitorHostTableView.swift
+      # The systemSmall grid (t_9e110d88): the tile's data half on Foundation
+      # only, so scripts/model_decode_check.sh compiles and RUNS the exact rows
+      # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
+      - path: Sources/HSCCWidgets/ClusterSmallGrid.swift
+      - path: Sources/HSCCWidgets/ClusterSmallGridView.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
       # Projects surface (small + medium + large), t_d739d163. Its configuration

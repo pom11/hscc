@@ -46,12 +46,18 @@ real_models=(
   # file's formatters against goldens generated from hscc_daemon/cluster_live.py,
   # so the harness has to compile the real thing, not a copy of it.
   Sources/Shared/ClusterMonitorViewModel.swift
+  # The systemSmall grid (t_9e110d88): Foundation-only by design, so the tile
+  # the small widget draws is executable here — the same bytes the view renders,
+  # no simulator. Its SwiftUI half lives in ClusterSmallGridView.swift and is
+  # covered structurally by widget_style_check.sh / cluster_widget_check.sh.
+  Sources/HSCCWidgets/ClusterSmallGrid.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
   # Declarations only (Swift forbids top-level statements outside main.swift),
   # so the monitor parity checks live here and main.swift calls them.
   scripts/model_decode_check/monitor_parity.swift
+  scripts/model_decode_check/cluster_small_grid.swift
   scripts/model_decode_check/main.swift
 )
 

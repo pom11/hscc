@@ -20,6 +20,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 WIDGET_VIEWS=(
   Sources/HSCCWidgets/ClusterWidgetViews.swift
   Sources/HSCCWidgets/MonitorViews.swift
+  # The shared systemSmall tile (t_9e110d88). It is in this list because it is
+  # the file that draws the densest surface: its fonts and colours must come from
+  # the stored style like every other widget view, or the operator's Settings
+  # changes would stop reaching the small tile.
+  Sources/HSCCWidgets/ClusterSmallGridView.swift
   Sources/HSCCWidgets/BoardStatusWidget.swift
   Sources/HSCCWidgets/ProjectsWidget.swift
   Sources/HSCCWidgets/KanbanMonitorWidget.swift
