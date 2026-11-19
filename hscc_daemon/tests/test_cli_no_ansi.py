@@ -120,10 +120,13 @@ class TestNoAnsiTriggers:
 class TestNoAnsiNotify:
     def test_notify(self, monkeypatch, tmp_path):
         _patch_state_dir(monkeypatch, tmp_path)
-        from hscc_daemon import desktop
-        monkeypatch.setattr(desktop, "send_macos_notification",
-                            lambda t, b, priority="normal": True)
-        _no_ansi(lambda: cli.cmd_notify("hello world"))
+        from hscc_daemon import notify_cli
+        monkeypatch.setattr(notify_cli, "post_alert", lambda opts: (201, {
+            "alert": {"id": 1, "level": "info", "key": None},
+            "created": True, "deduped": False, "rate_limited": False,
+        }))
+        out = _no_ansi(lambda: cli.cmd_notify(["Title", "Body"]))
+        assert "alert 1 posted" in out
 
 
 class TestNoAnsiLog:
