@@ -21,6 +21,8 @@ command-level tests use the existing `exec_seam` + the new `chat_env` pin.
 """
 
 import argparse
+import shutil
+import subprocess
 
 import pytest
 
@@ -49,6 +51,11 @@ class Cp:
 HERMES_CHAT = ["hermes", "-p", "pom-orch", "chat", "--continue", "pom"]
 
 
+def _target_name(target):
+    """`=NAME:` / `=NAME` / `NAME` -> NAME (the session part of a tmux target)."""
+    return target.lstrip("=").rstrip(":")
+
+
 class FakeTmux:
     """A scripted tmux server: `sessions` exist (each with pane ttys whose ps
     output is `ps[tty]`). Records every argv."""
@@ -65,7 +72,8 @@ class FakeTmux:
     def run(self, *args):
         self.calls.append(list(args))
         if args[0] == "has-session":
-            return Cp(0) if args[-1].lstrip("=") in self.sessions else Cp(1)
+            return (Cp(0) if _target_name(args[-1]) in self.sessions
+                    else Cp(1))
         if args[0] == "list-panes" and "-a" in args:
             return Cp(0, out="".join(
                 f"{name}\t%{i}-{tty}\t{tty}\n"
@@ -74,7 +82,7 @@ class FakeTmux:
         if args[0] in ("select-window", "select-pane"):
             return Cp(0)
         if args[0] == "list-panes":
-            name = args[args.index("-t") + 1].lstrip("=")
+            name = _target_name(args[args.index("-t") + 1])
             if name not in self.sessions:
                 return Cp(1, err="no such session")
             return Cp(0, out="\n".join(self.sessions[name]) + "\n")
@@ -85,7 +93,7 @@ class FakeTmux:
             self.sessions.setdefault(name, ["t-new"])
             return Cp(0)
         if args[0] == "new-window":
-            name = args[args.index("-t") + 1].lstrip("=")
+            name = _target_name(args[args.index("-t") + 1])
             self.sessions.setdefault(name, []).append("t-win")
             return Cp(0)
         raise AssertionError(f"unexpected tmux argv: {args}")
@@ -210,9 +218,76 @@ def test_branch_B_chatless_named_session_gets_chat_window(monkeypatch):
     rc = tmux_chat.launch_interactive_chat("pom", HERMES_CHAT, env={}, exec_seam=seam)
 
     assert rc == 0
-    assert fake.tmux_argv("new-window") == [["new-window", "-t", "=hscc-pom", "-P", "-d",
-                                             "--", *HERMES_CHAT]]
+    assert fake.tmux_argv("new-window") == [["new-window", "-t", "=hscc-pom:", "-P",
+                                             "-d", "--", *HERMES_CHAT]]
     assert seam.calls == [("tmux", ["tmux", "attach-session", "-t", "=hscc-pom"])]
+
+
+def test_branch_B_chatless_session_named_zero_gets_a_window(monkeypatch):
+    """Session literally named `0`: `=0` is WINDOW 0, so the chat must target
+    `=0:` — the session — or tmux fails with "index 0 in use" (same as #483)."""
+    fake = FakeTmux(sessions={"0": ["t1"]}, ps={"t1": "-zsh"})
+    seam = CapExec()
+    _wire(monkeypatch, fake, exec_chat=seam)
+    monkeypatch.setattr(tmux_chat, "session_name", lambda project: "0")
+
+    rc = tmux_chat.launch_interactive_chat("pom", HERMES_CHAT, env={}, exec_seam=seam)
+
+    assert rc == 0
+    assert fake.tmux_argv("new-window") == [["new-window", "-t", "=0:", "-P",
+                                             "-d", "--", *HERMES_CHAT]]
+    assert seam.calls == [("tmux", ["tmux", "attach-session", "-t", "=0"])]
+
+
+def test_session_profiles_addresses_the_session_not_its_window_zero(monkeypatch):
+    """`list-panes -t =0` is WINDOW 0 of the current session; the profile check
+    must pin session `0` (`=0:`) and cover every window (`-s`), including the
+    chat window `new-window -d` did not make current."""
+    calls = []
+
+    def fake_run(*args):
+        calls.append(list(args))
+        return Cp(0, out="t1\n")
+
+    monkeypatch.setattr(tmux_chat, "run_tmux", fake_run)
+    monkeypatch.setattr(tmux_chat, "run_ps",
+                        lambda tty: "hermes -p pom-orch chat")
+
+    assert tmux_chat._session_profiles("0") == {"pom-orch"}
+    assert calls == [["list-panes", "-s", "-t", "=0:", "-F",
+                      "#{pane_tty}"]]
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_chatless_session_named_zero_on_a_real_tmux_server(tmp_path, monkeypatch):
+    """The fake runner cannot model tmux target resolution, so use a real
+    throwaway server (`tmux -L`, never the default): session `0` already has
+    window 0; the chat must open at the next free index, not "index 0 in use"."""
+    socket = f"hscc-test-{tmp_path.name[-12:]}"
+
+    def tmux(*args):
+        return subprocess.run(["tmux", "-L", socket, *map(str, args)],
+                              capture_output=True, text=True)
+
+    created = tmux("new-session", "-d", "-s", "0", "-n", "operator",
+                   "sleep", "30")
+    assert created.returncode == 0, created.stderr
+    try:
+        monkeypatch.setattr(tmux_chat, "run_tmux", tmux)
+        monkeypatch.setattr(tmux_chat, "run_ps", lambda tty: "-zsh\n")
+        monkeypatch.setattr(tmux_chat, "session_name", lambda project: "0")
+
+        reason = tmux_chat._ensure_tmux_session(
+            "pom", ["sleep", "30"], which=lambda _: "/usr/bin/tmux")
+
+        assert reason is None, reason
+        windows = tmux("list-windows", "-t", "=0:", "-F",
+                       "#{window_index} #{window_name}")
+        assert windows.returncode == 0, windows.stderr
+        assert "0 operator" in windows.stdout, windows.stdout
+        assert "1 " in windows.stdout, windows.stdout
+    finally:
+        tmux("kill-server")
 
 
 def test_session_name_sanitised():

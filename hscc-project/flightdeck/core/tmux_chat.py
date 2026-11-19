@@ -308,7 +308,11 @@ def _session_profiles(session: str) -> set:
     One pane resolution per tty through the canonical matcher — a pane
     contributes the profile the matcher resolved for it (wrapper-safe),
     never a per-line guess (GAP-C-3)."""
-    r = run_tmux("list-panes", "-t", f"={session}", "-F", "#{pane_tty}")
+    # `=NAME` is a WINDOW target: a session named `0` resolves to window 0 of
+    # whatever session is current. `=NAME:` pins the session (and `-s` covers
+    # every window, including the chat window opened with `new-window -d`).
+    r = run_tmux("list-panes", "-s", "-t", f"={session}:", "-F",
+                 "#{pane_tty}")
     if r.returncode != 0:
         return set()
     found = set()
@@ -387,7 +391,11 @@ def _ensure_tmux_session(project: str, argv: list, which) -> str | None:
             # open the chat as a NEW WINDOW inside it — one command always
             # opens the chat; silently attaching to a chat-less session is a
             # no-op the operator would misread as success.
-            r = run_tmux("new-window", "-t", f"={session}", "-P", "-d",
+            # The trailing colon matters: `=NAME` alone is tmux's *window*
+            # target, so a session named `0` resolves to window 0 and
+            # `new-window` fails with "index 0 in use". `=NAME:` pins the
+            # session and leaves the index to tmux (same fix as #483).
+            r = run_tmux("new-window", "-t", f"={session}:", "-P", "-d",
                          "--", *argv)
             if r.returncode != 0:
                 err = (r.stderr or r.stdout or "").strip()
