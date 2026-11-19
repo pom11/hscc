@@ -174,13 +174,22 @@ def test_resolve_general_sentinel_is_honest(tmp_path, monkeypatch):
     (``general-orch``) was the stale half of that move: the resolver is the
     contract, so the expectation is what gets re-asserted here.
 
+    The expectation is the literal ``general``, deliberately. #444 landed the
+    same fix as ``assert profile == routes_orchestrator.main_profile()``, which
+    is self-referential: the resolver's own answer becomes the expected value,
+    so moving ``DEFAULT_NAME`` -- or having the sentinel answer any other
+    identity that the store happens to hold -- keeps it green while the
+    project-less session silently lands somewhere else. A literal here is what
+    keeps the sentinel honest about which profile a None-project session lands
+    in, which is the only reason this test exists. The stored-name case is
+    covered separately by
+    :func:`test_resolve_general_sentinel_follows_the_stored_main_name`, so
+    naming the default costs nothing.
+
     The legacy ``general-orch`` catch-all is still reachable, but only when
-    named explicitly — never as the default — which is pinned by
+    named explicitly -- never as the default -- which is pinned by
     :func:`test_resolve_legacy_catch_all_only_when_named_explicitly` so
     retiring it as the default cannot quietly retire it altogether.
-
-    The assertion itself stays: it is what keeps the sentinel honest about
-    which profile a None-project session lands in.
     """
     reg = _write_registry(tmp_path, [])
     state = tmp_path / "state.db"

@@ -175,6 +175,14 @@ struct ConfigView: View {
                 store: UserDefaults(suiteName: AppGroup.suiteName))
     private var notifyFleetUnreachable = true
 
+    /// APNs registration + permission status (card N3). Observable so the
+    /// Status row updates when the token arrives or a registration fails.
+    @ObservedObject private var pushRegistrar = PushRegistrar.shared
+    /// Last answer from the cluster's `POST /v1/devices/test` (hscc notify
+    /// test), shown under the Send test button.
+    @State private var pushTestLine: String?
+    @State private var isSendingPushTest = false
+
     // QR-scan flow state.
     @State private var showingScanner = false
     /// A valid scanned code awaiting the operator's confirm before it is
@@ -370,14 +378,50 @@ struct ConfigView: View {
                 }
 
                 Section {
+                    // APNs registration status (card N3). The token itself is
+                    // never shown — only whether this phone is registered and
+                    // with how many saved clusters.
+                    LabeledContent {
+                        Text(pushRegistrar.status.text)
+                            .foregroundColor(notificationStatusColor)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        Label("Notifications", systemImage: "bell.badge")
+                    }
+
                     Toggle("New card needs review", isOn: $notifyNeedsReview)
                     Toggle("Card failed or blocked", isOn: $notifyCardFailedBlocked)
                     Toggle("Cluster unreachable", isOn: $notifyFleetUnreachable)
 
                     Button {
+                        Task { await sendPushTest() }
+                    } label: {
+                        if isSendingPushTest {
+                            HStack {
+                                ProgressView()
+                                Text("Sending…")
+                            }
+                        } else {
+                            Label("Send test", systemImage: "paperplane")
+                        }
+                    }
+                    .disabled(isSendingPushTest)
+
+                    // The pre-push local path is still useful for checking
+                    // banner presentation without involving the cluster, so it
+                    // keeps its own button instead of being folded into the
+                    // remote test above.
+                    Button {
                         Task { await NotificationCoordinator.shared.testNotification() }
                     } label: {
-                        Label("Send test notification", systemImage: "bell.badge")
+                        Label("Send local test", systemImage: "bell")
+                    }
+
+                    if let pushTestLine {
+                        Text(pushTestLine)
+                            .font(.footnote)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 } header: {
                     Text("Notifications")
@@ -386,10 +430,10 @@ struct ConfigView: View {
                     // authorization was denied or never granted. Surface that
                     // right here instead of the operator wondering why no banner
                     // ever arrives.
-                    if !NotificationCoordinator.shared.canDeliver {
+                    if !pushRegistrar.authorized {
                         Text("Notifications are off in iOS Settings — enable them for HSCC there to receive alerts.")
                     } else {
-                        Text("Get a banner when the daemon reports something needing you: a card in the review queue, a failed or blocked card, or the cluster going unreachable.")
+                        Text("The cluster pushes alerts to this phone within seconds, even when the app is closed. Local banners still cover what the app itself notices while open. \"Send test\" asks the active cluster to send one through hscc notify test.")
                     }
                 }
 
@@ -807,7 +851,33 @@ struct ConfigView: View {
         let token = tokenField.trimmingCharacters(in: .whitespaces)
         settings.saveCluster(cluster, token: token.isEmpty ? nil : token)
         addingCluster = false
+        // Push roster (card N3): a new/edited cluster must receive this phone's
+        // APNs token too. No-op until permission + a token exist.
+        PushRegistrar.shared.clusterListChanged()
         // The root view re-probes on isConfigured change.
+    }
+
+    private var notificationStatusColor: Color {
+        switch pushRegistrar.status {
+        case .registered:
+            return Theme.Semantic.ok
+        case .denied, .failed:
+            return Theme.Semantic.bad
+        case .unknown, .awaitingToken, .registering:
+            return Theme.Semantic.onSurfaceMuted
+        }
+    }
+
+    /// Settings "Send test": register this phone on the ACTIVE cluster, then
+    /// ask it to send the same APNs test push `hscc notify test` drives. The
+    /// line under the button is the server's own `speak`, so a suppressed send
+    /// says why instead of looking like success.
+    @MainActor
+    private func sendPushTest() async {
+        isSendingPushTest = true
+        pushTestLine = nil
+        defer { isSendingPushTest = false }
+        pushTestLine = await pushRegistrar.sendTestPush()
     }
 
     private func testConnection() async {

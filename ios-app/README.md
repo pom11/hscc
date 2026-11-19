@@ -184,9 +184,10 @@ file-by-file disposition of the remaining console files is
     slice, so the sweep is this activity's only app-side hook.
   - `DeepLink.swift` — the `hscc://` scheme: open a project / card / session
     directly; the single entry point for notifications and Handoff.
-  - `Notify/` — the "operator needed" local-notification engine
-    (`NeedsOperatorNotifier` computes alerts purely;
-    `NotificationCoordinator` delivers them).
+  - `Notify/` — the "operator needed" alert path: `NeedsOperatorNotifier`
+    computes local alerts purely, `NotificationCoordinator` delivers them in
+    the foreground, and `PushRegistrar` registers the APNs device token with
+    every saved cluster so the daemon's alerts reach a closed app.
   - `Intents/` — Siri App Intents:
     - `ClusterStatusIntent` — speak the cluster-status `speak` one-liner.
       (The project ask/status, review-queue and approvals intents retired with

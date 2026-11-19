@@ -76,21 +76,28 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
 
     /// Request notification authorization if not already determined. This is
     /// the app's ONLY call into the permission prompt — invoked once at launch
-    /// by the `NotificationsAppDelegate`.
+    /// by the `NotificationsAppDelegate`. Once permission exists, hand control
+    /// to `PushRegistrar`, which asks APNs for the device token and registers
+    /// it with every saved cluster (card N3).
     func requestAuthorization() async {
         let center = UNUserNotificationCenter.current()
         // We are the center's delegate so a tapped notification banner routes
         // its deep link (t_136762f3) instead of the app silently opening at the
         // root. Set before asking, so a tap during the prompt is handled too.
+        // The same delegate presents foreground banners for REMOTE pushes too
+        // (`willPresent` below).
         center.delegate = self
         let settings = await center.notificationSettings()
-        guard settings.authorizationStatus == .notDetermined else {
+        if settings.authorizationStatus == .notDetermined {
+            // Alert + sound only: the design is alert-only (no badge count and
+            // no reply surface), so asking for less is the honest prompt.
+            let granted = try? await center.requestAuthorization(options: [.alert, .sound])
+            authorizationAuthorized = (granted ?? false)
+        } else {
             authorizationAuthorized = (settings.authorizationStatus == .authorized
                                        || settings.authorizationStatus == .provisional)
-            return
         }
-        let granted = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-        authorizationAuthorized = (granted ?? false)
+        PushRegistrar.shared.setAuthorization(authorizationAuthorized)
     }
 
     // MARK: - Notification deep-link routing (UNUserNotificationCenterDelegate)
@@ -149,6 +156,11 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         authorizationAuthorized = (settings.authorizationStatus == .authorized)
                                   || (settings.authorizationStatus == .provisional)
+        // A grant/revoke made in iOS Settings while the app is running is
+        // picked up here too; PushRegistrar owns the APNs registration side.
+        if PushRegistrar.shared.authorized != authorizationAuthorized {
+            PushRegistrar.shared.setAuthorization(authorizationAuthorized)
+        }
         guard authorizationAuthorized else { return }
 
         let prior = LastSeenStateStore.load()
@@ -255,10 +267,12 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         }
     }
 
-    // MARK: - Test button + authorization reflection
+    // MARK: - Local test + authorization reflection
 
-    /// Fire a sample alert for the Settings "Test notification" button.
-    /// Gated on authorization being granted; no-op (silently) otherwise.
+    /// Fire a sample LOCAL alert for the Settings "Send local test" button.
+    /// This is the pre-APNs path, kept so banner presentation can be checked
+    /// without asking the cluster to send anything. Gated on authorization
+    /// being granted; no-op (silently) otherwise.
     func testNotification() async {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         guard settings.authorizationStatus == .authorized
@@ -266,22 +280,8 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         await fire([OperatorAlert(
             kind: .needsReview,
             title: "HSCC test notification",
-            body: "If you can see this, alerts are working.",
+            body: "If you can see this, local alerts are working.",
             sound: true
         )])
-    }
-
-    /// Reflect current authorization so Settings can tell the truth about
-    /// whether notifications can fire. Refreshed by `requestAuthorization` and
-    /// every `refresh()`.
-    var isAuthorized: Bool {
-        authorizationAuthorized
-    }
-
-    /// Whether any notifications can currently be delivered — used by Settings
-    /// to show an honest banner when the user enabled toggles but denied (or
-    /// hasn't granted) authorization.
-    var canDeliver: Bool {
-        authorizationAuthorized
     }
 }
