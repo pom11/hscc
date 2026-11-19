@@ -37,10 +37,12 @@ additional `Widget` types in that directory.
 | Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`InlineClusterWidget`) | declared-and-renders (`CircularClusterWidget`) | declared-and-renders (`RectangularClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 
-Coverage note: all six iOS widgets also contain a `.systemExtraLarge` branch in
-their view switch, but none declares `.systemExtraLarge` in `supportedFamilies`
-on iOS. That family is therefore **absent** on iOS by configuration, not a
-missing renderer.
+Coverage note: every iOS widget contains a `.systemExtraLarge` branch in its view
+switch. **Cluster and Monitor declare `.systemExtraLarge` in `supportedFamilies`
+on iOS as well** (t_9e64d9d9): on iPad those two draw the `cluster monitor` host
+and serving tables side by side, so the family and the renderer are both live.
+The other four widgets still carry the branch without declaring the family, so
+for them XL remains **absent** on iOS by configuration, not a missing renderer.
 
 ## 2. Live Activities × surface
 
@@ -70,8 +72,8 @@ Monitor and CardsRunning.
 
 | Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
 |---|---|---|---|---|---|
-| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
-| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
+| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`ExtraLargeClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
+| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`ExtraLargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 | Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | absent | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
 | CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`CardsRunningLargeView` — XL reuses the large renderer) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
 | KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
@@ -146,7 +148,8 @@ body (documentation `192.0.2.x` addresses, generic node/model/workload names,
 |---|---|---|---|
 | systemSmall | `4/4 up` | `2 models · 12.3 t/s` | none (one number) |
 | systemMedium | `4/4 up` | `2 models · 2 jobs · 12.3 t/s` | 4 compact node rows |
-| systemLarge / XL | `4/4 up` | models · jobs · t/s | every node, + CPU/GPU temp and run/wait |
+| systemLarge | `4/4 up` | models · jobs · t/s | the CLI's host table, then its serving table (Node Port Model Run Wait KV% In Out + the per-model `total (n)` rows), each clipped to the plan with a `+N more` line |
+| systemExtraLarge | `4/4 up` | models · jobs · t/s | the same two tables side by side, plus one detail line per host — VRAM used/total, GPU clock, net ↓/↑ per second, uptime, fan %, load 1/5/15 |
 | accessoryInline | `4/4 up · 2 models · 12.3 t/s` | — | none |
 | accessoryCircular | `4/4` gauge | — | none |
 | accessoryRectangular | `4/4 up` | models · jobs · t/s | first node row |
@@ -156,6 +159,19 @@ models/throughput = `serving[].model` / `serving[].gen_tps`, jobs =
 `workloads[].workload_id` (and `status.workloads.count`), temperatures =
 `sample.cpu_temp_c` / `sample.gpu_temp_c`, daemon health =
 `daemon_running` / `daemon_uptime_seconds`.
+
+Who owns what on the two table surfaces (t_9e64d9d9): the **cells** are
+`ClusterMonitorViewModel`'s (parity with `hscc_daemon/cluster_live.py`, pinned by
+the goldens `cluster_monitor_cli_parity.py` generates), the **layout** — which
+columns fit, how many rows fit, what the `+N more` line says, and the six
+extra-large-only fields — is `Sources/Shared/ClusterMonitorTables.swift`, and the
+**painting** is `Sources/HSCCWidgets/ClusterMonitorTableViews.swift`, shared by
+the Cluster and Monitor widgets so the two tiles cannot drift. The layout file is
+Foundation-only so `model_decode_check.sh` can execute it against the committed
+captures; a rule that lived inside a view file could only ever be asserted in
+prose. The six detail fields are not CLI columns — `cluster_live.py` prints no
+VRAM, clock, net, uptime, fan or load anywhere — so they are the route's fields,
+formatted by the app and labelled as such, and they exist on extra-large only.
 
 ## 5b. Widget execution checks
 

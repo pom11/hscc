@@ -32,10 +32,12 @@ trap 'rm -rf "$TMP"' EXIT
 
 SUBJECT=Sources/HSCCWidgets/ClusterWidget.swift
 VIEWS=Sources/HSCCWidgets/ClusterWidgetViews.swift
+TABLE_VIEWS=Sources/HSCCWidgets/ClusterMonitorTableViews.swift
 METRICS=Sources/HSCCWidgets/ClusterWidgetMetrics.swift
 TALLY=Sources/Shared/ClusterNodeTally.swift
 STORE=Sources/Shared/SharedStore.swift
-for f in "$SUBJECT" "$VIEWS" "$METRICS" "$TALLY" "$STORE" \
+for f in "$SUBJECT" "$VIEWS" "$TABLE_VIEWS" "$METRICS" "$TALLY" "$STORE" \
+         Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
@@ -72,16 +74,37 @@ report "the cluster tile no longer reads autodown or kanban" \
 
 report "the invented .244/.246/.247/.248 topology is gone" \
   "$(grep -n '\.244\|\.246\|\.247\|\.248\|canonicalPairs\|TopologyPair' "$SUBJECT" "$VIEWS" "$METRICS")"
-report "the load average the CLI host table does not print is gone" \
-  "$(grep -n 'cpuLoad1m\|load1m' "$SUBJECT" "$VIEWS" "$METRICS")"
 
-for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+# Was: "the load average the CLI host table does not print is gone", over the
+# whole file set. t_9e64d9d9 gave extra-large a per-host detail block that
+# prints the route's load 1/5/15 — a field `cluster_live.py` never prints, but
+# one the route sends and the surface labels for what it is, on the single size
+# with room for it. So the ban keeps its teeth exactly where the tile mirrors
+# the CLI's own output, and points at the file that owns the XL-only fields
+# instead of pretending they do not exist.
+report "no load average anywhere the tile mirrors \`cluster monitor\` output" \
+  "$(grep -n 'cpuLoad1m\|load1m' "$SUBJECT" "$VIEWS" "$METRICS")"
+fail_when_absent "the extra-large-only fields are selected by the shared layout" \
+  "$TABLE_VIEWS" 'ClusterMonitorTableLayout.visibleDetails'
+fail_when_absent "…and not formatted by the view" \
+  "$TABLE_VIEWS" 'CLIMonitorHostRow'
+
+for fam in systemSmall systemMedium systemLarge systemExtraLarge \
+           accessoryInline accessoryCircular accessoryRectangular; do
   fail_when_absent "supportedFamilies offers .$fam" "$VIEWS" ".$fam"
 done
-for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+for fam in systemSmall systemMedium systemLarge systemExtraLarge \
+           accessoryInline accessoryCircular accessoryRectangular; do
   fail_when_absent "the view dispatches .$fam" "$VIEWS" "case .$fam:"
 done
 fail_when_absent "large has its own layout" "$VIEWS" 'struct LargeClusterWidget'
+fail_when_absent "extra-large has its own layout, not a re-used large one" \
+  "$VIEWS" 'struct ExtraLargeClusterWidget'
+fail_when_absent "the two biggest sizes draw the shared CLI tables" \
+  "$VIEWS" 'MonitorTablesBlock(tables:'
+fail_when_absent "…and ask the entry whether a table may be drawn at all" \
+  "$VIEWS" 'if let tables = entry.tables'
+fail_when_absent "the entry owns that gate" "$METRICS" 'var tables: ClusterMonitorTables?'
 
 fail_when_absent "every family renders the shared text model" "$VIEWS" 'entry.text(for:'
 fail_when_absent "small is one headline + detail" "$VIEWS" 'ClusterHeadline(entry: entry, size: 32)'

@@ -38,13 +38,28 @@ VIEWS=Sources/HSCCWidgets/MonitorViews.swift
 # block, not file-wide: a dispatch case proves the family is handled, not that
 # WidgetKit is allowed to offer it.
 family_list=$(sed -n '/\.supportedFamilies(\[/,/)\]/p' "$VIEWS")
-for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+for fam in systemSmall systemMedium systemLarge systemExtraLarge \
+           accessoryInline accessoryCircular accessoryRectangular; do
   if printf '%s\n' "$family_list" | grep -q "\.$fam"; then
     wok "supportedFamilies offers .$fam"
   else
     wbad "supportedFamilies does not offer .$fam"
   fi
 done
+
+# (1b) t_9e64d9d9: the two biggest surfaces draw the CLI's own tables, and the
+# decision "is there a table to draw at all" stays owned by the entry — the same
+# one-step-gate invariant this directory exists to enforce. A body that decided
+# it locally could paint a live-looking table on a paused or unconfigured tile.
+tables_blocks=$(grep -c 'MonitorTablesBlock(tables:' "$VIEWS")
+echo "monitor table blocks = $tables_blocks (want >= 2: large + extra-large)"
+[ "$tables_blocks" -ge 2 ] || wbad "a monitor surface stopped drawing the shared CLI tables"
+grep -q 'if let tables = entry.tables' "$VIEWS" \
+  || wbad "a monitor body decides the table gate itself instead of asking the entry"
+grep -q 'var tables: ClusterMonitorTables?' "$SUBJECT" \
+  || wbad "MonitorEntry no longer owns the table gate"
+grep -q 'struct ExtraLargeMonitorWidget' "$VIEWS" \
+  || wbad "extra-large has no layout of its own, so the XL-only fields are lost"
 
 # (2) Registration without dispatch is a family that never renders.
 for fam in systemSmall accessoryInline accessoryCircular accessoryRectangular; do
