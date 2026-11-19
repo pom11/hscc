@@ -55,6 +55,16 @@ additional `Widget` types in that directory.
 | Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`InlineClusterWidget`) | declared-and-renders (`CircularClusterWidget`) | declared-and-renders (`RectangularClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 | NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`NeedsMeCircular`) | declared-and-renders (`NeedsMeRectangular`) | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
+| ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | absent — gated home-screen-only | absent — gated home-screen-only | absent — gated home-screen-only | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch), `GraphWidgetViews.swift` (bodies) |
+
+The ClusterGraph row is the graph widget added by #426; its three accessory
+cells are `absent` by configuration **and by gate**, not by a missing renderer —
+`WidgetFamily.clusterGraphFamilies` (`GraphWidgetMetrics.swift`) is the positive
+list `[.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]` and
+`widget_view_dispatch` gates the surface as `home-screen-only`, which asserts the
+inverse (no `.accessory*` in `supportedFamilies`, no `shortGateLabel`). The
+bundle is therefore **eight** widgets: the six this section's preamble was
+first written against, plus Needs Me and the graph widget.
 
 Coverage note: every iOS widget contains a `.systemExtraLarge` branch in its view
 switch. **Cluster and Monitor declare `.systemExtraLarge` in `supportedFamilies`
@@ -85,9 +95,10 @@ Sources: `ios-app/Sources/HSCCLiveActivityMonitor/{MonitorLiveActivity,CardsRunn
 ## 3. macOS desktop widgets × family
 
 The macOS extension (`HSCCMacWidgets` in `macos-app/project.yml`) compiles the
-six iOS widget files by path. On macOS the accessory families are unavailable,
-so they are not part of this table. `systemExtraLarge` is declared by Cluster,
-Monitor and CardsRunning.
+eight iOS widget files by path — the seven this section was first written against
+plus the graph widget's files, added by #426 and #442. On macOS the accessory
+families are unavailable, so they are not part of this table. `systemExtraLarge`
+is declared by Cluster, Monitor, Kanban Monitor, Cards Running and ClusterGraph.
 
 | Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
 |---|---|---|---|---|---|
@@ -98,9 +109,21 @@ Monitor and CardsRunning.
 | KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
 | NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | absent | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
+| ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemExtraLarge`) | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch + macOS `supportedFamilies` arm), `GraphWidgetViews.swift` (bodies) |
+
+The ClusterGraph row is compiled in by path (t_be4e1a48): `macos-app/project.yml`
+lists the graph widget's files in `HSCCMacWidgets.sources`, and the four desktop
+families come from the explicit `[.systemSmall, .systemMedium, .systemLarge,
+.systemExtraLarge]` arm of the widget's `#else` (macOS) branch — the one line
+that card added on the macOS side. `systemExtraLarge` is not a stretched large:
+the chart width is measured (`ClusterGraphCanvas`), so the wider tile gets a
+wider pixel reduction and more axis labels. The same `ClusterGraphMarks` file is
+*also* compiled into the `HSCCMac` **app** target by path, which is what lets the
+menu bar dropdown's GRAPHS section (§5d) reuse the widget's charts instead of
+forking them.
 
 The two remaining `absent` XL cells (Projects and Board Status) are the
-documented macOS family split, not a defect: all seven widgets ship
+documented macOS family split, not a defect: all eight widgets ship
 small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
 Running (CARD B2) also ship `systemExtraLarge`. Needs Me is deliberately
 small/medium/large on macOS: its data is a three-to-eight-row list, so an XL
@@ -253,6 +276,83 @@ Levels `critical`/`action` use the operator's accent (`#FF5722` by default) and
 names the reason and age; a failed read names the reason. The macOS menu bar
 dropdown renders the same projection in a "Needs you" section at the top,
 hidden when empty.
+## 5d. Cluster Graph — metric × family × window × resolution
+
+The graph widget's surfaces read exactly one route: `GET /v1/cluster/history`
+(DECISION-t_447cc7fc). The retired `/v1/metrics/history` is read by none of them;
+`MetricsHistoryTrend.swift` still reads it and is a separate card.
+
+This section was measured at the tip of #442 (`wt/t_be4e1a48-c`, which carried
+#426's four commits underneath it) before those two PRs merged; the line numbers
+are that tip's and may have moved since. Where the two parent cards' prose and
+the code disagree, the code is what is recorded here.
+
+### The tiers the windows land on
+
+`hscc-api/routes_cluster.py:_history_windows` is the authority; the constants are
+`hscc_daemon/metrics_history.py`. A window is not just a span — it picks the
+resolution and the columns that exist, so a row of a table that does not say
+which tier it drew is not a claim about the same thing as a row that does.
+
+| `window=` | tier | served `resolution_s` | span | the three peak columns (`cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max`) |
+|---|---|---|---|---|
+| `15m` | 0 | 2 s | `TIER0_WINDOW_S` = 900 s in memory | **400** — `_parse_history_metrics` refuses them; a peak exists only after a roll-up |
+| `1h` | 1 | 60 s | 1 h drawn from the 24 h tier-1 store | available |
+| `6h` | 1 | 60 s | 6 h drawn from the 24 h tier-1 store | available |
+| `24h` | 1 | 60 s | `TIER1_WINDOW_S` = 86400 s | available |
+| `7d` | 2 | 300 s | `TIER2_WINDOW_S` = 604800 s | available |
+
+The route states the tier it served for every window (`tier`, `resolution_s`,
+`resolution`, `tier_summary`, `max_fields`), and its own default when a client
+sends neither `window` nor `tier` is `1h`. **No graph surface relies on that
+default** — each sends `window=` explicitly and prints the `resolution_s` that
+came back rather than deriving a step from its own request, so a 7-day chart
+cannot be read as a 2-second one.
+
+### Family × window × metrics × panel
+
+Metrics are named by their **wire key** (the `metrics=` value the route takes),
+not by a UI label, so a row here can be checked against a capture. "unset" means
+the operator left the metric-set picker alone.
+
+| Surface | Family | Layout / panel | Default window | Windows offered | Resolution stated by | Metrics when set unset | Metrics when a set is picked | Renderer |
+|---|---|---|---|---|---|---|---|---|
+| iOS Home Screen widget | `systemSmall` | `.sparkline` — one chart, whole tile; current at 22 pt, `min`/`max` captions, **no x axis** | `15m` (tier 0, 2 s) | 15m/1h/6h/24h/7d | `entry.resolutionLine` | **one** metric = the set's lead: `gpu_temp_c` | the chosen set's lead: utilisation `gpu_util_pct`, power `gpu_power_w`, memory `mem_used_pct`, serving `gen_tps` | `GraphWidgetViews.swift:236` (`ClusterGraphSmallWidget`) |
+| iOS Home Screen widget | `systemMedium` | `.nodeOverlay` — one mini **per unit group** (°C mini, % mini), each line's current value in a trailing column; x axis shown | `15m` (tier 0, 2 s) | 15m/1h/6h/24h/7d | `entry.footerLine` | `cpu_temp_c`, `gpu_temp_c`, `gpu_util_pct` | every metric in the chosen group, tier-filtered | `GraphWidgetViews.swift:302` (`ClusterGraphMediumWidget`) |
+| iOS Home Screen widget | `systemLarge` | `.smallMultiples` — one panel **per node**, panel = a row of unit-grouped minis (`miniHeight` 46), legend under the panels | `15m` (tier 0, 2 s) | 15m/1h/6h/24h/7d | `entry.footerLine` | `cpu_temp_c`, `gpu_temp_c`, `gpu_util_pct`, `cpu_usage_pct`, `gpu_power_w`, `mem_used_pct`, `kv`, `gen_tps` | card order ∩ set, then the set's remaining members | `GraphWidgetViews.swift:370` (`ClusterGraphPanelWidget`, `family: .systemLarge`) |
+| iOS Home Screen widget | `systemExtraLarge` | as `systemLarge`; the wider tile gets a wider pixel reduction and more axis labels (width measured by `ClusterGraphCanvas`), not a stretched large | `15m` (tier 0, 2 s) | 15m/1h/6h/24h/7d | `entry.footerLine` | as `systemLarge` | as `systemLarge` | `GraphWidgetViews.swift:370`, dispatched by name at `GraphWidget.swift:329` |
+| macOS desktop tile | small / medium / large / extraLarge | the same four renderers, compiled in by path; XL declared in the `#else` (macOS) `supportedFamilies` arm | `15m` (same `ClusterGraphEntry`) | 15m/1h/6h/24h/7d | same lines as iOS | same | same | `GraphWidgetViews.swift` via `macos-app/project.yml`; families at `GraphWidget.swift:337` |
+| macOS menu-bar dropdown, **GRAPHS** section | not a WidgetKit family — one section of the pinned 360 pt panel | one row per node, **two minis side by side** (temperature, percent), `miniWidth` = (360 − 2 × lg − gutter)/2, `miniHeight` 62; caption `label current·peak` per line | **`15m` fixed** (`DashboardGraphPlan.window`, `DashboardMonitor.swift:59`) — not user-selectable | none — no picker exists on this surface | the section header prints `\(history.window) · every \(resolution) · N nodes` from the payload's own fields | `cpu_temp_c`, `gpu_temp_c`, `gpu_util_pct`, `cpu_util_pct` (`DashboardMonitor.swift:64`) — fixed, no metric picker | not configurable: power, memory and serving metrics cannot be drawn here at all | `DashboardGraphsView.swift:63` (`graphsSection`), marks reused from the widget via `- path:` |
+
+Three measurements the parent cards' prose did not state:
+
+- **`systemExtraLarge` is declared on iOS as well as macOS.** Both arms come from
+  the same positive list (`GraphWidgetMetrics.swift:49`), so the fourth family is
+  live on the iPhone/iPad Home Screen, not only on the desktop.
+- **small and medium draw a fleet envelope, not "one node", when the node picker
+  is left unset.** `GraphWidgetEntry.swift:298`/`:337` route the unset case
+  through `ClusterGraphReading.envelope` (`ClusterGraphReading.swift:684`), which
+  folds every node's series into ONE line whose per-column min/max is the whole
+  fleet's, labelled `all nodes (N node(s))`, and returns nil (rendered as "nothing
+  to draw", never a flat zero) when the series disagree about tier. The parent
+  card's "medium = one node's temps plus GPU%" is what the code does **only when
+  a node is picked** (`GraphWidgetEntry.swift:306`, `:322`).
+- **the panel count is uncapped by design** (`panelLimit` is `nil`,
+  `ClusterGraphReading.swift:168`) on every small-multiples surface. The macOS
+  **dropdown** is the one place that caps — `DashboardGraphLayout.nodesShown = 4`
+  (`DashboardGraphsView.swift:52`) — and it says so in the section rather than
+  truncating silently.
+
+### The route's vocabulary vs what any surface can draw
+
+The requestable vocabulary is the recorder's own tuples (`HOST_KEYS` 14 + the 3
+peak columns + `ENGINE_KEYS` 5 = **22 wire keys**); the route 400s anything else.
+The client enum `ClusterHistoryMetric`
+(`ios-app/Sources/Shared/ClusterHistorySeries.swift`) carries **15** of them,
+grouped into the picker's five sets — temps (4), utilisation (2), power (2),
+memory (2), serving (5). The seven missing keys are gap rows; they are in §8,
+because "the route exposes it and nothing shows it" is the only kind of row this
+matrix cannot be read without.
 
 ## 6. Shipped feature checklist
 
@@ -295,10 +395,57 @@ title/board/worker/age and `run_s` is the age the CLI draws.
 
 ## 8. Gaps
 
-No GAP rows were found in the widget-family or Live Activity matrices. Every
-declared family has a dedicated non-placeholder renderer, every Live Activity
-type has all four surfaces (Lock Screen, compact, expanded, minimal), and both
-platform build checks are clean.
+No GAP rows were found in the widget-family or Live Activity matrices of §1–§3:
+every declared family has a dedicated non-placeholder renderer, every Live
+Activity type has all four surfaces (Lock Screen, compact, expanded, minimal),
+and both platform build checks are clean.
+
+The Cluster Graph matrix (§5d) has gaps, and they are the point of that section.
+
+**GAP-1 … GAP-7 — the route stores it, no surface shows it.** Each row below is
+a `hosts[]` column the recorder keeps and `GET /v1/cluster/history` will happily
+serve (all seven are in `HOST_KEYS`, so they are requestable at **every** tier,
+`15m` included), but it is **not in `ClusterHistoryMetric` at all** — which means
+it is not merely unpainted, it is unpickable: no family, no metric set, no
+configuration reaches it. Adding one is a new enum case plus its `group`,
+`seriesKind` and `unit`, not a view change.
+
+| GAP | Wire key | Unit | Series | Drawn by | Nearest surface that could carry it |
+|---|---|---|---|---|---|
+| GAP-1 | `swap_used_mb` | MB | `hosts[]` | nothing | `systemLarge`/XL panel — needs a new unit group (MB has no axis of its own yet; only `gpu_mem_used_mb` is in MB and it reaches the panel solely via the Memory set) |
+| GAP-2 | `swap_total_mb` | MB | `hosts[]` | nothing | as GAP-1; meaningful only paired with GAP-1 |
+| GAP-3 | `swap_used_pct` | % | `hosts[]` | nothing | the Memory set, which currently holds `mem_used_pct` + `gpu_mem_used_mb` only — a percent would land on the existing % axis |
+| GAP-4 | `gpu_clock_mhz` | MHz | `hosts[]` | nothing | needs a MHz axis (`ClusterGraphUnit` has temperature/percent/power/throughput/count, no frequency) |
+| GAP-5 | `net_recv_bytes_s` | B/s | `hosts[]` | nothing | XL desktop tile only in practice — a per-node net series is a second row per panel; needs a bytes/s axis |
+| GAP-6 | `net_send_bytes_s` | B/s | `hosts[]` | nothing | as GAP-5, and it must not share GAP-5's axis without a direction marker |
+| GAP-7 | `sparkrun_jobs` | count | `hosts[]` | nothing | the `count` unit already exists (`run`/`wait` use it), so this is the cheapest of the seven |
+
+**Coverage gaps that are reachability, not absence.** These metrics ARE in the
+client enum, so they can be painted — but no default configuration and, for the
+dropdown, no configuration at all reaches them:
+
+- **No peak is ever drawn at any surface's default window.** The three `*_max`
+  columns are refused with a 400 at tier 0, and `15m` — tier 0 — is the default
+  of all four iOS families, the desktop tile and the fixed dropdown window. So a
+  widget dropped on the Home Screen with nothing configured has no peak series;
+  peaks appear only on the iOS/desktop surfaces once the operator picks
+  Temperatures or Power **and** a window of `1h` or wider. Note the distinction:
+  the `min`/`max` captions on `systemSmall` are computed by the downsampler from
+  the *average* column, and are not the route's `*_max` series.
+- **`prompt_tps`, `run`, `wait`** are Serving-set members, so they exist only on
+  the iOS/desktop surfaces with the set explicitly narrowed to Serving — they are
+  in no default panel and never in the menu bar.
+- **`gpu_mem_used_mb`** is the one memory metric absent from the default large/XL
+  panel (which carries `mem_used_pct` as its only memory row), so VRAM needs an
+  explicit Memory pick.
+- **The macOS menu bar's GRAPHS section cannot show power, memory or serving
+  metrics at all** — `DashboardGraphPlan.metrics` is a fixed four (`cpu_temp_c`,
+  `gpu_temp_c`, `gpu_util_pct`, `cpu_util_pct`) with no picker — and it caps at 4
+  nodes per refresh, saying so in the section. The desktop extra-large tile is the
+  surface for a whole fleet (uncapped panel count).
+- **No accessory family carries a chart.** Deliberate and gated
+  (`home-screen-only`), so a Lock Screen complication of this data does not exist
+  on any size; §1 records the three accessory cells as `absent`.
 
 Non-gap coverage notes:
 
