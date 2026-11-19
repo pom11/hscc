@@ -44,6 +44,43 @@ struct MonitorActivityAttributes: ActivityAttributes {
         /// When the app last pushed a successful update — drives the staleDate
         /// and the honest age shown after a force-quit.
         public var updatedAt: Date
+
+        // MARK: Cluster metrics (t_1685f884)
+        //
+        // The real `hscc cluster monitor` tables, projected app-side by
+        // `MonitorSurfaceReading.payload` from the same read that set the fields
+        // above. Every one is optional and nil-defaulted for two reasons: an
+        // activity that an OLDER app pushed survives an app update (the stored
+        // state must still decode, and each surface falls back to what it drew
+        // before), and a section the operator switched off in Settings pushes
+        // nothing rather than an empty table. The defaults are on the fields
+        // because `ContentState` has no custom init — the synthesized memberwise
+        // one keeps every old call site compiling, and none of these keys is
+        // read back out of an `AppGroup` blob.
+
+        /// The host table, one entry per host, CLI cells verbatim. Nil when the
+        /// `nodes` section is off or the read never answered.
+        public var hostRows: [MonitorHostMetric]? = nil
+        /// Hosts the push cap left out, so a surface can say `+N more` instead
+        /// of quietly drawing a short table.
+        public var hostRowsDropped: Int? = nil
+        /// The serving table's per-model `total (n)` rows.
+        public var servingTotals: [MonitorServingTotalMetric]? = nil
+        /// `total (n)` rows the push cap left out, so the `+N more` under a
+        /// totals list is the truth about the fleet rather than about the list
+        /// this region happened to be handed.
+        public var servingTotalsDropped: Int? = nil
+        /// The serving table's aggregate Run/Wait. nil = never told, which is
+        /// NOT zero.
+        public var servingRunning: Int? = nil
+        public var servingWaiting: Int? = nil
+        /// The one metric the island's compact and minimal surfaces lead with.
+        public var primary: MonitorPrimaryMetric? = nil
+        /// The metric beside it in compact (a queue, a run count, or the tally).
+        public var secondary: MonitorPrimaryMetric? = nil
+        /// The serving table's queue verdict (the CLI's own `_load_style`), for
+        /// the aggregate run/wait line. nil = the table never answered.
+        public var queueLevel: ClusterMetricLevel? = nil
     }
 
     /// A token identifying this monitor activity so it can be updated/ended.

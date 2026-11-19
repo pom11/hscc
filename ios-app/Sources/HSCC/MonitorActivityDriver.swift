@@ -23,9 +23,14 @@ import BackgroundTasks
 // Uses the CLASS-based ActivityKit API (`Activity.request`, then instance
 // `update` / `end`) — exactly the `LiveActivityManager` pattern.
 //
-// The monitor decode structs (`ClusterMonitorResponse` / `NodeSample`) already
-// live in Models.swift (app target) and are reused here verbatim; only the NEW
-// daemon-host wire structs are declared below.
+// The monitor decode struct is the SHARED `MonitorResponse` (`SharedModels.swift`)
+// — the same shape the widget fetches and the same one
+// `ClusterMonitorViewModel`/`ClusterNodeTally` project — so the numbers the
+// activity pushes and the numbers the widget draws come from ONE decode of ONE
+// wire shape. (The app's older `ClusterMonitorResponse`/`NodeSample` pair in
+// `Models.swift` stays for the decode gate; nothing renders from it any more —
+// see the t_1685f884 notes.) The only NEW wire structs this file declares are
+// the daemon-host ones below.
 // ---------------------------------------------------------------------------
 
 // MARK: - Wire decoders (pinned against the LIVE shapes)
@@ -68,30 +73,42 @@ enum MonitorContent {
     }
 
     /// Build the ContentState from the decoded monitor + daemon-host responses
-    /// plus the section set the surface should render. Node numeric accessors
-    /// come from `NodeSample` (already-the-app's model — nil on empty/unreadable,
-    /// so an unreadable metric renders honestly as a dash, never a made-up value).
-    static func make(monitor: ClusterMonitorResponse?,
+    /// plus the section set the surface should render.
+    ///
+    /// Two halves, on purpose:
+    ///
+    ///   * `nodes` / `host` are the LONG-STANDING reduced metrics the surfaces
+    ///     drew before t_1685f884. They stay exactly as they were — an activity
+    ///     an older app pushed still renders, and a surface with nothing new to
+    ///     draw has something honest to draw.
+    ///   * the t_1685f884 fields (`hostRows`, `servingTotals`, the run/wait
+    ///     totals, `primary`/`secondary`) come from ONE call to
+    ///     `MonitorSurfaceReading.payload`, which runs the `hscc cluster
+    ///     monitor` view-model over the same bytes. The driver decides nothing
+    ///     about cells, thresholds or which metric leads — that file does, and
+    ///     `model_decode_check` executes it.
+    ///
+    /// The `nodes` section gates the whole cluster table half (host rows,
+    /// serving rows, and therefore the glance metrics derived from them): an
+    /// operator who switched node metrics off does not get them back through
+    /// the island. `host` gates only the daemon-host row.
+    static func make(monitor: MonitorResponse?,
                      daemonHost: DaemonHostResponse?,
                      state: String,
                      updatedAt: Date,
                      sections: Set<String>) -> MonitorActivityAttributes.ContentState {
+        let showsNodes = sections.contains("nodes")
+
         // Per-node metrics (section "nodes"), plus the serving table's model
         // and run/wait for that node. The same short-tail rule matches a host
-        // row to its serving row, so the two tables cannot disagree.
+        // row to its serving row, so the two tables cannot disagree — and the
+        // rule has ONE owner (`MonitorSurfaceReading.servingRow`), which the
+        // host table below uses for the same match.
         var nodes: [NodeMetric] = []
-        if sections.contains("nodes") {
+        if showsNodes {
             let serving = monitor?.serving
-            for node in monitor?.hosts ?? [] {
-                let tail = MonitorNode.shortTail(node.host)
-                var row: ServingRow?
-                for candidate in serving ?? [] where !candidate.isDown {
-                    guard let address = candidate.node else { continue }
-                    if MonitorNode.shortTail(address) == tail {
-                        row = candidate
-                        break
-                    }
-                }
+            for node in monitor?.nodes ?? [] {
+                let row = MonitorSurfaceReading.servingRow(forHost: node.host, in: serving)
                 nodes.append(NodeMetric(label: shortLabel(for: node.host),
                                         cpuPct: node.sample?.cpuUsagePct,
                                         memPct: node.sample?.memUsedPct,
@@ -118,33 +135,49 @@ enum MonitorContent {
                               daemonUptimeSeconds: h.daemon_uptime_seconds)
         }
 
-        // The app's monitor struct and the widget's Shared one carry the same
-        // hosts/error shape but are separate types; apply the SAME predicate
-        // (`error == nil`) rather than inventing a second notion of "up".
-        let listed = monitor?.hosts
-        let nodesUp = listed.map { rows in rows.filter { $0.error == nil }.count }
-        let nodesTotal = listed.map { $0.count }
+        // The t_1685f884 cluster-metric half: computed ONCE, then published
+        // field by field. That way the `nodes` section can hide the tables
+        // without a second projection path, and the "did this host answer" rule
+        // has one owner for the whole activity (`MonitorNode.isUp`, inside
+        // `MonitorSurfaceReading.payload`) instead of one here and one there.
+        let surface = MonitorSurfaceReading.payload(nodes: monitor?.nodes,
+                                                    serving: monitor?.serving)
         let serving = ServingSummary(rows: monitor?.serving)
+
         return MonitorActivityAttributes.ContentState(state: state,
                                                       nodes: nodes,
                                                       host: host,
-                                                      nodesUp: nodesUp,
-                                                      nodesTotal: nodesTotal,
+                                                      nodesUp: surface.nodesUp,
+                                                      nodesTotal: surface.nodesTotal,
                                                       models: serving.models,
                                                       genTps: serving.genTps,
-                                                      updatedAt: updatedAt)
+                                                      updatedAt: updatedAt,
+                                                      hostRows: showsNodes ? surface.hostRows : nil,
+                                                      hostRowsDropped: showsNodes ? surface.hostRowsDropped : nil,
+                                                      servingTotals: showsNodes ? surface.servingTotals : nil,
+                                                      servingTotalsDropped: showsNodes ? surface.servingTotalsDropped : nil,
+                                                      servingRunning: showsNodes ? surface.servingRunning : nil,
+                                                      servingWaiting: showsNodes ? surface.servingWaiting : nil,
+                                                      primary: showsNodes ? surface.primary : nil,
+                                                      secondary: showsNodes ? surface.secondary : nil,
+                                                      queueLevel: showsNodes ? surface.queueLevel : nil)
     }
 }
 
 // MARK: - Typed client endpoints for the monitor activity
 
 extension HSCCClient {
-    /// GET /v1/cluster/monitor, decoded as the STRONG `ClusterMonitorResponse`
-    /// (per-node CPU/RAM/GPU) — distinct from the generic `clusterMonitor()`
-    /// (which returns the untyped `ReadResponse` used by FleetView, and cannot
-    /// expose typed node metrics).
-    func monitorSnapshot() async throws -> ClusterMonitorResponse {
-        try await get("/v1/cluster/monitor", as: ClusterMonitorResponse.self)
+    /// GET /v1/cluster/monitor, decoded as the SHARED `MonitorResponse` — the
+    /// type the widget fetches and the type `ClusterMonitorViewModel` projects
+    /// the CLI's tables from, which is the whole point: the Live Activity's
+    /// host table is built by the same view-model that is held against goldens
+    /// generated from `cluster_live.py`, off the same decode the widget uses.
+    /// (The app's own `ClusterMonitorResponse` in `Models.swift` is a parallel
+    /// shape of this route that renders nothing today; retiring it is a card of
+    /// its own, because its fixtures and its `model_decode_check` block leave
+    /// with it.)
+    func monitorSnapshot() async throws -> MonitorResponse {
+        try await get("/v1/cluster/monitor", as: MonitorResponse.self)
     }
 
     /// GET /v1/daemon/host — the daemon host machine's own metrics.
@@ -315,9 +348,9 @@ final class MonitorActivityDriver {
         // Honest headline state from what the poll actually learned:
         // the API answered + the cluster monitor returned host rows -> serving;
         // otherwise (nothing decodable, or the route degraded to {speak}) ->
-        // unreachable. The app's `ClusterMonitorResponse` carries no `success`
-        // field (it only has json/speak), so presence of hosts is the signal.
-        let hasNodes = !(monitor?.hosts.isEmpty ?? true)
+        // unreachable. `MonitorResponse` carries no `success` field (it only has
+        // json/speak), so presence of hosts is the signal.
+        let hasNodes = !(monitor?.nodes.isEmpty ?? true)
         let hasHost = daemonHost != nil
         let state: String = (hasNodes || hasHost) ? "serving" : "unreachable"
 

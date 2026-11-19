@@ -170,6 +170,9 @@ enum CLIMonitorFormat {
 ///   * GPU power: ≥ 80% / ≥ 95% of `gpu_power_limit_w`; no limit read = no verdict
 ///   * RAM used:  warn ≥ 85, critical ≥ 95 (%)
 ///   * CPU used:  warn ≥ 85, critical ≥ 95 (%)
+///   * GPU used:  warn ≥ 85, critical ≥ 95 (%) — added by t_1685f884 for the
+///     Live Activity's glance metric, on the same util band as the two above:
+///     one "how busy is this part" rule, not three.
 ///
 /// Unreadable (`nil`) is `.unknown`, never `.dim`: `.dim` is the CLI's word
 /// for "measured, and idle", and painting an absent metric like an idle one is
@@ -242,6 +245,11 @@ struct CLIMonitorHostRow: Equatable, Identifiable {
     var gpuTempLevel: ClusterMetricLevel { .level(gpuTempC, warn: 80, critical: 90) }
     var memLevel: ClusterMetricLevel { .level(memUsedPct, warn: 85, critical: 95) }
     var cpuLevel: ClusterMetricLevel { .level(cpuUsagePct, warn: 85, critical: 95) }
+    /// GPU utilization, on the same util band as CPU and RAM above (t_1685f884:
+    /// the Live Activity's glance metric needed a verdict for it, and a second
+    /// band invented in a surface is how one card ends up calling 75% hot and
+    /// another calling it fine).
+    var gpuUtilLevel: ClusterMetricLevel { .level(gpuUtilPct, warn: 85, critical: 95) }
 
     /// GPU power only has a verdict against the part's own limit; the CLI
     /// prints the wattage and nothing else, so no limit read is no verdict.
