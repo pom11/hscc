@@ -44,6 +44,78 @@ struct BoardTotals {
     }
 }
 
+/// The graphs section's ONE history read (t_be4e1a48). The window default is
+/// the operator's amendment: the menu bar refreshes faster than a home-screen
+/// widget, so the dropdown asks for `15m` — the recorder's 2-second tier —
+/// and SHOWS the resolution the route reports back, because the same rows
+/// mean different charts at 2 s, 1 m and 5 m. The route is the canonical
+/// `GET /v1/cluster/history` (DECISION-t_447cc7fc); the retired
+/// `/v1/metrics/history` is never read from this app.
+enum DashboardGraphPlan {
+    static let window = "15m"
+
+    /// Per-node temperature and utilisation — the card's ask, in ONE request.
+    /// None of these is a `*_max` column, so all four stay requestable at
+    /// every tier, `15m` included (`ClusterHistoryMetric.requestable(atTier:)`).
+    static let metrics: [ClusterHistoryMetric] = [.cpuTempC, .gpuTempC, .gpuUtilPct, .cpuUtilPct]
+}
+
+/// One node's drawn line: the four host series the plan asked for, all from
+/// ONE response (one tier, one resolution). A nil series is the recorder's own
+/// "this node never reported it" — `—` at the view, never 0.
+struct DashboardGraphRow: Identifiable {
+    let host: String
+    let cpuTempC: ClusterHistorySeries?
+    let gpuTempC: ClusterHistorySeries?
+    let gpuUtilPct: ClusterHistorySeries?
+    let cpuUtilPct: ClusterHistorySeries?
+
+    var id: String { host }
+}
+
+/// The graphs section's view of one `GET /v1/cluster/history` answer. Series
+/// building goes through the shared chart layer (`ClusterHistorySeriesSet.make`)
+/// — this file derives no series, no min/max and no tier of its own; it keeps
+/// the route's stated window/resolution next to the rows so the dropdown can
+/// show what the points mean.
+struct DashboardHistory {
+    let window: String
+    let tier: Int
+    let resolution: String
+    let resolutionS: Int
+    let rows: [DashboardGraphRow]
+    /// The payload's own explanation for an empty answer (`note`/`error`),
+    /// carried so the view renders a gap with a reason: `store.tier0_resident`
+    /// false at `15m` means the 2 s ring lives in the daemon process, which is
+    /// not the same claim as "the fleet was quiet".
+    let reason: String?
+    let tier0Resident: Bool?
+
+    init(response: ClusterHistoryResponse) {
+        window = response.window
+        tier = response.tier
+        resolution = response.resolution
+        resolutionS = response.resolution_s
+        reason = response.note ?? response.error
+        tier0Resident = response.tier0Resident
+
+        var lines: [String: [ClusterHistoryMetric: ClusterHistorySeries]] = [:]
+        for metric in DashboardGraphPlan.metrics {
+            for line in ClusterHistorySeriesSet.make(response, for: metric).series {
+                lines[line.identity, default: [:]][metric] = line
+            }
+        }
+        rows = lines.keys.sorted().map { host in
+            let byMetric = lines[host] ?? [:]
+            return DashboardGraphRow(host: host,
+                                     cpuTempC: byMetric[.cpuTempC],
+                                     gpuTempC: byMetric[.gpuTempC],
+                                     gpuUtilPct: byMetric[.gpuUtilPct],
+                                     cpuUtilPct: byMetric[.cpuUtilPct])
+        }
+    }
+}
+
 /// Everything the menu bar label and the dropdown draw from one refresh.
 struct DashboardSnapshot {
     var configured = true
@@ -61,6 +133,9 @@ struct DashboardSnapshot {
     /// Why the alert read failed, already reduced to the shared client's
     /// address-free vocabulary. nil on a successful read.
     var needsMeFailure: String?
+    /// Per-node history for the graphs section — the ONE `/v1/cluster/history`
+    /// read this app makes, projected through the shared chart layer.
+    var history: DashboardHistory?
     var lastRefresh: Date?
     /// The first honest failure from this refresh, already reduced to the
     /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
@@ -213,6 +288,20 @@ final class DashboardMonitor: ObservableObject {
         case .failure(let failure):
             next.statusPanel = nil
             next.statusError = failure.shortLabel
+            failures.append(failure.shortLabel)
+        }
+
+        // The graphs section's series: ONE request for all nodes and all four
+        // planned metrics (canonical /v1/cluster/history — DECISION-t_447cc7fc),
+        // projected by the shared layer. An empty answer is kept, reason and
+        // all; a failed read keeps the last good history rather than claiming
+        // zero, like every other stat in this loop.
+        switch await client.clusterHistory(window: DashboardGraphPlan.window,
+                                           metrics: DashboardGraphPlan.metrics.map(\.rawValue)) {
+        case .success(let response):
+            next.history = DashboardHistory(response: response)
+            anySuccess = true
+        case .failure(let failure):
             failures.append(failure.shortLabel)
         }
 
