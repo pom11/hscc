@@ -26,6 +26,11 @@ struct HSCCClient {
     private let port: Int
     private let token: String
     private let session: URLSession
+    /// Background push registration talks to EVERY saved cluster, not just the
+    /// active one; its failures must not repaint the connection banner with a
+    /// non-active endpoint's state. Foreground/ordinary clients keep the
+    /// default `true`.
+    private let monitorsConnection: Bool
 
     /// The session a caller gets when it passes none: always `.shared`.
     /// (The debug fixture session that a capture launch used to swap in is
@@ -37,19 +42,23 @@ struct HSCCClient {
     /// Build a client for one saved cluster. `fallbacks` are tried, in order,
     /// only when a transport attempt fails (see `HostFailover`).
     init(host: String, fallbacks: [String] = [], port: Int, token: String,
-         session: URLSession = HSCCClient.defaultSession()) {
+         session: URLSession = HSCCClient.defaultSession(),
+         monitorsConnection: Bool = true) {
         self.hosts = HostFailover.orderedHosts(primary: host, fallbacks: fallbacks)
         self.port = port
         self.token = token
         self.session = session
+        self.monitorsConnection = monitorsConnection
     }
 
     /// Build from the shared settings read, so app/extension clients share the
     /// exact same address list and the same failover order.
     init(config: APIConfig,
-         session: URLSession = HSCCClient.defaultSession()) {
+         session: URLSession = HSCCClient.defaultSession(),
+         monitorsConnection: Bool = true) {
         self.init(host: config.host, fallbacks: config.fallbackHosts,
-                  port: config.port, token: config.token, session: session)
+                  port: config.port, token: config.token, session: session,
+                  monitorsConnection: monitorsConnection)
     }
 
     // MARK: - URL building (host + port, no hardcoded tailnet address)
@@ -141,11 +150,15 @@ struct HSCCClient {
         }
         switch outcome {
         case .success(let pair, let host):
-            ConnectionMonitor.shared.requestSucceeded(host: host)
+            if monitorsConnection {
+                ConnectionMonitor.shared.requestSucceeded(host: host)
+            }
             return (pair.0, pair.1, host)
         case .failed(let lastError):
             // Every address failed the TRANSPORT: one honest unreachable alarm.
-            ConnectionMonitor.shared.requestFailed()
+            if monitorsConnection {
+                ConnectionMonitor.shared.requestFailed()
+            }
             if let error = lastError as? HSCCError, error == .invalidURL {
                 throw error
             }
@@ -319,6 +332,30 @@ struct HSCCClient {
     /// GET /v1/ping — the API's own liveness probe. Used by "Test connection".
     func ping() async throws -> PingResponse {
         try await get("/v1/ping", as: PingResponse.self)
+    }
+
+    // MARK: - Push devices (card N3)
+
+    /// POST /v1/devices — register or refresh this device's APNs token on one
+    /// cluster. The server treats it as an idempotent refresh per (platform,
+    /// token), so the app can call it on every launch/foreground. The response
+    /// carries the derived device id, never the token.
+    func registerPushDevice(token: String,
+                            bundleID: String,
+                            environment: String) async throws -> PushDeviceRegistration {
+        try await post("/v1/devices", body: [
+            "platform": "ios",
+            "token": token,
+            "bundle_id": bundleID,
+            "env": environment,
+        ], as: PushDeviceRegistration.self)
+    }
+
+    /// POST /v1/devices/test — the same APNs test push `hscc notify test`
+    /// drives. A 200 may still report `sent: false` (no APNs key, no devices,
+    /// or every delivery failed); the caller surfaces `speak` verbatim.
+    func sendTestPush() async throws -> PushTestResult {
+        try await post("/v1/devices/test", body: [:], as: PushTestResult.self)
     }
 
     /// GET /v1/cluster/status — workloads + idle/total hosts (B2).

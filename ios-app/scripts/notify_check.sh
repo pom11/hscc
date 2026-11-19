@@ -13,8 +13,9 @@
 # The engine is pure Foundation (decision logic + Codable state), so a macOS
 # CLI is the faithful runner — there is no iOS runtime on this host and none is
 # claimed. `NotificationCoordinator.swift` / `NotificationsAppDelegate.swift`
-# are excluded because they import iOS-only frameworks (UserNotifications,
-# UIKit); their seams are verified by the app build, not this CLI.
+# / `PushRegistrar.swift` are excluded because they import iOS-only frameworks
+# (UserNotifications, UIKit); their seams are verified by the app build, not
+# this CLI.
 #
 # Usage: scripts/notify_check.sh
 set -uo pipefail

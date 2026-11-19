@@ -70,6 +70,11 @@ struct HSCCApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                // APNs (card N3): re-read the permission state on every
+                // foreground entry, then re-register the token if one exists.
+                // This is how a grant/revoke made in iOS Settings, or a saved
+                // cluster added since launch, reaches the push roster.
+                Task { await PushRegistrar.shared.activate() }
                 // In-app update check (t_2a1e5913): launch + every foreground
                 // entry, throttled to one attempt per six hours by
                 // UpdatePreferences. Never touches the cluster connection.

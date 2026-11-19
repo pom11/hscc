@@ -3,6 +3,15 @@
 Card: t_a009792a  |  Assignee: ios-engineer  |  Branch: dev
 Date: 2026-09-03
 
+> **Update 2026-11-19 (card N3).** The APNs path the plan deferred is now
+> built: the daemon has an alert feed + APNs sender + `/v1/devices` roster
+> (cards N1/N2), and the app registers its device token on every saved cluster
+> and shows a push status / Send test row in Settings (`PushRegistrar.swift`).
+> The decision engine and foreground local-banner path in this document are
+> unchanged and still run, so events the app itself notices while open keep
+> working without the server. `aps-environment` and the operator's one-time
+> Push Notifications/profile step are documented in `../RELEASE.md`.
+
 ## Problem
 
 The operator has to open the app to discover that a card finished, a card
