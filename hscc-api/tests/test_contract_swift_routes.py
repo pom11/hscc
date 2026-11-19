@@ -97,7 +97,18 @@ def _swift_routes():
     return routes
 
 
-SWIFT_ROUTES = _swift_routes()
+#: Push-device call sites retired by the operator's 2026-11-19 decision (no
+#: push notifications). The app code that called them is gone too, so these
+#: normally filter nothing; keeping the explicit set means a stale build cannot
+#: make the server look like it silently re-added the routes. The removal itself
+#: is pinned by ``test_retired_push_device_routes_are_not_registered`` below.
+RETIRED_CLIENT_ROUTES = {
+    ("POST", "/v1/devices"),
+    ("POST", "/v1/devices/test"),
+}
+
+SWIFT_ROUTES = [route for route in _swift_routes()
+                if route not in RETIRED_CLIENT_ROUTES]
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +218,15 @@ def _registered():
     return [(m, p) for (m, p, _h) in api_server.ROUTES]
 
 
+def test_retired_push_device_routes_are_not_registered():
+    """Push device registration/test are gone from the server and the client
+    (operator decision 2026-11-19)."""
+    for method, path in RETIRED_CLIENT_ROUTES:
+        hits = [p.pattern for (m, p, _h) in api_server.ROUTES
+                if m == method and p.match(path)]
+        assert not hits, f"{method} {path} is still registered: {hits}"
+
+
 def test_every_swift_route_is_registered():
     """The heart of the gate: each (method, path) the app calls must have a
     registered route that its concrete path matches. Mirrors the real
@@ -281,8 +301,11 @@ def test_every_mutating_post_carries_confirm():
     dict built before the call, or inline in the call args)."""
     src = open(f"{_REPO_ROOT}/{CLIENT_PATH}").read()
     offending = []
+    retired_paths = {path for _method, path in RETIRED_CLIENT_ROUTES}
     for m in _CALL_RE.finditer(src):
         if m.group(1).upper() != "POST":
+            continue
+        if _normalize_swift_path(m.group(2)) in retired_paths:
             continue
         # The enclosing function body: back to the nearest `func ` boundary,
         # forward to the next `func ` boundary (each endpoint is one function

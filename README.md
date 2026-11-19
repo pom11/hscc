@@ -125,12 +125,17 @@ hscc main wakeups disable health
 orchestrator, card any board, review and merge PRs, change settings and ship
 releases. A production/LIVE deploy asks you first.
 
-**How it reaches you.** `hscc notify <title> <body>` writes the durable alert
-feed (`GET /v1/alerts`). The apps do **not** show notifications: operator
-decision 2026-11-19 removed push and local notifications from both the iOS and
-macOS clients, so there is no app-side APNs setup and no device registration.
-Read the alert in the main orchestrator's pane; the feed is deduplicated and
-rate-limited, so the same condition does not repeat until it changes.
+**How it reaches you.** When something needs you, the main orchestrator records
+it with `hscc notify <title> <body>`, which writes the durable alert feed. You
+see it with `hscc notify list` (newest first; `--since <id>`, `--json`) or by
+asking it in the pane. `hscc notify ack <id>` marks one seen. When you are in
+the conversation it tells you directly. Alerts are deduplicated and
+rate-limited, so the same condition does not re-alert until it changes.
+
+The apps do **not** show or poll notifications: operator decision 2026-11-19
+removed push and local notifications from both clients, and the server has no
+APNs sender or device registration. Nothing to configure in the Apple developer
+portal. The feed and `hscc notify` remain the record.
 
 Existing installs upgrade in place: bootstrap creates the main profile, copies
 (never moves) the legacy catch-all's memories and sessions where the main has

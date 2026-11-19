@@ -292,57 +292,10 @@ def test_rewrite_is_a_noop_when_everything_already_matches():
     assert new == text and changes == []
 
 
-def test_extra_resources_are_driven_by_the_release_requirements():
-    """An old release without h2 gets no new blocks; a release that declares it
-    gets the complete ``--no-deps`` closure, h2 first."""
+def test_no_release_only_resource_closures_are_known():
+    """The generic mechanism stays, but no requirement adds formula blocks."""
     assert bf.extra_resources_for("rich>=13,<16\npsutil>=5.9\n") == []
-    entries = bf.extra_resources_for("# comment\nh2>=4,<5  # APNs HTTP/2\n")
-    assert [e["name"] for e in entries] == ["h2", "hpack", "hyperframe"]
-    assert all(re.fullmatch(r"[0-9a-f]{64}", e["sha256"]) for e in entries)
-    assert all(e["url"].startswith("https://files.pythonhosted.org/")
-               for e in entries)
-
-
-def test_rewrite_adds_missing_h2_resources_and_leaves_existing_ones_alone():
-    text = formula_text("2.12.0", OLD_SHA)
-    entries = bf.extra_resources_for("h2>=4,<5\n")
-    new, changes = bf.rewrite_formula(text, "2.13.0", NEW_SHA,
-                                      extra_resources=entries)
-    assert '  resource "h2" do' in new
-    assert '  resource "hpack" do' in new
-    assert '  resource "hyperframe" do' in new
-    h2 = next(e for e in entries if e["name"] == "h2")
-    assert f'sha256 "{h2["sha256"]}"' in new and h2["url"] in new
-    # The blocks land after the existing resources, before install.
-    assert new.index('resource "h2"') > new.index('resource "rich"')
-    assert new.index('resource "h2"') < new.index("def install")
-    # Existing digests and the release pin were not disturbed.
-    assert new.count(f'sha256 "{PYPI_SHA}"') == 2
-    assert 'v2.13.0.tar.gz' in new
-    assert any(before == "" and 'resource "h2" do' in after
-               for _line, before, after in changes)
-    # Re-running sees the blocks and adds nothing.
-    again, more = bf.rewrite_formula(new, "2.13.0", NEW_SHA,
-                                     extra_resources=entries)
-    assert again == new and more == []
-
-
-def test_an_existing_h2_block_is_never_rewritten():
-    """The tap may stage the block ahead of the release (as it did for h2). A
-    release bump must keep that content and only fill genuinely missing pieces."""
-    staged = formula_text("2.12.0", OLD_SHA).replace(
-        "  def install",
-        '  resource "h2" do\n'
-        '    url "https://files.pythonhosted.org/packages/00/00/h2-9.9.9.tar.gz"\n'
-        f'    sha256 "{"9" * 64}"\n'
-        "  end\n\n  def install")
-    entries = bf.extra_resources_for("h2>=4,<5\n")
-    new, _changes = bf.rewrite_formula(staged, "2.13.0", NEW_SHA,
-                                       extra_resources=entries)
-    assert 'h2-9.9.9.tar.gz' in new
-    assert '  resource "h2" do' in new and new.count('  resource "h2" do') == 1
-    assert '  resource "hpack" do' in new      # missing halves are still added
-    assert '  resource "hyperframe" do' in new
+    assert bf.extra_resources_for("# comment\nsome-future-dep>=1\n") == []
 
 
 @pytest.mark.parametrize("bad", ["", "deadbeef", "Z" * 64, "1" * 63, "1" * 65,
@@ -476,44 +429,6 @@ def test_bump_against_a_fabricated_tap(tap, served, monkeypatch):
     # pushed for real: origin/main moved to the same commit
     assert _git(tap, ["rev-parse", "HEAD"]) == _git(tap, ["rev-parse", "origin/main"])
     assert served.calls == [bf.tarball_url("2.13.0")]
-
-
-def test_bump_installs_h2_closure_when_the_release_requires_it(tap, served,
-                                                               monkeypatch):
-    """The N2 regression: requirements.txt declares h2 but ``pip_install
-    resources`` never reads it, so a bump of a release that needs h2 must emit
-    the pinned h2/hpack/hyperframe blocks or brew users get a sender that dies
-    on ``Using http2=True, but the 'h2' package is not installed``."""
-    env_for(monkeypatch)
-    served.install("2.13.0", requirements="rich>=13,<16\nh2>=4,<5\n")
-    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
-
-    res = bf.bump("v2.13.0", tap_dir=str(tap), push=True)
-    assert res["status"] == "bumped"
-    text = (tap / "Formula" / "hscc.rb").read_text(encoding="utf-8")
-    for entry in bf.extra_resources_for("h2>=4,<5\n"):
-        assert f'  resource "{entry["name"]}" do' in text
-        assert entry["url"] in text and f'sha256 "{entry["sha256"]}"' in text
-    # One commit, formula only, and the closure is in that commit.
-    assert _git(tap, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]) == \
-        "Formula/hscc.rb"
-    assert 'resource "h2"' in _git(tap, ["show", "HEAD:Formula/hscc.rb"])
-    # A second run is the steady state: no duplicate blocks, no new commit.
-    head = _git(tap, ["rev-parse", "HEAD"])
-    assert bf.bump("v2.13.0", tap_dir=str(tap), push=True)["status"] == "up-to-date"
-    assert _git(tap, ["rev-parse", "HEAD"]) == head
-    assert text.count('  resource "h2" do') == 1
-
-
-def test_bump_does_not_add_h2_to_an_old_release_that_lacks_it(tap, served,
-                                                             monkeypatch):
-    env_for(monkeypatch)
-    served.install("2.13.0")              # fixture requirements have no h2
-    seed_formula(tap, formula_text("2.12.0", OLD_SHA))
-    bf.bump("v2.13.0", tap_dir=str(tap), push=False)
-    text = (tap / "Formula" / "hscc.rb").read_text(encoding="utf-8")
-    assert 'resource "h2"' not in text and 'resource "hpack"' not in text
-    assert f'sha256 "{PYPI_SHA}"' in text
 
 
 def test_bump_message_has_no_trailer_no_local_path_no_username(tap, served, monkeypatch):

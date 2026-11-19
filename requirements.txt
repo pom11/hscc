@@ -16,13 +16,6 @@ psutil>=5.9
 # configured (httpx/_transports/default.py), which this path never does.
 httpx==0.28.1
 
-# APNs (card N2) needs HTTP/2. httpx speaks it when the `h2` package is present
-# (`httpx[http2]`); this is the one added dependency rather than a second HTTP
-# stack, and it is imported lazily by hscc_daemon/apns.py so every other CLI
-# path stays unchanged. The brew tap needs a matching resource block before a
-# release ships push to brew users (scripts/bump_formula.py owns the tap).
-h2>=4,<5
-
 # Hermes v0.23.0's board-read chain reaches ruamel eagerly: importing
 # `hermes_cli.kanban_db` pulls `utils` -> `hermes_yaml`, whose module-level
 # `from ruamel.yaml import YAML` (hermes_yaml.py:10) fails the whole chain

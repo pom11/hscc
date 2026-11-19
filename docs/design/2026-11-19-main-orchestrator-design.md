@@ -15,8 +15,9 @@ stuck orchestrators, reviews and merges PRs, and cuts releases. hscc should ship
 that role itself. A fresh `hscc-bootstrap` creates **one main orchestrator**: a
 Hermes profile that knows every project and the whole cluster, holds authority
 over the cluster, wakes itself up on a schedule, talks to the other
-orchestrators through the hscc daemon, and pings the operator's phone and Mac
-through the hscc apps when it needs them.
+orchestrators through the hscc daemon, and records what the operator must act
+on in the hscc alert feed — telling them directly when they are in the
+conversation.
 
 This was the original plan (a default `general` board plus a `general`
 orchestrator). What exists today never got used and is split in two:
@@ -68,13 +69,15 @@ orchestrator). What exists today never got used and is split in two:
    gateway's hscc CLI with the post-bootstrap checks).
    **Only a LIVE publish (production deploys of a project, e.g. a BC LIVE
    publish) asks the operator first.**
-10. **Reaches the operator by push.** iOS: Apple Push Notification service, the
-    phone buzzes within seconds even with the app closed. macOS: the menu bar
-    app shows a notification within seconds. Alert only — the operator answers
-    in the main orchestrator's pane / chat, not from the notification.
-    It notifies for: a LIVE publish waiting for approval; something broken it
-    could not fix; a release it shipped (FYI, low priority). Deduplicated and
-    rate-limited — the same condition does not re-alert until it changes.
+10. **~~Reaches the operator by push.~~ Dropped by the operator (2026-11-19).**
+    There are no push notifications and nothing to configure in the Apple
+    developer portal. Instead the main orchestrator records what the operator
+    must act on with `hscc notify` (the durable alert feed). The operator sees
+    it with `hscc notify list` or by asking, and is told directly when they are
+    in the conversation. The feed keeps its dedupe, rate limit and
+    persistence; it notifies for a LIVE publish waiting for approval,
+    something broken it could not fix, and a release it shipped (FYI, low
+    priority).
 
 ## Non-goals
 
@@ -99,25 +102,27 @@ orchestrator). What exists today never got used and is split in two:
 
 ## Constraints
 
-- pom11/hscc is public: the APNs key, team id, device tokens and the chosen
-  name's runtime state live outside the repo (keychain / `~/.hscc`), never in
-  tracked files; fixtures use placeholder addresses.
+- pom11/hscc is public: addresses, hostnames, tenant ids, tokens, team ids,
+  device tokens, secrets and private card titles never appear in tracked files;
+  the chosen name's runtime state lives outside the repo (`~/.hscc`), and
+  fixtures use placeholder addresses.
 - Fleet access only through sparkrun/hscc, never raw docker/ssh.
 - Idempotent bootstrap: re-running keeps the existing name (asks only when none
   is stored), never clobbers memories/sessions, never reverts operator-set
   values (caps 12/3, compression thresholds, autodown).
 - iOS app is ad hoc signed (bundle prefix `ro.parsec.hscc`); macOS is Developer
   ID + notarized. Gates stay compile-only; nothing is installed on the gateway.
-- One-time operator steps (2FA / Apple portal) are allowed: create the APNs
-  auth key (.p8) and enable Push Notifications on the app ids. Everything else
-  is automated.
+- No Apple developer portal step is needed: push is dropped (2026-11-19).
+  Everything else is automated.
 
 ## Decided by the operator
 
 - One merged main orchestrator; name asked at bootstrap, default `general`.
 - Authority: everything, including reviews, merges and releases; only LIVE
   publish asks.
-- Reach: push to the hscc iOS and macOS apps, within seconds; alert only.
+- Reach: no push (dropped 2026-11-19). Record alerts with `hscc notify`; the
+  operator reads `hscc notify list` or asks, and is told directly in the
+  conversation.
 - Built through OpenCode cards.
 
 ## My calls (operator can override)
@@ -140,11 +145,10 @@ orchestrator). What exists today never got used and is split in two:
 - Standing watch tasks are cards on its board parked so the dispatcher never
   hands them to a worker (e.g. blocked with a `watch` reason); the sweep
   comments on them and closes them when the watched work is merged.
-- Push: one alert feed in the API (`hscc notify` / `POST /v1/alerts`, `GET
-  /v1/alerts`), device registration (`POST /v1/devices`), APNs HTTP/2
-  token-auth sender in the daemon. The Mac menu bar app may poll the feed every
-  few seconds instead of APNs if push entitlements for a Developer ID app prove
-  impractical; the phone must use APNs.
+- Alerts: one feed in the API (`hscc notify` / `POST /v1/alerts`, `GET
+  /v1/alerts`, `hscc notify list` / `ack <id>`), with dedupe, rate limiting and
+  persistence. No device registration and no APNs sender — the operator
+  dropped push on 2026-11-19.
 
 ## Left to the builder
 
@@ -153,5 +157,5 @@ ones above, card split. Work goes as small single-purpose OpenCode cards, each
 with its own PR, gates green, no attribution, address guard clean. Suggested
 order: (1) name in interview + state + resolver, (2) merged SOUL + migration,
 (3) board + current pointer + doctor check, (4) pane start, (5) wake-ups,
-(6) alert feed + `hscc notify`, (7) APNs sender + device registration,
-(8) iOS push, (9) macOS notifications, (10) docs + bootstrap tests end to end.
+(6) alert feed + `hscc notify` + `list`/`ack`, (7) docs + bootstrap tests end
+to end.

@@ -1,22 +1,23 @@
-"""``hscc notify`` — post one alert to the HSCC feed.
+"""``hscc notify`` — the operator alert feed, from the CLI.
 
-The verb is the human/orchestrator side of ``POST /v1/alerts`` (design:
-``docs/design/2026-11-19-main-orchestrator-design.md`` §10). It does not write
-the feed directly: the API is the one writer and the one place auth, dedupe and
+The verb is the human/orchestrator side of ``/v1/alerts`` (design:
+``docs/design/2026-11-19-main-orchestrator-design.md``). It does not write the
+feed directly: the API is the one writer and the one place auth, dedupe and
 rate limiting are enforced, so the CLI is a thin authenticated client — exactly
-like a phone would be.
+like an app would be.
 
     hscc notify "<title>" "<body>" [--level info|action|critical] [--key K]
     hscc notify "<body>"                      # legacy one-argument form
-    hscc notify test                          # send a test push to the apps
-    hscc notify ... --json                    # the API's response, verbatim
+    hscc notify list [--since <id>] [--limit <n>]
+    hscc notify ack <id>
+    hscc notify ... --json                    # the API's response
 
 WHY THE API AND NOT THE FILE. A second writer would need a second copy of the
 dedupe/rate-limit rules, and the moment those drift the feed's promise ("the
 same condition does not re-alert") is only true for one caller. The API is
-already up on this host whenever the apps can see alerts; if it is down, saying
+already up on this host whenever the feed is readable; if it is down, saying
 so with the remedy (``hscc api start``) is more honest than writing a file the
-apps cannot read yet.
+other readers cannot see yet.
 
 CONNECTION RESOLUTION. In order:
 
@@ -31,19 +32,21 @@ The token is ``<hscc root>/api-token``, the same fail-closed credential every
 other route uses. The hscc root honours ``$HSCC_HOME`` (tests and alternate
 installs); production resolves ``~/.hscc``.
 
-OUTPUT. Human output is one line: created, deduplicated, or rate-limited with
-the wait. ``--json`` prints the API payload unchanged so a script can read
-``alert.id`` or ``deduped``. Exit codes: 0 for a created OR suppressed alert
-(suppression is the feed working as designed), 1 for usage/connection/API
-errors. A 4xx from the server is a caller bug and exits 1 with the server's
-own sentence, never a traceback.
+OUTPUT. Posts print one line: created, deduplicated, or rate-limited with the
+wait. ``list`` prints newest first with id, age, level, key and title; ``ack``
+confirms the id. ``--json`` prints the API payload. Exit codes: 0 for a created
+OR suppressed alert (suppression is the feed working as designed) and for a
+successful list/ack, 1 for usage/connection/API errors. A 4xx from the server
+is a caller bug and exits 1 with the server's own sentence, never a traceback.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from hscc_daemon.alerts import (
@@ -55,7 +58,7 @@ from hscc_daemon.alerts import (
 
 __all__ = [
     "parse_notify_args", "resolve_api_urls", "read_token", "post_alert",
-    "main", "USAGE",
+    "list_alerts", "ack_alert", "main", "USAGE",
 ]
 
 DEFAULT_API_PORT = 8787
@@ -63,12 +66,14 @@ REQUEST_TIMEOUT_S = 10
 
 USAGE = (
     'Usage: hscc notify "<title>" "<body>" [--level info|action|critical] '
-    "[--key <dedupe-key>] [--json]   (or: hscc notify test [--json])"
+    "[--key <dedupe-key>] [--json]\n"
+    "       hscc notify list [--since <id>] [--limit <n>] [--json]\n"
+    "       hscc notify ack <id> [--json]"
 )
 
 #: Flags that take a value. Anything else flag-shaped is a usage error, never
 #: a silently ignored token (a typo must not post the wrong alert).
-_VALUE_FLAGS = ("--level", "--key", "--api")
+_VALUE_FLAGS = ("--level", "--key", "--api", "--since", "--limit")
 
 
 class NotifyError(Exception):
@@ -83,19 +88,32 @@ def _split_flag(token):
     return None, None
 
 
+def _positive_int(value, name, allow_zero=False):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer")
+    if number < 0 or (number == 0 and not allow_zero):
+        comparator = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be a {comparator} integer")
+    return number
+
+
 def parse_notify_args(argv):
     """Parse the verb's argv (after ``notify``) into an options dict.
 
-    Positionals are ``title`` and ``body``. One positional is the legacy
+    Post forms are ``title`` and ``body``. One positional is the legacy
     "message only" form: it becomes the body with the title ``HSCC`` — the old
     verb sent a desktop notification, and an operator who types the old shape
     should not get a usage error, but the alert should still say where it came
-    from.
+    from. ``list`` and ``ack`` are subcommands and therefore cannot be a bare
+    one-argument body.
 
     Returns ``(opts, error)``; ``error`` is a sentence suitable for stderr.
     """
     argv = list(argv or [])
     opts = {
+        "command": "post",
         "title": None,
         "body": "",
         "level": DEFAULT_LEVEL,
@@ -103,7 +121,9 @@ def parse_notify_args(argv):
         "api": None,
         "json": False,
         "help": False,
-        "test": False,
+        "since": None,
+        "limit": None,
+        "id": None,
     }
     positionals = []
     i = 0
@@ -137,19 +157,46 @@ def parse_notify_args(argv):
 
     if opts["help"]:
         return opts, None
+
+    command = positionals[0] if positionals else None
+    if command == "list":
+        opts["command"] = "list"
+        if len(positionals) > 1:
+            return None, "hscc notify list takes flags only (see --help)"
+        if opts["key"] is not None:
+            return None, "--key does not apply to 'hscc notify list'"
+        if opts["level"] != DEFAULT_LEVEL:
+            return None, "--level does not apply to 'hscc notify list'"
+        try:
+            if opts["since"] is not None:
+                opts["since"] = _positive_int(opts["since"], "since",
+                                              allow_zero=True)
+            if opts["limit"] is not None:
+                opts["limit"] = _positive_int(opts["limit"], "limit")
+        except ValueError as exc:
+            return None, str(exc)
+        return opts, None
+
+    if command == "ack":
+        opts["command"] = "ack"
+        if len(positionals) != 2:
+            return None, "usage: hscc notify ack <id>"
+        if opts["key"] is not None:
+            return None, "--key does not apply to 'hscc notify ack'"
+        if opts["level"] != DEFAULT_LEVEL:
+            return None, "--level does not apply to 'hscc notify ack'"
+        try:
+            opts["id"] = _positive_int(positionals[1], "alert id")
+        except ValueError as exc:
+            return None, str(exc)
+        return opts, None
+
+    if opts["since"] is not None or opts["limit"] is not None:
+        return None, "--since/--limit apply only to 'hscc notify list'"
     if not positionals:
         return None, USAGE
     if len(positionals) > 2:
         return None, "too many arguments — quote the title and body separately"
-    if len(positionals) == 1 and positionals[0].lower() == "test":
-        # `hscc notify test` is the transport self-check, not an alert whose
-        # body happens to be the word "test". It goes straight to the same
-        # sender through POST /v1/devices/test, so it works with no feed row.
-        if opts["key"]:
-            return None, "--key does not apply to 'hscc notify test'"
-        opts["test"] = True
-        opts["title"], opts["body"] = "HSCC test notification", ""
-        return opts, None
     if len(positionals) == 1:
         opts["title"], opts["body"] = "HSCC", positionals[0]
     else:
@@ -245,16 +292,13 @@ def read_token(hscc_dir=None):
     return token or None
 
 
-def _post_json(url, token, payload, path="/v1/alerts", label="alert"):
-    data = json.dumps(payload).encode("utf-8")
+def _request_json(url, token, method, path, payload=None, label="alert"):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Authorization": "Bearer " + token}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        url + path,
-        data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-        },
+        url + path, data=data, method=method, headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
@@ -262,8 +306,8 @@ def _post_json(url, token, payload, path="/v1/alerts", label="alert"):
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
-            payload = json.loads(raw)
-            message = (payload.get("error") or {}).get("message") or raw
+            body = json.loads(raw)
+            message = (body.get("error") or {}).get("message") or raw
         except ValueError:
             message = raw or exc.reason
         raise NotifyError(
@@ -273,11 +317,10 @@ def _post_json(url, token, payload, path="/v1/alerts", label="alert"):
         raise NotifyError(f"cannot reach the HSCC API at {url}: {exc}") from exc
 
 
-def post_alert(opts, hscc_dir=None):
-    """POST the parsed options to /v1/alerts. Returns ``(status, payload)``.
+def _call(opts, hscc_dir, path, method="POST", payload=None, label="alert"):
+    """Call one route, trying each candidate base until one connects.
 
-    Tries each candidate base in turn; a connection failure moves to the next,
-    an HTTP error from a reachable server is final (retrying another address
+    An HTTP error from a reachable server is final (retrying another address
     would replay a caller mistake).
     """
     token = read_token(hscc_dir)
@@ -286,6 +329,23 @@ def post_alert(opts, hscc_dir=None):
             "no API token found under the hscc root — start the API once with "
             "'hscc api start' so ~/.hscc/api-token exists"
         )
+    urls = resolve_api_urls(opts.get("api"), hscc_dir=hscc_dir)
+    errors = []
+    for url in urls:
+        try:
+            return _request_json(url, token, method, path, payload, label)
+        except NotifyError as exc:
+            errors.append(str(exc))
+            if "API refused" in str(exc):
+                raise
+    detail = errors[-1] if errors else "no candidate address"
+    raise NotifyError(
+        f"{detail}. Is the API running? Start it with 'hscc api start'."
+    )
+
+
+def post_alert(opts, hscc_dir=None):
+    """POST the parsed options to /v1/alerts. Returns ``(status, payload)``."""
     payload = {
         "title": opts["title"],
         "body": opts["body"],
@@ -293,44 +353,30 @@ def post_alert(opts, hscc_dir=None):
     }
     if opts.get("key"):
         payload["key"] = opts["key"]
-
-    urls = resolve_api_urls(opts.get("api"), hscc_dir=hscc_dir)
-    errors = []
-    for url in urls:
-        try:
-            return _post_json(url, token, payload)
-        except NotifyError as exc:
-            errors.append(str(exc))
-            if "API refused" in str(exc):
-                raise
-    detail = errors[-1] if errors else "no candidate address"
-    raise NotifyError(
-        f"{detail}. Is the API running? Start it with 'hscc api start'."
-    )
+    return _call(opts, hscc_dir, "/v1/alerts", payload=payload)
 
 
-def post_test(opts, hscc_dir=None):
-    """POST /v1/devices/test — the sender's own one-push self-check."""
-    token = read_token(hscc_dir)
-    if not token:
-        raise NotifyError(
-            "no API token found under the hscc root — start the API once with "
-            "'hscc api start' so ~/.hscc/api-token exists"
-        )
-    urls = resolve_api_urls(opts.get("api"), hscc_dir=hscc_dir)
-    errors = []
-    for url in urls:
-        try:
-            return _post_json(url, token, {}, path="/v1/devices/test",
-                              label="test push")
-        except NotifyError as exc:
-            errors.append(str(exc))
-            if "API refused" in str(exc):
-                raise
-    detail = errors[-1] if errors else "no candidate address"
-    raise NotifyError(
-        f"{detail}. Is the API running? Start it with 'hscc api start'."
-    )
+def list_alerts(opts, hscc_dir=None):
+    """GET the feed (newest first in the CLI's presentation)."""
+    query = {}
+    if opts.get("since") is not None:
+        query["since"] = str(opts["since"])
+    if opts.get("limit") is not None:
+        query["limit"] = str(opts["limit"])
+    path = "/v1/alerts"
+    if query:
+        path += "?" + urllib.parse.urlencode(query)
+    status, payload = _call(
+        opts, hscc_dir, path, method="GET", label="alert feed")
+    payload["alerts"] = list(reversed(payload.get("alerts") or []))
+    return status, payload
+
+
+def ack_alert(opts, hscc_dir=None):
+    """POST /v1/alerts/<id>/ack — mark one alert seen."""
+    return _call(
+        opts, hscc_dir, f"/v1/alerts/{opts['id']}/ack",
+        payload={}, label="alert ack")
 
 
 def _summary(payload):
@@ -348,14 +394,42 @@ def _summary(payload):
     return f"alert suppressed ({payload.get('reason', 'rate_limited')}{wait})"
 
 
-def _test_summary(payload):
-    if payload.get("sent"):
-        count = payload.get("sent_count", 0)
-        return f"test push sent to {count} device{'s' if count != 1 else ''}"
-    reason = payload.get("reason") or "not_sent"
-    detail = payload.get("detail")
-    return "test push not sent (" + reason + ")" + (
-        f": {detail}" if detail else "")
+def _age_label(ts, now=None):
+    """``2m`` / ``3h`` / ``4d`` from an alert's UTC ``...Z`` timestamp."""
+    try:
+        stamp = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        seconds = max(0, int((now - stamp).total_seconds()))
+    except (TypeError, ValueError):
+        return "?"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _list_summary(payload):
+    """Newest-first human lines: id, age, level, key, title."""
+    alerts = payload.get("alerts") or []
+    if not alerts:
+        return "no alerts"
+    lines = []
+    for alert in alerts:
+        age = _age_label(alert.get("ts"))
+        level = alert.get("level", DEFAULT_LEVEL)
+        key = f"  key={alert['key']}" if alert.get("key") else ""
+        acked = "  (acked)" if alert.get("acked") else ""
+        title = alert.get("title") or ""
+        lines.append(f"#{alert.get('id')}  {age:>4}  {level}{key}{acked}  {title}")
+    return "\n".join(lines)
+
+
+def _ack_summary(payload):
+    alert = payload.get("alert") or {}
+    return f"alert {alert.get('id')} acknowledged"
 
 
 def main(argv, out=None, err=None):
@@ -375,14 +449,16 @@ def main(argv, out=None, err=None):
             "alert is deduplicated until its content changes or it is acknowledged;\n"
             "per-key and global rate limits apply. Flags: --level, --key, --json,\n"
             "--api <url>.\n"
-            "'hscc notify test' sends one test push to every registered device\n"
-            "(POST /v1/devices/test) without adding an alert to the feed.",
+            "'hscc notify list' reads the feed newest first (--since <id>,\n"
+            "--limit <n>); 'hscc notify ack <id>' marks one alert seen.",
             file=out,
         )
         return 0
     try:
-        if opts.get("test"):
-            status, payload = post_test(opts)
+        if opts["command"] == "list":
+            status, payload = list_alerts(opts)
+        elif opts["command"] == "ack":
+            status, payload = ack_alert(opts)
         else:
             status, payload = post_alert(opts)
     except NotifyError as exc:
@@ -390,10 +466,10 @@ def main(argv, out=None, err=None):
         return 1
     if opts["json"]:
         print(json.dumps(payload, indent=2), file=out)
-    elif opts.get("test"):
-        print(_test_summary(payload), file=out)
+    elif opts["command"] == "list":
+        print(_list_summary(payload), file=out)
+    elif opts["command"] == "ack":
+        print(_ack_summary(payload), file=out)
     else:
         print(_summary(payload), file=out)
-    if opts.get("test") and not payload.get("sent"):
-        return 1
     return 0
