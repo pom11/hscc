@@ -523,6 +523,15 @@ never the token. `POST /v1/devices/test` sends the `hscc notify test` push
 through the same sender; delivery failure is a `200` with `sent: false` and a
 `reason` (`no_config`, `no_devices`, `all_failed`, ...), not an HTTP error.
 
+Neither route is confirm-gated and neither body carries `confirm`: a device
+registering its own token behind the bearer gate is not a guarded cluster op, and
+the app performs it on every launch with no operator decision in front of it. An
+unconfirmed call answers `201` / `200` — that is the contract, asserted by
+`hscc-api/tests/test_routes_devices.py`. The exemption is stated per route in
+`CONFIRM_EXEMPT_POSTS` (`hscc-api/tests/test_contract_swift_routes.py`) and pinned
+closed by `test_confirm_exemption_is_closed_and_justified`; see
+`audit-client-server-params.md` for the full reasoning.
+
 ### GET /v1/devices
 
 The roster without tokens (`id`, `platform`, `bundle_id`, `env`,

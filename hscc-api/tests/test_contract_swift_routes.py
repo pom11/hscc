@@ -665,6 +665,7 @@ def test_every_required_query_param_is_sent():
 #   POST /v1/sessions/{id}/retire    profile                routes_sessions.py:254 (handle_sessions_retire)
 #   POST /v1/sessions/{id}/compact   profile                routes_sessions.py:293 (handle_sessions_compact)
 #   POST /v1/orchestrator/chat       prompt                 routes_orchestrator.py:1970-1975 (handle_orchestrator_chat -> _validate_prompt)
+#   POST /v1/devices                 platform, token, bundle_id, env   routes_devices.py:72-75 (handle_register_device -> devices.register normalises all four)
 #
 #   (Line anchors in the kept rows re-verified against these handlers on
 #   2026-11-18 (t_80e185d2); handler names carry the citation if they drift
@@ -702,6 +703,14 @@ REQUIRED_BODY_PARAMS = {
     ("POST", "/v1/sessions/{param}/retire"): ["profile"],
     ("POST", "/v1/sessions/{param}/compact"): ["profile"],
     ("POST", "/v1/orchestrator/chat"): ["prompt"],
+    # t_1af3ef07 (PR #443, cards N2/N3): the APNs token registration the app
+    # sends on every launch/foreground. All four fields are REQUIRED — the route
+    # maps `devices.register`'s ValueError to a 400 (routes_devices.py:72-79),
+    # and `test_invalid_registration_is_400_and_stores_nothing` already proves an
+    # empty body 400s — so a client that dropped one would silently stop
+    # registering. It carries no `confirm`, deliberately; see
+    # CONFIRM_EXEMPT_POSTS above.
+    ("POST", "/v1/devices"): ["platform", "token", "bundle_id", "env"],
 }
 
 

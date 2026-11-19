@@ -54,10 +54,29 @@ satisfied or correctly optional-defaulted.
 | POST /v1/sessions/{id}/retire | profile | routes_sessions.py:254 (`handle_sessions_retire`) |
 | POST /v1/sessions/{id}/compact | profile | routes_sessions.py:293 (`handle_sessions_compact`) |
 | POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1974-1979 (`_validate_prompt`) |
+| POST /v1/devices | platform, token, bundle_id, env | routes_devices.py:72-75 (`handle_register_device`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
 kanban recover, cluster up/down, triggers run, escalate) are covered by the
 confirm gates. Profile-editor PUT requires "at least one of many" — excluded.
+
+**The two POST routes outside the confirm contract, on purpose:**
+`POST /v1/devices` and `POST /v1/devices/test` (cards N2/N3, PR #443). Neither
+handler calls `_require_confirm` / `_action_fields` and neither call site sends
+`confirm`, so an unconfirmed registration answers `201`/`200` — that is the
+contract, asserted by `tests/test_routes_devices.py`. The reason is not
+convenience: registration creates or refreshes only the CALLER'S OWN APNs token
+row (idempotent per `(platform, token)`) behind the server's single bearer gate
+and touches no cluster, workload or board state, and the app performs it on every
+launch with no operator decision in front of it — a `confirm` flag there could
+only be a hardcoded `true` no handler checks. `POST /v1/devices/test` is the same
+route `hscc notify test` drives with an empty body, which requires no confirm
+either. The exemption is stated per route in `CONFIRM_EXEMPT_POSTS`
+(`tests/test_contract_swift_routes.py`), which BOTH confirm gates read so the
+client half and the server half cannot disagree, and it is pinned closed by
+`test_confirm_exemption_is_closed_and_justified`: every entry must name a POST
+the client still calls, carry a stated reason, resolve to a handler inside
+`routes_devices.py`, and still NOT call a confirm helper.
 
 ### Rows retired with their client call site (t_80e185d2, 2026-11-18)
 
@@ -103,6 +122,9 @@ The gate lives in `hscc-api/tests/test_contract_swift_routes.py`:
 * `test_every_swift_route_is_registered` — every client route is registered.
 * `test_every_mutating_post_carries_confirm` — client always sends confirm.
 * `test_every_client_post_server_handler_is_confirm_gated` — server always checks it.
+* `test_confirm_exemption_is_closed_and_justified` — the only routes that may be
+  excused from both are the named, reasoned entries of `CONFIRM_EXEMPT_POSTS`,
+  still inside `routes_devices.py` and still not confirm-gated (t_bcebb042).
 * `test_every_required_query_param_is_sent` — the query-param matrix (sessions `profile`).
 * `test_every_required_body_field_is_sent` — the body-field matrix (this run).
 * `test_matrices_name_routes_the_client_still_calls` — every matrix row still
