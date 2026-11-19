@@ -408,7 +408,20 @@ The script auto-detects the team from your signing certificate (override with
 level (all targets inherit), also refuses to generate while a source file is
 missing from `project.yml` (`check_sources.sh`), then verifies with
 `xcodebuild -showBuildSettings` that the team actually landed on HSCC,
-HSCCWidgets and HSCCLiveActivity.
+HSCCWidgets, HSCCLiveActivity and HSCCLiveActivityMonitor.
+
+Bare `xcodegen generate` does none of that. `project.yml` reads
+`${HSCC_DEVELOPMENT_TEAM}` at the project level, so with the variable unset
+XcodeGen writes that literal string as the team on all four targets — an invalid
+id that errors only much later, in Xcode. `generate.sh` is the only path that
+resolves it, and the per-target `HSCC -> <TEAMID>` lines it prints are the proof
+it did. The desktop side deliberately does NOT auto-detect:
+`macos-app/scripts/generate.sh` refuses outright unless
+`HSCC_DEVELOPMENT_TEAM` is exported.
+
+Either invocation works — `scripts/generate.sh` from `ios-app/`, or
+`bash ios-app/scripts/generate.sh` from the repo root; the script locates itself
+rather than trusting the cwd.
 
 A free personal Apple ID team works for sideloading onto your own device —
 **but a free team cannot provision App Groups**, so the Home Screen widget,
