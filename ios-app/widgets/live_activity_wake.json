@@ -1,0 +1,9 @@
+{
+  "order": 10,
+  "kind": "live_activity",
+  "surface_case": "liveActivityWake",
+  "surface_raw": "liveActivity.wake",
+  "display_name": "Wake Live Activity",
+  "icon": "bolt",
+  "id": "live_activity_wake"
+}

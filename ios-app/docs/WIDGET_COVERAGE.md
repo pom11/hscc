@@ -42,30 +42,20 @@ No cell below is `declared-but-placeholder` or `unknown`.
 
 ## 1. iOS widgets × family
 
-Every widget type under `ios-app/Sources/HSCCWidgets/` is listed. The bundle at
-`HSCCWidgetsBundle.swift` contains exactly these nine widgets; there are no
-additional `Widget` types in that directory.
-
-| Widget | systemSmall | systemMedium | systemLarge | accessoryInline | accessoryCircular | accessoryRectangular | Source |
-|---|---|---|---|---|---|---|---|
-| Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`ProjectsCircularView`) | declared-and-renders (`ProjectsRectangularView`) | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
-| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`CardsRunningCircularView`) | declared-and-renders (`CardsRunningRectangularView`) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
-| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`KanbanMonitorInline`) | declared-and-renders (`KanbanMonitorCircular`) | declared-and-renders (`KanbanMonitorRectangular`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
-| BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`BoardStatusCircularView`) | declared-and-renders (`BoardStatusRectangularView`) | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
-| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`InlineClusterWidget`) | declared-and-renders (`CircularClusterWidget`) | declared-and-renders (`RectangularClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
-| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
-| NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`NeedsMeCircular`) | declared-and-renders (`NeedsMeRectangular`) | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
-| ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | absent — gated home-screen-only | absent — gated home-screen-only | absent — gated home-screen-only | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch), `GraphWidgetViews.swift` (bodies) |
-| MergeQueue | declared-and-renders (`SmallMergeQueue`) | declared-and-renders (`MediumMergeQueue`) | declared-and-renders (`LargeMergeQueue`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`MergeQueueCircular`) | declared-and-renders (`MergeQueueRectangular`) | `ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift` |
+The family checkboxes are generated from one file per widget
+(`ios-app/widgets/<id>.json`) into
+[`WIDGET_COVERAGE.widgets.generated.md`](WIDGET_COVERAGE.widgets.generated.md)
+by `ios-app/scripts/widget_registry.py`. A widget card edits only its own JSON
+file, so two cards touching different widgets never share a row. The generated
+table is the authority for "declared-and-renders" versus "absent"; the
+hand-written prose below explains the one non-obvious row.
 
 The ClusterGraph row is the graph widget added by #426; its three accessory
 cells are `absent` by configuration **and by gate**, not by a missing renderer —
 `WidgetFamily.clusterGraphFamilies` (`GraphWidgetMetrics.swift`) is the positive
 list `[.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]` and
 `widget_view_dispatch` gates the surface as `home-screen-only`, which asserts the
-inverse (no `.accessory*` in `supportedFamilies`, no `shortGateLabel`). The
-bundle is therefore **nine** widgets: the six this section's preamble was
-first written against, plus Needs Me, the graph widget and Merge Queue.
+inverse (no `.accessory*` in `supportedFamilies`, no `shortGateLabel`).
 
 Coverage note: every iOS widget contains a `.systemExtraLarge` branch in its view
 switch. **Cluster and Monitor declare `.systemExtraLarge` in `supportedFamilies`
@@ -95,43 +85,29 @@ Sources: `ios-app/Sources/HSCCLiveActivityMonitor/{MonitorLiveActivity,CardsRunn
 
 ## 3. macOS desktop widgets × family
 
-The macOS extension (`HSCCMacWidgets` in `macos-app/project.yml`) compiles the
-nine iOS widget files by path — the seven this section was first written against
-plus the graph widget's files (#426/#442) and `MergeQueueWidget.swift` (MQ5). On
-macOS the accessory families are unavailable, so they are not part of this
-table. `systemExtraLarge` is declared by Cluster, Monitor, Kanban Monitor, Cards
-Running and ClusterGraph.
+The desktop family rows are generated from the same per-widget JSON files as
+section 1 into
+[`WIDGET_COVERAGE.widgets.generated.md`](WIDGET_COVERAGE.widgets.generated.md).
+The macOS extension compiles the iOS widget files by directory
+(`../ios-app/Sources/HSCCWidgets`), so adding a widget does not edit either
+project spec. On macOS the accessory families are unavailable, so they are not
+part of the generated table.
 
-| Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
-|---|---|---|---|---|---|
-| Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`ExtraLargeClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
-| Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`ExtraLargeMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
-| Projects | declared-and-renders (`SmallProjectsWidget`) | declared-and-renders (`MediumProjectsWidget`) | declared-and-renders (`LargeProjectsWidget`) | absent | `ios-app/Sources/HSCCWidgets/ProjectsWidget.swift` |
-| CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`CardsRunningLargeView` — XL reuses the large renderer) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
-| KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
-| BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
-| NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | absent | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
-| ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemExtraLarge`) | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch + macOS `supportedFamilies` arm), `GraphWidgetViews.swift` (bodies) |
-| MergeQueue | declared-and-renders (`SmallMergeQueue`) | declared-and-renders (`MediumMergeQueue`) | declared-and-renders (`LargeMergeQueue`) | absent | `ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift` |
-
-The ClusterGraph row is compiled in by path (t_be4e1a48): `macos-app/project.yml`
-lists the graph widget's files in `HSCCMacWidgets.sources`, and the four desktop
+The ClusterGraph row is compiled in by path (t_be4e1a48): the four desktop
 families come from the explicit `[.systemSmall, .systemMedium, .systemLarge,
-.systemExtraLarge]` arm of the widget's `#else` (macOS) branch — the one line
-that card added on the macOS side. `systemExtraLarge` is not a stretched large:
-the chart width is measured (`ClusterGraphCanvas`), so the wider tile gets a
-wider pixel reduction and more axis labels. The same `ClusterGraphMarks` file is
-*also* compiled into the `HSCCMac` **app** target by path, which is what lets the
-menu bar dropdown's GRAPHS section (§5d) reuse the widget's charts instead of
-forking them.
+.systemExtraLarge]` arm of the widget's `#else` (macOS) branch. `systemExtraLarge`
+is not a stretched large: the chart width is measured (`ClusterGraphCanvas`), so
+the wider tile gets a wider pixel reduction and more axis labels. The same
+`ClusterGraphMarks` file is *also* compiled into the `HSCCMac` **app** target by
+path, which is what lets the menu bar dropdown's GRAPHS section (§5d) reuse the
+widget's charts instead of forking them.
 
-The remaining `absent` XL cells (Projects, Board Status, Needs Me and Merge
-Queue) are the documented macOS family split, not a defect: all nine widgets ship
-small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3), Cards
-Running (CARD B2) and Cluster Graph (t_be4e1a48) also ship
-`systemExtraLarge`. Needs Me and Merge Queue are
-deliberately small/medium/large on macOS: both are short row lists, so an XL
-cell would repeat the large renderer rather than add a column.
+The remaining `absent` XL cells are the documented macOS family split, not a
+defect: every widget ships small/medium/large, and Cluster, Monitor, Kanban
+Monitor (CARD B3), Cards Running (CARD B2) and Cluster Graph (t_be4e1a48) also
+ship `systemExtraLarge`. Needs Me and Merge Queue are deliberately
+small/medium/large on macOS: both are short row lists, so an XL cell would repeat
+the large renderer rather than add a column.
 
 ## 4. Compile results
 

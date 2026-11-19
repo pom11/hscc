@@ -360,140 +360,19 @@ enum HostFailover {
 // defaults to on (backward compatible — the Cluster widget predates this and
 // must keep rendering exactly as it does today until the operator edits it).
 
-/// The surfaces the operator controls. The raw values are the registry
-/// keys stored in the App Group — stable identifiers, not display names.
+/// The surfaces the operator controls. The raw values are the registry keys
+/// stored in the App Group — stable identifiers, not display names.
 ///
-/// Not transcribed on purpose anywhere: `widget_settings_check.sh` iterates
-/// `allCases` rather than asserting a literal count, so adding a surface here
-/// cannot redden a healthy gate (it once did — `defaults.surfaces.count == 4`).
-enum WidgetSurfaceKind: String, CaseIterable, Codable {
-    /// The existing Home Screen cluster widget (state / topology / models /
-    /// board work).
-    case widgetCluster = "widget.cluster"
-    /// The new monitor widget (sibling card t_6d545375).
-    case widgetMonitor = "widget.monitor"
-    /// The board status widget — five counts for the ONE board the operator
-    /// picked in the widget's own configuration sheet (t_6d8731ab shipped the
-    /// widget; t_09cd8abf gave it this registry entry so Settings can pause it
-    /// and set its cadence like every other surface).
-    case widgetBoardStatus = "widget.boardStatus"
-    /// The "Running cards" widget (t_fa7926fb): the cards being worked right
-    /// now, with the worker running each and how long it has been going.
-    ///
-    /// Until this case existed the widget hard-coded a quarter-hour on its own
-    /// provider and could not be paused at all — the operator's only lever was
-    /// pulling the widget off the Home Screen. A raw value is permanent (it is
-    /// the key written into the installed App Group blob the moment the
-    /// operator touches the row), so it is chosen once, here:
-    /// `widget.cardsRunning` names the surface the widget calls itself
-    /// (`configurationDisplayName("Running Cards")`, kind
-    /// `CardsRunningWidget`), not one dataset inside it.
-    case widgetCardsRunning = "widget.cardsRunning"
-    /// The "Kanban Monitor" widget (t_fa7926fb): the
-    /// `hscc kanban monitor --live` panel — running / ready / blocked plus the
-    /// merged row list.
-    ///
-    /// Same reason and same shape as above. Its header claimed it "uses the
-    /// widget default cadence (5 min) and is never 'paused'", which was true
-    /// only because no registry entry existed that could say otherwise.
-    case widgetKanbanMonitor = "widget.kanbanMonitor"
-    /// The "Projects" widget (t_5f246177): the cluster's projects and the board
-    /// each one lives on.
-    ///
-    /// The last widget in `HSCCWidgets` outside this registry, and its provider
-    /// said so out loud: "`WidgetSurfaceKind` has no `widgetProjects` case yet,
-    /// so this surface is not in the shared cadence/Active registry", with a
-    /// private `refreshMinutes = 5` and no way for the operator to pause it —
-    /// the same dead end the three widgets above were in.
-    ///
-    /// The raw value is permanent the moment an installed device writes it, so
-    /// it is named here once: after the surface the widget calls itself
-    /// (`configurationDisplayName("Projects")`, kind `ProjectsWidget`), not after
-    /// one dataset inside it. It is deliberately NOT a reuse of `widget.cluster`
-    /// or `widget.monitor` — switching off the cluster widget must never blank
-    /// the project list, which is the reason #341 refused to let the monitor
-    /// panel borrow `.widgetMonitor`'s entry either.
-    case widgetProjects = "widget.projects"
-    /// The "Needs me" widget (card R3): the main orchestrator's unacknowledged
-    /// alert-feed rows — what still needs the operator — read from
-    /// `GET /v1/alerts` and projected by `NeedsMeReading.swift`.
-    ///
-    /// It gets its own entry rather than borrowing another widget's: the feed
-    /// is the one surface whose pause switch an operator may genuinely want
-    /// (silencing the tile must not silence the cluster monitor), and its
-    /// cadence is independent of every card/board read. No notifications are
-    /// involved: this is a read-only widget, not an alert delivery channel.
-    case widgetNeedsMe = "widget.needsMe"
-    /// The "Cluster Graph" widget (t_f4551339): the recorder's stored series drawn
-    /// as a chart — one metric sparkline at small, one node's temps plus GPU% at
-    /// medium, one panel per node at large and extra-large.
-    ///
-    /// The raw value is permanent the moment an installed device writes it, so it
-    /// is named once here: after the surface the widget calls itself
-    /// (`configurationDisplayName("Cluster Graph")`, kind `ClusterGraphWidget`).
-    /// Deliberately NOT a reuse of `widgetCluster` or `widgetMonitor` — those two
-    /// draw instants and this one draws a series, they are fetched from different
-    /// routes, and switching the instant tile off must never blank a chart the
-    /// operator reads for a trend.
-    case widgetClusterGraph = "widget.clusterGraph"
-    /// The "Merge Queue" widget (card MQ5): the local merge queue's rows —
-    /// exactly the per-project tables `hscc kanban monitor` draws and
-    /// `GET /v1/merge-queue` serves, projected by `MergeQueueReading.swift`.
-    ///
-    /// Its own registry entry, not a reuse of another widget's: the queue has
-    /// its own read, its own cadence and its own pause switch, and switching
-    /// the kanban monitor off must never blank the queue. The raw value follows
-    /// the surface's own name (`configurationDisplayName("Merge Queue")`, kind
-    /// `MergeQueueWidget`) and is permanent once an installed device writes it.
-    case widgetMergeQueue = "widget.mergeQueue"
-    /// The existing fleet-wake Live Activity.
-    case liveActivityWake = "liveActivity.wake"
-    /// The new monitor Live Activity (sibling card t_03d318cd).
-    case liveActivityMonitor = "liveActivity.monitor"
-    /// The cluster-health Live Activity (t_f2867fb3): "is the fleet up", the
-    /// Dynamic Island form of the cluster widget's state + nodes-up line.
-    ///
-    /// This case is what makes the surface controllable: the activity's launch
-    /// sweep is deliberately a PURE rule (`ClusterHealthOrphanRule`) with no
-    /// settings read, so it stays executable by
-    /// `live_activity_rehydration_check.sh`. The Active toggle and the cadence
-    /// belong to the DRIVER (`ClusterHealthActivityDriver`), which is the only
-    /// consumer of this entry — the sweep still consults nothing.
-    case liveActivityClusterHealth = "liveActivity.clusterHealth"
-    /// The running-cards Live Activity — the Island / Lock Screen form of
-    /// `hscc cards monitor --live` (t_f9cc34e0 renders it, t_71deac83 feeds it).
-    ///
-    /// Same division as the case above: the launch sweep
-    /// (`CardsRunningActivitySweep` + `CardsRunningOrphanRule`) stays a pure
-    /// rule the rehydration gate can execute, and the Active toggle plus the
-    /// cadence belong to `CardsRunningActivityDriver`, the only consumer of
-    /// this entry. It gets its OWN entry rather than borrowing
-    /// `.liveActivityMonitor`'s: the two surfaces are pushed by different
-    /// drivers off different routes, and one shared toggle would let switching
-    /// off the cluster monitor silently stop the cards bubble too.
-    case liveActivityCards = "liveActivity.cards"
-    /// The per-board kanban-progress Live Activity — the Island / Lock Screen
-    /// form of the Board Status widget's four counts (t_451cbe25).
-    ///
-    /// The driver described this surface as OPERATOR-STARTED and therefore not
-    /// a registry surface; that reasoning stops where the card that owns the
-    /// settings screen begins. It is still a Live Activity an operator can see,
-    /// and a surface with no entry cannot be paused, paced or listed — the same
-    /// dead end the widgets above were in before their cases existed. So it
-    /// gets one, and `BoardProgressActivityDriver` is its only consumer: the
-    /// Active toggle suppresses the start button's effect and ends a bubble
-    /// already up, 0 means no scheduled refresh, and the cadence replaces the
-    /// driver's former hard-coded 5 minutes. The board it watches still comes
-    /// from the Board screen's own start action, never from this blob.
-    ///
-    /// The raw value is permanent the moment an installed device writes it, so
-    /// it is named once: after the surface's own attributes type
-    /// (`BoardProgressActivityAttributes`, rendered by
-    /// `BoardProgressLiveActivity`). Deliberately NOT a reuse of
-    /// `.liveActivityCards` — that bubble is fleet-wide, this one is one board.
-    case liveActivityBoardProgress = "liveActivity.boardProgress"
-}
-
+/// The case list is GENERATED from `ios-app/widgets/*.json` by
+/// `ios-app/scripts/widget_registry.py` into
+/// `Sources/Shared/WidgetSurfaceKind.generated.swift`. Add or rename a surface
+/// there, run `--write`, and this file is not edited: two widget cards adding
+/// different surfaces therefore cannot conflict on the registry list.
+///
+/// The per-surface behaviour switches below (`isLiveActivity`,
+/// `supportsScope`, `availableSections`) stay hand-written on purpose: they are
+/// decisions, not registration, and a new case must make them compile-fail
+/// until somebody judges it.
 /// One surface's settings: enabled, refresh cadence, and which content
 /// sections it renders. Plain Codable struct (AppleScript-agnostic).
 struct WidgetSurfaceSettings: Codable, Equatable {

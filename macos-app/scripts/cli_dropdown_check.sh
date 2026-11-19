@@ -55,6 +55,7 @@ trap 'rm -rf "$TMP"' EXIT
 real_sources=(
   ../ios-app/Sources/Shared/SharedModels.swift
   ../ios-app/Sources/Shared/SharedStore.swift
+  ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
   ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
   "${grid_sources[@]}"
   Sources/HSCCMac/DashboardFleetReading.swift

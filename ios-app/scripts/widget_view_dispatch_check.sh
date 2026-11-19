@@ -100,14 +100,15 @@ done
 MAC_SPEC="../macos-app/project.yml"
 if [ -f "$MAC_SPEC" ] && grep -q '^  HSCCMacWidgets:' "$MAC_SPEC"; then
   mac_missing=0
-  for f in Sources/HSCCWidgets/*.swift; do
-    if ! grep -qF -- "- path: ../ios-app/$f" "$MAC_SPEC"; then
-      echo "  FAIL: macOS target does not compile $f — a desktop surface would be a second copy"
-      mac_missing=1
-    fi
-  done
-  for shared in Sources/Shared/SharedStore.swift Sources/Shared/WidgetDataClient.swift \
-                Sources/HSCC/Views/Theme.swift; do
+  # The whole widget directory is one computed source entry, so every widget
+  # file on disk (including a newly added one) is compiled by the desktop
+  # target without editing macos-app/project.yml.
+  if ! grep -qF -- "- path: ../ios-app/Sources/HSCCWidgets" "$MAC_SPEC"; then
+    echo "  FAIL: macOS target does not compile ../ios-app/Sources/HSCCWidgets — a desktop surface would be a second copy"
+    mac_missing=1
+  fi
+  for shared in Sources/Shared/SharedStore.swift Sources/Shared/WidgetSurfaceKind.generated.swift \
+                Sources/Shared/WidgetDataClient.swift Sources/HSCC/Views/Theme.swift; do
     if ! grep -qF -- "- path: ../ios-app/$shared" "$MAC_SPEC"; then
       echo "  FAIL: macOS target does not compile $shared — the desktop widget would have a second data path"
       mac_missing=1

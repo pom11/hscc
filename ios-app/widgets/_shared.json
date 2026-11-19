@@ -1,0 +1,7 @@
+{
+  "sources": [
+    "Sources/HSCCWidgets/HSCCWidgetsBundle.swift",
+    "Sources/HSCCWidgets/WidgetRendering.swift",
+    "Sources/HSCCWidgets/HSCCWidgetList.generated.swift"
+  ]
+}

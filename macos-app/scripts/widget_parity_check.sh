@@ -37,13 +37,28 @@ need() { # need <label> <file> <pattern>
 # spec_paths <file> <target> — the target's Swift paths, normalised to be
 # relative to ios-app/ so the two specs can be compared directly.
 spec_paths() {
-  awk -v t="$2" '
-    /^targets:[[:space:]]*$/ { intargets = 1 }
-    !intargets { next }
-    $0 ~ ("^  " t ":[[:space:]]*$") { f = 1; next }
-    f && /^  [A-Za-z][A-Za-z0-9]*:[[:space:]]*$/ { exit }
-    f && /- path: .*\.swift/ { p = $3; sub(/^\.\.\/ios-app\//, "", p); print p }
-  ' "$1" | LC_ALL=C sort -u
+  python3 - "$1" "$2" <<'PY'
+import os, re, sys
+spec_path, target = sys.argv[1], sys.argv[2]
+base = os.path.dirname(os.path.abspath(spec_path))
+ios = os.path.abspath(os.path.join(base, '..', 'ios-app')) if os.path.basename(base) == 'macos-app' else os.path.abspath(base)
+text = open(spec_path).read()
+text = '\n' + text.split('\ntargets:\n', 1)[1]
+blk = text.split(f'\n  {target}:', 1)[1]
+blk = re.split(r'\n  [A-Za-z]\w*:\n', blk, maxsplit=1)[0]
+out = []
+for path in re.findall(r'- path: ([^\s]+)', blk):
+    full = os.path.normpath(os.path.join(base, path))
+    if path.endswith('.swift'):
+        out.append(os.path.relpath(full, ios))
+    elif os.path.isdir(full):
+        for root, _, files in os.walk(full):
+            for f in sorted(files):
+                if f.endswith('.swift'):
+                    out.append(os.path.relpath(os.path.join(root, f), ios))
+for p in sorted(set(out)):
+    print(p)
+PY
 }
 
 CLUSTER=../ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift
@@ -211,8 +226,11 @@ echo "extra-large payload — the six fields the CLI host table has no column fo
 for label in VRAM "GPU clock" Net Up Fan Load; do
   need "XL detail field '$label' is owned by the shared layout model" "$TABLE_MODEL" "\"$label\""
 done
-need "the desktop compiles the table views" project.yml \
-     "- path: ../ios-app/Sources/HSCCWidgets/ClusterMonitorTableViews.swift"
+# The widget directory is compiled as ONE computed source entry, so adding a
+# widget file no longer edits either project spec. The set-for-set source check
+# above still proves this directory carries the table views.
+need "the desktop compiles the widget directory" project.yml \
+     "- path: ../ios-app/Sources/HSCCWidgets"
 need "the desktop compiles the table layout model" project.yml \
      "- path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift"
 if grep -q "#if os(iOS)" "$TABLE_VIEWS" || grep -q "#if os(iOS)" "$TABLE_MODEL"; then

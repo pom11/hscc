@@ -1,0 +1,10 @@
+# Generated widget registration: one record per line, append-only, stable
+# header. A union merge is provably safe here (pinned by
+# scripts/tests/test_widget_registry.py): two widget PRs adding different
+# surfaces append different lines and both survive. Nothing else in these files
+# is edited by hand; run ios-app/scripts/widget_registry.py --write instead.
+ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift merge=union
+ios-app/Sources/HSCCWidgets/HSCCWidgetList.generated.swift merge=union
+ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift merge=union
+ios-app/docs/WIDGET_COVERAGE.widgets.generated.md merge=union
+ios-app/scripts/model_decode_check/widgets.generated.swift merge=union

@@ -54,6 +54,7 @@ real_sources=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift  # APIConfig + the shared HostFailover loop
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/HSCC/APIError.swift
 )
 harness=(

@@ -57,8 +57,15 @@ spec = '\n' + spec.split('\ntargets:\n', 1)[1]
 blk = spec.split(f'\n  {name}:', 1)[1]
 blk = re.split(r'\n  [A-Za-z]\w*:\n', blk, maxsplit=1)[0]
 # Paths may be local (Sources/...) or reused by path (../ios-app/Sources/...).
-for m in re.findall(r'- path: ([^\s]+\.swift)', blk):
-    print(m)
+import os
+for path in re.findall(r'- path: ([^\s]+)', blk):
+    if path.endswith('.swift'):
+        print(path)
+    elif os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for f in sorted(files):
+                if f.endswith('.swift'):
+                    print(os.path.join(root, f))
 PY
 }
 

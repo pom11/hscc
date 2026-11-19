@@ -42,6 +42,7 @@ real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/Shared/ConnectionAddressProbe.swift
   Sources/HSCC/APIError.swift
 )

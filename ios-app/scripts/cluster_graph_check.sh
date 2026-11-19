@@ -56,6 +56,7 @@ subject="Sources/Shared/ClusterGraphReading.swift"
 real_models=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/Shared/ClusterHistorySeries.swift
   Sources/Shared/ClusterMonitorViewModel.swift
 )
@@ -158,9 +159,9 @@ entry_file="$widget_dir/GraphWidgetEntry.swift"
 reading="Sources/Shared/ClusterGraphReading.swift"
 layer="Sources/Shared/ClusterHistorySeries.swift"
 client="Sources/Shared/WidgetDataClient.swift"
-store="Sources/Shared/SharedStore.swift"
-bundle="Sources/HSCCWidgets/HSCCWidgetsBundle.swift"
-labels="Sources/HSCC/Views/WidgetSurfaceLabels.swift"
+store="Sources/Shared/WidgetSurfaceKind.generated.swift"
+bundle="Sources/HSCCWidgets/HSCCWidgetList.generated.swift"
+labels="Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift"
 
 # Comment text is stripped before any code-pattern search. Without that, a
 # sentence saying "no accessory family is declared" trips the accessory
