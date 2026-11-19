@@ -119,6 +119,7 @@ notion of "masked".
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -1031,6 +1032,31 @@ def _hosts_from_detect() -> List[str]:
     return list(cluster.get("hosts") or []) if cluster else []
 
 
+def _parser() -> argparse.ArgumentParser:
+    """Strict CLI: a typo must never turn into a live mask write on the fleet."""
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Mask (or with --unmask, unmask) snap firmware-updater's "
+                    "notifier units on every cluster node. The default is a "
+                    "dry-run plan; pass --apply to write.")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true",
+                      help="write the mask (or with --unmask, remove it)")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="explicitly select the default dry-run plan")
+    ap.add_argument("--unmask", action="store_true",
+                    help="remove the mask instead of adding it (needs --apply)")
+    ap.add_argument("--hosts", nargs="+", metavar="HOST", default=None,
+                    help="node addresses, comma- or space-separated (default: "
+                         "sparkrun cluster list)")
+    ap.add_argument("--config", default=None,
+                    help="cluster.json to read the opt-out from")
+    ap.add_argument("--bootstrap-lines", action="store_true",
+                    help="OK|/WARN| report lines")
+    ap.add_argument("--json", action="store_true", help="JSON report")
+    return ap
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI used by bootstrap.sh and by the operator.
 
@@ -1039,35 +1065,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     stays a dozen lines instead of carrying a second inline summariser).
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    dry_run = "--dry-run" in argv
-    unmask = "--unmask" in argv
-    as_lines = "--bootstrap-lines" in argv
-    as_json = "--json" in argv
+    parser = _parser()
+    if not argv:
+        parser.print_help()
+        return 2
+    ns = parser.parse_args(argv)
     hosts: List[str] = []
-    if "--hosts" in argv:
-        i = argv.index("--hosts")
+    for tok in ns.hosts or []:
         # bootstrap.sh passes ONE comma-joined arg (--hosts "$HOSTS_CSV");
         # without the split the whole list became a single bogus host.
-        for tok in argv[i + 1:]:
-            if tok.startswith("--"):
-                break
-            hosts.extend(h for h in tok.split(",") if h)
+        hosts.extend(h for h in tok.split(",") if h)
     if not hosts:
         hosts = _hosts_from_detect()
     if not hosts:
         print(json.dumps({"nodes": [], "ok": False,
                           "error": "no hosts: pass --hosts or configure a sparkrun cluster"}))
         return 2
-    config_path = None
-    if "--config" in argv:
-        config_path = argv[argv.index("--config") + 1]
     summary = mask_fleet(hosts, ssh_factory=lambda h: (
         lambda cmd, to, _host=h: _default_ssh(_host, cmd, to)),
-        dry_run=dry_run, config_path=config_path, unmask=unmask)
-    if as_lines:
+        dry_run=not ns.apply, config_path=ns.config, unmask=ns.unmask)
+    if ns.bootstrap_lines:
         print("\n".join(bootstrap_lines(summary)))
     else:
-        print(json.dumps(summary, indent=2) if as_json
+        print(json.dumps(summary, indent=2) if ns.json
               else "\n".join(format_report(summary)))
     return 0 if summary["ok"] else 1
 

@@ -21,6 +21,7 @@ profile session that path cannot exist, and this step would report a green
 ``skipped_missing`` while the feature stayed dropped (t_919ac971).
 """
 
+import argparse
 import json
 import os
 import re
@@ -249,4 +250,8 @@ def ensure_review_feature(hermes_dir=None, remote=None, branch=None,
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Apply the kanban review feature into the Hermes checkout.",
+    ).parse_args()
     print(json.dumps(ensure_review_feature()))

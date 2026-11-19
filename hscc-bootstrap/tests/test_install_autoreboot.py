@@ -12,6 +12,8 @@ All hosts are documented placeholders (10.0.0.x).
 import base64
 import json
 
+import pytest
+
 import install_autoreboot as m
 
 
@@ -379,7 +381,7 @@ def test_main_reports_json_and_rc(monkeypatch, capsys):
     n = FakeNode()
     monkeypatch.setattr(m, "_default_ssh", n.ssh)
     monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
-    rc = m.main(["--hosts", "192.0.2.1"])
+    rc = m.main(["--apply", "--hosts", "192.0.2.1"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["results"][0]["action"] == "installed"
@@ -398,15 +400,39 @@ def test_main_dry_run_writes_nothing(monkeypatch, capsys):
 
 def test_main_no_hosts_is_a_loud_rc2(monkeypatch, capsys):
     monkeypatch.setattr(m, "_hosts_from_detect", lambda: [])
-    rc = m.main([])
+    rc = m.main(["--apply"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 2 and payload["ok"] is False
+
+
+def test_main_default_is_dry_run_and_help_unknown_noargs_never_touch_the_fleet(
+        monkeypatch, capsys):
+    def forbidden(*_a, **_k):
+        pytest.fail("CLI reached the fleet before parsing was settled")
+
+    monkeypatch.setattr(m, "_hosts_from_detect", forbidden)
+    monkeypatch.setattr(m, "_default_ssh", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        m.main(["--help"])
+    assert exc.value.code == 0 and "usage:" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        m.main(["--typo"])
+    assert exc.value.code == 2 and "usage:" in capsys.readouterr().err
+    assert m.main([]) == 2 and "usage:" in capsys.readouterr().out
+
+    n = FakeNode()
+    monkeypatch.setattr(m, "_default_ssh", n.ssh)
+    monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
+    assert m.main(["--hosts", "192.0.2.1"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"][0]["action"] == "dry-run"
+    assert n.file is None and write_call_count(n) == 0
 
 
 def test_main_failing_node_is_rc1(monkeypatch, capsys):
     n = FakeNode(reachable=False)
     monkeypatch.setattr(m, "_default_ssh", n.ssh)
     monkeypatch.setattr(m, "read_cluster_config", lambda _d=None: {})
-    rc = m.main(["--hosts", "192.0.2.1"])
+    rc = m.main(["--apply", "--hosts", "192.0.2.1"])
     assert rc == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False

@@ -21,6 +21,7 @@ Config via env (sensible defaults):
   HSCC_WORKDIR         repo worktree for the card    (default: ~/dev/hscc)
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -302,4 +303,8 @@ def run_with_failure_stamp():
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Create kanban cards for pending dependency-bump PRs.",
+    ).parse_args()
     sys.exit(run_with_failure_stamp())

@@ -52,6 +52,8 @@ def test_stage_delegates_to_the_deployed_module():
     re-implement masking, and it never ssh's (sparkrun owns the fleet)."""
     body = _stage_body()
     assert "install_notifier_mask.py" in body
+    assert 'install_notifier_mask.py" --apply --hosts' in body, \
+        "a live stage must say --apply explicitly; the default is a dry-run plan"
     assert "systemctl" not in body, \
         "the stage must not compose systemctl itself — the module owns the bus-correct call"
     assert "ssh " not in body, "bootstrap must not hand-roll ssh"

@@ -12,6 +12,7 @@ not proof the content is bad) fails loud (ok=False + error) rather than
 silently re-seeding defaults over operator state. Returns what was actually
 done.
 """
+import argparse
 import json
 import os
 import sys
@@ -143,6 +144,10 @@ def install_triggers(
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Seed the trigger rules into ~/.hscc/triggers.json.",
+    ).parse_args()
     result = install_triggers()
     print(json.dumps(result, indent=2, ensure_ascii=False))
     if not result.get("ok", True):
