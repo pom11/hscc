@@ -1018,3 +1018,180 @@ struct AutodownStatusResponse: Decodable, Speakable {
     let speak: String
 }
 
+// ---------------------------------------------------------------------------
+// GET /v1/metrics/history · t_5ae8cfcf · the three-tier history read
+// ---------------------------------------------------------------------------
+//
+// The route is a pass-through of the daemon's recorder
+// (`hscc_daemon/metrics_history.py`), so these field names ARE sparkrun's
+// `MonitorSample` names — spelled exactly as the server sends them, snake_case
+// and all, because the rename a decoder "cleans up" is how a chart silently
+// reads nil for a real number. Two rules the shapes below encode:
+//
+//   * every metric is Optional and stays Optional. The server writes `null` for
+//     "this node did not report it" and NEVER 0, so a `Double` (non-optional)
+//     here would turn a node that never answered into an idle one on the chart.
+//   * `*_max` are separate columns from their averages, not decorations: a
+//     1-minute mean is exactly what hides a throttle spike. A temperature or
+//     power chart that draws `gpu_temp_c` without `gpu_temp_c_max` draws the
+//     wrong fact, and the peak column exists only on the rolled tiers.
+//
+// Tier 0 (the 2 s ring) has no `*_max` and carries `res: "2s"`; rows from the
+// store (tiers 1 and 2) have both peaks and no `res`. Both are one struct, all
+// optional, so one decoder serves every tier.
+
+/// One node row of `GET /v1/metrics/history` — one bucket, one host.
+struct MetricsHostRow: Decodable {
+    let tier: Int?
+    /// The bucket start (epoch seconds), inclusive — the store's own key.
+    let ts: Int?
+    /// `res` is the tier-0 resolution label ("2s"); absent on stored rows.
+    let res: String?
+    let host: String?
+    /// Samples that went into the bucket (1 on tier 0, up to 30 on tier 1).
+    /// `nil`/0 means "nothing sampled", which is not the same as a value.
+    let n: Int?
+    let error: String?
+
+    // sparkrun's MonitorSample names, verbatim.
+    let cpu_usage_pct: Double?
+    let cpu_temp_c: Double?
+    let gpu_util_pct: Double?
+    let gpu_temp_c: Double?
+    let gpu_power_w: Double?
+    let mem_used_pct: Double?
+    let swap_used_mb: Double?
+    let swap_total_mb: Double?
+    let swap_used_pct: Double?
+    let gpu_mem_used_mb: Double?
+    let gpu_clock_mhz: Double?
+    let net_recv_bytes_s: Double?
+    let net_send_bytes_s: Double?
+    let sparkrun_jobs: Double?
+
+    // The peaks, stored beside the averages (tiers 1 and 2 only).
+    let cpu_temp_c_max: Double?
+    let gpu_temp_c_max: Double?
+    let gpu_power_w_max: Double?
+}
+
+/// One engine row — one bucket, one backend. Identity is `(node, port)`:
+/// `model` is an attribute of the port, so a model swapped on that port is the
+/// same series, not a new one.
+struct MetricsEngineRow: Decodable {
+    let tier: Int?
+    let ts: Int?
+    let res: String?
+    let node: String?
+    let port: String?
+    let model: String?
+    let n: Int?
+    let error: String?
+    let run: Double?
+    let wait: Double?
+    let kv: Double?
+    let gen_tps: Double?
+    let prompt_tps: Double?
+
+    /// The identity the store keys on, as one string for a legend line.
+    var engineKey: String { "\(node ?? "?"):\(port ?? "?")" }
+}
+
+/// Tier 0's depth + whether the serving process could actually read the ring.
+///
+/// `readable_here` is the field a chart must branch on: tier 0 lives in the
+/// daemon's memory and the API is a different process, so `points` can be a real
+/// count while `hosts` is legitimately empty. Drawing that as "nothing happened"
+/// is the misreading this exists to prevent.
+struct MetricsHistoryTier0: Decodable {
+    let points: Int?
+    let capacity: Int?
+    let readable_here: Bool?
+    let source: String?
+    let reason: String?
+    let sampler_error: String?
+    let store_error: String?
+    let stamp_age_s: Double?
+}
+
+struct MetricsHistoryTierMeta: Decodable {
+    let tier: Int?
+    /// Seconds per bucket: 2 / 60 / 300.
+    let resolution_s: Int?
+    /// The tier's own retention in seconds: 900 / 86400 / 604800.
+    let window_s: Int?
+    let capacity: Int?
+}
+
+/// The field vocabulary the server publishes so no client hardcodes a column
+/// list. `host_peaks` is the list a temperature or power chart must draw
+/// alongside its averages.
+struct MetricsHistoryFields: Decodable {
+    let host: [String]?
+    let host_peaks: [String]?
+    let engine: [String]?
+    let engine_key: [String]?
+    let engine_identity: String?
+}
+
+struct MetricsHistoryCounts: Decodable {
+    let host_rows: Int?
+    let engine_rows: Int?
+}
+
+/// The recorder's `stats()`: the store's size against its stated bound.
+struct MetricsHistoryStats: Decodable {
+    let path: String?
+    let db_bytes: Int?
+    let bound_bytes: Int?
+    let tier1_rows: Int?
+    let tier2_rows: Int?
+    let exists: Bool?
+    let error: String?
+}
+
+/// `GET /v1/metrics/history?tier=&host=&node=&since=&until=`.
+///
+/// Verified route shape (routes_metrics.py, t_5ae8cfcf):
+///   { tier, tier_meta{tier,resolution_s,window_s,capacity}, since, until,
+///     host, node, source, hosts[], engines[], counts{host_rows,engine_rows},
+///     fields{host[],host_peaks[],engine[],engine_key[],engine_identity},
+///     tier0{points,capacity,readable_here,source,reason,sampler_error,
+///           store_error,stamp_age_s}, stats{…}, error, speak }
+/// Only `tier`, `hosts`, `engines` and `speak` are guaranteed present; every
+/// metric inside a row is optional by the rule above.
+struct MetricsHistoryResponse: Decodable, Speakable {
+    let tier: Int
+    let tier_meta: MetricsHistoryTierMeta?
+    let since: Int?
+    let until: Int?
+    let host: String?
+    let node: String?
+    /// Where the rows came from: `sqlite_store`, `sqlite_store_absent`,
+    /// `recorder_ring`, `recorder_ring_absent`.
+    let source: String?
+    let hosts: [MetricsHostRow]
+    let engines: [MetricsEngineRow]
+    let counts: MetricsHistoryCounts?
+    let fields: MetricsHistoryFields?
+    let tier0: MetricsHistoryTier0?
+    let stats: MetricsHistoryStats?
+    /// The route's own problem, if it had one. Absent on a clean read; a
+    /// degraded read still answers 200 with empty rows, so this — not the
+    /// status code — is what tells a surface the history is unavailable.
+    let error: String?
+    let speak: String
+
+    /// True only when rows actually came from the store. An empty `hosts` with
+    /// this false is "no history read yet", not "the fleet was idle".
+    var hasStoredRows: Bool {
+        source == "sqlite_store" && !hosts.isEmpty
+    }
+
+    /// The live 2 s window can be drawn ONLY when the serving process held the
+    /// ring when it answered.
+    var hasLiveTier0: Bool {
+        tier0?.readable_here == true && (tier0?.points ?? 0) > 0
+    }
+}
+
