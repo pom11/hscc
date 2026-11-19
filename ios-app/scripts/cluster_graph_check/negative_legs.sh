@@ -69,14 +69,22 @@ restore() {
   done
   [ "$bad" -eq 0 ] || { echo "  !!! RESTORE MISMATCH — tree may be dirty"; BROKEN=$((BROKEN+1)); }
 }
-# run_leg <id> <mutated-file-index> <expect-string> <mutate-fn> <want_rc: nonzero|zero>
+# run_leg <id> <mutated-file-index> <expect-string> <mutate-fn> <want_rc: nonzero|zero> [gate]
 # Which gate runs is DERIVED from what got mutated, so the two cannot drift apart here:
 # mutate the graph gate and you are testing the file that delegates to it; mutate a Swift
 # subject and you are testing the graph gate. The first draft keyed both off one index,
 # and L10 consequently asserted that the mutation had landed in a file it never touched.
+# The optional 6th argument overrides the derivation for the ONE leg whose subject is the
+# surface file while the mutation necessarily lives in the Swift that file measures (see
+# L14). One named override with its reason at the leg is not the drift the derivation
+# guards against; an unlabelled second index would be.
 run_leg() {
   local id="$1" tidx="$2" want="$3" mut="$4" wantrc="$5" gate out rc before
-  gate="$GATE"; [ "$tidx" = "3" ] && gate="$SURFACE"
+  # `${6:-}` and not `$6`: the harness runs under `set -u` and eleven of its legs pass
+  # no gate, so a bare $6 killed the whole run at the first leg.
+  local wantgate="${6:-}"
+  gate="$wantgate"
+  if [ -z "$gate" ]; then gate="$GATE"; [ "$tidx" = "3" ] && gate="$SURFACE"; fi
   before="${SHA_BEFORE[$tidx]}"
   "$mut"
   if [ "$(sha_of "${FILES[$tidx]}")" = "$before" ]; then
@@ -149,6 +157,16 @@ m12() { printf '#if os(iOS)\n        .supportedFamilies([.systemMedium, .systemL
 #       rule is a scope, not a ban, and without this leg L12 would only prove that a
 #       literal arm reddens, not that the marker was in the wrong place.
 m13() { printf '#if os(iOS)\n        // families-omit: .systemSmall — the iPhone small tile has no room for a chart\n        .supportedFamilies([.systemMedium, .systemLarge, .systemExtraLarge])\n#else\n        // families-omit: .systemSmall — desktop tiles start at medium too\n        // families-omit: .systemExtraLarge — the desktop gallery caps at large\n        .supportedFamilies([.systemMedium, .systemLarge])\n#endif\n' > "$BK/b"; place "$W/GraphWidget.swift" "$NEEDLE" "$BK/b"; }
+# L14 — the half of `widget_gate_families home-screen-only` that the graph-own-3
+#       delegation does NOT cover. That half greps a `supportedFamilies([...])` LITERAL
+#       for an accessory family; this widget hands supportedFamilies the named list, so
+#       the grep has nothing to look at and its ok measures nothing (the general fix is
+#       a common.sh job, recorded in this card's LEFT). What is proven here is that the
+#       check still has teeth WHEN a literal exists — which is what the inventory's
+#       graph-3a row is now allowed to claim. SUBJECT = the surface file, so this is the
+#       one leg that overrides the derived gate; the mutation still has to land in the
+#       Swift, which is why the mutation-applied assertion is not weakened.
+m14() { printf '        .supportedFamilies([.systemSmall, .accessoryInline])\n' > "$BK/b"; place "$W/GraphWidget.swift" "$NEEDLE" "$BK/b"; }
 
 echo "sanity (the harness's needles must be unique — ASSERTED):"
 # Every leg above plants and removes text BY NEEDLE, so a second occurrence of one
@@ -186,6 +204,7 @@ run_leg L10 3 "no accessory family anywhere in the graph widget (home-screen-onl
 leg  L11 0 "no supportedFamilies arm reaches macOS" m11
 leg  L12 0 "the [os(iOS)] arm omits systemSmall" m12
 run_leg L13 0 "structural leg: all checks passed" m13 zero
+run_leg L14 0 "names an accessory family in supportedFamilies while gated as home-screen-only" m14 nonzero "$SURFACE"
 echo "control run again (must match the first byte for byte):"
 bash "$GATE" > "$BK/control2.txt" 2>&1; echo "  rc=$? ok=$(grep -c '  ok: ' "$BK/control2.txt")"
 cmp -s "$BK/control.txt" "$BK/control2.txt" && echo "  control output BYTE-IDENTICAL" || echo "  !!! control drifted"
