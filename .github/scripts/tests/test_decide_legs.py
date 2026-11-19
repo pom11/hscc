@@ -90,11 +90,15 @@ def _repo_with_a_pr(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, main, head
 
 
+def _matrix_legs(fields: dict[str, str]) -> list[str]:
+    return [row["leg"] for row in json.loads(fields["matrix"])]
+
+
 def test_push_runs_the_full_roster(tmp_path):
     proc, fields = _run(tmp_path, EVENT="push")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert fields["legs"].split() == _roster()
-    assert json.loads(fields["matrix"]) == _roster()
+    assert _matrix_legs(fields) == _roster()
     assert fields["leg_count"] == str(len(_roster()))
     assert fields["reason"].startswith("full-suite-event")
 
@@ -112,7 +116,7 @@ def test_a_dispatch_input_is_used_verbatim_and_deduplicated(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert fields["legs"] == "scripts hscc-api"
-    assert json.loads(fields["matrix"]) == ["scripts", "hscc-api"]
+    assert _matrix_legs(fields) == ["scripts", "hscc-api"]
     assert fields["leg_count"] == "2"
     assert fields["reason"] == "dispatch-input"
 
@@ -130,7 +134,7 @@ def test_a_pull_request_selects_from_three_dot_diff(tmp_path):
     # hscc-roles was changed on MAIN after the branch point; a two-dot diff would
     # report it as touched by this PR and run its leg unnecessarily.
     assert fields["legs"] == "hscc-api", proc.stdout
-    assert json.loads(fields["matrix"]) == ["hscc-api"]
+    assert _matrix_legs(fields) == ["hscc-api"]
     assert fields["reason"] == "map"
 
 

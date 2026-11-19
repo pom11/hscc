@@ -44,10 +44,12 @@ full_roster() {
 }
 
 forced_selection() {
-  LEGS_INPUT="${1//,/ }" python3 - "$OUT" <<'PY' || exit 2
-import json
+  LEGS_INPUT="${1//,/ }" SELECTOR="$SELECT" python3 - "$OUT" <<'PY' || exit 2
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.environ["SELECTOR"]))
+import leg_select
 
 seen: set[str] = set()
 legs = [
@@ -61,7 +63,7 @@ if not legs:
 with open(sys.argv[1], "a", encoding="utf-8") as fh:
     fh.write(f"legs={' '.join(legs)}\n")
     fh.write(f"leg_count={len(legs)}\n")
-    fh.write(f"matrix={json.dumps(legs)}\n")
+    fh.write(f"matrix={leg_select.legs_json(legs)}\n")
     fh.write("full_suite=false\n")
     fh.write("reason=dispatch-input\n")
 PY

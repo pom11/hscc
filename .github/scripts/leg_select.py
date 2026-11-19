@@ -155,9 +155,35 @@ def _per_leg_rules(legs: list[str]) -> list[tuple[tuple[str, ...], object]]:
     return [((f"{leg}/",), (leg,)) for leg in legs]
 
 
+#: Legs whose tests legitimately need the macOS the daemon runs on.
+#:
+#: MEASURED, not assumed: the first ubuntu run of this gate
+#: (run 44539504053, 2026-11-19) died collecting this leg with
+#: ``AttributeError: module 'select' has no attribute 'kqueue'`` at
+#: hscc_daemon/event_driven.py:240 — the module annotates ``select.kqueue`` at
+#: class scope, and Linux has no kqueue. The daemon runs on Spark Macs, so the
+#: leg runs on macOS. Every other leg passed on ubuntu in that same run once its
+#: test-only imports were declared (requirements-ci.txt), so they keep the
+#: cheaper, 20-concurrent ubuntu pool.
+MACOS_LEGS = frozenset({"hscc_daemon"})
+
+
 def legs_json(legs: list[str]) -> str:
-    """The `strategy.matrix.leg` JSON array a workflow reads from this module."""
-    return json.dumps(legs)
+    """The `strategy.matrix` value a workflow reads from this module.
+
+    Objects, not bare names, because the runner image is part of the faithful
+    posture for a leg that touches Darwin-only APIs. Ubuntu is the default:
+    it is the cheaper pool and it is what the Python-only tests need.
+    """
+    return json.dumps(
+        [
+            {
+                "leg": leg,
+                "os": "macos-latest" if leg in MACOS_LEGS else "ubuntu-latest",
+            }
+            for leg in legs
+        ]
+    )
 
 
 def select_legs(paths: list[str], legs: list[str] | None = None) -> tuple[list[str], list[str]]:

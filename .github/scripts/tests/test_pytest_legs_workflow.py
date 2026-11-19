@@ -150,12 +150,14 @@ def test_the_venv_is_cached_and_the_pip_cache_is_kept():
     )
 
 
-def test_the_leg_job_runs_on_the_platform_the_suite_targets():
-    """ubuntu-latest was measured red: hscc_daemon/event_driven.py annotates
-    select.kqueue at class scope, which does not exist on Linux."""
+def test_each_leg_job_runs_on_the_platform_the_selector_chose():
+    """The first ubuntu run died collecting hscc_daemon on select.kqueue; the
+    selector marks that one macos-latest and leaves the rest on the 20-slot
+    ubuntu pool (pinned in test_leg_select.py). The workflow must consume it."""
     text = _text()
     leg_job = text[text.index("  leg:\n") : text.index("\n  legs:\n    name: legs")]
-    assert "    runs-on: macos-latest" in leg_job
+    assert "    runs-on: ${{ matrix.os }}" in leg_job
+    assert "leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in leg_job
 
 
 def test_the_legs_job_does_not_cancel_a_push_to_main():

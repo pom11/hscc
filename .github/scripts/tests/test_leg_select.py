@@ -23,6 +23,7 @@ the real ci_log.sh.
 """
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -210,7 +211,11 @@ def test_cli_writes_the_output_contract_a_workflow_reads(tmp_path):
     assert proc.returncode == 0, proc.stderr
     written = out.read_text(encoding="utf-8")
     assert "legs=hscc-api scripts\n" in written, written
-    assert 'matrix=["hscc-api", "scripts"]\n' in written, written
+    matrix = json.loads(next(ln for ln in written.splitlines() if ln.startswith("matrix="))[7:])
+    assert matrix == [
+        {"leg": "hscc-api", "os": "ubuntu-latest"},
+        {"leg": "scripts", "os": "ubuntu-latest"},
+    ], matrix
     assert "full_suite=false\n" in written, written
     # ...and the human-readable half, because a job log has to answer "why these
     # legs" without re-running anything.
@@ -244,6 +249,16 @@ def test_cli_all_refuses_to_be_combined_with_paths(tmp_path):
     )
     assert proc.returncode == 2
     assert "--all cannot be combined" in proc.stderr
+
+
+def test_matrix_gives_the_daemon_macos_and_everything_else_ubuntu():
+    """The runner image is part of the posture, not an optimisation detail: the
+    first ubuntu run died collecting hscc_daemon on `select.kqueue`."""
+    matrix = json.loads(leg_select.legs_json(leg_select.roster()))
+    assert [row["leg"] for row in matrix] == leg_select.roster()
+    by_leg = {row["leg"]: row["os"] for row in matrix}
+    assert by_leg.pop("hscc_daemon") == "macos-latest"
+    assert set(by_leg.values()) == {"ubuntu-latest"}, by_leg
 
 
 def test_cli_reports_a_widening_in_the_log(tmp_path):

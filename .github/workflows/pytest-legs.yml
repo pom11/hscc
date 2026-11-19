@@ -36,10 +36,13 @@ name: pytest-legs
 #
 # COST. One job per leg, in PARALLEL (fail-fast: false), so wall time is the
 # slowest selected leg rather than the sum of the roster, and the gate's duration
-# does not grow with the roster. The Python venv is cached on requirements.txt +
-# requirements-ci.txt and each leg only installs into it on a cache miss. The
-# measured wall time of the first full-suite run and of a single-leg PR run is
-# reported in the PR and in docs/reports/t_23bf61f3-ci-pytest-leg.md.
+# does not grow with the roster. Only hscc_daemon runs on macOS (its module
+# annotates select.kqueue at class scope; ubuntu died collecting it on the first
+# run); every other leg uses ubuntu's much larger concurrent pool. The Python
+# venv is cached on requirements.txt + requirements-ci.txt and each leg only
+# installs into it on a cache miss. The measured wall time of the first
+# full-suite run and of a single-leg PR run is reported in the PR and in
+# docs/reports/t_23bf61f3-ci-pytest-leg.md.
 #
 # BLOCKING OR ADVISORY (decision 2). Same shape as address-guard.yml: one
 # repository variable, not an edit to this file.
@@ -146,14 +149,10 @@ jobs:
       fail-fast: false
       matrix:
         leg: ${{ fromJSON(needs.select.outputs.matrix) }}
-    # macOS, not ubuntu. The first ubuntu run of this gate measured why:
-    # hscc_daemon/event_driven.py:240 annotates `Optional[select.kqueue]` at
-    # class scope, so the daemon leg dies at collection with
-    # `module 'select' has no attribute 'kqueue'` on Linux. The daemon runs on
-    # Spark Macs, so macOS is the posture these tests were written for. The
-    # Python-only steps are portable; the Apple clients are still covered by
-    # app-build-checks.yml (swiftc, no launch).
-    runs-on: macos-latest
+    # Ubuntu by default (cheap, 20 concurrent slots); a leg selector marks the
+    # ones whose tests need Darwin. The first ubuntu run measured hscc_daemon's
+    # kqueue import failure; see leg_select.MACOS_LEGS.
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
