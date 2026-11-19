@@ -186,6 +186,13 @@ def select_legs(paths: list[str], legs: list[str] | None = None) -> tuple[list[s
             full = True
 
     result = all_legs if full or not chosen else sorted(chosen, key=all_legs.index)
+    # `not chosen` is NOT the widening mechanism — it is the empty-diff case: a
+    # caller that claimed nothing (an empty path list, a diff of blank lines) must
+    # run everything rather than report green on zero tests. An unclaimed path
+    # among claimed ones is handled by `full` above, and
+    # test_a_single_unattributable_path_among_known_ones_widens_everything pins
+    # that pair — the empty case alone hides a missing `full=True`, which is how
+    # this line read as covered while nothing claimed the path.
     return result, widen
 
 

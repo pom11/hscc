@@ -64,8 +64,47 @@ def test_the_roster_this_covers_is_the_runners_own_roster():
 
 @pytest.mark.parametrize("leg", leg_select.roster())
 def test_every_leg_in_the_roster_is_covered_by_a_change_in_its_own_dir(leg):
-    """The card's gate: no leg may be selectable-by-accident only."""
-    assert leg in _sel(f"{leg}/whatever.py"), f"{leg} is unreachable from its own dir"
+    """The card's gate: no leg may be selectable-by-accident only.
+
+    Two halves, because the behavioural one alone was MEASURED to be decorative:
+    with the generated per-dir rule broken (``{leg}/src/`` instead of ``{leg}/``)
+    the path goes unclaimed, the fail-closed widening rescues it, and a bare
+    ``leg in chosen`` still passes — the leg looks covered while no rule claims
+    it. So the rule is checked structurally as well, and the behavioural result
+    is checked for not having needed the widening.
+    """
+    all_legs = leg_select.roster()
+    path = f"{leg}/some_file.py"
+
+    assert any(
+        prefixes == (f"{leg}/",) and leg in target
+        for prefixes, target in leg_select._per_leg_rules(all_legs)
+    ), f"{leg} has no generated rule claiming its own directory"
+
+    chosen, widen = leg_select.select_legs([path])
+    assert leg in chosen, f"{leg} is unreachable from its own dir"
+    if _claimed_by_an_all_rule(path):
+        # .github/scripts is the one leg whose dir a harness rule widens on
+        # purpose; that is a deliberate full suite, not an accident.
+        assert chosen == all_legs
+    else:
+        assert chosen != all_legs, (
+            f"{path} reached {leg} only because nothing claimed it — the map has "
+            "no rule for this leg's own directory"
+        )
+
+
+def _claimed_by_an_all_rule(path: str) -> bool:
+    for prefixes, target in leg_select._RULES:
+        if target is leg_select.ALL and any(
+            path == p or path.startswith(p) for p in prefixes
+        ):
+            return True
+    return False
+
+
+@pytest.mark.parametrize("leg", leg_select.roster())
+def test_every_leg_is_selectable_from_its_tests_dir_too(leg):
     assert leg in _sel(f"{leg}/tests/test_thing.py"), f"{leg} is unreachable from its tests"
 
 
