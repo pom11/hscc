@@ -112,11 +112,15 @@ def a_counts_baseline():
 
 # Candidate list for the cross-interpreter pin. An entry is only a CANDIDATE;
 # :func:`_sibling_is_runnable` decides whether it is a SIBLING (see there).
+#: The PATH interpreters the gate considers. Kept in one place so the
+#: independent capability probe below cannot test a version (e.g. 3.14) the
+#: gate never looks at and then call the resulting skip "un-gated".
+_SIBLING_PY_NAMES = ("python3.11", "python3.12", "python3.13")
 _SIBLING_CANDIDATES = (
     "~/.hermes/hermes-agent/venv/bin/python",
     "~/miniconda3/envs/p313/bin/python",
     "/Users/desac/miniconda3/envs/p313/bin/python",
-    "python3.11", "python3.12", "python3.13",
+    *_SIBLING_PY_NAMES,
 )
 
 # path -> drop reason, filled by :func:`_sibling_interpreters`. Module level so
@@ -704,6 +708,44 @@ def test_sibling_gate_uses_the_interpreter_that_can_import_the_audit(
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
+def _capable_python_on_path():
+    """The first PATH interpreter the gate could select that can import the
+    audit's deps, if any.
+
+    Scans the same names as :data:`_SIBLING_PY_NAMES`: a version the gate never
+    considers (e.g. ``python3.14`` on the runner) is not evidence of an un-gated
+    pin. The candidate must also be a DIFFERENT interpreter from the one running
+    this leg. In the CI venv ``python3.13`` on PATH *is* this interpreter (the
+    venv was built from it), and counting it made the anti-vacuity assertion
+    below fail on a runner that has no second CPython — while the gate itself
+    correctly deduped it as "this interpreter"."""
+    here = os.path.realpath(sys.executable)
+    for name in _SIBLING_PY_NAMES:
+        path = _which(name)
+        if not path or os.path.realpath(path) == here:
+            continue
+        probe = subprocess.run(
+            [path, "-c", "import rich, yaml, pygments, markdown_it"],
+            capture_output=True, text=True, timeout=60, env=_probe_env())
+        if probe.returncode == 0:
+            return path
+    return None
+
+
+def test_capable_python_probe_ignores_the_running_interpreter(monkeypatch):
+    """CI's only ``python3.x`` is the venv's own base interpreter.
+
+    setup-python puts ``python3.13`` on PATH and the leg builds its venv from
+    it, so a capability probe that forgets distinctness reports a "capable
+    sibling" that the selector has already (correctly) deduped. That is how
+    test_sibling_gate_still_runs_a_real_sibling went red on Ubuntu with an
+    empty drop map."""
+    monkeypatch.setattr(sys.modules[__name__], "_which", lambda name: sys.executable)
+    # The running interpreter can import the audit deps (the suite runs there),
+    # so this is the exact shape CI hit: capable, but not a sibling.
+    assert _capable_python_on_path() is None
+
+
 def test_sibling_gate_still_runs_a_real_sibling():
     """Anti-vacuity: the gate may not be 'fixed' into a permanent skip.
 
@@ -714,7 +756,7 @@ def test_sibling_gate_still_runs_a_real_sibling():
          surface name that cannot exist makes it return ``{}`` without
          launching a probe subprocess, so this proves the whole
          spawn -> import -> argparse -> JSON path for real in seconds;
-      2. if this host has ANY python3.x that can import the audit's
+      2. if this host has ANY DISTINCT python3.x that can import the audit's
          third-party deps (checked independently of the gate's own probe, so
          the assertion is not circular) the gate must have selected at least
          one sibling. A change that empties `_sibling_interpreters()` on a
@@ -727,17 +769,7 @@ def test_sibling_gate_still_runs_a_real_sibling():
             f"selected sibling {py} cannot run the (A)-only contract: {failed}")
         assert table == {}, f"unexpected (A) table for a phantom surface: {table}"
 
-    have_capable = False
-    for name in ("python3.11", "python3.12", "python3.13", "python3.14"):
-        path = _which(name)
-        if not path:
-            continue
-        probe = subprocess.run([path, "-c", "import rich, yaml"],
-                               capture_output=True, text=True, timeout=60,
-                               env=_probe_env())
-        if probe.returncode == 0:
-            have_capable = True
-            break
+    have_capable = _capable_python_on_path() is not None
     if have_capable:
         assert siblings, (
             "a capable interpreter exists on PATH but the gate selected no "

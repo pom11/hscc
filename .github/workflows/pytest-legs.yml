@@ -157,6 +157,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The scripts leg pins the pre-migration CHANGELOG.md from git history
+          # (test_changelog_fragments.test_migration_is_lossless_on_the_live_changelog).
+          # A depth-1 checkout has no such blob: the test then reconstructs HEAD's
+          # pointer-only [Unreleased] and goes red on the runner while staying green
+          # in a full local clone. Full history is needed only for that leg.
+          # `1 || 0` (not `0 || 1`): GitHub expressions treat 0 as falsy.
+          fetch-depth: ${{ matrix.leg != 'scripts' && 1 || 0 }}
 
       - uses: actions/setup-python@v5
         with:
