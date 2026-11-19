@@ -467,8 +467,9 @@ counts.
 The main orchestrator reaches the operator through one durable feed under
 `~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
 client of this route, not a second writer, so dedupe and rate limits cannot
-drift between producers. The push sender is a no-op seam today
-(`hscc_daemon/alert_push.py`); card N2 fills the APNs transport.
+drift between producers. Every newly created alert is pushed to the registered
+iOS/macOS devices by the daemon's APNs sender (card N2); the feed remains the
+durable record when a push fails.
 
 ### POST /v1/alerts
 
@@ -503,6 +504,30 @@ advance; `latest_id` is the newest id the store holds.
 Marks one alert acknowledged (idempotent — the first `acked_at` is kept) and
 clears its key's dedupe slot, so a condition that recurs after the operator has
 seen it can alert again. `404` when the id is not in the bounded feed.
+
+## Push devices (card N2)
+
+APNs token authentication uses a `.p8` key named by `~/.hscc/apns.json`; the
+key, key id, team id and topics never live in this repo. The daemon imports
+`h2` lazily (HTTP/2 through the already-pinned `httpx`) and signs the ES256 JWT
+with the system `openssl`, so no crypto wheel is added.
+
+### POST /v1/devices
+
+Body: `platform` (`ios|macos`), `token` (32-200 hex characters, the APNs device
+token), `bundle_id` (the app id, used as the `apns-topic` unless `topics` in
+`apns.json` says otherwise), `env` (`production|development`). Registration is
+idempotent per `(platform, token)`: `201` for a new row, `200` when an existing
+row was refreshed (`created: false`). The response carries a derived `id`,
+never the token. `POST /v1/devices/test` sends the `hscc notify test` push
+through the same sender; delivery failure is a `200` with `sent: false` and a
+`reason` (`no_config`, `no_devices`, `all_failed`, ...), not an HTTP error.
+
+### GET /v1/devices
+
+The roster without tokens (`id`, `platform`, `bundle_id`, `env`,
+`registered_at`, `updated_at`), newest first. APNs `410` / `BadDeviceToken`
+responses prune the rejected token automatically; transient failures keep it.
 
 ## Parity tests
 

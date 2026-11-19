@@ -45,10 +45,10 @@ empty timestamp". The bounded store evicts the oldest alerts by id, period: the
 feed has one order, and pretending an old unacknowledged alert is newer than a
 recent one would be a lie.
 
-PUSH IS A SEAM, NOT THIS CARD. ``hscc_daemon/alert_push.py`` is the no-op
-sender (N2 fills it). This module calls it once per CREATED alert, after the
-file is safely written, and records its result on the response. A sender
-failure never undoes or hides the alert.
+PUSH IS A SEAM, NOT THIS CARD. ``hscc_daemon/alert_push.py`` is the APNs
+sender (card N2). This module calls it once per CREATED alert, after the file is
+safely written, and records its result on the response. A sender failure never
+undoes or hides the alert.
 
 The store is safe against two writers (CLI + API) on one host: mutations take
 an exclusive ``fcntl`` lock on ``alerts.lock`` and replace the JSON atomically.
@@ -366,17 +366,32 @@ def _global_retry_after(state: dict, now: float):
     return max(0.0, oldest + GLOBAL_WINDOW_S - now)
 
 
-def _push(alert: dict) -> dict:
+def _push(alert: dict, hscc_dir=None) -> dict:
     """Offer one created alert to the sender seam; never raise.
 
     A dead sender must not turn a persisted alert into a failed request — the
     operator still sees it on the next ``GET /v1/alerts``. The result is
     reported to the caller so an operator can tell "queued but no push
-    transport" from "pushed".
+    transport" from "pushed". ``hscc_dir`` carries the caller's sandbox root
+    into the sender so its roster/config read the same ``~/.hscc`` the alert
+    was written under.
     """
     try:
         from . import alert_push
-        result = alert_push.send(dict(alert))
+        send = alert_push.send
+        # N1's documented seam was ``send(alert)``; N2 adds an optional
+        # ``hscc_dir`` so a sandboxed API/test resolves its own roster. Keep a
+        # single-argument hook (or an old monkeypatch) working.
+        try:
+            import inspect
+            params = inspect.signature(send).parameters
+            accepts_dir = "hscc_dir" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in params.values())
+        except (TypeError, ValueError):
+            accepts_dir = False
+        result = (send(dict(alert), hscc_dir=hscc_dir) if accepts_dir
+                  else send(dict(alert)))
     except Exception as exc:  # noqa: BLE001 - a seam must not break the feed
         log.warning("alerts: push sender failed: %r", exc)
         return {"sent": False, "reason": "sender_error"}
@@ -485,7 +500,7 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
         _prune(state, now)
         _save(path, state)
 
-    push = _push(alert)
+    push = _push(alert, hscc_dir)
     return {
         "created": True,
         "deduped": False,

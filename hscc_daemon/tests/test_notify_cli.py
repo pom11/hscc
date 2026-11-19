@@ -115,6 +115,21 @@ def test_one_positional_is_the_legacy_message_form():
     assert opts["body"] == "Hello World"
 
 
+def test_test_is_the_push_self_check_not_a_body():
+    opts, err = notify_cli.parse_notify_args(["test"])
+    assert err is None
+    assert opts["test"] is True
+    assert opts["title"] == "HSCC test notification"
+
+    opts, err = notify_cli.parse_notify_args(["test", "--key", "k"])
+    assert opts is None and "--key does not apply" in err
+
+    # Two positionals keep their normal title/body meaning.
+    opts, err = notify_cli.parse_notify_args(["test", "body"])
+    assert err is None and opts["test"] is False
+    assert (opts["title"], opts["body"]) == ("test", "body")
+
+
 @pytest.mark.parametrize("argv", [
     [],
     ["T", "B", "C"],
@@ -239,6 +254,39 @@ def test_api_refusal_surfaces_the_server_sentence(stub_api, hscc_home, capsys):
     assert "level must be one of" in captured.err
 
 
+def test_test_verb_posts_to_devices_test(stub_api, hscc_home, capsys):
+    _StubAPI.status = 200
+    _StubAPI.response = {"sent": True, "reason": "sent", "sent_count": 2,
+                         "test": True, "speak": "Test push sent."}
+    rc = notify_cli.main(["test", "--api", stub_api])
+    assert rc == 0
+    assert "test push sent to 2 devices" in capsys.readouterr().out
+    assert len(_StubAPI.seen) == 1
+    assert _StubAPI.seen[0]["path"] == "/v1/devices/test"
+    assert _StubAPI.seen[0]["body"] == {}
+
+
+def test_test_verb_exits_1_when_nothing_was_sent(stub_api, hscc_home, capsys):
+    _StubAPI.status = 200
+    _StubAPI.response = {"sent": False, "reason": "no_config",
+                         "detail": "~/.hscc/apns.json is not configured",
+                         "test": True, "speak": "Test push not sent."}
+    rc = notify_cli.main(["test", "--api", stub_api])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "test push not sent (no_config)" in out
+    assert "apns.json" in out
+
+
+def test_test_verb_json_prints_the_payload(stub_api, hscc_home, capsys):
+    _StubAPI.status = 200
+    _StubAPI.response = {"sent": True, "reason": "sent", "sent_count": 1,
+                         "test": True}
+    assert notify_cli.main(["test", "--json", "--api", stub_api]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["test"] is True and payload["sent"] is True
+
+
 # --------------------------------------------------------------------------- #
 # The real dispatch (the "green pytest != working CLI" leg)
 # --------------------------------------------------------------------------- #
@@ -261,6 +309,21 @@ def test_main_dispatches_the_verb_with_unjoined_argv(monkeypatch):
     assert calls == [[
         "Approve LIVE", "example-project wants to deploy", "--level", "action",
     ]]
+
+
+def test_main_dispatches_the_test_verb_untouched(monkeypatch):
+    calls = []
+
+    def fake_main(argv):
+        calls.append(list(argv))
+        return 1
+
+    monkeypatch.setattr(notify_cli, "main", fake_main)
+    monkeypatch.setattr(sys, "argv", ["hscc", "notify", "test", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        unified.main()
+    assert exc.value.code == 1
+    assert calls == [["test", "--json"]]
 
 
 def test_help_token_never_dispatches_the_verb(monkeypatch):

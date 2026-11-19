@@ -1,15 +1,15 @@
-"""Push sender seam for the alert feed — intentionally a no-op today.
+"""Push sender seam for the alert feed — APNs (card N2).
 
 ``hscc_daemon.alerts`` persists every created alert and then offers it here,
-once, after the write. This module is the ONE place that knows how to reach
-the operator's devices; card N2 (APNs sender + device registration) fills it in.
-Keeping the seam separate means the feed, the CLI and the API never grow a
-second delivery path, and N2 can change transport without touching the store.
+once, after the write. This module is the ONE place the feed reaches the
+operator's devices; the transport itself lives in :mod:`hscc_daemon.apns`.
 
-Contract for the implementation that replaces :func:`send`:
-
+Contract
+========
 * input is the public alert dict (``id``, ``ts``, ``title``, ``body``,
   ``level``, ``key``, ``acked``, ``acked_at``) — treat it as read-only;
+  ``hscc_dir`` is an optional keyword so a sandboxed API/test resolves the
+  roster and APNs config under its own root instead of the live ``~/.hscc``;
 * return a JSON-able dict describing what happened, at least
   ``{"sent": bool, "reason": str}`` (plus transport detail as useful);
 * never raise for a delivery failure and never retry inside this call: a
@@ -18,24 +18,27 @@ Contract for the implementation that replaces :func:`send`:
 * credentials (APNs key, team id, device tokens) live outside the repo —
   ``~/.hscc`` or the keychain — never in this file.
 
-The current answer is deliberately explicit: ``sent: false`` with
-``reason: "no_transport"``. An empty ``{}`` would let a response claim push
-was attempted when nothing was.
+With no APNs config or no registered device the answer is explicit
+(``sent: false`` with ``reason: "no_config"`` / ``"no_devices"``), never an
+empty ``{}`` that would let a response claim a push was attempted.
 """
 
 from __future__ import annotations
 
 __all__ = ["send", "SENDER_READY"]
 
-#: False until N2 lands a real transport. Surfaces can say "no push transport"
-#: from this flag instead of guessing from a response shape.
-SENDER_READY = False
+#: The APNs transport is real as of card N2.
+SENDER_READY = True
 
 
-def send(alert: dict) -> dict:
-    """No-op push: the alert is already persisted by the caller."""
-    return {
-        "sent": False,
-        "reason": "no_transport",
-        "detail": "push sender not configured (card N2)",
-    }
+def send(alert: dict, hscc_dir=None) -> dict:
+    """Push one created alert to the registered devices (never raises)."""
+    try:
+        from . import apns
+        return apns.send_alert(alert, hscc_dir=hscc_dir)
+    except Exception as exc:  # noqa: BLE001 - the feed must survive any sender
+        return {
+            "sent": False,
+            "reason": "sender_error",
+            "detail": type(exc).__name__,
+        }

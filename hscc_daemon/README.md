@@ -41,6 +41,7 @@ Core modules (not exhaustive — `ls hscc_daemon/*.py` is the census):
 | `dispatcher_wedge.py` | Dispatcher-wedge watchdog + guarded self-heal |
 | `kanban_blocked.py` / `kanban_cli.py` | `hscc kanban blocked` (why a card is blocked + recovery) / `hscc kanban stale` (board hygiene the autodown C3 interlock reads) |
 | `escalate.py` / `escalate_watcher.py` | Failure-escalation decision logic (pure) + the live watcher (reassign to strong-tier, desktop notify) |
+| `apns.py` / `devices.py` | APNs HTTP/2 token-auth sender (ES256 JWT, 410/BadDeviceToken pruning) + the registered push-device roster behind `/v1/devices` |
 | `autodown.py` / `autodown_cli.py` | Idle autodown/autoup core (`~/.hscc/autodown.json`, the `classify()` decision table, the O_EXCL lock) + `hscc autodown` verbs |
 | `kill_switch.py` | Backend for stopping a runaway kanban worker (wrapped by the API + iOS app) |
 | `qr_code.py` | Pure-stdlib QR encoder for the API pairing QR (no `qrcode`/Pillow by policy) |
@@ -72,6 +73,9 @@ environment as the `hscc` CLI. Entry point: `hscc_daemon.hscc.main`
 | `~/.hscc/recover.json` | Engine-wedge recovery cooldowns / attempt counts / `gave_up` |
 | `~/.hscc/watchdog-block.json` | Pipeline watchdog block (failures, backoff, `intentional == "autodown"`) |
 | `~/.hscc/autodown.json` + `autodown.lock` | Autodown config/state + its O_EXCL exclusivity lock |
+| `~/.hscc/alerts.json` + `alerts.lock` | Operator alert feed (last 500) + mutation lock |
+| `~/.hscc/devices.json` + `devices.lock` | Registered APNs push devices + mutation lock |
+| `~/.hscc/apns.json` | APNs key id / team id / `.p8` path or keychain item (never in the repo) |
 
 Health checks are configured by the daemon code + environment variables
 (e.g. `HSCC_WORKER_AUTOHEAL_DEBOUNCE`,
@@ -90,6 +94,7 @@ not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 | `hscc watch [stream]` | Live-tail check results |
 | `hscc triggers` | Show trigger-engine rules + recent firings |
 | `hscc notify <title> <body>` | Post an alert to the HSCC alert feed (`POST /v1/alerts`; `--level`, `--key`) |
+| `hscc notify test` | Send one test APNs push to every registered device (`POST /v1/devices/test`) |
 | `hscc heal-status` | List per-node heal-breaker strikes (read-only) |
 | `hscc heal-clear <node>` | Clear one node's strikes after investigating (MUTATES the ledger) |
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
