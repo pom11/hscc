@@ -263,11 +263,12 @@ EXPECTED_EXTENSION_ROUTES = {
     ("GET", "/v1/cluster/history"),
     ("GET", "/v1/daemon/host"),
     ("GET", "/v1/autodown/status"),
-    # t_5ae8cfcf: the metrics-history read the history chart draws from. Its
-    # shape half of the contract is `test_metrics_history_shape_is_declared`
-    # below, because a route whose keys drift from the decoder fails silently —
-    # the chart reads nil and nothing anywhere errors.
-    ("GET", "/v1/metrics/history"),
+    # `/v1/metrics/history` is NOT here, and that absence is the point: it is
+    # retired (DECISION-t_447cc7fc), and since t_0c99b017 no Swift source under
+    # ios-app/Sources or macos-app/Sources asks for it, so the derived set
+    # cannot contain it. `history_route_guard_check.sh` is the trip-wire that
+    # keeps it derived-empty; the route itself stays live until the API-side
+    # retirement card deletes it, its doc section and its own server tests.
     # Card R3: the "Needs me" widget and macOS dropdown read the alert feed.
     # Writes/acks stay CLI-only; the extension client is GET-only.
     ("GET", "/v1/alerts"),
@@ -1233,28 +1234,22 @@ def test_metrics_history_keeps_every_sparkrun_field_and_both_peak_halves():
     assert failed["gpu_temp_c"] is None and failed["cpu_usage_pct"] is None
 
 
-def test_metrics_history_tier_reaches_the_server_as_a_query_item():
-    """The widget client must send `tier` as a real URLQueryItem.
+def test_metrics_history_route_still_answers_off_the_store():
+    """The retired route must keep answering while anything can still call it.
 
-    `tier` is the one parameter the route 400s without, and the widget client is
-    not covered by `REQUIRED_QUERY_PARAMS` (that matrix parses HSCCClient.swift).
-    Welding it into the path instead — `"/v1/metrics/history?tier=1"` — is the
-    exact defect that hid the `profile` filter on /v1/sessions: URLComponents
-    percent-encodes the `?`, the handler never sees the query, and every refresh
-    400s while the call still compiles.
+    Its Swift read was deleted by t_0c99b017 (one canonical history path), and
+    the client-side half of its contract went with it — `tier` reaching the
+    server as a real `URLQueryItem` is now asserted where the read actually
+    lives, in `test_cluster_history_sends_every_parameter_as_a_real_query_item`.
+    What stays here is the server's own behaviour: `GET /v1/metrics/history` is
+    retired, not removed, so a caller that still points at it must get real rows
+    until the retirement card deletes the handler.
     """
-    src = METRICS_WIDGET_CLIENT.read_text()
-    assert 'static let metricsHistory = "/v1/metrics/history"' in src, (
-        "the history path must stay a bare path with no query welded into it")
-    body = src[src.index("func metricsHistory("):]
-    body = body[:body.index("\n    func ") + 1] if "\n    func " in body[10:] else body
-    sent = set(re.findall(r'URLQueryItem\(name:\s*"([^"]+)"', body))
-    for param in ("tier", "host", "node", "since", "until"):
-        assert param in sent, (
-            f"metricsHistory() does not transmit `{param}` as a URLQueryItem "
-            f"(sends {sorted(sent)})")
-    assert "WidgetDataPath.metricsHistory" in body, (
-        "the read must go through the allowlisted path constant, not a literal")
+    payload, host_a, host_b = _metrics_history_rows()
+    assert payload["tier"] == 1 and payload["source"] == "sqlite_store", payload
+    row = _host_row(payload, host_a, 60)
+    assert row["gpu_temp_c"] == 75.0 and row["gpu_temp_c_max"] == 90.0, row
+    assert payload["tier_meta"]["resolution_s"] == 60, payload
 
 
 # --------------------------------------------------------------------------- #
