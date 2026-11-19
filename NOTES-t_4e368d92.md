@@ -82,7 +82,51 @@ inserted the missing `---` at `changelog.d/t_c6eccd49.md:27`. At the tip:
 No change in this branch touches gate 2 or any other card's fragment. The card
 was filed against a tip that is no longer current — **only gate 1 was still real.**
 
-## Gate numbers (branch `wt/t_4e368d92`, commit `524f3bee`)
+## The merge, and a judgement call a reviewer should argue with
+
+main moved while this card was in flight (#440, #443, #444, #446). **#444 fixed
+the same test this card was filed for**, differently, so the file conflicted.
+Resolved in favour of this branch's shape, at merge commit `8ab41c70`:
+
+| | #444 (on main) | this branch |
+|---|---|---|
+| expectation | `assert profile == routes_orchestrator.main_profile()` | `assert profile == "general"` |
+| self-referential? | **yes** — the resolver reaches the profile via `resolve_orchestrator → main_identity → main_profile`, so the expected value *is* the resolver's own answer | no |
+| catches sentinel→legacy | yes | yes |
+| catches `DEFAULT_NAME` moving | **no** — `expected` follows it, green while a project-less session lands elsewhere | yes |
+| stored-name case | none | own dedicated case |
+| explicit-legacy case | none | own dedicated case |
+
+Both sides independently pinned `HSCC_DIR`, which is the convergent evidence
+that the hermeticity hole was real: the old test read the operator's actual
+`~/.hscc/main-orchestrator.json`.
+
+## Gate numbers, post-merge (branch head `8ab41c70`)
+
+- `hscc-api/tests/test_session_resolver.py`: **12 passed**
+- audit-doc citation test: **passes** (that red was cleared by #440, merged in)
+- `changelog_fragments.py check`: OK, **54 fragments**
+- `hscc-api/tests/` leg at the merge: **3 failed, 1223 passed, 1 skipped**
+
+**The 3 are main's, not this branch's** — reproduced on an untouched worktree at
+`9fc53cef` in `0.36s`:
+
+```
+test_extension_route_set_is_the_audited_widget_reads      # ('GET','/v1/alerts') not in the audited set
+test_every_mutating_post_carries_confirm                  # POST /v1/devices, /v1/devices/test omit "confirm": true
+test_every_client_post_server_handler_is_confirm_gated    # server-side half of the same
+```
+
+#443/#446 shipped those routes without their contract updates, so the `hscc-api`
+leg went red *again* immediately after #440 cleared it. Filed as **t_bcebb042** —
+including the note that two of the three are a probable runtime bug ("a
+409-on-the-phone waiting to happen"), not doc drift.
+
+### Measured earlier, at the pre-merge head `67bbb20e`
+
+Kept because the roster is a full-leg measurement worth having on record; the
+`hscc-api` figure below is superseded by the post-merge one above (the citation
+red it counts was cleared by #440, and three new ones arrived with #443/#446).
 
 Interpreter `~/.hermes/hermes-agent/venv/bin/python` (the runner's own `PY`).
 
