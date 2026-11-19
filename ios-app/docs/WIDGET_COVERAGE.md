@@ -202,6 +202,7 @@ rules (no `0 running` from a blind read, no fresh-looking cache).
 | GitHub Pages OTA install | #377 | `b5691c09` | `ios-app/scripts/publish_pages.sh`, `ios-app/scripts/make_manifest.py` |
 | Notarized release and Homebrew cask | #379 | `f8325093` | `macos-app/scripts/release.sh`, `scripts/templates/hscc-widgets.cask.rb.tmpl`, `scripts/bump_cask.py` |
 | Cards widget + CardsRunning Live Activity refurbish | B2 `t_635bae56` | this PR | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift`, `ios-app/Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift`, `ios-app/Sources/Shared/CardsRunningProjection.swift`, `ios-app/scripts/cards_running_widget_check.sh` |
+| systemSmall GPU% sparkline fed by `GET /v1/cluster/history` | t_2681d3de | this PR | `ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift` (trend model, executed by `scripts/model_decode_check.sh` — `gsmall:trend:*`), `ClusterSmallGridView.swift` (polyline), `ClusterWidget.swift`/`MonitorWidget.swift` (family-gated history read, `scripts/cluster_widget_check.sh` §2-budget proofs) |
 
 ## 7. Running-cards data mapping (B2)
 

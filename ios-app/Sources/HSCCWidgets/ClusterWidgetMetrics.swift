@@ -10,12 +10,16 @@ import WidgetKit
 // exactly those fields; the views render the strings this file returns and
 // compose no numbers of their own.
 //
-// Reads (two, the §2 budget):
-//   * GET /v1/cluster/monitor — hosts[].error / sample (node state, GPU,
+// Reads (the §2 budget — two per refresh for every family):
+//   GET /v1/cluster/monitor — hosts[].error / sample (node state, GPU,
 //     CPU/GPU temps) and serving[] (per-node model, run/wait, Gen t/s).
-//   * GET /v1/autodown/status — the fleet power state. It is the one word the
+//   GET /v1/cluster/status — the fleet power state. It is the one word the
 //     remaining surfaces use to say "Serving"/"Waking"/"Down"; the node and
 //     model rows above are the CLI truth either way.
+//   ...and for `systemSmall` ONLY (t_2681d3de) the status read is swapped for
+//     GET /v1/cluster/history, the recorder's stored series behind the tile's
+//     GPU% sparklines. The provider picks one or the other per family, so no
+//     family ever sends more than the two reads §2 allows.
 //
 // Removed from the old surface: the hard-coded four-node topology glyph (four
 // invented node identities), the load average (the CLI's host
@@ -99,6 +103,14 @@ struct ClusterEntry: TimelineEntry {
     /// Age of the last successful read, shown as "updated Nm ago". Set only
     /// when this entry is showing last-known/offline content.
     let lastKnownAgeMinutes: Int?
+    /// The recorder's series behind each host's GPU% sparkline (t_2681d3de):
+    /// the `GET /v1/cluster/history` answer for this refresh. Nil whenever the
+    /// read was not made (every family except `systemSmall`), failed, or came
+    /// back unusable — and nil is honestly "no trend": the GPU cells draw the
+    /// single-sample bars they drew before, never a flat line. A failed
+    /// history read deliberately does NOT set `failure` either; the trend is
+    /// an extra the tile can live without, and the rows above it are live.
+    let history: ClusterHistoryResponse?
     /// Operator content toggles. Only "nodes" and "models" are drawn; the old
     /// "topology"/"board" values are kept in the shared model for the settings
     /// editor but no longer have pixels here.
@@ -112,6 +124,7 @@ struct ClusterEntry: TimelineEntry {
          configured: Bool,
          paused: Bool,
          lastKnownAgeMinutes: Int? = nil,
+         history: ClusterHistoryResponse? = nil,
          showSections: Set<String> = ClusterEntry.availableSections) {
         self.date = date
         self.fleet = fleet
@@ -121,16 +134,21 @@ struct ClusterEntry: TimelineEntry {
         self.configured = configured
         self.paused = paused
         self.lastKnownAgeMinutes = lastKnownAgeMinutes
+        self.history = history
         self.showSections = showSections
     }
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
 
     /// What the small tile draws (t_9e110d88): four of the CLI's host columns
-    /// across up to four hosts, plus the serving totals. Nil means there is
-    /// nothing to grid — the family then shows its gate pane (setup invite,
-    /// "Paused", or why the read failed), never a table of dashes.
-    var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
+    /// across up to four hosts, plus the serving totals — and since t_2681d3de,
+    /// each host's GPU% cell carries the recorder-backed trend when this
+    /// entry's `history` answer has one for it. Nil means there is nothing to
+    /// grid — the family then shows its gate pane (setup invite, "Paused", or
+    /// why the read failed), never a table of dashes.
+    var smallTile: ClusterSmallGrid.Tile? {
+        ClusterSmallGrid.tile(from: monitor, history: history)
+    }
 
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the

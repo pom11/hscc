@@ -68,6 +68,11 @@ struct MonitorEntry: TimelineEntry {
     let showSections: Set<String>
     let lastKnownAgeMinutes: Int?
     let lastKnownNodeCount: Int
+    /// The recorder's series behind each host's GPU% sparkline (t_2681d3de):
+    /// the `GET /v1/cluster/history` answer for this refresh, read only for
+    /// `systemSmall`. Required, not defaulted — the same rule as `monitor`
+    /// above, so every entry site says whether it carries a series.
+    let history: ClusterHistoryResponse?
 
     static let availableSections = WidgetSurfaceKind.widgetMonitor.availableSections
 
@@ -154,9 +159,13 @@ struct MonitorEntry: TimelineEntry {
 
     /// What the small tile draws (t_9e110d88): the same four CLI columns and
     /// serving totals the cluster widget's small family draws, from this entry's
-    /// own `monitor` view-model. Nil means nothing to grid — the family falls
-    /// back to its daemon-health pane, whose copy `text(for:)` owns.
-    var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
+    /// own `monitor` view-model — plus, since t_2681d3de, the same
+    /// recorder-backed GPU% trends, joined from this entry's own `history`
+    /// answer. Nil means nothing to grid — the family falls back to its
+    /// daemon-health pane, whose copy `text(for:)` owns.
+    var smallTile: ClusterSmallGrid.Tile? {
+        ClusterSmallGrid.tile(from: monitor, history: history)
+    }
 
     static let unconfigured = MonitorEntry(date: .now, state: .unconfigured,
                                            configured: false, paused: false,
@@ -164,13 +173,15 @@ struct MonitorEntry: TimelineEntry {
                                            failure: nil, refreshMinutes: 5,
                                            showSections: availableSections,
                                            lastKnownAgeMinutes: nil,
-                                           lastKnownNodeCount: 0)
+                                           lastKnownNodeCount: 0,
+                                           history: nil)
 
     static func paused(_ date: Date = .now) -> MonitorEntry {
         MonitorEntry(date: date, state: .paused, configured: true, paused: true,
                      fleet: nil, monitor: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
                      showSections: availableSections,
-                     lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
+                     lastKnownAgeMinutes: nil, lastKnownNodeCount: 0,
+                     history: nil)
     }
 
     static let placeholder = MonitorEntry(date: .now, state: .monitoring,
@@ -181,7 +192,11 @@ struct MonitorEntry: TimelineEntry {
                                           failure: nil, refreshMinutes: 5,
                                           showSections: availableSections,
                                           lastKnownAgeMinutes: nil,
-                                          lastKnownNodeCount: 0)
+                                          lastKnownNodeCount: 0,
+                                          // The gallery never runs the provider's fetch path,
+                                          // so the preview honestly shows the single-sample
+                                          // bars rather than a hand-typed "trend".
+                                          history: nil)
 
     private static let sampleDaemonHost = MonitorDaemonHost(
         hostname: "hscc-host", platform: "macOS", arch: "arm64",
@@ -228,18 +243,30 @@ struct MonitorTimelineProvider: TimelineProvider {
         }
 
         // Accessories draw nodes + serving only; the daemon-host read is
-        // skipped entirely for them (§2's budget, same rule as before).
+        // skipped entirely for them (§2's budget, same rule as before). The
+        // small family skips it too as of t_2681d3de — its two reads are the
+        // host rows and the recorder's series behind the GPU% sparklines; the
+        // daemon line on its footer then shows only what the snapshot store
+        // last saw, which is the honest "not fetched at this size".
         let wantsHost = family.showsDaemonHost
+        let wantsHistory = family.wantsHostHistory
         async let monitorTask = WidgetData.read(using: client) { await $0.clusterMonitor() }
         async let hostTask = Self.daemonHost(client: client, enabled: wantsHost)
-        let (monitorOutcome, hostOutcome) = await (monitorTask, hostTask)
+        async let historyTask = Self.hostHistory(client: client, enabled: wantsHistory)
+        let (monitorOutcome, hostOutcome, historyOutcome) = await (monitorTask, hostTask,
+                                                                   historyTask)
 
         let fleet = monitorOutcome.value.flatMap(FleetProjection.init(projecting:))
         // The same decoded response through the CLI view-model — one read, two
         // projections, so the glance rows and the host table cannot come from
-        // different refreshes (§2's budget is unchanged: still two requests).
+        // different refreshes (§2's budget holds per family: monitor +
+        // daemon-host for the wide families, monitor + history for small).
         let monitor = monitorOutcome.value.flatMap { ClusterMonitorViewModel.project($0) }
         let daemonHost = hostOutcome?.value
+        // A failed history read is NOT an entry failure: the trend is an extra
+        // the tile lives without (its cells fall back to bars), and the rows
+        // beside it are live.
+        let history = historyOutcome?.value
         let failure = monitorOutcome.failure ?? hostOutcome?.failure
         let anyData = fleet != nil || daemonHost != nil
 
@@ -256,7 +283,8 @@ struct MonitorTimelineProvider: TimelineProvider {
                                 failure: failure, refreshMinutes: refreshMinutes,
                                 showSections: showSections,
                                 lastKnownAgeMinutes: failure?.showsStaleData == true ? age : nil,
-                                lastKnownNodeCount: last?.nodes.count ?? 0)
+                                lastKnownNodeCount: last?.nodes.count ?? 0,
+                                history: nil)
         }
 
         let down = fleet?.tally.nodesDown ?? 0
@@ -273,12 +301,25 @@ struct MonitorTimelineProvider: TimelineProvider {
                             fleet: fleet, monitor: monitor,
                             daemonHost: daemonHost, failure: failure,
                             refreshMinutes: refreshMinutes, showSections: showSections,
-                            lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
+                            lastKnownAgeMinutes: nil, lastKnownNodeCount: 0,
+                            history: history)
     }
 
     private static func daemonHost(client: WidgetDataClient,
                                    enabled: Bool) async -> WidgetDataOutcome<MonitorDaemonHost>? {
         guard enabled else { return nil }
         return await WidgetData.read(using: client) { await $0.daemonHost() }
+    }
+
+    /// Dataset 5 (`GET /v1/cluster/history`) for the small tile's GPU%
+    /// sparklines: the window and metric are the tile's own constants, so the
+    /// read and the code that draws it cannot drift to different fields.
+    private static func hostHistory(client: WidgetDataClient,
+                                    enabled: Bool) async -> WidgetDataOutcome<ClusterHistoryResponse>? {
+        guard enabled else { return nil }
+        return await WidgetData.read(using: client) {
+            await $0.clusterHistory(window: ClusterSmallGrid.trendWindow,
+                                    metrics: [ClusterSmallGrid.trendMetric.rawValue])
+        }
     }
 }

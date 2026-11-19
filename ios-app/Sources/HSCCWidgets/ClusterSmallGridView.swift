@@ -10,8 +10,11 @@ import WidgetKit
 // `ClusterSmallGrid`/`ClusterMonitorViewModel` (which formats the way
 // `hscc cluster monitor` does), so this file composes LAYOUT AND COLOUR and
 // nothing else. That split is what makes the tile's honesty testable: the
-// decode harness executes the model and asserts the cell strings, and this file
-// cannot invent a rounding, a unit or a zero without going red there.
+// decode harness executes the model and asserts the cell strings, and this
+// file cannot invent a rounding, a unit or a zero without going red there.
+// The GPU sparkline obeys the same split (t_2681d3de): its vertices arrive
+// normalised by the model, its colour is the model's `ClusterMetricLevel`,
+// and this file only maps vertices into the track and strokes them.
 //
 // STYLE RULES THIS FILE MUST KEEP (widget_style_check.sh enforces the file-wide
 // half; the two toggles are wired here rather than at the call site so a future
@@ -155,8 +158,10 @@ struct ClusterSmallGridView: View {
     }
 
     /// One cell: the CLI's text, painted by the view-model's verdict. The GPU
-    /// column carries a bar under the digits, because a percentage is a shape
-    /// before it is a number and the tile has the width for both.
+    /// column carries a shape under the digits — the recorder's trend when
+    /// the tile has one for this host, the single-sample bar when it does not
+    /// — because a percentage is a shape before it is a number and the tile
+    /// has the width for both.
     private func cellView(_ cell: ClusterSmallGrid.Cell) -> some View {
         Text(cell.text)
             .font(style.font(size: 9, weight: .semibold))
@@ -165,13 +170,42 @@ struct ClusterSmallGridView: View {
             .minimumScaleFactor(0.45)
             .frame(width: cell.column == .gpuUtil ? gpuTrackWidth : nil, alignment: .trailing)
             .overlay(alignment: .bottom) {
-                if let fraction = cell.fraction {
-                    Capsule()
-                        .fill(cell.level.color(style))
-                        .frame(width: gpuTrackWidth * CGFloat(fraction),
-                               height: style.scaled(2))
+                if cell.column == .gpuUtil {
+                    gpuFooter(cell)
                 }
             }
+    }
+
+    /// The height both GPU shapes occupy, so the row is the same height
+    /// whether a trend arrived or the cell fell back to its bar.
+    private var sparkTrackHeight: CGFloat { style.scaled(5) }
+
+    /// The shape under the GPU% digits: the recorder-backed sparkline when
+    /// the model produced one (t_2681d3de), the single-sample bar otherwise.
+    /// The view only multiplies the model's normalised vertices by this
+    /// track's width and height — the reduction, the extremes, the gap
+    /// breaks and the colour verdict all arrived as data, and this file
+    /// compares nothing. Each segment strokes as its own line, so a period
+    /// the recorder did not answer stays a visible gap.
+    @ViewBuilder
+    private func gpuFooter(_ cell: ClusterSmallGrid.Cell) -> some View {
+        ZStack(alignment: .bottom) {
+            if let trend = cell.trend {
+                ForEach(Array(trend.segments.enumerated()), id: \.offset) { _, run in
+                    SparklinePath(points: run)
+                        .stroke(trend.level.color(style),
+                                style: StrokeStyle(lineWidth: style.scaled(1),
+                                                   lineCap: .round,
+                                                   lineJoin: .round))
+                }
+            } else if let fraction = cell.fraction {
+                Capsule()
+                    .fill(cell.level.color(style))
+                    .frame(width: gpuTrackWidth * CGFloat(fraction),
+                           height: style.scaled(2))
+            }
+        }
+        .frame(width: gpuTrackWidth, height: sparkTrackHeight)
     }
 
     /// The serving totals the CLI's `total (n)` rows add up to. The CLI styles a
@@ -220,5 +254,29 @@ struct ClusterSmallGridView: View {
         [headerWord, tally, tile.accessibilitySummary, footer]
             .compactMap { $0 }
             .joined(separator: ". ")
+    }
+}
+
+/// The sparkline polyline. The vertices arrive normalised 0...1 by
+/// `ClusterSmallGrid.Trend` — this shape only maps them into the given rect
+/// (y grows upward with the value, which the view's bottom-origin rect has
+/// to invert), so the layout half owns geometry and nothing else. A
+/// multi-segment trend strokes one path per segment, and the space between
+/// segments is the gap the recorder actually left.
+private struct SparklinePath: Shape {
+    let points: [ClusterSmallGrid.TrendPoint]
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard let first = points.first else { return path }
+        func vertex(_ point: ClusterSmallGrid.TrendPoint) -> CGPoint {
+            CGPoint(x: rect.minX + CGFloat(point.x) * rect.width,
+                    y: rect.maxY - CGFloat(point.y) * rect.height)
+        }
+        path.move(to: vertex(first))
+        for point in points.dropFirst() {
+            path.addLine(to: vertex(point))
+        }
+        return path
     }
 }
