@@ -87,10 +87,15 @@ report should quote) and the probes re-run to 7/7.
 
 ## Gate
 
-* `hscc-api/tests/test_cluster_history_cli_parity.py` → 16 passed (12 before).
-* `pytest -q hscc-api hscc_daemon -p no:cacheprovider`, runner interpreter
-  (`~/.hermes/hermes-agent/venv/bin/python`) and the runner's posture → see the
-  card comment for the count measured at this sha.
-* `bash scripts/run_tests.sh` roster → see the card comment.
+Measured at `40c9e9e9` (the last commit that touches code; the only commit after
+it is this notes file) with the runner interpreter
+`~/.hermes/hermes-agent/venv/bin/python` and the runner's posture (kanban env
+vars unset, `HERMES_DISABLE_LAZY_INSTALLS=1 HSCC_SKIP_COMPACT_PROBE=1`):
+
+* `pytest -q hscc-api/tests/test_cluster_history_cli_parity.py` → 16 passed (12 before).
+* `pytest -q hscc-api hscc_daemon -p no:cacheprovider` → **5015 passed, 2 skipped**
+  in 425 s, exit 0.
+* `bash scripts/run_tests.sh` roster → **ALL GREEN, 12/12 legs**, exit 0.
+* `scripts/changelog_fragments.py check` → OK, 32 fragments.
 * **No changelog fragment**: test-only, nothing user-visible changed — the
   payloads, codes and messages on both surfaces are exactly what #425 shipped.
