@@ -106,6 +106,8 @@ echo "executed proofs (macOS compile of the real widget + shared sources)"
 xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$METRICS" \
   "$TALLY" \
+  Sources/Shared/ClusterMonitorViewModel.swift \
+  Sources/Shared/ClusterMonitorTables.swift \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

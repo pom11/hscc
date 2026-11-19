@@ -27,7 +27,9 @@ struct MonitorWidget: Widget {
         .configurationDisplayName("HSCC Monitor")
         .description("Per-node model, load and temperature, plus the daemon host.")
         #if os(iOS)
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+        // .systemExtraLarge is the iPad size (t_9e64d9d9), where the two CLI
+        // tables fit side by side.
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge,
                             .accessoryInline, .accessoryCircular, .accessoryRectangular])
         #else
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
@@ -58,7 +60,7 @@ struct MonitorWidgetView: View {
         case .systemLarge:
             LargeMonitorWidget(entry: entry)
         case .systemExtraLarge:
-            LargeMonitorWidget(entry: entry)
+            ExtraLargeMonitorWidget(entry: entry)
         default:
             MediumMonitorWidget(entry: entry)
         }
@@ -223,7 +225,12 @@ struct LargeMonitorWidget: View {
                 MonitorDetail(entry: entry, surface: .large)
             }
             .widgetHeader(style)
-            if !text.rows.isEmpty {
+            if let tables = entry.tables {
+                // The CLI's own tables replace the summary rows: same hosts,
+                // every printed column, and the serving rows the rows used to
+                // paraphrase.
+                MonitorTablesBlock(tables: tables, surface: .large)
+            } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
                         MonitorNodeRowView(row: row, node: node(of: entry, at: index))
@@ -235,6 +242,38 @@ struct LargeMonitorWidget: View {
             }
             Spacer(minLength: 0)
             MonitorFooter(entry: entry, surface: .large)
+        }
+    }
+}
+
+/// iPad / macOS extra-large: the two tables side by side, and the six sample
+/// fields the CLI's host table prints no column for. The footer keeps the
+/// daemon sentence `text(for:)` appends — this size does not drop it.
+struct ExtraLargeMonitorWidget: View {
+    @Environment(\.widgetStyle) private var style
+    let entry: MonitorEntry
+
+    var body: some View {
+        let text = entry.text(for: .extraLarge)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: "gauge.with.dots.needle.bottom.50percent").widgetIcon(style)
+                MonitorHeadline(entry: entry, size: 34)
+                Spacer(minLength: 0)
+                MonitorDetail(entry: entry, surface: .extraLarge)
+            }
+            .widgetHeader(style)
+            if let tables = entry.tables {
+                MonitorTablesBlock(tables: tables, surface: .extraLarge)
+            } else if !text.rows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
+                        MonitorNodeRowView(row: row, node: node(of: entry, at: index))
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            MonitorFooter(entry: entry, surface: .extraLarge)
         }
     }
 }

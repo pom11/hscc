@@ -54,6 +54,10 @@ struct ClusterTimelineProvider: TimelineProvider {
         let (monitorOutcome, statusOutcome) = await (monitorTask, statusTask)
 
         let fleet = monitorOutcome.value.flatMap(FleetProjection.init(projecting:))
+        // The tables the large/extra-large bodies draw, from the SAME response
+        // object — the read stays at two requests (§2 budget), and `fleet` and
+        // `monitor` can never describe different refreshes.
+        let tables = ClusterMonitorTables.project(monitorOutcome.value)
         let status = statusOutcome.value.flatMap(ClusterStatusSummary.init)
         let failure = monitorOutcome.failure ?? statusOutcome.failure
 
@@ -81,6 +85,7 @@ struct ClusterTimelineProvider: TimelineProvider {
         return ClusterEntry(date: .now,
                             fleet: fleet,
                             status: status,
+                            monitor: tables,
                             failure: failure,
                             configured: true,
                             paused: false,

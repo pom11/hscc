@@ -85,6 +85,10 @@ struct ClusterEntry: TimelineEntry {
     let fleet: ClusterFleet?
     /// `hscc cluster status`'s counts, or nil when that read did not answer.
     let status: ClusterStatusSummary?
+    /// The two tables the large/extra-large surfaces draw, projected from the
+    /// SAME monitor read as `fleet` — never a second request. Nil when that read
+    /// sent no host list, which is the same condition `fleet` is nil under.
+    let monitor: ClusterMonitorTables?
     /// What stopped this refresh being live. Nil while live.
     let failure: WidgetDataFailure?
     let configured: Bool
@@ -100,6 +104,7 @@ struct ClusterEntry: TimelineEntry {
     init(date: Date,
          fleet: ClusterFleet?,
          status: ClusterStatusSummary? = nil,
+         monitor: ClusterMonitorTables? = nil,
          failure: WidgetDataFailure? = nil,
          configured: Bool,
          paused: Bool,
@@ -108,6 +113,7 @@ struct ClusterEntry: TimelineEntry {
         self.date = date
         self.fleet = fleet
         self.status = status
+        self.monitor = monitor
         self.failure = failure
         self.configured = configured
         self.paused = paused
@@ -116,6 +122,15 @@ struct ClusterEntry: TimelineEntry {
     }
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
+
+    /// The tables a large/extra-large body may draw, or nil. This is the SAME
+    /// gate `text(for:)` runs first: an unconfigured or paused surface has no
+    /// table, so no family can paint a live-looking table where the text model
+    /// would have printed the invite. Checking it here rather than in each body
+    /// keeps one owner for the rule.
+    var tables: ClusterMonitorTables? {
+        (!configured || paused) ? nil : monitor
+    }
 
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
@@ -175,12 +190,26 @@ struct ClusterEntry: TimelineEntry {
 
     /// Placeholder/first-render data. Sample only: `placeholder(in:)` never runs
     /// through the provider's fetch path and can never replace a real entry.
+    /// It carries the tables too, because a gallery preview of a size that draws
+    /// tables must show tables — the same projection the live path uses, over
+    /// sample data, so the preview cannot drift from what ships.
     static let placeholder = ClusterEntry(date: .now,
                                           fleet: sampleFleet,
+                                          monitor: ClusterMonitorTables.project(sampleResponse),
                                           configured: true,
                                           paused: false)
 
-    private static let sampleFleet: ClusterFleet? = {
+    /// TEST-NET addresses only (§7): a sample must never look like a real node.
+    private static let sampleResponse = MonitorResponse(
+        json: MonitorPayload(timestamp: nil, hosts: sampleHosts),
+        serving: sampleServing,
+        serving_error: nil,
+        serving_proxy_error: nil,
+        speak: "sample")
+
+    private static let sampleFleet: ClusterFleet? = FleetProjection(projecting: sampleResponse)
+
+    private static let sampleHosts: [MonitorNode] = {
         func sample(_ hostname: String, gpu: String, gpuTemp: String, cpuTemp: String) -> MonitorSample {
             MonitorSample(hostname: hostname, uptime_sec: nil, cpu_usage_pct: nil,
                           mem_used_pct: nil, mem_total_mb: nil, mem_used_mb: nil,
@@ -205,18 +234,15 @@ struct ClusterEntry: TimelineEntry {
                         used_slots: nil, free_slots: nil,
                         workloads: [MonitorWorkload(workload_id: "b", cluster_id: nil)]),
         ]
-        let serving = [
-            ServingRow(node: "192.0.2.11", port: "8001", model: "model-a", routes: [],
-                       running: 0, waiting: 0, kv: 0.2, gen_tps: 6.1, prompt_tps: 10,
-                       prompt_total: nil, gen_total: nil, error: nil),
-            ServingRow(node: "192.0.2.13", port: "8002", model: "model-b", routes: [],
-                       running: 3, waiting: 0, kv: 0.4, gen_tps: 6.2, prompt_tps: 12,
-                       prompt_total: nil, gen_total: nil, error: nil),
-        ]
-        return FleetProjection(projecting: MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: hosts),
-                                                           serving: serving,
-                                                           serving_error: nil,
-                                                           serving_proxy_error: nil,
-                                                           speak: "sample"))
+        return hosts
     }()
+
+    private static let sampleServing: [ServingRow] = [
+        ServingRow(node: "192.0.2.11", port: "8001", model: "model-a", routes: [],
+                   running: 0, waiting: 0, kv: 0.2, gen_tps: 6.1, prompt_tps: 10,
+                   prompt_total: nil, gen_total: nil, error: nil),
+        ServingRow(node: "192.0.2.13", port: "8002", model: "model-b", routes: [],
+                   running: 3, waiting: 0, kv: 0.4, gen_tps: 6.2, prompt_tps: 12,
+                   prompt_total: nil, gen_total: nil, error: nil),
+    ]
 }
