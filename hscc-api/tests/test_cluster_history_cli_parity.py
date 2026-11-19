@@ -391,8 +391,9 @@ def _same_code_on_both_surfaces(state, api, cli_payload, want):
         f"{want!r} — the state and the code for it have come apart")
 
 
-@pytest.mark.parametrize("group,ruled", [("source", SOURCE_CODES),
-                                         ("axis", AXIS_CODES)])
+@pytest.mark.parametrize("group,ruled", [
+    pytest.param("source", SOURCE_CODES, id="source"),
+    pytest.param("axis", AXIS_CODES, id="axis")])
 def test_the_two_surfaces_share_one_closed_set_of_codes(group, ruled):
     """Same constant names, same value per name, same closed set — route and CLI.
 
