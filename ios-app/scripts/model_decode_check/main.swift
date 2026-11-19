@@ -797,6 +797,16 @@ monitorSampleDecodeShape(c)
 // Sources/HSCCWidgets/ClusterSmallGrid.swift — the tile the small widget draws —
 // against the fixtures above and, where a golden exists, the CLI's own cells.
 clusterSmallGridChecks(c)
+// ---- The large / extra-large table layout (t_9e64d9d9). The checks are in
+// monitor_tables.swift; only the calls are here. Parity above owns the CELLS;
+// these own the SELECTION (which columns a width draws), the CLIP, and the six
+// fields only the two biggest monitor surfaces print (VRAM, GPU clock, net,
+// uptime, fan, load) — none of which the CLI's host table has a column for, so
+// they are pinned by rule and by fixture rather than by a CLI golden.
+monitorRateRules(c)
+monitorDetailRules(c)
+monitorPlans(c)
+monitorTablesFromFixtures(c)
 
 // ---- Cluster history (t_b6512c2e) ---------------------------------------
 // The four `v1_cluster_history_*.json` fixtures are NOT hand-typed:

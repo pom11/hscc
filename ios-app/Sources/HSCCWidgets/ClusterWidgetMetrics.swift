@@ -92,6 +92,13 @@ struct ClusterEntry: TimelineEntry {
     let monitor: ClusterMonitorViewModel?
     /// `hscc cluster status`'s counts, or nil when that read did not answer.
     let status: ClusterStatusSummary?
+    /// The two tables the large/extra-large surfaces draw (t_9e64d9d9),
+    /// projected from the SAME monitor read as `fleet` — never a second request.
+    /// Nil when that read sent no host list, which is the same condition `fleet`
+    /// is nil under. Named apart from `monitor` because the two are different
+    /// projections of that one read: `monitor` is the CLI view-model the medium
+    /// table and the small grid draw, this is the large/extra-large LAYOUT.
+    let tableData: ClusterMonitorTables?
     /// What stopped this refresh being live. Nil while live.
     let failure: WidgetDataFailure?
     let configured: Bool
@@ -108,6 +115,7 @@ struct ClusterEntry: TimelineEntry {
          fleet: ClusterFleet?,
          monitor: ClusterMonitorViewModel? = nil,
          status: ClusterStatusSummary? = nil,
+         tableData: ClusterMonitorTables? = nil,
          failure: WidgetDataFailure? = nil,
          configured: Bool,
          paused: Bool,
@@ -117,6 +125,7 @@ struct ClusterEntry: TimelineEntry {
         self.fleet = fleet
         self.monitor = monitor
         self.status = status
+        self.tableData = tableData
         self.failure = failure
         self.configured = configured
         self.paused = paused
@@ -131,6 +140,15 @@ struct ClusterEntry: TimelineEntry {
     /// nothing to grid — the family then shows its gate pane (setup invite,
     /// "Paused", or why the read failed), never a table of dashes.
     var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
+
+    /// The tables a large/extra-large body may draw, or nil. This is the SAME
+    /// gate `text(for:)` runs first: an unconfigured or paused surface has no
+    /// table, so no family can paint a live-looking table where the text model
+    /// would have printed the invite. Checking it here rather than in each body
+    /// keeps one owner for the rule.
+    var tables: ClusterMonitorTables? {
+        (!configured || paused) ? nil : tableData
+    }
 
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
@@ -207,20 +225,24 @@ struct ClusterEntry: TimelineEntry {
 
     /// First-render / gallery data. Sample only: `placeholder(in:)` never runs
     /// through the provider's fetch path and can never replace a real entry.
-    /// It carries the CLI table too, so the gallery shows the medium tile as
-    /// the operator will meet it rather than as an empty frame.
+    /// It carries the CLI table AND the large/XL tables, so the gallery shows
+    /// the medium tile as the operator will meet it rather than as an empty
+    /// frame, and a preview of a size that draws tables shows tables — the same
+    /// projections the live path uses, over sample data, so the preview cannot
+    /// drift from what ships.
     static let placeholder = ClusterEntry(date: .now,
                                           fleet: sampleFleet,
                                           monitor: sampleMonitor,
+                                          tableData: ClusterMonitorTables.project(sampleResponse),
                                           configured: true,
                                           paused: false)
 
-    /// One sample payload, projected BOTH ways: the glance projection the
-    /// small/large/accessory surfaces draw and the CLI cell table the medium
-    /// tile draws. From one `MonitorResponse` on purpose — a second, hand-typed
-    /// sample would be a second truth about what the fleet looks like, and the
-    /// gallery would then show a headline tally that does not match its own
-    /// table.
+    /// One sample payload, projected THREE ways from one `MonitorResponse`: the
+    /// glance projection the small/accessory surfaces draw, the CLI cell table
+    /// the medium tile draws, and the large/extra-large table layout. A second,
+    /// hand-typed sample would be a second truth about what the fleet looks
+    /// like, and the gallery would then show a headline tally that does not
+    /// match its own table. Addresses are TEST-NET only (§7).
     private static let sampleResponse = MonitorResponse(
         json: MonitorPayload(timestamp: nil, hosts: sampleHosts),
         serving: sampleServing,
@@ -280,6 +302,7 @@ struct ClusterEntry: TimelineEntry {
                  swapUsed: "0", swapTotal: nil, gpu: "0",
                  gpuTemp: "88", cpuTemp: "91.2", power: "196.5", workload: "b"),
         ]
+
     }()
 
     private static let sampleServing: [ServingRow] = [

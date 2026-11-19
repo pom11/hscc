@@ -51,6 +51,14 @@ real_models=(
   # no simulator. Its SwiftUI half lives in ClusterSmallGridView.swift and is
   # covered structurally by widget_style_check.sh / cluster_widget_check.sh.
   Sources/HSCCWidgets/ClusterSmallGrid.swift
+  # The large/XL table layout (t_9e64d9d9): which columns and rows the two
+  # biggest monitor surfaces draw, and the six fields only they print. Layout
+  # lives outside the view files so this harness can RUN it. It names
+  # `FleetSurface` and `FleetFormat.dash`, so the file that owns them is
+  # compiled here too — a harness that skipped a dependency would either not
+  # compile or, worse, test a copy of the rule.
+  Sources/Shared/ClusterNodeTally.swift
+  Sources/Shared/ClusterMonitorTables.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
@@ -58,6 +66,7 @@ harness=(
   # so the monitor parity checks live here and main.swift calls them.
   scripts/model_decode_check/monitor_parity.swift
   scripts/model_decode_check/cluster_small_grid.swift
+  scripts/model_decode_check/monitor_tables.swift
   scripts/model_decode_check/main.swift
 )
 

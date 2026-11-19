@@ -154,10 +154,22 @@ keychain and only the public key is in Info.plist (`SUPublicEDKey`).
 ## Gates
 
 ```sh
-macos-app/scripts/build_check.sh       # both targets, per-target swiftc, 0/0 required
-macos-app/scripts/actool_icon_check.sh # asset catalog + AppIcon resolve
-macos-app/scripts/make_appicon.sh      # regenerate PNGs from ios-app masters
+macos-app/scripts/build_check.sh         # both targets, per-target swiftc, 0/0 required
+macos-app/scripts/widget_parity_check.sh # HSCCMacWidgets' shared sources and family list
+                                         # equal the iOS widget target's, by path
+macos-app/scripts/actool_icon_check.sh   # asset catalog + AppIcon resolve
+macos-app/scripts/make_appicon.sh        # regenerate PNGs from ios-app masters
 ```
+
+`HSCCMacWidgets` compiles the widget sources out of `../ios-app/Sources/…` by
+path — there is no second copy to keep in sync, and equally no compiler complaint
+when one project lists a file the other forgot. `widget_parity_check.sh` is what
+makes that agreement measured instead of assumed: the two shared-source lists
+must be equal, every listed path must exist, and all four desktop families
+(small, medium, large, extra-large) must be declared, dispatched, and drawing a
+view of their own — an extra-large arm that reuses the large view is the failure
+that silently drops the six fields only the CLI's widest table prints. It runs in
+CI as the "macOS widget parity gate" step of `app-build-checks.yml`.
 
 The app icon is generated from `ios-app/assets-master/appicon-*.svg`; do not
 hand-drop PNGs. The menu bar mark is `MenuBarIcon.imageset/menubar-h.svg`, a

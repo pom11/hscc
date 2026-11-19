@@ -113,6 +113,9 @@ targets:
       # pixel reduction that preserves every column's min and max. Shared with
       # iOS so the desktop draws the same series from the same bytes.
       - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9), same file the iOS
+      # widget target compiles. Foundation-only.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system, so the menu bar app and the iOS widgets share
       # the black + #FF5722 palette and spacing rather than growing a second.
@@ -222,6 +225,9 @@ targets:
       # `MonitorViews.swift` both reference.
       - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
+      # The host / serving tables and the XL detail block (t_9e64d9d9), the same
+      # file the iOS widget target compiles.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterMonitorTableViews.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
       - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift
@@ -245,6 +251,15 @@ targets:
       # may request, and the reduction that keeps every pixel column's min and
       # max, so a desktop sparkline cannot draw a peak the data never had.
       - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9), same file the iOS
+      # widget target compiles. Foundation-only.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
+      # The history-trend projection (t_5ae8cfcf): the iOS widget target compiles
+      # it, so the desktop target compiles it too. Foundation-only, and the rule
+      # it owns — a metric the route did not report stays a gap and never becomes
+      # 0.0 — is the same rule the desktop tiles are held to, so leaving it out
+      # would give one platform a chart rule the other cannot reach.
+      - path: ../ios-app/Sources/Shared/MetricsHistoryTrend.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift

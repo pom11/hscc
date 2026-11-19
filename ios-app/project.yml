@@ -308,6 +308,10 @@ targets:
       # sparkline cannot draw a peak the data never had. Foundation-only, which
       # is what lets scripts/cluster_history_chart_check.sh execute it on macOS.
       - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which columns and
+      # rows the two biggest monitor surfaces draw, and the six fields only they
+      # print. Foundation-only, so `model_decode_check.sh` can execute it.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       - path: Sources/Shared/WidgetDataClient.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
@@ -446,6 +450,10 @@ targets:
       # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
       - path: Sources/HSCCWidgets/ClusterSmallGrid.swift
       - path: Sources/HSCCWidgets/ClusterSmallGridView.swift
+      # The host / serving tables and the XL detail block the large + extra-large
+      # monitor surfaces draw (t_9e64d9d9). Shared by the cluster and monitor
+      # widgets so the two tiles cannot drift apart.
+      - path: Sources/HSCCWidgets/ClusterMonitorTableViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
       # Projects surface (small + medium + large), t_d739d163. Its configuration
@@ -480,14 +488,18 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
-      # History chart points for a widget surface reading
-      # `GET /v1/metrics/history` (t_5ae8cfcf). Foundation-only, so the decode
-      # gate can exercise it without SwiftUI.
       - path: Sources/Shared/MetricsHistoryTrend.swift
       # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
       # requestable metric set and the min/max-preserving pixel reduction.
       # Foundation-only, so the widget and the gate both execute the same file.
       - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which of the CLI's
+      # columns and how many of its rows the two biggest monitor surfaces draw,
+      # plus the six fields only they print (VRAM, GPU clock, net, uptime, fan,
+      # load). Foundation-only for the same reason as the file above — the view
+      # files import WidgetKit, and a layout rule no gate can run is a layout
+      # rule that drifts.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
@@ -638,6 +650,10 @@ targets:
       # requestable metric set and the min/max-preserving pixel reduction, so a
       # Live Activity trend line cannot draw a peak the recorder never stored.
       - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which columns and
+      # rows the two biggest monitor surfaces draw, and the six fields only they
+      # print. Foundation-only, so `model_decode_check.sh` can execute it.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
