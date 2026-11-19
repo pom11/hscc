@@ -472,7 +472,10 @@ expect(lockGroup, "the sample entry draws the same four numbers as its own rows"
 
 print("")
 if failures.isEmpty {
-    print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")
+    // Only the shell owns the gate's PASSED verdict: this binary sees the
+    // executed checks alone and cannot know whether the structural proofs
+    // above it failed, so it must never print a whole-gate claim.
+    print("executed proofs passed — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")
     exit(0)
 }
 print("FAILURES: \(failures.count) of \(checks)")

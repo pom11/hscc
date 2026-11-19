@@ -312,8 +312,12 @@ fi
 "$TMP/cluster_widget_check" || rc=1
 
 echo ""
+# The gate's verdict is printed HERE and nowhere else: the compiled harness only
+# knows its executed checks, so it must not claim PASSED while a structural
+# proof above is red. `rc` is every check's exit status, not the last one's.
 if [ "$rc" -eq 0 ]; then
   echo "CLUSTER WIDGET CHECK PASSED — CLI rows, every family's lines, nil-is-not-zero, redaction"
   exit 0
 fi
+echo "CLUSTER WIDGET CHECK FAILED — a structural or executed check above is red"
 exit 1
