@@ -19,6 +19,20 @@ configured" and the installer never runs. Two controls cover the gap instead:
   * detective: the live-state checksum assertion below fails if a run did
     reach outside the sandbox.
 
+HERMES_BIN IS sealed, at a stub that refuses — and that seal is what keeps the
+fresh-home premise true at the stage that asserts it. `Install: main orchestrator
+board` shells out to the real Hermes CLI (`main_board.find_hermes_bin` →
+`hermes kanban boards create`), and that CLI initialises HERMES_HOME on first
+run: measured on this host, the stage alone wrote `<sandbox>/.hermes/config.yaml`
+(109 bytes: `_config_version` + the browser block) plus `kanban/`, SOUL.md and the
+cache dirs. Six stages later the wiring stage would then find a config.yaml that
+exists, wire it and print "config wired (...)" — true of that home, but not the
+fresh, never-installed home this test is named for. So the CLI is sealed off for
+the isolated run and the home stays config-less until the wiring stage looks at
+it. What the stub gives up is nothing this file asserts: the board stage's own
+contract — create-then-switch, idempotence, the HERMES_BIN/venv lookup order, and
+a real fake-CLI subprocess run — is pinned in test_main_board.py.
+
 Skipped steps and why:
   --skip-cli             installs a console script INTO the Hermes venv (shared, real)
   --skip-patches         patches the hermes-agent git checkout (shared, real)
@@ -55,6 +69,31 @@ def _md5(p: Path):
     return hashlib.md5(p.read_bytes()).hexdigest() if p.is_file() else None
 
 
+def _sealed_hermes_bin(home: Path) -> Path:
+    """An executable Hermes-CLI stand-in that refuses, inside the sandbox.
+
+    `main_board.find_hermes_bin` honours ``HERMES_BIN`` ahead of the venv, so
+    pointing it here keeps the real Hermes CLI out of the isolated run. Why that
+    is load-bearing for ``test_fresh_home_says_not_wired_instead_of_claiming_success``:
+    see the module docstring. It refuses (rc 1 + a stderr naming the seal) rather
+    than reporting a board it never created, so the stage warns visibly instead
+    of claiming success, and any *new* stage that grew a dependency on the real
+    CLI would surface as a warning too, not as a silent fake.
+    """
+    stub = home / "bin" / "hermes"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text(
+        "#!/bin/sh\n"
+        "# Sealed for the hscc-bootstrap isolated-install tests (t_ea59a6ba):\n"
+        "# the real Hermes CLI would initialise HERMES_HOME (and config.yaml)\n"
+        "# here, which is exactly the state the fresh-home test must not have.\n"
+        "echo 'hermes: sealed by the isolated-install test (no real CLI ran)' >&2\n"
+        "exit 1\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
+
+
 @pytest.fixture
 def sandbox(tmp_path):
     """A throwaway HERMES_HOME/HSCC_DIR with the real venv reachable."""
@@ -66,22 +105,34 @@ def sandbox(tmp_path):
     # Symlink the DIRECTORY, not the python binary: symlinking the binary
     # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
     (hermes / "hermes-agent").symlink_to(REAL_HERMES_AGENT)
-    return {"home": home, "hermes": hermes, "hscc": hscc}
+    return {"home": home, "hermes": hermes, "hscc": hscc,
+            "hermes_bin": _sealed_hermes_bin(home)}
 
 
-def _run(sandbox, extra=()):
+def _env(sandbox):
+    """The installer child's environment — every home-ish input pointed at the
+    sandbox, and the real Hermes CLI sealed (module docstring).
+
+    Split out of ``_run`` so ``test_the_sandbox_seals_every_input_the_stages_shell_out_to``
+    can assert the seal list without paying for an installer run.
+    """
     env = dict(os.environ)
     env.update({
         # NOTE: HOME is intentionally left alone — see the module docstring.
         "HERMES_HOME": str(sandbox["hermes"]),
         "HSCC_DIR": str(sandbox["hscc"]),
         "HERMES_SCRIPTS": str(sandbox["hermes"] / "scripts"),
+        "HERMES_BIN": str(sandbox["hermes_bin"]),
     })
+    return env
+
+
+def _run(sandbox, extra=()):
     return subprocess.run(
         ["bash", str(BOOTSTRAP), "--yes",
          "--skip-cli", "--skip-daemon", "--skip-patches",
          "--skip-node-recovery", *extra],
-        capture_output=True, text=True, env=env, timeout=900)
+        capture_output=True, text=True, env=_env(sandbox), timeout=900)
 
 
 @needs_runtime
@@ -182,6 +233,38 @@ def _assert_all_orch_profiles_reviewable(sandbox):
         if res["state"] != "ok":
             broken.append(f"{p.name}: {res['state']}")
     assert not broken, f"profiles created by THIS run cannot review: {broken}"
+
+
+def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox):
+    """The isolated run's child env must not reach the operator's install.
+
+    Guards the premise of every `@needs_runtime` case here: a stage that shells
+    out to a home-resolving tool is only contained if the env points that tool
+    at the sandbox. `HERMES_BIN` is the one this file lost a green leg over
+    (t_ea59a6ba) — with it unsealed, `Install: main orchestrator board` ran the
+    real Hermes CLI, which wrote the sandbox's `config.yaml` on first-run init
+    and the wiring stage then legitimately reported "config wired" on a run the
+    fresh-home test calls fresh.
+
+    HOME is asserted UNSEALED on purpose (module docstring): pinning it here
+    would be a lie about the one input the run deliberately shares.
+    """
+    env = _env(sandbox)
+    for key in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HERMES_BIN"):
+        assert key in env, f"{key} is not sealed — the installer could reach live state"
+        assert str(env[key]).startswith(str(sandbox["home"])), \
+            f"{key}={env[key]!r} points outside the sandbox {sandbox['home']!r}"
+    stub = Path(env["HERMES_BIN"])
+    assert stub.is_file() and stub.stat().st_mode & 0o111, \
+        "HERMES_BIN must be an executable stub, else find_hermes_bin falls back "
+    # The seal refuses; it never impersonates a board that was not created.
+    r = subprocess.run([str(stub), "kanban", "boards", "create", "general"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, "the sealed Hermes CLI claimed success it did not earn"
+    assert "sealed" in (r.stderr or ""), r.stderr
+    assert env.get("HOME") == os.environ.get("HOME"), \
+        "HOME must stay exactly as inherited — sealing it is the deliberate choice " \
+        "this file's docstring argues against"
 
 
 def test_helpers_do_not_hardcode_the_home_paths():
