@@ -300,10 +300,11 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
-      # The chart projection for `GET /v1/metrics/history` (t_5ae8cfcf): keeps
-      # a not-reported metric a gap rather than a zero, and exposes each
-      # series' peak column next to its average. Foundation-only.
-      - path: Sources/Shared/MetricsHistoryTrend.swift
+      # The chart projection for `GET /v1/cluster/history` (t_5ae8cfcf,
+      # re-pointed at the canonical route by t_0c99b017): keeps a not-reported
+      # metric a gap rather than a zero, and exposes each series' peak column
+      # next to its average. Foundation-only.
+      - path: Sources/Shared/ClusterHistoryTrend.swift
       # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
       # metric set a widget may request (the recorder's own column names) and
       # the pixel-width reduction that keeps every column's min AND max, so a
@@ -514,7 +515,7 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
-      - path: Sources/Shared/MetricsHistoryTrend.swift
+      - path: Sources/Shared/ClusterHistoryTrend.swift
       # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
       # requestable metric set and the min/max-preserving pixel reduction.
       # Foundation-only, so the widget and the gate both execute the same file.

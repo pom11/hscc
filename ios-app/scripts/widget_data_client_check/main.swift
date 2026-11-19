@@ -109,6 +109,10 @@ let summaryBody = Data(#"""
 /// the recorder writes it: two node buckets where the first answered twice
 /// (so the bucket has a mean AND a peak) and the second host did not answer at
 /// all (so every metric is null and `error` carries why), plus one engine row.
+/// Nothing REQUESTS this route any more — t_0c99b017 folded every history read
+/// onto `/v1/cluster/history` — but the endpoint is still live and its row keys
+/// are still contract-checked against these decoders, so the payload stays
+/// compiled and decoded here rather than standing untested until it is deleted.
 let metricsHistoryBody = Data(#"""
 {"tier":1,"tier_meta":{"tier":1,"resolution_s":60,"window_s":86400,"capacity":1440},
  "since":null,"until":null,"host":null,"node":null,"source":"sqlite_store",
@@ -211,6 +215,24 @@ let historyBody = Data(#"""
  "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
 """#.utf8)
 
+/// The same tier-1 answer with the "every machine" filter on it: `node` comes
+/// back `all`, which is a filter value and NOT a host name. A projection that
+/// treats it as one matches it against every row's `host`, finds nothing, and
+/// draws an empty series that reads as an empty fleet.
+let historyAllNodesBody = Data(#"""
+{"window":"3600s","window_s":3600,"axis":"tier","source":"sqlite_store","tier":1,"resolution_s":60,"resolution":"60s",
+ "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
+ "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
+ "since":1794978300,"until":1794999900,"node":"all",
+ "hosts_included":true,"engines_included":true,
+ "hosts":[{"tier":1,"ts":1794978300,"host":"192.0.2.10","gpu_util_pct":94.0,"gpu_power_w":160.5,"gpu_power_w_max":480.0,"n":30,"error":null},
+          {"tier":1,"ts":1794978360,"host":"192.0.2.11","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
+ "engines":[],
+ "counts":{"hosts":2,"engines":0},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
+ "note":"","speak":"Last hour at 60s resolution: 2 node points."}
+"""#.utf8)
+
 /// The same route's answer for `window=15m` (tier 0) as the deployed topology
 /// serves it: the 2 s ring is the daemon's memory, so this process measured
 /// `tier0_resident == false`, both series came back empty, and `note` says why.
@@ -286,9 +308,11 @@ func runAll() async {
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
-        "/v1/metrics/history", "/v1/alerts",
+        "/v1/alerts",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
+    check("the audited set carries exactly one history read",
+          audited.filter { $0.hasSuffix("/history") } == ["/v1/cluster/history"])
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
     for mutation in ["/v1/cards", "/v1/cards/ABC123/kill", "/v1/sessions/ABC/reply",
                      "/v1/kanban/ABC123/assign", "/v1/cluster/autodown/up",
@@ -567,25 +591,18 @@ func runAll() async {
         check("alerts should decode, got \(String(reflecting: alertRead))", false)
     }
 
-    // 10b. Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf). Three things
-    //      this gate exists to keep true: `tier` leaves as a query item (the
-    //      route 400s without it), an out-of-range tier is clamped rather than
-    //      forwarded (a 400 on every refresh is worse than the nearest real
-    //      tier), and a metric the node never reported stays `nil` — it must
-    //      not reach a chart as a flat 0.
-    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
-    let metricsRead = await client.metricsHistory(tier: 1, host: "dgx-01",
-                                                  since: 1795000000,
-                                                  until: 1795000120)
-    let metricsURL = StubTransport.requests.last?.url?.absoluteString ?? ""
-    check("history carries tier=1", metricsURL.contains("tier=1"))
-    check("history carries host and the inclusive window",
-          metricsURL.contains("host=dgx-01") && metricsURL.contains("since=1795000000")
-            && metricsURL.contains("until=1795000120"))
-    check("history path stayed clean",
-          StubTransport.requests.last?.url?.path == "/v1/metrics/history")
-    if case .success(let payload) = metricsRead {
-        check("history decodes its node rows", payload.hosts.count == 2 && payload.tier == 1)
+    // 10b. The retired `GET /v1/metrics/history` payload (t_5ae8cfcf) still
+    //      decodes into the model the route's contract says must exist. The READ
+    //      is gone from this client — t_0c99b017 folded every history read onto
+    //      the canonical route, and `history_route_guard_check.sh` keeps a second
+    //      one from coming back — but the endpoint stays live until the API-side
+    //      card retires it, and `test_contract_swift_routes.py` still holds that
+    //      its row keys are declared in Swift. So the decoder is compiled and
+    //      exercised here. Directly: this is a payload check, not a request.
+    if let payload = try? JSONDecoder().decode(MetricsHistoryResponse.self,
+                                               from: metricsHistoryBody) {
+        check("the retired route still decodes its node rows",
+              payload.hosts.count == 2 && payload.tier == 1)
         check("an unreported metric is nil, never 0",
               payload.hosts[1].gpu_temp_c == nil
                 && payload.hosts[1].error == "ssh: collect failed")
@@ -597,39 +614,92 @@ func runAll() async {
         check("rows from the store read as a stored window", payload.hasStoredRows)
         check("a ring in another process is not a live window",
               payload.tier0?.readable_here == false && !payload.hasLiveTier0)
-        let trend = MetricsTrend.make(payload, field: .gpuTemp, host: "dgx-01")
-        check("the trend keeps the bucket's mean and its peak",
-              trend.points.count == 1 && trend.points[0].value == 75.0
-                && trend.points[0].peak == 90.0 && trend.hasPeaks)
-        check("the axis scales by the peak, not the mean", trend.upperBound == 90.0)
-        let unreported = MetricsTrend.make(payload, field: .gpuPower, host: "dgx-02")
-        check("a host that never answered is a gap, not a zero",
-              unreported.points.count == 1 && unreported.gaps == 1
-                && unreported.points[0].value == nil && unreported.upperBound == nil)
-        check("the caption names the gap instead of hiding it",
-              unreported.statusLine.contains("1 not reported"))
-        check("with no host named the series takes the first host present",
-              MetricsTrend.make(payload, field: .gpuTemp).host == "dgx-01")
         check("the field vocabulary comes from the server, not a hardcoded list",
               payload.fields?.host_peaks == ["gpu_temp_c_max"])
     } else {
-        check("history should decode, got \(String(reflecting: metricsRead))", false)
+        check("the retired route's payload should still decode", false)
     }
-    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
-    _ = await client.metricsHistory(tier: 9)
-    check("an out-of-range tier is clamped, not forwarded",
-          StubTransport.requests.last?.url?.absoluteString.contains("tier=2") == true)
-    // A tier-0 read with nothing in it must not be able to claim a live window.
-    StubTransport.arm(.http(status: 200, body: Data(#"""
+    // A tier-0 answer with nothing in it must not be able to claim a live window:
+    // `points: 0` with `readable_here: true` is the recorder reporting an empty
+    // ring, and drawing that as "the last 15 minutes were flat" is a lie.
+    if let empty = try? JSONDecoder().decode(MetricsHistoryResponse.self, from: Data(#"""
     {"tier":0,"hosts":[],"engines":[],"tier0":{"points":0,"capacity":450,
      "readable_here":true,"source":"recorder_ring"},"speak":"empty"}
-    """#.utf8)))
-    if case .success(let empty) = await client.metricsHistory(tier: 0) {
+    """#.utf8)) {
         check("an empty ring is not a live window",
               !empty.hasLiveTier0 && !empty.hasStoredRows)
     } else {
         check("an empty tier-0 response should still decode", false)
     }
+
+    // 10c. The trend projection, driven off the CANONICAL read. The two rules it
+    //      owns are the reason it exists: a metric the node never reported stays
+    //      a gap a surface can count and caption (never a flattening to 0), and a
+    //      peak rides beside the average it was averaged away by — including the
+    //      axis bound, which must scale by the PEAK or the throttle spike the
+    //      peak column exists for is clipped off the chart.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    if case .success(let trendPayload) = await client.clusterHistory(window: "6h",
+                                                                     node: "192.0.2.10") {
+        let power = ClusterHistoryTrend.make(trendPayload, field: .gpuPowerW)
+        check("the trend keeps the bucket's mean and its peak",
+              power.points.count == 2 && power.points[0].value == 160.5
+                && power.points[0].peak == 480.0 && power.hasPeaks)
+        check("the axis scales by the peak, not the mean", power.upperBound == 480.0)
+        check("a bucket that never answered is a gap, not a zero",
+              power.gaps == 1 && power.points[1].value == nil
+                && power.points[1].peak == nil)
+        check("the caption names the gap instead of hiding it",
+              power.statusLine.contains("1 not reported"))
+        check("the tier and the step come from the response, not from the points",
+              power.tier == 1 && power.resolutionSeconds == 60 && power.host == "192.0.2.10")
+        let util = ClusterHistoryTrend.make(trendPayload, field: .gpuUtilPct)
+        check("a field with no peak column claims none",
+              !util.hasPeaks && util.points[0].peak == nil
+                && util.points[0].value == 94.0)
+        check("the peak companion exists for temps and power, and nowhere else",
+              ClusterHistoryMetric.gpuPowerW.peakCompanion == .gpuPowerWMax
+                && ClusterHistoryMetric.gpuTempC.peakCompanion == .gpuTempCMax
+                && ClusterHistoryMetric.gpuUtilPct.peakCompanion == nil
+                && ClusterHistoryMetric.gpuPowerWMax.peakCompanion == nil)
+    } else {
+        check("the canonical history answer should decode for the trend", false)
+    }
+    // `node=all` is the route's "every machine" spelling, not a machine name.
+    // Matching it against a row's `host` would hand back an empty series that
+    // looks exactly like an empty fleet, so the series must fall through to the
+    // first host present instead.
+    StubTransport.arm(.http(status: 200, body: historyAllNodesBody))
+    if case .success(let allPayload) = await client.clusterHistory(node: "all", tier: 1) {
+        let series = ClusterHistoryTrend.make(allPayload, field: .gpuPowerW)
+        check("an `all` node filter falls through to the first host present",
+              allPayload.node == "all" && allPayload.hosts.count == 2
+                && series.host == "192.0.2.10" && series.points.count == 1)
+        check("and the series never silently merges the second machine in",
+              !series.points.contains { $0.ts == 1794978360 })
+    } else {
+        check("the node=all answer should decode", false)
+    }
+    // The tier-0 answer the deployed topology gives: an empty pair of series and
+    // a `note` saying the ring is the daemon's. A chart must caption that, not
+    // draw a quiet fleet — the flag is never the reason, `note` is.
+    StubTransport.arm(.http(status: 200, body: historyTier0Body))
+    if case .success(let ringPayload) = await client.clusterHistory(window: "15m") {
+        let ring = ClusterHistoryTrend.make(ringPayload, field: .gpuTempC)
+        check("an empty tier-0 series says so and carries the route's reason",
+              ring.points.isEmpty && ring.hasPeaks == false
+                && ring.statusLine.contains("no rows in this window")
+                && (ring.tier0Notice ?? "").contains("in-memory ring"))
+    } else {
+        check("the tier-0 answer should decode for the trend", false)
+    }
+    // An out-of-range tier is a coding bug in a surface, and a 400 on every
+    // refresh is worse than the chart drawing the nearest real tier: the client
+    // clamps rather than forwards.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    _ = await client.clusterHistory(node: "192.0.2.10", tier: 9)
+    check("an out-of-range tier is clamped, not forwarded",
+          StubTransport.requests.last?.url?.absoluteString.contains("tier=2") == true)
 
     // 11. The nil-shim the two pre-pivot providers still use keeps working.
     StubTransport.arm(.http(status: 200, body: kanbanRunningBody))
