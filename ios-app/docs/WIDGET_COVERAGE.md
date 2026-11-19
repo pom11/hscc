@@ -468,7 +468,7 @@ serves both widgets in every row below; `ClusterWidgetViews.swift` and
 | N2 host_error line | app (gate pane replaces the grid) | app (replaces the table) | app `Fleet` footer | app `Fleet` footer | app `Fleet` | app `Fleet` | app `Fleet` |
 | N3 `serving — proxy :PORT` | — | — | — | — | — | — | — |
 | N4 `In/Out = tokens since…` | — | — | — | — | — | — | — |
-| N5 proxy-unreachable line | app (`Tables` note) | — | app `Tables` | app `Tables` | — | — | — |
+| N5 proxy-unreachable line | — | — | — | — | — | — | — |
 | N6 `no backends behind the proxy` | — (a nil serving section draws nothing here) | — | — (an absent section draws no table) | — | — | — | — |
 | C1 workload name | — | — | — | — | — | — | — |
 | C2 tp | — | — | — | — | — | — | — |
@@ -568,7 +568,10 @@ column here.
 | S11 Prompt t/s | — | — | — | — | — | — |
 | S12 `total (n)` | agg `SmallGrid` | — | CLI `Tables` | CLI `Tables` | CLI `MacDrop` (total rows are drawn as rows, never capped behind backends) | — |
 | N1 `N host(s)` | agg `SmallGrid` | — | agg `Fleet` | agg `Fleet` | agg `MacDrop` (`Copy.hosts(hostCount)`) | agg `MacTitle` (`hostCount`, in the VoiceOver sentence) |
-| N5 proxy line | app `Tables` | — | app `Tables` | app `Tables` | app `MacDrop` (`tile.note`) | — |
+| N3 `serving — proxy :PORT` | — | — | — | — | — (the pane's header is a bare `serving`; the CLI's line carries the proxy port, and this is the only place the port could be shown) | — |
+| N4 `In/Out = tokens since…` | — | — | — | — | CLI `MacDrop` (`Copy.tokensNote`, the CLI's words verbatim, beside the serving header) | — |
+| N5 proxy-unreachable line | — | — | — | — | CLI `MacDrop` (`Copy.proxyUnreachable`, including the CLI's ` (showing last known routes)` suffix; the dropdown also has one line that is the app's own, `serving poll failed: …`, because `serving_error` has no line in `render()`) | — |
+| N6 `no backends behind the proxy` | — (a nil serving section draws nothing here) | — | — | — | CLI `MacDrop` (`Copy.noBackends`) | — |
 | C1 workload name | — | — | — | — | CLI `MacDrop` (`DashboardWorkloadRow.name`) | — |
 | C2 tp | — | — | — | — | CLI `MacDrop` | — |
 | C3 pp | — | — | — | — | CLI `MacDrop` | — |
@@ -598,7 +601,8 @@ naming them is better than a confident dash:
 | cell | why unknown |
 |---|---|
 | every cell, all surfaces, **as pixels** | nothing has rendered any of this. Every gate here is a compile or a Foundation-only harness; the simulator path is blocked by a revoked certificate and no device is attached. Whether a nine-column table actually *fits* `systemMedium` on a given device, or truncates, is unmeasured. The `+N more` rules say what the app intends; only a render says what a user sees. |
-| `N6 no backends behind the proxy` | the CLI prints this line when the serving list is empty. No surface reproduces it, and each instead distinguishes "the route sent no `serving` key" from "the route sent an empty list" — a distinction the CLI does not draw. Whether the app *should* print the CLI's line for the empty case is an open decision, not a gap this card can settle. |
+| `N6 no backends behind the proxy` **on iOS** | the CLI prints this line when the serving list is empty, and `MacDrop` reproduces it verbatim (`Copy.noBackends`). No iOS surface does. Each instead distinguishes "the route sent no `serving` key" from "the route sent an empty list" — a distinction the CLI does not draw, and one a phone user cannot see either way. Whether iOS should adopt the desktop's line, or keep its silence, is a decision this card cannot make. |
+| `ClusterMonitorTables.hasServingSection` | `Sources/Shared/ClusterMonitorTables.swift:367` returns `servingError == nil`, which is true for a clean poll of a response with no `serving` key at all — the same shape `ClusterMonitorViewModel`'s copy fixed (presence captured at projection time). This page reports that the two copies disagree; which one the large/XL tiles should use is a code question, not a docs one, and this card changes no code. |
 
 ## 12. Gap list — fields no surface shows
 
@@ -618,16 +622,21 @@ This is the point of the exercise. Ordered by how surprising the gap is.
 | `Jobs` (H2) as the CLI prints it | `host_table` | the only fleet-wide "N jobs" on Lock Screen families is `FleetProjection.jobs` — a count of `hosts[].workloads[].workload_id`, a different source than the CLI's `sample.sparkrun_jobs`. Same word, two numbers. |
 | `total (n)` per model (S12) on `systemSmall`, the accessories, both Live Activities | `serving_table` | only `Tables` (large/XL) and the macOS dropdown keep the per-model total rows. Everywhere else they are collapsed into one run/wait line, which loses *which model* the queue belongs to. |
 | `N1` host-tally wording | title line `— N host(s) —` | no surface prints the CLI's phrase; every surface invents its own tally form (`4/4 up`, `3/4`, `9+`, `4 hosts`). |
-| `N3 serving — proxy :PORT`, `N4 In/Out = tokens since…`, `N6 no backends behind the proxy` | `render()` | no surface reproduces any of the three. The proxy port — the thing that tells an operator *which* proxy the serving rows came from — appears on no surface. `N4` is the line that explains what `In`/`Out` mean, and both columns are drawn on four surfaces without it. |
+| `N3 serving — proxy :PORT` | `render()` | no surface prints this line, so **the proxy port appears nowhere in either app** — yet every serving row on four surfaces came from that proxy, and `MacDrop` is the only surface that even labels the section as `serving`. This is the single most consequential missing note: two clusters behind different proxies render identically. |
+| `N4 In/Out = tokens since…` and `N6 no backends behind the proxy` | `render()` | **macOS dropdown only** — `Copy.tokensNote` and `Copy.noBackends` quote the CLI verbatim. On iOS neither line exists, so `In` and `Out` are drawn on `systemLarge`, `systemExtraLarge` and the desktop tiles with no statement that they are cumulative-since-engine-start rather than rates, and an empty backend list on iOS is silence where the CLI says *why*. |
+| `N5 proxy /v1/model/info unreachable: …` | `render()` | macOS dropdown only (`Copy.proxyUnreachable`, suffix included). `ClusterMonitorTables.proxyError` is carried by the iOS projection and drawn by **no iOS view** — the phone has the same failure and shows nothing. |
 | `N2` the `host_error` line | `render()` | not reproduced as text. Surfaces replace the table with a gate pane instead, which is a different sentence from the CLI's. |
 | `N7 Ctrl-C to quit` | `render()` | interactive-only; correct that no passive surface shows it. Recorded so the row is not mistaken for a gap. |
 
 **On the wire, printed by no CLI verb, and drawn by no surface:** `gpu_name`,
 `mem_total_mb`, `mem_available_mb`, `mem_bufcache_mb`, `cpu_freq_mhz`,
 `gpu_mem_clock_mhz`, `gpu_encoder_pct`, `gpu_decoder_pct`, `sparkrun_job_names`,
-`gpu_mem_used_pct` (only used/total are shown, on XL), `serving[].error` as text
-(the row shows `down` and the first 30 characters, which `Tables` does draw but
-no Live Activity or accessory does).
+`gpu_mem_used_pct` (only used/total are shown, on XL). The `serving[].error`
+*reason* is the one exception worth naming: `serving_table` puts the truncated
+reason in the **Run** column of a `down` row (`ClusterMonitorViewModel` mirrors
+that exactly), and every plan draws Run — so the reason is visible on the tables
+and the dropdown, and on no Live Activity or accessory, which draw no per-backend
+row at all.
 
 **On the wire, printed by no CLI verb, and drawn by exactly one surface** — each
 of these is a single-surface field, so if that surface is clipped it is the only
