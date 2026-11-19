@@ -35,6 +35,17 @@ families=$(grep -c 'entry.text(for:' Sources/HSCCWidgets/ClusterWidgetViews.swif
 echo "source family text routes = $families (want >= 6)"
 [ "$families" -ge 6 ] || { echo "❌ a cluster family bypasses the shared gate/text model"; exit 1; }
 
+# t_9e64d9d9: large and extra-large draw the CLI's own tables through ONE shared
+# block, and the "is there a table at all" decision stays owned by ClusterEntry
+# — the same one-step-gate invariant this directory enforces for the copy.
+tables=$(grep -c 'MonitorTablesBlock(tables:' Sources/HSCCWidgets/ClusterWidgetViews.swift)
+echo "cluster table blocks = $tables (want >= 2: large + extra-large)"
+[ "$tables" -ge 2 ] || { echo "❌ a cluster surface stopped drawing the shared CLI tables"; exit 1; }
+grep -q 'if let tables = entry.tables' Sources/HSCCWidgets/ClusterWidgetViews.swift \
+  || { echo "❌ a cluster body decides the table gate itself instead of asking the entry"; exit 1; }
+grep -q 'var tables: ClusterMonitorTables?' Sources/HSCCWidgets/ClusterWidgetMetrics.swift \
+  || { echo "❌ ClusterEntry no longer owns the table gate"; exit 1; }
+
 cat > "$TMPDIR/widget_dispatch_$$.swift" <<'SWIFT'
 import Foundation
 enum S: String, CaseIterable { case serving, waking, down, unreachable, unknown }
