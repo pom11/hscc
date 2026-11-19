@@ -798,6 +798,84 @@ monitorSampleDecodeShape(c)
 // against the fixtures above and, where a golden exists, the CLI's own cells.
 clusterSmallGridChecks(c)
 
+// ---- Cluster history (t_b6512c2e) ---------------------------------------
+// The four `v1_cluster_history_*.json` fixtures are NOT hand-typed:
+// scripts/make_cluster_history_fixture.py fills a real store through the
+// recorder's own write path (`MetricsRecorder.tick`, which rolls tiers 1 and 2
+// with its own `rollup`) and then calls
+// `routes_cluster.handle_cluster_history`, so these are the handler's bytes.
+// scripts/cluster_history_metric_vocabulary.py re-checks every key in them
+// against `metrics_history.HOST_COLUMNS` / `ENGINE_KEYS`, and
+// scripts/cluster_history_chart_check.sh runs the behavioural half (the
+// pixel-width reduction that must not move a min or a max, and the tiers that
+// must never be mixed). What is asserted HERE is only the decode shape the
+// chart reads off the payload — including the two keys the model gained here
+// (`gpu_mem_used_mb`, `prompt_tps`), which the route has always sent.
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_6h.json",
+        "ClusterHistoryResponse (window=6h -> tier 1, 1-minute averages)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_7d.json",
+        "ClusterHistoryResponse (window=7d -> tier 2, 5-minute averages)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_6h_engine_only.json",
+        "ClusterHistoryResponse (a metrics= projection that excludes the host series)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_15m.json",
+        "ClusterHistoryResponse (window=15m, tier 0, ring not resident here)")
+
+c.assertions("v1_cluster_history_6h.json", "the history decode shape the chart reads") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_6h.json"))
+    var ok = payload.tier == 1 && payload.resolution_s == 60 && payload.resolution == "60s"
+    ok = ok && payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"]
+    // The store's columns are sqlite REAL, so a count of 2 arrives as 2.0; the
+    // model's Int? only holds because JSONDecoder converts an integral number
+    // losslessly. Pinned here so a stricter decoder strategy fails LOUDLY.
+    ok = ok && payload.engines.first?.run == 2 && payload.engines.first?.wait == 1
+    // nulls stay null: 192.0.2.11 never reported its GPU in the fixture's ticks
+    ok = ok && payload.hosts.contains { $0.host == "192.0.2.11" && $0.gpu_temp_c == nil
+        && $0.gpu_power_w == nil }
+    // the two keys this card added to the model, and the kv fraction as stored
+    ok = ok && payload.hosts.first?.gpu_mem_used_mb == 12000
+        && payload.engines.first?.prompt_tps == 200
+        && payload.engines.first?.kv == 0.125
+    let storeKeys = Mirror(reflecting: payload.store!).children.compactMap { $0.label }
+    ok = ok && !storeKeys.contains("path")
+    c.expect("v1_cluster_history_6h.json",
+             "tier + resolution stated, peaks named, nulls kept, VRAM MB and prompt tok/s decode, no server path",
+             ok, "tier=\(payload.tier) res=\(payload.resolution) max=\(payload.max_fields ?? [])")
+}
+
+c.assertions("v1_cluster_history_7d.json", "the 7d tier is stated, not guessed") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_7d.json"))
+    c.expect("v1_cluster_history_7d.json",
+             "tier 2 at 300 s, with the same three peak columns available",
+             payload.tier == 2 && payload.resolution_s == 300 && payload.resolution == "300s"
+                && payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"]
+                && !payload.hosts.isEmpty && !payload.engines.isEmpty,
+             "tier=\(payload.tier) res=\(payload.resolution) hosts=\(payload.hosts.count)")
+}
+
+c.assertions("v1_cluster_history_6h_engine_only.json", "an excluded series is reported as excluded") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_6h_engine_only.json"))
+    c.expect("v1_cluster_history_6h_engine_only.json",
+             "hosts_included=false with empty hosts, while the engine series still carries data",
+             payload.hosts_included == false && payload.hosts.isEmpty
+                && payload.engines_included == true && !payload.engines.isEmpty
+                && payload.engines.first?.kv == nil,
+             "hosts_included=\(String(describing: payload.hosts_included)) engines=\(payload.engines.count)")
+}
+
+c.assertions("v1_cluster_history_15m.json", "an empty tier 0 explains itself") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_15m.json"))
+    c.expect("v1_cluster_history_15m.json",
+             "tier 0, ring not resident, no peak columns, and a note that points at window=1h",
+             payload.tier == 0 && payload.resolution_s == 2 && payload.tier0Resident == false
+                && (payload.max_fields ?? []).isEmpty && payload.hosts.isEmpty
+                && (payload.note ?? "").contains("window=1h"),
+             "tier=\(payload.tier) resident=\(String(describing: payload.tier0Resident)) note=\(payload.note ?? "")")
+}
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. The exit code is the guard; the words below only
