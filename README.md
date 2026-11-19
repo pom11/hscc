@@ -132,6 +132,7 @@ Anything else — no cache, a cache older than 24 h, a cached "up to date" — p
 | see the daily fleet digest | `hscc project standup` |
 | check health at a glance | `hscc status` · full smoke test: `hscc verify` |
 | watch per-node / per-model live load | `hscc cluster monitor --live` |
+| look back at the stored series, not just the present | `hscc cluster history --window 6h` |
 | see throughput + queue depth, get scaling advice | `hscc throughput` · `hscc autoscale` |
 | review + merge a finished card | `hscc project review <card>` |
 | see why a card is stuck / un-stick it | `hscc kanban blocked [--recover <id>]` |

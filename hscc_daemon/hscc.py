@@ -594,7 +594,7 @@ COMMAND_HELP = {
 
 
 CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop",
-                       "down", "up"}
+                       "down", "up", "history"}
 TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
 
 # ── unknown-command hint: the single source of the advertised verb list ────
@@ -746,6 +746,12 @@ _CLUSTER_GROUP_ENTRIES = [
     ("hscc cluster hosts", "All cluster hosts and saved sparkrun clusters"),
     ("hscc cluster monitor",
      "One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)"),
+    # `history` (t_eee43fac) is the stored series behind that snapshot: the
+    # same rows GET /v1/cluster/history serialises, printed. Read-only, and it
+    # reads the recorder's store rather than the fleet, so it needs no sparkrun.
+    ("hscc cluster history [--window W|--tier N]",
+     "Stored CPU/GPU/serving series for one window or tier (read-only; "
+     "--json prints the rows the API serves)"),
     ("hscc cluster jobs", "All sparkrun jobs currently running"),
     ("hscc cluster info", "Detailed resolved cluster configuration"),
     ("hscc cluster stop <id>", "Stop a running workload by container id"),
@@ -808,6 +814,26 @@ _CLUSTER_SUBCOMMAND_HELP = {
                  "this starts live workloads across the fleet. Pass "
                  "--dry-run to see the plan without touching the cluster."),
     },
+    # history (t_eee43fac): the CLI behind the canonical stored-series route
+    # (t_447cc7fc ruled /v1/cluster/history canonical), so a chart that looks
+    # wrong can be checked from a terminal. The flags ARE the route's
+    # parameters — two mutually exclusive axes, one machine filter — because a
+    # CLI that invents a third way to say "which window" is a second contract to
+    # keep in sync. Wording describes the flags rather than echoing what the
+    # verb prints. No `example:` line, same reason as every other verb here: the
+    # (C) gate parse-checks a printed example and a fabricated one is a lie.
+    "history": {
+        "usage": "hscc cluster history [--window W | --tier N]",
+        "desc": ("The stored CPU/GPU/serving series the metrics recorder keeps, "
+                 "read from its own store — this reads nothing live: no "
+                 "sample, no ssh, no sparkrun. Two mutually exclusive axes: "
+                 "--window 15m|1h|6h|24h|7d (the default is 1h) or --tier "
+                 "0|1|2 with optional --since/--until (inclusive epoch "
+                 "seconds). --node <host|all> is the one machine filter; "
+                 "--metrics a,b keeps those fields plus the row's identity; "
+                 "--json prints the rows the API serves, verbatim. A value a "
+                 "node never reported prints as an em dash, never as 0."),
+    },
 }
 
 
@@ -859,7 +885,7 @@ def _print_cluster_verb_usage(sub: str):
 # F3's gate rules (canonical-whitespace pin in
 # hscc_daemon/tests/test_cluster_group_help.py).
 _CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop", "up",
-                       "down")
+                       "down", "history")
 
 
 def _help_token_index(args):
@@ -1115,6 +1141,26 @@ def _handle_cluster():
     help_at = _help_token_index(cluster_args_raw)
     if help_at is not None and sub in _CLUSTER_HELP_VERBS:
         _print_cluster_verb_usage(sub)
+        return 0
+
+    # ── `hscc cluster history` (t_eee43fac) ────────────────────────────────
+    # Deliberately BEFORE the engine load: this verb's only data source is the
+    # recorder's own store (hscc_daemon/metrics_history.py), so it must not
+    # need the cluster engine — and therefore must not depend on sparkrun being
+    # installed or reachable — to print history that is already on disk. It
+    # never touches metrics_history.get_sampler(), which CONSTRUCTS a Sampler
+    # on first use and would spawn a second `sparkrun cluster monitor` plus a
+    # second writer on the roll-up watermarks.
+    if sub == "history":
+        from hscc_daemon import metrics_history_cli
+        opts, err = metrics_history_cli.parse_history_args(cluster_args[1:])
+        if err:
+            print(metrics_history_cli.usage_error_message(
+                err, width=_cluster_help_width()))
+            return metrics_history_cli.USAGE_ERROR_RC
+        payload = metrics_history_cli.read_history(opts)
+        print(metrics_history_cli.history_json(payload) if opts["json"]
+              else metrics_history_cli.render_history(payload))
         return 0
 
     eng = _load_cluster_engine()
