@@ -122,7 +122,11 @@ trap cleanup EXIT
 NOTES_MD="$WORK_DIR/notes.md"
 
 step "Render release notes from changelog.d/"
-if [ -n "$PREV_TAG" ]; then
+if [ -n "${HSCC_APPS_NOTES_FILE:-}" ]; then
+  # A CLI release archives changelog.d/ fragments, leaving nothing to render;
+  # the operator then supplies the notes file directly.
+  cp "$HSCC_APPS_NOTES_FILE" "$NOTES_MD"
+elif [ -n "$PREV_TAG" ]; then
   python3 "$BUILD_NUMBER_SCRIPT" notes --version "$VERSION" \
     --since "$PREV_TAG" --out "$NOTES_MD"
 else
