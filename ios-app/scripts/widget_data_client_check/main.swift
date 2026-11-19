@@ -174,8 +174,11 @@ let kanbanRunningBody = Data(#"""
 /// reported — a `null` that must stay nil, because a 0.0 would draw a node that
 /// never answered as an idle one. `store.path` is on the wire and deliberately
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
+/// `axis`/`source` ARE declared: which axis answered and where the rows came
+/// from are facts a chart branches on, and a key the model does not declare is
+/// invisible to it however much the server states it.
 let historyBody = Data(#"""
-{"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
+{"window":"6h","window_s":21600,"axis":"window","source":"sqlite_store","tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
  "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
  "since":1794978300,"until":1794999900,"node":"192.0.2.10",
@@ -275,6 +278,8 @@ func runAll() async {
               payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"])
         check("history reports whether the 2 s ring was readable",
               payload.tier0Resident == true)
+        check("history states which axis answered and where the rows came from",
+              payload.axis == "window" && payload.source == "sqlite_store")
         let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
         check("the store's server path is never decoded",
               !historyFields.contains("path"))
@@ -288,6 +293,28 @@ func runAll() async {
             && historyRequest?.url?.query?.contains("metrics=") == true)
     check("history's path carries no query string of its own",
           historyRequest?.url?.path == "/v1/cluster/history")
+
+    // 1c. The tier axis. `since`/`until` are the reason this axis exists (a
+    //     preset is anchored to `now` and cannot ask about last night), so they
+    //     must leave as real query items — and the DEFAULTED `window` must not
+    //     ride along: the route answers 400 when both axes are named, and a
+    //     defaulted parameter is exactly how every refresh would 400 while the
+    //     call still compiled.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    _ = await client.clusterHistory(node: "192.0.2.10", tier: 1,
+                                    since: 1794978300, until: 1794999900)
+    let tierRequest = StubTransport.requests.last
+    let tierQuery = tierRequest?.url?.query ?? ""
+    check("history's tier/since/until/node are real query items",
+          tierQuery.contains("tier=1")
+            && tierQuery.contains("since=1794978300")
+            && tierQuery.contains("until=1794999900")
+            && tierQuery.contains("node=192.0.2.10"))
+    check("the tier axis drops the defaulted window preset (both axes = a 400 "
+          + "on every refresh): \(tierQuery)",
+          !tierQuery.contains("window="))
+    check("the tier axis still uses the bare allowlisted path",
+          tierRequest?.url?.path == "/v1/cluster/history")
 
     // 2. A refused path never reaches the transport — no request, no side effect.
     StubTransport.arm(.http(status: 200, body: Data("{}".utf8)))

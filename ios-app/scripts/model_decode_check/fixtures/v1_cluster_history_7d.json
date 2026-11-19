@@ -1,4 +1,5 @@
 {
+ "axis": "window",
  "counts": {
   "engines": 3,
   "hosts": 6
@@ -229,13 +230,17 @@
  "resolution": "300s",
  "resolution_s": 300,
  "since": 1794395100,
+ "source": "sqlite_store",
  "speak": "Last 7d at 300s resolution: 6 node points, 3 engine points.",
  "store": {
+  "bound_bytes": 10485760,
   "db_bytes": 16384,
   "error": null,
   "exists": true,
   "path": "/Users/example/.hscc/metrics/history.db",
-  "tier0_resident": true
+  "tier0_resident": null,
+  "tier1_rows": 24,
+  "tier2_rows": 6
  },
  "tier": 2,
  "tier_summary": "5-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",

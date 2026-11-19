@@ -263,7 +263,15 @@ against `hscc_daemon/metrics_history.py`'s own column tuples.
 - `v1_cluster_history_15m.json` — tier 0 as the deployed topology answers it: the
   2 s ring lives in the daemon process, so `store.tier0_resident` is false, both
   series are empty, and `note`/`speak` say why. A chart must draw that as a gap
-  with a reason, never as a flat line at zero. Read the reason from `note`, not
-  from the flag: the route initialises `tier0_resident` to `True` and only asks
-  the recorder seam when the served tier is 0, which is why the tier-1 and tier-2
-  fixtures above both say `true` regardless of what this process could read.
+  with a reason, never as a flat line at zero. Since t_5cfd5bda the flag is a
+  measurement rather than an initialisation — `false` here, where tier 0 was asked
+  and the ring was not resident, and `null` in the tier-1 and tier-2 fixtures,
+  where nobody read the ring at all — so those fixtures no longer claim a residency
+  this process could not have. Branch on `source`
+  (`recorder_ring_absent` here) for the decision and read `note` for the sentence.
+- `v1_cluster_history_tier_axis.json` — `?tier=1&since=&until=` (t_b611b56e), the
+  second request axis: an explicit span instead of a preset anchored to `now`.
+  `axis` is `tier`, `window` is the derived label `"600s"` and deliberately not a
+  preset name, and `since`/`until` are the pair the server served *after* clamping
+  to the tier's retention — so a surface draws the span it was given rather than
+  the one it asked for.

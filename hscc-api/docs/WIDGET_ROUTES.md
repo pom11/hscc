@@ -195,24 +195,55 @@ must never have to guess whether a point is 2 seconds or 5 minutes wide:
 | `1h`, `6h`, `24h` | 1 | 1 min | `~/.hscc/metrics/history.db` | `cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max` |
 | `7d` | 2 | 5 min | the same file | the same three |
 
+**Two request axes, exactly one per request.** A preset is anchored to `now`, and
+that is the only span it can name — it cannot ask about last night. `tier` +
+`since`/`until` is the second axis and names an explicit span over one raw tier:
+
+```
+GET /v1/cluster/history?node=<host|all>&metrics=a,b
+    &window=15m|1h|6h|24h|7d                    # axis A — a preset, anchored to now
+    &tier=0|1|2&since=<epoch>&until=<epoch>     # axis B — an explicit span, anchored to nothing
+```
+
+The two are rejected together rather than resolved by precedence, because they
+denote two different spans and a client whose `since`/`until` were silently
+ignored has no way to learn it. So: `window` + `tier` → 400 naming both;
+`since`/`until` without `tier` → 400 (a preset has an anchor, a raw tier does not,
+so naming both asks for two spans at once); neither → `window=1h`.
+`since`/`until` are **inclusive epoch-second bucket starts** — `since=until=ts`
+returns the bucket starting at `ts` — and the span is clamped to that tier's own
+retention (900 s / 86 400 s / 604 800 s), read from `metrics_history` rather than
+copied here. On the tier axis `window` is a derived span label (`"600s"`), never a
+preset name the request did not use.
+
 | field | type | meaning |
 |---|---|---|
-| `window` / `window_s` | string / integer | the requested window and its length in seconds |
+| `axis` | string | `"window"` or `"tier"` — which axis answered, stated rather than left to be inferred from which keys are non-null |
+| `source` | string | `recorder_ring`, `recorder_ring_absent`, `sqlite_store`, `sqlite_store_absent` — where the rows came from, as a **code**. Branch on this, not on the English of `note`. `null` only when the read itself failed, which `error` states |
+| `window` / `window_s` | string / integer | the window label and its length in seconds. On the preset axis the label is the preset; on the tier axis it is `"<window_s>s"` |
 | `tier` | integer | 0, 1 or 2 — the tier that answered |
 | `resolution_s` / `resolution` | integer / string | 2/60/300 and `"2s"`/`"60s"`/`"300s"` |
 | `tier_summary` | string | what that tier is, in words ("1-minute averages, with peaks for …") |
 | `max_fields` | array | the peak columns this response carries — `[]` at tier 0, which stores no peak |
-| `since` / `until` | integer | epoch seconds; both inclusive, and the store's bucket starts are what they filter |
+| `since` / `until` | integer | epoch seconds; **the pair actually served**, both inclusive, and the store's bucket starts are what they filter. When a clamp moved them these are the clamped values and `note` says so |
 | `node` | string | the echo of `?node=` (`all` by default) |
 | `metrics` | array | the effective field names, taken from the recorder's own vocabulary |
 | `hosts_included` / `engines_included` | bool | `false` means this `metrics=` filter named no field of that series — it is excluded, not empty |
 | `hosts` | array | the recorder's `host_rollup` rows, key names unchanged: `tier`, `ts`, `host`, the `HOST_KEYS` averages, the three `*_max`, `n`, `error` |
 | `engines` | array | the recorder's `engine_rollup` rows: `tier`, `ts`, `node`, `port`, `model`, `run`, `wait`, `kv`, `gen_tps`, `prompt_tps`, `n`, `error` |
 | `counts` | object | `{hosts, engines}` — the row counts served |
-| `store` | object | `{path, exists, db_bytes, tier0_resident, error}` — `tier0_resident` is a tier-0 measurement only; see below |
-| `note` | string | why the answer is empty when it is (fresh install, ring not resident) |
+| `store` | object | `{path, exists, db_bytes, bound_bytes, tier1_rows, tier2_rows, tier0_resident, error}` — one block for everything the store is, so there is no second `stats` to disagree with it. See below on what is measured where |
+| `note` | string | why the answer is not what was asked, or empty: a clamp that shortened the span, a fresh install, a ring that is not resident |
 | `error` | string | present only when the store read failed, with the real reason |
 | `speak` | string | window + resolution + how much data came back |
+
+**The response always states the window it actually served, on either axis.**
+`since`/`until` are the served pair and `window_s` the served span, so a client
+draws what arrived instead of assuming its request was honoured. When the tier
+axis clamps a span to the tier's retention, `note` names both numbers — the one
+asked and the retention that moved it. A silently shortened span is the worst
+shape a history route can have: the chart reads as a quiet fleet for exactly the
+hours the route quietly dropped.
 
 **A `null` is a missing reading, never a zero.** The recorder stores `None` for
 a field a node did not report (an empty CSV string would otherwise draw "GPU
@@ -229,6 +260,15 @@ so and point at `window=1h` — it does not return an empty list as if the fleet
 had been quiet. When the route *does* own the ring (a test, or any process that
 hosts the sampler) it serves it verbatim.
 
+**`store` states what it measured, and is silent about what it did not.**
+`bound_bytes` is the recorder's stated ceiling and is always knowable.
+`tier1_rows`/`tier2_rows` are the store's own counts, read from the one branch
+that opens the file: they are the real numbers at tiers 1-2, `0` when the store
+does not exist yet (there is nothing there to count — a measured absence), and
+`null` at `tier=0`, which answers from memory and never opens it. A `0` there
+would be a default wearing a measurement's name. The same rule already governs
+`tier0_resident`, two paragraphs down.
+
 **`store.tier0_resident` means what its name says, and only at `tier == 0`.** It
 is written by the one branch that reads the ring, so it is `true`/`false` when
 the served `tier` is 0 and `null` when it is not: at tiers 1-2 nobody measured
@@ -241,13 +281,19 @@ answer. `test_cluster_history_parity.py` pins both halves: `None` at every
 durable window against a store with nothing resident, `false` at tier 0.
 
 Rejected with `400 bad_request` (message + `speak`), never a silent empty
-answer: an unknown `window`; a `metrics` name the recorder does not store for
-that tier — including any `*_max` at `window=15m`, which has no peak column to
+answer: an unknown `window`; `window` and `tier` in one request; `since`/`until`
+without `tier`; a `tier` that is not 0, 1 or 2; a `since`/`until` that is not
+epoch seconds; a `since` after its `until` (an inverted range answered empty
+would read as "nothing happened"); a `metrics` name the recorder does not store
+for that tier — including any `*_max` at `window=15m`, which has no peak column to
 give; `metrics` naming no field; a `node` that is not a host name; and any
-parameter other than `node`, `metrics` and `window`. A well-formed node with no
-samples in the window is *not* an error — it answers `200` with empty `hosts`
-and `engines`, because a node that was down for the whole window is a fact
-about the window.
+parameter other than `node`, `metrics`, `window`, `tier`, `since` and `until`.
+`host=` is deliberately not in that set: `host_rollup.host` and
+`engine_rollup.node` are two column names for one identity, so `node=` filters
+both series and a second machine key would only be a second way to ask the same
+question. A well-formed node with no samples in the window is *not* an error — it
+answers `200` with empty `hosts` and `engines`, because a node that was down for
+the whole window is a fact about the window.
 
 Parity: `hscc-api/tests/test_cluster_history_parity.py` drives the recorder's
 own `tick()` to build one store, serves it over HTTP and reads the same store
