@@ -275,6 +275,30 @@ struct MonitorTableOverflow: View {
     }
 }
 
+/// The CLI's note line under the serving block: the proxy route map that could
+/// not refresh, the serving poll that failed, or the empty-serving sentence.
+///
+/// `CLIMonitorNote` owns the words, the precedence and which of them the CLI
+/// styles `warn`; this view owns the type size and nothing else, and is why the
+/// phone now says the same thing the desktop dropdown says for the same failure.
+/// Two lines rather than one because a proxy error string is the route's own
+/// sentence and can be long — the table width gives it two rows, then stops.
+struct MonitorTableNote: View {
+    @Environment(\.widgetStyle) private var style
+
+    let text: String
+    var warning = false
+
+    var body: some View {
+        Text(text)
+            .font(style.font(size: 8, weight: .regular))
+            .foregroundColor(warning ? style.warnColor : style.secondaryTextColor)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// The two tables a large or extra-large monitor surface draws, or nothing when
 /// there is no table to draw. Both widgets go through here so the column/row
 /// selection and the arrangement live in exactly one place per size: stacked on
@@ -337,8 +361,9 @@ struct MonitorHostColumn: View {
     }
 }
 
-/// The serving table with its caption, or nothing when the route sent no
-/// serving section at all — silence, not an empty table of zeroes.
+/// The serving table with its caption and the CLI's note line — or nothing when
+/// the route sent no serving section and reported no failure: silence, not an
+/// empty table of zeroes.
 struct MonitorServingColumn: View {
     @Environment(\.widgetStyle) private var style
 
@@ -347,15 +372,30 @@ struct MonitorServingColumn: View {
 
     var body: some View {
         let rows = ClusterMonitorTableLayout.visibleServingRows(tables.servingRows, plan: plan)
-        if tables.hasServingSection {
+        let note = tables.note
+        if tables.hasServingSection || note != nil {
             VStack(alignment: .leading, spacing: style.spacing(3)) {
-                MonitorTableCaption(title: plan.compactHeaders ? "Serving" : "Serving engines")
-                MonitorServingTableView(rows: rows,
-                                        columns: plan.servingColumns,
-                                        compactHeaders: plan.compactHeaders)
-                if let more = ClusterMonitorTableLayout.overflowLine(shown: rows.count,
-                                                                    total: tables.servingRows.count) {
-                    MonitorTableOverflow(text: more)
+                if tables.hasServingSection {
+                    MonitorTableCaption(title: plan.compactHeaders ? "Serving" : "Serving engines")
+                }
+                // The CLI's order: the note sits between the header and the
+                // table, and a proxy failure is printed even when there is no
+                // table to print — the case this block used to leave silent
+                // while still projecting `proxyError` (t_b5d0ec18).
+                if let note {
+                    MonitorTableNote(text: note.text, warning: note.isWarning)
+                }
+                // `serving_table(rows) if rows else <the CLI's line>`: a told
+                // empty section gets the sentence, never a header row with
+                // nothing under it.
+                if !rows.isEmpty {
+                    MonitorServingTableView(rows: rows,
+                                            columns: plan.servingColumns,
+                                            compactHeaders: plan.compactHeaders)
+                    if let more = ClusterMonitorTableLayout.overflowLine(shown: rows.count,
+                                                                        total: tables.servingRows.count) {
+                        MonitorTableOverflow(text: more)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

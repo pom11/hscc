@@ -338,6 +338,127 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
     c.expect("monitor-tables", "\(label): live — serving rows exist, so the section is not silence",
              tables.hasServingSection)
 
+    // ---- the absent `serving` KEY is not a present-and-empty section.
+    //
+    // §6 rule 1, and the case a fixture cannot express: every committed monitor
+    // fixture carries the key, so the payloads are built here the way
+    // cluster_small_grid.swift builds its own — one host list, three serving
+    // shapes. A clean poll that sent NO key has no `serving_error` either, so
+    // "no error" is not evidence that a section exists: reading it as such made
+    // the large/XL tiles treat an absent section as a present-and-empty one
+    // (t_9e110d88 removed that same conflation from the small tile; the tables
+    // block had arrived at it independently). `ClusterMonitorViewModel` already
+    // answers this correctly from `response.serving != nil`, so the assertion
+    // below is deliberately a TWINS-AGREE check: same payload, one answer.
+    let presenceHosts = live.json?.hosts ?? []
+    func presencePayload(_ serving: [ServingRow]?) -> MonitorResponse {
+        MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: presenceHosts),
+                        serving: serving, serving_error: nil,
+                        serving_proxy_error: nil, speak: "serving presence")
+    }
+    let notTold = ClusterMonitorTables.project(presencePayload(nil))
+    let toldEmpty = ClusterMonitorTables.project(presencePayload([]))
+    c.expect("monitor-tables", "\(label): a MISSING serving key still projects (the hosts answered)",
+             notTold != nil && notTold?.hostRows.count == presenceHosts.count,
+             "hostRows=\(notTold?.hostRows.count ?? -1) hosts=\(presenceHosts.count)")
+    c.expect("monitor-tables",
+             "\(label): a MISSING serving key is NOT a serving section (and has no error)",
+             notTold?.hasServingSection == false && notTold?.servingError == nil
+                && notTold?.backendRows.isEmpty == true,
+             "hasServingSection=\(String(describing: notTold?.hasServingSection)) "
+                + "servingError=\(String(describing: notTold?.servingError))")
+    c.expect("monitor-tables", "\(label): an EMPTY serving key IS a section (0 rows, and it says so)",
+             toldEmpty?.hasServingSection == true && toldEmpty?.servingRows.isEmpty == true,
+             "hasServingSection=\(String(describing: toldEmpty?.hasServingSection)) "
+                + "rows=\(toldEmpty?.servingRows.count ?? -1)")
+    // The two projections must not drift apart again: layout may differ from
+    // cells, the meaning of "was I told about serving?" may not.
+    let presencePairs: [(String, [ServingRow]?)] = [
+        ("missing key", nil), ("empty key", []),
+        ("fixture key", live.serving),
+    ]
+    for (name, serving) in presencePairs {
+        let payload = presencePayload(serving)
+        let fromTables = ClusterMonitorTables.project(payload)?.hasServingSection
+        let fromViewModel = ClusterMonitorViewModel.project(payload)?.hasServingSection
+        c.expect("monitor-tables", "\(label): twins agree — \(name) answers one way",
+                 fromTables == fromViewModel,
+                 "tables=\(String(describing: fromTables)) viewModel=\(String(describing: fromViewModel))")
+    }
+
+    // ---- the serving-block note line, which iOS did not draw at all.
+    //
+    // `ClusterMonitorTables.proxyError` was projected and read by no view in
+    // `ios-app/Sources/` (t_b5d0ec18): the phone met the desktop's
+    // proxy-unreachable failure and said nothing while the menu bar printed the
+    // CLI's line. The sentence and its precedence now have ONE owner,
+    // `CLIMonitorNote`, compiled into both apps, and `MonitorServingColumn` draws
+    // it. The words below are the terminal's own, typed here on purpose: comparing
+    // against a constant of the owner would still pass after somebody re-worded
+    // that owner away from `cluster_live.py`.
+    func notePayload(_ serving: [ServingRow]?, proxy: String? = nil,
+                     poll: String? = nil) -> MonitorResponse {
+        MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: presenceHosts),
+                        serving: serving, serving_error: poll,
+                        serving_proxy_error: proxy, speak: "serving note")
+    }
+    /// The note exactly as the block prints it — text plus the CLI's own style
+    /// word — so one string comparison pins the sentence AND the warn/dim rule.
+    /// No interpolation anywhere: this file is compiled by a harness whose own
+    /// interpolation nesting has to stay shallow.
+    func noteLine(_ response: MonitorResponse) -> String {
+        guard let note = ClusterMonitorTables.project(response)?.note else { return "no note" }
+        return note.text + " [" + (note.isWarning ? "warn" : "dim") + "]"
+    }
+    let proxyWithRoutes = noteLine(notePayload(live.serving, proxy: "connect timeout"))
+    c.expect("monitor-tables",
+             "\(label): proxy failure prints the CLI's line WITH the routes suffix, as a warning",
+             proxyWithRoutes == "proxy /v1/model/info unreachable: connect timeout"
+                + " (showing last known routes) [warn]",
+             "got " + proxyWithRoutes)
+    let proxyNoRoutes = noteLine(notePayload([], proxy: "connect timeout"))
+    c.expect("monitor-tables",
+             "\(label): proxy failure with NO rows drops the suffix (the CLI prints it only `if rows`)",
+             proxyNoRoutes == "proxy /v1/model/info unreachable: connect timeout [warn]",
+             "got " + proxyNoRoutes)
+    let pollOnly = noteLine(notePayload(live.serving, poll: "proxy returned 500"))
+    c.expect("monitor-tables", "\(label): a failed poll gets the app's own sentence, not a warning",
+             pollOnly == "serving poll failed: proxy returned 500 [dim]",
+             "got " + pollOnly)
+    let emptyNote = noteLine(notePayload([]))
+    c.expect("monitor-tables", "\(label): a TOLD empty section gets the CLI's no-backends line, dim",
+             emptyNote == "no backends behind the proxy [dim]", "got " + emptyNote)
+    // The §6 rule-1 pair, one last time at the sentence level: nobody said
+    // anything, so the surface says nothing — the no-backends line is for a
+    // section that was reported and came back empty.
+    c.expect("monitor-tables", "\(label): a MISSING serving section prints no note at all",
+             notTold?.note == nil, "got \(String(describing: notTold?.note?.text))")
+    let notePairs: [(String, MonitorResponse)] = [
+        ("proxy with routes", notePayload(live.serving, proxy: "connect timeout")),
+        ("proxy with no rows", notePayload([], proxy: "connect timeout")),
+        ("failed poll", notePayload(live.serving, poll: "proxy returned 500")),
+        ("told empty", notePayload([])),
+        ("missing section", notePayload(nil)),
+        ("clean", notePayload(live.serving)),
+    ]
+    for (name, payload) in notePairs {
+        let fromTables = ClusterMonitorTables.project(payload)?.note
+        let fromViewModel = ClusterMonitorViewModel.project(payload)?.note
+        c.expect("monitor-tables", "\(label): twins agree — \(name) prints one sentence",
+                 fromTables == fromViewModel,
+                 "tables=\(String(describing: fromTables)) viewModel=\(String(describing: fromViewModel))")
+    }
+    // The one note line the committed CLI golden actually renders — the dim
+    // caption beside `serving — proxy :PORT`. Pinned against the CLI's OWN
+    // rendered bytes (generated by cluster_monitor_cli_parity.py, never typed),
+    // so the shared owner cannot drift from the terminal unnoticed.
+    let cliText = (try? c.load("v1_cluster_monitor_live.cli.txt"))
+        .flatMap { String(data: $0, encoding: .utf8) }
+    c.expect("monitor-tables",
+             "\(label): the owner's header caption is inside the CLI's own rendered text",
+             cliText.map { $0.contains(CLIMonitorNote.tokensNote) } == true,
+             "owner=\(CLIMonitorNote.tokensNote) golden=\(cliText == nil ? "unreadable" : "read")")
+
     // ---- edge: a host with a real VRAM/fan reading, a host with an SSH error
     // and no sample at all, and a host whose whole GPU block is empty.
     guard let edge = try? JSONDecoder().decode(MonitorResponse.self,
