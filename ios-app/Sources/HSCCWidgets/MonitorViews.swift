@@ -258,10 +258,12 @@ struct LargeMonitorWidget: View {
             }
             .widgetHeader(style)
             if let tables = entry.tables {
-                // The CLI's own tables replace the summary rows: same hosts,
-                // every printed column, and the serving rows the rows used to
-                // paraphrase.
-                MonitorTablesBlock(tables: tables, surface: .large)
+                // Main's host table draws the same hosts the summary rows used
+                // to paraphrase (same `cliHostRows`, same CLI cells); this block
+                // adds the serving rows and, on XL, the six detail fields.
+                MonitorTablesBlock(tables: tables,
+                                   hostRows: entry.cliHostRows ?? [],
+                                   surface: .large)
             } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
@@ -296,7 +298,9 @@ struct ExtraLargeMonitorWidget: View {
             }
             .widgetHeader(style)
             if let tables = entry.tables {
-                MonitorTablesBlock(tables: tables, surface: .extraLarge)
+                MonitorTablesBlock(tables: tables,
+                                   hostRows: entry.cliHostRows ?? [],
+                                   surface: .extraLarge)
             } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in

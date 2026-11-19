@@ -9,11 +9,14 @@ import SwiftUI
 // `CLIMonitorTableReading.swift` for why the rules live there and this file is
 // kept too thin to hold one.
 //
-// THE ONE DECISION THIS FILE OWNS: which slot of the operator's palette a
-/// `ClusterMetricLevel` paints. Everything else — the columns, their order,
-// their alignment, the cell text, the row cap — is read from the view-model or
-// from the reading layer, and a second colour rule here would be a second
-// thing to keep in agreement with the CLI.
+// THE ONE DECISION THIS FILE NO LONGER OWNS: which slot of the operator's
+// palette a `ClusterMetricLevel` paints. That mapping moved to
+// `ClusterMetricLevel.color(_:)` when the large/XL surfaces arrived
+// (t_5cc43192), because those surfaces needed the same rule for their serving
+// table and a second switch here would have been a second palette. Everything
+// else — the columns, their order, their alignment, the cell text, the row cap —
+// is read from the view-model or from the reading layer, and a second colour
+// rule here would be a second thing to keep in agreement with the CLI.
 //
 // WHY `.ok` IS NOT GREEN. The CLI prints every cell of `host_table` in the
 // default style; its only threshold anywhere is `_load_style` on the serving
@@ -116,14 +119,14 @@ struct CLIMonitorHostTableView: View {
             .joined(separator: "; ")
     }
 
-    /// The one mapping this file owns. `nil` — a column nobody thresholds — is
-    /// primary ink, never the "unreadable" grey.
+    /// The palette slot for a cell. NOT a second mapping: the switch lives in
+    /// `ClusterMetricLevel.color(_:)` (ClusterMonitorTableViews.swift), which is
+    /// the app's one level->palette rule for every CLI-shaped table, and a
+    /// copy here would be a second thing to keep in agreement. `nil` — a column
+    /// nobody thresholds — is `.ok`, i.e. primary ink, never the "unreadable"
+    /// grey. `.dim` (a queue the CLI measured and found empty) recedes to
+    /// secondary, the same treatment the small tile's grid gives it.
     private func ink(for level: ClusterMetricLevel?) -> Color {
-        switch level ?? .ok {
-        case .ok, .dim: return style.primaryTextColor
-        case .warn: return style.warnColor
-        case .critical: return style.badColor
-        case .unknown: return style.secondaryTextColor
-        }
+        (level ?? .ok).cliCellColor(style)
     }
 }

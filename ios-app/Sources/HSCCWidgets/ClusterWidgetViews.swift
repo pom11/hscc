@@ -291,10 +291,12 @@ struct LargeClusterWidget: View {
             }
             .widgetHeader(style)
             if let tables = entry.tables {
-                // The tables replace the node rows: they carry the same hosts
-                // plus every column `cluster monitor` prints, and the text rows
-                // were a summary of exactly this data.
-                MonitorTablesBlock(tables: tables, surface: .large)
+                // Main's host table draws the same hosts the summary rows used
+                // to paraphrase (same `cliHostRows`, same CLI cells); this block
+                // adds the serving rows and, on XL, the six detail fields.
+                MonitorTablesBlock(tables: tables,
+                                   hostRows: entry.cliHostRows ?? [],
+                                   surface: .large)
             } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
@@ -340,7 +342,9 @@ struct ExtraLargeClusterWidget: View {
             }
             .widgetHeader(style)
             if let tables = entry.tables {
-                MonitorTablesBlock(tables: tables, surface: .extraLarge)
+                MonitorTablesBlock(tables: tables,
+                                   hostRows: entry.cliHostRows ?? [],
+                                   surface: .extraLarge)
             } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { _, row in

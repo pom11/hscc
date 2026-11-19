@@ -454,9 +454,10 @@ targets:
       # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
       - path: Sources/HSCCWidgets/ClusterSmallGrid.swift
       - path: Sources/HSCCWidgets/ClusterSmallGridView.swift
-      # The host / serving tables and the XL detail block the large + extra-large
-      # monitor surfaces draw (t_9e64d9d9). Shared by the cluster and monitor
-      # widgets so the two tiles cannot drift apart.
+      # The serving table and the XL detail block the large + extra-large
+      # monitor surfaces draw (t_9e64d9d9), shared by the cluster and monitor
+      # widgets so the two tiles cannot drift apart. The host table beside them
+      # is `CLIMonitorHostTableView` above — one host table, every size.
       - path: Sources/HSCCWidgets/ClusterMonitorTableViews.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift

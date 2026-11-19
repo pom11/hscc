@@ -1,24 +1,35 @@
 import Foundation
 
 // ---------------------------------------------------------------------------
-// What the `systemLarge` / `systemExtraLarge` monitor surfaces draw, as data.
+// What the `systemLarge` / `systemExtraLarge` monitor surfaces add to the
+// table `systemMedium` already draws.
 //
-// `ClusterMonitorViewModel` (t_61ed3f5e) owns the CELLS: it reproduces, to the
-// character, what `hscc cluster monitor` puts in each one, and the goldens in
-// `model_decode_check` hold it there. What that file deliberately does NOT own
-// is the LAYOUT — which columns fit at a widget's width, how many rows fit at
-// its height, and which fields the extra-large size spends its room on. That
-// is this file, and it is why this file exists separately: a layout rule buried
+// THE SPLIT, and why it is this way and not the other way. Three files touch
+// this fleet's numbers and each owns exactly one thing:
+//
+//   * `ClusterMonitorViewModel.swift` (t_61ed3f5e) owns the CELLS — every
+//     string `hscc cluster monitor` prints, host table and serving table, and
+//     the goldens in `model_decode_check` hold it there.
+//   * `CLIMonitorTableReading.swift` (t_2d1c12dc) owns the HOST TABLE as drawn:
+//     its nine columns, their titles, their alignment, the row cap and the
+//     `+n`. `CLIMonitorHostTableView.swift` is the only thing that draws them,
+//     at every size — large and extra-large pass a taller `rowLimit`, they do
+//     not grow a second host table.
+//   * THIS FILE owns only what those two do not have: the serving table's
+//     column SELECTION (main's reading layer has no serving table at all) and
+//     the extra-large DETAIL FIELDS, which the CLI has no column for.
+//
+// It exists separately from the view files for one reason: a layout rule buried
 // in a view cannot be executed by a gate, and a view file imports WidgetKit.
 //
 // TWO RULES THIS FILE KEEPS.
 //
-//   1. It formats NOTHING that the CLI also formats. Every host and serving
-//      cell comes out of `CLIMonitorHostRow` / `CLIMonitorServingRow` — the
-//      same instance the parity goldens are compared against. A column here is
-//      a SELECTION of the CLI's row, never a re-derivation, so the widget's
-//      table and the terminal's table cannot round differently. The harness
-//      asserts exactly that: column i's header and cell equal the CLI's
+//   1. It formats NOTHING that the CLI also formats. The serving rows it draws
+//      ARE main's `CLIMonitorServingRow` / `CLIMonitorServingTotal`, reached
+//      through `ClusterMonitorViewModel.servingRows` rather than re-projected
+//      here — a column is a SELECTION of the CLI's row, never a copy of it, so
+//      the widget's table and the terminal's table cannot round differently.
+//      The harness asserts that: column i's header and cell equal the CLI's
 //      `wideColumns[i]` / `cells(wide: true)[i]`.
 //   2. The fields ONLY this file prints (VRAM, GPU clock, net, fan, load) are
 //      NOT the CLI's — `host_table()` has nine columns and none of them is
@@ -35,7 +46,9 @@ import Foundation
 // SURFACES: `.large` and `.extraLarge` only. Every other surface answers nil
 // ("no table for you") rather than getting a silently shrunk table; a surface
 // that later wants one adds its own plan by name, so shrinking large to make
-// room for medium cannot happen by accident.
+// room for medium cannot happen by accident. Whether a table may be ON SCREEN
+// at all is not this file's decision either — that is `entry.cliHostRows`, and
+// `entry.tables` is built on it (one definition per entry).
 // ---------------------------------------------------------------------------
 
 // MARK: - The XL-only per-host detail
@@ -144,64 +157,15 @@ struct ClusterMonitorHostDetail: Equatable, Identifiable {
 
 // MARK: - Columns
 
-/// The host table's nine columns, in the CLI's order. `cell` reads the
-/// CLI-formatted row, so the value is the CLI's by construction.
-enum ClusterMonitorHostColumn: String, CaseIterable, Equatable {
-    case host, jobs, cpu, ram, swap, gpu, cpuTemp, gpuTemp, gpuPower
-
-    /// The CLI's own header words, and the abbreviation `.large` uses because
-    /// nine words will not fit 320 pt. Only the LABEL shrinks — the cell text
-    /// is identical in both sizes, which is what the parity goldens hold.
-    func header(compact: Bool) -> String {
-        switch self {
-        case .host: return "Host"
-        case .jobs: return "Jobs"
-        case .cpu: return compact ? "CPU" : "CPU%"
-        case .ram: return compact ? "RAM" : "RAM%"
-        case .swap: return "Swap"
-        case .gpu: return compact ? "GPU" : "GPU%"
-        case .cpuTemp: return compact ? "CPU°" : "CPU Temp"
-        case .gpuTemp: return compact ? "GPU°" : "GPU Temp"
-        case .gpuPower: return compact ? "W" : "GPU Power"
-        }
-    }
-
-    func cell(in row: CLIMonitorHostRow) -> String {
-        switch self {
-        // NOT `row.host`: the CLI's own cell there is the wire address, and a
-        // Home Screen tile that prints a node's address is the §7 violation the
-        // view-model exists to prevent (`displayLabel` is the hostname, or the
-        // `.NNN` tail). This is the one column where the widget's table and the
-        // terminal's table differ on purpose, and `monitor_tables.swift` pins
-        // both halves of that difference by name.
-        case .host: return row.displayLabel
-        case .jobs: return row.jobs
-        case .cpu: return row.cpuPct
-        case .ram: return row.ramPct
-        case .swap: return row.swapPct
-        case .gpu: return row.gpuPct
-        case .cpuTemp: return row.cpuTemp
-        case .gpuTemp: return row.gpuTemp
-        case .gpuPower: return row.gpuPower
-        }
-    }
-
-    /// The column's threshold verdict, or nil when the column has no threshold
-    /// anywhere: `host_table()` colours nothing, so these bands are
-    /// `ClusterMetricLevel`'s own (see that enum) and only the four columns the
-    /// app already bands get painted.
-    func level(in row: CLIMonitorHostRow) -> ClusterMetricLevel? {
-        switch self {
-        case .cpu: return row.cpuLevel
-        case .ram: return row.memLevel
-        case .gpu: return .level(row.gpuUtilPct, warn: 85, critical: 95)
-        case .cpuTemp: return row.cpuTempLevel
-        case .gpuTemp: return row.gpuTempLevel
-        case .gpuPower: return row.gpuPowerLevel
-        case .host, .jobs, .swap: return nil
-        }
-    }
-}
+// The HOST table's columns are NOT here. They are main's:
+// `CLIMonitorTableReading.drawnColumns` (Shared/CLIMonitorTableReading.swift)
+// pairs each of `host_table()`'s nine titles with its alignment and its
+// verdict, and `CLIMonitorHostTableView` draws them at every size — large and
+// extra-large pass a taller `rowLimit` rather than growing a second host table
+// with a second set of header words. An earlier revision of this file carried
+// its own nine-column enum with abbreviated `.large` header words ("CPU°", "W");
+// it duplicated titles the reading layer already owns and drifted from them, so
+// it was deleted rather than reconciled.
 
 /// The serving table's eleven columns — the same eleven, in the same order, as
 /// `CLIMonitorServingRow.wideColumns`. A plan selects a subset; nothing here
@@ -246,15 +210,25 @@ enum ClusterMonitorServingColumn: String, CaseIterable, Equatable {
 
 // MARK: - The plan
 
-/// Everything a table surface needs to decide, laid out: which columns, in
-/// which order, how many rows, and whether the XL detail block is drawn.
+/// Everything a large / extra-large surface needs to decide, laid out: which
+/// serving columns, in which order, how many rows of each block, and whether
+/// the XL detail block is drawn.
+///
+/// There is deliberately NO host-column field here. The host half of these two
+/// surfaces is main's `CLIMonitorHostTableView`, which reads its own columns
+/// from `CLIMonitorTableReading.drawnColumns`; all this plan tells it is how
+/// many rows the surface has room for (`hostRowLimit`), which is the one
+/// parameter `CLIMonitorHostTableView` already takes for taller surfaces.
 struct ClusterMonitorTablePlan: Equatable {
     let surface: FleetSurface
-    let hostColumns: [ClusterMonitorHostColumn]
     let servingColumns: [ClusterMonitorServingColumn]
-    /// Header words: the CLI's own (`.extraLarge`) or the abbreviated set
-    /// (`.large`). Cells are unaffected either way.
+    /// The SERVING table's compact rendering: the abbreviated caption and the
+    /// smaller type, for the ~320 pt tile. It says nothing about the host
+    /// table's header words, which are the CLI's at every size (the reading
+    /// layer has no abbreviated set, and this card's former one was deleted).
     let compactHeaders: Bool
+    /// Host rows this surface gives room to. Passed to `CLIMonitorHostTableView`
+    /// as its `rowLimit`; the tile's own `+n` comes from there, not from here.
     let hostRowLimit: Int
     let servingRowLimit: Int
     let showsHostDetail: Bool
@@ -265,28 +239,26 @@ enum ClusterMonitorTableLayout {
     static func plan(for surface: FleetSurface) -> ClusterMonitorTablePlan? {
         switch surface {
         case .large:
-            // ~320 pt wide, 2 rows tall. Nine host columns fit at 9-10 pt with
-            // monospaced digits; the serving table takes the CLI's narrow row
-            // MINUS `Gen t/s`, which is aggregate-only on this fleet (see the
-            // PR note: every live row sends null, so a column of dashes is not
-            // information, and the fleet total already sits in the header
-            // detail line). `Routes` and `Prompt t/s` are the CLI's own
-            // wide-only columns.
+            // ~320 pt wide, 2 rows tall. The host table is main's nine columns
+            // at its own sizes; this is their row budget. The serving table
+            // takes the CLI's narrow row MINUS `Gen t/s`, which is
+            // aggregate-only on this fleet (see the PR note: every live row
+            // sends null, so a column of dashes is not information, and the
+            // fleet total already sits in the header detail line). `Routes` and
+            // `Prompt t/s` are the CLI's own wide-only columns.
             return ClusterMonitorTablePlan(
                 surface: .large,
-                hostColumns: ClusterMonitorHostColumn.allCases,
                 servingColumns: [.node, .port, .model, .run, .wait, .kvPct, .tokensIn, .tokensOut],
                 compactHeaders: true,
                 hostRowLimit: 8,
                 servingRowLimit: 8,
                 showsHostDetail: false)
         case .extraLarge:
-            // ~660 pt wide: room for the CLI's own header words, room for the
-            // per-host detail block, and room for the serving table to be the
-            // right-hand column instead of a second stack.
+            // ~660 pt wide: room for the per-host detail block, and room for
+            // the serving table to be the right-hand column instead of a second
+            // stack.
             return ClusterMonitorTablePlan(
                 surface: .extraLarge,
-                hostColumns: ClusterMonitorHostColumn.allCases,
                 servingColumns: [.node, .port, .model, .run, .wait, .kvPct, .tokensIn, .tokensOut],
                 compactHeaders: false,
                 hostRowLimit: 8,
@@ -297,14 +269,10 @@ enum ClusterMonitorTableLayout {
         }
     }
 
-    /// The rows a plan draws, clipped to its limit. The clipped count is what
-    /// the `overflowLine` reports, so a truncated table says so instead of
-    /// reading as "the fleet is four hosts".
-    static func visibleHostRows(_ rows: [CLIMonitorHostRow],
-                                plan: ClusterMonitorTablePlan) -> [CLIMonitorHostRow] {
-        Array(rows.prefix(plan.hostRowLimit))
-    }
-
+    /// The serving rows a plan draws, clipped to its limit. The host rows are
+    /// NOT clipped here: `CLIMonitorTableReading.visibleRows` does that, and a
+    /// second clip function for the same rows is how the two halves of a table
+    /// start disagreeing about the `+n`.
     static func visibleServingRows(_ rows: [CLIMonitorServingRow],
                                    plan: ClusterMonitorTablePlan) -> [CLIMonitorServingRow] {
         Array(rows.prefix(plan.servingRowLimit))
@@ -320,6 +288,9 @@ enum ClusterMonitorTableLayout {
 
     /// `+N more` for a clipped block, or nil when nothing was clipped. `total`
     /// is a count of rows the ROUTE sent — never an estimate, never a zero.
+    /// Only the SERVING table and the detail block use this: the host table's
+    /// `+n` is `CLIMonitorHostTableView`'s own, computed from the same list it
+    /// drew so the two cannot disagree.
     static func overflowLine(shown: Int, total: Int) -> String? {
         let hidden = total - shown
         guard hidden > 0 else { return nil }
@@ -329,55 +300,51 @@ enum ClusterMonitorTableLayout {
 
 // MARK: - The tables
 
-/// The host table, the serving table and the XL detail, projected from ONE
-/// `GET /v1/cluster/monitor` response — no second read, and no number that the
-/// route did not send.
+/// The two things a large / extra-large monitor surface draws BESIDES main's
+/// host table: the serving table and the extra-large detail block.
+///
+/// Projected from the SAME `GET /v1/cluster/monitor` response the widgets
+/// already fetch, and it re-projects NOTHING: the serving rows are main's
+/// `ClusterMonitorViewModel.servingRows` (`CLIMonitorServingRow` built from
+/// `CLIMonitorServingTotal`), passed through rather than rebuilt, so there is
+/// one serving projection in the app. `details` is the only new projection,
+/// because no CLI column exists for those six fields.
 ///
 /// `nil` from `project` means "this response has no host list" (the fleet-down
 /// body, or a failed read), which is the same rule `FleetProjection` uses: a
 /// surface with no host list draws its failure/stale text rather than an empty
-/// table. An EMPTY host list is different and does project — the route sent it,
-/// and `hostCount` says 0.
+/// table. An EMPTY host list is different and does project — the route sent it.
+///
+/// This struct is data, not a gate. Whether the surface may show numbers at all
+/// is `entry.cliHostRows` (per entry, one definition), and `entry.tables` is
+/// that predicate applied to this projection.
 struct ClusterMonitorTables: Equatable {
-    let hostCount: Int
-    let hostRows: [CLIMonitorHostRow]
-    /// Backend rows, errored ones included — the CLI keeps a `down` row rather
-    /// than dropping it. Stored separately from the totals for the same reason
-    /// `ClusterMonitorViewModel` keeps them separate: the totals come from the
-    /// accumulator, not from the printed rows.
-    let backendRows: [CLIMonitorServingRow]
-    /// Per-model totals, in the CLI's order (sorted by short model name).
-    let totalRows: [CLIMonitorServingTotal]
-    /// One line per host, in host-table order. Drawn only where the plan says
-    /// so, but always projected: clipping it is a layout decision, not a read.
-    let details: [ClusterMonitorHostDetail]
-    let proxyError: String?
-    let servingError: String?
-
     /// Backend rows then the per-model `total (n)` rows, in `serving_table`'s
-    /// order — the rows the table draws, built the same way
-    /// `ClusterMonitorViewModel.servingRows` builds them.
-    var servingRows: [CLIMonitorServingRow] {
-        backendRows + totalRows.map(CLIMonitorServingRow.init(total:))
-    }
-
+    /// order — main's rows, read off main's view-model.
+    let servingRows: [CLIMonitorServingRow]
     /// Whether the serving section exists at all — `false` means the route sent
     /// no section, which is silence, NOT "0 backends" (§6 rule 1). The view
     /// must not draw an empty serving table for it.
-    var hasServingSection: Bool { servingError == nil }
+    ///
+    /// This is `ClusterMonitorViewModel.toldServingSection`, which captured the
+    /// wire key's presence at projection time. Reading `servingError == nil`
+    /// instead — as an earlier revision of this file did — conflates "the poll
+    /// failed" with "the route sent no serving key", the exact bug t_9e110d88
+    /// caught in the small tile.
+    let hasServingSection: Bool
+    /// One line per host, in host-table order. Drawn only where the plan says
+    /// so, but always projected: clipping it is a layout decision, not a read.
+    let details: [ClusterMonitorHostDetail]
 
     static func project(_ response: MonitorResponse?) -> ClusterMonitorTables? {
-        guard let response, let hosts = response.json?.hosts, !hosts.isEmpty else {
+        // The host-list rule is main's projection's rule, taken from the same
+        // response rather than re-decided here.
+        guard let model = ClusterMonitorViewModel.project(response),
+              let hosts = response?.json?.hosts, !hosts.isEmpty else {
             return nil
         }
-        let rows = response.serving ?? []
-        return ClusterMonitorTables(
-            hostCount: hosts.count,
-            hostRows: hosts.map(CLIMonitorHostRow.init(node:)),
-            backendRows: rows.map(CLIMonitorServingRow.init(row:)),
-            totalRows: CLIMonitorServingTotal.summing(rows: rows),
-            details: hosts.map(ClusterMonitorHostDetail.init(host:)),
-            proxyError: response.serving_proxy_error,
-            servingError: response.serving_error)
+        return ClusterMonitorTables(servingRows: model.servingRows,
+                                    hasServingSection: model.hasServingSection,
+                                    details: hosts.map(ClusterMonitorHostDetail.init(host:)))
     }
 }

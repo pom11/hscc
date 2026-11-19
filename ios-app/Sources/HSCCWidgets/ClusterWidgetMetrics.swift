@@ -98,6 +98,10 @@ struct ClusterEntry: TimelineEntry {
     /// is nil under. Named apart from `monitor` because the two are different
     /// projections of that one read: `monitor` is the CLI view-model the medium
     /// table and the small grid draw, this is the large/extra-large LAYOUT.
+    ///
+    /// Ungated on purpose: this is what the read contained, and `tables` below is
+    /// what the surface may draw. Draw anything from this without going through
+    /// `tables` and you have painted numbers on a paused or unconfigured tile.
     let tableData: ClusterMonitorTables?
     /// What stopped this refresh being live. Nil while live.
     let failure: WidgetDataFailure?
@@ -148,15 +152,6 @@ struct ClusterEntry: TimelineEntry {
     /// "Paused", or why the read failed), never a table of dashes.
     var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
 
-    /// The tables a large/extra-large body may draw, or nil. This is the SAME
-    /// gate `text(for:)` runs first: an unconfigured or paused surface has no
-    /// table, so no family can paint a live-looking table where the text model
-    /// would have printed the invite. Checking it here rather than in each body
-    /// keeps one owner for the rule.
-    var tables: ClusterMonitorTables? {
-        (!configured || paused) ? nil : tableData
-    }
-
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
     /// tally, not a second state word.
@@ -183,6 +178,25 @@ struct ClusterEntry: TimelineEntry {
         guard configured, !paused, showSections.contains("nodes") else { return nil }
         guard let monitor, !monitor.hostRows.isEmpty else { return nil }
         return monitor.hostRows
+    }
+
+    /// The blocks the large / extra-large surfaces may draw, or nil when they
+    /// draw none.
+    ///
+    /// BUILT ON `cliHostRows`, not beside it. That accessor is the entry's one
+    /// definition of "may this surface show numbers at all" (unconfigured,
+    /// paused, the operator switched `nodes` off, or the read carried no host
+    /// list), and a second test here — `monitor != nil`, `configured`, whatever —
+    /// is a second definition waiting to disagree with the first. The host rows
+    /// and the serving rows therefore cannot disagree about whether a table is
+    /// on screen, which is exactly what happened when each size had its own.
+    ///
+    /// An empty `details`/`servingRows` is not nil and is not "no table": the
+    /// route said it has no serving section, and the block renders that as
+    /// silence, not as zeroes (§6 rule 1).
+    var tables: ClusterMonitorTables? {
+        guard cliHostRows != nil else { return nil }
+        return tableData
     }
 
     /// The one short string an accessory renders when it has nothing live.

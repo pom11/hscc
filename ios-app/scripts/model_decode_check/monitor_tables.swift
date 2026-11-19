@@ -11,19 +11,25 @@ import Foundation
 //
 // Parity owns the CELLS: every host and serving string is compared there
 // against goldens generated from `hscc_daemon/cluster_live.py`. This file owns
-// what the CLI does not have: the SELECTION (which columns a widget width
-// draws), the CLIP (how many rows, and whether a clipped table says so), and
-// the six XL detail fields (VRAM, GPU clock, net, uptime, fan, load) that
-// `host_table()` has no column for. Those six are THIS app's formatting rule,
-// so they are pinned by exact inputs and by fixture values rather than by a
-// CLI golden — and the first block below asserts the rules with literals chosen
-// so no decimal rounding is involved in the claim.
+// what the CLI does not have: the serving table's column SELECTION, the CLIP
+// (how many rows, and whether a clipped block says so), and the six XL detail
+// fields (VRAM, GPU clock, net, uptime, fan, load) that `host_table()` has no
+// column for. Those six are THIS app's formatting rule, so they are pinned by
+// exact inputs and by fixture values rather than by a CLI golden — and the
+// first block below asserts the rules with literals chosen so no decimal
+// rounding is involved in the claim.
 //
-// THE LOAD-BEARING ASSERTION is `columnsMatchCLI`: for every column the plan
-// names, its header and its cell are the CLI's header and cell at the same
-// index of the same row. A column that started reading a different field, or a
-// header that quietly became a different word, fails here instead of shipping a
-// table that looks like the CLI's and is not.
+// THE HOST TABLE IS NOT CHECKED HERE. `cluster_widget_check.sh` compiles and
+// runs `CLIMonitorTableReading.swift` — the one host table, drawn at every
+// size — against the same fixtures and the same goldens. Repeating it here
+// would be a second host-table contract to keep in agreement, which is the
+// exact thing this card was created to remove.
+//
+// THE LOAD-BEARING ASSERTION is `monitorColumnsMatchCLI`: for every serving
+// column the plan names, its header and its cell are the CLI's header and cell
+// at the same index of the same row. A column that started reading a different
+// field, or a header that quietly became a different word, fails here instead of
+// shipping a table that looks like the CLI's and is not.
 // ===========================================================================
 
 /// The exact-input rules for the bytes/s formatter: the SI steps, the dash for
@@ -128,21 +134,18 @@ func monitorPlans(_ c: DecodeCheck) {
                 .allSatisfy { ClusterMonitorTableLayout.plan(for: $0) == nil })
 
     if let large {
-        c.expect("monitor-tables", "\(label): large draws all nine host columns",
-                 large.hostColumns == ClusterMonitorHostColumn.allCases,
-                 large.hostColumns.map(\.rawValue).joined(separator: ","))
         c.expect("monitor-tables", "\(label): large draws Node Port Model Run Wait KV% In Out",
                  large.servingColumns == [.node, .port, .model, .run, .wait, .kvPct,
                                           .tokensIn, .tokensOut],
                  large.servingColumns.map(\.rawValue).joined(separator: ","))
-        c.expect("monitor-tables", "\(label): large abbreviates the header words",
-                 large.compactHeaders, "full headers at 320 pt")
+        c.expect("monitor-tables", "\(label): large renders the serving block compactly",
+                 large.compactHeaders, "full-size type at 320 pt")
         c.expect("monitor-tables", "\(label): large does not draw the XL detail block",
                  !large.showsHostDetail)
     }
     if let extra {
-        c.expect("monitor-tables", "\(label): extraLarge keeps the CLI's header words",
-                 !extra.compactHeaders, "abbreviated headers at 660 pt")
+        c.expect("monitor-tables", "\(label): extraLarge renders the serving block at full size",
+                 !extra.compactHeaders, "compact type at 660 pt")
         c.expect("monitor-tables", "\(label): extraLarge draws the per-host detail block",
                  extra.showsHostDetail)
         c.expect("monitor-tables", "\(label): extraLarge fits more serving rows than large",
@@ -161,27 +164,38 @@ func monitorPlans(_ c: DecodeCheck) {
              ClusterMonitorTableLayout.overflowLine(shown: 4, total: 4) == nil
                 && ClusterMonitorTableLayout.overflowLine(shown: 4, total: 2) == nil)
 
-    // The three clip functions are what the views actually call, so they are
-    // executed here rather than trusted: a plan that says N must draw exactly N
-    // and pair it with the right `+N more`. The detail block is included on
-    // purpose — it has no header row of its own, so an over-long XL detail
-    // block is the one clip that would otherwise be invisible on screen.
+    // The two clip functions this file owns are what the views actually call,
+    // so they are executed here rather than trusted: a plan that says N must
+    // draw exactly N and pair it with the right `+N more`. The detail block is
+    // included on purpose — it has no header row of its own, so an over-long XL
+    // detail block is the one clip that would otherwise be invisible on screen.
+    // The host rows are NOT clipped here any more: `CLIMonitorTableReading`
+    // owns that clip and `cluster_widget_check.sh` runs it.
     let hosts = (1...12).map {
         MonitorNode(host: "192.0.2.\($0)", error: nil, sample: MonitorSample(),
                     used_slots: nil, free_slots: nil, workloads: nil)
     }
-    let hostRows = hosts.map(CLIMonitorHostRow.init(node:))
     let detailLines = hosts.map(ClusterMonitorHostDetail.init(host:))
+    // `ServingRow`'s memberwise init takes its arguments in DECLARATION order,
+    // which is not the order the table prints them in.
+    let servingRows = (1...14).map {
+        CLIMonitorServingRow(row: ServingRow(node: "192.0.2.\($0)", port: "800\($0 % 4)",
+                                             model: "m\($0)", routes: nil, running: $0,
+                                             waiting: 0, kv: nil,
+                                             gen_tps: nil, prompt_tps: nil,
+                                             prompt_total: nil, gen_total: nil,
+                                             error: nil))
+    }
     if let large, let extra {
-        c.expect("monitor-tables", "\(label): the host clip is the plan's limit",
-                 ClusterMonitorTableLayout.visibleHostRows(hostRows, plan: large).count
-                    == large.hostRowLimit && large.hostRowLimit < hostRows.count,
-                 "limit \(large.hostRowLimit) of \(hostRows.count)")
-        c.expect("monitor-tables", "\(label): a clipped host table names the hidden rows",
-                 ClusterMonitorTableLayout.overflowLine(shown: large.hostRowLimit,
-                                                        total: hostRows.count)
-                    == "+\(hostRows.count - large.hostRowLimit) more")
-        c.expect("monitor-tables", "\(label): the detail clip follows the same limit",
+        c.expect("monitor-tables", "\(label): the serving clip is the plan's limit",
+                 ClusterMonitorTableLayout.visibleServingRows(servingRows, plan: large).count
+                    == large.servingRowLimit && large.servingRowLimit < servingRows.count,
+                 "limit \(large.servingRowLimit) of \(servingRows.count)")
+        c.expect("monitor-tables", "\(label): a clipped serving table names the hidden rows",
+                 ClusterMonitorTableLayout.overflowLine(shown: large.servingRowLimit,
+                                                        total: servingRows.count)
+                    == "+\(servingRows.count - large.servingRowLimit) more")
+        c.expect("monitor-tables", "\(label): the detail clip follows the host row budget",
                  ClusterMonitorTableLayout.visibleDetails(detailLines, plan: extra).count
                     == extra.hostRowLimit,
                  "limit \(extra.hostRowLimit) of \(detailLines.count)")
@@ -190,12 +204,13 @@ func monitorPlans(_ c: DecodeCheck) {
     }
 }
 
-/// The column/CLI coupling, run over both real captures. This is the check that
-/// makes "the table is the CLI's table" a measured fact rather than a claim in
-/// a comment: every column's header is the CLI's word at that index and every
-/// column's cell is the CLI's string at that index.
+/// The serving column/CLI coupling, run over both real captures. This is the
+/// check that makes "the serving table is the CLI's table" a measured fact
+/// rather than a claim in a comment: every column's header is the CLI's word at
+/// that index and every column's cell is the CLI's string at that index. The
+/// host table's equivalent coupling is `cluster_widget_check.sh`'s subject.
 func monitorColumnsMatchCLI(_ c: DecodeCheck, fixture: String) {
-    let label = "table columns are the CLI's cells"
+    let label = "serving table columns are the CLI's cells"
     guard let response = try? JSONDecoder().decode(MonitorResponse.self,
                                                    from: try c.load(fixture)),
           let tables = ClusterMonitorTables.project(response),
@@ -203,32 +218,6 @@ func monitorColumnsMatchCLI(_ c: DecodeCheck, fixture: String) {
         c.expect(fixture, label, false, "the fixture did not project tables")
         return
     }
-    var hostProblem = ""
-    var labelProblem = ""
-    for row in tables.hostRows {
-        // Column 0 is the ONE deliberate difference from the CLI's row, and it
-        // is the parent view-model's rule rather than this file's: the CLI's
-        // cell is the wire host, while a surface must print `displayLabel`
-        // because drawing a node's address on the Home Screen is the §7
-        // violation. Asserted BOTH ways below, so the exclusion is a pinned
-        // rule and not a hole in the loop.
-        if ClusterMonitorHostColumn.host.cell(in: row) != row.displayLabel {
-            labelProblem = "\(row.host): host column != displayLabel"
-        }
-        if row.cells[0] != row.host {
-            labelProblem = "\(row.host): the CLI's own host cell is not the wire host"
-        }
-        for (index, column) in ClusterMonitorHostColumn.allCases.enumerated() where index > 0 {
-            if column.cell(in: row) != row.cells[index] {
-                hostProblem = "\(row.host) column \(index) (\(column.rawValue)): "
-                    + "\(column.cell(in: row)) != \(row.cells[index])"
-            }
-        }
-    }
-    c.expect(fixture, "\(label) — the eight numeric host columns × \(tables.hostRows.count) rows",
-             hostProblem.isEmpty, hostProblem)
-    c.expect(fixture, "\(label) — column 0 is displayLabel while the CLI's cell stays the wire host (§7)",
-             labelProblem.isEmpty, labelProblem)
 
     var headerProblem = ""
     for (index, column) in ClusterMonitorServingColumn.allCases.enumerated() {
@@ -261,6 +250,12 @@ func monitorColumnsMatchCLI(_ c: DecodeCheck, fixture: String) {
     }
     c.expect(fixture, "\(label) — drawn serving columns equal narrow row minus Gen t/s",
              cellProblem.isEmpty, cellProblem)
+    // The rows this file draws are main's rows, read off main's projection —
+    // not a second copy of it. `total (n)` is the shape that would break first
+    // if someone re-projected the totals here instead of passing them through.
+    c.expect(fixture, "\(label) — the drawn rows are ClusterMonitorViewModel.servingRows verbatim",
+             tables.servingRows == ClusterMonitorViewModel.project(response)?.servingRows,
+             "the block no longer passes main's rows through")
 }
 
 /// The whole projection against the live capture and the edge capture: what the
@@ -293,12 +288,12 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
         c.expect("monitor-tables", "\(label): live projects", false, "decode/project failed")
         return
     }
-    c.expect("monitor-tables", "\(label): live — 4 host rows, 4 detail lines, 4+1 serving rows",
-             tables.hostRows.count == 4 && tables.details.count == 4
-                && tables.backendRows.count == 4 && tables.totalRows.count == 1
-                && tables.servingRows.count == 5,
-             "hosts \(tables.hostRows.count) details \(tables.details.count) "
-                + "backends \(tables.backendRows.count) totals \(tables.totalRows.count)")
+    let liveModel = ClusterMonitorViewModel.project(live)
+    c.expect("monitor-tables", "\(label): live — 4 detail lines and 4+1 serving rows",
+             tables.details.count == 4 && tables.servingRows.count == 5
+                && liveModel?.backendRows.count == 4 && liveModel?.totalRows.count == 1,
+             "details \(tables.details.count) backends \(liveModel?.backendRows.count ?? -1) "
+                + "totals \(liveModel?.totalRows.count ?? -1)")
     c.expect("monitor-tables", "\(label): live — the serving block ends with the total row",
              tables.servingRows.last?.isTotalRow == true
                 && tables.servingRows.last?.node == "total (4)"
@@ -317,24 +312,15 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
     c.expect("monitor-tables", "\(label): live — the detail label is a hostname, not an address (§7)",
              tables.details.allSatisfy { !$0.label.hasPrefix("192.0.2.") }
                 && liveDetail.label == "node-1", "got \(liveDetail.label)")
-    let hostRow = tables.hostRows[0]
-    c.expect("monitor-tables", "\(label): live — temp/power/util columns carry the threshold verdict",
-             hostRow.cpuTempLevel == .ok && hostRow.gpuPowerLevel == .unknown
-                && ClusterMonitorHostColumn.gpu.level(in: hostRow) == .warn,
-             "cpuTemp=\(hostRow.cpuTempLevel.rawValue) power=\(hostRow.gpuPowerLevel.rawValue) "
-                + "gpu=\(ClusterMonitorHostColumn.gpu.level(in: hostRow).map(\.rawValue) ?? "nil")")
-    // The `GPU Power` column has no limit on this hardware, so it has no
-    // verdict — and no verdict must not read as "cool".
-    c.expect("monitor-tables", "\(label): live — no power limit read is .unknown, not .ok",
-             hostRow.gpuPowerLimitW == nil && hostRow.gpuPowerLevel == .unknown,
-             "limit=\(String(describing: hostRow.gpuPowerLimitW))")
-    c.expect("monitor-tables", "\(label): live — a host row's header words are abbreviated on large",
-             ClusterMonitorHostColumn.cpuTemp.header(compact: true) == "CPU°"
-                && ClusterMonitorHostColumn.cpuTemp.header(compact: false) == "CPU Temp"
-                && ClusterMonitorHostColumn.gpuPower.header(compact: true) == "W")
-    c.expect("monitor-tables", "\(label): live — the un-thresholded columns are never painted",
-             [ClusterMonitorHostColumn.host, .jobs, .swap]
-                .allSatisfy { $0.level(in: hostRow) == nil })
+    // The detail block must cover EXACTLY the hosts the host table draws —
+    // same route order, same set — because a detail line for a host the tile
+    // does not list, or a listed host with no line, is the two halves of this
+    // card's own surfaces disagreeing. The CELLS and the header words of those
+    // rows are `cluster_widget_check.sh`'s subject, not this file's.
+    let liveHosts = liveModel?.hostRows.map(\.host) ?? []
+    c.expect("monitor-tables", "\(label): live — one detail line per host row, in the route's order",
+             tables.details.map(\.id) == liveHosts && !liveHosts.isEmpty,
+             "details=\(tables.details.map(\.id)) hostRows=\(liveHosts)")
     c.expect("monitor-tables", "\(label): live — serving rows exist, so the section is not silence",
              tables.hasServingSection)
 
@@ -346,6 +332,10 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
         c.expect("monitor-tables", "\(label): edge projects", false, "decode/project failed")
         return
     }
+    // The host rows and backend rows are main's projection's, read from the
+    // same response — this file no longer projects them, so it no longer has
+    // them to assert against either.
+    let edgeModel = ClusterMonitorViewModel.project(edge)
     let hot = edgeTables.details.first { $0.id == "192.0.2.21" }
     c.expect("monitor-tables", "\(label): edge — a host that reads VRAM prints used/total GB",
              hot?.vram == "56.0/64.0G" && hot?.fan == "45%" && hot?.clock == "2405 MHz"
@@ -355,30 +345,29 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
                 + "net=\(hot?.net ?? "nil") up=\(hot?.uptime ?? "nil") load=\(hot?.load ?? "nil")")
     c.expect("monitor-tables", "\(label): edge — VRAM at 87.5% is .warn",
              hot?.vramLevel == .warn, "got \(hot?.vramLevel.rawValue ?? "nil")")
-    let hotRow = edgeTables.hostRows.first { $0.host == "192.0.2.21" }
-    c.expect("monitor-tables", "\(label): edge — a 87.25 C CPU is .warn and 71.5 C GPU is .ok",
-             hotRow?.cpuTempLevel == .warn && hotRow?.gpuTempLevel == .ok,
-             "cpu=\(hotRow?.cpuTempLevel.rawValue ?? "nil") gpu=\(hotRow?.gpuTempLevel.rawValue ?? "nil")")
-    c.expect("monitor-tables", "\(label): edge — 37.885 W of a 120 W limit is .ok",
-             hotRow?.gpuPowerLevel == .ok, "got \(hotRow?.gpuPowerLevel.rawValue ?? "nil")")
+    let hotRow = edgeModel?.hostRows.first { $0.host == "192.0.2.21" }
+    c.expect("monitor-tables", "\(label): edge — the detail line's host really is in the host table",
+             hotRow != nil, "no host row for 192.0.2.21")
     let down = edgeTables.details.first { $0.id == "192.0.2.22" }
     let downFields = down.map { [$0.vram, $0.clock, $0.uptime, $0.fan, $0.load] } ?? []
     c.expect("monitor-tables", "\(label): edge — the host that never sampled has dashes everywhere, no zeroes",
              downFields.count == 5 && downFields.allSatisfy { $0 == FleetFormat.dash }
                 && down?.net == "↓\(FleetFormat.dash) ↑\(FleetFormat.dash)",
              "got \(down.map { "\($0.vram)|\($0.clock)|\($0.uptime)|\($0.fan)|\($0.load)|\($0.net)" } ?? "nil")")
-    c.expect("monitor-tables", "\(label): edge — an errored host keeps its row in the table",
-             edgeTables.hostRows.contains { $0.host == "192.0.2.22" }
-                && edgeTables.details.contains { $0.id == "192.0.2.22" })
-    c.expect("monitor-tables", "\(label): edge — host order is the route's order, not a sorted copy",
-             edgeTables.details.map(\.id) == edgeTables.hostRows.map(\.host))
+    c.expect("monitor-tables", "\(label): edge — an errored host keeps its detail line",
+             edgeTables.details.contains { $0.id == "192.0.2.22" })
+    c.expect("monitor-tables", "\(label): edge — detail order is the route's order, not a sorted copy",
+             edgeTables.details.map(\.id) == (edgeModel?.hostRows.map(\.host) ?? []))
     // A `down` backend is still a row (the CLI keeps it), and its Run cell
     // carries the reason — the colour rule must not invent a load verdict there.
-    let downRow = edgeTables.backendRows.first { $0.isDown }
+    let downRow = edgeModel?.backendRows.first { $0.isDown }
     c.expect("monitor-tables", "\(label): edge — the down backend row survives with the CLI's cells",
              downRow != nil && downRow?.model == "down"
                 && ClusterMonitorServingColumn.run.level(in: downRow!) == .unknown,
              "run level=\(downRow.flatMap { ClusterMonitorServingColumn.run.level(in: $0) }?.rawValue ?? "nil")")
+    c.expect("monitor-tables", "\(label): edge — that down row is still drawn by the serving block",
+             edgeTables.servingRows.contains { $0.isDown },
+             "the block dropped a row main's projection kept")
 
     monitorColumnsMatchCLI(c, fixture: "v1_cluster_monitor_live.json")
     monitorColumnsMatchCLI(c, fixture: "v1_cluster_monitor_edge.json")

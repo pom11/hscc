@@ -2,16 +2,20 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// ClusterMonitorTableViews.swift — the host table, the serving table and the
-// extra-large detail block, for BOTH cluster/monitor widgets.
+// ClusterMonitorTableViews.swift — the serving table, the extra-large detail
+// block, and the arrangement of those two with the host table, for BOTH
+// cluster/monitor widgets.
 //
 // These two widgets show the same fleet at the same sizes, so they draw the
-// same tables: two bodies each, one shared implementation. Everything numeric
-// here is a string the view-model already produced (`CLIMonitorHostRow`,
-// `CLIMonitorServingRow`, `ClusterMonitorHostDetail`) and the columns and rows
-// come from `ClusterMonitorTableLayout` — a view here selects and paints, it
-// never formats. That is what keeps a widget cell and a terminal cell from
-// rounding differently, and it is why no number is composed in this file.
+// same blocks: two bodies each, one shared implementation. Everything numeric
+// here is a string the view-model already produced (`CLIMonitorServingRow`,
+// `ClusterMonitorHostDetail`) and the columns and rows come from
+// `ClusterMonitorTableLayout` — a view here selects and paints, it never
+// formats. That is what keeps a widget cell and a terminal cell from rounding
+// differently, and it is why no number is composed in this file.
+//
+// The HOST table is not here either: `CLIMonitorHostTableView` draws it at
+// every size, and this file hands it its row budget.
 //
 // Every colour and font comes from `WidgetStyle`, so the operator's palette,
 // design, weight, text scale and density apply to the new elements exactly as
@@ -19,7 +23,10 @@ import WidgetKit
 // ---------------------------------------------------------------------------
 
 extension ClusterMetricLevel {
-    /// Paint one cell of a monitor table.
+    /// THE app's one `ClusterMetricLevel` -> operator-palette mapping, and the
+    /// only one: `CLIMonitorHostTableView.ink(for:)` delegates here rather than
+    /// keeping its own switch, so the host table and the serving table cannot
+    /// drift apart on what `warn` looks like.
     ///
     /// Deliberately NOT "green means fine": at these sizes a table where every
     /// ordinary reading is green is noise, and it makes the alarming cells stop
@@ -45,46 +52,13 @@ extension ClusterMetricLevel {
     }
 }
 
-// MARK: - Host table
-
-/// The `hscc cluster monitor` host table: Host, Jobs, CPU%, RAM%, Swap, GPU%,
-/// CPU Temp, GPU Temp, GPU Power. Header words are abbreviated on `systemLarge`
-/// and spelled out on `systemExtraLarge`, where there is room for them.
-struct MonitorHostTableView: View {
-    @Environment(\.widgetStyle) private var style
-
-    let rows: [CLIMonitorHostRow]
-    let columns: [ClusterMonitorHostColumn]
-    let compactHeaders: Bool
-
-    var body: some View {
-        Grid(alignment: .trailing,
-             horizontalSpacing: style.spacing(5),
-             verticalSpacing: style.spacing(2)) {
-            GridRow {
-                ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
-                    Text(column.header(compact: compactHeaders))
-                        .font(style.font(size: compactHeaders ? 8 : 9, weight: .semibold))
-                        .foregroundColor(style.secondaryTextColor)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .gridColumnAlignment(index == 0 ? .leading : .trailing)
-                }
-            }
-            ForEach(rows) { row in
-                GridRow {
-                    ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
-                        MonitorTableCell(text: column.cell(in: row),
-                                         color: column.level(in: row).map { $0.cliCellColor(style) }
-                                             ?? style.primaryTextColor,
-                                         leading: index == 0,
-                                         size: compactHeaders ? 9 : 10)
-                    }
-                }
-            }
-        }
-    }
-}
+// The host table is NOT drawn in this file. `CLIMonitorHostTableView` (main,
+// t_2d1c12dc) is the only thing that draws `host_table()`'s nine columns, on
+// every surface, from `CLIMonitorTableReading.drawnColumns`; large and
+// extra-large pass it a taller `rowLimit` instead of growing their own table
+// with their own abbreviated header words. This file owns the serving table and
+// the extra-large detail block — the two blocks main's reading layer has no
+// equivalent for — and the arrangement of the three.
 
 // MARK: - Serving table
 
@@ -275,22 +249,29 @@ struct MonitorTableOverflow: View {
     }
 }
 
-/// The two tables a large or extra-large monitor surface draws, or nothing when
+/// The blocks a large or extra-large monitor surface draws, or nothing when
 /// there is no table to draw. Both widgets go through here so the column/row
 /// selection and the arrangement live in exactly one place per size: stacked on
 /// `systemLarge` (a phone tile is tall, not wide) and side by side on
 /// `systemExtraLarge`, where the CLI's two stacked tables fit as two columns.
+///
+/// `hostRows` comes from the CALLER (`entry.cliHostRows ?? []`) rather than
+/// being re-derived here, because `cliHostRows` is the one predicate that says
+/// whether numbers may be on this surface at all. A block that reached
+/// `entry.monitor` itself would be a second definition of that rule, and the
+/// two would drift.
 struct MonitorTablesBlock: View {
     @Environment(\.widgetStyle) private var style
 
     let tables: ClusterMonitorTables
+    let hostRows: [CLIMonitorHostRow]
     let surface: FleetSurface
 
     var body: some View {
         if let plan = ClusterMonitorTableLayout.plan(for: surface) {
             if plan.surface == .extraLarge {
                 HStack(alignment: .top, spacing: style.spacing(12)) {
-                    MonitorHostColumn(tables: tables, plan: plan)
+                    hostBlock(plan)
                     Rectangle()
                         .fill(style.hairlineColor)
                         .frame(width: 0.5)
@@ -300,7 +281,7 @@ struct MonitorTablesBlock: View {
                 .accessibilityElement(children: .contain)
             } else {
                 VStack(alignment: .leading, spacing: style.spacing(6)) {
-                    MonitorHostColumn(tables: tables, plan: plan)
+                    hostBlock(plan)
                     MonitorServingColumn(tables: tables, plan: plan)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -308,26 +289,14 @@ struct MonitorTablesBlock: View {
             }
         }
     }
-}
 
-/// Host table, its clip line, and — where the plan asks — the per-host detail
-/// block that only extra-large has room for.
-struct MonitorHostColumn: View {
-    @Environment(\.widgetStyle) private var style
-
-    let tables: ClusterMonitorTables
-    let plan: ClusterMonitorTablePlan
-
-    var body: some View {
-        let rows = ClusterMonitorTableLayout.visibleHostRows(tables.hostRows, plan: plan)
+    /// The host half: main's table, given this surface's row budget, plus —
+    /// where the plan asks — the per-host detail block that only extra-large
+    /// has room for. Not a `View` of its own: a second host-table component is
+    /// exactly the thing this file used to get wrong.
+    @ViewBuilder private func hostBlock(_ plan: ClusterMonitorTablePlan) -> some View {
         VStack(alignment: .leading, spacing: style.spacing(3)) {
-            MonitorHostTableView(rows: rows,
-                                 columns: plan.hostColumns,
-                                 compactHeaders: plan.compactHeaders)
-            if let more = ClusterMonitorTableLayout.overflowLine(shown: rows.count,
-                                                                total: tables.hostRows.count) {
-                MonitorTableOverflow(text: more)
-            }
+            CLIMonitorHostTableView(rows: hostRows, rowLimit: plan.hostRowLimit)
             if plan.showsHostDetail {
                 MonitorHostDetailView(
                     details: ClusterMonitorTableLayout.visibleDetails(tables.details, plan: plan))

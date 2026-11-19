@@ -67,6 +67,9 @@ struct MonitorEntry: TimelineEntry {
     /// two are different projections of that one read: `monitor` is the CLI
     /// view-model the medium table and the small grid draw, this is the
     /// large/extra-large LAYOUT.
+    ///
+    /// Ungated on purpose: this is what the read contained. `tables` below is
+    /// what the surface may draw — one gate, one owner, never per body.
     let tableData: ClusterMonitorTables?
     /// The daemon-host machine data, or nil when that read did not answer.
     let daemonHost: MonitorDaemonHost?
@@ -83,13 +86,6 @@ struct MonitorEntry: TimelineEntry {
     let lockScreen: CLILockScreenMetrics?
 
     static let availableSections = WidgetSurfaceKind.widgetMonitor.availableSections
-
-    /// The tables a large/extra-large body may draw, or nil — the same gate
-    /// `text(for:)` runs first, so a paused or unconfigured tile cannot paint a
-    /// live-looking table. One owner for the rule, not one per body.
-    var tables: ClusterMonitorTables? {
-        (!configured || paused) ? nil : tableData
-    }
 
     var shortGateLabel: String {
         if !configured { return "Set up in HSCC" }
@@ -121,6 +117,17 @@ struct MonitorEntry: TimelineEntry {
     var lockScreenVoice: String? {
         guard let lockScreen, !lockScreen.hasNothing else { return nil }
         return CLILockScreenCopy.voice(lockScreen)
+    }
+
+    /// The blocks the large / extra-large surfaces may draw, or nil when they
+    /// draw none — built ON `cliHostRows` rather than beside it, for the same
+    /// reason that accessor is character-identical to `ClusterEntry`'s: one
+    /// definition per entry of "no configured hosts, no numbers". A second test
+    /// here is how one size ends up drawing a live-looking table on a paused
+    /// tile while the other draws its gate pane.
+    var tables: ClusterMonitorTables? {
+        guard cliHostRows != nil else { return nil }
+        return tableData
     }
 
     /// The daemon's health sentence: `hscc status`'s daemon block, with the

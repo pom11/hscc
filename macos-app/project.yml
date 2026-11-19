@@ -243,8 +243,9 @@ targets:
       # `MonitorViews.swift` both reference.
       - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
-      # The host / serving tables and the XL detail block (t_9e64d9d9), the same
-      # file the iOS widget target compiles.
+      # The serving table + XL detail block (t_9e64d9d9), the same file the iOS
+      # widget target compiles. The desktop's large tile is the same two blocks
+      # over the same host table above, not a macOS re-implementation.
       - path: ../ios-app/Sources/HSCCWidgets/ClusterMonitorTableViews.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift

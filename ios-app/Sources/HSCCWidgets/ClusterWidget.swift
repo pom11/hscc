@@ -55,8 +55,6 @@ struct ClusterTimelineProvider: TimelineProvider {
 
         let fleet = monitorOutcome.value.flatMap(FleetProjection.init(projecting:))
         // The same decoded response, projected by the CLI view-model. No third
-        // request: one read, three projections, so the tally above the table, the
-        // table and the large/XL layout can never come from different refreshes.
         let monitor = monitorOutcome.value.flatMap { ClusterMonitorViewModel.project($0) }
         // The tables the large/extra-large bodies draw (t_9e64d9d9), from the
         // SAME response object — the read stays at two requests (§2 budget).
