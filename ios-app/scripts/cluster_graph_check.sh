@@ -132,7 +132,12 @@ echo "structural leg: the WidgetKit half the macOS harness cannot execute..."
 
 struct_fail=0
 sok() { echo "  ok: $1"; }
-sfail() { echo "  FAIL: $1"; }
+# The assignment is the load-bearing half. A `sfail` that only echoes prints a
+# FAIL line and exits 0, which is the worst shape a gate can have: it looks like
+# a check and behaves like a comment. It was exactly that here once — restored,
+# and negative-proven by planting a bad pattern in a copy of this leg at the same
+# depth and requiring a non-zero exit.
+sfail() { echo "  FAIL: $1"; struct_fail=1; }
 # `has PATTERN TEXT` — true when TEXT contains PATTERN (BRE). No pipe, so a
 # match cannot be turned into a failure by an early grep exit.
 has() { grep -q -- "$2" <<<"$1"; }
@@ -392,6 +397,60 @@ if has "$intent_code" "policy: .atEnd" && has "$intent_code" "policy: .after("; 
   sok "the timeline honours the registry's pause and cadence"
 else
   sfail "$intent_file no longer derives its timeline policy from the surface settings"
+fi
+
+# 8b. The GATE ORDER, measured inside the function that owns it. Comparing
+#     file-global `grep -n` line numbers is the trap this repo has already been
+#     bitten by (makeIfConfigured() appears more than once in this file), so the
+#     provider's own entry function is sliced out first and the three decisions
+#     are ordered within it.
+#
+#     The shipped order here is invite, then pause, then read — which is the
+#     INVERSE of the wording in the fleet's widget convention ("decide !isActive
+#     before makeIfConfigured()"). It is deliberately the other way round for this
+#     widget, and the reason is that `ClusterGraphEntry.status` is ONE value, not
+#     two booleans: `configured` and `paused` cannot both be true, so whichever
+#     guard fires first decides the word the user reads. Ask the paused question
+#     first and a device that has lost its token AND has the surface switched off
+#     prints "Paused in Settings" forever, hiding the one sentence that would tell
+#     someone to configure the app. The rule the fleet ordering actually protects
+#     — a paused surface must issue no request — is what the third assertion
+#     measures, and it holds either way round.
+entry_region=$(awk '/private func entry\(for configuration:/{f=1} f {print} f && /^    \}$/ {exit}' <<<"$intent_code")
+if [ -z "$entry_region" ]; then
+  sfail "could not slice the provider's entry function out of $intent_file — the ordering checks below would be vacuous"
+else
+  line_of() { awk -v pat="$2" 'index($0, pat) {print NR; exit}' <<<"$1"; }
+  invite_at=$(line_of "$entry_region" "WidgetDataClient.makeIfConfigured()")
+  pause_at=$(line_of "$entry_region" "isActive")
+  read_at=$(line_of "$entry_region" "clusterHistory(")
+  if [ -n "$invite_at" ] && [ -n "$pause_at" ] && [ "$invite_at" -lt "$pause_at" ]; then
+    sok "the invite is decided before the pause (a lost token can never be reported as 'Paused')"
+  else
+    sfail "the invite is no longer decided before the pause in the provider's entry function (invite=$invite_at pause=$pause_at)"
+  fi
+  if [ -n "$pause_at" ] && [ -n "$read_at" ] && [ "$pause_at" -lt "$read_at" ]; then
+    sok "the pause is decided before any history request (a paused surface issues zero requests)"
+  else
+    sfail "the provider reads history before deciding the pause (pause=$pause_at read=$read_at) — a paused surface would still fetch"
+  fi
+fi
+
+# 8c. Every gated body gates BOTH states in ONE step. A body that tests
+#     `configured` and then separately tests `paused` is a body that will forget
+#     one of them the next time someone edits it — the failure this repo's audit
+#     found twice, and invisible to a compile because both branches render
+#     something. So a configured-only `if` is a finding.
+if has "$views_code" "if !entry.configured {"; then
+  sfail "a body in $views_file tests !configured alone — it must test both states in one step"
+else
+  sok "every gated body tests configured and paused together"
+fi
+gate_steps=$(grep -c "if !entry.configured || entry.paused {" <<<"$views_code")
+if [ "${gate_steps:-0}" -lt 3 ]; then
+  sfail "only ${gate_steps:-0} gated bodies found in $views_file — the three content views must each gate"
+else
+  sok "${gate_steps} content bodies each carry the one-step gate"
 fi
 
 # 9. Every metric set the picker can produce must be exercised by a fixture. That

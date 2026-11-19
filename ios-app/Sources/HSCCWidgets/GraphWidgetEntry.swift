@@ -220,10 +220,16 @@ struct ClusterGraphEntry: TimelineEntry {
     var configured: Bool { status != .unconfigured }
     var paused: Bool { status == .paused }
 
-    /// The single line the two gate states draw, in every family. Setup first: an
-    /// unconfigured app must never read as "paused", and a paused surface must
-    /// never read as a failure (audit-3's ordering rule, which every shipped widget
-    /// obeys).
+    /// The single line the two gate states draw, in every family. Audit-3's rule
+    /// is that an unconfigured app must never read as "paused" and a paused
+    /// surface must never read as a failure. It holds here by construction rather
+    /// than by branch order: `status` carries ONE of these states, so `paused` and
+    /// `!configured` cannot both be true and the order below cannot produce the
+    /// sentence the rule forbids. The provider keeps the same property at the other
+    /// end — it decides the setup invite before the pause, which is what stops a
+    /// device that lost its token while the surface was switched off from printing
+    /// "Paused in Settings" forever. `cluster_graph_check.sh` measures that order
+    /// inside the provider's own entry function.
     var gateLine: String {
         if paused { return "Paused in Settings" }
         return "Set up the app to see cluster history"
