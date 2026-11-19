@@ -12,10 +12,11 @@ share one definition.
 Every route sits behind the server's single bearer-token gate; there is no
 unauthenticated device path. Both POSTs sit behind the API's confirm gate as
 well — ``"confirm": true`` in the body or the answer is ``409``, the same
-contract every other app POST keeps (see ``_require_confirm`` below for why
-these two are mutations and not exempt). Registration is idempotent per
-``(platform, token)`` — the app calls it on launch, and a rebuilt app id or a
-sandbox -> production move refreshes the row instead of duplicating it.
+contract every other mutating POST in this API keeps (see ``_require_confirm``
+below for why these two are mutations and not exempt, and for which test file
+holds that gate now the Apple clients stopped calling them). Registration is
+idempotent per ``(platform, token)`` — a rebuilt app id or a sandbox ->
+production move refreshes the row instead of duplicating it.
 
 The response never contains the device token. The public ``id`` is a derived
 stable identifier (a hash prefix) the operator can use to tell rows apart.
@@ -66,25 +67,27 @@ def _parse_body(body):
 def _require_confirm(data: dict, what: str) -> None:
     """Return None (pass) if ``confirm`` is exactly true, else raise 409.
 
-    The confirm gate is the Actions contract's whole point, and it is enforced
-    in BOTH directions by ``hscc-api/tests/test_contract_swift_routes.py``:
-    ``test_every_mutating_post_carries_confirm`` proves the iOS/macOS client
-    sends ``"confirm": true``, and
-    ``test_every_client_post_server_handler_is_confirm_gated`` proves this
-    module's handlers actually CHECK it. Both routes the apps POST to are
-    mutations, so both are gated:
+    Both routes here are mutations, so both are gated:
 
       * ``/v1/devices`` writes a durable roster row — it ENROLLS a recipient of
         every future alert push, and a caller holding the API token gets to
         choose which device that is;
       * ``/v1/devices/test`` fires a real APNs push at EVERY registered device,
-        i.e. it buzzes the operator's phone and Mac.
+        i.e. it buzzes a phone and a Mac.
 
-    An exemption here would be a hole in a closed set: the gate's value is that
-    it covers every client POST, and the first named exception is the last
-    route the next author has to think about. Wording is module-specific (like
-    every other ``_require_confirm`` in this package) because "destructive" is
-    not what these two do — they mutate and they notify.
+    Why the gate needs a witness of its own. The API's bidirectional confirm
+    gates live in ``hscc-api/tests/test_contract_swift_routes.py`` and derive
+    the route set FROM ``HSCCClient.swift``. ``540f8a8b`` (t_cc36520c, #454)
+    removed push and local notifications from both Apple clients, so those two
+    routes are no longer in the derived set and those gates cannot see them —
+    green there does NOT mean gated here. The witness for this module is
+    ``test_routes_devices.py``: the ``409`` on both routes, an untouched roster
+    and an unreached APNs seam after a ``409``, and ``confirm`` accepted only as
+    the JSON boolean ``true``. Keep that file green if you touch either handler.
+
+    Wording is module-specific (the convention: every route module in this
+    package carries its own ``_require_confirm``) because "destructive" is not
+    what these two do — they mutate and they notify.
     """
     if data.get("confirm") is True:
         return
@@ -104,7 +107,8 @@ def handle_register_device(server, ctx, query, body):
     """Register/refresh one device; 201 new, 200 refreshed, 409 without confirm.
 
     The confirm gate runs BEFORE the roster write, so an unconfirmed call cannot
-    enroll anything — it answers the same 409 as every other app POST.
+    enroll anything — it answers the same ``409`` as every other mutating POST
+    in this API.
     """
     body = _parse_body(body)
     _require_confirm(body, "register a push device")
@@ -155,8 +159,8 @@ def handle_test_push(server, ctx, query, body):
 
     The push itself is the reason this route is confirm-gated: it buzzes every
     registered device, so nothing is sent until the caller has said so with
-    ``"confirm": true`` — which the app always does and which ``hscc notify
-    test`` sends on the operator's behalf.
+    ``"confirm": true``. The only caller left is ``hscc notify test``, which
+    sends the flag for the human who typed the command.
     """
     body = _parse_body(body)
     _require_confirm(body, "send a test push")

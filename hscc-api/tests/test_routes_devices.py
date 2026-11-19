@@ -6,9 +6,12 @@ route's own backing seam for the test push. The roster rules are covered by
 idempotent refresh and "a token is never echoed".
 
 Both POSTs are also confirm-gated (``_require_confirm`` in ``routes_devices``),
-which the two directions of ``hscc-api/tests/test_contract_swift_routes.py``
-enforce from the client side. The 409 half of that contract is pinned HERE,
-server-side: an unconfirmed call must neither enroll a device nor send a push.
+and THIS file is the witness for that gate: the bidirectional confirm gates in
+``test_contract_swift_routes.py`` derive their route set from
+``HSCCClient.swift``, and `540f8a8b` (t_cc36520c, #454) removed the push call
+sites from both Apple clients, so those gates no longer see these two routes.
+A green there does not mean gated here. What is pinned below is the server-side
+409 half: an unconfirmed call must neither enroll a device nor send a push.
 """
 
 import pytest

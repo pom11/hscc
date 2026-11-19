@@ -56,12 +56,19 @@ satisfied or correctly optional-defaulted.
 | POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1974-1979 (`_validate_prompt`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
-kanban recover, cluster up/down, triggers run, escalate, `POST /v1/devices`,
-`POST /v1/devices/test`) are covered by the confirm gates. The two push-device
-routes joined that set in t_8d153e99: enrolling a push recipient writes a
-durable roster row, and the test push buzzes every registered device, so both
-are mutations on the same footing as the rest — not exempt. Profile-editor PUT
-requires "at least one of many" — excluded.
+kanban recover, cluster up/down, triggers run, escalate) are covered by the
+confirm gates. Profile-editor PUT requires "at least one of many" — excluded.
+
+Outside this doc's client scope but gated the same way: `POST /v1/devices` and
+`POST /v1/devices/test` are confirm-gated (both are mutations — one writes a
+durable roster row, the other fires a real APNs push at every registered
+device), a ruling made in t_8d153e99. t_8d153e99 was carded from the two
+confirm gates failing on those call sites; `540f8a8b` (t_cc36520c, #454)
+retired the call sites themselves by removing push and local notifications from
+both Apple clients, so the routes are not client routes and no row above names
+them — and the two gates above can no longer see them. The witness that keeps
+them gated is `hscc-api/tests/test_routes_devices.py` (409 without `confirm`,
+the APNs seam never reached); the only caller left is `hscc notify test`.
 
 ### Rows retired with their client call site (t_80e185d2, 2026-11-18)
 

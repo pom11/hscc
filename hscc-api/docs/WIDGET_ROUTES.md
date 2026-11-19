@@ -508,6 +508,15 @@ seen it can alert again. `404` when the id is not in the bounded feed.
 
 ## Push devices (card N2)
 
+No app consumer since `540f8a8b` (t_cc36520c, #454) removed push and local
+notifications from both Apple clients: nothing in the apps registers a device or
+fires the test push any more, so `hscc notify test` is the only caller of
+`POST /v1/devices/test` and there is no caller of `POST /v1/devices`. The routes
+themselves stay live and stay confirm-gated (t_8d153e99) — the daemon's sender,
+the roster and the CLI are unchanged — and because the Swift client no longer
+calls them, the drift gates in `test_contract_swift_routes.py` cannot see them;
+`test_routes_devices.py` is what holds the gate.
+
 APNs token authentication uses a `.p8` key named by `~/.hscc/apns.json`; the
 key, key id, team id and topics never live in this repo. The daemon imports
 `h2` lazily (HTTP/2 through the already-pinned `httpx`) and signs the ES256 JWT
