@@ -9,6 +9,8 @@ switch the operator's window" are pinned.
 
 import io
 import json
+import shutil
+import subprocess
 import sys
 from contextlib import redirect_stdout
 
@@ -119,12 +121,67 @@ def test_start_creates_a_window_named_after_the_profile():
     assert res["session"] == "work" and res["pane"] == "%9"
     new = [c for c in runner.calls if c[0] == "new-window"][0]
     assert new[1] == "-d", "must not switch the operator's current window"
-    assert new[new.index("-t") + 1] == "=work"
+    assert new[new.index("-t") + 1] == "=work:", \
+        "the trailing colon pins the SESSION; `=work` would be a window target"
     assert new[new.index("-n") + 1] == "general"
     command = new[new.index("--") + 1:]
     assert command[-3:] == ["-p", "general", "chat"]
     assert all("kill" not in v and v not in ("select-window", "select-pane")
                for v in runner.verbs())
+
+
+def test_start_targets_the_session_named_zero_not_its_window_zero():
+    """The operator's session is literally named `0` (live 2.16.0 defect).
+
+    Without the trailing colon tmux reads `=0` as WINDOW 0, so `new-window`
+    fails with "index 0 in use" and bootstrap never starts the pane.
+    """
+    repl = FakeRepl([])
+    runner = FakeRunner(sessions=[{"name": "0", "attached": True}])
+    res = mc.start(repl=repl, runner=runner)
+    assert res["ok"] is True and res["action"] == "created-window"
+    assert res["session"] == "0"
+    new = [c for c in runner.calls if c[0] == "new-window"][0]
+    assert new[new.index("-t") + 1] == "=0:"
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_start_creates_the_window_in_a_real_zero_named_session(tmp_path):
+    """The fake runner cannot model tmux's target syntax, so use a real server.
+
+    Throwaway socket only (`tmux -L`), never the operator's default server: a
+    session named `0` whose window 0 already exists must get a NEW window at
+    the next free index instead of "index 0 in use".
+    """
+    socket = f"hscc-test-{tmp_path.name[-12:]}"
+
+    def tmux(*args):
+        return subprocess.run(["tmux", "-L", socket, *args],
+                              capture_output=True, text=True)
+
+    binary = tmp_path / "fake-hermes"
+    binary.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    binary.chmod(0o755)
+    try:
+        created = tmux("new-session", "-d", "-s", "0", "-n", "operator",
+                       "sleep", "30")
+        assert created.returncode == 0, created.stderr
+
+        def runner(argv):
+            cp = tmux(*[str(a) for a in argv])
+            return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+        res = mc.start(repl=FakeRepl([]), runner=runner,
+                       hermes_bin=str(binary))
+        assert res["ok"] is True, res
+        assert res["action"] == "created-window" and res["session"] == "0"
+        assert res["pane"].startswith("%")
+        windows = tmux("list-windows", "-t", "=0:", "-F",
+                       "#{window_index} #{window_name}")
+        assert windows.returncode == 0, windows.stderr
+        assert "1 general" in windows.stdout, windows.stdout
+    finally:
+        tmux("kill-server")
 
 
 def test_start_uses_the_current_tmux_session_when_inside_one(monkeypatch):

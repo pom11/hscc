@@ -315,8 +315,12 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
         sessions = _sessions(run)
         if sessions:
             session = _choose_session(sessions, run)
+            # The trailing colon matters: `=NAME` alone is tmux's *window*
+            # target, so a session named `0` resolves to window 0 and
+            # `new-window` fails with "index 0 in use". `=NAME:` pins the
+            # session and leaves the index to tmux.
             rc, out, err = run(
-                ["new-window", "-d", "-t", f"={session}", "-n", profile,
+                ["new-window", "-d", "-t", f"={session}:", "-n", profile,
                  "-P", "-F", "#{pane_id}", "--", *command])
             action = "created-window"
         else:
