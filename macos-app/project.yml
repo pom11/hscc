@@ -117,6 +117,25 @@ targets:
       # pixel reduction that preserves every column's min and max. Shared with
       # iOS so the desktop draws the same series from the same bytes.
       - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
+      # The graph chart layer (t_f4551339) and the marks themselves, compiled
+      # into the MENU BAR APP as well as the widget extension: the dropdown's
+      # graphs section (t_be4e1a48) draws `ClusterGraphMarks`, the same Swift
+      # Charts view the Cluster Graph tile draws, rather than a macOS copy of it.
+      # `GraphWidgetEntry.swift` comes along because the marks' file draws its
+      # entry type; `WidgetRendering.swift` because that entry's chrome does.
+      # `widget_parity_check.sh` refuses a spec that drops the marks or their
+      # projection, because the dropdown would then draw numbers with no chart
+      # while both build gates stayed green.
+      - path: ../ios-app/Sources/Shared/ClusterGraphReading.swift
+      - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
+      # The status colour rule the marks ask for (`ClusterMetricLevel.color`)
+      # lives with the small-grid cell model, and the marks refuse to grow a
+      # second one — so that view file and the cell model behind it come along.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
       # The large / extra-large table layout (t_9e64d9d9), same file the iOS
       # widget target compiles. Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift

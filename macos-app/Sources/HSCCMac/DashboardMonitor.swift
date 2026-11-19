@@ -52,7 +52,11 @@ struct BoardTotals {
 /// `GET /v1/cluster/history` (DECISION-t_447cc7fc); the retired
 /// `/v1/metrics/history` is never read from this app.
 enum DashboardGraphPlan {
-    static let window = "15m"
+    /// `15m` — the recorder's 2-second tier, the operator's amendment for every
+    /// fast-refreshing surface. A `ClusterGraphWindow` rather than a string so
+    /// the request, the axis tick format and the shared captions all read the
+    /// same value; the fetch sends `.requestValue`.
+    static let window: ClusterGraphWindow = .fifteenMinutes
 
     /// Per-node temperature and utilisation — the card's ask, in ONE request.
     /// None of these is a `*_max` column, so all four stay requestable at
@@ -60,59 +64,58 @@ enum DashboardGraphPlan {
     static let metrics: [ClusterHistoryMetric] = [.cpuTempC, .gpuTempC, .gpuUtilPct, .cpuUtilPct]
 }
 
-/// One node's drawn line: the four host series the plan asked for, all from
-/// ONE response (one tier, one resolution). A nil series is the recorder's own
-/// "this node never reported it" — `—` at the view, never 0.
-struct DashboardGraphRow: Identifiable {
-    let host: String
-    let cpuTempC: ClusterHistorySeries?
-    let gpuTempC: ClusterHistorySeries?
-    let gpuUtilPct: ClusterHistorySeries?
-    let cpuUtilPct: ClusterHistorySeries?
+/// One node's drawn history: the shared chart layer's panel (its lines, each
+/// carrying the true current and the window's true min/max) and the unit groups
+/// those lines fold into for the marks. Both come from `ClusterGraphReading` at
+/// the width the dropdown actually draws at — this app derives no series, no
+/// min/max, no unit group and no tier of its own.
+struct DashboardGraphNode: Identifiable {
+    let panel: ClusterGraphPanel
+    let minis: [ClusterGraphMini]
 
-    var id: String { host }
+    var id: String { panel.host }
 }
 
 /// The graphs section's view of one `GET /v1/cluster/history` answer. Series
-/// building goes through the shared chart layer (`ClusterHistorySeriesSet.make`)
-/// — this file derives no series, no min/max and no tier of its own; it keeps
-/// the route's stated window/resolution next to the rows so the dropdown can
-/// show what the points mean.
+/// building and projection go through the shared chart layer
+/// (`ClusterGraphReading.panels`, which calls `ClusterHistorySeriesSet.make`) —
+/// this file keeps the route's stated window and step next to the panels so the
+/// dropdown can show what the points mean.
 struct DashboardHistory {
     let window: String
-    let tier: Int
-    let resolution: String
     let resolutionS: Int
-    let rows: [DashboardGraphRow]
-    /// The payload's own explanation for an empty answer (`note`/`error`),
-    /// carried so the view renders a gap with a reason: `store.tier0_resident`
-    /// false at `15m` means the 2 s ring lives in the daemon process, which is
-    /// not the same claim as "the fleet was quiet".
-    let reason: String?
-    let tier0Resident: Bool?
+    /// The window the axis prints its ticks for: the PAYLOAD's own window when
+    /// the route named one this app recognises (`since`/`until` reads answer with
+    /// a derived span label), otherwise what this app asked for.
+    let axisWindow: ClusterGraphWindow
+    let nodes: [DashboardGraphNode]
+    /// Why there is nothing to draw, in whoever already knew's words.
+    let emptyLine: String
 
     init(response: ClusterHistoryResponse) {
         window = response.window
-        tier = response.tier
-        resolution = response.resolution
         resolutionS = response.resolution_s
-        reason = response.note ?? response.error
-        tier0Resident = response.tier0Resident
+        axisWindow = ClusterGraphWindow(rawValue: response.window) ?? DashboardGraphPlan.window
+        let panels = ClusterGraphReading.panels(response: response,
+                                                metrics: DashboardGraphPlan.metrics,
+                                                pixelWidth: DashboardGraphLayout.miniPixelWidth)
+        nodes = panels.map {
+            DashboardGraphNode(panel: $0, minis: ClusterGraphReading.minis(from: $0.lines))
+        }
+        emptyLine = Self.reason(for: response, axisWindow: axisWindow)
+    }
 
-        var lines: [String: [ClusterHistoryMetric: ClusterHistorySeries]] = [:]
-        for metric in DashboardGraphPlan.metrics {
-            for line in ClusterHistorySeriesSet.make(response, for: metric).series {
-                lines[line.identity, default: [:]][metric] = line
-            }
-        }
-        rows = lines.keys.sorted().map { host in
-            let byMetric = lines[host] ?? [:]
-            return DashboardGraphRow(host: host,
-                                     cpuTempC: byMetric[.cpuTempC],
-                                     gpuTempC: byMetric[.gpuTempC],
-                                     gpuUtilPct: byMetric[.gpuUtilPct],
-                                     cpuUtilPct: byMetric[.cpuUtilPct])
-        }
+    /// The payload's own sentence when it sent one; otherwise the shared
+    /// layer's reason for the lead metric, which separates "the `metrics=` filter
+    /// named no field of this series" from "nothing is stored at this tier" from
+    /// "the 2 s ring lives in the daemon process". A gap with a cause, never a
+    /// quiet fleet.
+    private static func reason(for response: ClusterHistoryResponse,
+                               axisWindow: ClusterGraphWindow) -> String {
+        if let note = response.note ?? response.error, !note.isEmpty { return note }
+        let lead = DashboardGraphPlan.metrics[0]
+        return ClusterGraphCaption.emptyReason(for: ClusterHistorySeriesSet.make(response, for: lead),
+                                               window: axisWindow)
     }
 }
 
@@ -223,7 +226,7 @@ final class DashboardMonitor: ObservableObject {
         // projected by the shared layer. An empty answer is kept, reason and
         // all; a failed read keeps the last good history rather than claiming
         // zero, like every other stat in this loop.
-        switch await client.clusterHistory(window: DashboardGraphPlan.window,
+        switch await client.clusterHistory(window: DashboardGraphPlan.window.requestValue,
                                            metrics: DashboardGraphPlan.metrics.map(\.rawValue)) {
         case .success(let response):
             next.history = DashboardHistory(response: response)

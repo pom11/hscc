@@ -156,7 +156,9 @@ keychain and only the public key is in Info.plist (`SUPublicEDKey`).
 ```sh
 macos-app/scripts/build_check.sh         # both targets, per-target swiftc, 0/0 required
 macos-app/scripts/widget_parity_check.sh # HSCCMacWidgets' shared sources and family list
-                                         # equal the iOS widget target's, by path
+                                         # equal the iOS widget target's, by path,
+                                         # for every tile incl. the graph — plus the
+                                         # graph marks the menu bar app compiles
 macos-app/scripts/actool_icon_check.sh   # asset catalog + AppIcon resolve
 macos-app/scripts/make_appicon.sh        # regenerate PNGs from ios-app masters
 ```
@@ -166,9 +168,15 @@ path — there is no second copy to keep in sync, and equally no compiler compla
 when one project lists a file the other forgot. `widget_parity_check.sh` is what
 makes that agreement measured instead of assumed: the two shared-source lists
 must be equal, every listed path must exist, and all four desktop families
-(small, medium, large, extra-large) must be declared, dispatched, and drawing a
-view of their own — an extra-large arm that reuses the large view is the failure
-that silently drops the six fields only the CLI's widest table prints. It runs in
+(small, medium, large, extra-large) must be declared and dispatched — for the
+table tiles with an extra-large view of its own (an extra-large arm that reuses
+the large view is the failure that silently drops the six fields only the CLI's
+widest table prints), and for the graph tile with the family handed into the
+panel layout, which is the number that size reads its own density from. The gate
+also refuses a spec where the menu bar app stops compiling the graph marks the
+dropdown draws: those files belong to the widget extension, so the dropdown can
+lose its charts and both build gates stay green, because the widget target
+compiles the same paths either way. It runs in
 CI as the "macOS widget parity gate" step of `app-build-checks.yml`.
 
 The app icon is generated from `ios-app/assets-master/appicon-*.svg`; do not
