@@ -63,6 +63,11 @@ struct ClusterTimelineProvider: TimelineProvider {
         let tableData = ClusterMonitorTables.project(monitorOutcome.value)
         let status = statusOutcome.value.flatMap(ClusterStatusSummary.init)
         let failure = monitorOutcome.failure ?? statusOutcome.failure
+        // The Lock Screen's four numbers come from the SAME monitor body, through
+        // the CLI view-model (t_61ed3f5e) — one read, so a Lock Screen number and
+        // the CLI's cell for that host cannot disagree, and a failed read nils
+        // this half exactly like `fleet` does rather than inventing zeroes.
+        let lockScreen = CLILockScreenMetrics(monitorOutcome.value)
 
         // A live monitor read is the only writer of the last-good timestamp.
         // A half-degraded refresh must not overwrite it.
@@ -94,6 +99,7 @@ struct ClusterTimelineProvider: TimelineProvider {
                             configured: true,
                             paused: false,
                             lastKnownAgeMinutes: age,
-                            showSections: showSections)
+                            showSections: showSections,
+                            lockScreen: lockScreen)
     }
 }

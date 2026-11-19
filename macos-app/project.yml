@@ -278,6 +278,9 @@ targets:
       # 0.0 — is the same rule the desktop tiles are held to, so leaving it out
       # would give one platform a chart rule the other cannot reach.
       - path: ../ios-app/Sources/Shared/MetricsHistoryTrend.swift
+      # The Lock Screen's four numbers + the one copy rule its three families
+      # share (t_314a3811), so the desktop extension words them identically.
+      - path: ../ios-app/Sources/Shared/ClusterLockScreen.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift
