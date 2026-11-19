@@ -338,6 +338,54 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
     c.expect("monitor-tables", "\(label): live — serving rows exist, so the section is not silence",
              tables.hasServingSection)
 
+    // ---- the absent `serving` KEY is not a present-and-empty section.
+    //
+    // §6 rule 1, and the case a fixture cannot express: every committed monitor
+    // fixture carries the key, so the payloads are built here the way
+    // cluster_small_grid.swift builds its own — one host list, three serving
+    // shapes. A clean poll that sent NO key has no `serving_error` either, so
+    // "no error" is not evidence that a section exists: reading it as such made
+    // the large/XL tiles treat an absent section as a present-and-empty one
+    // (t_9e110d88 removed that same conflation from the small tile; the tables
+    // block had arrived at it independently). `ClusterMonitorViewModel` already
+    // answers this correctly from `response.serving != nil`, so the assertion
+    // below is deliberately a TWINS-AGREE check: same payload, one answer.
+    let presenceHosts = live.json?.hosts ?? []
+    func presencePayload(_ serving: [ServingRow]?) -> MonitorResponse {
+        MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: presenceHosts),
+                        serving: serving, serving_error: nil,
+                        serving_proxy_error: nil, speak: "serving presence")
+    }
+    let notTold = ClusterMonitorTables.project(presencePayload(nil))
+    let toldEmpty = ClusterMonitorTables.project(presencePayload([]))
+    c.expect("monitor-tables", "\(label): a MISSING serving key still projects (the hosts answered)",
+             notTold != nil && notTold?.hostRows.count == presenceHosts.count,
+             "hostRows=\(notTold?.hostRows.count ?? -1) hosts=\(presenceHosts.count)")
+    c.expect("monitor-tables",
+             "\(label): a MISSING serving key is NOT a serving section (and has no error)",
+             notTold?.hasServingSection == false && notTold?.servingError == nil
+                && notTold?.backendRows.isEmpty == true,
+             "hasServingSection=\(String(describing: notTold?.hasServingSection)) "
+                + "servingError=\(String(describing: notTold?.servingError))")
+    c.expect("monitor-tables", "\(label): an EMPTY serving key IS a section (0 rows, and it says so)",
+             toldEmpty?.hasServingSection == true && toldEmpty?.servingRows.isEmpty == true,
+             "hasServingSection=\(String(describing: toldEmpty?.hasServingSection)) "
+                + "rows=\(toldEmpty?.servingRows.count ?? -1)")
+    // The two projections must not drift apart again: layout may differ from
+    // cells, the meaning of "was I told about serving?" may not.
+    let presencePairs: [(String, [ServingRow]?)] = [
+        ("missing key", nil), ("empty key", []),
+        ("fixture key", live.serving),
+    ]
+    for (name, serving) in presencePairs {
+        let payload = presencePayload(serving)
+        let fromTables = ClusterMonitorTables.project(payload)?.hasServingSection
+        let fromViewModel = ClusterMonitorViewModel.project(payload)?.hasServingSection
+        c.expect("monitor-tables", "\(label): twins agree — \(name) answers one way",
+                 fromTables == fromViewModel,
+                 "tables=\(String(describing: fromTables)) viewModel=\(String(describing: fromViewModel))")
+    }
+
     // ---- edge: a host with a real VRAM/fan reading, a host with an SSH error
     // and no sample at all, and a host whose whole GPU block is empty.
     guard let edge = try? JSONDecoder().decode(MonitorResponse.self,

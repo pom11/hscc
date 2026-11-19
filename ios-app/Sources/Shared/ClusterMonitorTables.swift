@@ -353,6 +353,16 @@ struct ClusterMonitorTables: Equatable {
     let details: [ClusterMonitorHostDetail]
     let proxyError: String?
     let servingError: String?
+    /// Whether the route sent a `serving` section at all, captured at projection
+    /// time from the wire key's presence — the same capture
+    /// `ClusterMonitorViewModel.toldServingSection` makes, for the same reason,
+    /// and this copy has to make it too: `let rows = response.serving ?? []` in
+    /// `project` has already flattened "empty list" and "no key" into one empty
+    /// array by the time anybody asks. A clean poll of a route that sent no
+    /// `serving` key has NO error and still has nothing to show, so the error is
+    /// a different fact and cannot answer this question (t_9e110d88 caught the
+    /// conflation in the small tile; the tables block had it independently).
+    let toldServingSection: Bool
 
     /// Backend rows then the per-model `total (n)` rows, in `serving_table`'s
     /// order — the rows the table draws, built the same way
@@ -362,9 +372,15 @@ struct ClusterMonitorTables: Equatable {
     }
 
     /// Whether the serving section exists at all — `false` means the route sent
-    /// no section, which is silence, NOT "0 backends" (§6 rule 1). The view
-    /// must not draw an empty serving table for it.
-    var hasServingSection: Bool { servingError == nil }
+    /// no section, which is silence, NOT "0 backends" (§6 rule 1). The view must
+    /// not draw an empty serving table for it.
+    ///
+    /// Reads the wire key's presence captured above, never `servingError`: a
+    /// clean poll of a route that sent no `serving` key has no error and nothing
+    /// to show. `monitor_tables.swift` pins that case and pins that this answer
+    /// equals `ClusterMonitorViewModel`'s for the same payload — the two copies
+    /// exist because one file is layout and one is cells, not to disagree.
+    var hasServingSection: Bool { toldServingSection }
 
     static func project(_ response: MonitorResponse?) -> ClusterMonitorTables? {
         guard let response, let hosts = response.json?.hosts, !hosts.isEmpty else {
@@ -378,6 +394,7 @@ struct ClusterMonitorTables: Equatable {
             totalRows: CLIMonitorServingTotal.summing(rows: rows),
             details: hosts.map(ClusterMonitorHostDetail.init(host:)),
             proxyError: response.serving_proxy_error,
-            servingError: response.serving_error)
+            servingError: response.serving_error,
+            toldServingSection: response.serving != nil)
     }
 }
