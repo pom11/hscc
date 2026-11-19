@@ -38,6 +38,7 @@ struct DashboardView: View {
                 setupInvite
             } else {
                 clusterSection
+                graphsSection
                 runningSection
                 boardSection
                 projectsSection
@@ -296,7 +297,11 @@ struct DashboardView: View {
 
     // MARK: - Small pieces
 
-    private func sectionTitle(_ title: String) -> some View {
+    /// Internal, not private: `DashboardGraphsView.swift` draws its section
+    /// header with this exact type (Swift `private` is file-scoped, and the
+    /// graphs section lives in its own file so the dropdown body stays a
+    /// plain sequence of sections). One section-header style, one owner.
+    func sectionTitle(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.caption2.weight(.semibold))
             .foregroundColor(Theme.Semantic.onSurfaceMuted)

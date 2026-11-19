@@ -85,6 +85,10 @@ targets:
       - path: Sources/HSCCMac/MenuBarLabel.swift
       - path: Sources/HSCCMac/DashboardMonitor.swift
       - path: Sources/HSCCMac/DashboardView.swift
+      # The "graphs" section of the dropdown (t_be4e1a48): per-node history
+      # over the canonical /v1/cluster/history, projected by the shared chart
+      # layer. An extension of DashboardView, so it rides the app target.
+      - path: Sources/HSCCMac/DashboardGraphsView.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
       # Sparkle 2 (t_2a1e5913): one SPUStandardUpdaterController owns daily
