@@ -80,14 +80,10 @@ extension ClusterGraphDensity {
         families.filter { $0.clusterGraphDensity == self }
     }
 
-    /// How many nodes a panel chart draws.
-    ///
-    /// No limit: the card asks for one panel per node, and a limit that dropped
-    /// the fifth host would be a chart claiming the fleet is smaller than it is.
-    /// The layout fits what the fleet has; a four-node fleet gets four panels and
-    /// a nine-node fleet gets nine, and `WidgetSurfaceEditor` never promised a
-    /// fixed row count.
-    var panelLimit: Int? { nil }
+    // `panelLimit` deliberately lives with `ClusterGraphDensity` in
+    // `Sources/Shared/ClusterGraphReading.swift`: it is a rule about how much of
+    // the fleet a chart may show, and the macOS harness has to be able to assert
+    // it. Only the layout numbers belong on the WidgetKit side.
 
     /// The mini-charts inside one panel, per unit group. `large` is the tighter
     /// canvas, so it draws each mini shorter rather than dropping a unit group —

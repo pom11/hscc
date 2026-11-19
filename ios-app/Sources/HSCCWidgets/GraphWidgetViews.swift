@@ -171,7 +171,12 @@ struct ClusterGraphMarks: View {
         var out: [Segment] = []
         var index = 0
         for line in mini.lines {
-            for (offset, segment) in line.segments.enumerated() {
+            // `drawSegments` is the rule, not `line.segments`: it drops valueless
+            // samples (a null is never a point) and breaks where the retained step
+            // is a gap, including the case where the reduction had nothing to do and
+            // so left its valueless points in place — which is exactly where a hole
+            // would otherwise be drawn as a slope.
+            for (offset, segment) in ClusterGraphReading.drawSegments(of: line).enumerated() {
                 var points: [PlotPoint] = []
                 for sample in segment {
                     guard let value = sample.value else { continue }

@@ -155,6 +155,19 @@ enum ClusterGraphDensity: String, CaseIterable, Codable, Equatable {
     case smallMultiples
 }
 
+extension ClusterGraphDensity {
+    /// How many nodes a panel chart draws.
+    ///
+    /// No limit: the card asks for one panel per node, and a limit that dropped
+    /// the fifth host would be a chart claiming the fleet is smaller than it is.
+    /// The layout fits what the fleet has; a four-node fleet gets four panels and
+    /// a nine-node fleet gets nine. Declared HERE rather than in the WidgetKit
+    /// file because it is a rule about the data, and `cluster_graph_check.sh`
+    /// asserts it — a limit that appeared later would redden the gate instead of
+    /// quietly hiding a node.
+    var panelLimit: Int? { nil }
+}
+
 // MARK: - Metric selection per size
 
 extension ClusterHistoryMetricGroup {
@@ -348,6 +361,49 @@ struct ClusterGraphLegendEntry: Equatable {
 }
 
 extension ClusterGraphReading {
+    /// The polylines the widget actually draws for one line.
+    ///
+    /// Two rules the reduction's own `segments()` cannot guarantee on its own,
+    /// both of which decide whether a chart lies:
+    ///
+    ///   * a `null` is never a point. A sample that carries no value is dropped,
+    ///     so no mark is ever placed at a height the fleet never reported;
+    ///   * a retained step wider than the reduction's own threshold ends the
+    ///     polyline. `ClusterHistoryDownsampled.segments()` computes its breaks
+    ///     over the points it was given, and when a series needed NO reduction
+    ///     (fewer samples than two per column — the ordinary case for a 15-minute
+    ///     window on a small tile) those points still include the valueless ones,
+    ///     whose timestamps step along at the tier's own interval. The break then
+    ///     never fires and the hole would be joined by a straight line — the
+    ///     exact lie this widget exists not to draw. Measured, not theorised:
+    ///     `cluster_graph_check.sh` builds a 100-point series with a 20-bucket
+    ///     hole at 200 pixel columns, which lands in that no-reduction branch, and
+    ///     fails if this function stops breaking there.
+    ///
+    /// A polyline of one point is dropped rather than drawn: a lone dot reads as a
+    /// measurement of a trend.
+    static func drawSegments(of line: ClusterGraphLine) -> [[ClusterHistorySample]] {
+        var out: [[ClusterHistorySample]] = []
+        var current: [ClusterHistorySample] = []
+        let breakAfterS = line.downsampled.breakAfterS
+        for segment in line.segments {
+            for point in segment {
+                guard point.value != nil else { continue }
+                if let previous = current.last,
+                   point.t - previous.t > breakAfterS {
+                    out.append(current)
+                    current = []
+                }
+                current.append(point)
+            }
+            if !current.isEmpty {
+                out.append(current)
+                current = []
+            }
+        }
+        return out.filter { $0.count > 1 }
+    }
+
     /// Group a panel's lines by unit and derive each group's axis domain.
     ///
     /// Groups keep `ClusterGraphUnit.allCases` order, so the panels of a widget
