@@ -163,6 +163,75 @@ def resolve_orchestrator(project: Optional[str] = None, path: Optional[str] = No
     )
 
 
+def _registry_lines(path: Optional[str]) -> list[str]:
+    """One bullet per registry project: project, orchestrator profile, board.
+
+    The main orchestrator "knows every registry project, its orchestrator
+    profile and board" — its SOUL carries a snapshot of that roster, and says
+    the registry is the live source of truth so a stale snapshot is never
+    mistaken for the current one.
+    """
+    lines = []
+    for row in _load_projects(path):
+        name = row.get("name")
+        if not name:
+            continue
+        board = row.get("board")
+        if board:
+            lines.append(
+                f"- **{name}** — orchestrator `{name}-orch`, board `{board}`.")
+        else:
+            lines.append(
+                f"- **{name}** — orchestrator `{name}-orch`, no board recorded "
+                "in the registry (flag this).")
+    if not lines:
+        lines.append(
+            "- (registry empty or unreadable — read "
+            "`~/.flightdeck/registry.yaml` before acting.)")
+    return lines
+
+
+def _main_orch_spec(resolved: dict, path: Optional[str] = None) -> dict:
+    """The merged spec for the ONE main orchestrator.
+
+    Board duties (the old general catch-all) + cluster authority (the old
+    `orchestrator` role) in one identity. The operational contract itself lives
+    in ``generator._MAIN_OPS`` so every regeneration emits the same text; the
+    identity here supplies the live roster the main must know.
+    """
+    profile = resolved["profile"]
+    roster = "\n".join(_registry_lines(path))
+    identity = (
+        f"You are the main orchestrator of this cluster — the ONE "
+        f"cluster-wide agent, named `{profile}` at bootstrap. You are the "
+        "merge of the old general catch-all's board duties and the cluster "
+        "authority of the old `orchestrator` role. You keep every project's "
+        "work moving and hold sole authority over the physical cluster; you do "
+        "NOT do project work yourself.\n"
+        "\n"
+        "You know every project in the flightdeck registry, its orchestrator "
+        "profile and its board:\n"
+        f"{roster}\n"
+        "\n"
+        "`~/.flightdeck/registry.yaml` is the source of truth — re-read it "
+        "when the roster may have changed instead of trusting this snapshot.\n"
+    )
+    routing = (
+        "Claim cluster-wide orchestration: watching every project and "
+        "orchestrator, steering stuck work, reviewing and merging PRs, cluster "
+        "operations, settings and releases. Holds sole authority over the "
+        "physical cluster and its own board. Do NOT claim implementation work "
+        "— route it to the right project board and specialist profile."
+    )
+    return {
+        "name": profile,
+        "identity": identity,
+        "routing_description": routing,
+        "preload_skills": ["brainstorming", "writing-plans"],
+        "model_tier": "strong",
+    }
+
+
 def _project_orch_spec(project: str, resolved: dict) -> dict:
     """Build the role spec for a project's orchestrator from resolved facts.
 
@@ -310,7 +379,10 @@ def ensure_orchestrator(
     :func:`seed_review_skills_for`).
     """
     resolved = resolve_orchestrator(project, path=path)
-    spec = _project_orch_spec(resolved["project"], resolved)
+    if resolved["profile"] == main_orch.main_profile():
+        spec = _main_orch_spec(resolved, path)
+    else:
+        spec = _project_orch_spec(resolved["project"], resolved)
     changed = generator.generate_profile(spec, base_identity=base_identity)
     # Same rolelib object generate_profile uses (tests monkeypatch it).
     seed = seed_review_skills_for(

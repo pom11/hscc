@@ -50,6 +50,11 @@ LEGACY_GENERAL_PROFILE = "general-orch"
 LEGACY_GENERAL_SESSION = "general"
 LEGACY_GENERAL_BOARD = "default"
 
+#: Marker every retired profile's SOUL carries. The migration and the generator
+#: both key idempotence on it (never the full heading, so a future rename cannot
+#: duplicate the block).
+RETIRED_MARKER = "retired — use"
+
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -114,6 +119,35 @@ def main_identity(hscc_dir=None) -> dict:
         "board": main_board(hscc_dir),
         "repo": None,
     }
+
+
+def legacy_general_profile() -> str:
+    """The legacy catch-all's profile name (kept on disk, retired).
+
+    A function, not a bare constant reference, so modules that migrate the
+    legacy profile never spell the old name into new code: the resolver stays
+    the one owner of it.
+    """
+    return LEGACY_GENERAL_PROFILE
+
+
+def retirement_block(name=None) -> str:
+    """The SOUL block that retires a legacy profile in favour of the main one.
+
+    Kept here (the resolver owns the identity) so the generator and the
+    migration writer emit byte-identical text. Contains
+    :data:`RETIRED_MARKER`, which both writers use as their idempotence key.
+    """
+    main = name or main_name()
+    block = (
+        f"## Retired — use `{main}`\n\n"
+        f"This profile is **{RETIRED_MARKER} {main}**. The ONE main "
+        f"orchestrator `{main}` now holds the cluster-wide authority and its "
+        "own board; it replaces both the old cluster-wide role and the general "
+        "board duties. This profile is kept on disk only for history — do not "
+        "create, dispatch or claim work here.\n"
+    )
+    return block
 
 
 def store_name(name, *, hscc_dir=None, overwrite=False,
