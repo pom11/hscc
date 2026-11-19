@@ -49,13 +49,17 @@ TALLY=Sources/Shared/ClusterNodeTally.swift
 # the harness must see that type too. It is Foundation-only, like everything else
 # compiled here; the view-model it reads is already `$MODEL`.
 GRID=Sources/HSCCWidgets/ClusterSmallGrid.swift
+# The history series model (t_2681d3de): `$GRID` now builds its GPU% trends
+# from ClusterHistorySeriesSet + the pixel-column downsampler, so the harness
+# that compiles the tile must compile the series too (both Foundation-only).
+HIST=Sources/Shared/ClusterHistorySeries.swift
 STORE=Sources/Shared/SharedStore.swift
 # The Lock Screen's four numbers + the one copy rule its three families share
 # (t_314a3811). Foundation-only like $MODEL above, which is what lets the
 # harness execute them: every number here is projected from that view-model.
 LOCK=Sources/Shared/ClusterLockScreen.swift
 for f in "$SUBJECT" "$VIEWS" "$TABLE_VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" \
-         "$MODEL" "$TALLY" "$GRID" "$STORE" "$LOCK" \
+         "$MODEL" "$TALLY" "$GRID" "$HIST" "$STORE" "$LOCK" \
          Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
@@ -84,10 +88,59 @@ report "no /v1/ route literal in the widget file set (reads go through the clien
   "$(grep -n '"/v1/' "$SUBJECT" "$VIEWS" "$METRICS")"
 
 reads=$(grep -c 'WidgetData.read(' "$SUBJECT")
-report "exactly 2 WidgetData.read calls (cluster/monitor + cluster/status), got $reads" \
-  "$([ "$reads" -eq 2 ] || echo x)"
+report "3 WidgetData.read sites (monitor + gated status + gated history), got $reads" \
+  "$([ "$reads" -eq 3 ] || echo x)"
 fail_when_absent "the row read is cluster/monitor" "$SUBJECT" '$0.clusterMonitor()'
 fail_when_absent "the job/host read is cluster/status" "$SUBJECT" '$0.clusterStatus()'
+fail_when_absent "the series read is cluster/history" "$SUBJECT" '$0.clusterHistory(window:'
+# t_2681d3de: §2's budget is per SURFACE PER REFRESH, and the file holds it BY
+# CONSTRUCTION — status and history each sit behind a family gate whose
+# disabled arm returns without sending, and the family switches decide which
+# size pays for which. Assert both halves: the gates exist, and the switches
+# answer them so no family holds more than two reads (monitor + one of the
+# pair). A gate count of 3 sites with no `enabled:` arms WOULD be three
+# requests per refresh, and that is what these checks refuse.
+fail_when_absent "the status read is family-gated" "$SUBJECT" \
+  'Self.statusRead(client: client, enabled: family.showsStatus)'
+fail_when_absent "the history read is family-gated" "$SUBJECT" \
+  'Self.historyRead(client: client, enabled: family.wantsHostHistory)'
+skips=$(grep -c 'guard enabled else { return nil }' "$SUBJECT")
+report "both gated reads skip the request entirely when disabled, got $skips (want 2)" \
+  "$([ "$skips" -eq 2 ] || echo x)"
+fail_when_absent "the series read uses the tile's own window" "$SUBJECT" \
+  'ClusterSmallGrid.trendWindow'
+fail_when_absent "the series read uses the tile's own metric" "$SUBJECT" \
+  'ClusterSmallGrid.trendMetric.rawValue'
+fail_when_absent "the small tile joins its entry's series into the grid" "$METRICS" \
+  'ClusterSmallGrid.tile(from: monitor, history: history)'
+# The switches themselves (the one WidgetFamily extension, in MonitorViews).
+# Extract each var's own body so the claim cannot be satisfied by an
+# unrelated arm elsewhere in the file.
+fam_slice() {  # fam_slice <var> — the body of one WidgetFamily computed var
+  awk -v v="var $1: Bool {" 'index($0, v) { f = 1 } f { print } f && /^    \}$/ { exit }' "$MONVIEWS"
+}
+if fam_slice wantsHostHistory | grep -A1 'case \.systemSmall' | grep -q 'return true'; then
+  echo "  ok: systemSmall pays for the history read"
+else
+  echo "FAIL: systemSmall no longer pays for the history read — the tile has no series"; rc=1
+fi
+if fam_slice showsStatus | grep -A1 'case \.systemSmall' | grep -q 'return false'; then
+  echo "  ok: systemSmall trades status for history (two reads, never three)"
+else
+  echo "FAIL: systemSmall still pays for cluster/status alongside history — 3 reads on one surface"; rc=1
+fi
+# And the monitor widget's pair: small may not pay for daemon-host alongside
+# history either (its slot went to the series, same swap, same budget).
+dd_slice=$(fam_slice showsDaemonHost)
+if printf '%s\n' "$dd_slice" | grep -A1 '\.systemSmall' | grep -q 'return true'; then
+  echo "FAIL: systemSmall still pays for daemon-host alongside history — 3 reads on one surface"; rc=1
+elif printf '%s\n' "$dd_slice" | grep -q '\.systemSmall'; then
+  echo "  ok: systemSmall is excluded from the daemon-host read (listed false)"
+elif printf '%s\n' "$dd_slice" | grep -A1 'default:' | grep -q 'return false'; then
+  echo "  ok: systemSmall is excluded from the daemon-host read (falls to the false default)"
+else
+  echo "FAIL: showsDaemonHost does not refuse systemSmall by a readable arm"; rc=1
+fi
 report "the cluster tile no longer reads autodown or kanban" \
   "$(grep -n 'autodownStatus\|kanbanRunning\|kanbanBlocked\|kanbanStale' "$SUBJECT")"
 
@@ -209,6 +262,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$READING" \
   "$GRID" \
   Sources/Shared/ClusterMonitorTables.swift \
+  "$HIST" \
   "$LOCK" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
