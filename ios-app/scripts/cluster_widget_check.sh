@@ -58,8 +58,12 @@ STORE=Sources/Shared/SharedStore.swift
 # (t_314a3811). Foundation-only like $MODEL above, which is what lets the
 # harness execute them: every number here is projected from that view-model.
 LOCK=Sources/Shared/ClusterLockScreen.swift
+# The alert-feed wire types (R3, t_c6f4a807): `$STORE`'s `WidgetDataClient` now
+# declares `alerts(limit:)` returning `AlertsLite`, so the harness compiling the
+# client must compile the file that declares it too. Foundation-only.
+NEEDS=Sources/Shared/NeedsMeReading.swift
 for f in "$SUBJECT" "$VIEWS" "$TABLE_VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" \
-         "$MODEL" "$TALLY" "$GRID" "$HIST" "$STORE" "$LOCK" \
+         "$MODEL" "$TALLY" "$GRID" "$HIST" "$STORE" "$LOCK" "$NEEDS" \
          Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
@@ -264,6 +268,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   Sources/Shared/ClusterMonitorTables.swift \
   "$HIST" \
   "$LOCK" \
+  "$NEEDS" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \
