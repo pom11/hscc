@@ -77,6 +77,25 @@ Working budget this contract sets (my decision, binding on the widget cards):
 * **no raw server body may be persisted into the App Group container** — only
   the projected struct (§7).
 
+**The history read is a surface of its own and it spends one request**
+(`t_08b1e1a5`, recording in this file the call `t_447cc7fc` made in a card
+comment). History does **not** ride the cluster tile's tick: that surface keeps
+exactly the two requests of §5.5 (`/v1/cluster/monitor` + `/v1/cluster/status`)
+and grows no third. The history surface makes **1** request —
+`GET /v1/cluster/history`, one call whose `metrics=` list carries every metric
+its size draws — and refreshes on the cadence its own `WidgetSurfaceKind` row
+controls, not the cluster row's. That is what keeps this bullet decidable:
+`WidgetDataPath.all` is a closed set, so a second history path inside it would
+not make "≤ 2 per surface per refresh" tight, it would make it unanswerable —
+which is the reason `t_447cc7fc` retired one of the two routes rather than
+keeping both.
+
+No wire byte figure for this route appears anywhere in this file, and none may
+be quoted from a card or a PR body until §9's re-measure runs: the ≤ 16 KB soft
+ceiling above is therefore **unverified** for history, and the only case that
+could breach it is the widest one (`window=7d`, `node=all`, the full
+`metrics=` list), which is what that measurement must take.
+
 ## 3. The table (the input every widget card reads)
 
 | # | dataset | endpoint(s) today | wire bytes today (measured) | verdict | what a widget card must do |
@@ -373,6 +392,34 @@ is the node's **LAN address** and `sample.sparkrun_job_names` can carry
 workload names — neither may be persisted or rendered (§7). Re-measure this row
 against a powered-up fleet (see §1).
 
+### 5.6 history (the graph surface) — verdict `new surface`, **no server change**, **1 request**
+
+Registered here by `t_08b1e1a5`. This row is **not** part of §1's capture: as of
+2026-11-19 the deployed build on the audit host answers `404 unknown route` for
+`GET /v1/cluster/history` (measured; `/v1/cluster/monitor` and
+`/v1/cluster/status` answer 200 on the same process), so this row carries **no
+measured byte figure** and none may be invented for it until §9's re-measure
+runs. Everything below is read off the route's own payload and the projection
+that consumes it, never estimated.
+
+| what | the rule the surface must honour | where it is enforced |
+|---|---|---|
+| requests | exactly **1** per refresh; one `metrics=` list carries every metric the size draws | `WidgetDataClient.clusterHistory`, §2 |
+| axis | `window` **or** `tier`+`since`/`until`, never both (the route 400s); `axis` on the response says which, so a surface never infers it from which keys are non-null | `ClusterHistoryResponse.axis` |
+| resolution | label what the route served — `resolution_s` — never a resolution inferred from the window a picker shows | `ClusterHistoryResponse.resolution_s`, `tier_summary` |
+| a metric the node did not report | stays a **gap**: `nil` is the recorder's own "not reported" and must never become `0`, a flat line, or a dot at the floor. A node that stopped answering must not render as an idle one | `ClusterHistoryPoint` (all numeric fields optional), `ClusterHistorySeries.missingCount`, `ClusterHistoryDownsampled.gapColumns` |
+| an average of a field that has a peak | is **never drawn alone**: the `*_max` columns ride beside it and the axis scales to them, because the peak columns exist precisely to stop a chart from averaging a thermal excursion away | `ClusterHistoryResponse.max_fields`, `ClusterHistoryMetric.isPeakField` + `requestable(atTier:)`, `ClusterHistoryExtremes` |
+| peak availability | the three `*_max` columns exist only after a roll-up, so they are not requestable at tier 0 — asking for them there fails the **whole request**, not one series | `ClusterHistoryMetric.requestable(atTier:)` |
+| an empty answer | is a process fact, not an idle fleet: `store.exists == false` means nothing has been rolled up yet, `tier0_resident == false` at tier 0 means the 2 s ring lives in another process, and `nil` means the served tier never read it. Branch on `source` (a code, `recorder_ring_absent` / `sqlite_store_absent`), render `note` as the caption | `ClusterHistoryResponse.source`, `.note`, `ClusterHistoryStore`, `tier0Resident` |
+| a series the filter excluded | must not read as an empty fleet: `hosts_included` / `engines_included` say the `metrics=` filter excluded that series, which is a different fact from "nothing to serve" | `ClusterHistoryResponse.hosts_included`, `.engines_included` |
+| a failed read | keeps the surface's own last-known window and states its age — never zeros and never an empty chart | `WidgetData.read(using:lastKnown:_:)`, §7 |
+| raw rows in the container | forbidden, as everywhere: `hosts[].host` is a node address, `store.path` is a server path and is deliberately **undeclared** in the model so it can never be decoded, stored or rendered | §7, `ClusterHistoryStore` |
+
+This row needs no server change for the same reason §5.5 does not: the route
+already projects (`metrics=`), already states its own resolution, and already
+forwards its nulls untouched. What it needs is a surface that does not turn any
+of that into a zero.
+
 ## 6. The compact endpoint — authorised, scoped to dataset 2
 
 `Authorised: YES` — one dataset (`board status counts`) requires a server
@@ -480,6 +527,12 @@ that fetched it. Rules:
    extension.
 5. The ≤4 KB / ≤16 KB / ≤2-requests budget in §2 is the acceptance number for
    every widget card.
+6. History is a **surface of its own** and it makes **one** request (§2, §5.6).
+   No card may add `/v1/cluster/history` to the cluster tile's fetch chain —
+   that tile is already at the ceiling with its own two reads — and no card may
+   add a second history path to `WidgetDataPath.all`. A closed audited set
+   holding two history routes does not make §2 tight, it makes it undecidable,
+   which is why `t_447cc7fc` retired one route rather than budgeting both.
 
 ## 9. Left / follow-ups (recorded, not done here)
 
@@ -502,3 +555,13 @@ that fetched it. Rules:
   row-4 argument but not row 2 (`done` at 8.6 MB is ~300 KB gzipped — still not
   a widget payload), so it changes no verdict here. Filed as an observation for
   whoever next touches the API's HTTP layer.
+* **§5.6 has no wire measurement at all — measure it.** The audit host's
+  deployed build answers `404 unknown route` for `GET /v1/cluster/history`, so
+  no byte figure exists for that route anywhere in this file and §2's ≤ 16 KB
+  soft ceiling is **unverified** for it. The measurement has to take the worst
+  case — `window=7d`, `node=all`, the full `metrics=` list — on a build that
+  actually carries the route, and it must record the served `tier`,
+  `resolution_s` and the node/engine row counts beside the size: a 7 d figure
+  captured against an empty store proves nothing about the ceiling. Until then
+  no card may quote a payload size for history, including one that argues a
+  sparkline belongs on the cluster surface.

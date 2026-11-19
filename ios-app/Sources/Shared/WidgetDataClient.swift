@@ -220,8 +220,17 @@ struct WidgetDataClient {
         await load(WidgetDataPath.clusterStatus, as: ClusterStatusResponse.self)
     }
 
-    /// Dataset 5 — `GET /v1/cluster/history`, the recorder's stored series: the
-    /// only read here that answers about the past instead of the now.
+    /// The history surface's read — `GET /v1/cluster/history`, the recorder's
+    /// stored series: the only read here that answers about the past instead of
+    /// the now.
+    ///
+    /// IT IS A SURFACE OF ITS OWN, not a third request on the cluster tile.
+    /// WIDGET_DATA_CONTRACT §2 budgets ≤ 2 requests per surface per refresh; the
+    /// cluster surface already spends both of its own (§5.5: this route +
+    /// `cluster/status`) and must not grow a third, so history spends **1** here,
+    /// on the cadence its own registry row controls, with its `metrics=` list
+    /// carrying every metric the size draws. Recorded in §2 and §5.6 of that
+    /// contract by `t_08b1e1a5`, after `t_447cc7fc` made the call in prose only.
     ///
     /// `window` picks which tier the server reads — `15m` the 2 s ring,
     /// `1h`/`6h`/`24h` the 1-minute roll-ups, `7d` the 5-minute ones — and the
