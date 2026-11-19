@@ -172,28 +172,145 @@ views_code="$(code_text "$views_file")"
 intent_code="$(code_text "$intent_file")"
 widget_code="$(code_text "${widget_files[@]}")"
 
-# 1. One dispatch arm per declared family. This is the t_b3ae3809 failure: a
-#    family in `supportedFamilies` whose body was reached through `default:`
-#    drew another size's layout, and nothing in a compile or a decode could see
-#    it. The list is read from the code, never transcribed here.
-declared=$(awk '/static let clusterGraphFamilies/,/^    \]/' <<<"$families_code" \
+# 1. One dispatch arm and one density entry for every size each PLATFORM ARM
+#    offers, and a written reason for every size an arm leaves out. Two failure
+#    classes live here, both invisible to a compile:
+#      * t_b3ae3809 — a family in `supportedFamilies` whose body was reached
+#        through `default:` drew another size's layout.
+#      * t_4311500c — the widget declared its sizes twice, once per platform, and
+#        the desktop arm hardcoded three of the shared list's four. The density map
+#        and the dispatch switch carried the fourth, so the desktop compiled,
+#        shipped and gated a layout it could never be asked to draw — and the check
+#        that used to sit here read the shared list and grepped the text of the
+#        iOS call, so it printed "reads the same positive list" while the other
+#        arm disagreed. A grep for one arm's text cannot see the other arm.
+#    The widget MAY keep a per-platform arm; what it may not do is offer a size
+#    nothing draws, repeat the shared list as a literal, or drop a size without
+#    writing why. Nothing below is transcribed: the shared list and every arm's
+#    list are extracted at run time, and a call site that cannot be resolved is a
+#    refusal rather than a clean run.
+shared_list=$(awk '/static let clusterGraphFamilies/,/^    \]/' <<<"$families_code" \
   | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
-if [ -z "$declared" ]; then
+if [ -z "$shared_list" ]; then
   sfail "no family list found in $families_file — the positive list is gone"
-else
-  for fam in $declared; do
-    if has "$views_code" "case .$fam:"; then
-      sok "$fam has its own arm in $views_file"
-    else
-      sfail "$fam is declared but has no dispatch arm in $views_file (it would draw via default:)"
-    fi
-  done
 fi
-fam_count=$(printf '%s\n' $declared | sed '/^$/d' | wc -l | tr -d ' ')
-if [ "$fam_count" -eq 4 ]; then
-  sok "the widget declares the card's four sizes (small, medium, large, extraLarge)"
+
+# The sizes this widget owes the operator, pinned BY NAME. A count is the wrong
+# pin and this leg used one (`fam_count -eq 4`): a dropped size then fails as a
+# number instead of naming itself, and the next size decision gets "resolved" by
+# editing the gate rather than by a decision.
+for fam in systemSmall systemMedium systemLarge systemExtraLarge; do
+  if printf '%s\n' $shared_list | grep -qx -- "$fam"; then
+    sok "$fam is in the widget's positive family list"
+  else
+    sfail "$fam is missing from clusterGraphFamilies in $families_file — if dropping it is a decision, land it with this check edited in the same commit"
+  fi
+done
+
+# The family -> density map, sliced so `default: return nil` cannot be mistaken for
+# coverage. A size the map skips resolves to nil, and the provider's
+# `family.clusterGraphDensity ?? .sparkline` would then draw it with a layout it was
+# never designed for — the same lie as a missing dispatch arm, one file later.
+density_region=$(awk '/var clusterGraphDensity/{f=1} f {print} f && /^    \}$/ {exit}' <<<"$families_code")
+if [ -z "$density_region" ]; then
+  sfail "could not slice clusterGraphDensity out of $families_file — the density-coverage checks below would be vacuous"
+  density_fams=""
 else
-  sfail "the widget declares $fam_count sizes, not the card's four"
+  density_fams=$(awk '/case \.system/ && /return \./ {print}' <<<"$density_region" \
+    | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
+  sok "$(printf '%s\n' $density_fams | sed '/^$/d' | wc -l | tr -d ' ') families get a density from the map (a size missing here draws via the provider's fallback)"
+fi
+
+# Every supportedFamilies call site, labelled with the platform arm it sits in. The
+# arm boundaries are anchored at line start so prose mentioning `#if os(iOS)` cannot
+# invent one, and an unlabelled condition is carried into the failure message rather
+# than guessed at. Comments are already stripped from $intent_code, so a sentence
+# about supportedFamilies is not a call site.
+arm_sites=$(awk '
+  /^[[:space:]]*#if[[:space:]]/ {
+    cond = $0
+    sub(/^[[:space:]]*#if[[:space:]]*/, "", cond)
+    sub(/[[:space:]]*$/, "", cond)
+    base = cond; arm = cond; next
+  }
+  /^[[:space:]]*#else/  { arm = base " else"; next }
+  /^[[:space:]]*#endif/ { arm = ""; next }
+  /supportedFamilies\(/ {
+    line = $0
+    gsub(/[ \t]+/, " ", line)
+    sub(/^[[:space:]]+/, "", line)
+    print (arm == "" ? "all platforms" : arm) "\t" line
+  }' <<<"$intent_code")
+if [ -z "$arm_sites" ]; then
+  sfail "no supportedFamilies call in $intent_file — the widget would offer whatever WidgetKit defaults to, and a leg that finds nothing must not print clean"
+else
+  # A HERE-STRING, not a pipe: piped into a while loop the whole body runs in a
+  # subshell and every struct_fail it sets would be discarded with it.
+  while IFS="$(printf '\t')" read -r arm site; do
+    [ -n "$arm" ] || continue
+    case "$site" in
+      *")"*) ;;
+      *) sfail "$intent_file has a supportedFamilies call spanning more than one line on the [$arm] arm — this leg refuses rather than measure nothing"
+         continue ;;
+    esac
+    if printf '%s' "$site" | grep -q 'WidgetFamily\.clusterGraphFamilies'; then
+      arm_fams="$shared_list"
+      arm_src="the shared list"
+    else
+      arm_fams=$(printf '%s' "$site" | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
+      arm_src="a literal list of its own"
+    fi
+    if [ -z "$arm_fams" ]; then
+      sfail "the [$arm] arm's supportedFamilies call resolves to NO family ($site) — an unresolvable list is a refusal, never a clean run"
+      continue
+    fi
+    sok "the [$arm] arm declares $(printf '%s\n' $arm_fams | sed '/^$/d' | wc -l | tr -d ' ') size(s) via $arm_src, each measured below"
+
+    for fam in $arm_fams; do
+      if ! printf '%s\n' $shared_list | grep -qx -- "$fam"; then
+        sfail "the [$arm] arm offers $fam, which is not in $families_file's clusterGraphFamilies — no layout layer knows that size"
+      fi
+      if has "$views_code" "case .$fam:"; then
+        sok "$fam (offered on the [$arm] arm) has its own dispatch arm in $views_file"
+      else
+        sfail "$fam is offered on the [$arm] arm but has no dispatch arm in $views_file — it would draw through default:"
+      fi
+      if ! printf '%s\n' $density_fams | grep -qx -- "$fam"; then
+        sfail "$fam is offered on the [$arm] arm but $families_file maps it to no density — it would draw on the provider's fallback layout"
+      fi
+    done
+
+    # A literal arm is only defensible when it says something the shared list does
+    # not. A literal repeating the shared list is a second list with nothing to say,
+    # and a second list nothing reads is exactly how the desktop drifted.
+    if [ "$arm_src" = "a literal list of its own" ]; then
+      lit=$(printf '%s\n' $arm_fams | tr '\n' ' ')
+      sha=$(printf '%s\n' $shared_list | tr '\n' ' ')
+      if [ "$lit" = "$sha" ]; then
+        sfail "the [$arm] arm repeats the shared list as a literal instead of reading WidgetFamily.clusterGraphFamilies — a duplicate list is the drift that started t_4311500c"
+      else
+        sok "the [$arm] arm's literal differs from the shared list, so it is a decision rather than a duplicate"
+      fi
+    fi
+
+    # And every size the arm leaves OUT has to be justified in the file, in writing:
+    # "an unwritten asymmetry gets fixed by the next person" is the whole reason
+    # this card exists. The marker must carry a reason, not just name the size.
+    omissions=""
+    for fam in $shared_list; do
+      if printf '%s\n' $arm_fams | grep -qx -- "$fam"; then continue; fi
+      omissions="$omissions $fam"
+      if grep -E "^[[:space:]]*//[[:space:]]*families-omit:.*\.${fam}([^A-Za-z]|$)" "$intent_file" \
+         | grep -q '—'; then
+        sok "the [$arm] arm omits $fam and $intent_file writes why (families-omit marker)"
+      else
+        sfail "the [$arm] arm omits $fam from the shared list with no written reason — offer it, or add a '// families-omit: .$fam — <reason>' marker on that arm"
+      fi
+    done
+    if [ -z "$omissions" ]; then
+      sok "the [$arm] arm omits none of the shared families, so no families-omit marker is owed"
+    fi
+  done <<< "$arm_sites"
 fi
 
 # 2. Home-screen-only. No accessory family anywhere: the card asks for Home
@@ -208,11 +325,12 @@ if has "$widget_code" "\.accessory"; then
 else
   sok "no accessory family anywhere in the graph widget (home-screen-only holds)"
 fi
-if has "$intent_code" "supportedFamilies(WidgetFamily.clusterGraphFamilies)"; then
-  sok "supportedFamilies reads the same positive list the dispatch is checked against"
-else
-  sfail "supportedFamilies no longer reads WidgetFamily.clusterGraphFamilies (list and arms can drift)"
-fi
+# The single-source claim used to sit here as a grep for the TEXT of one arm's call
+# (`supportedFamilies(WidgetFamily.clusterGraphFamilies)`). It is deleted rather than
+# kept alongside §1, because that grep passed while the desktop arm hardcoded a
+# different list — grepping one arm's text cannot see the other arm, and a second
+# owner of a weaker version of a rule is how a rule stops being true without any gate
+# printing anything. §1 now compares every arm by its RESOLVED families instead.
 
 # 3. The family → density map is a positive list written out per size, because
 #    WidgetFamily is Int-backed off-iOS and the harness cannot execute this side.
