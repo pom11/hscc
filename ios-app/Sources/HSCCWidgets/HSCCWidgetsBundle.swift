@@ -45,5 +45,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         ProjectsWidget()
         BoardStatusWidget()
         NeedsMeWidget()
+        ClusterGraphWidget()
     }
 }
