@@ -663,6 +663,24 @@ _HISTORY_HOST_IDENTITY = ("tier", "ts", "host", "res", "n", "error")
 _HISTORY_ENGINE_IDENTITY = ("tier", "ts", "node", "port", "model", "res", "n",
                             "error")
 
+#: Every parameter the route accepts, in request-axis order. An unknown key is
+#: a 400 that names this whole set — `host=` deliberately is NOT in it:
+#: `host_rollup.host` and `engine_rollup.node` are two column names for one
+#: identity, so `node=` stays the single "which machine" filter for both series.
+_HISTORY_QUERY_KEYS = ("node", "metrics", "window", "tier", "since", "until")
+
+#: The two request axes, stated on the response as `axis` so a client never
+#: infers "which axis was asked" from which keys happen to be non-null.
+AXIS_WINDOW = "window"
+AXIS_TIER = "tier"
+
+#: Where the served rows came from, as a CODE. A client must branch on this, not
+#: on the English of `note` (the same reason `error.code` exists).
+SOURCE_RING = "recorder_ring"
+SOURCE_RING_ABSENT = "recorder_ring_absent"
+SOURCE_STORE = "sqlite_store"
+SOURCE_STORE_ABSENT = "sqlite_store_absent"
+
 
 def _metrics_history():
     """The recorder module, imported on first use (never at import time)."""
@@ -780,6 +798,175 @@ def _parse_history_metrics(query, mh, tier: int):
     return names
 
 
+# --------------------------------------------------------------------------- #
+# The two request axes
+# --------------------------------------------------------------------------- #
+
+def _history_retention_s(mh, tier: int) -> int:
+    """How deep one tier actually goes, read from the module that owns it.
+
+    Hardcoding 900/86400/604800 here would let the response lie the day the
+    recorder's cadence changes, so the numbers come from ``metrics_history``.
+    """
+    if tier == 0:
+        return mh.TIER0_WINDOW_S
+    if tier == 1:
+        return mh.TIER1_WINDOW_S
+    return mh.TIER2_WINDOW_S
+
+
+def _history_bucket_s(mh, tier: int) -> int:
+    """The bucket width of one tier, again the recorder's own number."""
+    if tier == 0:
+        return mh.TIER0_INTERVAL_S
+    return mh.TIER1_BUCKET_S if tier == 1 else mh.TIER2_BUCKET_S
+
+
+def _parse_history_tier(query, mh) -> int:
+    """?tier= -> 0, 1 or 2. 400 on anything else.
+
+    Required on the tier axis rather than defaulted: "which resolution am I
+    looking at" is the one thing a chart may not guess, and a silent default is
+    how a 2 s widget starts rendering 5-minute averages.
+    """
+    from api_server import ApiError
+    raw = str(query.get("tier") or "").strip()
+    try:
+        tier = int(raw)
+    except (TypeError, ValueError):
+        tier = -1
+    if tier not in (0, 1, 2):
+        raise ApiError(
+            400, "bad_request",
+            f"tier must be 0, 1 or 2 (got {raw!r}): 0 is the 2 s ring (15 min), "
+            "1 the 1-minute roll-ups (24 h), 2 the 5-minute roll-ups (7 d)",
+            "tier must be 0, 1 or 2.",
+        )
+    return tier
+
+
+def _parse_history_epoch(query, name) -> int | None:
+    """?since= / ?until= -> an inclusive epoch-second bucket start, or None.
+
+    Ported from the retired ``/v1/metrics/history`` parser, including the
+    floor-not-round: the store's buckets are integer second offsets aligned to
+    the wall clock, so flooring keeps the "inclusive bucket start" meaning the
+    store documents, where rounding would silently admit a bucket the client
+    did not ask for.
+    """
+    from api_server import ApiError
+    raw = query.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        raise ApiError(
+            400, "bad_request",
+            f"{name} must be epoch seconds (got {raw!r})",
+            f"History {name} must be epoch seconds.",
+        )
+
+
+def _resolve_history_axis(query, mh) -> dict:
+    """Decide which axis this request is, and the span it will actually serve.
+
+    Two ways to pick a span, and they are not interchangeable:
+
+      * ``window=15m|1h|6h|24h|7d`` — a **preset anchored to `now`**. It implies
+        the tier, and its span is fixed.
+      * ``tier=0|1|2&since=&until=`` — a **raw tier with an explicit span**, for
+        "the hour around last night's slow run". It anchors to nothing.
+
+    Because the two anchors are different instants, exactly one axis may be
+    asked for at a time, and that is enforced here rather than resolved by
+    precedence — a client that gets `window=1h` served when it also sent
+    `since`/`until` would have no way to learn its span was ignored:
+
+      * `window` + `tier` together -> 400 naming both;
+      * `since`/`until` without `tier` -> 400 (a preset anchors to `now`, a raw
+        tier does not, so naming both anchors asks for two different spans);
+      * neither -> `window=1h`, which is #407's default and stays it, so the
+        callers shipped before this axis are unaffected.
+
+    The tier axis's span is clamped to that tier's own retention, and the clamp
+    is *stated*: the returned `since`/`until` are what was served, `window_s` is
+    the served span, and `clamp` says what moved and why. Both axes therefore
+    obey the same rule — the response always states the window it really served.
+
+    Returns ``{axis, window, tier, bucket_s, since, until, window_s, clamp}``.
+    """
+    from api_server import ApiError
+    asked_window = bool(str(query.get("window") or "").strip())
+    asked_tier = bool(str(query.get("tier") or "").strip())
+    asked_span = bool(str(query.get("since") or "").strip()) or \
+        bool(str(query.get("until") or "").strip())
+
+    if asked_window and asked_tier:
+        raise ApiError(
+            400, "bad_request",
+            "'window' and 'tier' pick a span two different ways and cannot be "
+            "asked together: 'window' is a preset anchored to now (15m, 1h, 6h, "
+            "24h, 7d), 'tier' is a raw tier with its own since/until. Send one "
+            "or the other.",
+            "Ask for either window or tier, not both.",
+        )
+    if asked_span and not asked_tier:
+        raise ApiError(
+            400, "bad_request",
+            "'since'/'until' need 'tier': a 'window' preset always runs back from "
+            "now, while an explicit since/until does not, so a request naming "
+            "both states two different spans and the route would have to guess "
+            "which one you meant.",
+            "since and until need tier.",
+        )
+
+    now = int(_history_now())
+    if not asked_tier:
+        window, tier, bucket_s, span_s = _parse_history_window(query, mh)
+        return {"axis": AXIS_WINDOW, "window": window, "tier": tier,
+                "bucket_s": bucket_s, "since": now - span_s, "until": now,
+                "window_s": span_s, "clamp": ""}
+
+    tier = _parse_history_tier(query, mh)
+    bucket_s = _history_bucket_s(mh, tier)
+    retention = _history_retention_s(mh, tier)
+    asked_since = _parse_history_epoch(query, "since")
+    asked_until = _parse_history_epoch(query, "until")
+
+    # `until` defaults to now (the same anchor the preset uses); `since` then
+    # defaults to the deepest bucket this tier can still hold.
+    until = now if asked_until is None else asked_until
+    since = (until - retention) if asked_since is None else asked_since
+
+    clamps = []
+    if until > now:
+        clamps.append(f"until={asked_until} is in the future; the newest bucket "
+                      f"that can exist is {now}")
+        until = now
+    floor = until - retention
+    if since < floor:
+        clamps.append(f"since={asked_since} is deeper than tier {tier} keeps "
+                      f"({retention} s); its oldest bucket is {floor}")
+        since = floor
+    if since < 0:
+        clamps.append(f"since={asked_since} is before the epoch; serving from 0")
+        since = 0
+    if since > until:
+        raise ApiError(
+            400, "bad_request",
+            f"since={since} is after until={until}: an inclusive span cannot run "
+            "backwards, and answering it empty would read as 'nothing happened' "
+            "rather than as a bad range",
+            "since must not be after until.",
+        )
+    return {"axis": AXIS_TIER, "window": f"{until - since}s", "tier": tier,
+            "bucket_s": bucket_s, "since": since, "until": until,
+            "window_s": until - since,
+            "clamp": ("; ".join(clamps) + f" — served {until - since} s of "
+                      f"tier {tier}") if clamps else ""}
+
+
 def _history_host_rows_from_points(points, node: str) -> list:
     """Tier-0 records -> per-node rows, key names unchanged.
 
@@ -848,21 +1035,36 @@ def _backing_history_rows(hscc_dir, tier, since, until, node):
     when the file already exists: the recorder owns that file, and a widget poll
     against a fresh install must not leave an empty database behind (an empty
     file looks like a data source; a missing one says what it means).
+
+    ``store_info`` also carries the store's own size facts — `bound_bytes`,
+    `tier1_rows`, `tier2_rows` — because they belong to the same object the block
+    already describes. They are read while the handle is open and only where the
+    store was really opened: `tier1_rows`/`tier2_rows` are `None` at tier 0, which
+    never touches the file, and a `0` from a branch that did not count would be
+    the same fabricated default `store.tier0_resident` used to carry.
     """
     mh = _metrics_history()
     store = mh.MetricsStore(hscc_dir=hscc_dir)
     exists = os.path.exists(store.path)
     info = {"path": store.path, "exists": exists,
-            "db_bytes": os.path.getsize(store.path) if exists else 0}
+            "db_bytes": os.path.getsize(store.path) if exists else 0,
+            "bound_bytes": mh.size_bound_bytes()}
     if not exists:
+        # Not a default: there is no store, so there is nothing to count. That is
+        # a measured absence, and it costs no file handle to know.
+        info["tier1_rows"] = info["tier2_rows"] = 0
         return [], [], info
     name = None if node == "all" else node
     try:
         host_rows = store.host_rows(tier, since=since, until=until, host=name)
         engine_rows = store.engine_rows(tier, since=since, until=until, node=name)
+        counts = store.stats()
     finally:
         store.close()
     info["error"] = store.error
+    info["tier1_rows"] = counts.get("tier1_rows")
+    info["tier2_rows"] = counts.get("tier2_rows")
+    info["bound_bytes"] = counts.get("bound_bytes", mh.size_bound_bytes())
     return host_rows, engine_rows, info
 
 
@@ -871,42 +1073,59 @@ def _speak_cluster_history(payload) -> str:
     if payload.get("error"):
         return f"Cluster history failed: {payload['error']}"
     if payload["tier"] == 0 and not payload["store"]["tier0_resident"]:
-        return ("The 15 m window is the daemon's in-memory ring and this server "
+        return ("The 2 s tier is the daemon's in-memory ring and this server "
                 "process does not own it. Ask for window=1h for 1-minute points.")
     counts = payload["counts"]
-    return (f"Last {payload['window']} at {payload['resolution']} resolution: "
-            f"{counts['hosts']} node point{'s' if counts['hosts'] != 1 else ''}, "
-            f"{counts['engines']} engine point{'s' if counts['engines'] != 1 else ''}.")
+    plural = lambda n, thing: f"{n} {thing}{'s' if n != 1 else ''}"
+    span = (f"Last {payload['window']}" if payload["axis"] == AXIS_WINDOW else
+            f"Tier {payload['tier']} over {payload['window_s']} s")
+    return (f"{span} at {payload['resolution']} resolution: "
+            f"{plural(counts['hosts'], 'node point')}, "
+            f"{plural(counts['engines'], 'engine point')}.")
 
 
 def handle_cluster_history(server, ctx, query, body):
-    """GET /v1/cluster/history?node=<host|all>&metrics=a,b&window=15m|1h|6h|24h|7d
+    """GET /v1/cluster/history?node=<host|all>&metrics=a,b
+                    &window=15m|1h|6h|24h|7d
+                    &tier=0|1|2&since=<epoch>&until=<epoch>
 
     The recorder's stored per-node and per-engine series, read-only: a request
-    here never triggers a sample, an ssh call or a sparkrun child. `window`
-    picks the tier (15m -> tier 0's 2 s ring; 1h/6h/24h -> tier 1's 1-minute
-    roll-ups; 7d -> tier 2's 5-minute roll-ups) and the response says which tier
-    and resolution it served, plus which peak columns it carries.
+    here never triggers a sample, an ssh call or a sparkrun child.
+
+    TWO REQUEST AXES, exactly one per request. `window` is a preset anchored to
+    `now` and implies its tier (15m -> tier 0's 2 s ring; 1h/6h/24h -> tier 1's
+    1-minute roll-ups; 7d -> tier 2's 5-minute roll-ups). `tier`+`since`/`until`
+    is a raw tier over an explicit span — "the hour around last night's slow
+    run" — and anchors to nothing. Asking for both is a 400 rather than a
+    precedence, because the two names denote two different spans; `since`/`until`
+    without `tier` is one too, since only the raw tier has no anchor of its own.
+    Neither key is `window=1h`, unchanged from #407. `since`/`until` are
+    INCLUSIVE epoch-second bucket starts and the span is clamped to the tier's own
+    retention — and the response always states the window it actually served, on
+    either axis: `since`/`until` are the served pair, `window_s` the served span,
+    `axis` which axis answered and `note` says when a clamp moved the span.
 
     Rows come back with the recorder's own field names and its ``None``s
     intact — ``None`` means "not reported", and coercing it to 0 would draw a
-    node that never answered as an idle one.
+    node that never answered as an idle one. `source` says where the rows came
+    from as a code, so a client branches on that and not on the English of
+    `note`.
     """
     from api_server import ApiError
     mh = _metrics_history()
-    for unsupported in sorted(set(query) - {"node", "metrics", "window"}):
+    for unsupported in sorted(set(query) - set(_HISTORY_QUERY_KEYS)):
         raise ApiError(
             400, "bad_request",
             f"'{unsupported}' is not supported by /v1/cluster/history: it "
-            "accepts 'node', 'metrics' and 'window' only",
+            f"accepts {', '.join(repr(k) for k in _HISTORY_QUERY_KEYS)} only",
             f"{unsupported} is not supported by the cluster history route.",
         )
-    window, tier, bucket_s, span_s = _parse_history_window(query, mh)
+    axis = _resolve_history_axis(query, mh)
+    window, tier, bucket_s = axis["window"], axis["tier"], axis["bucket_s"]
+    since, until, span_s = axis["since"], axis["until"], axis["window_s"]
     node = _parse_history_node(query)
     metrics = _parse_history_metrics(query, mh, tier)
 
-    until = int(_history_now())
-    since = until - span_s
     host_vocab, engine_vocab = _history_vocab(mh, tier)
     keep_host = keep_engine = None
     if metrics is not None:
@@ -921,6 +1140,15 @@ def handle_cluster_history(server, ctx, query, body):
     payload = {
         "window": window,
         "window_s": span_s,
+        # Which axis the CLIENT asked on, stated rather than left to be inferred
+        # from which of `since`/`until`/`window` happen to be non-null. On the
+        # tier axis `window` is a derived span label (`"<n>s"`), never a preset
+        # name the request did not use.
+        "axis": axis["axis"],
+        # Where the rows came from, as a code: a client must branch on this, not
+        # on the English of `note`. None only when the read itself failed, which
+        # `error` then states.
+        "source": None,
         "tier": tier,
         "resolution_s": bucket_s,
         "resolution": mh.RES_TIER0 if tier == 0 else f"{bucket_s}s",
@@ -952,6 +1180,8 @@ def handle_cluster_history(server, ctx, query, body):
         if tier == 0:
             points = _backing_history_tier0(node)
             tier0_resident = points is not None
+            payload["source"] = SOURCE_RING if points is not None \
+                else SOURCE_RING_ABSENT
             host_rows = _history_host_rows_from_points(points, node)
             engine_rows = _history_engine_rows_from_points(points, node)
             store_info = {"path": mh.db_path(ctx.hscc_dir),
@@ -959,13 +1189,23 @@ def handle_cluster_history(server, ctx, query, body):
                           "db_bytes": 0}
             store_info["db_bytes"] = (os.path.getsize(store_info["path"])
                                       if store_info["exists"] else 0)
+            # This branch never opens the store, so it cannot count its rows:
+            # `None` says "nobody measured", which is what #417 established for
+            # `tier0_resident` and is the reason there is no top-level `stats`.
+            # `bound_bytes` is the recorder's stated ceiling, knowable without
+            # the file.
+            store_info["bound_bytes"] = mh.size_bound_bytes()
+            store_info["tier1_rows"] = store_info["tier2_rows"] = None
         else:
             host_rows, engine_rows, store_info = _backing_history_rows(
                 ctx.hscc_dir, tier, since, until, node)
+            payload["source"] = SOURCE_STORE if store_info["exists"] \
+                else SOURCE_STORE_ABSENT
     except Exception as exc:
         host_rows, engine_rows = [], []
         store_info = {"path": mh.db_path(ctx.hscc_dir), "exists": False,
-                      "db_bytes": 0}
+                      "db_bytes": 0, "bound_bytes": mh.size_bound_bytes(),
+                      "tier1_rows": None, "tier2_rows": None}
         error = _failure_detail(exc=exc)
 
     if not hosts_included:
@@ -983,24 +1223,35 @@ def handle_cluster_history(server, ctx, query, body):
     payload["counts"] = {"hosts": len(host_rows), "engines": len(engine_rows)}
     if error:
         payload["error"] = error
-    payload["note"] = _history_note(tier, tier0_resident, store_info, error)
+    payload["note"] = _history_note(tier, tier0_resident, store_info, error,
+                                    axis["clamp"])
     payload["speak"] = _speak_cluster_history(payload)
     return 200, payload
 
 
-def _history_note(tier, tier0_resident, store_info, error) -> str:
-    """What the payload says about its own emptiness, so a gap explains itself."""
+def _history_note(tier, tier0_resident, store_info, error, clamp="") -> str:
+    """What the payload says about its own emptiness, so a gap explains itself.
+
+    The clamp statement rides in the same field: a request whose span the route
+    shortened has to say so where a client looks for "why is this answer not what
+    I asked for", and a silent shortening is indistinguishable from a fleet that
+    was quiet for the rest of the range.
+    """
+    parts = []
+    if clamp:
+        parts.append(clamp)
     if error:
-        return f"history read failed: {error}"
-    if tier == 0 and not tier0_resident:
-        return ("tier 0 is the sampler's in-memory ring and lives in the daemon "
-                "process; this server process cannot read it, so no 2 s points "
-                "are served here. Use window=1h for the durable 1-minute tier.")
-    if tier != 0 and not store_info.get("exists"):
-        return ("the recorder has not written its store yet "
-                f"({store_info['path']}); the durable tiers are empty until it "
-                "closes its first minute")
-    return ""
+        parts.append(f"history read failed: {error}")
+    elif tier == 0 and not tier0_resident:
+        parts.append("tier 0 is the sampler's in-memory ring and lives in the "
+                     "daemon process; this server process cannot read it, so no "
+                     "2 s points are served here. Use window=1h for the durable "
+                     "1-minute tier.")
+    elif tier != 0 and not store_info.get("exists"):
+        parts.append("the recorder has not written its store yet "
+                     f"({store_info['path']}); the durable tiers are empty until "
+                     "it closes its first minute")
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
