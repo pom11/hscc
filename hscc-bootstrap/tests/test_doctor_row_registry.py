@@ -43,6 +43,7 @@ CHECK_NAMES = [
     "daemon supervision (service manager owns the pid)",
     "kanban enforce (paused-board hold)",
     "kanban current board (main orchestrator)",
+    "main wakeups (daemon-owned schedule)",
     "worker budget hook ([budget] note)",
     "APNs push (operator notifications)",
 ]
@@ -83,8 +84,8 @@ def _doctor(tmp_path, monkeypatch, **kw):
 def test_registry_exists_and_covers_the_feature_rows():
     keys = [r.key for r in doctor.FEATURE_CHECK_ROWS]
     assert keys == ["orch_waker", "cron_watchers", "supervision",
-                    "kanban_enforce", "main_board", "budget_hook",
-                    "apns"], "registry order is row order"
+                    "kanban_enforce", "main_board", "main_wakeups",
+                    "budget_hook", "apns"], "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -120,7 +121,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
                 and p.endswith("_check")}
     registered = set(doctor._FEATURE_SEAM_NAMES)
     assert declared <= registered
-    assert registered - declared == {"_main_board_check", "_apns_check"}
+    assert registered - declared == {"_main_board_check",
+                                     "_main_wakeups_check", "_apns_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 

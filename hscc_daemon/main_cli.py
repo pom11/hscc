@@ -26,23 +26,30 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-VALID_SUBCOMMANDS = ("start", "status")
+from . import main_wakeups
+
+VALID_SUBCOMMANDS = ("start", "status", "wakeups")
 SUB_HELP = ("--help", "-h")
 
 HELP_TEXT = """\
-hscc main — the main orchestrator's own tmux pane.
+hscc main — the main orchestrator's pane and wake-ups.
 
 Subcommands:
   start            Ensure one tmux pane runs the main orchestrator
   status [--json]  Report name, board, pane and busy/idle state
+  wakeups list|set|enable|disable
+                   Daemon-owned wake-up schedule (see below)
 
 `start` reuses a pane that already runs the profile, opens a window named
 after the profile in the operator's tmux session when none exists, and never
 kills another pane or window. With no tmux server it creates a detached
 session named after the profile.
 `status` uses the same pane matcher and busy marker as `hscc orch inject`.
+`wakeups` edits the schedule the hscc daemon fires into that pane with
+`--mode auto` (queued while busy); see `hscc main wakeups --help`.
 """
 
 SUBCOMMAND_HELP = {
@@ -67,6 +74,26 @@ ones `hscc orch inject` uses, so the two always agree.
 
 --json prints the machine-readable receipt (name, profile, board, state,
 running, busy, pane, target).
+""",
+    "wakeups": """\
+Usage: hscc main wakeups <list|set|enable|disable> [args] [--json]
+
+The hscc daemon owns four wake-ups and fires each into the main
+orchestrator's pane through the `hscc orch inject` path with --mode auto
+(queued when the pane is busy; skipped and logged when it is missing).
+
+  list                       Show schedule, enabled and last fire
+  set <name> <schedule>      Change one schedule
+  enable|disable <name>      Turn one wake-up on or off
+
+Schedules (local time for daily/weekly):
+  every 2h           interval from the last fire
+  daily 07:00        every day at 07:00
+  weekly Monday 07:30  every Monday at 07:30
+
+Names: health, sweep, memory, settings.
+--json prints the machine-readable receipt (schedule, enabled, last_fired,
+next_due, last_result and prompt per wake-up).
 """,
 }
 
@@ -404,6 +431,98 @@ def _status_lines(result):
     return lines
 
 
+def _fmt_ts(ts):
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return "never"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+
+
+def _wakeup_lines(receipt):
+    """Human view of ``hscc main wakeups list`` (one line per wake-up)."""
+    lines = [f"main wakeups ({receipt.get('profile')}):"]
+    for item in receipt.get("wakeups") or []:
+        state = "enabled " if item.get("enabled") else "disabled"
+        line = (f"  {item.get('name'):<8} {state}  "
+                f"{item.get('schedule'):<20}")
+        result = item.get("last_result") or {}
+        if item.get("last_fired") is None:
+            line += " never fired"
+        else:
+            line += f" last {_fmt_ts(item.get('last_fired'))}"
+            detail = result.get("detail") or result.get("skipped")
+            if detail:
+                line += f" ({detail})"
+            if item.get("next_due") is not None:
+                line += f"  next {_fmt_ts(item.get('next_due'))}"
+        lines.append(line)
+    return lines
+
+
+def _wakeup_edit_line(receipt):
+    action = receipt.get("action")
+    name = receipt.get("name")
+    if action == "set":
+        return (f"main wakeups: {name} schedule {receipt.get('schedule')} "
+                f"(was {receipt.get('previous')})")
+    return (f"main wakeups: {name} "
+            f"{'enabled' if receipt.get('enabled') else 'disabled'}")
+
+
+def cmd_wakeups(argv):
+    """Dispatch ``hscc main wakeups <list|set|enable|disable>``."""
+    raw = list(argv)
+    if not raw or raw[0] in SUB_HELP:
+        print(SUBCOMMAND_HELP["wakeups"])
+        return 0
+
+    json_mode = "--json" in raw
+    args = [a for a in raw if a != "--json"]
+    if not args or args[0] in SUB_HELP:
+        print(SUBCOMMAND_HELP["wakeups"])
+        return 0
+    sub, rest = args[0], args[1:]
+    try:
+        if sub == "list":
+            if rest:
+                print(f"error: unknown argument for 'main wakeups list': "
+                      f"{rest[0]}")
+                return 1
+            receipt = main_wakeups.list_receipt()
+            if json_mode:
+                import json
+                print(json.dumps(receipt, indent=2, default=str))
+            else:
+                print("\n".join(_wakeup_lines(receipt)))
+            return 0
+        if sub == "set":
+            if len(rest) != 2:
+                print("usage: hscc main wakeups set <name> <schedule>")
+                return 1
+            receipt = main_wakeups.set_schedule(rest[0], rest[1])
+        elif sub in ("enable", "disable"):
+            if len(rest) != 1:
+                print(f"usage: hscc main wakeups {sub} <name>")
+                return 1
+            receipt = main_wakeups.set_enabled(rest[0], sub == "enable")
+        else:
+            print(f"Error: unknown main wakeups subcommand: {sub}")
+            print("Valid subcommands: list, set, enable, disable")
+            return 1
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+    if json_mode:
+        import json
+        updated = main_wakeups.list_receipt()
+        print(json.dumps({**receipt, "wakeups": updated["wakeups"],
+                          "profile": updated["profile"]}, indent=2,
+                         default=str))
+    else:
+        print(_wakeup_edit_line(receipt))
+    return 0
+
+
 def cmd_main(argv):
     """Dispatch ``hscc main <subcommand>``; returns an exit code."""
     argv = list(argv)
@@ -443,6 +562,9 @@ def cmd_main(argv):
         else:
             print("\n".join(_status_lines(result)))
         return 0 if result.get("ok") else 1
+    if sub == "wakeups":
+        # Pass the raw tail: cmd_wakeups owns its own --json parsing.
+        return cmd_wakeups(raw[1:])
 
     print(f"Error: unknown main subcommand: {sub}")
     print(f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")

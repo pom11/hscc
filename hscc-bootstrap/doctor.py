@@ -1879,6 +1879,48 @@ def _refused_main_board_check() -> dict:
                    "operator's current board."}
 
 
+def _load_main_wakeups():
+    """Import ``hscc_daemon/main_wakeups.py`` for the M5 doctor check.
+
+    The verdict lives with the feature (config loader, state, schedule math and
+    the pane seam), so doctor only adapts it to its five Check fields. Returns
+    None when the daemon plugin is not deployed next to bootstrap — the row
+    then reports itself unverifiable rather than vanishing.
+    """
+    try:
+        from hscc_daemon import main_wakeups
+        return main_wakeups
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import main_wakeups
+        return main_wakeups
+    except Exception:
+        return None
+
+
+#: Fallback for the row name when the module itself cannot be imported.
+_MAIN_WAKEUPS_CHECK_NAME = "main wakeups (daemon-owned schedule)"
+
+
+def _refused_main_wakeups_check() -> dict:
+    """In-suite stand-in when no wake-up verdict was injected.
+
+    The real check reads ``~/.hscc/main_wakeups.json``, its state file and the
+    operator's tmux panes. Same fence shape as the other daemon rows: an ERROR
+    naming the seam, never a silent pass and never a real read.
+    """
+    return {"name": _MAIN_WAKEUPS_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-wakeups check refused inside a pytest process — "
+                      "inject _main_wakeups_check",
+            "fix": "Pass _main_wakeups_check=lambda: {...} built from tmp "
+                   "config/state fixtures; a suite must never read the "
+                   "operator's wake-ups or panes."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2011,6 +2053,20 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
         missing_detail="hscc-bootstrap/main_board.py not importable — the "
                        "kanban current board cannot be verified",
         missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # M5: are the daemon-owned wake-ups enabled and delivering? The row is the
+    # doctor half of "skip and log when the pane is missing": it reads the
+    # persisted last-result stamp, so a missing main-orchestrator pane says so
+    # with the `hscc main start` fix even between two scheduled fires. WARN-only
+    # (fatal=False) — wake-up drift is work to steer, never a bootstrap stop.
+    doctor_rows.FeatureCheckRow(
+        key="main_wakeups", seam_kwarg="_main_wakeups_check",
+        loader="_load_main_wakeups",
+        refusal="_refused_main_wakeups_check",
+        fallback_name="_MAIN_WAKEUPS_CHECK_NAME",
+        missing_detail="hscc_daemon/main_wakeups.py not importable — the "
+                       "main orchestrator's wake-ups cannot be verified",
+        missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
                     "(re-run bootstrap)."),
     # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note and
     # budget_watch.doctor_check verifies the two ctx.register_hook calls that
