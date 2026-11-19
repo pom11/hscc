@@ -73,9 +73,11 @@ struct MonitorWidgetView: View {
 
 extension WidgetFamily {
     /// The families that pay for `GET /v1/daemon/host`. The small tile gave
-    /// that budget slot to the recorder's series (t_2681d3de) — its footer
-    /// then shows the last daemon state the store holds, never a fetched-now
-    /// claim it did not pay for.
+    /// that budget slot to the recorder's series (t_2681d3de) and draws no
+    /// daemon-host line in its grid anyway — so when the grid has nothing to
+    /// grid, its pane names the failure it actually has, instead of printing
+    /// a "Daemon up" this size did not pay to ask about. Wide families keep
+    /// the read; the snapshot store keeps the last host state either way.
     var showsDaemonHost: Bool {
         switch self {
         case .systemMedium, .systemLarge, .systemExtraLarge:

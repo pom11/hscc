@@ -354,8 +354,17 @@ func clusterSmallGridChecks(_ c: DecodeCheck) {
                             kv: nil, gen_tps: nil, prompt_tps: nil)
     }
     func histResponse(_ points: [ClusterHistoryPoint], tier: Int = 1, res: Int = 60,
-                      hostsIncluded: Bool = true, note: String? = nil) -> ClusterHistoryResponse {
-        ClusterHistoryResponse(window: ClusterSmallGrid.trendWindow, window_s: 3600, tier: tier,
+                      hostsIncluded: Bool = true, note: String? = nil,
+                      axis: String = "window", source: String? = "sqlite_store")
+            -> ClusterHistoryResponse {
+        // The tile asks on the `window` axis of the durable store — the two
+        // fields #425 added, stated rather than inferred. A synthetic case
+        // that wanted the daemon ring would say `recorder_ring*` here; the
+        // tile's trend rules never read these codes (they gate on usable
+        // points and `hosts_included`), so an absent ring is refused for the
+        // same reason as any other answer with < 2 readable numbers.
+        ClusterHistoryResponse(window: ClusterSmallGrid.trendWindow, window_s: 3600,
+                               axis: axis, source: source, tier: tier,
                                resolution_s: res, resolution: "1 minute", tier_summary: nil,
                                max_fields: [], since: 0, until: 3600, node: "all",
                                hosts_included: hostsIncluded, engines_included: false,

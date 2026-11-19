@@ -298,9 +298,10 @@ struct MonitorTimelineProvider: TimelineProvider {
         // Accessories draw nodes + serving only; the daemon-host read is
         // skipped entirely for them (§2's budget, same rule as before). The
         // small family skips it too as of t_2681d3de — its two reads are the
-        // host rows and the recorder's series behind the GPU% sparklines; the
-        // daemon line on its footer then shows only what the snapshot store
-        // last saw, which is the honest "not fetched at this size".
+        // host rows and the recorder's series behind the GPU% sparklines. The
+        // small grid draws no daemon-host line anyway; its no-rows pane names
+        // the failure it has rather than claiming a daemon state it did not
+        // pay for. The snapshot store still keeps the last host state.
         let wantsHost = family.showsDaemonHost
         let wantsHistory = family.wantsHostHistory
         async let monitorTask = WidgetData.read(using: client) { await $0.clusterMonitor() }
