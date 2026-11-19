@@ -13,11 +13,19 @@ import SwiftUI
 // surface, not a Home Screen widget.
 // ---------------------------------------------------------------------------
 
-/// Which optional short stat rides next to the menu bar H.
+/// Which optional short stat rides next to the menu bar icon.
+///
+/// The last two are `hscc cluster monitor`'s fleet numbers (t_f5fdc6b2): the
+/// mean GPU load and the hottest temperature in the fleet, each with the
+/// fleet's total reported draw. They are additive to the list, and the default
+/// stays `.clusterNodes` — an existing operator's menu bar does not change when
+/// they install a build that added a stat.
 enum MenuBarStat: String, CaseIterable, Identifiable {
     case off
     case runningCards
     case clusterNodes
+    case fleetGpu
+    case hottestTemp
 
     var id: String { rawValue }
 
@@ -26,6 +34,8 @@ enum MenuBarStat: String, CaseIterable, Identifiable {
         case .off: return "Icon only"
         case .runningCards: return "Running cards"
         case .clusterNodes: return "Cluster nodes up"
+        case .fleetGpu: return "GPU load + watts"
+        case .hottestTemp: return "Hottest temp + watts"
         }
     }
 }

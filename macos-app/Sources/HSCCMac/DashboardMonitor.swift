@@ -60,6 +60,30 @@ struct DashboardSnapshot {
     /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
     var failure: String?
 
+    // MARK: The two CLI surfaces (t_f5fdc6b2)
+
+    /// The raw `/v1/cluster/monitor` answer. Kept because `used_slots` and
+    /// `free_slots` live on the host objects and the CLI view-model's rows
+    /// deliberately do not carry them; every DISPLAYED string still comes from
+    /// the projections below, never from this.
+    var monitorResponse: MonitorResponse?
+    /// `hscc cluster monitor`'s host + serving tables as the dropdown draws
+    /// them. nil means there was no table to draw (the fleet is down, or the
+    /// read failed) and `fleetEmptyText` says which.
+    var fleetTile: DashboardFleetReading.Tile?
+    /// What to print in place of the monitor table when there is none: the
+    /// route's own `speak` line for a degraded answer, the read's `shortLabel`
+    /// for a failed one. Never a table of dashes.
+    var fleetEmptyText: String?
+    /// The fleet numbers the dense menu-bar title draws.
+    var fleetStats: MenuBarFleet.Stats = .noAnswer
+    /// `hscc cluster status`'s workload table + host tally + slot pair. nil when
+    /// the read failed or the route answered with its own `error` — a degraded
+    /// route's `total_hosts: 0` is never drawn as an empty cluster.
+    var statusPanel: ClusterStatusReading.Panel?
+    /// Why the status panel is not there, when it is not.
+    var statusError: String?
+
     /// The optional short stat next to the menu bar icon. nil draws the icon
     /// alone — never a fabricated zero for a read that did not answer.
     func menuBarText(for stat: MenuBarStat) -> String? {
@@ -74,6 +98,23 @@ struct DashboardSnapshot {
         case .clusterNodes:
             guard let nodesUp, let nodesTotal else { return nil }
             return "\(nodesUp)/\(nodesTotal)"
+        case .fleetGpu:
+            return fleetStats.gpuLoadTitle()
+        case .hottestTemp:
+            return fleetStats.hottestTitle()
+        }
+    }
+
+    /// The VoiceOver sentence for the same stat: the host, sensor and coverage
+    /// the dense title had to leave out.
+    func menuBarAccessibilityText(for stat: MenuBarStat) -> String? {
+        switch stat {
+        case .fleetGpu:
+            return fleetStats.gpuLoadAccessibilityText()
+        case .hottestTemp:
+            return fleetStats.hottestAccessibilityText()
+        case .off, .runningCards, .clusterNodes:
+            return nil
         }
     }
 }
@@ -138,8 +179,34 @@ final class DashboardMonitor: ObservableObject {
             } else {
                 next.modelCount = nil
             }
+            // The dropdown's two CLI tables and the title's fleet numbers, both
+            // projected from the same payload the tally came from.
+            let view = ClusterMonitorViewModel.project(monitor)
+            next.monitorResponse = monitor
+            next.fleetTile = DashboardFleetReading.tile(from: view, response: monitor)
+            // A degraded `{speak}`-only body has no table: show the route's own
+            // sentence (`fleet monitor unavailable`), not a table of dashes.
+            next.fleetEmptyText = monitor.speak
+            next.fleetStats = MenuBarFleet.Stats.project(view)
             anySuccess = true
         case .failure(let failure):
+            failures.append(failure.shortLabel)
+            next.fleetEmptyText = failure.shortLabel
+        }
+
+        // `hscc cluster status` — the workloads table, the host tally, and the
+        // slot pair the monitor route carries. Unlike the reads above this one
+        // DOES clear on failure: a workload table is exactly the kind of list an
+        // operator would otherwise read as "these are the engines running now".
+        switch await client.clusterStatus() {
+        case .success(let status):
+            next.statusPanel = ClusterStatusReading.panel(status: status,
+                                                          hosts: next.monitorResponse?.json?.hosts)
+            next.statusError = status.error
+            anySuccess = true
+        case .failure(let failure):
+            next.statusPanel = nil
+            next.statusError = failure.shortLabel
             failures.append(failure.shortLabel)
         }
 

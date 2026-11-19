@@ -26,7 +26,13 @@ struct MenuBarLabel: View {
     private var accessibilityText: String {
         var parts = ["HSCC"]
         if let text = dashboard.snapshot.menuBarText(for: preferences.menuBarStat) {
-            parts.append(text)
+            // The dense title drops the host, the sensor and the coverage; the
+            // sentence puts them back for VoiceOver.
+            if let full = dashboard.snapshot.menuBarAccessibilityText(for: preferences.menuBarStat) {
+                parts.append(full)
+            } else {
+                parts.append(text)
+            }
         }
         return parts.joined(separator: ", ")
     }
