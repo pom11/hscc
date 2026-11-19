@@ -350,6 +350,11 @@ def _get_help_text():
         *_entry("uninstall", "Remove the service and stop the daemon"),
         *_entry("plist", "Print the launchd plist (no install)"),
         *_entry("log", "Show the daemon log output"),
+        # start-daemon is a dispatched TOP_LEVEL_COMMAND, so the primary
+        # surface names it too (t_88d896f3); `hscc help advanced` still
+        # documents it as the service-manager entry point.
+        *_entry("start-daemon",
+                "Foreground daemon loop (used by launchd)"),
     ])
 
     health = _section("Health & monitoring", [
@@ -370,6 +375,12 @@ def _get_help_text():
                 "Show autoscale decision from current queue depth (read-only)"),
         *_entry("escalate",
                 "Show pending failure escalations (dry-run, no mutations)"),
+        # Heal verbs are live TOP_LEVEL_COMMANDS (the breaker's alert names
+        # `hscc heal-clear`), so they are listed on the primary surface too.
+        *_entry("heal-clear <node>",
+                "Clear one node's heal-breaker strikes (mutates)"),
+        *_entry("heal-status",
+                "List heal-breaker strikes per node (read-only)"),
     ])
 
     cluster = _section("Cluster & templates", [
@@ -405,6 +416,12 @@ def _get_help_text():
                 "Idle autodown/autoup: status enable disable wake cancel"),
         *_entry("kanban <cmd>",
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
+        # merge-queue (MQ1) is dispatched and in COMMAND_HELP; the primary
+        # surface must list it like every other live top-level command
+        # (F5 surface-honesty rule, t_88d896f3).
+        *_entry("merge-queue <cmd>",
+                "Local merge queue: status list add remove pause resume "
+                "enable disable"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
         # main group (M4/M5): the main orchestrator's own pane + wake-ups.
@@ -469,7 +486,7 @@ def _get_advanced_help():
     from rich.console import Group
     from rich.text import Text
 
-    heading = Text("Advanced / internal commands (omitted from main help):", style="label")
+    heading = Text("Advanced / internal commands:", style="label")
     lines = Text("", style="text")
     lines.append("", style="text")
     for cmd, desc in [

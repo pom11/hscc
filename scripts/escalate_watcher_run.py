@@ -53,17 +53,18 @@ def _stamp_module():
     indistinguishable from a healthy idle one). Defensive by design — losing
     the module must not stop the watcher's real work; it only loses the liveness
     signal, and ``main()`` PRINTS that loss so it lands in the cron run history.
+
+    The checkout's file is loaded BY PATH and always wins: importing the
+    package first let a live install's deployed ``~/.hermes/plugins`` copy
+    shadow the tree under test — and stamp through older code (t_77db1513).
+    The deployed path is only the fallback when this script itself runs from
+    ``~/.hermes/scripts`` (where the sibling does not exist).
     """
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(os.path.dirname(here), "hscc_daemon", "cron_watchers.py"),
         os.path.expanduser("~/.hermes/plugins/hscc_daemon/cron_watchers.py"),
     ]
-    try:
-        from hscc_daemon import cron_watchers as cw  # deployed package
-        return cw
-    except ImportError:
-        pass
     try:
         import importlib.util
         path = next((p for p in candidates if os.path.isfile(p)), None)
