@@ -126,35 +126,11 @@ orchestrator, card any board, review and merge PRs, change settings and ship
 releases. A production/LIVE deploy asks you first.
 
 **How it reaches you.** `hscc notify <title> <body>` writes the durable alert
-feed (`GET /v1/alerts`). The iOS app registers for APNs and buzzes within
-seconds even when closed; the macOS menu bar app polls the same feed and shows
-a local notification. Alerts are notification-only — answer in the main
-orchestrator's pane. They are deduplicated and rate-limited, so the same
-condition does not re-alert until it changes. `hscc notify test` sends one test
-push to every registered device.
-
-**One-time APNs setup.** The key never goes in the repo:
-
-1. In [developer.apple.com → Identifiers](https://developer.apple.com/account/resources/identifiers/list),
-   enable **Push Notifications** on the app id (`ro.parsec.hscc.ios`, plus
-   `com.hscc.ios` if you install Debug builds).
-2. In **Keys**, create an **APNs** auth key, download the `.p8` once, and note
-   the key id and your team id.
-3. On the cluster host, put the key at `~/.hscc/AuthKey_<KEYID>.p8`
-   (`chmod 600`) and write `~/.hscc/apns.json`:
-
-   ```json
-   {
-     "key_id": "ABCDE12345",
-     "team_id": "TEAM123456",
-     "key_path": "~/.hscc/AuthKey_ABCDE12345.p8"
-   }
-   ```
-
-   (`keychain_service`/`keychain_account` can replace `key_path`; see
-   `hscc_daemon/apns.py`.) The bootstrap doctor reports the APNs row, and
-   `hscc notify test` proves the path end to end. iOS release details:
-   [ios-app/RELEASE.md](ios-app/RELEASE.md).
+feed (`GET /v1/alerts`). The apps do **not** show notifications: operator
+decision 2026-11-19 removed push and local notifications from both the iOS and
+macOS clients, so there is no app-side APNs setup and no device registration.
+Read the alert in the main orchestrator's pane; the feed is deduplicated and
+rate-limited, so the same condition does not repeat until it changes.
 
 Existing installs upgrade in place: bootstrap creates the main profile, copies
 (never moves) the legacy catch-all's memories and sessions where the main has

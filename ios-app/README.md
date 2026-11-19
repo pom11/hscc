@@ -74,7 +74,7 @@ file-by-file disposition of the remaining console files is
     the former `SettingsView` moved byte-for-byte, plus `ConnectionBanner`
     (moved from the deleted `ContentView.swift`), the App-Group / token-save
     diagnostics, and the app-lifecycle seeding `AppShell` used to own: client
-    seeding for the notifier / deep-link router / reply watcher,
+    seeding for the deep-link router,
     `ConnectionMonitor.reset()` on a cluster switch, the cold-start Live
     Activity sweeps, and the `onOpenURL` + Handoff intake with its honest
     "Couldn't open that link" alert. `shared_store_check.sh` asserts THIS file
@@ -127,7 +127,7 @@ file-by-file disposition of the remaining console files is
     - `Views/ConfigView.swift` — the root screen (above): saved clusters
       (enter/persist host, port, token), **Scan QR** (QR from
       `hscc api status`, see `SetupQRCode.swift`), **Test connection**
-      (`GET /v1/ping`), the notification toggles, and the per-surface
+      (`GET /v1/ping`), and the per-surface
       Widgets & Live Activities editor (`WidgetSurfaceEditor`). Reads and
       writes only the App-Group stores and the Keychain.
     - `Views/NodesServingView.swift` — the machines + what runs on them:
@@ -183,11 +183,10 @@ file-by-file disposition of the remaining console files is
     key and no poll loop yet — the driver that feeds that surface is its own
     slice, so the sweep is this activity's only app-side hook.
   - `DeepLink.swift` — the `hscc://` scheme: open a project / card / session
-    directly; the single entry point for notifications and Handoff.
-  - `Notify/` — the "operator needed" alert path: `NeedsOperatorNotifier`
-    computes local alerts purely, `NotificationCoordinator` delivers them in
-    the foreground, and `PushRegistrar` registers the APNs device token with
-    every saved cluster so the daemon's alerts reach a closed app.
+    directly; the single entry point for deep links and Handoff.
+  - `LaunchAppDelegate.swift` — the Live Activities' `BGTaskScheduler`
+    registration and one-time launch sweeps. The app carries no notifications
+    and no APNs device registration (operator decision 2026-11-19).
   - `Intents/` — Siri App Intents:
     - `ClusterStatusIntent` — speak the cluster-status `speak` one-liner.
       (The project ask/status, review-queue and approvals intents retired with

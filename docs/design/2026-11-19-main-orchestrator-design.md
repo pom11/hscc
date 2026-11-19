@@ -2,6 +2,11 @@
 
 Date: 2026-11-19. Status: draft for operator approval. Builder: OpenCode cards.
 
+**Operator update 2026-11-19:** the hscc apps carry **no notifications** —
+neither push nor local. Widgets and Live Activities stay exactly as they are.
+Goal 10 and the push/reach paragraphs below are superseded on the app side;
+the server-side alert feed (`hscc notify`, `POST/GET /v1/alerts`) remains.
+
 ## Intent
 
 The operator manages the cluster today through an outside assistant: it watches

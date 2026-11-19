@@ -252,6 +252,9 @@ platform build checks are clean.
 
 Non-gap coverage notes:
 
+- Notifications are out of scope by operator decision (2026-11-19): the apps
+  carry neither local nor push notifications. The widgets and Live Activities
+  in this document are unaffected — they are not notifications.
 - The monitor extension does not refresh Live Activities. That is the platform
   contract, not a missing path: all five activities are refreshed by app-side
   drivers that poll and push.

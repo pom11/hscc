@@ -334,44 +334,6 @@ struct HSCCClient {
         try await get("/v1/ping", as: PingResponse.self)
     }
 
-    // MARK: - Push devices (card N3)
-
-    /// POST /v1/devices — register or refresh this device's APNs token on one
-    /// cluster. The server treats it as an idempotent refresh per (platform,
-    /// token), so the app can call it on every launch/foreground. The response
-    /// carries the derived device id, never the token.
-    ///
-    /// `confirm: true` is the API's mutation gate, not an alert on screen: this
-    /// write enrolls a push recipient, so the server 409s without it, exactly
-    /// like `/v1/cluster/down`. It is unconditional because the app always
-    /// intends this write — there is no user gesture to wait for.
-    /// `test_every_mutating_post_carries_confirm` fails the suite if it is ever
-    /// dropped, and `test_every_client_post_server_handler_is_confirm_gated`
-    /// fails it if the server ever stops checking.
-    func registerPushDevice(token: String,
-                            bundleID: String,
-                            environment: String) async throws -> PushDeviceRegistration {
-        try await post("/v1/devices", body: [
-            "confirm": true,
-            "platform": "ios",
-            "token": token,
-            "bundle_id": bundleID,
-            "env": environment,
-        ], as: PushDeviceRegistration.self)
-    }
-
-    /// POST /v1/devices/test — the same APNs test push `hscc notify test`
-    /// drives. A 200 may still report `sent: false` (no APNs key, no devices,
-    /// or every delivery failed); the caller surfaces `speak` verbatim.
-    ///
-    /// `confirm: true` because this really buzzes every registered device — it
-    /// is the same class of call as the confirm-gated `run trigger` / `escalate`
-    /// endpoints, reached from an explicit button in Settings.
-    func sendTestPush() async throws -> PushTestResult {
-        try await post("/v1/devices/test", body: ["confirm": true],
-                       as: PushTestResult.self)
-    }
-
     /// GET /v1/cluster/status — workloads + idle/total hosts (B2).
     func clusterStatus() async throws -> ClusterStatusResponse {
         try await get("/v1/cluster/status", as: ClusterStatusResponse.self)

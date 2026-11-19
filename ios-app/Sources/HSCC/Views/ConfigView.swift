@@ -11,8 +11,9 @@ import SwiftUI
 // Activity (docs/CONSOLE_RETIREMENT.md §2.3).
 //
 // Everything here is a byte-for-byte move out of the files it replaces:
-//   * the connection + widget Sections, the cluster list, the QR flow, the
-//     notification toggles and `WidgetSurfaceEditor` from `SettingsView.swift`;
+//   * the connection + widget Sections, the cluster list, the QR flow and
+//     `WidgetSurfaceEditor` from `SettingsView.swift`;
+//     the notification toggles are gone under the 2026-11-19 operator decision;
 //   * `ConnectionBanner` from `ContentView.swift`;
 //   * `makeClient()` and the lifecycle seeding from `AppShell.swift`.
 // Renaming the screen to `ConfigView` is the only content change.
@@ -159,29 +160,6 @@ struct ConfigView: View {
     @State private var testIsSuccess: Bool?
     @State private var testReport: ConnectionTestReport?
     @State private var isTesting = false
-
-    // Notification toggles — backed by the shared App-Group suite so the
-    // foreground NotificationCoordinator reads the identical store the operator
-    // edits here (one source of truth, reachable across processes/widgets).
-    // The default-`true` on a fresh install matches `NotifyPreferences.isEnabled`
-    // (absent key ⇒ on), so what the toggle shows always equals what fires.
-    @AppStorage("hscc.notify.enabled.needsReview",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyNeedsReview = true
-    @AppStorage("hscc.notify.enabled.cardFailedBlocked",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyCardFailedBlocked = true
-    @AppStorage("hscc.notify.enabled.fleetUnreachable",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyFleetUnreachable = true
-
-    /// APNs registration + permission status (card N3). Observable so the
-    /// Status row updates when the token arrives or a registration fails.
-    @ObservedObject private var pushRegistrar = PushRegistrar.shared
-    /// Last answer from the cluster's `POST /v1/devices/test` (hscc notify
-    /// test), shown under the Send test button.
-    @State private var pushTestLine: String?
-    @State private var isSendingPushTest = false
 
     // QR-scan flow state.
     @State private var showingScanner = false
@@ -374,66 +352,6 @@ struct ConfigView: View {
                                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             }
                         }
-                    }
-                }
-
-                Section {
-                    // APNs registration status (card N3). The token itself is
-                    // never shown — only whether this phone is registered and
-                    // with how many saved clusters.
-                    LabeledContent {
-                        Text(pushRegistrar.status.text)
-                            .foregroundColor(notificationStatusColor)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        Label("Notifications", systemImage: "bell.badge")
-                    }
-
-                    Toggle("New card needs review", isOn: $notifyNeedsReview)
-                    Toggle("Card failed or blocked", isOn: $notifyCardFailedBlocked)
-                    Toggle("Cluster unreachable", isOn: $notifyFleetUnreachable)
-
-                    Button {
-                        Task { await sendPushTest() }
-                    } label: {
-                        if isSendingPushTest {
-                            HStack {
-                                ProgressView()
-                                Text("Sending…")
-                            }
-                        } else {
-                            Label("Send test", systemImage: "paperplane")
-                        }
-                    }
-                    .disabled(isSendingPushTest)
-
-                    // The pre-push local path is still useful for checking
-                    // banner presentation without involving the cluster, so it
-                    // keeps its own button instead of being folded into the
-                    // remote test above.
-                    Button {
-                        Task { await NotificationCoordinator.shared.testNotification() }
-                    } label: {
-                        Label("Send local test", systemImage: "bell")
-                    }
-
-                    if let pushTestLine {
-                        Text(pushTestLine)
-                            .font(.footnote)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } header: {
-                    Text("Notifications")
-                } footer: {
-                    // Be honest: toggles flipped on do nothing if iOS-level
-                    // authorization was denied or never granted. Surface that
-                    // right here instead of the operator wondering why no banner
-                    // ever arrives.
-                    if !pushRegistrar.authorized {
-                        Text("Notifications are off in iOS Settings — enable them for HSCC there to receive alerts.")
-                    } else {
-                        Text("The cluster pushes alerts to this phone within seconds, even when the app is closed. Local banners still cover what the app itself notices while open. \"Send test\" asks the active cluster to send one through hscc notify test.")
                     }
                 }
 
@@ -851,33 +769,7 @@ struct ConfigView: View {
         let token = tokenField.trimmingCharacters(in: .whitespaces)
         settings.saveCluster(cluster, token: token.isEmpty ? nil : token)
         addingCluster = false
-        // Push roster (card N3): a new/edited cluster must receive this phone's
-        // APNs token too. No-op until permission + a token exist.
-        PushRegistrar.shared.clusterListChanged()
         // The root view re-probes on isConfigured change.
-    }
-
-    private var notificationStatusColor: Color {
-        switch pushRegistrar.status {
-        case .registered:
-            return Theme.Semantic.ok
-        case .denied, .failed:
-            return Theme.Semantic.bad
-        case .unknown, .awaitingToken, .registering:
-            return Theme.Semantic.onSurfaceMuted
-        }
-    }
-
-    /// Settings "Send test": register this phone on the ACTIVE cluster, then
-    /// ask it to send the same APNs test push `hscc notify test` drives. The
-    /// line under the button is the server's own `speak`, so a suppressed send
-    /// says why instead of looking like success.
-    @MainActor
-    private func sendPushTest() async {
-        isSendingPushTest = true
-        pushTestLine = nil
-        defer { isSendingPushTest = false }
-        pushTestLine = await pushRegistrar.sendTestPush()
     }
 
     private func testConnection() async {
@@ -1065,7 +957,7 @@ struct ConfigView: View {
     /// Activity orphan the last process kill left behind (a deinit does not run
     /// when the process is killed, so this sweep is what ends a stale bubble).
     /// The monitor activity's matching `sweepLeftoverMonitors()` runs from
-    /// `NotificationsAppDelegate` / `HSCCApp`, not here; the session activity's
+    /// `LaunchAppDelegate` / `HSCCApp`, not here; the session activity's
     /// `sweepLeftoverSessions()` left with the activity itself (t_3b15b8c9).
     private func rootDidAppear() {
         loadFromStore()
@@ -1073,13 +965,11 @@ struct ConfigView: View {
         LiveActivityManager.sweepLeftoverWakes()
     }
 
-    /// The two subsystems that still reach the daemon both take the same
-    /// client: the operator-alert notifier (`Notify/`, which polls on its own
-    /// schedule) and the deep-link router. (The reply watcher took a third
-    /// seeding until the chat family it served was retired — t_9d5a30c9.)
+    /// The one subsystem that still reaches the daemon takes the same client:
+    /// the deep-link router. (The reply watcher took a second seeding until
+    /// the chat family it served was retired — t_9d5a30c9.)
     private func seedClients() {
         let client = makeClient()
-        NotificationCoordinator.shared.setClient(client)
         router.setClient(client)
     }
 
