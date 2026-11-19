@@ -71,6 +71,9 @@ enum WidgetDataPath {
     /// sidecar, and the two fleet-state reads a `large` cluster tile renders.
     static let clusterMonitor = "/v1/cluster/monitor"
     static let clusterStatus = "/v1/cluster/status"
+    /// `GET /v1/cluster/history` — the recorder's stored series (the one route
+    /// here that answers about the past instead of the present).
+    static let clusterHistory = "/v1/cluster/history"
     static let daemonHost = "/v1/daemon/host"
     static let autodownStatus = "/v1/autodown/status"
     /// Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf): the recorder's three
@@ -85,7 +88,8 @@ enum WidgetDataPath {
     static let all: Set<String> = [
         projects, mobileSummary,
         kanbanRunning, kanbanBlocked, kanbanStale,
-        clusterMonitor, clusterStatus, daemonHost, autodownStatus,
+        clusterMonitor, clusterStatus, clusterHistory,
+        daemonHost, autodownStatus,
         metricsHistory,
     ]
 
@@ -210,6 +214,30 @@ struct WidgetDataClient {
     /// host/workload line).
     func clusterStatus() async -> Result<ClusterStatusResponse, WidgetDataFailure> {
         await load(WidgetDataPath.clusterStatus, as: ClusterStatusResponse.self)
+    }
+
+    /// Dataset 5 — `GET /v1/cluster/history`, the recorder's stored series: the
+    /// only read here that answers about the past instead of the now.
+    ///
+    /// `window` picks which tier the server reads — `15m` the 2 s ring,
+    /// `1h`/`6h`/`24h` the 1-minute roll-ups, `7d` the 5-minute ones — and the
+    /// response carries `tier`, `resolution_s`, `resolution`, `tier_summary` and
+    /// `max_fields`, because a 2-second point and a 5-minute point must never be
+    /// plotted as if they were the same width. `15m` additionally carries
+    /// `store.tier0_resident`: that ring is memory-only and belongs to the daemon
+    /// process, so a `false` there means "this server cannot see it", which a
+    /// chart must render as a gap with a reason, not as a quiet fleet.
+    func clusterHistory(window: String = "1h",
+                        node: String = "all",
+                        metrics: [String] = []) async -> Result<ClusterHistoryResponse, WidgetDataFailure> {
+        var query: [URLQueryItem] = [URLQueryItem(name: "window", value: window),
+                                     URLQueryItem(name: "node", value: node)]
+        if !metrics.isEmpty {
+            query.append(URLQueryItem(name: "metrics",
+                                      value: metrics.joined(separator: ",")))
+        }
+        return await load(WidgetDataPath.clusterHistory,
+                          as: ClusterHistoryResponse.self, queryItems: query)
     }
 
     /// Dataset 5 — `GET /v1/daemon/host`, the 439 B sidecar the monitor's

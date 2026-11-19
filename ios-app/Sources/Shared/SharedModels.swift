@@ -900,6 +900,86 @@ struct ClusterStatusResponse: Decodable, Speakable {
     let speak: String
 }
 
+/// One stored point from GET /v1/cluster/history — a node row or an engine row,
+/// which share this shape because the server forwards the recorder's own rows
+/// with their key names (`hosts[]` carry `host`, `engines[]` carry
+/// `node`/`port`/`model`).
+///
+/// Deliberately sparse: the recorder carries every field it samples
+/// (`HOST_KEYS` plus the three `*_max` peaks), and a model that declared all of
+/// them would fail to decode the first time the recorder adds one. A `nil` here
+/// is the recorder's own "not reported", and it must stay nil — the server
+/// forwards its nulls untouched precisely because a 0.0 would draw a node that
+/// never answered as an idle one.
+struct ClusterHistoryPoint: Decodable {
+    let ts: Int
+    let n: Int?
+    let host: String?
+    let node: String?
+    let port: String?
+    let model: String?
+    let error: String?
+    let cpu_usage_pct: Double?
+    let cpu_temp_c: Double?
+    let gpu_util_pct: Double?
+    let gpu_temp_c: Double?
+    let gpu_power_w: Double?
+    let gpu_power_w_max: Double?
+    let gpu_temp_c_max: Double?
+    let cpu_temp_c_max: Double?
+    let mem_used_pct: Double?
+    let run: Int?
+    let wait: Int?
+    let kv: Double?
+    let gen_tps: Double?
+}
+
+/// GET /v1/cluster/history — the recorder's stored series over three tiers.
+///
+/// `tier`/`resolution_s`/`resolution`/`tier_summary` are the part a surface must
+/// not guess: the same `hosts` array means 2-second points at `tier 0`, 1-minute
+/// averages at `tier 1` and 5-minute averages at `tier 2`, and `max_fields`
+/// names the peak columns this answer carries (empty at tier 0, which stores no
+/// peak). `hosts_included`/`engines_included` distinguish "this `metrics=`
+/// filter excluded that series" from "the fleet had nothing to serve".
+struct ClusterHistoryResponse: Decodable, Speakable {
+    let window: String
+    let window_s: Int?
+    let tier: Int
+    let resolution_s: Int
+    let resolution: String
+    let tier_summary: String?
+    let max_fields: [String]?
+    let since: Int
+    let until: Int
+    let node: String?
+    let hosts_included: Bool?
+    let engines_included: Bool?
+    let hosts: [ClusterHistoryPoint]
+    let engines: [ClusterHistoryPoint]
+    /// Why the answer is empty when it is (fresh install, or — for `15m` — that
+    /// the 2 s ring lives in the daemon process and this server cannot see it).
+    let note: String?
+    let error: String?
+    let speak: String
+    let store: ClusterHistoryStore?
+
+    /// `false` here means the 2 s ring is not readable from the serving process,
+    /// which a chart must render as a gap with a reason, not as a quiet fleet.
+    var tier0Resident: Bool? { store?.tier0_resident }
+}
+
+/// The `store` object of GET /v1/cluster/history. `path` is deliberately NOT
+/// declared: it is a filesystem path on the operator's machine, and §7 keeps
+/// server-side paths out of the App Group container — an undeclared key is never
+/// decoded, so it can neither be stored nor rendered.
+struct ClusterHistoryStore: Decodable {
+    let exists: Bool?
+    let db_bytes: Int?
+    let tier0_resident: Bool?
+    let error: String?
+}
+
 // RETIRE (console retirement D3 — Autodown): `blocked_by`, `reason`,
 // `kanban_ok`/`kanban_reason`, `watchdog_*`, `force_armed*`, `active_cron*`,
 // `last_activity_iso`, `wake_source`, `down_since` are read only by AutodownView.

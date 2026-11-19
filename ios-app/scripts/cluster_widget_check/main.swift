@@ -218,6 +218,118 @@ let wl = String(describing: MonitorWorkload(workload_id: "a", cluster_id: "a"))
 expect("workload", "id is the contract field", !wl.contains("Optional(") || wl.contains("a"))
 expect("workload", "no recipe/container/path can be rendered", !wl.contains("recipe") && !wl.contains("/"))
 
+// ---------------------------------------------------------------------------
+// 6 — the CLI host table `systemMedium` draws (t_2d1c12dc).
+//
+// `CLIMonitorTableReading` is the tile's whole data half, and this is the half
+// that can be EXECUTED: the columns it draws, the strings it puts in them, the
+// verdicts it paints by, and how many rows the size has room for. The tile's
+// own header and cell strings come from here, so if these hold, the tile shows
+// `host_table`'s table.
+// ---------------------------------------------------------------------------
+
+let tableGroup = "cli_host_table"
+guard let viewModel = ClusterMonitorViewModel.project(response) else {
+    print("FATAL: the committed fixture did not project to a CLI monitor view-model")
+    exit(2)
+}
+expect(tableGroup, "the fixture's four hosts are four rows",
+       viewModel.hostRows.count == 4)
+
+let drawnTitles = CLIMonitorTableReading.drawnColumns.map { $0.title }
+expect(tableGroup, "the tile draws every CLI column, in the CLI's order",
+       drawnTitles == CLIMonitorHostRow.columns)
+expect(tableGroup, "that is the CLI's nine columns",
+       drawnTitles == ["Host", "Jobs", "CPU%", "RAM%", "Swap%", "GPU%",
+                       "CPU Temp", "GPU Temp", "GPU Power"])
+expect(tableGroup, "only Host is left-justified, as in host_table",
+       CLIMonitorTableReading.drawnColumns.map { $0.leadingAligned }
+        == [true, false, false, false, false, false, false, false, false])
+
+// THE claim of the card: every drawn cell IS the CLI's own cell for that
+// column, `-` and units included, for every host in the fixture — with the one
+// documented §7 exception, the Host column, which draws the display label the
+// view-model hands over rather than the address the CLI prints.
+for (index, row) in viewModel.hostRows.enumerated() {
+    let drawn = CLIMonitorTableReading.cells(for: row)
+    let cliRow = [row.displayLabel] + Array(row.cells.dropFirst())
+    expect(tableGroup, "host \(index): drawn cells are the CLI's row verbatim",
+           drawn.map { $0.text } == cliRow)
+    expect(tableGroup, "host \(index): the eight numeric cells are byte-identical to the CLI's",
+           Array(drawn.dropFirst().map { $0.text }) == Array(row.cells.dropFirst()))
+    expect(tableGroup, "host \(index): the Host column draws the label, never the address",
+           drawn.first?.text == row.displayLabel && drawn.first?.text != row.host)
+}
+expect(tableGroup, "no drawn cell of any row is a dotted-quad address",
+       viewModel.hostRows.allSatisfy { row in
+           !CLIMonitorTableReading.cells(for: row).contains { $0.text.contains("192.0.2.") }
+       })
+
+// Which columns carry a verdict. `host_table` colours nothing; these five are
+// the view-model's thresholds, and the four others must be nil so the tile
+// cannot invent a colour for a column nobody thresholds. The reads are
+// bounds-guarded: a column that disappeared must report a FAIL naming the
+// column, not trap on the harness's own subscript and bury the reason.
+let verdicts = CLIMonitorTableReading.cells(for: viewModel.hostRows[0]).map { $0.level }
+expect(tableGroup, "one verdict slot per drawn column",
+       verdicts.count == CLIMonitorHostRow.columns.count)
+func verdict(_ index: Int) -> ClusterMetricLevel? {
+    verdicts.indices.contains(index) ? verdicts[index] : .critical
+}
+expect(tableGroup, "Host/Jobs/Swap/GPU% carry no verdict",
+       verdict(0) == nil && verdict(1) == nil && verdict(4) == nil && verdict(5) == nil)
+expect(tableGroup, "CPU%, RAM%, both temps and power carry the view-model's verdict",
+       verdict(2) == viewModel.hostRows[0].cpuLevel
+        && verdict(3) == viewModel.hostRows[0].memLevel
+        && verdict(6) == viewModel.hostRows[0].cpuTempLevel
+        && verdict(7) == viewModel.hostRows[0].gpuTempLevel
+        && verdict(8) == viewModel.hostRows[0].gpuPowerLevel)
+
+// The row budget of the size, and the `+n` that admits there were more.
+func tableNode(_ tail: Int) -> MonitorNode {
+    MonitorNode(host: "192.0.2.\(tail)", error: nil,
+                sample: MonitorSample(hostname: "node-\(tail)"),
+                used_slots: nil, free_slots: nil, workloads: nil)
+}
+let six = (11...16).map { tableNode($0) }.map(CLIMonitorHostRow.init(node:))
+expect(tableGroup, "medium keeps the four-row budget it always had",
+       CLIMonitorTableReading.visibleRows(from: six).count == 4
+        && CLIMonitorTableReading.mediumRowLimit == 4)
+expect(tableGroup, "the two hosts it left out are counted, not dropped",
+       CLIMonitorTableReading.hiddenRowCount(from: six) == 2)
+expect(tableGroup, "a fleet that fits says so (no phantom +0)",
+       CLIMonitorTableReading.hiddenRowCount(from: viewModel.hostRows) == 0)
+expect(tableGroup, "limit 0 draws no row and hides every host",
+       CLIMonitorTableReading.visibleRows(from: six, limit: 0).isEmpty
+        && CLIMonitorTableReading.hiddenRowCount(from: six, limit: 0) == 6)
+expect(tableGroup, "a zero-row limit never reads as a zero-host fleet",
+       CLIMonitorTableReading.hiddenRowCount(from: viewModel.hostRows, limit: 0) == 4)
+
+// VoiceOver reads the same CLI strings the eyes do.
+let spoken = CLIMonitorTableReading.accessibilityLabel(for: viewModel.hostRows[0])
+expect(tableGroup, "the row's sentence names each column and its CLI cell",
+       spoken.hasPrefix(viewModel.hostRows[0].displayLabel)
+        && spoken.contains("CPU Temp \(viewModel.hostRows[0].cpuTemp)")
+        && spoken.contains("GPU Power \(viewModel.hostRows[0].gpuPower)"))
+
+// The gate that decides whether the tile draws a table at all — executed, not
+// grepped, because "an unconfigured tile invites setup" is the same invariant
+// every other family is held to.
+let liveEntry = ClusterEntry(date: .now, fleet: fleet, monitor: viewModel,
+                             configured: true, paused: false)
+expect(tableGroup, "configured + live: four rows", liveEntry.cliHostRows?.count == 4)
+expect(tableGroup, "paused draws no table", ClusterEntry.paused().cliHostRows == nil)
+expect(tableGroup, "unconfigured draws no table", ClusterEntry.unconfigured.cliHostRows == nil)
+let noNodes = ClusterEntry(date: .now, fleet: fleet, monitor: viewModel,
+                           configured: true, paused: false,
+                           showSections: ["state", "models"])
+expect(tableGroup, "the operator switched 'nodes' off: no table",
+       noNodes.cliHostRows == nil)
+expect(tableGroup, "no host list is nil, not an empty table",
+       ClusterEntry(date: .now, fleet: nil, configured: true, paused: false).cliHostRows == nil)
+expect(tableGroup, "the gallery sample carries the CLI table",
+       ClusterEntry.placeholder.cliHostRows?.count == 4)
+
 print("")
 if failures.isEmpty {
     print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")

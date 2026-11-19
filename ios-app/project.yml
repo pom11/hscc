@@ -429,6 +429,12 @@ targets:
       - path: Sources/HSCCWidgets/ClusterWidget.swift
       - path: Sources/HSCCWidgets/ClusterWidgetMetrics.swift
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
+      # The `systemMedium` CLI host table (t_2d1c12dc). Split in two on purpose:
+      # the reading half is Foundation-only so `cluster_widget_check.sh` can
+      # compile and RUN the column/cell/threshold rules against the fixture, and
+      # the view half is the only file that names a Colour.
+      - path: Sources/HSCCWidgets/CLIMonitorTableReading.swift
+      - path: Sources/HSCCWidgets/CLIMonitorHostTableView.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
       # Projects surface (small + medium + large), t_d739d163. Its configuration

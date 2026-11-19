@@ -50,6 +50,17 @@ struct MonitorEntry: TimelineEntry {
     /// The CLI rows (nodes + serving table), or nil when the monitor route
     /// sent no host list.
     let fleet: ClusterFleet?
+    /// `hscc cluster monitor`'s host table for this refresh, cell for cell, or
+    /// nil when the monitor read did not answer. The medium tile draws this
+    /// (`CLIMonitorHostTableView`); the glance surfaces draw `fleet`, and both
+    /// come from the same decoded response.
+    ///
+    /// Required rather than defaulted, and that is load-bearing: a `let` with
+    /// an initial value is dropped from the synthesized memberwise `init`
+    /// altogether, so a "`= nil`" here would have been invisible to every call
+    /// site and the table would have silently never arrived. A required
+    /// argument makes each new entry site say what it carries.
+    let monitor: ClusterMonitorViewModel?
     /// The daemon-host machine data, or nil when that read did not answer.
     let daemonHost: MonitorDaemonHost?
     let failure: WidgetDataFailure?
@@ -64,6 +75,17 @@ struct MonitorEntry: TimelineEntry {
         if !configured { return "Set up in HSCC" }
         if paused { return "Paused" }
         return failure?.shortLabel ?? "No data"
+    }
+
+    /// The host rows the CLI-shaped surface may draw, or nil when something else
+    /// owns it. Deliberately the SAME predicate as `ClusterEntry.cliHostRows`,
+    /// character for character: two tiles deciding independently when the table
+    /// is allowed on screen is how one of them ends up drawing numbers on a
+    /// paused surface.
+    var cliHostRows: [CLIMonitorHostRow]? {
+        guard configured, !paused, showSections.contains("nodes") else { return nil }
+        guard let monitor, !monitor.hostRows.isEmpty else { return nil }
+        return monitor.hostRows
     }
 
     /// The daemon's health sentence: `hscc status`'s daemon block, with the
@@ -132,7 +154,7 @@ struct MonitorEntry: TimelineEntry {
 
     static let unconfigured = MonitorEntry(date: .now, state: .unconfigured,
                                            configured: false, paused: false,
-                                           fleet: nil, daemonHost: nil,
+                                           fleet: nil, monitor: nil, daemonHost: nil,
                                            failure: nil, refreshMinutes: 5,
                                            showSections: availableSections,
                                            lastKnownAgeMinutes: nil,
@@ -140,7 +162,7 @@ struct MonitorEntry: TimelineEntry {
 
     static func paused(_ date: Date = .now) -> MonitorEntry {
         MonitorEntry(date: date, state: .paused, configured: true, paused: true,
-                     fleet: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
+                     fleet: nil, monitor: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
                      showSections: availableSections,
                      lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
     }
@@ -148,6 +170,7 @@ struct MonitorEntry: TimelineEntry {
     static let placeholder = MonitorEntry(date: .now, state: .monitoring,
                                           configured: true, paused: false,
                                           fleet: ClusterEntry.placeholder.fleet,
+                                          monitor: ClusterEntry.placeholder.monitor,
                                           daemonHost: sampleDaemonHost,
                                           failure: nil, refreshMinutes: 5,
                                           showSections: availableSections,
@@ -206,6 +229,10 @@ struct MonitorTimelineProvider: TimelineProvider {
         let (monitorOutcome, hostOutcome) = await (monitorTask, hostTask)
 
         let fleet = monitorOutcome.value.flatMap(FleetProjection.init(projecting:))
+        // The same decoded response through the CLI view-model — one read, two
+        // projections, so the glance rows and the host table cannot come from
+        // different refreshes (§2's budget is unchanged: still two requests).
+        let monitor = monitorOutcome.value.flatMap { ClusterMonitorViewModel.project($0) }
         let daemonHost = hostOutcome?.value
         let failure = monitorOutcome.failure ?? hostOutcome?.failure
         let anyData = fleet != nil || daemonHost != nil
@@ -214,7 +241,12 @@ struct MonitorTimelineProvider: TimelineProvider {
             let last = MonitorSnapshotStore.load()
             let age = last.map { WidgetData.ageMinutes(from: Date(timeIntervalSince1970: $0.date)) }
             return MonitorEntry(date: .now, state: .unreachable, configured: true,
-                                paused: false, fleet: nil, daemonHost: last?.daemonHost,
+                                paused: false, fleet: nil,
+                                // Nothing to draw: this branch is only reached
+                                // when the monitor read gave no host list, and
+                                // `FleetProjection` refuses an empty one, so a
+                                // view-model built from it would hold zero rows.
+                                monitor: nil, daemonHost: last?.daemonHost,
                                 failure: failure, refreshMinutes: refreshMinutes,
                                 showSections: showSections,
                                 lastKnownAgeMinutes: failure?.showsStaleData == true ? age : nil,
@@ -232,7 +264,8 @@ struct MonitorTimelineProvider: TimelineProvider {
         }
 
         return MonitorEntry(date: .now, state: state, configured: true, paused: false,
-                            fleet: fleet, daemonHost: daemonHost, failure: failure,
+                            fleet: fleet, monitor: monitor,
+                            daemonHost: daemonHost, failure: failure,
                             refreshMinutes: refreshMinutes, showSections: showSections,
                             lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
     }

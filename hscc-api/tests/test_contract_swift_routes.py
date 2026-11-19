@@ -229,9 +229,9 @@ def test_every_swift_route_is_registered():
 
 
 #: The extension client's audited read set (WIDGET_DATA_CONTRACT §3 + the
-#: daemon-host sidecar). Kept explicit so deleting a path from the Swift source
-#: is a visible change here, and adding one without registering it fails the
-#: register gate above.
+#: daemon-host sidecar + the recorder's history read). Kept explicit so deleting
+#: a path from the Swift source is a visible change here, and adding one without
+#: registering it fails the register gate above.
 EXPECTED_EXTENSION_ROUTES = {
     ("GET", "/v1/projects"),
     ("GET", "/v1/mobile/summary"),
@@ -240,6 +240,7 @@ EXPECTED_EXTENSION_ROUTES = {
     ("GET", "/v1/kanban/stale"),
     ("GET", "/v1/cluster/monitor"),
     ("GET", "/v1/cluster/status"),
+    ("GET", "/v1/cluster/history"),
     ("GET", "/v1/daemon/host"),
     ("GET", "/v1/autodown/status"),
     # t_5ae8cfcf: the metrics-history read the history chart draws from. Its
