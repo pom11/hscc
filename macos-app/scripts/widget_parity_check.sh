@@ -112,6 +112,20 @@ mac_families() {
 ios_only_region() {
   awk '/#if os\(iOS\)/ { f = 1; next } /#endif/ { f = 0 } f { print }' "$1"
 }
+# ios_families <file> — the supportedFamilies list inside the #if os(iOS) arm.
+# The mirror of mac_families: a family may be added on the phone and forgotten on
+# the desktop, and it may also be *deleted* from the phone by an edit that only
+# meant to change the desktop list. Both directions are checked below.
+ios_families() {
+  awk '
+    /#if os\(iOS\)/  { state = "ios" }
+    /^[[:space:]]*#else/ { state = "mac" }
+    /#endif/          { state = "" }
+    state == "ios" && /\.supportedFamilies\(/ { f = 1 }
+    f { print }
+    f && /\]\)/ { f = 0 }
+  ' "$1"
+}
 # arm_view <file> <family> — the struct the dispatch arm draws.
 arm_view() {
   awk -v fam="$2" '
@@ -170,6 +184,21 @@ for spec in "ClusterWidget:$CLUSTER" "MonitorWidget:$MONITOR"; do
     ok "$widget: no system* family is hidden behind #if os(iOS)"
   else
     bad "$widget: $guarded system* dispatch arm(s) sit inside an #if os(iOS) region"
+  fi
+  # The mirror: an edit aimed at the desktop list must not quietly remove a
+  # family from the phone list. Every desktop family has to stay offered there.
+  ios_declared=$(ios_families "$file" | tr -d '[:space:]')
+  ios_missing=""
+  for fam in $DESKTOP_FAMILIES; do
+    case "$ios_declared" in
+      *".$fam"*) ;;
+      *) ios_missing="$ios_missing .$fam" ;;
+    esac
+  done
+  if [ -z "$ios_missing" ]; then
+    ok "$widget: the iOS list still offers all four desktop families"
+  else
+    bad "$widget: iOS no longer offers$ios_missing — a desktop-side edit took a phone family away"
   fi
   echo "  $widget iOS-only region: $(ios_only_region "$file" | grep -c 'case \.accessory' || true) accessory arm(s), $(ios_only_region "$file" | grep -c supportedFamilies || true) supportedFamilies list(s)"
 done
