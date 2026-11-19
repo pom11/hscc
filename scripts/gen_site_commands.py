@@ -44,7 +44,10 @@ Known limitation, stated rather than papered over: an entry the CLI publishes
 as a placeholder group (``api <cmd>``, ``kanban <cmd>``) cannot be checked
 verb-by-verb from ``--help`` alone, because the verbs live in that group's own
 help. ``scripts/hscc_cli_help_audit.py`` enumerates every verb from the
-dispatch tables and is the gate for those.
+dispatch tables and is the gate for those. The same goes for a concrete
+subcommand the copy card names after a bare verb (``hscc api start``): it is
+command path, not an argument, so ``command_key()`` carries it and the group's
+own help is what has to agree.
 
 The two are keyed off the ``<!-- COMMANDS:BEGIN -->`` / ``<!-- COMMANDS:END -->``
 markers: the block in ``site/COPY.md`` (format contract, one bullet per
