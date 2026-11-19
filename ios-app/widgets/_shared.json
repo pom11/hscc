@@ -2,6 +2,10 @@
   "sources": [
     "Sources/HSCCWidgets/HSCCWidgetsBundle.swift",
     "Sources/HSCCWidgets/WidgetRendering.swift",
-    "Sources/HSCCWidgets/HSCCWidgetList.generated.swift"
+    "Sources/HSCCWidgets/HSCCWidgetList.generated.swift",
+    "Sources/HSCCWidgets/CLIMonitorHostTableView.swift",
+    "Sources/HSCCWidgets/CLIMonitorTableReading.swift",
+    "Sources/HSCCWidgets/ClusterSmallGrid.swift",
+    "Sources/HSCCWidgets/ClusterSmallGridView.swift"
   ]
 }
