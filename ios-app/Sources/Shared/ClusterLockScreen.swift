@@ -368,8 +368,12 @@ enum CLILockScreenCopy {
                 parts.append("\(metrics.backendsDown) backend down")
             }
         } else {
+            // The note words are `CLIMonitorNote`'s, never re-typed here: the
+            // empty-serving sentence is the CLI's own dim line, and only the
+            // missing-section case (where the CLI prints nothing at all) keeps
+            // the app's neutral wording.
             parts.append(metrics.servingReported
-                ? "no backends behind the proxy" : "serving poll did not answer")
+                ? CLIMonitorNote.noBackends.text : "serving poll did not answer")
         }
         return parts.joined(separator: ", ") + "."
     }
