@@ -174,6 +174,9 @@ let kanbanRunningBody = Data(#"""
 /// reported — a `null` that must stay nil, because a 0.0 would draw a node that
 /// never answered as an idle one. `store.path` is on the wire and deliberately
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
+/// `store.tier0_resident` is `null` here and that is not a missing field: the
+/// route reads the 2 s ring only inside its tier-0 branch, so at tier 1 nobody
+/// measured it (`hscc-api/routes_cluster.py`, since `d47ae40f`).
 let historyBody = Data(#"""
 {"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
@@ -184,8 +187,27 @@ let historyBody = Data(#"""
           {"tier":1,"ts":1794978360,"host":"192.0.2.10","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
  "engines":[{"tier":1,"ts":1794978300,"node":"192.0.2.10","port":"8000","model":"org/Qwen-Test","run":2,"wait":1,"kv":12.5,"gen_tps":40.0,"n":30,"error":null}],
  "counts":{"hosts":2,"engines":1},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":true},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
  "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
+"""#.utf8)
+
+/// The same route's answer for `window=15m` (tier 0) as the deployed topology
+/// serves it: the 2 s ring is the daemon's memory, so this process measured
+/// `tier0_resident == false`, both series came back empty, and `note` says why.
+/// Those are the answers of
+/// `model_decode_check/fixtures/v1_cluster_history_15m.json`, so the two harnesses
+/// cannot drift into disagreeing about what tier 0 replies. It exists because the
+/// tier-1 case alone could not tell "the route answered null" from "the `store`
+/// object never decoded at all" — both read as `nil`.
+let historyTier0Body = Data(#"""
+{"window":"15m","window_s":900,"tier":0,"resolution_s":2,"resolution":"2s",
+ "tier_summary":"raw 2 s samples from the recorder's in-memory ring, no averaging, and no peak columns",
+ "max_fields":[],"since":1794999000,"until":1794999900,"node":"all",
+ "hosts_included":true,"engines_included":true,"hosts":[],"engines":[],
+ "counts":{"hosts":0,"engines":0},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":16384,"tier0_resident":false},
+ "note":"tier 0 is the sampler's in-memory ring and lives in the daemon process; this server process cannot read it, so no 2 s points are served here. Use window=1h for the durable 1-minute tier.",
+ "speak":"The 15 m window is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points."}
 """#.utf8)
 
 // MARK: - Harness
@@ -273,8 +295,16 @@ func runAll() async {
                 && payload.hosts[0].gpu_power_w_max == 480.0)
         check("history names the peak columns it carried",
               payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"])
-        check("history reports whether the 2 s ring was readable",
-              payload.tier0Resident == true)
+        // `tier0_resident` is a MEASUREMENT of the 2 s ring, and the route takes
+        // it only inside its tier-0 branch, so a durable window answers `null` for
+        // it — a tier the route never read cannot report residency. The `store`
+        // fields beside it are what give this teeth: they decoded, so the `nil`
+        // below is the wire's `null` and not a `store` object that failed to
+        // decode. The tier-0 case further down is the other half.
+        check("a tier-1 answer leaves the 2 s ring unmeasured, not resident",
+              payload.tier == 1 && payload.tier0Resident == nil
+                && payload.store?.exists == true
+                && payload.store?.db_bytes == 3355443)
         let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
         check("the store's server path is never decoded",
               !historyFields.contains("path"))
@@ -288,6 +318,33 @@ func runAll() async {
             && historyRequest?.url?.query?.contains("metrics=") == true)
     check("history's path carries no query string of its own",
           historyRequest?.url?.path == "/v1/cluster/history")
+
+    // 1c. The same field where the route DID read the ring. Without this case the
+    //     tier-1 assertion above is worthless: `tier0Resident == nil` would also
+    //     hold if the model simply never read the flag, or if the `store` object
+    //     failed to decode. A `false` at tier 0 is a measurement, and the reason a
+    //     chart draws a gap instead of a quiet fleet rides on `note` — the flag is
+    //     never that reason (`ClusterHistorySeries.reason` reads `note`, and
+    //     cluster_history_chart_check.sh gates that).
+    StubTransport.arm(.http(status: 200, body: historyTier0Body))
+    let ring = await client.clusterHistory(window: "15m", node: "192.0.2.10",
+                                           metrics: ["gpu_util_pct"])
+    switch ring {
+    case .success(let payload):
+        check("a tier-0 answer measures the 2 s ring instead of leaving it open",
+              payload.tier == 0 && payload.resolution_s == 2
+                && payload.tier0Resident == false)
+        check("an empty tier-0 answer carries its reason on note, not on the flag",
+              payload.hosts.isEmpty && payload.engines.isEmpty
+                && payload.tier0Resident == false
+                && (payload.note ?? "").contains("window=1h"))
+    case .failure(let failure):
+        check("tier-0 history should decode, got \(String(reflecting: failure))", false)
+    }
+    let ringRequest = StubTransport.requests.last
+    check("the tier-0 read went out as its own request, not a replay of tier 1",
+          ringRequest?.url?.path == "/v1/cluster/history"
+            && ringRequest?.url?.query?.contains("window=15m") == true)
 
     // 2. A refused path never reaches the transport — no request, no side effect.
     StubTransport.arm(.http(status: 200, body: Data("{}".utf8)))
