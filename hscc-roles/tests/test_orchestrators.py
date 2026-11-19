@@ -81,9 +81,9 @@ def test_resolver_general_sentinel(registry_file):
     got = orchestrators.resolve_orchestrator("general", path=registry_file)
     assert got == {
         "project": "general",
-        "profile": "general-orch",
+        "profile": "general",
         "session": "general",
-        "board": "default",
+        "board": "general",
         "repo": None,
     }
 
@@ -91,9 +91,9 @@ def test_resolver_general_sentinel(registry_file):
 def test_resolver_general_is_default_when_none(registry_file):
     """No project specified -> the general orchestrator (repo=None)."""
     got = orchestrators.resolve_orchestrator(None, path=registry_file)
-    assert got["profile"] == "general-orch"
+    assert got["profile"] == "general"
     assert got["session"] == "general"
-    assert got["board"] == "default"
+    assert got["board"] == "general"
     assert got["repo"] is None
 
 
@@ -259,8 +259,8 @@ def test_ensure_orchestrator_general_repo_none(registry_file, isolated_home):
     got = orchestrators.ensure_orchestrator(None, base_identity="BASE-ID",
                                              path=registry_file)
     assert got["repo"] is None
-    assert got["profile"] == "general-orch"
-    pdir = os.path.join(isolated_home, "general-orch")
+    assert got["profile"] == "general"
+    pdir = os.path.join(isolated_home, "general")
     assert os.path.isdir(pdir)
     with open(os.path.join(pdir, "SOUL.md")) as f:
         soul = f.read()
@@ -413,10 +413,11 @@ def test_orch_all_ensures_every_project_plus_general(
     code, report = _run_orch_all(registry_file, isolated_home)
     assert code == 1  # noboard failed -> non-zero exit
     ensured = {e["profile"] for e in report["ensured"]}
-    assert ensured == {"ecofire-app-orch", "hscc-orch", "general-orch"}
+    assert ensured == {"ecofire-app-orch", "hscc-orch", "general"}
     assert "noboard" in {f["project"] for f in report["failures"]}
-    for name in ("ecofire-app", "hscc", "general"):
+    for name in ("ecofire-app", "hscc"):
         assert os.path.isdir(os.path.join(isolated_home, f"{name}-orch"))
+    assert os.path.isdir(os.path.join(isolated_home, "general"))
     # no orchestrator was half-written for the failing project
     assert not os.path.isdir(os.path.join(isolated_home, "noboard-orch"))
 
@@ -446,8 +447,8 @@ def test_orch_all_missing_registry_still_ensures_general(tmp_path, isolated_home
     code, report = _run_orch_all(missing, isolated_home)
     assert code == 0
     assert report["requested"] == ["general"]
-    assert report["ensured"][0]["profile"] == "general-orch"
-    assert os.path.isdir(os.path.join(isolated_home, "general-orch"))
+    assert report["ensured"][0]["profile"] == "general"
+    assert os.path.isdir(os.path.join(isolated_home, "general"))
 
 
 def test_orch_all_stdout_is_pure_json(registry_file_no_noboard, isolated_home):
@@ -500,11 +501,11 @@ def test_cli_orch_all_subprocess_ensures_fleet(registry_file_no_noboard,
     import json as _json
     report = _json.loads(result.stdout)   # stdout must be pure JSON
     assert {e["profile"] for e in report["ensured"]} == \
-        {"ecofire-app-orch", "hscc-orch", "general-orch"}
+        {"ecofire-app-orch", "hscc-orch", "general"}
     assert result.stderr == ""  # ssh into registry present, no warnings
     home = tmp_path / "home"
     assert (home / "profiles" / "hscc-orch").is_dir()
-    assert (home / "profiles" / "general-orch").is_dir()
+    assert (home / "profiles" / "general").is_dir()
 
 
 def test_cli_orch_all_subprocess_missing_registry(tmp_path, monkeypatch):
@@ -514,6 +515,6 @@ def test_cli_orch_all_subprocess_missing_registry(tmp_path, monkeypatch):
     import json as _json
     report = _json.loads(result.stdout)
     assert report["requested"] == ["general"]
-    assert (tmp_path / "home" / "profiles" / "general-orch").is_dir()
+    assert (tmp_path / "home" / "profiles" / "general").is_dir()
     # the warning about the missing registry is on STDERR, keeping stdout pure
     assert "warn" in result.stderr

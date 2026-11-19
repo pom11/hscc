@@ -397,10 +397,11 @@ print(json.dumps({
 def _provision_profile_names(registry=None):
     """The profile names provision-check iterates — exactly the set orch-all
     provisions: an orchestrator profile per registry project (``<P>-orch``)
-    plus the ``general`` catch-all (``general-orch``). Degrades to just the
-    catch-all on a missing/unreadable registry, mirroring orch-all."""
+    plus the main orchestrator (the name stored by bootstrap, default
+    ``general``). Degrades to just the main profile on a missing/unreadable
+    registry, mirroring orch-all."""
     projects = orchestrators.list_registry_projects(registry)
-    return [f"{p}-orch" for p in projects] + [orchestrators.GENERAL_PROFILE]
+    return [f"{p}-orch" for p in projects] + [orchestrators.main_profile()]
 
 
 def _nested_get(data, keys):
@@ -492,7 +493,8 @@ def cmd_provision_check(argv):
     Usage: hscc.py provision-check [--registry PATH] [--profile NAME] [--json]
 
     For every profile in the provisioning set (a ``<P>-orch`` per registry
-    project plus the ``general-orch`` catch-all — the same set orch-all
+    project plus the main orchestrator (the bootstrap-stored name, default
+    ``general``) — the same set orch-all
     provisions) this resolves <profile>/config.yaml and reports the values
     Hermes would ACTUALLY use: memory.provider, memory.memory_char_limit,
     compression.threshold_tokens (compaction cap) and the aggregate

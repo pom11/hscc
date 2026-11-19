@@ -77,6 +77,49 @@ die()  { echo "  ✗ $1" >&2; exit 1; }
 hdr()  { echo; echo "━━━ $1 ━━━"; }
 plan() { echo "  → plan: $1"; }
 
+# ── main orchestrator name (t_c6eccd49) ─────────────────────────────────────
+# ONE name, stored once in ~/.hscc/main-orchestrator.json and resolved by
+# hscc-roles/main_orch.py everywhere. Re-running bootstrap NEVER changes a
+# stored name; the question is asked only when none is stored. Tests extract
+# this function verbatim (keep it self-contained: BOOT_DIR, PYBIN, HSCC_DIR,
+# HERMES_HOME, ASSUME_YES, DRY_RUN, say/ok/warn/plan/die).
+ask_main_orch_name() {
+  local _helper _stored _name _in _why
+  _helper="$BOOT_DIR/../hscc-roles/main_orch.py"
+  _stored="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+    "$PYBIN" "$_helper" stored 2>/dev/null || true)"
+  if [ -n "$_stored" ]; then
+    MAIN_ORCH_NAME="$_stored"
+    ok "main orchestrator: $MAIN_ORCH_NAME (stored)"
+    return 0
+  fi
+  _name="general"
+  if ! $ASSUME_YES; then
+    while :; do
+      read -rp "  Main orchestrator name [general]: " _in || _in=""
+      [ -n "${_in:-}" ] && _name="$_in"
+      if _why="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+          "$PYBIN" "$_helper" validate "$_name" 2>&1)"; then
+        break
+      fi
+      warn "invalid main orchestrator name: $_why"
+      _name="general"
+    done
+  fi
+  _why="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+    "$PYBIN" "$_helper" validate "$_name" 2>&1)" \
+    || die "invalid main orchestrator name: $_why"
+  MAIN_ORCH_NAME="$_name"
+  if $DRY_RUN; then
+    plan "write $HSCC_DIR/main-orchestrator.json (main orchestrator name=$MAIN_ORCH_NAME)"
+  else
+    _stored="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+      "$PYBIN" "$_helper" store "$MAIN_ORCH_NAME" 2>&1)" \
+      || die "could not store main orchestrator name: $_stored"
+    ok "main orchestrator: $MAIN_ORCH_NAME"
+  fi
+}
+
 # ── brew libexec detection (t_bc5a3fee) ─────────────────────────────────────
 # The brew tap (homebrew-hscc) extracts the release tarball under
 # <prefix>/libexec/hscc-<ver>/ and puts `hscc` on PATH through brew itself.
@@ -133,6 +176,10 @@ if ! $ASSUME_YES && [ "${#HOST_ARR[@]}" -gt 1 ]; then
   read -rp "  Orchestrator node [$ORCH]: " _in; [ -n "${_in:-}" ] && ORCH="$_in"
 fi
 ok "orchestrator: $ORCH"
+
+# Main orchestrator name: asked once (only when none is stored), persisted in
+# ~/.hscc. --yes takes the stored name or "general"; --dry-run only plans.
+ask_main_orch_name
 
 # recipe: sole recipe auto, else pick.
 # (read loop, not mapfile — macOS ships Bash 3.2 which lacks mapfile.)
