@@ -75,6 +75,12 @@ struct MonitorEntry: TimelineEntry {
     let showSections: Set<String>
     let lastKnownAgeMinutes: Int?
     let lastKnownNodeCount: Int
+    /// The four Lock Screen metrics (hottest temp, GPU load, fleet watts,
+    /// running/waiting), projected from the CLI view-model over the SAME monitor
+    /// read as `fleet`. There is deliberately NO default here: `MonitorEntry`'s
+    /// init is synthesized, so every construction path has to say where its Lock
+    /// Screen numbers come from instead of silently shipping a blank ring.
+    let lockScreen: CLILockScreenMetrics?
 
     static let availableSections = WidgetSurfaceKind.widgetMonitor.availableSections
 
@@ -100,6 +106,21 @@ struct MonitorEntry: TimelineEntry {
         guard configured, !paused, showSections.contains("nodes") else { return nil }
         guard let monitor, !monitor.hostRows.isEmpty else { return nil }
         return monitor.hostRows
+    }
+
+    /// The value the Lock Screen ring fills to: the fleet's GPU load, 0…100.
+    /// Nil means the ring has nothing to measure and draws the gated line
+    /// instead — a ring at zero would claim an idle fleet (§6 rule 1).
+    var lockScreenGaugeValue: Double? {
+        lockScreen.flatMap { $0.gpuUtil?.value }
+    }
+
+    /// The VoiceOver sentence, and only when the Lock Screen copy is what is on
+    /// screen: a fallback line ("Can't reach the cluster") must not be read out
+    /// as a list of things nobody measured.
+    var lockScreenVoice: String? {
+        guard let lockScreen, !lockScreen.hasNothing else { return nil }
+        return CLILockScreenCopy.voice(lockScreen)
     }
 
     /// The daemon's health sentence: `hscc status`'s daemon block, with the
@@ -135,6 +156,17 @@ struct MonitorEntry: TimelineEntry {
         let isAccessory = surface == .inline || surface == .circular || surface == .rectangular
         let shortForm = surface == .small || isAccessory
         let reason = shortForm ? failure?.shortLabel : failure?.operatorLine
+        // The three Lock Screen families draw `hscc cluster monitor`'s four
+        // numbers through the shared copy rule, and they do NOT get the
+        // daemon-host half: the provider refuses that request for an accessory
+        // family and a Lock Screen line has no room for a second machine's
+        // health, so this returns instead of falling into the daemon merge.
+        if isAccessory, let lockScreen, !lockScreen.hasNothing,
+           let cli = CLILockScreenCopy.text(for: surface, lockScreen,
+                                            failure: reason,
+                                            ageMinutes: lastKnownAgeMinutes) {
+            return cli
+        }
         let base: FleetText
         if let fleet {
             base = fleet.text(for: surface, failure: reason, ageMinutes: lastKnownAgeMinutes)
@@ -178,13 +210,15 @@ struct MonitorEntry: TimelineEntry {
                                            failure: nil, refreshMinutes: 5,
                                            showSections: availableSections,
                                            lastKnownAgeMinutes: nil,
-                                           lastKnownNodeCount: 0)
+                                           lastKnownNodeCount: 0,
+                                           lockScreen: nil)
 
     static func paused(_ date: Date = .now) -> MonitorEntry {
         MonitorEntry(date: date, state: .paused, configured: true, paused: true,
                      fleet: nil, monitor: nil, tableData: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
                      showSections: availableSections,
-                     lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
+                     lastKnownAgeMinutes: nil, lastKnownNodeCount: 0,
+                     lockScreen: nil)
     }
 
     static let placeholder = MonitorEntry(date: .now, state: .monitoring,
@@ -196,7 +230,11 @@ struct MonitorEntry: TimelineEntry {
                                           failure: nil, refreshMinutes: 5,
                                           showSections: availableSections,
                                           lastKnownAgeMinutes: nil,
-                                          lastKnownNodeCount: 0)
+                                          lastKnownNodeCount: 0,
+                                          // The same sample fleet, so the two
+                                          // tiles' Lock Screen previews cannot
+                                          // describe two different clusters.
+                                          lockScreen: ClusterEntry.placeholder.lockScreen)
 
     private static let sampleDaemonHost = MonitorDaemonHost(
         hostname: "hscc-host", platform: "macOS", arch: "arm64",
@@ -256,6 +294,11 @@ struct MonitorTimelineProvider: TimelineProvider {
         let monitor = monitorOutcome.value.flatMap { ClusterMonitorViewModel.project($0) }
         let daemonHost = hostOutcome?.value
         let failure = monitorOutcome.failure ?? hostOutcome?.failure
+        // The Lock Screen's four numbers, from the SAME monitor body and through
+        // the CLI view-model (t_61ed3f5e): one read feeds both halves, so a
+        // Lock Screen temperature is the CLI's own cell for that host and a
+        // failed read nils this half rather than inventing zeroes.
+        let lockScreen = CLILockScreenMetrics(monitorOutcome.value)
         let anyData = fleet != nil || daemonHost != nil
 
         guard anyData else {
@@ -271,7 +314,12 @@ struct MonitorTimelineProvider: TimelineProvider {
                                 failure: failure, refreshMinutes: refreshMinutes,
                                 showSections: showSections,
                                 lastKnownAgeMinutes: failure?.showsStaleData == true ? age : nil,
-                                lastKnownNodeCount: last?.nodes.count ?? 0)
+                                lastKnownNodeCount: last?.nodes.count ?? 0,
+                                // The stored snapshot keeps nodes and the daemon
+                                // host only, so a last-known render has no CLI
+                                // metrics — the accessories fall back to the
+                                // reason + age copy rather than a stale total.
+                                lockScreen: nil)
         }
 
         let down = fleet?.tally.nodesDown ?? 0
@@ -289,7 +337,8 @@ struct MonitorTimelineProvider: TimelineProvider {
                             tableData: ClusterMonitorTables.project(monitorOutcome.value),
                             daemonHost: daemonHost, failure: failure,
                             refreshMinutes: refreshMinutes, showSections: showSections,
-                            lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
+                            lastKnownAgeMinutes: nil, lastKnownNodeCount: 0,
+                            lockScreen: lockScreen)
     }
 
     private static func daemonHost(client: WidgetDataClient,
