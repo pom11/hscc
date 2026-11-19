@@ -24,6 +24,7 @@ task: t_c6eccd49
   and the API's role-profile sweep all read the resolver instead. The legacy
   `orchestrator` role profile remains supported on disk — this card does not
   rewrite SOULs or migrate profiles (that is the next card).
+---
 kind: Verified
 task: t_c6eccd49
 
