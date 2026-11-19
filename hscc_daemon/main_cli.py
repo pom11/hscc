@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from . import main_wakeups
+from .hermes_python import kanban_root_refusal
 
 VALID_SUBCOMMANDS = ("start", "status", "wakeups")
 SUB_HELP = ("--help", "-h")
@@ -266,6 +267,16 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
     name = main_orch.main_name(hscc_dir)
     profile = profile or main_orch.main_profile(hscc_dir)
     board = main_orch.main_board(hscc_dir)
+    # Fail closed before launching a REPL that would see a foreign board: the
+    # same resolved-root rule bootstrap's main_board.ensure enforces. Starting
+    # the pane is the other path that shares find_hermes_bin, and an orchestrator
+    # whose board lives outside its own home is exactly the wrong-target state
+    # this guard exists to make impossible.
+    refusal = kanban_root_refusal(_hermes_root())
+    if refusal:
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "kanban-root-refused", "pane": None, "target": None,
+                "session": None, "command": None, "detail": refusal}
     repl = repl if repl is not None else load_repl_inject()
 
     try:
@@ -402,6 +413,9 @@ def _start_lines(result):
     lines = [f"error: {result.get('detail') or 'could not start the main orchestrator'}"]
     if result.get("action") == "missing-hermes":
         lines.append("  fix: install the Hermes venv or set HERMES_BIN")
+    elif result.get("action") == "kanban-root-refused":
+        lines.append("  fix: unset HERMES_KANBAN_HOME, or point HERMES_HOME "
+                     "at that root")
     elif result.get("action") in ("missing-repl", "discovery-failed"):
         lines.append("  fix: deploy the hscc-api plugin beside hscc_daemon")
     elif result.get("action") in ("create-failed", "tmux-error"):

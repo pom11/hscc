@@ -88,6 +88,10 @@ def _pin_state(tmp_path, monkeypatch):
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # The package-wide hermetic floor pins a DIFFERENT kanban root; align it
+    # with this fixture's target home so start()'s fail-closed guard is about
+    # the thing each test names, not an artefact of the floor.
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.delenv("HERMES_BIN", raising=False)
     return binary
 
@@ -178,6 +182,23 @@ def test_start_reports_missing_hermes_without_touching_tmux(monkeypatch):
     res = mc.start(repl=FakeRepl([]), runner=runner)
     assert res["ok"] is False and res["action"] == "missing-hermes"
     assert runner.calls == []
+
+
+def test_start_refuses_a_kanban_root_outside_the_target_home(tmp_path,
+                                                             monkeypatch):
+    """The other find_hermes_bin path must fail closed on a foreign board root.
+
+    Starting the REPL is harmless by itself, but the main orchestrator it
+    launches would read and mutate whatever board that root holds.
+    """
+    foreign = tmp_path / "foreign-kanban"
+    foreign.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(foreign))
+    runner = FakeRunner(sessions=[{"name": "work", "attached": True}])
+    res = mc.start(repl=FakeRepl([]), runner=runner)
+    assert res["ok"] is False and res["action"] == "kanban-root-refused"
+    assert str(foreign) in res["detail"]
+    assert runner.calls == [], "no tmux command may run after the refusal"
 
 
 def test_start_reports_missing_repl(monkeypatch):

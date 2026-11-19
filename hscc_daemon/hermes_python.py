@@ -91,6 +91,74 @@ def hermes_root(home):
     return home
 
 
+#: Env var Hermes' kanban layer reads before the Hermes root
+#: (``hermes_cli.kanban_db.kanban_home``). A non-empty value wins outright.
+KANBAN_HOME_ENV = "HERMES_KANBAN_HOME"
+
+
+def native_hermes_home(env=None, *, home=None) -> str:
+    """The platform default root Hermes uses when ``HERMES_HOME`` is unset."""
+    env = os.environ if env is None else env
+    if home is None:
+        home = env.get("HOME") or os.path.expanduser("~")
+    suffix = str(env.get("HERMES_DATA_DIR_SUFFIX", "") or "")
+    return os.path.join(os.path.expanduser(str(home)), ".hermes" + suffix)
+
+
+def kanban_root(env=None, *, home=None) -> str:
+    """The absolute root Hermes' kanban state resolves to.
+
+    Mirrors ``hermes_cli.kanban_db.kanban_home`` -> ``get_default_hermes_root``:
+    ``HERMES_KANBAN_HOME`` wins; otherwise ``HERMES_HOME`` is honoured only
+    when it resolves OUTSIDE the native ``~/.hermes``. A home *inside* the
+    native root resolves BACK to it (the t_d39c720e trap), and
+    ``<root>/profiles/<name>`` resolves to ``<root>``.
+    """
+    env = os.environ if env is None else env
+    override = str(env.get(KANBAN_HOME_ENV, "") or "").strip()
+    if override:
+        return os.path.realpath(os.path.expanduser(override))
+    native = os.path.realpath(native_hermes_home(env, home=home))
+    raw = str(env.get("HERMES_HOME", "") or "").strip()
+    if not raw:
+        return native
+    env_path = os.path.realpath(os.path.expanduser(raw))
+    try:
+        if os.path.commonpath([env_path, native]) == native:
+            return native
+    except ValueError:  # different drives (Windows): cannot be under native
+        pass
+    if is_profile_dir(env_path):
+        return os.path.dirname(os.path.dirname(env_path))
+    return env_path
+
+
+def kanban_root_refusal(target_home, env=None):
+    """Fail-closed guard for any caller that mutates (or launches against) kanban.
+
+    ``target_home`` is the Hermes ROOT the caller was told to install into (a
+    profile-scoped home has already been walked to its root by the caller).
+    Returns ``None`` when Hermes' resolved kanban root is equal to or under
+    that target; otherwise a message naming BOTH roots. A caller must refuse
+    on a non-None return — never warn and continue.
+    """
+    target = os.path.realpath(os.path.expanduser(str(target_home)))
+    resolved = kanban_root(env)
+    try:
+        inside = os.path.commonpath([resolved, target]) == target
+    except ValueError:  # different drives (Windows): cannot be under target
+        inside = False
+    if inside:
+        return None
+    env = os.environ if env is None else env
+    pinned = str(env.get(KANBAN_HOME_ENV, "") or "").strip()
+    detail = (f"refusing: Hermes' kanban root would be {resolved!r}, outside "
+              f"the target home {target!r}")
+    if pinned:
+        detail += f" ({KANBAN_HOME_ENV}={pinned!r} overrides the home)"
+    return detail + "."
+
+
 def hermes_homes(env=None, *, home=None) -> list[str]:
     """Candidate Hermes ROOTS, in priority order, de-duplicated.
 

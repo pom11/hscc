@@ -8,14 +8,20 @@ real board.
 
 import json
 import os
+import subprocess
 
 import doctor
 import main_board as mb
 
 
-def _pin(tmp_path, monkeypatch, name=None):
+def _pin(tmp_path, monkeypatch, name=None, *, started=True):
     home = tmp_path / "home" / ".hermes"
     home.mkdir(parents=True)
+    if started:
+        # Hermes writes this on first run; ensure() now refuses to run the CLI
+        # (and thus create it) before that (t_6f4895aa).
+        (home / "config.yaml").write_text("_config_version: 52\n",
+                                          encoding="utf-8")
     hscc = tmp_path / "hscc"
     hscc.mkdir()
     if name is not None:
@@ -24,6 +30,7 @@ def _pin(tmp_path, monkeypatch, name=None):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HSCC_DIR", str(hscc))
     monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     return home, hscc
 
 
@@ -112,6 +119,121 @@ def test_ensure_missing_hermes_says_so(tmp_path, monkeypatch):
     res = mb.ensure(runner=lambda argv: (0, "", ""))
     assert res["ok"] is False and res["action"] == "missing-hermes"
     assert "HERMES_BIN" in res["detail"]
+
+
+# ── fail-closed kanban-root guard (t_abe94f61) ─────────────────────────────
+
+def test_ensure_refuses_a_kanban_root_pinned_outside_the_target_home(
+        tmp_path, monkeypatch):
+    """HERMES_HOME alone is not containment: a stale HERMES_KANBAN_HOME wins.
+
+    Hermes' rule is ``HERMES_KANBAN_HOME`` first, then the home-derived root.
+    A caller that pinned only HERMES_HOME would have mutated this foreign root.
+    """
+    home, _ = _pin(tmp_path, monkeypatch)
+    foreign = tmp_path / "foreign-kanban"
+    foreign.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(foreign))
+    calls = []
+    res = mb.ensure(hermes_bin="/bin/sh", runner=_recording_runner(calls))
+    assert res["ok"] is False and res["action"] == "kanban-root-refused"
+    assert str(foreign) in res["detail"] and str(home) in res["detail"]
+    assert "HERMES_KANBAN_HOME" in res["detail"]
+    assert calls == [], "a refused root must not run create/switch"
+
+
+def test_ensure_refuses_a_throwaway_home_inside_the_native_root(
+        tmp_path, monkeypatch):
+    """A HERMES_HOME UNDER ~/.hermes resolves back to the live root (t_d39c720e).
+
+    The target is the throwaway dir the caller asked for; Hermes would use the
+    native root instead, so the two disagree and the stage must refuse.
+    """
+    fake_home = tmp_path / "operator-home"
+    native = fake_home / ".hermes"
+    throwaway = native / "scratch" / "throwaway"
+    throwaway.mkdir(parents=True)
+    (native / "config.yaml").write_text("_config_version: 52\n",
+                                        encoding="utf-8")
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("HERMES_HOME", str(throwaway))
+    monkeypatch.setenv("HSCC_DIR", str(hscc))
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    calls = []
+    res = mb.ensure(hermes_bin="/bin/sh", runner=_recording_runner(calls))
+    assert res["ok"] is False and res["action"] == "kanban-root-refused"
+    assert str(native) in res["detail"] and str(throwaway) in res["detail"]
+    assert calls == []
+
+
+def test_ensure_accepts_a_profile_scoped_home(tmp_path, monkeypatch):
+    """A live profile session (HERMES_HOME=<root>/profiles/x) targets <root>;
+    the resolved kanban root is that same root, so the guard must not fire."""
+    root = tmp_path / "live-hermes"
+    profile = root / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    (root / "config.yaml").write_text("_config_version: 52\n", encoding="utf-8")
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setenv("HSCC_DIR", str(hscc))
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    calls = []
+    res = mb.ensure(hermes_bin="/bin/sh", runner=_recording_runner(calls))
+    assert res["ok"] is True and res["board"] == "general"
+    assert [c[3] for c in calls] == ["create", "switch"]
+
+
+def test_ensure_defers_when_hermes_has_never_run_in_the_home(
+        tmp_path, monkeypatch):
+    """t_6f4895aa: creating the board here would write config.yaml as a side
+    effect, and the later wiring stage would then truthfully but misleadingly
+    print "config wired" on a first install. Defer, warn, keep the home fresh."""
+    _pin(tmp_path, monkeypatch, started=False)
+    calls = []
+    res = mb.ensure(hermes_bin="/bin/sh", runner=_recording_runner(calls))
+    assert res["ok"] is False and res["action"] == "hermes-not-started"
+    assert "no config.yaml" in res["detail"]
+    assert "re-run hscc-bootstrap" in res["detail"]
+    assert "hermes kanban boards create general --switch" in res["detail"]
+    assert calls == [], "the CLI would have created config.yaml — do not run it"
+
+
+def test_the_refusal_names_the_root_a_hermes_cli_would_use(tmp_path,
+                                                           monkeypatch):
+    """The guard's answer is compared against a Hermes-shaped binary, not a
+    guess. A real Hermes resolves ``HERMES_KANBAN_HOME`` first; the fake here
+    reports exactly that (and is never asked to create anything)."""
+    home, _ = _pin(tmp_path, monkeypatch)
+    foreign = tmp_path / "foreign-kanban"
+    foreign.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(foreign))
+    fake = tmp_path / "hermes"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "# kanban_home(): HERMES_KANBAN_HOME else the HERMES_HOME root.\n"
+        "if [ -n \"$HERMES_KANBAN_HOME\" ]; then\n"
+        "  printf '%s\\n' \"$HERMES_KANBAN_HOME\"\n"
+        "else\n"
+        "  printf '%s\\n' \"$HERMES_HOME\"\n"
+        "fi\n",
+        encoding="utf-8")
+    fake.chmod(0o755)
+    reported = subprocess.run(
+        [str(fake), "kanban", "boards", "create", "general"],
+        capture_output=True, text=True,
+        env={**os.environ, "HERMES_HOME": str(home)}).stdout.strip()
+    assert reported == str(foreign)
+    calls = []
+    res = mb.ensure(hermes_bin=str(fake), runner=_recording_runner(calls))
+    assert res["action"] == "kanban-root-refused"
+    assert reported in res["detail"]
+    assert calls == []
 
 
 def test_find_hermes_bin_prefers_the_hermes_home_venv(tmp_path, monkeypatch):
