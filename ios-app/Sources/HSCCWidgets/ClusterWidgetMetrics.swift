@@ -103,6 +103,11 @@ struct ClusterEntry: TimelineEntry {
     /// "topology"/"board" values are kept in the shared model for the settings
     /// editor but no longer have pixels here.
     let showSections: Set<String>
+    /// The four Lock Screen metrics, projected from the CLI view-model over the
+    /// SAME monitor read as `fleet`. Nil when that read never answered — the
+    /// accessory families then fall back to the failure/last-known copy below
+    /// rather than drawing a row of dashes.
+    let lockScreen: CLILockScreenMetrics?
 
     init(date: Date,
          fleet: ClusterFleet?,
@@ -112,7 +117,8 @@ struct ClusterEntry: TimelineEntry {
          configured: Bool,
          paused: Bool,
          lastKnownAgeMinutes: Int? = nil,
-         showSections: Set<String> = ClusterEntry.availableSections) {
+         showSections: Set<String> = ClusterEntry.availableSections,
+         lockScreen: CLILockScreenMetrics? = nil) {
         self.date = date
         self.fleet = fleet
         self.monitor = monitor
@@ -122,6 +128,7 @@ struct ClusterEntry: TimelineEntry {
         self.paused = paused
         self.lastKnownAgeMinutes = lastKnownAgeMinutes
         self.showSections = showSections
+        self.lockScreen = lockScreen
     }
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
@@ -171,6 +178,18 @@ struct ClusterEntry: TimelineEntry {
         let shortForm = surface == .small || surface == .inline
             || surface == .circular || surface == .rectangular
         let reason = shortForm ? failure?.shortLabel : failure?.operatorLine
+        // The three Lock Screen families draw the CLI's own four numbers —
+        // hottest temperature, GPU load, fleet watts, running/waiting — when
+        // this refresh has them. `CLILockScreenCopy.text` returns nil for a
+        // system family, so this one branch cannot reach small/medium/large,
+        // and a nil `lockScreen` (a monitor read that never answered) falls
+        // through to the tally / failure copy below instead of drawing dashes.
+        if let lockScreen, !lockScreen.hasNothing,
+           let cli = CLILockScreenCopy.text(for: surface, lockScreen,
+                                            failure: reason,
+                                            ageMinutes: lastKnownAgeMinutes) {
+            return cli
+        }
         guard let fleet else {
             if let status {
                 let detail = FleetFormat.count(status.jobs, singular: "job", plural: "jobs")
@@ -190,6 +209,21 @@ struct ClusterEntry: TimelineEntry {
         text(for: .inline).headline + (text(for: .inline).detail.map { " · \($0)" } ?? "")
     }
 
+    /// The value the Lock Screen ring fills to: the fleet's GPU load, 0…100.
+    /// Nil means the ring has nothing to measure and draws the gated line
+    /// instead — a ring at zero would claim an idle fleet (§6 rule 1).
+    var lockScreenGaugeValue: Double? {
+        lockScreen.flatMap { $0.gpuUtil?.value }
+    }
+
+    /// The VoiceOver sentence, and only when the Lock Screen copy is what is on
+    /// screen: a fallback line ("Timed out") must not be read out as a list of
+    /// things nobody measured.
+    var lockScreenVoice: String? {
+        guard let lockScreen, !lockScreen.hasNothing else { return nil }
+        return CLILockScreenCopy.voice(lockScreen)
+    }
+
     static let unconfigured = ClusterEntry(date: .now,
                                            fleet: nil,
                                            configured: false,
@@ -207,14 +241,15 @@ struct ClusterEntry: TimelineEntry {
                                           fleet: sampleFleet,
                                           monitor: sampleMonitor,
                                           configured: true,
-                                          paused: false)
+                                          paused: false,
+                                          lockScreen: sampleLockScreen)
 
-    /// One sample payload, projected BOTH ways: the glance projection the
-    /// small/large/accessory surfaces draw and the CLI cell table the medium
-    /// tile draws. From one `MonitorResponse` on purpose — a second, hand-typed
-    /// sample would be a second truth about what the fleet looks like, and the
-    /// gallery would then show a headline tally that does not match its own
-    /// table.
+    /// One sample payload, projected ALL THREE ways: the glance projection the
+    /// small/large surfaces draw, the CLI cell table the medium tile draws, and
+    /// the Lock Screen's four numbers. From one `MonitorResponse` on purpose — a
+    /// second, hand-typed sample would be a second truth about what the fleet
+    /// looks like, and the gallery would then show a headline tally, a table and
+    /// a Lock Screen line that do not describe the same cluster.
     private static let sampleResponse = MonitorResponse(
         json: MonitorPayload(timestamp: nil, hosts: sampleHosts),
         serving: sampleServing,
@@ -225,6 +260,11 @@ struct ClusterEntry: TimelineEntry {
     private static let sampleFleet = FleetProjection(projecting: sampleResponse)
 
     private static let sampleMonitor = ClusterMonitorViewModel.project(sampleResponse)
+
+    /// The Lock Screen sample comes from the same bytes, through the same
+    /// projection the shipped widgets run — a hand-written sample line here
+    /// would be a second copy rule nobody executes.
+    private static let sampleLockScreen = CLILockScreenMetrics(sampleResponse)
 
     /// The sample hosts, in route order. The values cover the threshold bands
     /// the medium tile paints — a calm pair, a warm one (CPU 87.3 %, RAM 91.2 %,

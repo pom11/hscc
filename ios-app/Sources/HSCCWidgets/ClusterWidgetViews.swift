@@ -11,12 +11,15 @@ import WidgetKit
 //   small      — one headline tally + the models/throughput line
 //   medium     — the CLI's host table: nine columns, one row per host
 //   large      — every node row with CPU/GPU temps and run/wait
-//   inline     — the headline + detail on one Lock Screen line
-//   circular   — the up/total gauge
-//   rectangular— headline, detail, the first two node rows
+//   inline     — hottest temperature + the queue that matters, one line
+//   circular   — the fleet GPU load as a ring, its wattage underneath
+//   rectangular— the metric row (temp, GPU avg, W) + queue and host count
 //
-// No view composes a number. `scripts/cluster_widget_check.sh` executes the
-// text model against the committed fixture and asserts each family's lines.
+// The three Lock Screen families draw `hscc cluster monitor`'s own four
+// numbers through `CLILockScreenCopy` (Sources/Shared/ClusterLockScreen.swift);
+// the three Home Screen families draw the glance rows. Neither composes a
+// number: `scripts/cluster_widget_check.sh` executes both text models against
+// the committed fixture and asserts each family's lines.
 // ---------------------------------------------------------------------------
 
 struct ClusterWidget: Widget {
@@ -277,35 +280,52 @@ struct LargeClusterWidget: View {
 // Lock Screen accessories
 // ---------------------------------------------------------------------------
 
-/// One clear headline number: the up/total gauge.
+/// The Lock Screen ring: the fleet's GPU load as a capacity gauge (a percentage
+/// is a ring's own shape), with the wattage it costs underneath as the
+/// secondary. Both strings are the text model's — this view supplies the FILL
+/// and nothing else — and the accessibility sentence carries the temperature,
+/// the queue and the `n/N` coverage the ring has no room for. A ring with no
+/// measured percentage draws the gated line: an empty ring would read as an
+/// idle fleet, which is the opposite of what is known.
 struct CircularClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
 
     var body: some View {
-        if let fleet = entry.fleet,
-           let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal, total > 0 {
-            Gauge(value: Double(min(max(up, 0), total)), in: 0...Double(total)) {
-                Text("up")
-            } currentValueLabel: {
-                Text("\(up)/\(total)")
-                    .font(style.font(size: 11, weight: .semibold))
+        let text = entry.text(for: .circular)
+        if let fill = entry.lockScreenGaugeValue {
+            VStack(spacing: 0) {
+                Gauge(value: min(max(fill, 0), 100), in: 0...100) {
+                    Text(CLILockScreenCopy.gaugeLabel)
+                } currentValueLabel: {
+                    Text(text.headline)
+                        .font(style.font(size: 11, weight: .semibold))
+                }
+                .gaugeStyle(.accessoryCircularCapacity)
+                .tint(.primary)
+                if let watts = text.detail {
+                    Text(watts)
+                        .font(style.font(size: 8))
+                        .foregroundStyle(.secondary)
+                }
             }
-            .gaugeStyle(.accessoryCircularCapacity)
-            .tint(.primary)
-            .accessibilityLabel("\(up) of \(total) nodes up")
+            .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
         } else {
-            Text(entry.text(for: .circular).headline)
+            Text(text.headline)
                 .font(style.font(size: 9, weight: .semibold))
                 .foregroundColor(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
-                .accessibilityLabel(entry.text(for: .circular).headline)
+                .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
         }
     }
 }
 
-/// Two lines: the tally + models, then throughput or the failure reason.
+/// The Lock Screen row: the metrics as the CLI prints them (hottest temperature,
+/// fleet GPU load, fleet watts — each with its `n/N` coverage when only some of
+/// the hosts reported), then the queue and how many hosts the read covers, then
+/// the age or the failure reason. Every line is `entry.text(for:)`; the
+/// fallback's node rows stay, so a degraded read keeps what it knows.
 struct RectangularClusterWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: ClusterEntry
@@ -317,6 +337,7 @@ struct RectangularClusterWidget: View {
                 .font(style.font(size: 12, weight: .semibold))
                 .foregroundColor(.primary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.7)
             if let detail = text.detail {
                 Text(detail)
                     .font(style.font(size: 10, weight: .medium))
@@ -339,6 +360,7 @@ struct RectangularClusterWidget: View {
             }
             Spacer(minLength: 0)
         }
+        .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
     }
 }
 

@@ -465,6 +465,11 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The Lock Screen's four numbers (hottest temp, GPU load, fleet watts,
+      # running/waiting), projected from that view-model and worded by one copy
+      # rule the three accessory families share (t_314a3811). Foundation-only
+      # for the same reason: `cluster_widget_check.sh` executes it.
+      - path: Sources/Shared/ClusterLockScreen.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
