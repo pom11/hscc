@@ -56,9 +56,10 @@ for brew users until the formula states its sdist closure, because
 ``venv.pip_install resources`` runs with ``--no-deps`` and never reads
 ``requirements.txt``. The release tarball carries that file, so the bump reads
 it and adds the pinned closure for a known new dependency when the formula does
-not already carry it. Today that is ``h2`` (HTTP/2 for the APNs sender) and its
-``hpack``/``hyperframe`` dependencies. Existing resource blocks are never
-rewritten; a re-run sees them and adds nothing.
+not already carry it. There are no release-only closures today; the mechanism
+stays so a future dependency can be added without touching the bump flow.
+Existing resource blocks are never rewritten; a re-run sees them and adds
+nothing.
 
 THE TWO GATES BEFORE A COMMIT
 -----------------------------
@@ -142,19 +143,7 @@ RESOURCE_RE = re.compile(r"^\s*resource\s+\"")
 #: last manual resource refresh. Keyed by the requirement name the tarball
 #: declares; the value is the complete ``--no-deps`` closure. A release that
 #: does not declare the key adds nothing, so old tags still bump cleanly.
-RESOURCE_CLOSURES = {
-    "h2": (
-        {"name": "h2",
-         "url": "https://files.pythonhosted.org/packages/e7/85/7c366e69d84c17bb778fe41419e1fbcce3033d5b7ce29bbffff0a98b859f/h2-4.4.1.tar.gz",
-         "sha256": "4e866ffb1a869ae14dd9b5e6beb5c24a13da0495ad72b65925ded182521c1516"},
-        {"name": "hpack",
-         "url": "https://files.pythonhosted.org/packages/26/5b/fcabf6028144a8723726318b07a32c2f3314acdff6265743cf08a344b18e/hpack-4.2.0.tar.gz",
-         "sha256": "0895cfa3b5531fc65fe439c05eb65144f123bf7a394fcaa56aa423548d8e45c0"},
-        {"name": "hyperframe",
-         "url": "https://files.pythonhosted.org/packages/02/e7/94f8232d4a74cc99514c13a9f995811485a6903d48e5d952771ef6322e30/hyperframe-6.1.0.tar.gz",
-         "sha256": "f630908a00854a7adeabd6382b43923a4c4cd4b821fcb527e6ab9e15382a3b08"},
-    ),
-}
+RESOURCE_CLOSURES = {}
 
 _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _RESOURCE_NAME_RE = re.compile(r'^\s*resource\s+"([^"]+)"\s+do\s*$', re.MULTILINE)

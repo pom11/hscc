@@ -12,8 +12,8 @@ rules and the same durable record.
 
 Every route is behind the server's single bearer-token gate (``_authorize`` in
 ``api_server``) like every other /v1 route; there is no unauthenticated alert
-path. The response never contains credentials, device tokens or transport
-secrets — the feed is title/body/level/key and the receiver's state.
+path. The response never contains credentials or transport secrets — the feed
+is title/body/level/key and the receiver's state.
 
 CONTRACT NOTES
 ==============
@@ -126,8 +126,6 @@ def handle_post_alert(server, ctx, query, body):
         "retry_after_s": result.get("retry_after_s"),
         "speak": speak,
     }
-    if result.get("push") is not None:
-        payload["push"] = result["push"]
     return status, payload
 
 

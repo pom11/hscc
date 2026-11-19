@@ -876,13 +876,13 @@ def cmd_triggers():
 
 
 def cmd_notify(argv):
-    """Post one alert to the HSCC feed (``hscc notify``).
+    """Post, list or acknowledge HSCC feed entries (``hscc notify``).
 
-    Since the main-orchestrator card the verb is the CLI face of
-    ``POST /v1/alerts`` (see :mod:`hscc_daemon.notify_cli`), not a direct
-    desktop notification: the feed is the durable record, the apps read it,
-    and auth/dedupe/rate-limiting live in the one place every producer shares.
-    A bare string is treated as the legacy one-argument message form.
+    The verb is the CLI face of ``/v1/alerts`` (see
+    :mod:`hscc_daemon.notify_cli`), not a direct desktop notification: the
+    feed is the durable record, and auth/dedupe/rate-limiting live in the one
+    place every producer shares. A bare string is treated as the legacy
+    one-argument message form; ``list`` and ``ack`` are subcommands.
     """
     from . import notify_cli
 

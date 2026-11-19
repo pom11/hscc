@@ -2,23 +2,23 @@
 
 The main orchestrator (design: ``docs/design/2026-11-19-main-orchestrator-design.md``)
 must reach the operator when something needs a human: a LIVE publish waiting
-for approval, a break it could not fix, or a release it shipped. The transport
-is push (the hscc iOS/macOS apps), but the SOURCE OF TRUTH is one small feed
-on disk that every surface shares:
+for approval, a break it could not fix, or a release it shipped. The SOURCE OF
+TRUTH is one small feed on disk that every surface shares:
 
     hscc notify "<title>" "<body>" [--level info|action|critical] [--key K]
         -> POST /v1/alerts -> this module -> ~/.hscc/alerts.json
-    GET  /v1/alerts?since=<id>  -> the apps poll the same file
-    POST /v1/alerts/<id>/ack    -> mark seen and clear its dedupe slot
+    hscc notify list [--since <id>]  -> newest-first operator read
+    POST /v1/alerts/<id>/ack         -> mark seen and clear its dedupe slot
+    hscc notify ack <id>             -> the same ack from the CLI
 
 WHY A FILE AND NOT AN IN-MEMORY QUEUE
 =====================================
 The API server is its own process (``hscc_daemon/api_launchd.py`` starts
 ``python -m api_server serve``) and ``hscc notify`` is a third one. The feed
-must survive an API restart and be visible to the daemon that will send push,
-so it is a bounded JSON document written atomically under ``~/.hscc``. The
-file is deliberately small (the last ``MAX_ALERTS`` entries): this is a feed
-for a phone lock screen, not an audit log.
+must survive an API restart and stay readable by the CLI and the apps, so it
+is a bounded JSON document written atomically under ``~/.hscc``. The file is
+deliberately small (the last ``MAX_ALERTS`` entries): this is an operator
+feed, not an audit log.
 
 THE THREE RULES
 ===============
@@ -44,11 +44,6 @@ THE THREE RULES
 empty timestamp". The bounded store evicts the oldest alerts by id, period: the
 feed has one order, and pretending an old unacknowledged alert is newer than a
 recent one would be a lie.
-
-PUSH IS A SEAM, NOT THIS CARD. ``hscc_daemon/alert_push.py`` is the APNs
-sender (card N2). This module calls it once per CREATED alert, after the file is
-safely written, and records its result on the response. A sender failure never
-undoes or hides the alert.
 
 The store is safe against two writers (CLI + API) on one host: mutations take
 an exclusive ``fcntl`` lock on ``alerts.lock`` and replace the JSON atomically.
@@ -366,40 +361,6 @@ def _global_retry_after(state: dict, now: float):
     return max(0.0, oldest + GLOBAL_WINDOW_S - now)
 
 
-def _push(alert: dict, hscc_dir=None) -> dict:
-    """Offer one created alert to the sender seam; never raise.
-
-    A dead sender must not turn a persisted alert into a failed request — the
-    operator still sees it on the next ``GET /v1/alerts``. The result is
-    reported to the caller so an operator can tell "queued but no push
-    transport" from "pushed". ``hscc_dir`` carries the caller's sandbox root
-    into the sender so its roster/config read the same ``~/.hscc`` the alert
-    was written under.
-    """
-    try:
-        from . import alert_push
-        send = alert_push.send
-        # N1's documented seam was ``send(alert)``; N2 adds an optional
-        # ``hscc_dir`` so a sandboxed API/test resolves its own roster. Keep a
-        # single-argument hook (or an old monkeypatch) working.
-        try:
-            import inspect
-            params = inspect.signature(send).parameters
-            accepts_dir = "hscc_dir" in params or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in params.values())
-        except (TypeError, ValueError):
-            accepts_dir = False
-        result = (send(dict(alert), hscc_dir=hscc_dir) if accepts_dir
-                  else send(dict(alert)))
-    except Exception as exc:  # noqa: BLE001 - a seam must not break the feed
-        log.warning("alerts: push sender failed: %r", exc)
-        return {"sent": False, "reason": "sender_error"}
-    if isinstance(result, dict):
-        return dict(result)
-    return {"sent": bool(result), "reason": "sent" if result else "no_transport"}
-
-
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -415,7 +376,6 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
           "reason": "created"|"duplicate"|"rate_limited_key"|...,
           "alert": {...} | None,     # the existing one when deduped
           "retry_after_s": float|None,
-          "push": {...}              # only on created
         }
 
     ``source`` is accepted for callers that later want per-source reporting;
@@ -500,7 +460,6 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
         _prune(state, now)
         _save(path, state)
 
-    push = _push(alert, hscc_dir)
     return {
         "created": True,
         "deduped": False,
@@ -508,7 +467,6 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
         "reason": "created",
         "alert": _public(alert),
         "retry_after_s": None,
-        "push": push,
     }
 
 

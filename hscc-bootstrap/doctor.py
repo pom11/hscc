@@ -1956,47 +1956,6 @@ def _refused_main_wakeups_check() -> dict:
 # doctor_notifier_mask convention) or "hermes_home" (the deployed plugin tree,
 # what the budget-hook row reads).
 # ---------------------------------------------------------------------------
-def _load_apns():
-    """Import ``hscc_daemon/apns.py`` for the push-configuration check.
-
-    The verdict lives with the feature (config format, key sources, roster) so
-    doctor cannot drift from what the sender means by "configured". Returns the
-    module, or None when the daemon plugin is not deployed next to this one.
-    """
-    try:
-        from hscc_daemon import apns
-        return apns
-    except Exception:
-        pass
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-    try:
-        from hscc_daemon import apns
-        return apns
-    except Exception:
-        return None
-
-
-#: Fallback for the row name when the module itself cannot be imported.
-_APNS_CHECK_NAME = "APNs push (operator notifications)"
-
-
-def _refused_apns_check() -> dict:
-    """In-suite stand-in when no APNs verdict was injected.
-
-    The real check reads ``~/.hscc/apns.json`` and the key it names — the
-    OPERATOR's credentials when this suite runs from a dispatched worker. Same
-    fence shape as the other daemon rows: an ERROR naming the seam, never a
-    silent pass and never a real read.
-    """
-    return {"name": _APNS_CHECK_NAME, "ok": False, "fatal": False,
-            "detail": "APNs check refused inside a pytest process — "
-                      "inject _apns_check",
-            "fix": "Pass _apns_check=lambda: {...} built from tmp config "
-                   "fixtures; a suite must never read the operator's APNs key."}
-
-
 FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
     # enabled and ticking? Its own check (hscc_daemon/orch_waker.py) owns the
@@ -2080,19 +2039,6 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     doctor_rows.FeatureCheckRow(
         key="budget_hook", seam_kwarg="_budget_hook_check",
         row_fn="_budget_hook_check_row", row_kwargs=("hermes_home",)),
-    # Card N2: can the main orchestrator reach the operator's phone/Mac? The
-    # APNs key and device roster live under ~/.hscc; a fresh install has none
-    # yet, so the row is a WARN (ok=False, fatal=False) with the one-time Apple
-    # portal steps, never a bootstrap hard-stop. Its verdict lives in
-    # hscc_daemon/apns.py so the sender and doctor agree on "configured".
-    doctor_rows.FeatureCheckRow(
-        key="apns", seam_kwarg="_apns_check",
-        loader="_load_apns", refusal="_refused_apns_check",
-        fallback_name="_APNS_CHECK_NAME",
-        missing_detail="hscc_daemon/apns.py not importable — push "
-                       "configuration cannot be verified",
-        missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
-                    "(re-run bootstrap)."),
 ]
 
 #: The seam keywords the registry owns. run_doctor() validates its

@@ -467,10 +467,11 @@ counts.
 The main orchestrator reaches the operator through one durable feed under
 `~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
 client of this route, not a second writer, so dedupe and rate limits cannot
-drift between producers. Every newly created alert is handed to the daemon's
-APNs sender when a device roster exists; the feed remains the durable record
-when a push fails. The iOS and macOS apps do not poll or register for these
-alerts (operator decision 2026-11-19), so the roster may be empty.
+drift between producers. `hscc notify list` reads it newest first (`--since`,
+`--limit`, `--json`) and `hscc notify ack <id>` marks one seen. The iOS and
+macOS apps do not poll or register for these alerts (operator decision
+2026-11-19): there is no APNs sender and no device registration; the feed is
+the record.
 
 ### POST /v1/alerts
 
@@ -479,7 +480,7 @@ Body: `title` (required, ≤200 chars), `body` (≤4000), `level`
 ≤200). `201` means a new alert was stored; `200` means the same key/content was
 already live (`deduped: true`) or the rate limit suppressed it
 (`rate_limited: true`, with `retry_after_s`). Suppression is success, not an
-error. `push` reports the sender seam's answer for a created alert.
+error.
 
 | field | type | meaning |
 |---|---|---|
@@ -505,30 +506,6 @@ advance; `latest_id` is the newest id the store holds.
 Marks one alert acknowledged (idempotent — the first `acked_at` is kept) and
 clears its key's dedupe slot, so a condition that recurs after the operator has
 seen it can alert again. `404` when the id is not in the bounded feed.
-
-## Push devices (card N2)
-
-APNs token authentication uses a `.p8` key named by `~/.hscc/apns.json`; the
-key, key id, team id and topics never live in this repo. The daemon imports
-`h2` lazily (HTTP/2 through the already-pinned `httpx`) and signs the ES256 JWT
-with the system `openssl`, so no crypto wheel is added.
-
-### POST /v1/devices
-
-Body: `platform` (`ios|macos`), `token` (32-200 hex characters, the APNs device
-token), `bundle_id` (the app id, used as the `apns-topic` unless `topics` in
-`apns.json` says otherwise), `env` (`production|development`). Registration is
-idempotent per `(platform, token)`: `201` for a new row, `200` when an existing
-row was refreshed (`created: false`). The response carries a derived `id`,
-never the token. `POST /v1/devices/test` sends the `hscc notify test` push
-through the same sender; delivery failure is a `200` with `sent: false` and a
-`reason` (`no_config`, `no_devices`, `all_failed`, ...), not an HTTP error.
-
-### GET /v1/devices
-
-The roster without tokens (`id`, `platform`, `bundle_id`, `env`,
-`registered_at`, `updated_at`), newest first. APNs `410` / `BadDeviceToken`
-responses prune the rejected token automatically; transient failures keep it.
 
 ## Parity tests
 

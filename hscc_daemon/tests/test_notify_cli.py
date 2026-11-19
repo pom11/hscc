@@ -13,6 +13,7 @@ tmp ``$HSCC_HOME`` with its own ``api-token``, and no request ever leaves
 127.0.0.1.
 """
 
+import datetime
 import io
 import json
 import sys
@@ -33,11 +34,22 @@ class _StubAPI(BaseHTTPRequestHandler):
     seen = []
     response = None
     status = 201
+    get_response = None
+    get_status = 200
+
+    def _answer(self, status, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_POST(self):  # noqa: N802 - stdlib handler name
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         type(self).seen.append({
+            "method": "POST",
             "path": self.path,
             "authorization": self.headers.get("Authorization"),
             "body": json.loads(raw) if raw else None,
@@ -52,12 +64,18 @@ class _StubAPI(BaseHTTPRequestHandler):
             "created": True, "deduped": False, "rate_limited": False,
             "reason": "created", "retry_after_s": None,
         }
-        data = json.dumps(payload).encode()
-        self.send_response(type(self).status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._answer(type(self).status, payload)
+
+    def do_GET(self):  # noqa: N802 - stdlib handler name
+        type(self).seen.append({
+            "method": "GET",
+            "path": self.path,
+            "authorization": self.headers.get("Authorization"),
+            "body": None,
+        })
+        self._answer(type(self).get_status, type(self).get_response or {
+            "alerts": [], "count": 0, "latest_id": None,
+        })
 
     def log_message(self, *args):
         pass
@@ -68,6 +86,8 @@ def stub_api():
     _StubAPI.seen = []
     _StubAPI.response = None
     _StubAPI.status = 201
+    _StubAPI.get_response = None
+    _StubAPI.get_status = 200
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubAPI)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -115,19 +135,20 @@ def test_one_positional_is_the_legacy_message_form():
     assert opts["body"] == "Hello World"
 
 
-def test_test_is_the_push_self_check_not_a_body():
-    opts, err = notify_cli.parse_notify_args(["test"])
+def test_list_and_ack_are_subcommands():
+    opts, err = notify_cli.parse_notify_args(
+        ["list", "--since", "5", "--limit", "20"])
     assert err is None
-    assert opts["test"] is True
-    assert opts["title"] == "HSCC test notification"
+    assert opts["command"] == "list"
+    assert (opts["since"], opts["limit"]) == (5, 20)
 
-    opts, err = notify_cli.parse_notify_args(["test", "--key", "k"])
-    assert opts is None and "--key does not apply" in err
+    opts, err = notify_cli.parse_notify_args(["ack", "7"])
+    assert err is None
+    assert opts["command"] == "ack" and opts["id"] == 7
 
-    # Two positionals keep their normal title/body meaning.
-    opts, err = notify_cli.parse_notify_args(["test", "body"])
-    assert err is None and opts["test"] is False
-    assert (opts["title"], opts["body"]) == ("test", "body")
+    # Reserved subcommands do not fall back to a title/body post.
+    opts, err = notify_cli.parse_notify_args(["list", "body"])
+    assert opts is None and "flags only" in err
 
 
 @pytest.mark.parametrize("argv", [
@@ -137,6 +158,13 @@ def test_test_is_the_push_self_check_not_a_body():
     ["T", "--key"],
     ["T", "--wat"],
     ["T", "--level=noisy"],
+    ["list", "extra"],
+    ["list", "--key", "k"],
+    ["list", "--since", "nope"],
+    ["ack"],
+    ["ack", "7", "8"],
+    ["ack", "nope"],
+    ["T", "--since", "1"],
 ])
 def test_bad_argv_is_refused_with_a_sentence(argv):
     opts, err = notify_cli.parse_notify_args(argv)
@@ -254,37 +282,73 @@ def test_api_refusal_surfaces_the_server_sentence(stub_api, hscc_home, capsys):
     assert "level must be one of" in captured.err
 
 
-def test_test_verb_posts_to_devices_test(stub_api, hscc_home, capsys):
-    _StubAPI.status = 200
-    _StubAPI.response = {"sent": True, "reason": "sent", "sent_count": 2,
-                         "test": True, "speak": "Test push sent."}
-    rc = notify_cli.main(["test", "--api", stub_api])
+def _alert(ident, age_s, level="info", key=None, acked=False):
+    ts = (datetime.datetime.now(datetime.timezone.utc)
+          - datetime.timedelta(seconds=age_s))
+    return {"id": ident, "ts": ts.isoformat(timespec="seconds").replace(
+                "+00:00", "Z"), "title": f"alert {ident}", "body": "",
+            "level": level, "key": key, "acked": acked, "acked_at": None}
+
+
+def test_list_gets_the_feed_and_prints_it_newest_first(
+        stub_api, hscc_home, capsys):
+    _StubAPI.get_response = {
+        "alerts": [_alert(1, 120), _alert(2, 10, "critical", "node-down")],
+        "count": 2, "since": None, "limit": 100, "oldest_id": 1,
+        "latest_id": 2, "next_since": 2, "has_more": False,
+    }
+    rc = notify_cli.main(["list", "--api", stub_api])
     assert rc == 0
-    assert "test push sent to 2 devices" in capsys.readouterr().out
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0].startswith("#2") and "critical" in lines[0]
+    assert "key=node-down" in lines[0] and "alert 2" in lines[0]
+    assert lines[1].startswith("#1") and "info" in lines[1]
+
     assert len(_StubAPI.seen) == 1
-    assert _StubAPI.seen[0]["path"] == "/v1/devices/test"
+    assert _StubAPI.seen[0]["method"] == "GET"
+    assert _StubAPI.seen[0]["path"] == "/v1/alerts"
+    assert _StubAPI.seen[0]["authorization"] == "Bearer test-token"
+
+
+def test_list_since_is_exclusive_and_json_is_newest_first(
+        stub_api, hscc_home, capsys):
+    _StubAPI.get_response = {
+        "alerts": [_alert(5, 30), _alert(6, 5, "action")],
+        "count": 2, "since": 5, "limit": 100, "oldest_id": 5,
+        "latest_id": 6, "next_since": 6, "has_more": False,
+    }
+    assert notify_cli.main(
+        ["list", "--since", "5", "--json", "--api", stub_api]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [a["id"] for a in payload["alerts"]] == [6, 5]
+    assert _StubAPI.seen[0]["path"] == "/v1/alerts?since=5"
+
+
+def test_list_empty_feed_is_a_plain_sentence(stub_api, hscc_home, capsys):
+    assert notify_cli.main(["list", "--api", stub_api]) == 0
+    assert capsys.readouterr().out.strip() == "no alerts"
+
+
+def test_ack_posts_to_the_alert_ack_route(stub_api, hscc_home, capsys):
+    _StubAPI.status = 200
+    _StubAPI.response = {"alert": _alert(7, 5, acked=True), "acked": True,
+                         "speak": "Alert 7 acknowledged."}
+    assert notify_cli.main(["ack", "7", "--api", stub_api]) == 0
+    assert "alert 7 acknowledged" in capsys.readouterr().out
+    assert _StubAPI.seen[0]["method"] == "POST"
+    assert _StubAPI.seen[0]["path"] == "/v1/alerts/7/ack"
     assert _StubAPI.seen[0]["body"] == {}
 
 
-def test_test_verb_exits_1_when_nothing_was_sent(stub_api, hscc_home, capsys):
-    _StubAPI.status = 200
-    _StubAPI.response = {"sent": False, "reason": "no_config",
-                         "detail": "~/.hscc/apns.json is not configured",
-                         "test": True, "speak": "Test push not sent."}
-    rc = notify_cli.main(["test", "--api", stub_api])
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "test push not sent (no_config)" in out
-    assert "apns.json" in out
-
-
-def test_test_verb_json_prints_the_payload(stub_api, hscc_home, capsys):
-    _StubAPI.status = 200
-    _StubAPI.response = {"sent": True, "reason": "sent", "sent_count": 1,
-                         "test": True}
-    assert notify_cli.main(["test", "--json", "--api", stub_api]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["test"] is True and payload["sent"] is True
+def test_ack_unknown_id_surfaces_the_server_sentence(
+        stub_api, hscc_home, capsys):
+    _StubAPI.status = 404
+    _StubAPI.response = {"error": {"code": "not_found",
+                                   "message": "no alert with id 99 in the feed"}}
+    assert notify_cli.main(["ack", "99", "--api", stub_api]) == 1
+    err = capsys.readouterr().err
+    assert "API refused the alert ack (404)" in err
+    assert "no alert with id 99" in err
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +375,7 @@ def test_main_dispatches_the_verb_with_unjoined_argv(monkeypatch):
     ]]
 
 
-def test_main_dispatches_the_test_verb_untouched(monkeypatch):
+def test_main_dispatches_the_list_subcommand_untouched(monkeypatch):
     calls = []
 
     def fake_main(argv):
@@ -319,11 +383,11 @@ def test_main_dispatches_the_test_verb_untouched(monkeypatch):
         return 1
 
     monkeypatch.setattr(notify_cli, "main", fake_main)
-    monkeypatch.setattr(sys, "argv", ["hscc", "notify", "test", "--json"])
+    monkeypatch.setattr(sys, "argv", ["hscc", "notify", "list", "--json"])
     with pytest.raises(SystemExit) as exc:
         unified.main()
     assert exc.value.code == 1
-    assert calls == [["test", "--json"]]
+    assert calls == [["list", "--json"]]
 
 
 def test_help_token_never_dispatches_the_verb(monkeypatch):

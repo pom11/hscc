@@ -173,9 +173,9 @@ The background watcher that does the checking and the healing.
 
 ### Utility
 
-- `hscc notify "<title>" "<body>"` — post an alert to the feed the iOS and
-  macOS apps read (`--level`, `--key`). `hscc notify test` sends one test push
-  to the registered devices.
+- `hscc notify "<title>" "<body>"` — post an alert to the feed (`--level`,
+  `--key`); `hscc notify list` reads it newest first (`--since`, `--limit`,
+  `--json`) and `hscc notify ack` marks one seen.
 - `hscc bootstrap` — the installer, runnable from a repo checkout, a plugin tree
   or a Homebrew install.
 - `hscc update --check` — ask GitHub whether a newer release exists. Reads only;

@@ -91,12 +91,7 @@ def test_post_creates_a_persisted_alert(running, token):
     assert alert["key"] == "live-publish/example-project"
     assert alert["acked"] is False and alert["acked_at"] is None
     assert alert["ts"].endswith("Z")
-
-    # The sender is real (card N2) but this server's hscc root has no APNs
-    # config, so the response says push was not attempted rather than implying
-    # it happened.
-    assert payload["push"]["sent"] is False
-    assert payload["push"]["reason"] == "no_config"
+    assert "push" not in payload
 
     status, feed = get(running, token)
     assert status == 200

@@ -422,9 +422,10 @@ def _get_help_text():
     ])
 
     util = _section("Utility", [
-        *_entry("notify <title> <body>",
-                "Post an alert to the HSCC alert feed (the apps read it)",
+        *_entry("notify <title> <body> | list | ack <id>",
+                "Post, read or acknowledge an HSCC alert-feed entry",
                 ["flags: --level info|action|critical --key <dedupe-key>",
+                 "list: --since <id> --limit <n>; all: --json",
                  "requires the API: hscc api start"]),
         *_entry("bootstrap [flags]",
                 "Run the HSCC installer from any layout (repo, plugins, brew)",
@@ -490,13 +491,16 @@ COMMAND_HELP = {
     "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers\n  hscc check --repo <path> [--json]   address-guard posture for that checkout\n          (default: cwd's top-level). Calls posture() from hscc-bootstrap/\n          install_hooks.py — single implementation, nothing recomputed here.\n          States: armed | unarmed | armed-but-absent (config advertises\n          protection, this checkout resolves no runnable hook = FAIL-OPEN) |\n          not-a-repo. Exit 0 only for 'armed', non-zero otherwise.",
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
-    "notify": "Post one alert to the HSCC alert feed (POST /v1/alerts).\n"
+    "notify": "Post, list or acknowledge HSCC alert-feed entries.\n"
               "  Usage: hscc notify <title> <body>\n"
               "         [--level info|action|critical] [--key <dedupe-key>]\n"
               "         [--json]\n"
+              "         hscc notify list [--since <id>] [--limit <n>] [--json]\n"
+              "         hscc notify ack <id> [--json]\n"
               "  A keyed alert does not repeat until its content changes or\n"
               "  it is acknowledged; per-key and global rate limits apply.\n"
-              "  The API must be up (hscc api start).",
+              "  list prints newest first. The API must be up (hscc api\n"
+              "  start).",
     # bootstrap (card t_bc5a3fee): installer verb. Every line authored <=76 so
     # the (B) gate's 78 budget holds at both mandated widths (only the FIRST
     # line receives _handle_help's 2-space prefix).
