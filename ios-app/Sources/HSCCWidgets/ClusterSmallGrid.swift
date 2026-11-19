@@ -27,6 +27,20 @@ import Foundation
 //      never sampled has no temperature to paint; a serving section the route
 //      did not send has no queue depth.
 //
+// THE TREND (t_2681d3de).
+//
+// A bar under the GPU% digit says one thing: what that host read on the last
+// refresh. The card this tile follows asked for a real trend, and the recorder
+// answers one — `GET /v1/cluster/history` (see `ClusterHistorySeries.swift`).
+// `Trend` is that series reduced to the cell's track: the SAME pixel-column
+// downsampler every other history surface uses, so the reduced polyline keeps
+// each column's min and max and therefore the series' true extremes. The join
+// from tile row to series is by the payload's own `host` identity, used as a
+// key only — an address never becomes a drawn string (the harness scans the
+// trend's spoken text for one exactly as it scans every cell). A host the
+// recorder cannot answer for has NO trend, and the view falls back to the
+// single-sample bar rather than drawing a flat line off one reading.
+//
 // THE ONE THRESHOLD THAT IS NOT THE VIEW-MODEL'S.
 //
 // GPU utilisation is the only column here the view-model does not classify
@@ -137,13 +151,18 @@ enum ClusterSmallGrid {
         /// 0...1 for the GPU column's bar, nil when the value was not told or
         /// the column has no scale.
         let fraction: Double?
+        /// The recorder-backed trend for the GPU column, or nil — the view
+        /// draws the sparkline where this is set and the single-sample bar
+        /// where only `fraction` is. Other columns never carry one.
+        let trend: Trend?
 
         var id: String { column.rawValue }
 
-        init(column: Column, row: CLIMonitorHostRow) {
+        init(column: Column, row: CLIMonitorHostRow, trend: Trend? = nil) {
             self.column = column
             text = column.cellText(in: row)
             level = column.level(of: row)
+            self.trend = column == .gpuUtil ? trend : nil
             if let raw = column.value(of: row) {
                 fraction = min(max(raw / 100, 0), 1)
             } else {
@@ -164,11 +183,11 @@ enum ClusterSmallGrid {
         /// CLI printed.
         let isDown: Bool
 
-        init(row: CLIMonitorHostRow) {
+        init(row: CLIMonitorHostRow, trend: Trend? = nil) {
             id = row.host
             label = row.displayLabel
             isDown = row.error != nil
-            cells = Column.allCases.map { Cell(column: $0, row: row) }
+            cells = Column.allCases.map { Cell(column: $0, row: row, trend: trend) }
         }
     }
 
@@ -207,6 +226,112 @@ enum ClusterSmallGrid {
         }
     }
 
+    // MARK: - The GPU% trend (t_2681d3de)
+
+    /// The metric every host sparkline draws. One metric for the whole tile
+    /// keeps the tile honest in the cheapest way: one request, one series per
+    /// host, and the spoken trend cannot disagree with the digit above it
+    /// because they describe the same field.
+    static let trendMetric = ClusterHistoryMetric.gpuUtilPct
+
+    /// The window the small family asks the recorder for. `1h` is the
+    /// durable 1-minute tier (tier 1) — `15m` would ask for the daemon's
+    /// 2 s ring, which the API process cannot read and answers empty with a
+    /// `note` (the committed tier-0 fixture is exactly that answer), and a
+    /// flat line drawn from "the ring was not resident" would be the lie
+    /// this tile exists to avoid.
+    static let trendWindow = "1h"
+
+    /// How many pixel columns the cell's track gets. The downsampler emits at
+    /// most two points per column (its min and its max), so this bounds the
+    /// polyline at ~2x that many vertices — plenty for a track the width of
+    /// three digits, and few enough that no vertex lands inside another.
+    static let sparkPixelColumns = 13
+
+    /// One vertex of a sparkline, normalised into the track by the model half
+    /// so the SwiftUI half multiplies by width and height and compares
+    /// nothing. `y` is 0 at the series' own minimum and 1 at its maximum.
+    struct TrendPoint: Equatable {
+        let x: Double
+        let y: Double
+    }
+
+    /// The drawable trend of one host's GPU utilisation. Everything numeric
+    /// about it comes from the history payload: the extremes are the whole
+    /// series' (the reduction is min/max preserving), the vertices are real
+    /// samples, and the spoken text formats those extremes the way the CLI
+    /// formats the GPU% column. A `nil` trend means the recorder had nothing
+    /// to draw — and "nothing to draw" renders as the single-sample bar, not
+    /// as a flat line.
+    struct Trend: Equatable {
+        /// Contiguous runs of the reduced polyline. More than one run means a
+        /// gap the recorder actually left (no reading for longer than the
+        /// break threshold), and the view must draw each run as its own
+        /// stroke rather than connect across it.
+        let segments: [[TrendPoint]]
+        /// The whole series' min/max, formatted as the CLI formats the GPU%
+        /// column. A caption reads these, never the vertices.
+        let minText: String
+        let maxText: String
+        /// The GPU% band of the series' LATEST readable point — the same
+        /// verdict style the digit above the track takes, so a line that is
+        /// calm where it ends is calm, not the colour of its own past.
+        let level: ClusterMetricLevel
+
+        /// The sentence fragment for this cell. Built beside the data it
+        /// describes and only ever appended when the sparkline was drawn.
+        var accessibilityPart: String {
+            "\(Column.gpuUtil.cliColumn) trend \(minText) to \(maxText)"
+        }
+    }
+
+    /// The host-keyed trends off one history answer. The key is the payload's
+    /// own `host` identity — an address, used as a join key and never drawn.
+    /// A host the payload excludes, omits or never gives two readable points
+    /// for simply has no entry, which is how "not told" stays not told.
+    static func trends(from history: ClusterHistoryResponse?) -> [String: Trend] {
+        guard let history else { return [:] }
+        var out: [String: Trend] = [:]
+        for series in ClusterHistorySeriesSet.make(history, for: trendMetric).series {
+            if let trend = trend(for: series) { out[series.identity] = trend }
+        }
+        return out
+    }
+
+    /// Reduce one host series to the track. Nil whenever a polyline would be
+    /// a fiction: fewer than two readable points is not a trend, and no
+    /// segment may be a single point either (a lone vertex is a dot, and a
+    /// dot at some remembered height reads as a level the series may never
+    /// have held).
+    static func trend(for series: ClusterHistorySeries) -> Trend? {
+        guard series.readable.count >= 2 else { return nil }
+        let reduced = ClusterHistoryDownsampler.downsample(series,
+                                                           pixelWidth: sparkPixelColumns)
+        guard let low = reduced.outMin, let high = reduced.outMax,
+              let firstPoint = reduced.points.first,
+              let lastPoint = reduced.points.last,
+              let latest = series.readable.last?.value else { return nil }
+        let span = lastPoint.t - firstPoint.t
+        let range = high - low
+        let segments = reduced.segments().compactMap { run -> [TrendPoint]? in
+            let points = run.compactMap { sample -> TrendPoint? in
+                guard let value = sample.value else { return nil }
+                let x = span > 0 ? (sample.t - firstPoint.t) / span : 0
+                // A flat series is a level, and a level is a centred line —
+                // a layout convention, not a number (both texts print the
+                // same value either way).
+                let y = range > 0 ? (value - low) / range : 0.5
+                return TrendPoint(x: x, y: y)
+            }
+            return points.count >= 2 ? points : nil
+        }
+        guard !segments.isEmpty else { return nil }
+        return Trend(segments: segments,
+                     minText: CLIMonitorFormat.cell(trendMetric.displayValue(low), places: 0),
+                     maxText: CLIMonitorFormat.cell(trendMetric.displayValue(high), places: 0),
+                     level: .level(latest, warn: gpuUtilWarn, critical: gpuUtilCritical))
+    }
+
     /// Everything one small tile draws, as data. `nil` from `tile(from:)` means
     /// there was nothing to draw: the caller shows its gate pane (the setup
     /// invite, "Paused", or why the read failed) instead of a grid of dashes.
@@ -224,14 +349,19 @@ enum ClusterSmallGrid {
         /// view applies it with `children: .ignore`, so the tile is one element
         /// that speaks the truth instead of twenty fragments a listener has to
         /// reassemble — and the sentence cannot drift from the grid, because it
-        /// is composed from the same cells the grid draws.
+        /// is composed from the same cells the grid draws (and the same reduced
+        /// series a drawn sparkline strokes).
         var accessibilitySummary: String {
             var parts: [String] = []
             if hostCount > 0 {
                 parts.append("\(hostCount) host\(hostCount == 1 ? "" : "s")")
             }
             for row in rows {
-                parts.append(row.label + ": " + row.cells.map(\.text).joined(separator: ", "))
+                var line = row.label + ": " + row.cells.map(\.text).joined(separator: ", ")
+                for cell in row.cells {
+                    if let trend = cell.trend { line += ", " + trend.accessibilityPart }
+                }
+                parts.append(line)
             }
             if hiddenHosts > 0 {
                 parts.append("\(hiddenHosts) more not shown")
@@ -240,17 +370,33 @@ enum ClusterSmallGrid {
                          + "\(ClusterSmallGrid.countText(totals.waiting)) waiting")
             return parts.joined(separator: ". ")
         }
+
+        /// Whether any drawn cell carries a recorder-backed trend. The view
+        /// needs no such answer (it decides per cell), but the coverage docs
+        /// and the gate name the difference between "a tile with trends" and
+        /// "a tile of bars", and it must be read off the data, not the layout.
+        var hasTrends: Bool {
+            rows.contains { row in row.cells.contains { $0.trend != nil } }
+        }
     }
 
-    /// Project the view-model onto the tile. Nil for a nil view-model (the read
-    /// failed) or a payload that carried neither a host row nor a serving row:
-    /// a degraded `{speak}` body has nothing to grid, and drawing its emptiness
-    /// as a table of dashes would read as "four hosts, all unreadable".
-    static func tile(from view: ClusterMonitorViewModel?) -> Tile? {
+    /// Project the view-model onto the tile, joining each host onto its
+    /// recorder-backed trend by the payload's own `host` identity (a join key,
+    /// never a drawn string). Nil for a nil view-model (the read failed) or a
+    /// payload that carried neither a host row nor a serving row: a degraded
+    /// `{speak}` body has nothing to grid, and drawing its emptiness as a
+    /// table of dashes would read as "four hosts, all unreadable". A nil (or
+    /// unusable) `history` is NOT such a case: the grid still draws, and the
+    /// GPU cells fall back to their single-sample bars.
+    static func tile(from view: ClusterMonitorViewModel?,
+                     history: ClusterHistoryResponse? = nil) -> Tile? {
         guard let view, !view.hostRows.isEmpty || !view.servingRows.isEmpty else {
             return nil
         }
-        let shown = view.hostRows.prefix(maxHosts).map(Row.init(row:))
+        let trends = trends(from: history)
+        let shown = view.hostRows.prefix(maxHosts).map {
+            Row(row: $0, trend: trends[$0.host])
+        }
         return Tile(rows: Array(shown),
                     hiddenHosts: max(0, view.hostRows.count - maxHosts),
                     hostCount: view.hostCount,

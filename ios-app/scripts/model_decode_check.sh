@@ -68,6 +68,12 @@ real_models=(
   # same newest-first order, unacknowledged filter, age and body-first-line
   # rules the widget and the macOS dropdown draw.
   Sources/Shared/NeedsMeReading.swift
+  # The history series model (t_2681d3de): the tile's GPU% trend is built from
+  # ClusterHistorySeriesSet + the pixel-column downsampler, both Foundation-only,
+  # so the join, the reduction and the extremes-preserving property are executed
+  # here against the committed tier-1/tier-2 fixtures rather than asserted in
+  # prose by the SwiftUI gate.
+  Sources/Shared/ClusterHistorySeries.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
