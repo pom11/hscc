@@ -55,6 +55,12 @@ struct DashboardSnapshot {
     var boardTotals: BoardTotals?
     var projectCount: Int?
     var projects: [ProjectLite] = []
+    /// The main orchestrator's unacknowledged alerts ("Needs you", card R3).
+    /// nil when the read failed; empty is the honest "nothing needs you".
+    var needsMe: NeedsMeFeed?
+    /// Why the alert read failed, already reduced to the shared client's
+    /// address-free vocabulary. nil on a successful read.
+    var needsMeFailure: String?
     var lastRefresh: Date?
     /// The first honest failure from this refresh, already reduced to the
     /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
@@ -232,6 +238,19 @@ final class DashboardMonitor: ObservableObject {
             next.projects = projects.rows(limit: 6)
             anySuccess = true
         case .failure(let failure):
+            failures.append(failure.shortLabel)
+        }
+
+        // The alert feed is the one surface that still answers "what needs the
+        // operator"; it is a read-only GET, not a notification registration.
+        switch await client.alerts(limit: 100) {
+        case .success(let payload):
+            next.needsMe = NeedsMeFeed.from(payload)
+            next.needsMeFailure = nil
+            anySuccess = true
+        case .failure(let failure):
+            next.needsMe = nil
+            next.needsMeFailure = failure.shortLabel
             failures.append(failure.shortLabel)
         }
 

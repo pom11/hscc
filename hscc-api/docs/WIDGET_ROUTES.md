@@ -25,8 +25,8 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
 | `POST /v1/alerts` | `hscc notify` (main orchestrator, daemon, operators) | `routes_alerts.handle_post_alert` | `hscc_daemon.alerts.post_alert` — the same store/rules `hscc notify` reaches over HTTP |
-| `GET /v1/alerts?since=<id>` | server-side feed (no app consumer; 2026-11-19 decision) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
-| `POST /v1/alerts/<id>/ack` | server-side feed (no app consumer; 2026-11-19 decision) | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
+| `GET /v1/alerts?since=<id>` | "Needs me" widget, macOS menu bar dropdown (`NeedsMeWidget.swift` / `DashboardView.swift`) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
+| `POST /v1/alerts/<id>/ack` | CLI only (`hscc notify ack`); the apps are read-only | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
 
 
 ## GET /v1/kanban/running
@@ -462,16 +462,16 @@ the live server already answers, but without the board-truth fields above —
 older clients decode only `{name, board}`, newer ones render `—` for missing
 counts.
 
-## Alert feed (card N1)
+## Alert feed (cards N1 + R3)
 
 The main orchestrator reaches the operator through one durable feed under
 `~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
 client of this route, not a second writer, so dedupe and rate limits cannot
 drift between producers. `hscc notify list` reads it newest first (`--since`,
-`--limit`, `--json`) and `hscc notify ack <id>` marks one seen. The iOS and
-macOS apps do not poll or register for these alerts (operator decision
-2026-11-19): there is no APNs sender and no device registration; the feed is
-the record.
+`--limit`, `--json`) and `hscc notify ack <id>` marks one seen. There is no APNs
+sender and no device registration (operator decision 2026-11-19): the read-only
+"Needs me" widget and the macOS menu bar dropdown render the feed; neither
+registers for or posts notifications.
 
 ### POST /v1/alerts
 
@@ -507,6 +507,34 @@ Marks one alert acknowledged (idempotent — the first `acked_at` is kept) and
 clears its key's dedupe slot, so a condition that recurs after the operator has
 seen it can alert again. `404` when the id is not in the bounded feed.
 
+### "Needs me" widget mapping (card R3)
+
+`WidgetDataClient.alerts(limit:)` performs one `GET /v1/alerts?limit=100`; the
+Foundation-only `NeedsMeFeed.from` projection in
+`ios-app/Sources/Shared/NeedsMeReading.swift` is the one mapping the iOS widget,
+the macOS widget and the menu bar dropdown share.
+
+| route field | surface use | rule |
+|---|---|---|
+| `alerts[]` | the row set | drop `acked: true` (a "needs me" row is unacknowledged work); `hscc notify list` still prints acked history with its `(acked)` marker |
+| `alerts[].id` | identity + newest-first order | descending id, the reverse of the route's ascending page — exactly the order `hscc notify list` presents |
+| `alerts[].ts` | age | the CLI's vocabulary: `2m`, `3h`, `4d`; a stale snapshot's age is minutes since it was read |
+| `alerts[].title` | row title / newest title | verbatim |
+| `alerts[].body` | large family's second line | first non-empty line only |
+| `alerts[].level` | level colour | `critical`/`action` → the operator's accent (`#FF5722` in the default style), `info` → secondary; an unknown level is `info` |
+| `alerts[].key` | not rendered | dedupe identity only |
+| `alerts[].acked` / `.acked_at` | filter only | not rendered |
+| `count` / `latest_id` / `has_more` | not drawn | the surface's count is `NeedsMeFeed.count` (unacknowledged rows), never the page count |
+
+Families: iOS `systemSmall` (count + newest title + age), `systemMedium` (top 3
+rows: level, title, age), `systemLarge` (up to 8 rows with the body first line),
+`accessoryCircular` (count), `accessoryRectangular` (newest title),
+`accessoryInline` (`"N need you"` / `"nothing needs you"`). macOS ships the same
+small/medium/large widget by path and a "Needs you" section at the top of the
+menu bar dropdown, hidden when the feed has no row. Empty is `"Nothing needs
+you"` with the update age; a failed read renders the shared client's reason
+(never a fabricated zero).
+
 ## Parity tests
 
 * `hscc-api/tests/test_routes_project.py::test_projects_list_matches_hscc_project_list_json`
@@ -516,6 +544,9 @@ seen it can alert again. `404` when the id is not in the bounded feed.
 * `hscc-api/tests/test_widget_route_parity.py` runs the cluster
   status/monitor and autodown status CLI functions against the live route on
   the same fixture state and asserts equal rows/numbers (card t_8743f98c).
+  Its `test_alerts_api_matches_notify_list` pins the alert route and
+  `hscc notify list` to the same rows/order before `NeedsMeFeed` applies the
+  unacknowledged filter (card R3).
   builds one SQLite board, serves it through the route's flightdeck seam and
   through `hscc_daemon.kanban_live.collect` (the function behind
   `hscc kanban monitor --json`), and asserts identical status histograms.

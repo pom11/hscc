@@ -14,7 +14,7 @@ import Foundation
 //      below; there is no body parameter and no method-name parameter anywhere
 //      in the type, so there is nothing to pass a mutation through.
 //   2. it only fetches a path named in `WidgetDataPath.all` — the closed set of
-//      routes §3's five datasets are served by. Anything else fails with
+//      routes the widget datasets are served by. Anything else fails with
 //      `.pathNotAllowed` BEFORE a request is built, so a later card cannot reach
 //      a mutating route by inventing a string.
 //   3. it decodes into the shared payload types (`SharedModels.swift`) and hands
@@ -53,7 +53,8 @@ import Foundation
 // worse outcome than a `.timeout` a surface can render.
 // ---------------------------------------------------------------------------
 
-/// The closed set of routes the five widget datasets are served by (§3), and
+/// The closed set of routes the widget datasets are served by (§3 plus the
+/// card-R3 alert feed), and
 /// nothing else. A read that is not listed here is refused — that is what makes
 /// "no mutation calls at all" a property of this file rather than a promise.
 enum WidgetDataPath {
@@ -83,6 +84,12 @@ enum WidgetDataPath {
     /// guess. This read is a surface of its own: §2 budgets ≤ 2 requests per
     /// surface per refresh, and the cluster surface already spends both.
     static let metricsHistory = "/v1/metrics/history"
+    /// Dataset 7 — the operator alert feed (`GET /v1/alerts`, card R3).
+    /// `hscc notify` is the writer; this is the read the "Needs me" widget and
+    /// the macOS dropdown project. The route is paging-ordered ascending; the
+    /// surface's own projection applies the newest-first order and the
+    /// unacknowledged filter (`NeedsMeReading.swift`).
+    static let alerts = "/v1/alerts"
 
     /// Every path this client will fetch. Additive only, and only for a read.
     static let all: Set<String> = [
@@ -90,7 +97,7 @@ enum WidgetDataPath {
         kanbanRunning, kanbanBlocked, kanbanStale,
         clusterMonitor, clusterStatus, clusterHistory,
         daemonHost, autodownStatus,
-        metricsHistory,
+        metricsHistory, alerts,
     ]
 
     static func isReadPath(_ path: String) -> Bool { all.contains(path) }
@@ -159,7 +166,7 @@ struct WidgetDataClient {
         return URLSession(configuration: configuration)
     }
 
-    // MARK: - The five datasets (§3), one method each
+    // MARK: - The widget datasets (§3 + the alert feed), one method each
 
     /// Dataset 1 — `GET /v1/projects`. `{name, board}` only is decoded
     /// (`ProjectsLite`); `repo` is an absolute local path and is never decoded,
@@ -316,6 +323,18 @@ struct WidgetDataClient {
         }
         return await load(WidgetDataPath.metricsHistory,
                           as: MetricsHistoryResponse.self, queryItems: query)
+    }
+
+    /// Dataset 7 — `GET /v1/alerts`, the operator feed (`hscc notify`'s read).
+    /// `limit` is the page size (the route caps it at 500 and defaults to 100);
+    /// no `since` cursor is offered because the "Needs me" surface renders the
+    /// current unacknowledged set, not a drain loop. Ordering and the
+    /// unacknowledged filter belong to `NeedsMeFeed.from`, the one projection
+    /// the widget and the macOS dropdown share.
+    func alerts(limit: Int = 100) async -> Result<AlertsLite, WidgetDataFailure> {
+        await load(WidgetDataPath.alerts, as: AlertsLite.self,
+                   queryItems: [URLQueryItem(name: "limit",
+                                             value: String(min(max(limit, 1), 500)))])
     }
 
     // MARK: - Core read

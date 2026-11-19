@@ -1,4 +1,4 @@
-# Widget / Live Activity data contract — five datasets audited against the live API
+# Widget / Live Activity data contract — datasets audited against the live API
 
 Card: `t_a873a0a2` · Owner: ios-engineer · Status: **AUTHORITY** (this file, not a
 card comment, is the input every widget/Live-Activity card reads)
@@ -7,7 +7,7 @@ The iOS pivot turns `ios-app/` into a widget + Live Activity client: connection
 settings, one small config screen, and read-only surfaces. That changes what a
 payload has to *be*: a widget extension refetches on a timeline cadence for a
 surface that renders 1–8 lines, and a Live Activity content state has a hard
-ceiling. This file measures what the five datasets cost today, what each view
+ceiling. This file measures what the widget datasets cost today, what each view
 family actually needs, and which datasets can be served from the routes that
 already exist.
 
@@ -456,9 +456,13 @@ that fetched it. Rules:
 * The token never enters the App Group store: `WidgetDataClient`
   (`Sources/Shared/WidgetDataClient.swift`, which replaced `ExtensionClient`)
   reads it from the shared keychain per client and the struct is `GET`-only by
-  construction, with a closed allowlist of read paths — keep it that way. The
-  allowlist names only widget/Live Activity datasets: the apps carry no
-  notifications (operator decision 2026-11-19), so `GET /v1/alerts` is absent.
+  construction, with a closed allowlist of read paths — keep it that way.
+  **Amendment (card R3, 2026-11-19):** the apps still carry no notifications,
+  but the read-only alert feed is now a widget dataset. `GET /v1/alerts` is in
+  the allowlist; the "Needs me" widget and the macOS dropdown project it through
+  `Sources/Shared/NeedsMeReading.swift` (unacknowledged rows, newest first,
+  body first line, `ts` age). Nothing registers a device, posts an alert, or
+  acks from an app — the one write path remains `hscc notify`.
 
 ## 8. Consequences the next cards should not re-litigate
 

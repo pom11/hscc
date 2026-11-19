@@ -6,9 +6,10 @@ import Foundation
 // real SharedModels.swift + SharedStore.swift) through a stubbed transport and
 // asserts the four promises the pivot rests on:
 //
-//   1. READ-ONLY: the fetch allowlist is exactly the ten audited read routes,
-//      a mutating-looking path is refused BEFORE the transport sees anything,
-//      and every request that does go out is a GET with the app's headers.
+//   1. READ-ONLY: the fetch allowlist is exactly the eleven audited read
+//      routes, a mutating-looking path is refused BEFORE the transport sees
+//      anything, and every request that does go out is a GET with the app's
+//      headers.
 //   2. TIMEOUT: the per-request ceiling is on the request (and clamped), so an
 //      extension is never left holding URLSession's 60 s default.
 //   3. FAILURE TYPES: each transport/status/decode outcome maps to the one
@@ -149,6 +150,22 @@ let summaryMissingDoneBody = Data(#"""
  "speak":"hscc: 20 open, 3 running."}
 """#.utf8)
 
+/// The real `GET /v1/alerts?limit=100` shape (card R3): ascending by id, with
+/// one acknowledged row. Placeholder alert text only — the live feed is private.
+let alertsBody = Data(#"""
+{"alerts":[{"id":1,"ts":"2026-11-19T12:00:00Z","title":"Example info alert",
+            "body":"Example body line one.","level":"info","key":null,
+            "acked":false,"acked_at":null},
+           {"id":2,"ts":"2026-11-19T12:28:00Z","title":"Example action alert",
+            "body":"Example body line one.\nExample body line two.",
+            "level":"action","key":"fixture/action","acked":false,"acked_at":null},
+           {"id":3,"ts":"2026-11-19T12:29:00Z","title":"Example acked alert",
+            "body":"History.","level":"critical","key":null,
+            "acked":true,"acked_at":"2026-11-19T12:29:30Z"}],
+ "count":3,"since":null,"limit":100,"oldest_id":1,"latest_id":3,
+ "next_since":3,"has_more":false,"speak":"3 alerts."}
+"""#.utf8)
+
 /// §5.5's down-state: 38 B, no `json` key. A SUCCESSFUL read with no nodes.
 let monitorDownBody = Data(#"{"speak":"fleet monitor unavailable"}"#.utf8)
 
@@ -269,7 +286,7 @@ func runAll() async {
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
-        "/v1/metrics/history",
+        "/v1/metrics/history", "/v1/alerts",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
@@ -525,6 +542,30 @@ func runAll() async {
     _ = await client.mobileSummary(boards: ["hscc", "inc"])
     let scoped = StubTransport.requests.last?.url?.absoluteString ?? ""
     check("mobileSummary scopes boards", scoped.contains("boards=") && scoped.contains("hscc") && scoped.contains("inc"))
+
+    // 10a. Dataset 7 — the operator alert feed (card R3). One GET, a real
+    //      `limit` query item, and the surface projection keeps only the
+    //      unacknowledged rows newest first.
+    StubTransport.arm(.http(status: 200, body: alertsBody))
+    let alertRead = await client.alerts(limit: 100)
+    let alertURL = StubTransport.requests.last?.url?.absoluteString ?? ""
+    check("alerts carries limit=100", alertURL.contains("limit=100"))
+    check("alerts path stayed clean",
+          StubTransport.requests.last?.url?.path == "/v1/alerts")
+    if case .success(let payload) = alertRead {
+        let feed = NeedsMeFeed.from(payload)
+        check("the alert feed decodes and keeps only unacknowledged rows",
+              payload.alerts.count == 3 && feed.count == 2)
+        check("the alert projection is newest first",
+              feed.items.map(\.id) == [2, 1])
+        check("an alert row carries the first body line only",
+              feed.items[0].bodyFirstLine == "Example body line one."
+                && !feed.items[0].bodyFirstLine.contains("\n"))
+        check("the alert level normalises to action",
+              feed.items[0].level == .action)
+    } else {
+        check("alerts should decode, got \(String(reflecting: alertRead))", false)
+    }
 
     // 10b. Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf). Three things
     //      this gate exists to keep true: `tier` leaves as a query item (the

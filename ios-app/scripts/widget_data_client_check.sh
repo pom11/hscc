@@ -88,6 +88,10 @@ real_sources=(
   # job is two rules — a not-reported metric stays a gap, and a peak rides
   # beside its average — and a rule nobody compiles is a rule nobody keeps.
   Sources/Shared/MetricsHistoryTrend.swift
+  # The alert-feed projection (card R3): the widget and macOS dropdown share
+  # this file, and the harness drives its order/filter/first-line rules through
+  # the real client.
+  Sources/Shared/NeedsMeReading.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

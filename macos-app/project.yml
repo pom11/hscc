@@ -112,6 +112,10 @@ targets:
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      # The alert-feed projection ("Needs me", card R3): the same Foundation-only
+      # order/filter/age rules the iOS widget draws, so the dropdown and the
+      # desktop tile cannot disagree.
+      - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
       # "Test connection" here runs the same per-address probe as iOS: one row
       # per saved address, one overall line, one last-working update.
       - path: ../ios-app/Sources/Shared/ConnectionAddressProbe.swift
@@ -214,7 +218,7 @@ targets:
   #
   # Every widget file is the iOS extension's own source, referenced BY PATH.
   # There is no duplicated view, provider, entity query or configuration
-  # intent: the same six widgets ship on both platforms, and the few places
+  # intent: the same seven widgets ship on both platforms, and the few places
   # where WidgetKit differs (the accessory families do not exist on macOS)
   # are `#if os(iOS)` inside those files, not a second copy here.
   #
@@ -227,7 +231,7 @@ targets:
     deploymentTarget: "14.0"
     sources:
       # The shared @main WidgetBundle: Cluster, Monitor, Cards Running,
-      # Kanban Monitor, Projects and Board Status.
+      # Kanban Monitor, Projects, Board Status and Needs Me.
       - path: ../ios-app/Sources/HSCCWidgets/HSCCWidgetsBundle.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetMetrics.swift
@@ -253,6 +257,9 @@ targets:
       - path: ../ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/BoardStatusReading.swift
+      # The main orchestrator's alert feed ("Needs me", card R3), the same file
+      # the iOS widget extension compiles.
+      - path: ../ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift
       # The one rendering-mode adapter (fullColor / accented / vibrant), shared
       # with the iOS extension rather than reimplemented for macOS.
       - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
@@ -261,6 +268,7 @@ targets:
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
       # The monitor view-model (t_61ed3f5e): the widget cards draw the CLI's
       # own host and serving cells rather than re-deriving units and rounding.

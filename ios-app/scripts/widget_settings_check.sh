@@ -952,6 +952,7 @@ widget_kind_for() {
     KanbanMonitorWidget) echo widgetKanbanMonitor ;;
     ProjectsWidget) echo widgetProjects ;;
     BoardStatusWidget) echo widgetBoardStatus ;;
+    NeedsMeWidget) echo widgetNeedsMe ;;
     *) echo "" ;;
   esac
 }
