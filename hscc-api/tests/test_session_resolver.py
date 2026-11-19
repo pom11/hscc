@@ -161,16 +161,26 @@ def test_resolve_no_session_honest_none(tmp_path, monkeypatch):
 
 
 def test_resolve_general_sentinel_is_honest(tmp_path, monkeypatch):
-    """None / 'general' resolve to the catch-all orchestrator (no session)."""
+    """None / 'general' resolve to the main orchestrator (no session).
+
+    The sentinel is no longer the retired ``general-orch`` catch-all: M1 made
+    the bootstrap-stored main name (default ``general``) the one identity for
+    profile, session and board. The expectation comes from that resolver, not
+    a second hardcoded name, so this test keeps its intent — an honest
+    no-session result for the project-less identity — without spelling the
+    retired profile.
+    """
+    monkeypatch.setenv("HSCC_DIR", str(tmp_path / "hscc-state"))
     reg = _write_registry(tmp_path, [])
     state = tmp_path / "state.db"
     _make_state_db(state).close()
     _point_profile_db_at(monkeypatch, state)
 
+    expected = routes_orchestrator.main_profile()
     for proj in (None, "general"):
         profile, title, sid = resolve_named_session_id(proj, registry_path=reg)
-        assert profile == "general-orch"
-        assert title == "general"
+        assert profile == expected
+        assert title == expected
         assert sid is None
 
 
