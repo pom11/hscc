@@ -116,6 +116,13 @@ PERIODIC_INTERVALS = {
     # like every other stream, and the tick stamps on every path including the
     # one where the sampler raised.
     "metrics_history": 2,
+    # MQ1 (operator 2026-11-19): the local merge queue tick. 60 s is the
+    # dispatcher-class cadence: one PR per project per tick, and each tick is
+    # cheap when nothing is queued (state read only). A tick that is actively
+    # running gates blocks its own stream thread, so verify's per-stream rule
+    # widens this to the usual 600 s floor; the queue ledger, not this thread,
+    # is the durable source of truth across restarts.
+    "merge_queue": 60,
 }
 
 
@@ -723,6 +730,7 @@ def run_daemon_loop():
     from .proxy_stall import check_proxy_stall
     from .stream_silence import check_stream_silence
     from .metrics_history import check_metrics_history
+    from .merge_queue import check_merge_queue
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -830,6 +838,10 @@ def run_daemon_loop():
         # rather than adding a poller of its own, and every sample it takes goes
         # to the tiered store under ~/.hscc/metrics.
         "metrics_history": check_metrics_history,
+        # MQ1: the local merge queue. Same supervised-thread machinery as every
+        # other stream; the tick never raises and stamps merge_queue.json on
+        # every path, so a disabled queue is visibly alive, not dark.
+        "merge_queue": check_merge_queue,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the

@@ -96,6 +96,7 @@ _OPTIONAL_FIELDS = (
     "installed_version_cmd",
     "version_file",
     "deployed_at_cmd",
+    "merge_queue",
 )
 
 
@@ -115,6 +116,7 @@ class Project:
     installed_version_cmd: str | None = None
     version_file: str | None = None
     deployed_at_cmd: str | None = None
+    merge_queue: dict | None = None
     depends_on: list[str] = field(default_factory=list)
 
     def missing_fields(self) -> list[str]:
@@ -189,6 +191,42 @@ def _parse_depends_on(raw) -> list[str]:
     return out
 
 
+def _parse_merge_queue(raw) -> dict | None:
+    """Validate the optional ``merge_queue`` mapping.
+
+    ``None``/absent -> None (opt-in remains off; the daemon treats the project
+    as not queued). A mapping may carry ``enabled`` (bool), ``gates`` (list of
+    command strings) and ``timeout_s`` (positive int). Anything malformed
+    raises instead of being silently dropped — a typo in a gate list must not
+    turn into an empty gate set.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RegistryError(
+            "project 'merge_queue' must be a mapping, "
+            f"got {type(raw).__name__}: {raw!r}")
+    out = dict(raw)
+    if "enabled" in out and not isinstance(out["enabled"], bool):
+        raise RegistryError(
+            "project 'merge_queue.enabled' must be a boolean, "
+            f"got {out['enabled']!r}")
+    if "gates" in out:
+        gates = out["gates"]
+        if not isinstance(gates, list) or not all(
+                isinstance(g, str) and g.strip() for g in gates):
+            raise RegistryError(
+                "project 'merge_queue.gates' must be a list of non-empty "
+                f"command strings, got {gates!r}")
+    if "timeout_s" in out:
+        timeout = out["timeout_s"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise RegistryError(
+                "project 'merge_queue.timeout_s' must be a positive integer, "
+                f"got {timeout!r}")
+    return out
+
+
 def _row_to_project(row: dict) -> Project:
     """Build a Project from a parsed yaml row.
 
@@ -221,6 +259,7 @@ def _row_to_project(row: dict) -> Project:
         installed_version_cmd=row.get("installed_version_cmd"),
         version_file=row.get("version_file"),
         deployed_at_cmd=row.get("deployed_at_cmd"),
+        merge_queue=_parse_merge_queue(row.get("merge_queue")),
         depends_on=_parse_depends_on(row.get("depends_on")),
     )
 

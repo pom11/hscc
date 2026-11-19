@@ -78,6 +78,7 @@ def test_missing_optional_fields_are_none_not_errors(tmp_path):
         "installed_version_cmd",
         "version_file",
         "deployed_at_cmd",
+        "merge_queue",
     ]
 
 
@@ -525,3 +526,54 @@ def test_dependent_notice_none_when_no_dependents(tmp_path):
     projects = _projs(("bc", "/tmp/bc"), ("app", "/tmp/app"))
     assert dependent_notice("bc", projects) is None
 
+
+
+# ── merge_queue (MQ1) ──────────────────────────────────────────────────────
+
+def test_merge_queue_absent_is_none_and_round_trips_minimally(tmp_path):
+    reg = tmp_path / "registry.yaml"
+    _write(reg, "projects:\n- name: alpha\n  repo: /tmp/alpha\n")
+    [project] = load_registry(str(reg))
+    assert project.merge_queue is None
+    save_registry([project], str(reg))
+    assert "merge_queue" not in reg.read_text(encoding="utf-8")
+
+
+def test_merge_queue_mapping_loads_and_round_trips(tmp_path):
+    reg = tmp_path / "registry.yaml"
+    _write(reg, (
+        "projects:\n"
+        "- name: alpha\n"
+        "  repo: /tmp/alpha\n"
+        "  merge_queue:\n"
+        "    enabled: true\n"
+        "    gates: ['pytest -q', 'make check']\n"
+        "    timeout_s: 900\n"))
+    [project] = load_registry(str(reg))
+    assert project.merge_queue == {
+        "enabled": True,
+        "gates": ["pytest -q", "make check"],
+        "timeout_s": 900,
+    }
+    save_registry([project], str(reg))
+    assert "merge_queue" in reg.read_text(encoding="utf-8")
+    [again] = load_registry(str(reg))
+    assert again.merge_queue == project.merge_queue
+
+
+@pytest.mark.parametrize("value", [
+    "yes",
+    {"enabled": "yes"},
+    {"gates": "pytest -q"},
+    {"gates": [""]},
+    {"timeout_s": 0},
+    {"timeout_s": True},
+])
+def test_malformed_merge_queue_raises(tmp_path, value):
+    import yaml
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(yaml.safe_dump(
+        {"projects": [{"name": "alpha", "repo": "/tmp/alpha",
+                       "merge_queue": value}]}), encoding="utf-8")
+    with pytest.raises(RegistryError):
+        load_registry(str(reg))

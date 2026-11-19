@@ -563,6 +563,14 @@ COMMAND_HELP = {
               "  monitor [--live] [--interval <s>] [--board <slug>]: workers\n"
               "    on every board, running/ready/counts/outcomes (read-only)\n"
               "  Usage: hscc kanban <subcommand> [args]",
+    # merge-queue (MQ1): local FIFO of green PRs run by the daemon. Lines
+    # authored <=76 for the same (B)-gate reason as kanban/cards above.
+    "merge-queue": "Local merge queue (daemon-run, one PR at a time per repo).\n"
+                   "  status [--json] | list [<project>] [--json]\n"
+                   "  add <project> <pr> [--card <id>] | remove <project> <pr>\n"
+                   "  pause|resume|enable|disable <project> [--json]\n"
+                   "  Rebase -> gates -> force-with-lease push -> squash merge.\n"
+                   "  Usage: hscc merge-queue <subcommand> [args]",
     "cards": "Live per-card worker view (read-only).\n"
              "  monitor [--live] [--interval <s>] [--board <slug>] [--tools]:\n"
              "    one panel per running card streaming its transcript; waiting\n"
@@ -654,6 +662,7 @@ TOP_LEVEL_COMMANDS = (
     "cluster", "template", "profiles", "project", "api", "autodown",
     "kanban", "cards", "orch", "main", "verify", "stats", "throughput",
     "autoscale", "escalate", "start-daemon", "heal-clear", "heal-status",
+    "merge-queue",
 )
 
 # ── template group help surface (t_9032f96b) ───────────────────────────────
@@ -2205,6 +2214,13 @@ def main():
     if cmd == "autodown":
         from hscc_daemon.autodown_cli import cmd_autodown
         rc = cmd_autodown(args[1:])
+        sys.exit(rc)
+
+    # 'merge-queue' group (MQ1) — local FIFO of green PRs. Help is intercepted
+    # inside cmd_merge_queue before any state read, like kanban/api.
+    if cmd == "merge-queue":
+        from hscc_daemon.merge_queue_cli import cmd_merge_queue
+        rc = cmd_merge_queue(args[1:])
         sys.exit(rc)
 
     # 'kanban' group — board hygiene. kanban_blocked owns the single dispatcher
