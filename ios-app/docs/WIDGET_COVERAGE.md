@@ -127,8 +127,9 @@ forking them.
 
 The remaining `absent` XL cells (Projects, Board Status, Needs Me and Merge
 Queue) are the documented macOS family split, not a defect: all nine widgets ship
-small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
-Running (CARD B2) also ship `systemExtraLarge`. Needs Me and Merge Queue are
+small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3), Cards
+Running (CARD B2) and Cluster Graph (t_be4e1a48) also ship
+`systemExtraLarge`. Needs Me and Merge Queue are
 deliberately small/medium/large on macOS: both are short row lists, so an XL
 cell would repeat the large renderer rather than add a column.
 
@@ -254,7 +255,7 @@ rules (no `0 running` from a blind read, no fresh-looking cache).
 
 ```text
 $ bash ios-app/scripts/model_decode_check.sh
-ALL DECODE CHECKS PASSED — 300/300 checks (over 70 committed fixtures) decoded against the real models
+ALL DECODE CHECKS PASSED — N/N checks (over F committed fixtures) decoded against the real models
 ```
 
 `v1_alerts.json` is the alert-feed fixture (shape from `routes_alerts.py`, all
@@ -279,6 +280,7 @@ Levels `critical`/`action` use the operator's accent (`#FF5722` by default) and
 names the reason and age; a failed read names the reason. The macOS menu bar
 dropdown renders the same projection in a "Needs you" section at the top,
 hidden when empty.
+
 ## 5d. Cluster Graph — metric × family × window × resolution
 
 The graph widget's surfaces read exactly one route: `GET /v1/cluster/history`
@@ -420,7 +422,7 @@ is empty (a failed read still says why).
 | Multi-address clusters with automatic failover | #371 | `64f8361f` | `ios-app/Sources/Shared/SharedStore.swift`, `ios-app/Sources/Shared/WidgetDataClient.swift`, `ios-app/Sources/HSCC/SettingsStore.swift` |
 | Block-H app icon and black/orange dark-only theme | #372 | `e0b88ff7` | `ios-app/Sources/HSCC/Views/Theme.swift`, `ios-app/Sources/HSCC/Views/HSCCMark.swift`, `ios-app/assets-master/appicon-*.svg` |
 | Widget style model, App Group storage and appearance editor | #373 | `8bab4521` | `ios-app/Sources/HSCC/WidgetSettingsStore.swift`, `ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift`, `ios-app/Sources/Shared/SharedStore.swift` |
-| Widget style applied to every widget and Live Activity | #375 | `14b080dc` | all seven widget roots under `ios-app/Sources/HSCCWidgets/` and all five Live Activity configurations; `ios-app/scripts/widget_style_check.sh` |
+| Widget style applied to every widget and Live Activity | #375 | `14b080dc` | all nine widget roots under `ios-app/Sources/HSCCWidgets/` and all five Live Activity configurations; `ios-app/scripts/widget_style_check.sh` |
 | macOS menu-bar app | #374 | `d9b78273` | `macos-app/Sources/HSCCMac/` (menu-bar-only app, `LSUIElement`) |
 | macOS desktop widgets | #376 | `a3da0180` | `HSCCMacWidgets` target in `macos-app/project.yml`; `ios-app/Sources/HSCCWidgets/WidgetRendering.swift` |
 | GitHub Pages OTA install | #377 | `b5691c09` | `ios-app/scripts/publish_pages.sh`, `ios-app/scripts/make_manifest.py` |
@@ -510,8 +512,9 @@ dropdown, no configuration at all reaches them:
 Non-gap coverage notes:
 
 - Notifications are out of scope by operator decision (2026-11-19): the apps
-  carry neither local nor push notifications. The widgets and Live Activities
-  in this document are unaffected — they are not notifications.
+  carry neither local nor push notifications, and this page therefore has no
+  notification widget or Live Activity rows. The widgets and Live Activities in
+  this document are unaffected — they are not notifications.
 - The monitor extension does not refresh Live Activities. That is the platform
   contract, not a missing path: all five activities are refreshed by app-side
   drivers that poll and push.
@@ -647,7 +650,7 @@ File tags (each cell names the file that decides what appears):
 | `Fleet` | `ios-app/Sources/Shared/ClusterNodeTally.swift` — `FleetProjection.text(for:)`, the pre-existing glance text |
 | `VM` | `ios-app/Sources/Shared/ClusterMonitorViewModel.swift` — the only formatter of CLI cells |
 | `ChLA` | `ios-app/Sources/Shared/ClusterHealthActivity.swift` (rules) + `ios-app/Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift` (draws) |
-| `MonLA` | `ios-app/Sources/Shared/MonitorActivity.swift` (state) + `ios-app/Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift` (draws) |
+| `MonLA` | `ios-app/Sources/Shared/MonitorActivityMetrics.swift` (rules, Foundation-only) + `ios-app/Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift` (draws) |
 | `MacDrop` | `macos-app/Sources/HSCCMac/DashboardFleetReading.swift` (rules) + `DashboardFleetSection.swift` (draws) |
 | `MacTitle` | `macos-app/Sources/HSCCMac/MenuBarLabel.swift` + `MenuBarFleet` in `DashboardFleetReading.swift` |
 
@@ -664,23 +667,23 @@ serves both widgets in every row below; `ClusterWidgetViews.swift` and
 | H3 CPU% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
 | H4 RAM% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
 | H5 Swap% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
-| H6 GPU% | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | app `Fleet` (`GPU 48%`, `FleetFormat.pct` — the CLI prints `48` with no sign) | — | — |
-| H7 CPU Temp | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
-| H8 GPU Temp | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | app `Fleet` (`49°C`, rounded integer + `°C`; the CLI prints `49 C`) | — | — |
-| H9 GPU Power | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
+| H6 GPU% | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | agg `ChLA` (`GPU avg 48%`, `CLILockScreenCopy.gpuToken` — the CLI prints `48` with no sign) | — | — |
+| H7 CPU Temp | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | CLI `ChLA` (the hottest CPU cell) | — | CLI `ChLA` (same token) |
+| H8 GPU Temp | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | CLI `ChLA` (the hottest GPU cell) | — | CLI `ChLA` (same token) |
+| H9 GPU Power | CLI `SmallGrid` | CLI `MedTable` | CLI `Tables` | CLI `Tables` | agg `ChLA` (summed watts, `CLILockScreenCopy.wattsToken`) | agg `ChLA` (summed watts, ring detail) | — |
 | S1 Node | — | — | CLI `Tables` | CLI `Tables` | — | — | — |
 | S2 Port | — | — | CLI `Tables` | CLI `Tables` | — | — | — |
 | S3 Model | app `SmallGrid` (`models` count in the totals line, `Fleet` elsewhere) | — | CLI `Tables` | CLI `Tables` | agg `Fleet` (`2 models`, a count) | — | agg `Fleet` (count) |
 | S4 Routes | — | — | — | — | — | — | — |
-| S5 Run | CLI `SmallGrid` (totalled) | — | CLI `Tables` | CLI `Tables` | — | — | — |
-| S6 Wait | CLI `SmallGrid` (totalled) | — | CLI `Tables` | CLI `Tables` | — | — | — |
+| S5 Run | CLI `SmallGrid` (totalled) | — | CLI `Tables` | CLI `Tables` | agg `ChLA` (fleet total, `queueToken`) | — | agg `ChLA` (`queueHeadline`) |
+| S6 Wait | CLI `SmallGrid` (totalled) | — | CLI `Tables` | CLI `Tables` | agg `ChLA` (fleet total, `queueToken`) | — | agg `ChLA` (`queueHeadline`) |
 | S7 KV% | — | — | CLI `Tables` | CLI `Tables` | — | — | — |
 | S8 In | — | — | CLI `Tables` | CLI `Tables` | — | — | — |
 | S9 Out | — | — | CLI `Tables` | CLI `Tables` | — | — | — |
-| S10 Gen t/s | — | — | — | — | app `Fleet` (`12.3 t/s`, the CLI's wide-row total, app-rounded) | — | app `Fleet` (`12.3 t/s`) |
+| S10 Gen t/s | — | — | — | — | — | — | — |
 | S11 Prompt t/s | — | — | — | — | — | — | — |
 | S12 `total (n)` | agg `SmallGrid` (run/wait + `models` only; the per-model rows are collapsed into one line) | — | CLI `Tables` (drawn as rows) | CLI `Tables` (drawn as rows) | — | — | — |
-| N1 `N host(s)` | agg `SmallGrid` (host tally `3/4`-style + `+N` for the clipped rows) | — | agg `Fleet` (`4/4 up`) | agg `Fleet` | agg `Fleet` | agg `Fleet` (the headline is all this family draws) | agg `Fleet` |
+| N1 `N host(s)` | agg `SmallGrid` (host tally `3/4`-style + `+N` for the clipped rows) | — | agg `Fleet` (`4/4 up`) | agg `Fleet` | agg `ChLA` (`N hosts`) | agg `ChLA` (the ring has no tally) | — |
 | N2 host_error line | app (gate pane replaces the grid) | app (replaces the table) | app `Fleet` footer | app `Fleet` footer | app `Fleet` | app `Fleet` | app `Fleet` |
 | N3 `serving — proxy :PORT` | — | — | — | — | — | — | — |
 | N4 `In/Out = tokens since…` | — | — | — | — | — | — | — |
@@ -711,43 +714,50 @@ widget had before the tables existed.
 
 ### 10c. Live Activity surfaces
 
-There are two cluster Live Activities. `ClusterHealthActivityAttributes` is the
-CLI-parity one. `MonitorActivityAttributes` is the older activity: it still
-carries its own `NodeMetric` doubles and formats them in the view, so its cells
-are `app`, not `CLI` — the card that moves it onto the shared view-model
-(PR #423) is **open, not merged**, so at this commit the Monitor activity does
-not draw CLI cells on any surface.
+There are two cluster Live Activities. `ClusterHealthActivityAttributes` and
+`MonitorActivityAttributes` now share the same CLI view-model: `ChLA` projects
+`CLILockScreenMetrics`, and `MonLA` pushes `MonitorSurfacePayload` from
+`MonitorActivityMetrics.swift` (rules, Foundation-only). Both draw the CLI's
+own cell strings for their tables; the only app-formatted Monitor LA values are
+the compact/minimal primary and secondary (`FleetFormat`) and the one-line feed
+text. The Monitor LA's host table carries Host, GPU%, CPU Temp, GPU Temp and GPU
+Power, then that host's serving run/wait; its Lock Screen and expanded island
+also draw the per-model `total (n)` rows. Compact and minimal lead with the
+pushed primary metric (hottest temperature, else busiest GPU%, else serving
+count) and never invent a number.
 
 | field | CH lock screen | CH compact | CH expanded | CH minimal | Mon lock screen | Mon compact | Mon expanded | Mon minimal |
 |---|---|---|---|---|---|---|---|---|
-| H1 Host | CLI† `ChLA` | — | CLI† `ChLA` | — | app `MonLA` (`node.label`, `.NNN` tail) | — | app `MonLA` | — |
+| H1 Host | CLI† `ChLA` | — | CLI† `ChLA` | — | CLI† `MonLA` (display label, never the wire address) | — | CLI† `MonLA` | — |
 | H2 Jobs | — | — | — | — | — | — | — | — |
-| H3 CPU% | — | — | — | — | app `MonLA` (`MBar`, `%.0f`) | — | app `MonLA` | — |
-| H4 RAM% | — | — | — | — | app `MonLA` (`MBar`) | — | app `MonLA` | — |
+| H3 CPU% | — | — | — | — | — | — | — | — |
+| H4 RAM% | — | — | — | — | — | — | — | — |
 | H5 Swap% | — | — | — | — | — | — | — | — |
-| H6 GPU% | CLI `ChLA` | agg `ChLA` (peak over hosts, `CLIMonitorFormat.cell(…, "%")`) | CLI `ChLA` | agg `ChLA` (same peak rule) | app `MonLA` (`MBar`) | — | app `MonLA` | — |
-| H7 CPU Temp | — | — | — | — | app `MonLA` (`CPU 49°C` — the CLI prints `49.3 C`: one decimal, `" C"`) | — | app `MonLA` | — |
-| H8 GPU Temp | CLI `ChLA` | agg `ChLA` (peak temp when no GPU% exists) | CLI `ChLA` | agg `ChLA` | app `MonLA` (`GPU 49°C`) | — | app `MonLA` | — |
-| H9 GPU Power | CLI `ChLA` (per host) + agg (total W) | — | CLI `ChLA` + agg (total W) | — | — | — | — | — |
-| S3 Model | app `ChLA` (`feedText`) | — | app `ChLA` | — | app `MonLA` | — | app `MonLA` | — |
-| S5 Run | agg `ChLA` (`servingLoadText`, `N run`) | — | agg `ChLA` | — | — (decoded into `NodeMetric.running`, never drawn) | — | — | — |
-| S6 Wait | agg `ChLA` (`N wait`) | — | agg `ChLA` | — | — (decoded into `NodeMetric.waiting`, never drawn) | — | — | — |
+| H6 GPU% | CLI `ChLA` | agg `ChLA` (peak over hosts, `CLIMonitorFormat.cell(…, "%")`) | CLI `ChLA` | agg `ChLA` (same peak rule) | CLI `MonLA` (host cell) | app `MonLA` (primary when no temperature was read) | CLI `MonLA` | app `MonLA` (same primary rule) |
+| H7 CPU Temp | — | — | — | — | CLI `MonLA` (host cell, `49.3 C`) | app `MonLA` (primary, `FleetFormat`) | CLI `MonLA` | app `MonLA` |
+| H8 GPU Temp | CLI `ChLA` | agg `ChLA` (peak temp when no GPU% exists) | CLI `ChLA` | agg `ChLA` | CLI `MonLA` (host cell, `49 C`) | app `MonLA` (primary) | CLI `MonLA` | app `MonLA` |
+| H9 GPU Power | CLI `ChLA` (per host) + agg (total W) | — | CLI `ChLA` + agg (total W) | — | CLI `MonLA` (host cell) | — | CLI `MonLA` | — |
+| S3 Model | app `ChLA` (`feedText`) | — | app `ChLA` | — | app `MonLA` (feed text) | — | app `MonLA` | — |
+| S5 Run | agg `ChLA` (`servingLoadText`, `N run`) | — | agg `ChLA` | — | agg `MonLA` (per-host run/wait and the serving total) | app `MonLA` (secondary when it is the queue) | agg `MonLA` | — |
+| S6 Wait | agg `ChLA` (`N wait`) | — | agg `ChLA` | — | agg `MonLA` (per-host run/wait and the serving total) | app `MonLA` (same secondary) | agg `MonLA` | — |
 | S7 KV% | — | — | — | — | — | — | — | — |
-| S8 In | — | — | — | — | — | — | — | — |
-| S9 Out | — | — | — | — | — | — | — | — |
-| S10 Gen t/s | app `ChLA` (`feedText`, `%.1f t/s`) | — | app `ChLA` | — | app `MonLA` (`%.1f t/s`) | — | app `MonLA` | — |
-| S12 `total (n)` | agg `ChLA` (run/wait totals only, one line) | — | agg `ChLA` | — | — | — | — | — |
-| N1 host tally | agg `ChLA` (`tallyText`) | agg `ChLA` (`compactTrailing`, `3/4`, clipped to `9+`) | agg `ChLA` (in the headline) | fallback only (when no load metric exists) | agg `MonLA` (`tallyText`) | agg `MonLA` (`tallyText` — the only number in the compact region) | — | — |
+| S8 In | — | — | — | — | CLI `MonLA` (per-model `total (n)` row) | — | CLI `MonLA` (one total row) | — |
+| S9 Out | — | — | — | — | CLI `MonLA` (per-model `total (n)` row) | — | CLI `MonLA` (one total row) | — |
+| S10 Gen t/s | app `ChLA` (`feedText`, `%.1f t/s`) | — | app `ChLA` | — | app `MonLA` (feed) + CLI `MonLA` (total row cell) | — | app `MonLA` (feed) + CLI `MonLA` (total row) | — |
+| S12 `total (n)` | agg `ChLA` (run/wait totals only, one line) | — | agg `ChLA` | — | CLI `MonLA` (drawn as rows, clipped) | — | CLI `MonLA` (one row, clipped) | — |
+| N1 host tally | agg `ChLA` (`tallyText`) | agg `ChLA` (`compactTrailing`, `3/4`, clipped to `9+`) | agg `ChLA` (in the headline) | fallback only (when no load metric exists) | agg `MonLA` (`tallyText`) | CLI `MonLA` (`compactTrailing` when the primary is not the tally) | CLI `MonLA` (trailing) | — |
 | N3/N5 serving-proxy lines | — | — | — | — | — | — | — | — |
 | C1–C7 (`cluster status`) | — | — | — | — | — | — | — | — |
 
 Two surfaces are honest-but-empty by rule, not by omission: **CH minimal** and
 **Mon minimal** draw one glyph plus at most one primary metric, and
-**Mon compact-leading** is a glyph only. A Dynamic Island region that would hold
-"nothing" is where the app deliberately puts no number.
+**Mon compact-leading** is a glyph only when the push carried no primary. A
+Dynamic Island region that would hold "nothing" is where the app deliberately
+puts no number.
 
-`Mon minimal` shows **no metric at all** on this commit (a state dot only) — the
-"one honest primary" rule for minimal is PR #423's, still open.
+`Mon minimal` shows the primary metric when one exists (the "one honest primary"
+rule landed with #423); with no primary it draws the state dot alone rather than
+a fabricated zero.
 
 ### 10d. macOS surfaces
 
@@ -836,7 +846,7 @@ This is the point of the exercise. Ordered by how surprising the gap is.
 | `idle hosts` the host **list** (C7) | `cluster status`, as a dim line | drawn nowhere, on either platform. macOS draws the count only — deliberately, because those lines are raw sparkrun status text containing node addresses (§7). |
 | `Swap%` (H5) on any surface except the medium/large/XL tables | `host_table` | the small tile's four columns are GPU%/GPU Temp/CPU Temp/GPU Power, so Swap% (and CPU%, RAM%, Jobs) are absent from `systemSmall` on both platforms. |
 | `Jobs` (H2) as the CLI prints it | `host_table` | the only fleet-wide "N jobs" on Lock Screen families is `FleetProjection.jobs` — the count of **distinct** `hosts[].workloads[].workload_id` read off the monitor route, a different source from the CLI's per-host `sample.sparkrun_jobs`. Same word, two numbers. Its own doc comment calls it "`hscc cluster status`'s workload count", which is a third thing: the Cluster widget does separately fetch `cluster status` and use `workloads.count` for that number, but only in the no-monitor-data fallback line. |
-| `total (n)` per model (S12) on `systemSmall`, the accessories, both Live Activities | `serving_table` | only `Tables` (large/XL) and the macOS dropdown keep the per-model total rows. Everywhere else they are collapsed into one run/wait line, which loses *which model* the queue belongs to. |
+| `total (n)` per model (S12) on `systemSmall`, the accessories, CH and the Monitor compact/minimal | `serving_table` | `Tables` (large/XL), the macOS dropdown and the Monitor Live Activity's Lock Screen/expanded island keep the per-model total rows. Everywhere else they are collapsed into one run/wait line, which loses *which model* the queue belongs to. |
 | `N1` host-tally wording | title line `— N host(s) —` | no surface prints the CLI's phrase; every surface invents its own tally form (`4/4 up`, `3/4`, `9+`, `4 hosts`). |
 | `N3 serving — proxy :PORT` | `render()` | no surface prints this line, so **the proxy port appears nowhere in either app** — yet every serving row on four surfaces came from that proxy, and `MacDrop` is the only surface that even labels the section as `serving`. This is the single most consequential missing note: two clusters behind different proxies render identically. |
 | `N4 In/Out = tokens since…` and `N6 no backends behind the proxy` | `render()` | **macOS dropdown only** — `Copy.tokensNote` and `Copy.noBackends` quote the CLI verbatim. On iOS neither line exists, so `In` and `Out` are drawn on `systemLarge`, `systemExtraLarge` and the desktop tiles with no statement that they are cumulative-since-engine-start rather than rates, and an empty backend list on iOS is silence where the CLI says *why*. |
@@ -874,29 +884,22 @@ as the CLI prints them, so a comparison line-by-line against the CLI fails:
 
 | field | surfaces | CLI prints | surface shows |
 |---|---|---|---|
-| `CPU Temp` (H7) | Monitor Live Activity, all rows | `49.3 C` (`{:.1f}`) | `CPU 49°C` — integer, `°C` suffix (`MonitorLiveActivity.swift`) |
-| `GPU Temp` (H8) | accessoryRectangular, Monitor LA | `49 C` | `GPU 49°C` |
-| `GPU%` (H6) | accessoryRectangular, Monitor LA | `93` (no sign) | `GPU 93%` |
-| `Run`/`Wait` (S5/S6) | `systemSmall`, both Live Activities | per-backend rows, plus `total (n)` | fleet totals only (`N run · N wait`) |
-| `Gen t/s` (S10) | `Fleet` detail lines | per-row + total | total only, app-rounded |
+| `GPU%` (H6) | accessoryRectangular, Monitor compact/minimal, menu bar title | `93` (no sign, per host) | a fleet mean (`GPU avg 48%`, `48%`) — a reduction the CLI never prints, labelled `avg` wherever it appears |
+| `Run`/`Wait` (S5/S6) | `systemSmall`, CH, Monitor compact/minimal | per-backend rows, plus `total (n)` | fleet totals only (`N run · N wait`); the Monitor LA's own tables draw the per-host and per-model rows |
+| `Gen t/s` (S10) | `Fleet` / `ChLA` / `MonLA` feed lines | per-row + total | total only, app-rounded (`12.3 t/s`) |
 | workload count (C1) | iOS Cluster widget families | one row per workload with tp/pp | a single `N jobs` count |
 
 ## 13. Provenance and what would falsify this page
 
-Measured at `origin/main` `af6e0c61` in a scratch worktree (the branch was then
-rebased onto a newer `origin/main` with no conflict and no code change, so every
-cell still describes merged behaviour), and no code changed — so the matrices
-describe merged behaviour only. Three PRs in this family are open
-and are therefore **not** in the matrices above as merged behaviour — where the
-handoff for one of them claims a surface draws CLI cells, this page follows the
-code on `main` instead: #409 (large/XL — its content reached `main` through the
-#424 squash, which is why the XL rows are marked CLI), #415 (accessory families
-rewritten onto `CLILockScreenMetrics` — until it merges, the accessories are the
-`Fleet` app-formatted cells this page records), and #423 (Monitor Live Activity
-onto `MonitorActivityMetrics` — until it merges, the Monitor activity's four
-surfaces are the `app`/glyph rows recorded here, and its minimal region shows no
-metric at all). If any of those three merges, sections 10b, 10c and 12 need a
-re-read: the `app` and `—` cells they name are the ones that change.
+Measured at `origin/main` `af6e0c61` in a scratch worktree, then re-read after
+each of this family's merges; no code changed for the documentation itself, so
+every cell describes merged behaviour. The parent cards that were open at
+`af6e0c61` have since merged and are recorded as merged above: #409's content
+reached `main` through the #424 squash (why the large/XL rows are CLI), #415
+moved the three accessory families onto `CLILockScreenMetrics` (CLI temperature
+cells, `avg` GPU and summed watts), and #423 moved the Monitor Live Activity onto
+`MonitorActivityMetrics` (CLI host/total rows, `FleetFormat` compact/minimal
+primary). Sections 10b, 10c and 12 now describe those merged surfaces.
 
 The gate outputs for this pass — both `build_check.sh` runs and the
 `model_decode_check.sh` banner — are in the PR body, not here: those numbers are
