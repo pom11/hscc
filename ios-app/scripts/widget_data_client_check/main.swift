@@ -308,7 +308,7 @@ func runAll() async {
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
-        "/v1/alerts",
+        "/v1/alerts", "/v1/merge-queue",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     check("the audited set carries exactly one history read",

@@ -256,7 +256,11 @@ file-by-file disposition of the remaining console files is
     availability, plus a compiled harness exercises the real `SharedStore`
     availability logic (nil provider → unavailable; real store → available).
   - `widget_data_client_check.sh` — drives the **real** `WidgetDataClient.swift`
-    (plus `SharedModels.swift` + `SharedStore.swift`) through a stubbed
+    (plus `SharedModels.swift` + `SharedStore.swift`, and the canonical history
+    vocabulary `ClusterHistorySeries.swift` with the trend projection
+    `ClusterHistoryTrend.swift` compiled alongside them, so a chart series is
+    executed against the ONE metric vocabulary it reads and not a lookalike)
+    through a stubbed
     `URLProtocol` and asserts the four promises the extension surfaces rest on:
     the read allowlist is exactly the audited routes and a mutating path is
     refused **before** a request is built; the per-request deadline is on the
@@ -319,6 +323,21 @@ file-by-file disposition of the remaining console files is
     a mixed-tier merge is asserted too — folding a 2 s sample and a 5-minute
     average into one column is the same lie as dropping a peak. No network, no
     device.
+  - `history_route_guard_check.sh` — the canonical-route trip-wire
+    (`DECISION-t_447cc7fc`): the Swift widget layer must read metrics history
+    through ONE path, `/v1/cluster/history`. Strips comments and scans every
+    `.swift` under `ios-app/Sources` **and** `macos-app/Sources` on three legs —
+    no `metrics/history` in code (so the ruling can be documented in prose
+    without tripping it, while any spelling of the path in code is caught),
+    every literal naming a history route must be one of a set the script names
+    exactly (`/v1/daemon/history` allowed BY NAME because it is the
+    automated-action timeline, a different dataset, and not by pattern), and the
+    canonical constant must still exist, still be used, and still be the only
+    history path in `WidgetDataPath.all` — so the guard cannot be walked past by
+    deleting the canonical read instead of the stale one. Pure text: no SDK, no
+    compile, no network. `HISTORY_ROUTE_GUARD_NEGATIVE_TEST=1` plants a
+    `metrics/history` read, a second `…/history` path, and a client with its
+    canonical constant removed, and the run fails unless each plant goes red.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
   - `merge_base_check.sh` — the stale-base guard: a branch whose merge-base with

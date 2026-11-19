@@ -45,6 +45,15 @@ jobs:
       - name: macOS widget parity gate
         run: bash macos-app/scripts/widget_parity_check.sh
 
+      # DECISION-t_447cc7fc left the two Apple clients split across two history
+      # routes, and a tile that charts history can pick the retired one with a
+      # plausible line of code — it compiles, it decodes, it draws. This trips on
+      # any Swift source under either Sources tree asking for a history path
+      # other than /v1/cluster/history. Pure text — no SDK, no compile — so it
+      # belongs next to the other text gates and runs on every PR.
+      - name: canonical history-route guard
+        run: bash ios-app/scripts/history_route_guard_check.sh
+
       - name: iOS compile gate
         run: |
           set +e

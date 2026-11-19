@@ -216,18 +216,21 @@ if [ "${HISTORY_ROUTE_GUARD_NEGATIVE_TEST:-0}" = "1" ]; then
   fail=0
 
   plant_with_read() {  # plant_with_read <dir> <literal-to-plant>
+    # printf, not an interpolating heredoc: `heredoc_backtick_check.sh` refuses
+    # every backtick in a script that writes files through an unquoted heredoc
+    # ("it is only a comment" is not accepted there), and this script's prose is
+    # full of backticks about routes. Single-quoted args keep the plant inert.
     mkdir -p "$1/Shared"
     cp "$CLIENT" "$1/Shared/WidgetDataClient.swift"
-    cat > "$1/Shared/PlantedTrendReader.swift" <<PLANT
-import Foundation
-
-// Planted by HISTORY_ROUTE_GUARD_NEGATIVE_TEST — a surface reading history off
-// a path the ruling retired. The guard must not survive this.
-enum PlantedTrendReader {
-    static let path = "$2"
-    static func read() -> String { path }
-}
-PLANT
+    printf '%s\n' \
+      'import Foundation' \
+      '' \
+      '// Planted by HISTORY_ROUTE_GUARD_NEGATIVE_TEST — a surface reading' \
+      '// history off a path the ruling retired. The guard must not survive it.' \
+      'enum PlantedTrendReader {' \
+      "    static let path = \"$2\"" \
+      '    static func read() -> String { path }' \
+      '}' > "$1/Shared/PlantedTrendReader.swift"
   }
 
   # Plant FIRST, then scan. A scan of a directory that does not exist would go
