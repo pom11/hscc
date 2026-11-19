@@ -106,9 +106,9 @@ def test_the_final_gate_has_the_check_name_branch_protection_types():
 
 def test_one_parallel_job_per_leg_from_the_selector_output():
     text = _text()
-    assert "matrix:\n        leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in text or (
-        "leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in text
-    ), "the matrix must consume the selector's JSON, not a literal leg list"
+    assert "include: ${{ fromJSON(needs.select.outputs.matrix) }}" in text, (
+        "the matrix must consume the selector's JSON objects, not a literal leg list"
+    )
     assert "fail-fast: false" in text, "one red leg must not cancel the others"
     assert "bash .github/scripts/decide_legs.sh" in text
     assert "bash .github/scripts/leg_verdict.sh \"$rc\" \"$log\"" in text
@@ -157,7 +157,10 @@ def test_each_leg_job_runs_on_the_platform_the_selector_chose():
     text = _text()
     leg_job = text[text.index("  leg:\n") : text.index("\n  legs:\n    name: legs")]
     assert "    runs-on: ${{ matrix.os }}" in leg_job
-    assert "leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in leg_job
+    assert "include: ${{ fromJSON(needs.select.outputs.matrix) }}" in leg_job, (
+        "a named axis would make matrix.leg the whole {leg, os} object and leave "
+        "matrix.os unset, which queues no leg job at all"
+    )
 
 
 def test_the_legs_job_does_not_cancel_a_push_to_main():

@@ -148,7 +148,9 @@ jobs:
       # verdict for all of them is taken by the `legs` job below.
       fail-fast: false
       matrix:
-        leg: ${{ fromJSON(needs.select.outputs.matrix) }}
+        # Objects ({leg, os}), so this is `include`, not a named axis: a named
+        # axis would make matrix.leg the whole object and leave matrix.os unset.
+        include: ${{ fromJSON(needs.select.outputs.matrix) }}
     # Ubuntu by default (cheap, 20 concurrent slots); a leg selector marks the
     # ones whose tests need Darwin. The first ubuntu run measured hscc_daemon's
     # kqueue import failure; see leg_select.MACOS_LEGS.
