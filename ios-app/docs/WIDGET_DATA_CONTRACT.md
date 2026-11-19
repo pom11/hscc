@@ -456,10 +456,9 @@ that fetched it. Rules:
 * The token never enters the App Group store: `WidgetDataClient`
   (`Sources/Shared/WidgetDataClient.swift`, which replaced `ExtensionClient`)
   reads it from the shared keychain per client and the struct is `GET`-only by
-  construction, with a closed allowlist of read paths — keep it that way. One
-  app-only read is named deliberately: `GET /v1/alerts` (card N4), the operator
-  alert feed the macOS menu bar app polls every 5 s. It is not a widget dataset
-  — the phone receives those alerts through APNs — and no widget may read it.
+  construction, with a closed allowlist of read paths — keep it that way. The
+  allowlist names only widget/Live Activity datasets: the apps carry no
+  notifications (operator decision 2026-11-19), so `GET /v1/alerts` is absent.
 
 ## 8. Consequences the next cards should not re-litigate
 

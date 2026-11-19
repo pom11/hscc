@@ -83,11 +83,6 @@ enum WidgetDataPath {
     /// guess. This read is a surface of its own: §2 budgets ≤ 2 requests per
     /// surface per refresh, and the cluster surface already spends both.
     static let metricsHistory = "/v1/metrics/history"
-    /// The operator alert feed (card N4). NOT a widget dataset: the phone gets
-    /// these through APNs, while the macOS menu bar app polls this route every
-    /// 5 s. It is listed here because this file is the one GET-only client, and
-    /// a read must be named in the allowlist to be reachable at all.
-    static let alerts = "/v1/alerts"
 
     /// Every path this client will fetch. Additive only, and only for a read.
     static let all: Set<String> = [
@@ -95,7 +90,7 @@ enum WidgetDataPath {
         kanbanRunning, kanbanBlocked, kanbanStale,
         clusterMonitor, clusterStatus, clusterHistory,
         daemonHost, autodownStatus,
-        metricsHistory, alerts,
+        metricsHistory,
     ]
 
     static func isReadPath(_ path: String) -> Bool { all.contains(path) }
@@ -321,23 +316,6 @@ struct WidgetDataClient {
         }
         return await load(WidgetDataPath.metricsHistory,
                           as: MetricsHistoryResponse.self, queryItems: query)
-    }
-
-    /// The operator alert feed (card N4) — `GET /v1/alerts`.
-    ///
-    /// `since` is the exclusive cursor the macOS app advances from its own
-    /// persisted `next_since`; omitting it asks for the newest page, which is
-    /// how a first launch renders a screenful without replaying notifications
-    /// for history. `limit` is clamped to the route's own 1...500 range so a
-    /// client bug cannot turn one poll into a feed-sized body.
-    func alertFeed(since: Int? = nil, limit: Int = 100) async -> Result<AlertFeedPage, WidgetDataFailure> {
-        var query = [URLQueryItem(name: "limit",
-                                  value: String(min(max(limit, 1), 500)))]
-        if let since {
-            query.append(URLQueryItem(name: "since", value: String(max(0, since))))
-        }
-        return await load(WidgetDataPath.alerts, as: AlertFeedPage.self,
-                          queryItems: query)
     }
 
     // MARK: - Core read
@@ -650,76 +628,6 @@ enum WidgetData {
     /// fact is.
     static func ageMinutes(from date: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(date) / 60))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The alert feed's wire shape (card N4)
-// ---------------------------------------------------------------------------
-//
-// `GET /v1/alerts` is the one app-only read in this file. The response is the
-// durable operator feed (`hscc_daemon/alerts.py`): monotonic integer ids,
-// ascending pages, `next_since` the cursor and `latest_id` the newest id the
-// store holds. A corrupt/missing store answers an empty feed with `latest_id`
-// null, which the menu bar app treats as an honest empty page — never as an
-// error and never as "no alerts ever again".
-
-/// One alert: exactly the public fields the route promises. `acked` is a Bool
-/// (false until acknowledged) and `acked_at` is null in that case — clients must
-/// not read the null as an empty timestamp.
-struct AlertFeedAlert: Decodable, Equatable {
-    let id: Int
-    let ts: String?
-    let title: String
-    let body: String?
-    let level: String?
-    let key: String?
-    let acked: Bool
-    let ackedAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id, ts, title, body, level, key, acked
-        case ackedAt = "acked_at"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(Int.self, forKey: .id)
-        ts = try c.decodeIfPresent(String.self, forKey: .ts)
-        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
-        body = try c.decodeIfPresent(String.self, forKey: .body)
-        level = try c.decodeIfPresent(String.self, forKey: .level)
-        key = try c.decodeIfPresent(String.self, forKey: .key)
-        acked = try c.decodeIfPresent(Bool.self, forKey: .acked) ?? false
-        ackedAt = try c.decodeIfPresent(String.self, forKey: .ackedAt)
-    }
-}
-
-/// One page of `GET /v1/alerts?since=<id>&limit=<n>`. `since` is exclusive and
-/// rows ascend by id; `next_since` is the cursor to advance and `has_more` says
-/// to ask again. `latest_id` describes the STORE, not this page, so it is also
-/// how a client notices a feed that was cleared (latest below its cursor).
-struct AlertFeedPage: Decodable, Equatable {
-    let alerts: [AlertFeedAlert]
-    let count: Int
-    let latestId: Int?
-    let nextSince: Int?
-    let hasMore: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case alerts, count
-        case latestId = "latest_id"
-        case nextSince = "next_since"
-        case hasMore = "has_more"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        alerts = try c.decodeIfPresent([AlertFeedAlert].self, forKey: .alerts) ?? []
-        count = try c.decodeIfPresent(Int.self, forKey: .count) ?? alerts.count
-        latestId = try c.decodeIfPresent(Int.self, forKey: .latestId)
-        nextSince = try c.decodeIfPresent(Int.self, forKey: .nextSince)
-        hasMore = try c.decodeIfPresent(Bool.self, forKey: .hasMore) ?? false
     }
 }
 

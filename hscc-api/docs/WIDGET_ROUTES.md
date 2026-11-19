@@ -25,8 +25,8 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
 | `POST /v1/alerts` | `hscc notify` (main orchestrator, daemon, operators) | `routes_alerts.handle_post_alert` | `hscc_daemon.alerts.post_alert` — the same store/rules `hscc notify` reaches over HTTP |
-| `GET /v1/alerts?since=<id>` | iOS/macOS apps (alert feed poll) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
-| `POST /v1/alerts/<id>/ack` | iOS/macOS apps (mark seen) | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
+| `GET /v1/alerts?since=<id>` | server-side feed (no app consumer; 2026-11-19 decision) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
+| `POST /v1/alerts/<id>/ack` | server-side feed (no app consumer; 2026-11-19 decision) | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
 
 
 ## GET /v1/kanban/running
@@ -467,9 +467,10 @@ counts.
 The main orchestrator reaches the operator through one durable feed under
 `~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
 client of this route, not a second writer, so dedupe and rate limits cannot
-drift between producers. Every newly created alert is pushed to the registered
-iOS/macOS devices by the daemon's APNs sender (card N2); the feed remains the
-durable record when a push fails.
+drift between producers. Every newly created alert is handed to the daemon's
+APNs sender when a device roster exists; the feed remains the durable record
+when a push fails. The iOS and macOS apps do not poll or register for these
+alerts (operator decision 2026-11-19), so the roster may be empty.
 
 ### POST /v1/alerts
 

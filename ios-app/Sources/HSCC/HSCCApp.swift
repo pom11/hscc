@@ -14,9 +14,9 @@ import SwiftUI
 /// did not compile.
 @main
 struct HSCCApp: App {
-    /// Requests notification authorization once at launch so the foreground
-    /// NotificationCoordinator can present needs-operator banners (t_0454eb56).
-    @UIApplicationDelegateAdaptor(NotificationsAppDelegate.self) private var appDelegate
+    /// The Live Activities' background-refresh registration and launch hooks.
+    /// Notifications are deliberately absent (operator decision 2026-11-19).
+    @UIApplicationDelegateAdaptor(LaunchAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var settings = SettingsStore()
     /// In-app update check (t_2a1e5913). App target only: the extensions get
@@ -27,9 +27,9 @@ struct HSCCApp: App {
     /// store that every widget/Live Activity extension reads read-only.
     @StateObject private var widgetSettings = WidgetSettingsStore()
     /// Deep-link router (t_136762f3): the single entry point for `hscc://`
-    /// URLs, notification taps and Handoff, injected everywhere navigation
-    /// happens so every external link can land the operator on the exact
-    /// project, card or session.
+    /// URLs and Handoff, injected everywhere navigation happens so every
+    /// external link can land the operator on the exact project, card or
+    /// session.
     @StateObject private var router = DeepLinkRouter.shared
 
     init() {
@@ -64,17 +64,12 @@ struct HSCCApp: App {
         // HSCC Monitor Live Activity (t_03d318cd). Scene phase drives the
         // foreground poll loop (active → poll; background → stop the tight loop
         // + schedule a BGAppRefresh). The one-time launch hooks (task
-        // registration + orphan sweep) run in `NotificationsAppDelegate`
+        // registration + orphan sweep) run in `LaunchAppDelegate`
         // `didFinishLaunching` — a Scene has no `.task`, and the delegate is
         // the correct launch seam.
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
-                // APNs (card N3): re-read the permission state on every
-                // foreground entry, then re-register the token if one exists.
-                // This is how a grant/revoke made in iOS Settings, or a saved
-                // cluster added since launch, reaches the push roster.
-                Task { await PushRegistrar.shared.activate() }
                 // In-app update check (t_2a1e5913): launch + every foreground
                 // entry, throttled to one attempt per six hours by
                 // UpdatePreferences. Never touches the cluster connection.

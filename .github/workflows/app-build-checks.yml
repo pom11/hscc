@@ -45,11 +45,6 @@ jobs:
       - name: macOS widget parity gate
         run: bash macos-app/scripts/widget_parity_check.sh
 
-      # Card N4: the alert poll's policy EXECUTED over fixtures, plus the
-      # polling-not-APNs / 5 s / dropdown wiring checks.
-      - name: macOS alert feed gate
-        run: bash macos-app/scripts/alert_feed_check.sh
-
       - name: iOS compile gate
         run: |
           set +e

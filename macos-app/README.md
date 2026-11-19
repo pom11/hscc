@@ -71,22 +71,11 @@ no new backend routes.
   (state, nodes up/total, models served);
 - running cards from `/v1/kanban/running` (title, worker, age);
 - board totals from `/v1/mobile/summary` (todo/ready/running/blocked/done);
-- projects from `/v1/projects`;
-- operator alerts from `/v1/alerts` (newest rows + unseen badge in the
-  dropdown, one local notification per new alert).
+- projects from `/v1/projects`.
 
-## Alerts
-
-The main orchestrator reaches the operator through the cluster's alert feed.
-The phone receives those alerts through APNs; the Mac polls the same feed every
-5 seconds while it runs and posts a local macOS notification for each new alert
-— no `aps-environment`, no device token, and no change to the Developer ID +
-notarized signing. The first launch (and a feed that was cleared) establishes a
-baseline and does not replay history as notifications. A burst is coalesced to
-five banners plus one "earlier alerts" line, and the dropdown keeps the newest
-six rows with a count of the ones not yet opened. Notifications use the local
-`UNUserNotificationCenter` path; if macOS permission is denied, the dropdown
-says so and the badge/list keep working.
+The menu bar app carries no notifications: it polls no alert feed and asks for
+no notification permission (operator decision 2026-11-19). The cluster alert
+feed and its APNs sender remain backend features; neither app surfaces them.
 
 `/v1/cluster/monitor` exposes no tokens-per-second field in the shared model,
 so the app does not invent one.

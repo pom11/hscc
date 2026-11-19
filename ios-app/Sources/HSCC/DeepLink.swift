@@ -7,8 +7,8 @@ import SwiftUI
 // Today everything starts from the root. This adds a `hscc://` URL scheme that
 // opens a specific PROJECT, CARD or SESSION directly, plus the routing that
 // lands the operator there instead of the root tab. It is the single entry
-// point that notifications and future integrations (a Telegram message, a Mac
-// session) can deep-link into.
+// point that future integrations (a Telegram message, a Mac session) can
+// deep-link into.
 //
 //   hscc://project/<name>     → Projects tab → that project's detail (Overview)
 //   hscc://session/<project>  → Projects tab → that project's CHAT (session)
@@ -94,7 +94,7 @@ enum DeepLinkParser {
 // `AppShell` replaced and that the two-screen collapse (t_9664a1c8) deleted.
 // The router is its only remaining consumer, so the declaration moved here
 // rather than dying with the file: `deeplink_check`, and every Siri /
-// notification-tap / Handoff target, still name these three cases. S8 retires
+// Handoff target, still name these three cases. S8 retires
 // the ones whose destinations the pivot deletes.
 
 /// The legacy root tabs — still the router's public vocabulary.
@@ -130,7 +130,7 @@ enum ProjectRoute: Hashable {
 // MARK: - Router
 
 /// The app's single deep-link router. Owned by `ContentView` and injected into
-/// the Projects NavigationStack; a `hscc://` URL, a notification tap, or a
+/// the Projects NavigationStack; a `hscc://` URL or a
 /// Handoff activity all funnel through this one object, so every entry point
 /// lands the operator on the exact project, card or session.
 ///
@@ -141,10 +141,9 @@ enum ProjectRoute: Hashable {
 @MainActor
 final class DeepLinkRouter: ObservableObject {
 
-    /// The single, app-wide router. Mirroring `NotificationCoordinator.shared`
-    /// / `ConnectionMonitor.shared`: HSCCApp owns it as its @StateObject via
-    /// this singleton, and any entry point (URL, notification tap, Handoff)
-    /// can reach it without chasing an object graph.
+    /// The single, app-wide router. Mirroring `ConnectionMonitor.shared`:
+    /// HSCCApp owns it as its @StateObject via this singleton, and any entry
+    /// point (URL, Handoff) can reach it without chasing an object graph.
     static let shared = DeepLinkRouter()
 
     private init() {}
