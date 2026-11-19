@@ -514,13 +514,16 @@ with the system `openssl`, so no crypto wheel is added.
 
 ### POST /v1/devices
 
-Body: `platform` (`ios|macos`), `token` (32-200 hex characters, the APNs device
+Body: `confirm` (must be the JSON boolean `true` — the route is confirm-gated
+like every other app POST, and the answer is `409` `confirm_required` without
+it), `platform` (`ios|macos`), `token` (32-200 hex characters, the APNs device
 token), `bundle_id` (the app id, used as the `apns-topic` unless `topics` in
 `apns.json` says otherwise), `env` (`production|development`). Registration is
 idempotent per `(platform, token)`: `201` for a new row, `200` when an existing
 row was refreshed (`created: false`). The response carries a derived `id`,
 never the token. `POST /v1/devices/test` sends the `hscc notify test` push
-through the same sender; delivery failure is a `200` with `sent: false` and a
+through the same sender and takes the same `confirm` key (`hscc notify test`
+sends it for you); delivery failure is a `200` with `sent: false` and a
 `reason` (`no_config`, `no_devices`, `all_failed`, ...), not an HTTP error.
 
 ### GET /v1/devices

@@ -263,7 +263,10 @@ def test_test_verb_posts_to_devices_test(stub_api, hscc_home, capsys):
     assert "test push sent to 2 devices" in capsys.readouterr().out
     assert len(_StubAPI.seen) == 1
     assert _StubAPI.seen[0]["path"] == "/v1/devices/test"
-    assert _StubAPI.seen[0]["body"] == {}
+    # The route is confirm-gated (POST /v1/devices/test mutates: it buzzes every
+    # registered device), so the CLI must carry the flag or the server 409s and
+    # `hscc notify test` is dead. Pinned as an exact body, not a subset.
+    assert _StubAPI.seen[0]["body"] == {"confirm": True}
 
 
 def test_test_verb_exits_1_when_nothing_was_sent(stub_api, hscc_home, capsys):

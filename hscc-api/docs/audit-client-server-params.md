@@ -56,8 +56,12 @@ satisfied or correctly optional-defaulted.
 | POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1974-1979 (`_validate_prompt`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
-kanban recover, cluster up/down, triggers run, escalate) are covered by the
-confirm gates. Profile-editor PUT requires "at least one of many" — excluded.
+kanban recover, cluster up/down, triggers run, escalate, `POST /v1/devices`,
+`POST /v1/devices/test`) are covered by the confirm gates. The two push-device
+routes joined that set in t_8d153e99: enrolling a push recipient writes a
+durable roster row, and the test push buzzes every registered device, so both
+are mutations on the same footing as the rest — not exempt. Profile-editor PUT
+requires "at least one of many" — excluded.
 
 ### Rows retired with their client call site (t_80e185d2, 2026-11-18)
 

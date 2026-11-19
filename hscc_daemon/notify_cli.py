@@ -321,8 +321,13 @@ def post_test(opts, hscc_dir=None):
     errors = []
     for url in urls:
         try:
-            return _post_json(url, token, {}, path="/v1/devices/test",
-                              label="test push")
+            # `confirm: true` is the API's mutation gate — the route 409s
+            # without it, like every other POST the apps send. The human
+            # already confirmed by typing `hscc notify test`, which is exactly
+            # what the CLI's own --apply/--confirm guard does; the flag is how
+            # that intent crosses the wire.
+            return _post_json(url, token, {"confirm": True},
+                              path="/v1/devices/test", label="test push")
         except NotifyError as exc:
             errors.append(str(exc))
             if "API refused" in str(exc):
