@@ -61,9 +61,10 @@ Cluster & templates
       The built-in orchestrator waker (daemon-resident)
 
 Utility
-  notify <title> <body>
-      Post an alert to the HSCC alert feed (the apps read it)
+  notify <title> <body> | list | ack <id>
+      Post, read or acknowledge an HSCC alert-feed entry
                        flags: --level info|action|critical --key <dedupe-key>
+                       list: --since <id> --limit <n>; all: --json
                        requires the API: hscc api start
   bootstrap [flags]
       Run the HSCC installer from any layout (repo, plugins, brew)
