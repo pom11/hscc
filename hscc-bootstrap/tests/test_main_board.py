@@ -17,6 +17,14 @@ import main_board as mb
 def _pin(tmp_path, monkeypatch, name=None, *, started=True):
     home = tmp_path / "home" / ".hermes"
     home.mkdir(parents=True)
+    # Doctor resolves an install from <HERMES_HOME>/hermes-agent. Without this
+    # marker the run_doctor() wiring test below only passed on a box that
+    # happened to carry a real ~/.hermes install (false green on macOS).
+    (home / "hermes-agent").mkdir(exist_ok=True)
+    # sparkrun is a FATAL preflight check; stub it here for the same reason:
+    # its absence on the Ubuntu runner must not sink an unrelated row.
+    monkeypatch.setattr(doctor, "_sparkrun_ok",
+                        lambda: doctor.Check("sparkrun", True, detail="stubbed"))
     if started:
         # Hermes writes this on first run; ensure() now refuses to run the CLI
         # (and thus create it) before that (t_6f4895aa).

@@ -63,6 +63,12 @@ def _pin_home(monkeypatch, home, hermes_home=None):
         if var not in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS"):
             monkeypatch.delenv(var, raising=False)
 
+    # sparkrun is a FATAL preflight check keyed to the HOST, not this fixture's
+    # home. Stub its verdict so a CI/dev box without it cannot sink tests that
+    # are about unrelated rows; TestSparkrunCheck pins the probe itself.
+    monkeypatch.setattr(doctor, "_sparkrun_ok",
+                        lambda: doctor.Check("sparkrun", True, detail="stubbed"))
+
     # enable_plugins resolves its hook target at IMPORT time from ambient
     # HERMES_HOME (module constants), so a `--fix` run would copy
     # cluster-guard.py — plus a timestamped .bak — into the real home no matter
@@ -454,6 +460,17 @@ class TestGatewayCheck:
         '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
         '\t"Program" = "/Users/desac/.hermes/hermes-agent/venv/bin/python";\n};\n')
 
+    @pytest.fixture(autouse=True)
+    def _darwin_launchd(self, monkeypatch):
+        """These cases pin the macOS launchd transport.
+
+        gateway_liveness branches on sys.platform. Without pinning it the
+        launchd legs are dead code on the Ubuntu runner: the fake runner never
+        sees a launchctl call and the row reports the systemd/ps verdict
+        instead. The Linux branch has its own explicit test below.
+        """
+        monkeypatch.setattr(doctor.sys, "platform", "darwin")
+
     class _R:
         def __init__(self, returncode=0, stdout=""):
             self.returncode = returncode
@@ -802,7 +819,8 @@ class TestCheckModelsServed:
         assert check.ok is True
         assert "unreadable" in check.detail
 
-    def test_run_doctor_includes_check_and_keeps_ok(self, tmp_path):
+    def test_run_doctor_includes_check_and_keeps_ok(self, tmp_path,
+                                                    monkeypatch):
         # A models-served failure is NON-fatal: it must not flip run_doctor ok.
         cfg = {
             "model": {"default": "GONE", "base_url": "http://localhost:8000/v1"},
@@ -812,7 +830,14 @@ class TestCheckModelsServed:
         def fake_get(url, api_key=None):
             return '{"data": [{"id": "X"}]}'
 
-        os.makedirs(os.path.join(str(tmp_path), ".hermes", "hermes-agent"), exist_ok=True)
+        # HERMES_HOME IS tmp_path here (config.yaml sits at its root), so the
+        # install marker must sit there too. The old ".hermes" marker was
+        # invisible to _hermes_ok(), which then fell back to the operator's
+        # real ~/.hermes — green on macOS, a fatal red on the Ubuntu runner.
+        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        monkeypatch.setattr(doctor, "_sparkrun_ok",
+                            lambda: doctor.Check("sparkrun", True,
+                                                 detail="stubbed"))
         result = doctor.run_doctor(hermes_home=str(tmp_path),
                                    _cluster_runner=lambda: "[]",
                                    _http_get=fake_get)
