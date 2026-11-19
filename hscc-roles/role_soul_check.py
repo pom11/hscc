@@ -742,6 +742,46 @@ def check(profiles_dir: Optional[str] = None, *, roles_dir: Optional[str] = None
             "detail": "\n".join(lines), "fix": fix if bad else ""}
 
 
+def spec_coverage(profiles_dir=None, roles_dir=None) -> Dict[str, Any]:
+    """Which live worker profiles have no spec, and which specs git does not track.
+
+    This is the one predicate neither the pytest guard nor :func:`inspect_profile`
+    had: ``has_spec`` is a FILESYSTEM question, so a spec that exists but is not
+    committed reads healthy — for ~6 hours in the ``marketing`` case — right up to
+    the moment the deployed plugin dir is re-synced from the repo, the spec is
+    deleted, and ``~/.hermes/profiles/<name>/`` survives without it. Asking both
+    halves at once:
+
+      ``orphans``   — worker-signature profiles with NO spec, taken straight from
+                      :func:`scan` rows so the census and the doctor can never
+                      disagree about what "has a spec" means. One predicate, reused
+                      — not a second implementation of it.
+      ``untracked`` — specs on disk but absent from ``git ls-files``: doomed at the
+                      next re-sync, which is why :func:`hscc.cmd_create` now prints
+                      the exact commit lines instead of only "spec written".
+
+    ``git_known`` False means ``roles/`` is not the tracked repo's own dir — the
+    deployed plugin copy, a scratch copy — which is itself the warning, never an
+    all-clear. A vacuous scan (no profiles dir) reports ``vacuous`` + the reason
+    instead of an empty list that reads like health.
+    """
+    res = scan(profiles_dir, roles_dir=roles_dir)
+    orphans = sorted(r["profile"] for r in res["rows"]
+                     if r["worker"] and not r["has_spec"])
+    tracked = rolelib.tracked_spec_names(roles_dir)
+    root = roles_dir if roles_dir is not None else rolelib.ROLES_DIR
+    untracked: List[str] = []
+    if tracked is not None and os.path.isdir(root):
+        untracked = sorted(os.path.splitext(f)[0] for f in os.listdir(root)
+                           if f.endswith(".yaml") and f not in tracked)
+    return {"vacuous": res["vacuous"], "detail": res["detail"],
+            "scanned": res["scanned"], "worker_scanned": res["worker_scanned"],
+            "nonworker": res["nonworker"],
+            "orphans": orphans, "untracked": untracked,
+            "git_known": tracked is not None,
+            "ok": not orphans}
+
+
 def main(argv=None) -> int:
     """Standalone probe: `python3 role_soul_check.py [--profiles-dir DIR] [--json]`."""
     import argparse

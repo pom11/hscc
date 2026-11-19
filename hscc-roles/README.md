@@ -15,8 +15,11 @@ data: mint one with `create`, adjust it in `roles/<name>.yaml`, rebuild with
 ```
 hscc.py generate [--hermes-home DIR]
                             # build all profiles from specs → ~/.hermes/profiles/
-hscc.py create <name> "…"   # author a new role on demand
-hscc.py list                # roles + whether a profile exists
+hscc.py create <name> "…"   # author a new role on demand, and print the exact
+                            # git add/commit that keeps it (see Provenance below)
+hscc.py list                # roles + whether a profile exists, then the spec
+                            # coverage census (exit 1 if a live worker profile
+                            # has no spec)
 hscc.py validate            # validate every role spec (load + required fields)
 hscc.py autonomy [on|off]   # the ~/.hscc/autonomy master flag
 hscc.py orch <project|general> [--registry P] [--hermes-home DIR]
@@ -121,6 +124,29 @@ the census. New roles are minted with `create` — the roster is data, not code.
 diff + tests + spec and approves only when all three pass (powers the WS4
 `auto_review` gate). Profiles are build artifacts (not tracked) — regenerate
 with `generate`.
+
+### Provenance: a spec that exists is not a spec that survives
+
+`ls roles/` is the census, but `ROLES_DIR` is *whatever checkout the CLI
+imported from* — and the fleet's own ops block tells an orchestrator to mint
+from the deployed copy (`~/.hermes/plugins/hscc-roles/hscc.py create …`), which
+is not a git working tree. A spec minted there is data with no home: the next
+re-sync of the deployed plugin dir from the repo restores the tracked specs and
+silently drops the untracked one, while `~/.hermes/profiles/<name>/` — outside
+that tree — survives. That is how `marketing` was orphaned (t_f2630ca3): the spec
+existed for ~6 hours and every filesystem-reading check said healthy, because the
+loss was already scheduled.
+
+So `create` never just says "spec written". It prints the two commands that make
+it durable (`git -C <repo> add hscc-roles/roles/<name>.yaml`, then the commit),
+or — when the tree it wrote into is not the tracked repo at all — says plainly
+that the role is temporary until the file is copied into the checkout and
+committed. `hscc.py list` then censuses both halves on any host: a
+worker-signature profile with **no spec** (exit 1, the same condition the
+`hscc-roles` leg asserts) and a spec **present but absent from `git ls-files`**
+(a warning, because minting ahead of the commit card is the documented flow). The
+orphan half reuses `role_soul_check`'s `has_spec` rows — one predicate for the
+doctor, the leg and this census, never a second one.
 
 ## Role SOUL drift (`role_soul_check.py`)
 
