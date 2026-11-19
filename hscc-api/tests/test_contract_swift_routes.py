@@ -229,9 +229,15 @@ def test_every_swift_route_is_registered():
 
 
 #: The extension client's audited read set (WIDGET_DATA_CONTRACT §3 + the
-#: daemon-host sidecar + the recorder's history read). Kept explicit so deleting
-#: a path from the Swift source is a visible change here, and adding one without
-#: registering it fails the register gate above.
+#: daemon-host sidecar + the recorder's history read + the alert feed). Kept
+#: explicit so deleting a path from the Swift source is a visible change here,
+#: and adding one without registering it fails the register gate above.
+#:
+#: "Extension client", not "widget": the last entry is an app-only read that
+#: happens to live in the same shared GET-only client file, so the derived
+#: scanner sees it and the audited set must name it. The set is what the
+#: scanner is checked against, so it is the union of both, whatever surface
+#: renders the read.
 EXPECTED_EXTENSION_ROUTES = {
     ("GET", "/v1/projects"),
     ("GET", "/v1/mobile/summary"),
@@ -248,6 +254,17 @@ EXPECTED_EXTENSION_ROUTES = {
     # below, because a route whose keys drift from the decoder fails silently —
     # the chart reads nil and nothing anywhere errors.
     ("GET", "/v1/metrics/history"),
+    # t_c55be8e1 (PR #446, card N4): the operator alert feed. NOT a widget
+    # dataset — the phone receives alerts through APNs and the macOS menu bar
+    # app polls this route every 5 s — but the read lives in
+    # `WidgetDataClient.swift` because that file is the one GET-only client the
+    # app and the extensions share, and a path must be in `WidgetDataPath.all`
+    # to be reachable at all. The derived scanner reads the whole file, so this
+    # set has to name it: the entry is what turns the `GET /v1/alerts` row
+    # already present in `WIDGET_ROUTES.md` into audited contract instead of
+    # prose the gates never read. #446 shipped the read and its doc row but not
+    # this entry, which is what made the leg red.
+    ("GET", "/v1/alerts"),
 }
 
 
@@ -273,12 +290,55 @@ def test_widget_routes_doc_names_every_extension_route():
     )
 
 
+# --------------------------------------------------------------------------- #
+# The STATED exemptions to the confirm contract
+# --------------------------------------------------------------------------- #
+#
+# `confirm` belongs to the GUARDED-OPS plane: provision/stop/restart, cluster
+# up/down, card dispatch/merge/comment/block/close, autodown wake/cancel, memory
+# edit/delete, profile writes — an action that changes cluster, workload or board
+# state and must never fire just because a screen got tapped. Every mutating POST
+# on that plane carries `"confirm": true` and its handler calls
+# `_require_confirm` / `_action_fields`; the two gates below prove neither half of
+# that pair can drift alone.
+#
+# The push-device roster is the one mutating surface the app calls that this
+# contract deliberately does NOT cover. The exemption lives here as a stated,
+# per-route reason rather than as a route skipped by the regex, because an
+# unstated exemption is indistinguishable from the exact bug these gates exist to
+# catch, and because BOTH gates read this one dict: a route can therefore never
+# land in the theatre shape the reverse gate names (client sends `confirm`, server
+# ignores it). Adding an entry is audited by
+# `test_confirm_exemption_is_closed_and_justified` — read it first.
+CONFIRM_EXEMPT_POSTS = {
+    "/v1/devices": (
+        "Registers or refreshes the CALLER'S OWN APNs token (idempotent per "
+        "(platform, token)), behind the server's single bearer-token gate, and "
+        "changes no cluster, workload or board state. The app calls it on every "
+        "launch and foreground with no operator decision in front of it, so a "
+        "confirm flag here could only be a hardcoded `true` that no handler "
+        "checks — theatre, not a gate."
+    ),
+    "/v1/devices/test": (
+        "The operator's own one-push APNs self-check: the same route "
+        "`hscc notify test` drives with an empty body, and that CLI requires no "
+        "confirm either (hscc_daemon/notify_cli.py:post_test). It delivers at "
+        "most one test notification, stores nothing, and a failed delivery is an "
+        "honest 200 with sent=false rather than a mutation."
+    ),
+}
+
+
 def test_every_mutating_post_carries_confirm():
     """Last night's root cause: a mutating POST that reached the phone without
     `confirm` and 409'd. Every mutating call the Swift client makes must send
     `confirm: true`. We assert by scanning the enclosing function of each POST
     call site for a `"confirm": true` payload key (set either in a `payload`
-    dict built before the call, or inline in the call args)."""
+    dict built before the call, or inline in the call args).
+
+    A route is excused ONLY if it is a key of `CONFIRM_EXEMPT_POSTS` — a named
+    route with a stated reason, not a pattern, and the same list the server-side
+    gate below consults, so the two halves cannot disagree."""
     src = open(f"{_REPO_ROOT}/{CLIENT_PATH}").read()
     offending = []
     for m in _CALL_RE.finditer(src):
@@ -294,8 +354,10 @@ def test_every_mutating_post_carries_confirm():
         if fn_end == -1:
             fn_end = len(src)
         body = src[fn_start:fn_end]
-        if re.search(r'"confirm"\s*:\s*true', body) is None:
-            offending.append(_normalize_swift_path(m.group(2)))
+        path = _normalize_swift_path(m.group(2))
+        if (re.search(r'"confirm"\s*:\s*true', body) is None
+                and path not in CONFIRM_EXEMPT_POSTS):
+            offending.append(path)
     assert not offending, (
         "Mutating POST(s) in HSCCClient.swift omit `\"confirm\": true` — a "
         "409-on-the-phone waiting to happen:\n"
@@ -361,7 +423,13 @@ def test_every_client_post_server_handler_is_confirm_gated():
     (`_require_confirm(...)` or `_action_fields(...)`, which wraps it). If a
     server handler stops checking confirm on a route the app POSTs to, the
     mutation becomes ungated — worse than a 409 — and this must fail the suite.
-    Checks the CALL SITE, not prose, by stripping the handler docstring first."""
+    Checks the CALL SITE, not prose, by stripping the handler docstring first.
+
+    The same `CONFIRM_EXEMPT_POSTS` list excuses a route here as on the client
+    half, so the pair cannot drift apart; and the exemption is only valid while
+    the server really is ungated — that direction is pinned by
+    `test_confirm_exemption_is_closed_and_justified`, not by this gate.
+    """
     ungated = []
     not_registered = []
     for method, path in SWIFT_ROUTES:
@@ -370,6 +438,8 @@ def test_every_client_post_server_handler_is_confirm_gated():
         handler, pattern = _server_handler_for(method, path)
         if handler is None:
             not_registered.append(path)
+            continue
+        if path in CONFIRM_EXEMPT_POSTS:
             continue
         src = _strip_handler_docstring(inspect.getsource(handler))
         if _CONFIRM_HELPER_CALL.search(src) is None:
@@ -387,6 +457,98 @@ def test_every_client_post_server_handler_is_confirm_gated():
                      for p, h, rp in ungated)
     )
 
+
+# The minimum a stated exemption must prove to be allowed to exist. Both gates
+# above skip anything named in CONFIRM_EXEMPT_POSTS, so that dict is the single
+# place where the whole confirm contract could be deleted by adding one line.
+_MIN_EXEMPTION_REASON_CHARS = 80
+
+
+def test_confirm_exemption_is_closed_and_justified():
+    """The exemption list is a closed, audited set — never an escape hatch.
+
+    Four directions are pinned, one per failure this list could cause:
+
+    1. **staleness** — every entry names a POST the Swift client actually calls
+       today. A route the app stopped calling loses its entry, the same rule
+       `test_matrices_name_routes_the_client_still_calls` enforces on the two
+       matrices: a stale exemption reads as "still audited" for a surface that
+       no longer exists.
+    2. **an exemption with no reason** — the reason must be a rationale, not a
+       placeholder. An unstated exemption is indistinguishable from deleting the
+       assertion, which is the failure mode these gates were written for.
+    3. **scope creep, both ways.** (a) Each exempt route's server handler must
+       still live in the module the exemption was written for —
+       `routes_devices.py`, the push-device roster — so a later rewrite that
+       points one of these paths at a guarded-ops handler cannot inherit the
+       exemption. (b) Each one must still NOT call a confirm helper. That is the
+       case neither confirm gate can see, because both gates skip the route: an
+       exempt client POST against a server that started requiring `confirm` is
+       the literal 409-on-the-phone, and without this pin the two gates would go
+       green while it happened.
+    4. **exempt from confirm is never exempt from auth** — the reason a
+       self-registration needs no confirm is that it sits behind the token
+       gate. `ApiHandler` authorizes once, unconditionally, in `_route`, which
+       every verb method funnels through; there is no per-route allowlist to
+       weaken. If that shape ever changes, this pin fails and the exemption has
+       to be re-argued rather than inherited.
+    """
+    stale, thin, off_plane, secretly_gated = [], [], [], []
+
+    derived_posts = {p for (m, p) in SWIFT_ROUTES if m == "POST"}
+    for path, reason in CONFIRM_EXEMPT_POSTS.items():
+        if path not in derived_posts:
+            stale.append(path)
+        if not isinstance(reason, str) or len(reason.strip()) < _MIN_EXEMPTION_REASON_CHARS:
+            thin.append(path)
+        handler, pattern = _server_handler_for("POST", path)
+        if handler is None:
+            off_plane.append((path, "no registered POST route"))
+            continue
+        module = os.path.basename(inspect.getsourcefile(handler) or "")
+        if module != "routes_devices.py":
+            off_plane.append((path, f"{handler.__name__} lives in {module}"))
+            continue
+        src = _strip_handler_docstring(inspect.getsource(handler))
+        if _CONFIRM_HELPER_CALL.search(src) is not None:
+            secretly_gated.append((path, handler.__name__, pattern))
+
+    verbs = sorted(n for n in vars(api_server.ApiHandler) if n.startswith("do_"))
+    unauthenticated = []
+    if verbs:
+        for name in verbs:
+            if "self._route(" not in inspect.getsource(getattr(api_server.ApiHandler, name)):
+                unauthenticated.append(name)
+        if "self._authorize()" not in inspect.getsource(api_server.ApiHandler._route):
+            unauthenticated.append("_route (no _authorize call)")
+
+    report = (
+        [f"  STALE exemption: {p} — HSCCClient.swift no longer POSTs it. "
+         f"Delete the entry (and its reason) with the call site."
+         for p in stale]
+        + [f"  THIN exemption: {p} — the reason is under "
+           f"{_MIN_EXEMPTION_REASON_CHARS} characters. Say why the route is "
+           f"outside the confirm contract, or gate it."
+           for p in thin]
+        + [f"  OFF-PLANE exemption: {p} -> {why}. The exemption covers the "
+           f"push-device roster only; a mutating POST elsewhere must carry "
+           f"confirm on both halves."
+           for p, why in off_plane]
+        + [f"  CONTRADICTED exemption: POST {p} -> {h} (registered {rp}) DOES "
+           f"call a confirm helper while the client is exempted from sending it "
+           f"— that call 409s on the phone. Either send confirm and drop the "
+           f"exemption, or un-gate the handler deliberately."
+           for p, h, rp in secretly_gated]
+        + [f"  AUTH SHAPE CHANGED: ApiHandler.{n} does not route through the "
+           f"single unconditional _authorize() gate. The exemption's central "
+           f"premise (every device call is authenticated) no longer holds and "
+           f"has to be re-argued."
+           for n in unauthenticated]
+    )
+    assert not report, (
+        "CONFIRM_EXEMPT_POSTS is no longer a closed, justified, same-plane "
+        "exemption:\n" + "\n".join(report)
+    )
 
 
 # Real-HTTP exercise of the chat seam (the exact failure class from last night)
