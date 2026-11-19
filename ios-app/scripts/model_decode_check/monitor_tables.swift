@@ -160,6 +160,34 @@ func monitorPlans(_ c: DecodeCheck) {
     c.expect("monitor-tables", "\(label): an un-clipped block adds no line",
              ClusterMonitorTableLayout.overflowLine(shown: 4, total: 4) == nil
                 && ClusterMonitorTableLayout.overflowLine(shown: 4, total: 2) == nil)
+
+    // The three clip functions are what the views actually call, so they are
+    // executed here rather than trusted: a plan that says N must draw exactly N
+    // and pair it with the right `+N more`. The detail block is included on
+    // purpose — it has no header row of its own, so an over-long XL detail
+    // block is the one clip that would otherwise be invisible on screen.
+    let hosts = (1...12).map {
+        MonitorNode(host: "192.0.2.\($0)", error: nil, sample: MonitorSample(),
+                    used_slots: nil, free_slots: nil, workloads: nil)
+    }
+    let hostRows = hosts.map(CLIMonitorHostRow.init(node:))
+    let detailLines = hosts.map(ClusterMonitorHostDetail.init(host:))
+    if let large, let extra {
+        c.expect("monitor-tables", "\(label): the host clip is the plan's limit",
+                 ClusterMonitorTableLayout.visibleHostRows(hostRows, plan: large).count
+                    == large.hostRowLimit && large.hostRowLimit < hostRows.count,
+                 "limit \(large.hostRowLimit) of \(hostRows.count)")
+        c.expect("monitor-tables", "\(label): a clipped host table names the hidden rows",
+                 ClusterMonitorTableLayout.overflowLine(shown: large.hostRowLimit,
+                                                        total: hostRows.count)
+                    == "+\(hostRows.count - large.hostRowLimit) more")
+        c.expect("monitor-tables", "\(label): the detail clip follows the same limit",
+                 ClusterMonitorTableLayout.visibleDetails(detailLines, plan: extra).count
+                    == extra.hostRowLimit,
+                 "limit \(extra.hostRowLimit) of \(detailLines.count)")
+        c.expect("monitor-tables", "\(label): an un-clipped detail block is not padded",
+                 ClusterMonitorTableLayout.visibleDetails(Array(detailLines.prefix(2)), plan: extra).count == 2)
+    }
 }
 
 /// The column/CLI coupling, run over both real captures. This is the check that
