@@ -265,7 +265,12 @@ def main(argv=None):
         return 0 if p["state"] == "armed" else 1
     res = install_hooks(ns.repo_root, dry_run=ns.dry_run)
     print(json.dumps(res))
-    return 0 if res["action"] in ("installed", "verified") else 1
+    # ``skipped`` is a successful refusal, not a failure: there is nothing to
+    # arm in this checkout (not a git repo, or a revision without the committed
+    # hook). A non-zero rc made bootstrap.sh's `elif` fail and print "git hooks
+    # install failed — the guard is INACTIVE" for a path where the honest
+    # answer is "not applicable". Only a real config write error is non-zero.
+    return 0 if res["action"] in ("installed", "verified", "skipped") else 1
 
 
 if __name__ == "__main__":
