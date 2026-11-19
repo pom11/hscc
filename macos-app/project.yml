@@ -85,6 +85,14 @@ targets:
       - path: Sources/HSCCMac/MenuBarLabel.swift
       - path: Sources/HSCCMac/DashboardMonitor.swift
       - path: Sources/HSCCMac/DashboardView.swift
+      # The dropdown's two CLI surfaces (t_f5fdc6b2): `DashboardFleetReading` is
+      # the Foundation-only projection layer (no SwiftUI, no `Color`, so a
+      # harness can compile and RUN the bytes the dropdown runs, exactly like
+      # `cluster_widget_check.sh` does for the iOS tile), and
+      # `DashboardFleetSection` is the view that draws it. Neither formats a
+      # number: both re-expose `ClusterMonitorViewModel`'s CLI-parity cells.
+      - path: Sources/HSCCMac/DashboardFleetReading.swift
+      - path: Sources/HSCCMac/DashboardFleetSection.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
       # Sparkle 2 (t_2a1e5913): one SPUStandardUpdaterController owns daily
@@ -109,6 +117,13 @@ targets:
       # as the CLI formats it, so the menu bar app draws the same strings the
       # iOS widgets draw and the terminal prints (t_61ed3f5e). Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+      # The widget grid's own Foundation-only column reading, reused BY PATH
+      # rather than restated in macos-app: the dropdown draws the same four CLI
+      # host columns the `systemSmall` tile draws (GPU%, GPU Temp, CPU Temp, GPU
+      # Power), resolved by the same CLI column NAME, so a rename degrades both
+      # surfaces to `-` together instead of silently mislabelling one of them.
+      # It is the data half of the tile — no SwiftUI, no `WidgetKit`.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
       # The history chart layer (t_b6512c2e): the requestable metric set and the
       # pixel reduction that preserves every column's min and max. Shared with
       # iOS so the desktop draws the same series from the same bytes.

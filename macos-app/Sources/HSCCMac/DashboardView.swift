@@ -2,9 +2,12 @@ import AppKit
 import SwiftUI
 
 /// The dropdown behind the menu bar H. It is a read-only dashboard: cluster
-/// health, the cards being worked, board totals and the project list, all from
-/// the shared client's existing GET routes. Actions are limited to refresh,
-/// opening Settings and quitting.
+/// health, `hscc cluster monitor`'s host and serving tables, `hscc cluster
+/// status`'s workloads and slots, the cards being worked, board totals and the
+/// project list — all from the shared client's existing GET routes, and every
+/// CLI-shaped string drawn out of the shared view-model rather than formatted
+/// here (`DashboardFleetSection.swift`, `DashboardFleetReading.swift`). Actions
+/// are limited to refresh, opening Settings and quitting.
 struct DashboardView: View {
     @ObservedObject var dashboard: DashboardMonitor
     @EnvironmentObject private var settings: SettingsStore
@@ -38,6 +41,8 @@ struct DashboardView: View {
                 setupInvite
             } else {
                 clusterSection
+                clusterMonitorSection
+                clusterStatusSection
                 runningSection
                 boardSection
                 projectsSection
@@ -296,7 +301,12 @@ struct DashboardView: View {
 
     // MARK: - Small pieces
 
-    private func sectionTitle(_ title: String) -> some View {
+    /// The section header style, shared by the sections in this file AND the
+    /// two CLI-surface sections in `DashboardFleetSection.swift`. It is
+    /// internal on purpose: `private` in Swift is file-scoped, so a second file
+    /// extending this view could not reuse it, and a second copy of the header
+    /// style would be a second design system.
+    func sectionTitle(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.caption2.weight(.semibold))
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
