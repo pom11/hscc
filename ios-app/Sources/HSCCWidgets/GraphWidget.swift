@@ -328,7 +328,14 @@ struct ClusterGraphWidget: Widget {
         #if os(iOS)
         .supportedFamilies(WidgetFamily.clusterGraphFamilies)
         #else
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        // All four sizes, the same set the Cluster, Monitor, Cards Running and
+        // Kanban tiles ship on the desktop: WidgetKit offers the four home sizes
+        // on macOS and withholds only the accessories. `systemExtraLarge` is not
+        // a stretched large here — the chart width is MEASURED
+        // (`ClusterGraphCanvas`), so the wider tile gets a wider reduction and
+        // more axis labels rather than a bigger picture of the same 320 columns.
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+                            .systemExtraLarge])
         #endif
     }
 }
