@@ -14,6 +14,9 @@
 # aggregate. Exit non-zero if any dir fails.
 #
 # Usage:  scripts/run_tests.sh [extra pytest args...]
+#         HSCC_TEST_LEGS="hscc-api scripts"  run ONLY those legs (see the leg
+#         selection block below for the full contract; unknown names exit 64
+#         rather than running a subset silently).
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -179,6 +182,82 @@ HEARTBEAT_SECONDS="${HSCC_LEG_HEARTBEAT_SECONDS:-30}"
 # only thing that executes the address-guard workflow's real step script.
 DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts .github/scripts comfyui-sparkrun)
 
+# ━━━ leg selection — HSCC_TEST_LEGS (t_23bf61f3) ━───────────────────────────
+# WHY THIS EXISTS. The roster above is the repo's only test gate, and until this
+# block it had NO selection mechanism at all: extra argv goes to pytest (see the
+# Usage line), so `run_tests.sh hscc-api` ran TWELVE legs and handed "hscc-api"
+# to pytest as a path argument. That is why CI could not carry the gate: a job
+# that must run the whole 12-leg roster on every push is ~25 min on a loaded
+# host and makes every flake of an unrelated leg a merge blocker, so the honest
+# options were "slow" or "not run", and the repo picked "not run" by omission.
+#
+# CONTRACT (pinned by scripts/tests/test_run_tests_leg_selection.py):
+#   HSCC_TEST_LEGS unset or empty  -> every leg in DIRS, exactly as before.
+#   HSCC_TEST_LEGS="a b" or "a,b"  -> ONLY those legs, run in DIRS order,
+#                                     duplicates collapsed.
+#   a name that is not in DIRS     -> exit 64 BEFORE any leg runs. Selection is
+#                                     fail-CLOSED on purpose: a typo'd leg name
+#                                     that silently ran nothing would report
+#                                     green, and a green report from a job that
+#                                     executed zero tests is the exact failure
+#                                     mode this whole gate exists to close. Same
+#                                     rule for an empty selection.
+#   the selection is always printed, so a reader of a redirected log can tell
+#     "3 legs, selected" from "12 legs, full suite" without re-running anything
+#     (the same reasoning that put `-rs` on the pytest invocation).
+#
+# Nothing here decides WHICH legs a change should run — that map lives in
+# .github/scripts/leg_select.py and is a CI concern. This block only makes
+# "run exactly these legs" expressible at all.
+SELECTED_LEGS="${HSCC_TEST_LEGS:-}"
+SELECTED_LEGS="${SELECTED_LEGS//,/ }"
+# Collapse whitespace before anything else: `set -f` so a stray glob char in the
+# value cannot pathname-expand into whatever happens to be in the cwd, and a
+# whitespace-only value has to read as "unset" (full suite) rather than as a
+# zero-leg run. Both shapes are one `join` away in a workflow that built the
+# string from a list.
+set -f
+_NORM=""
+for _tok in $SELECTED_LEGS; do _norm="$_tok"; _NORM="${_NORM:+$_NORM }$_norm"; done
+SELECTED_LEGS="$_NORM"
+set +f
+unset _NORM _norm _tok
+declare -a LEGS
+if [ -z "$SELECTED_LEGS" ]; then
+  LEGS=("${DIRS[@]}")
+else
+  for _want in $SELECTED_LEGS; do
+    _known=0
+    for _d in "${DIRS[@]}"; do
+      if [ "$_d" = "$_want" ]; then _known=1; break; fi
+    done
+    if [ "$_known" -eq 0 ]; then
+      echo "run_tests.sh: HSCC_TEST_LEGS names an unknown leg: '$_want'" >&2
+      echo "  valid legs: ${DIRS[*]}" >&2
+      exit 64
+    fi
+  done
+  LEGS=()
+  for _d in "${DIRS[@]}"; do
+    for _want in $SELECTED_LEGS; do
+      if [ "$_d" = "$_want" ]; then LEGS+=("$_d"); break; fi
+    done
+  done
+  if [ "${#LEGS[@]}" -eq 0 ]; then
+    echo "run_tests.sh: HSCC_TEST_LEGS='$HSCC_TEST_LEGS' selected zero legs" >&2
+    echo "  valid legs: ${DIRS[*]}" >&2
+    exit 64
+  fi
+fi
+unset _want _known _d
+
+if [ "${#LEGS[@]}" -eq "${#DIRS[@]}" ]; then
+  echo "legs: FULL SUITE (${#LEGS[@]} legs)"
+else
+  echo "legs: SELECTED ${#LEGS[@]}/${#DIRS[@]} -> ${LEGS[*]}"
+  echo "      (HSCC_TEST_LEGS='$SELECTED_LEGS' — this is NOT the full suite)"
+fi
+
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
 # `pkill -f pytest`, or any pattern-kill of a generic script name. It matches
@@ -281,7 +360,7 @@ unset _pin
 
 rc=0
 declare -a summary
-for d in "${DIRS[@]}"; do
+for d in "${LEGS[@]}"; do
   CURRENT_SUITE="$d"
   echo "━━━ $d ━━━"
   # Run each suite OUTSIDE the delegated-child execution context so a kanban
