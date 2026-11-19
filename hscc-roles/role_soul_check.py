@@ -166,7 +166,7 @@ def base_headings(base_path: Optional[str] = None) -> List[str]:
 
 
 def ops_headings() -> List[str]:
-    """The `## ` headings of the three operational blocks generator can pick.
+    """The `## ` headings of the operational blocks generator can pick.
 
     Read from generator itself rather than hardcoded: if a fourth ops block or a
     renamed ops heading lands there, this check follows automatically instead of
@@ -175,7 +175,8 @@ def ops_headings() -> List[str]:
     import generator
     out: List[str] = []
     for block in (generator._WORKER_OPS, generator._ORCH_OPS,
-                  generator._PROJECT_ORCH_OPS):
+                  generator._PROJECT_ORCH_OPS, generator._MAIN_OPS,
+                  generator._RETIRED_OPS):
         for h in _headings(block.format(name="x")):
             if h not in out:
                 out.append(h)

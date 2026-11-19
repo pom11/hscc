@@ -111,9 +111,23 @@ Provision one with `hscc.py orch <project>`; provision the whole registry at
 once with `hscc.py orch-all` (bootstrap calls it during install). Verify the
 result with `hscc.py provision-check`.
 
+### Migrating an existing install (`migrate_main.py`)
+
+The main orchestrator replaces both legacy identities, and nothing is deleted:
+`orch-all` creates the main profile when it is missing, copies the legacy
+catch-all's `memories/` and `sessions/` into it (per file, only where the
+destination has no such path — the main profile always wins and the source is
+never moved or deleted), and marks both the legacy catch-all and the legacy
+cluster-wide role retired in their SOULs ("retired — use `<main>`"). `generate`
+stamps the legacy cluster-wide role retired on every run, so a regeneration can
+never re-mint a competing authority. The step is idempotent: a second run is a
+byte-identical no-op. Config files are never rewritten by the migration; the
+generator's existing YAML merge keeps every operator key.
+
 ## Roster (`roles/`)
 
-A full org (27 specs): orchestrator, architect, coder, **reviewer**, qa;
+A full org (27 specs): orchestrator (retired legacy profile), architect, coder,
+**reviewer**, qa;
 backend/frontend/devops/security/data engineers; ml-engineer, ml-researcher,
 data-scientist; **ios-engineer**, **ecofire-bc-engineer**,
 **ecofire-pontaje-engineer**; product-manager, technical-writer, ux-designer;
