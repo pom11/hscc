@@ -34,7 +34,9 @@ struct ClusterWidget: Widget {
         .configurationDisplayName("Cluster")
         .description("Nodes up, the model each node serves, throughput and temperatures.")
         #if os(iOS)
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
+        // .systemExtraLarge is the iPad size (t_9e64d9d9): the iPhone cannot
+        // host it, but the same widget on iPad gets the two-column tables.
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge,
                             .accessoryCircular, .accessoryRectangular,
                             .accessoryInline])
         #else
@@ -66,7 +68,7 @@ struct ClusterWidgetView: View {
         case .systemLarge:
             LargeClusterWidget(entry: entry)
         case .systemExtraLarge:
-            LargeClusterWidget(entry: entry)
+            ExtraLargeClusterWidget(entry: entry)
         default:
             MediumClusterWidget(entry: entry)
         }
@@ -231,7 +233,7 @@ struct MediumClusterWidget: View {
 }
 
 // ---------------------------------------------------------------------------
-// Large / macOS XL — every node row, full metrics, failure/age line.
+// Large — the CLI's host table + serving table, stacked.
 // ---------------------------------------------------------------------------
 
 struct LargeClusterWidget: View {
@@ -248,7 +250,12 @@ struct LargeClusterWidget: View {
                 ClusterDetail(entry: entry, surface: .large)
             }
             .widgetHeader(style)
-            if !text.rows.isEmpty {
+            if let tables = entry.tables {
+                // The tables replace the node rows: they carry the same hosts
+                // plus every column `cluster monitor` prints, and the text rows
+                // were a summary of exactly this data.
+                MonitorTablesBlock(tables: tables, surface: .large)
+            } else if !text.rows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
                         ClusterNodeRowView(row: row, node: node(at: index))
@@ -270,6 +277,44 @@ struct LargeClusterWidget: View {
     private func node(at index: Int) -> FleetNodeLine? {
         guard let nodes = entry.fleet?.nodes, nodes.indices.contains(index) else { return nil }
         return nodes[index]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extra large (iPad + macOS) — the two tables side by side, plus the six
+// fields the CLI's host table has no column for.
+// ---------------------------------------------------------------------------
+
+struct ExtraLargeClusterWidget: View {
+    @Environment(\.widgetStyle) private var style
+    let entry: ClusterEntry
+
+    var body: some View {
+        let text = entry.text(for: .extraLarge)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: "square.stack.3d.up").widgetIcon(style)
+                ClusterHeadline(entry: entry, size: 34)
+                Spacer(minLength: 0)
+                ClusterDetail(entry: entry, surface: .extraLarge)
+            }
+            .widgetHeader(style)
+            if let tables = entry.tables {
+                MonitorTablesBlock(tables: tables, surface: .extraLarge)
+            } else if !text.rows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(text.rows.enumerated()), id: \.offset) { _, row in
+                        ClusterNodeRowView(row: row, node: nil)
+                    }
+                }
+            } else if entry.failure == nil {
+                Text("No node sample in this refresh.")
+                    .font(style.font(.caption))
+                    .foregroundColor(style.secondaryTextColor)
+            }
+            Spacer(minLength: 0)
+            ClusterFooter(entry: entry, surface: .extraLarge)
+        }
     }
 }
 
