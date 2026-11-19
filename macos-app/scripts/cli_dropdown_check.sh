@@ -32,6 +32,15 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
   echo "error: no macOS SDK (is Xcode installed?)" >&2; exit 1; }
 
+# The dropdown compiles the iOS small-grid tile by path. That group also names
+# ClusterHistorySeries.swift, where the grid's trend types live, so this gate
+# cannot fall behind the iOS one the way it did on main (t_1399335e).
+. ../ios-app/scripts/swift_source_groups.sh
+grid_sources=()
+while IFS= read -r path; do
+  grid_sources+=("$path")
+done < <(swift_group_with_prefix ../ios-app cluster-grid)
+
 FIXDIR="$(cd "$SELF_DIR/../../ios-app/scripts/model_decode_check/fixtures" 2>/dev/null && pwd)"
 if [ -z "$FIXDIR" ] || [ ! -d "$FIXDIR" ]; then
   # The goldens are the iOS decode harness's; this gate re-uses them rather
@@ -47,7 +56,7 @@ real_sources=(
   ../ios-app/Sources/Shared/SharedModels.swift
   ../ios-app/Sources/Shared/SharedStore.swift
   ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
-  ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
+  "${grid_sources[@]}"
   Sources/HSCCMac/DashboardFleetReading.swift
 )
 harness=(
