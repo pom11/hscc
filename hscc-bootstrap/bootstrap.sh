@@ -66,7 +66,7 @@ for a in "$@"; do case "$a" in
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
   --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, main orchestrator board, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -380,6 +380,29 @@ if $SKIP_ROLES; then warn "skipped"; else
   else
     "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
   fi
+fi
+
+# The main orchestrator's board (M3, t_7b55db57): create it by the stored name
+# (default `general`) and make it the kanban CURRENT board, so cards created
+# without an explicit board= land there instead of on whichever project board
+# was switched to last. `boards create` is idempotent; `boards switch` is the
+# same pointer write the CLI makes. The legacy `default` board keeps its cards.
+# Runs after profile provisioning so the name is stored and its board can share
+# the identity. Non-fatal: a failed board stage warns with the one-line fix.
+hdr "Install: main orchestrator board"
+if $DRY_RUN; then
+  plan "main orchestrator board: $PYBIN $BOOT_DIR/main_board.py ensure (hermes kanban boards create + switch; writes $HERMES_HOME/kanban; the default board keeps its cards)"
+elif BOARD_JSON=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+    "$PYBIN" "$BOOT_DIR/main_board.py" ensure 2>&1); then
+  BOARD_NAME=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin)["board"])' 2>/dev/null || echo "?")
+  ok "main orchestrator board: $BOARD_NAME (current; created if missing)"
+else
+  BOARD_ERR=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin).get("detail") or "?")' 2>/dev/null \
+    || printf '%s' "$BOARD_JSON")
+  warn "main orchestrator board not ensured: $BOARD_ERR"
+  warn "  fix: hermes kanban boards create ${MAIN_ORCH_NAME:-general} --switch"
 fi
 
 # Guarded review-skill fan-out (t_bc611809): the dispatcher force-injects

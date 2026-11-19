@@ -1834,6 +1834,51 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+def _load_main_board():
+    """Import the main-board feature module (M3, t_7b55db57).
+
+    The verdict lives in ``hscc-bootstrap/main_board.py`` with the resolver
+    (``hscc-roles/main_orch.py``) and the Hermes current-board reader, so doctor
+    only adapts it to its five Check fields. Returns None when the module is
+    not deployed next to bootstrap — the row then reports itself unverifiable
+    instead of vanishing.
+    """
+    try:
+        import main_board
+        return main_board
+    except Exception:
+        pass
+    bootstrap_dir = os.path.dirname(os.path.abspath(__file__))
+    if bootstrap_dir not in sys.path:
+        sys.path.insert(0, bootstrap_dir)
+    try:
+        import main_board
+        return main_board
+    except Exception:
+        return None
+
+
+#: Fallback for the row name when the module itself cannot be imported — same
+#: trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
+_MAIN_BOARD_CHECK_NAME = "kanban current board (main orchestrator)"
+
+
+def _refused_main_board_check() -> dict:
+    """In-suite stand-in for the main-board check when no seam was injected.
+
+    The check reads Hermes' machine-wide kanban current pointer — the
+    OPERATOR's live board state when the suite runs from a dispatched worker.
+    Same fence shape as ``_refused_kanban_enforce_check``: an ERROR naming the
+    missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _MAIN_BOARD_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-board check refused inside a pytest process — "
+                      "inject _main_board_check",
+            "fix": "Pass _main_board_check=lambda: {...} built from a tmp "
+                   "HERMES_HOME/kanban fixture; a suite must never read the "
+                   "operator's current board."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -1952,6 +1997,21 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     doctor_rows.FeatureCheckRow(
         key="kanban_enforce", seam_kwarg="_kanban_enforce_check",
         row_fn="_kanban_enforce_check_row"),
+    # M3 (t_7b55db57): does the machine-wide kanban current board still point
+    # at the main orchestrator's board? Bootstrap creates it and switches to it
+    # so board-less cards land there, never on a project board; this row flags
+    # any later drift (a manual switch, a board migration) with the one-line
+    # `hermes kanban boards switch <name>` fix. WARN-only: a wrong current
+    # board is work to steer, not a reason to abort an install.
+    doctor_rows.FeatureCheckRow(
+        key="main_board", seam_kwarg="_main_board_check",
+        loader="_load_main_board",
+        refusal="_refused_main_board_check",
+        fallback_name="_MAIN_BOARD_CHECK_NAME",
+        missing_detail="hscc-bootstrap/main_board.py not importable — the "
+                       "kanban current board cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
     # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note and
     # budget_watch.doctor_check verifies the two ctx.register_hook calls that
     # make it fire — but until that row existed nothing in doctor ever CALLED
