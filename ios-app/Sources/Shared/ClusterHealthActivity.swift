@@ -51,6 +51,17 @@ struct ClusterHealthActivityAttributes: ActivityAttributes {
     /// fixed-height region.
     static let downNodeLimit = 2
 
+    /// The most host lines the LOCK SCREEN draws — the same four the projection
+    /// clips a push to, so a Lock Screen with room for them shows every host the
+    /// app ever sent. `+n` counts the rest (`hostsMoreText`), against the count
+    /// the route itself named.
+    static let hostLineLimit = ClusterHealthProjection.hostLineLimit
+
+    /// The most host lines the EXPANDED Island's bottom region draws. Declared on
+    /// `ClusterHealthProjection` (the slice the gate compiles) and re-exported
+    /// here, so the view's budget and the gate's assertion cannot drift apart.
+    static let islandHostLineLimit = ClusterHealthProjection.islandHostLineLimit
+
     /// A token identifying this activity so it can be updated/ended.
     public var healthID: UUID = UUID()
 }
@@ -577,6 +588,18 @@ enum ClusterHealthProjection {
     /// fleet-level numbers below are always computed over EVERY host, so a clip
     /// can never change what the compact region claims.
     static let hostLineLimit = 4
+
+    /// The most host lines the EXPANDED Island's bottom region draws, and the
+    /// reason it is declared here rather than on the attributes type: this file
+    /// is the slice the gate can compile (no ActivityKit), and a budget the view
+    /// keeps to itself is a budget the gate can only transcribe. The attributes
+    /// type re-exports this one, exactly as it re-exports `hostLineLimit` above.
+    ///
+    /// Smaller than the Lock Screen's on purpose — the expanded Island is a few
+    /// lines tall above the notch's own content, and a fifth host is worth less
+    /// there than the queue and the down-node names beside it. The clip stays
+    /// honest because `hostsMoreText` counts what it hid.
+    static let islandHostLineLimit = 3
 
     /// The serving state word, from the autodown read's `state`.
     ///
