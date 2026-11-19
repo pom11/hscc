@@ -1,17 +1,16 @@
 import UIKit
 
 // ===========================================================================
-// NotificationsAppDelegate — one-time notification authorization at launch.
+// LaunchAppDelegate — the app's one `UIApplicationDelegate` launch seam.
 //
-// Phase 1+2 of docs/notify-operator-plan.md. This lightweight
-// `UIApplicationDelegate` is attached to `HSCCApp` via
-// `@UIApplicationDelegateAdaptor`. Its Phase-1/2 job is to request
-// notification authorization once, so the foreground `NotificationCoordinator`
-// can later present local banners.
+// It exists for the Live Activities: each BGAppRefreshTask identifier must be
+// registered SYNCHRONOUSLY in `didFinishLaunching`, before the first scene can
+// become active and submit a request. It also runs the idempotent orphan
+// sweeps and starts the foreground poll loops at launch.
 //
-// Phase 3 (BGAppRefreshTask background refresh) registers the monitor Live
-// Activity's background-refresh identifier here and routes the one-time
-// launch hooks (task registration + orphan sweep) to `MonitorActivityDriver`.
+// It deliberately has no notification job: the apps carry no notifications
+// (operator decision 2026-11-19), so there is no authorization request and no
+// APNs device-token callback here.
 // ===========================================================================
 
 /// `@MainActor` because UIKit calls `didFinishLaunching` on the main thread and
@@ -19,7 +18,7 @@ import UIKit
 /// MainActor-isolated. Making the whole delegate MainActor lets us call
 /// `registerBackgroundTasks()` SYNCHRONOUSLY in `didFinishLaunching`.
 @MainActor
-final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
+final class LaunchAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Register the BGTaskScheduler background-refresh launch handler
@@ -50,27 +49,10 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
         // synchronous-before-submit reason.
         BoardProgressActivityDriver.registerBackgroundTasks()
 
-        // The async block holds everything that must not block launch AND does
-        // not need to precede registration: the notification-auth request and
-        // the monitor orphan-sweep + foreground-poll kick. All idempotent —
-        // safe on every launch.
+        // The async block holds everything that must not block launch: the
+        // monitor orphan-sweep + foreground-poll kick. All idempotent — safe on
+        // every launch.
         Task { @MainActor in
-            #if DEBUG
-            // Capture harness (t_0d5632bc): the first-run authorization alert
-            // holds the key window, and this device refuses
-            // `simctl privacy grant notifications` (proof:
-            // PHASE2_PROGRESS_t_25aed701 "Screenshots"), so a fixture capture
-            // launch skips the REQUEST rather than trying to answer the alert.
-            // Skipping authorization only means banners cannot fire —
-            // irrelevant to a screenshot. Everything below runs unchanged on
-            // every launch (its registration ordering is load-bearing, see
-            // the BGTaskScheduler note above). Release builds always request.
-            if ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURES"] != "1" {
-                await NotificationCoordinator.shared.requestAuthorization()
-            }
-            #else
-            await NotificationCoordinator.shared.requestAuthorization()
-            #endif
             // HSCC Monitor Live Activity (t_03d318cd): run the orphan sweep and
             // kick off the foreground poll loop at launch. All idempotent —
             // safe on every launch. (A Scene has no `.task` mutation seam, so
@@ -100,23 +82,5 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
             ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
         }
         return true
-    }
-
-    // MARK: - APNs device token (card N3)
-
-    /// iOS answered `registerForRemoteNotifications` with this device's token.
-    /// PushRegistrar stores it and POSTs it to /v1/devices on every saved
-    /// cluster through the normal failover client. The token is never logged.
-    func application(_ application: UIApplication,
-                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        PushRegistrar.shared.didRegister(deviceToken: deviceToken)
-    }
-
-    /// Registration failed (usually a missing/mismatched aps-environment
-    /// entitlement or a provisioning profile without Push Notifications).
-    /// Surface the reason in Settings; this never crashes the app.
-    func application(_ application: UIApplication,
-                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        PushRegistrar.shared.didFailToRegister(error)
     }
 }
