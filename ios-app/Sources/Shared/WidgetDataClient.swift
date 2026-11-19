@@ -76,6 +76,13 @@ enum WidgetDataPath {
     static let clusterHistory = "/v1/cluster/history"
     static let daemonHost = "/v1/daemon/host"
     static let autodownStatus = "/v1/autodown/status"
+    /// Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf): the recorder's three
+    /// tiers, so a surface can chart history instead of re-reading one
+    /// snapshot. `tier` is required by the route (it answers 400 without it)
+    /// because which resolution a chart draws is the one thing a client may not
+    /// guess. This read is a surface of its own: §2 budgets ≤ 2 requests per
+    /// surface per refresh, and the cluster surface already spends both.
+    static let metricsHistory = "/v1/metrics/history"
 
     /// Every path this client will fetch. Additive only, and only for a read.
     static let all: Set<String> = [
@@ -83,6 +90,7 @@ enum WidgetDataPath {
         kanbanRunning, kanbanBlocked, kanbanStale,
         clusterMonitor, clusterStatus, clusterHistory,
         daemonHost, autodownStatus,
+        metricsHistory,
     ]
 
     static func isReadPath(_ path: String) -> Bool { all.contains(path) }
@@ -215,10 +223,13 @@ struct WidgetDataClient {
     /// `1h`/`6h`/`24h` the 1-minute roll-ups, `7d` the 5-minute ones — and the
     /// response carries `tier`, `resolution_s`, `resolution`, `tier_summary` and
     /// `max_fields`, because a 2-second point and a 5-minute point must never be
-    /// plotted as if they were the same width. `15m` additionally carries
-    /// `store.tier0_resident`: that ring is memory-only and belongs to the daemon
-    /// process, so a `false` there means "this server cannot see it", which a
-    /// chart must render as a gap with a reason, not as a quiet fleet.
+    /// plotted as if they were the same width. `store.tier0_resident` is answered
+    /// only for `15m`: the key is on the wire at every tier, but the route reads
+    /// the ring inside its tier-0 branch alone, so a durable window answers `null`
+    /// for it. That ring is memory-only and belongs to the daemon process, so a
+    /// `false` at tier 0 means "this server cannot see it", which a chart must
+    /// render as a gap with a reason, not as a quiet fleet — and `note` is where
+    /// that reason is written, not the flag.
     func clusterHistory(window: String = "1h",
                         node: String = "all",
                         metrics: [String] = []) async -> Result<ClusterHistoryResponse, WidgetDataFailure> {
@@ -241,6 +252,42 @@ struct WidgetDataClient {
     /// Dataset 5 — `GET /v1/autodown/status` (fleet power state + idle minutes).
     func autodownStatus() async -> Result<AutodownStatusResponse, WidgetDataFailure> {
         await load(WidgetDataPath.autodownStatus, as: AutodownStatusResponse.self)
+    }
+
+    /// Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf).
+    ///
+    /// `tier` is required (0 = the 2 s ring / 15 min, 1 = 1-minute buckets /
+    /// 24 h, 2 = 5-minute buckets / 7 d) and is clamped into range rather than
+    /// forwarded raw: an out-of-range tier is a coding bug in the surface, and a
+    /// 400 on every refresh is a worse outcome than the chart drawing the
+    /// nearest real tier. `host` filters node rows, `node` filters engine rows
+    /// — the two names the same subject has in the store's two tables.
+    /// `since`/`until` are inclusive epoch-second bucket starts.
+    ///
+    /// A caller drawing the live 2 s window must check
+    /// ``MetricsHistoryResponse/hasLiveTier0``: the ring lives in the daemon's
+    /// memory, so an empty tier-0 `hosts` with a real `tier0.points` is a
+    /// process boundary, not an idle fleet.
+    func metricsHistory(tier: Int, host: String? = nil, node: String? = nil,
+                        since: Int? = nil,
+                        until: Int? = nil) async -> Result<MetricsHistoryResponse, WidgetDataFailure> {
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "tier", value: String(min(max(tier, 0), 2)))
+        ]
+        if let host, !host.isEmpty {
+            query.append(URLQueryItem(name: "host", value: host))
+        }
+        if let node, !node.isEmpty {
+            query.append(URLQueryItem(name: "node", value: node))
+        }
+        if let since {
+            query.append(URLQueryItem(name: "since", value: String(since)))
+        }
+        if let until {
+            query.append(URLQueryItem(name: "until", value: String(until)))
+        }
+        return await load(WidgetDataPath.metricsHistory,
+                          as: MetricsHistoryResponse.self, queryItems: query)
     }
 
     // MARK: - Core read

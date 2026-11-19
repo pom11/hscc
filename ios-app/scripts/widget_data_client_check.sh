@@ -84,6 +84,10 @@ real_sources=(
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  # The history chart projection (t_5ae8cfcf) compiles here too: its whole
+  # job is two rules — a not-reported metric stays a gap, and a peak rides
+  # beside its average — and a rule nobody compiles is a rule nobody keeps.
+  Sources/Shared/MetricsHistoryTrend.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

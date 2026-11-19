@@ -298,6 +298,16 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The chart projection for `GET /v1/metrics/history` (t_5ae8cfcf): keeps
+      # a not-reported metric a gap rather than a zero, and exposes each
+      # series' peak column next to its average. Foundation-only.
+      - path: Sources/Shared/MetricsHistoryTrend.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # metric set a widget may request (the recorder's own column names) and
+      # the pixel-width reduction that keeps every column's min AND max, so a
+      # sparkline cannot draw a peak the data never had. Foundation-only, which
+      # is what lets scripts/cluster_history_chart_check.sh execute it on macOS.
+      - path: Sources/Shared/ClusterHistorySeries.swift
       - path: Sources/Shared/WidgetDataClient.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
@@ -470,6 +480,14 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # History chart points for a widget surface reading
+      # `GET /v1/metrics/history` (t_5ae8cfcf). Foundation-only, so the decode
+      # gate can exercise it without SwiftUI.
+      - path: Sources/Shared/MetricsHistoryTrend.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # requestable metric set and the min/max-preserving pixel reduction.
+      # Foundation-only, so the widget and the gate both execute the same file.
+      - path: Sources/Shared/ClusterHistorySeries.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
@@ -616,6 +634,10 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # requestable metric set and the min/max-preserving pixel reduction, so a
+      # Live Activity trend line cannot draw a peak the recorder never stored.
+      - path: Sources/Shared/ClusterHistorySeries.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:

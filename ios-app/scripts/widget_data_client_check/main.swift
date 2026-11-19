@@ -104,6 +104,42 @@ let summaryBody = Data(#"""
  "speak":"hscc: 20 open, 3 running, 750 done."}
 """#.utf8)
 
+/// The real `GET /v1/metrics/history?tier=1` shape (t_5ae8cfcf), built the way
+/// the recorder writes it: two node buckets where the first answered twice
+/// (so the bucket has a mean AND a peak) and the second host did not answer at
+/// all (so every metric is null and `error` carries why), plus one engine row.
+let metricsHistoryBody = Data(#"""
+{"tier":1,"tier_meta":{"tier":1,"resolution_s":60,"window_s":86400,"capacity":1440},
+ "since":null,"until":null,"host":null,"node":null,"source":"sqlite_store",
+ "hosts":[{"tier":1,"ts":1795000060,"host":"dgx-01","n":2,"error":null,
+           "cpu_usage_pct":30.0,"cpu_temp_c":null,"gpu_util_pct":80.0,
+           "gpu_temp_c":75.0,"gpu_power_w":160.0,"mem_used_pct":40.0,
+           "swap_used_mb":null,"swap_total_mb":null,"swap_used_pct":null,
+           "gpu_mem_used_mb":30000.0,"gpu_clock_mhz":1900.0,
+           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":3.0,
+           "cpu_temp_c_max":null,"gpu_temp_c_max":90.0,"gpu_power_w_max":200.0},
+          {"tier":1,"ts":1795000120,"host":"dgx-02","n":1,
+           "error":"ssh: collect failed","cpu_usage_pct":null,"cpu_temp_c":null,
+           "gpu_util_pct":null,"gpu_temp_c":null,"gpu_power_w":null,
+           "mem_used_pct":null,"swap_used_mb":null,"swap_total_mb":null,
+           "swap_used_pct":null,"gpu_mem_used_mb":null,"gpu_clock_mhz":null,
+           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":null,
+           "cpu_temp_c_max":null,"gpu_temp_c_max":null,"gpu_power_w_max":null}],
+ "engines":[{"tier":1,"ts":1795000060,"node":"dgx-01","port":"8000",
+             "model":"qwen3-coder","n":2,"error":null,"run":2.0,"wait":0.0,
+             "kv":61.5,"gen_tps":31.0,"prompt_tps":120.0}],
+ "counts":{"host_rows":2,"engine_rows":1},
+ "fields":{"host":["cpu_usage_pct","gpu_temp_c"],"host_peaks":["gpu_temp_c_max"],
+           "engine":["run","kv"],"engine_key":["node","port"],
+           "engine_identity":"(node, port)"},
+ "tier0":{"points":450,"capacity":450,"readable_here":false,
+          "source":"recorder_ring_absent",
+          "reason":"the 2-second ring lives in the daemon process, which is not this one"},
+ "stats":{"path":"/Users/op/.hscc/metrics/history.db","db_bytes":3355443,
+          "bound_bytes":10485760,"tier1_rows":5760,"tier2_rows":2016,"exists":true},
+ "speak":"1-minute metrics history: 2 node rows, 1 engine row."}
+"""#.utf8)
+
 /// The same payload with `done` removed — §6 rule 1 says this must NOT be
 /// readable as zero.
 let summaryMissingDoneBody = Data(#"""
@@ -138,6 +174,9 @@ let kanbanRunningBody = Data(#"""
 /// reported — a `null` that must stay nil, because a 0.0 would draw a node that
 /// never answered as an idle one. `store.path` is on the wire and deliberately
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
+/// `store.tier0_resident` is `null` here and that is not a missing field: the
+/// route reads the 2 s ring only inside its tier-0 branch, so at tier 1 nobody
+/// measured it (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`).
 let historyBody = Data(#"""
 {"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
@@ -148,8 +187,27 @@ let historyBody = Data(#"""
           {"tier":1,"ts":1794978360,"host":"192.0.2.10","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
  "engines":[{"tier":1,"ts":1794978300,"node":"192.0.2.10","port":"8000","model":"org/Qwen-Test","run":2,"wait":1,"kv":12.5,"gen_tps":40.0,"n":30,"error":null}],
  "counts":{"hosts":2,"engines":1},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":true},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
  "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
+"""#.utf8)
+
+/// The same route's answer for `window=15m` (tier 0) as the deployed topology
+/// serves it: the 2 s ring is the daemon's memory, so this process measured
+/// `tier0_resident == false`, both series came back empty, and `note` says why.
+/// Those are the answers of
+/// `model_decode_check/fixtures/v1_cluster_history_15m.json`, so the two harnesses
+/// cannot drift into disagreeing about what tier 0 replies. It exists because the
+/// tier-1 case alone could not tell "the route answered null" from "the `store`
+/// object never decoded at all" — both read as `nil`.
+let historyTier0Body = Data(#"""
+{"window":"15m","window_s":900,"tier":0,"resolution_s":2,"resolution":"2s",
+ "tier_summary":"raw 2 s samples from the recorder's in-memory ring, no averaging, and no peak columns",
+ "max_fields":[],"since":1794999000,"until":1794999900,"node":"all",
+ "hosts_included":true,"engines_included":true,"hosts":[],"engines":[],
+ "counts":{"hosts":0,"engines":0},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":16384,"tier0_resident":false},
+ "note":"tier 0 is the sampler's in-memory ring and lives in the daemon process; this server process cannot read it, so no 2 s points are served here. Use window=1h for the durable 1-minute tier.",
+ "speak":"The 15 m window is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points."}
 """#.utf8)
 
 // MARK: - Harness
@@ -208,6 +266,7 @@ func runAll() async {
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
+        "/v1/metrics/history",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
@@ -236,8 +295,16 @@ func runAll() async {
                 && payload.hosts[0].gpu_power_w_max == 480.0)
         check("history names the peak columns it carried",
               payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"])
-        check("history reports whether the 2 s ring was readable",
-              payload.tier0Resident == true)
+        // `tier0_resident` is a MEASUREMENT of the 2 s ring, and the route takes
+        // it only inside its tier-0 branch, so a durable window answers `null` for
+        // it — a tier the route never read cannot report residency. The `store`
+        // fields beside it are what give this teeth: they decoded, so the `nil`
+        // below is the wire's `null` and not a `store` object that failed to
+        // decode. The tier-0 case further down is the other half.
+        check("a tier-1 answer leaves the 2 s ring unmeasured, not resident",
+              payload.tier == 1 && payload.tier0Resident == nil
+                && payload.store?.exists == true
+                && payload.store?.db_bytes == 3355443)
         let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
         check("the store's server path is never decoded",
               !historyFields.contains("path"))
@@ -251,6 +318,33 @@ func runAll() async {
             && historyRequest?.url?.query?.contains("metrics=") == true)
     check("history's path carries no query string of its own",
           historyRequest?.url?.path == "/v1/cluster/history")
+
+    // 1c. The same field where the route DID read the ring. Without this case the
+    //     tier-1 assertion above is worthless: `tier0Resident == nil` would also
+    //     hold if the model simply never read the flag, or if the `store` object
+    //     failed to decode. A `false` at tier 0 is a measurement, and the reason a
+    //     chart draws a gap instead of a quiet fleet rides on `note` — the flag is
+    //     never that reason (`ClusterHistorySeries.reason` reads `note`, and
+    //     cluster_history_chart_check.sh gates that).
+    StubTransport.arm(.http(status: 200, body: historyTier0Body))
+    let ring = await client.clusterHistory(window: "15m", node: "192.0.2.10",
+                                           metrics: ["gpu_util_pct"])
+    switch ring {
+    case .success(let payload):
+        check("a tier-0 answer measures the 2 s ring instead of leaving it open",
+              payload.tier == 0 && payload.resolution_s == 2
+                && payload.tier0Resident == false)
+        check("an empty tier-0 answer carries its reason on note, not on the flag",
+              payload.hosts.isEmpty && payload.engines.isEmpty
+                && payload.tier0Resident == false
+                && (payload.note ?? "").contains("window=1h"))
+    case .failure(let failure):
+        check("tier-0 history should decode, got \(String(reflecting: failure))", false)
+    }
+    let ringRequest = StubTransport.requests.last
+    check("the tier-0 read went out as its own request, not a replay of tier 1",
+          ringRequest?.url?.path == "/v1/cluster/history"
+            && ringRequest?.url?.query?.contains("window=15m") == true)
 
     // 2. A refused path never reaches the transport — no request, no side effect.
     StubTransport.arm(.http(status: 200, body: Data("{}".utf8)))
@@ -402,6 +496,70 @@ func runAll() async {
     _ = await client.mobileSummary(boards: ["hscc", "inc"])
     let scoped = StubTransport.requests.last?.url?.absoluteString ?? ""
     check("mobileSummary scopes boards", scoped.contains("boards=") && scoped.contains("hscc") && scoped.contains("inc"))
+
+    // 10b. Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf). Three things
+    //      this gate exists to keep true: `tier` leaves as a query item (the
+    //      route 400s without it), an out-of-range tier is clamped rather than
+    //      forwarded (a 400 on every refresh is worse than the nearest real
+    //      tier), and a metric the node never reported stays `nil` — it must
+    //      not reach a chart as a flat 0.
+    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
+    let metricsRead = await client.metricsHistory(tier: 1, host: "dgx-01",
+                                                  since: 1795000000,
+                                                  until: 1795000120)
+    let metricsURL = StubTransport.requests.last?.url?.absoluteString ?? ""
+    check("history carries tier=1", metricsURL.contains("tier=1"))
+    check("history carries host and the inclusive window",
+          metricsURL.contains("host=dgx-01") && metricsURL.contains("since=1795000000")
+            && metricsURL.contains("until=1795000120"))
+    check("history path stayed clean",
+          StubTransport.requests.last?.url?.path == "/v1/metrics/history")
+    if case .success(let payload) = metricsRead {
+        check("history decodes its node rows", payload.hosts.count == 2 && payload.tier == 1)
+        check("an unreported metric is nil, never 0",
+              payload.hosts[1].gpu_temp_c == nil
+                && payload.hosts[1].error == "ssh: collect failed")
+        check("the peak rides beside the average",
+              payload.hosts[0].gpu_temp_c == 75.0 && payload.hosts[0].gpu_temp_c_max == 90.0)
+        check("engine identity is node+port, model is not the key",
+              payload.engines.first?.engineKey == "dgx-01:8000"
+                && payload.engines.first?.model == "qwen3-coder")
+        check("rows from the store read as a stored window", payload.hasStoredRows)
+        check("a ring in another process is not a live window",
+              payload.tier0?.readable_here == false && !payload.hasLiveTier0)
+        let trend = MetricsTrend.make(payload, field: .gpuTemp, host: "dgx-01")
+        check("the trend keeps the bucket's mean and its peak",
+              trend.points.count == 1 && trend.points[0].value == 75.0
+                && trend.points[0].peak == 90.0 && trend.hasPeaks)
+        check("the axis scales by the peak, not the mean", trend.upperBound == 90.0)
+        let unreported = MetricsTrend.make(payload, field: .gpuPower, host: "dgx-02")
+        check("a host that never answered is a gap, not a zero",
+              unreported.points.count == 1 && unreported.gaps == 1
+                && unreported.points[0].value == nil && unreported.upperBound == nil)
+        check("the caption names the gap instead of hiding it",
+              unreported.statusLine.contains("1 not reported"))
+        check("with no host named the series takes the first host present",
+              MetricsTrend.make(payload, field: .gpuTemp).host == "dgx-01")
+        check("the field vocabulary comes from the server, not a hardcoded list",
+              payload.fields?.host_peaks == ["gpu_temp_c_max"])
+    } else {
+        check("history should decode, got \(String(reflecting: metricsRead))", false)
+    }
+    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
+    _ = await client.metricsHistory(tier: 9)
+    check("an out-of-range tier is clamped, not forwarded",
+          StubTransport.requests.last?.url?.absoluteString.contains("tier=2") == true)
+    // A tier-0 read with nothing in it must not be able to claim a live window.
+    StubTransport.arm(.http(status: 200, body: Data(#"""
+    {"tier":0,"hosts":[],"engines":[],"tier0":{"points":0,"capacity":450,
+     "readable_here":true,"source":"recorder_ring"},"speak":"empty"}
+    """#.utf8)))
+    if case .success(let empty) = await client.metricsHistory(tier: 0) {
+        check("an empty ring is not a live window",
+              !empty.hasLiveTier0 && !empty.hasStoredRows)
+    } else {
+        check("an empty tier-0 response should still decode", false)
+    }
 
     // 11. The nil-shim the two pre-pivot providers still use keeps working.
     StubTransport.arm(.http(status: 200, body: kanbanRunningBody))

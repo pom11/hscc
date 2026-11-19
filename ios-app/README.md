@@ -286,6 +286,24 @@ file-by-file disposition of the remaining console files is
     families pay for the board row. Structural greps pin the layout file: the
     two-read budget, no `cluster/status` read, the accessory dispatch, and that
     an accessory body never reads the board row's fields. No network, no device.
+  - `cluster_history_chart_check.sh` — compiles the history chart layer
+    (`ClusterHistorySeries.swift`) together with the real wire types it decodes
+    (`SharedModels.swift`) into a macOS CLI and executes the two rules a history
+    widget cannot be trusted to re-derive. The reduction half: a series of 600
+    samples drawn into 40 pixel columns still holds the series' true min and max
+    (the spike's own reading is among the drawn points; a same-size stride thin
+    provably loses it, so the assertion cannot pass vacuously), the last reading
+    survives so the "now" value is real, an empty column is counted as a gap and
+    never filled with a number, and `null` is never rewritten to `0`. The
+    vocabulary half: the raw values of `ClusterHistoryMetric` must equal the
+    recorder's own `HOST_KEYS` + `HOST_COLUMNS` + `ENGINE_KEYS` from
+    `hscc_daemon/metrics_history.py` minus the columns that are not chartable
+    (deltas, counters, `sparkrun_jobs`), so a rename in the recorder reddens this
+    gate instead of emptying a chart. The same leg re-checks every key in the
+    committed `v1_cluster_history_*.json` fixtures against those tuples. Refusing
+    a mixed-tier merge is asserted too — folding a 2 s sample and a 5-minute
+    average into one column is the same lie as dropping a peak. No network, no
+    device.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
   - `merge_base_check.sh` — the stale-base guard: a branch whose merge-base with
@@ -408,7 +426,20 @@ The script auto-detects the team from your signing certificate (override with
 level (all targets inherit), also refuses to generate while a source file is
 missing from `project.yml` (`check_sources.sh`), then verifies with
 `xcodebuild -showBuildSettings` that the team actually landed on HSCC,
-HSCCWidgets and HSCCLiveActivity.
+HSCCWidgets, HSCCLiveActivity and HSCCLiveActivityMonitor.
+
+Bare `xcodegen generate` does none of that. `project.yml` reads
+`${HSCC_DEVELOPMENT_TEAM}` at the project level, so with the variable unset
+XcodeGen writes that literal string as the team on all four targets — an invalid
+id that errors only much later, in Xcode. `generate.sh` is the only path that
+resolves it, and the per-target `HSCC -> <TEAMID>` lines it prints are the proof
+it did. The desktop side deliberately does NOT auto-detect:
+`macos-app/scripts/generate.sh` refuses outright unless
+`HSCC_DEVELOPMENT_TEAM` is exported.
+
+Either invocation works — `scripts/generate.sh` from `ios-app/`, or
+`bash ios-app/scripts/generate.sh` from the repo root; the script locates itself
+rather than trusting the cwd.
 
 A free personal Apple ID team works for sideloading onto your own device —
 **but a free team cannot provision App Groups**, so the Home Screen widget,
