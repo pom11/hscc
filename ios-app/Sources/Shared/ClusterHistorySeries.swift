@@ -290,6 +290,13 @@ struct ClusterHistorySeries: Equatable {
 /// from the API process. A chart must render the first as an excluded series
 /// and the second as a gap with a reason — never as a flat quiet fleet, so the
 /// distinction is carried on the type instead of being re-guessed at the view.
+///
+/// `reason` is that explanation, and it is read from `note` deliberately rather
+/// than from `store.tier0_resident`: the route initialises that flag to `True`
+/// and only consults the recorder seam when the served tier IS 0
+/// (`hscc-api/routes_cluster.py`, `tier0_resident = points is not None` inside
+/// `if tier == 0`), so a `true` on a tier-1 or tier-2 payload is a default and
+/// not a measurement of what this process can read.
 struct ClusterHistorySeriesSet: Equatable {
     let metric: ClusterHistoryMetric
     let kind: ClusterHistorySeriesKind
