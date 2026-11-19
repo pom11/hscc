@@ -319,6 +319,10 @@ targets:
       # The alert-feed wire types + projection ("Needs me", card R3). The client
       # names AlertsLite, so every target that compiles the client compiles this.
       - path: Sources/Shared/NeedsMeReading.swift
+      # The merge-queue widget's wire types, CLI-shaped cells and last-known
+      # snapshot (card MQ5). Named by `WidgetDataClient.mergeQueue()` above, so
+      # every target that compiles the client compiles this too.
+      - path: Sources/Shared/MergeQueueReading.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
       - path: Sources/Shared/ConnectionAddressProbe.swift
@@ -479,6 +483,10 @@ targets:
       # The main orchestrator's alert feed ("Needs me", card R3): one read of
       # GET /v1/alerts through WidgetDataClient, projected by NeedsMeReading.swift.
       - path: Sources/HSCCWidgets/NeedsMeWidget.swift
+      # The local merge queue (card MQ5): the per-project tables `hscc kanban
+      # monitor` draws, read-only through WidgetDataClient. Its cells are the
+      # CLI's own column strings, projected by MergeQueueReading.swift.
+      - path: Sources/HSCCWidgets/MergeQueueWidget.swift
       # Rendering-mode adaptation (t_1143c19b): one shared palette swap for
       # WidgetKit's fullColor / accented / vibrant modes, used by the iOS
       # widgets and the macOS desktop extension alike.
@@ -506,6 +514,9 @@ targets:
       # Foundation-only so the decode gate executes the same order/filter/age
       # rules the widget and the macOS dropdown draw.
       - path: Sources/Shared/NeedsMeReading.swift
+      # The merge-queue widget's wire types + CLI cells + snapshot (MQ5),
+      # Foundation-only so the decode gate executes the same projection.
+      - path: Sources/Shared/MergeQueueReading.swift
       # `ClusterFleet`'s host tally IS this projection (t_f2867fb3) — the
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
@@ -678,6 +689,9 @@ targets:
       # here; Foundation/Security only, and the extension still never fetches.
       - path: Sources/Shared/WidgetDataClient.swift
       - path: Sources/Shared/NeedsMeReading.swift
+      # The client's `mergeQueue()` names `MergeQueueLite` (MQ5), so this target
+      # compiles the wire type too; the extension still never fetches.
+      - path: Sources/Shared/MergeQueueReading.swift
       - path: Sources/Shared/ClusterHealthActivity.swift
       - path: Sources/Shared/BoardProgressActivity.swift
       # Needed by the projection block inside the file above — the extension

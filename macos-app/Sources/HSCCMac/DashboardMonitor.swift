@@ -136,6 +136,11 @@ struct DashboardSnapshot {
     /// Why the alert read failed, already reduced to the shared client's
     /// address-free vocabulary. nil on a successful read.
     var needsMeFailure: String?
+    /// The local merge queue's rows ("Merge queue", card MQ5). nil when the
+    /// read failed; empty is the honest "nothing queued".
+    var mergeQueue: MergeQueueFeed?
+    /// Why the merge-queue read failed, in the shared client's vocabulary.
+    var mergeQueueFailure: String?
     /// Per-node history for the graphs section — the ONE `/v1/cluster/history`
     /// read this app makes, projected through the shared chart layer.
     var history: DashboardHistory?
@@ -343,6 +348,19 @@ final class DashboardMonitor: ObservableObject {
         case .failure(let failure):
             next.needsMe = nil
             next.needsMeFailure = failure.shortLabel
+            failures.append(failure.shortLabel)
+        }
+
+        // The local merge queue is read-only: the daemon owns the queue, and
+        // this dropdown only asks where each PR sits.
+        switch await client.mergeQueue() {
+        case .success(let payload):
+            next.mergeQueue = MergeQueueFeed.from(payload)
+            next.mergeQueueFailure = nil
+            anySuccess = true
+        case .failure(let failure):
+            next.mergeQueue = nil
+            next.mergeQueueFailure = failure.shortLabel
             failures.append(failure.shortLabel)
         }
 

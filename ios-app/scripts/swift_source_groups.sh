@@ -20,13 +20,16 @@
 # shellcheck shell=bash
 
 # The shared client every widget gate compiles. `WidgetDataClient.alerts()`
-# returns `AlertsLite`, declared in NeedsMeReading.swift, so the client group
-# is not buildable without the alert projection.
+# returns `AlertsLite`, declared in NeedsMeReading.swift, and
+# `WidgetDataClient.mergeQueue()` returns `MergeQueueLite`, declared in
+# MergeQueueReading.swift, so the client group is not buildable without both
+# projections.
 SWIFT_GROUP_WIDGET_CLIENT=(
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/NeedsMeReading.swift
+  Sources/Shared/MergeQueueReading.swift
 )
 
 # The small cluster tile's data half. `ClusterSmallGrid` builds its GPU trend

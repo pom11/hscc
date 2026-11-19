@@ -96,6 +96,9 @@ real_sources=(
   # this file, and the harness drives its order/filter/first-line rules through
   # the real client.
   Sources/Shared/NeedsMeReading.swift
+  # The merge-queue projection (card MQ5): `mergeQueue()` returns
+  # `MergeQueueLite`, declared here, so the client is not buildable without it.
+  Sources/Shared/MergeQueueReading.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

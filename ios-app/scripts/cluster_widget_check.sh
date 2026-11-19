@@ -62,8 +62,11 @@ LOCK=Sources/Shared/ClusterLockScreen.swift
 # declares `alerts(limit:)` returning `AlertsLite`, so the harness compiling the
 # client must compile the file that declares it too. Foundation-only.
 NEEDS=Sources/Shared/NeedsMeReading.swift
+# The merge-queue wire types (MQ5): `WidgetDataClient.mergeQueue()` returns
+# `MergeQueueLite`, declared here; the same harness compiles the client.
+MERGE=Sources/Shared/MergeQueueReading.swift
 for f in "$SUBJECT" "$VIEWS" "$TABLE_VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" \
-         "$MODEL" "$TALLY" "$GRID" "$HIST" "$STORE" "$LOCK" "$NEEDS" \
+         "$MODEL" "$TALLY" "$GRID" "$HIST" "$STORE" "$LOCK" "$NEEDS" "$MERGE" \
          Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
@@ -294,6 +297,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$HIST" \
   "$LOCK" \
   "$NEEDS" \
+  "$MERGE" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

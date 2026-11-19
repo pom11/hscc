@@ -954,6 +954,7 @@ widget_kind_for() {
     BoardStatusWidget) echo widgetBoardStatus ;;
     NeedsMeWidget) echo widgetNeedsMe ;;
     ClusterGraphWidget) echo widgetClusterGraph ;;
+    MergeQueueWidget) echo widgetMergeQueue ;;
     *) echo "" ;;
   esac
 }

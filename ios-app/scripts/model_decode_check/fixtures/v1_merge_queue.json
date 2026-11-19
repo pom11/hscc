@@ -1,0 +1,268 @@
+{
+  "ok": true,
+  "generated_at": "2026-11-19T12:30:00+00:00",
+  "projects": {
+    "alpha": {
+      "enabled": true,
+      "paused": false,
+      "repo": "example/alpha",
+      "queue_len": 2,
+      "rows": [
+        {
+          "project": "alpha",
+          "position": 1,
+          "pr": 101,
+          "card": "t_alpha1",
+          "branch": "wt/t_alpha1",
+          "state": "queued",
+          "age_s": 95,
+          "enqueued_at": "2026-11-19T12:28:25+00:00",
+          "last_result": null,
+          "detail": null,
+          "assignee": "worker-a",
+          "attempts": 0,
+          "is_last": false
+        },
+        {
+          "project": "alpha",
+          "position": 2,
+          "pr": 102,
+          "card": "t_alpha2",
+          "branch": "wt/t_alpha2",
+          "state": "queued",
+          "age_s": 3725,
+          "enqueued_at": "2026-11-19T11:27:55+00:00",
+          "last_result": null,
+          "detail": null,
+          "assignee": "worker-b",
+          "attempts": 1,
+          "is_last": false
+        },
+        {
+          "project": "alpha",
+          "position": null,
+          "pr": 103,
+          "card": "t_alpha3",
+          "branch": "wt/t_alpha3",
+          "state": "gating",
+          "age_s": 45,
+          "enqueued_at": "2026-11-19T12:29:15+00:00",
+          "last_result": null,
+          "detail": null,
+          "assignee": "worker-c",
+          "attempts": 0,
+          "is_last": false
+        },
+        {
+          "project": "alpha",
+          "position": null,
+          "pr": 99,
+          "card": "t_alpha0",
+          "branch": "wt/t_alpha0",
+          "state": "merged",
+          "age_s": 7200,
+          "enqueued_at": "2026-11-19T10:30:00+00:00",
+          "last_result": "merged",
+          "detail": null,
+          "assignee": null,
+          "attempts": 1,
+          "is_last": true
+        }
+      ],
+      "last": {
+        "pr": 99,
+        "card": "t_alpha0",
+        "branch": "wt/t_alpha0",
+        "result": "merged",
+        "at": "2026-11-19T10:30:00+00:00"
+      }
+    },
+    "beta": {
+      "enabled": true,
+      "paused": false,
+      "repo": "example/beta",
+      "queue_len": 1,
+      "rows": [
+        {
+          "project": "beta",
+          "position": 1,
+          "pr": 201,
+          "card": "t_beta1",
+          "branch": "wt/t_beta1",
+          "state": "queued",
+          "age_s": 93784,
+          "enqueued_at": "2026-11-18T10:26:56+00:00",
+          "last_result": "retry",
+          "detail": "gate timed out\nretry scheduled",
+          "assignee": "worker-d",
+          "attempts": 2,
+          "is_last": false
+        },
+        {
+          "project": "beta",
+          "position": null,
+          "pr": 198,
+          "card": "t_beta0",
+          "branch": "wt/t_beta0",
+          "state": "resolve",
+          "age_s": 86430,
+          "enqueued_at": "2026-11-18T12:29:30+00:00",
+          "last_result": "conflict",
+          "detail": "shared.txt, app.swift",
+          "assignee": null,
+          "attempts": 1,
+          "is_last": true
+        }
+      ],
+      "last": {
+        "pr": 198,
+        "card": "t_beta0",
+        "branch": "wt/t_beta0",
+        "result": "conflict",
+        "at": "2026-11-18T12:29:30+00:00",
+        "conflicted": ["shared.txt", "app.swift"]
+      }
+    },
+    "gamma": {
+      "enabled": false,
+      "paused": true,
+      "repo": "example/gamma",
+      "queue_len": 0,
+      "rows": [
+        {
+          "project": "gamma",
+          "position": null,
+          "pr": 301,
+          "card": "t_gamma0",
+          "branch": "wt/t_gamma0",
+          "state": "failed",
+          "age_s": 60,
+          "enqueued_at": "2026-11-19T12:29:00+00:00",
+          "last_result": "error",
+          "detail": "gh pr merge failed: checks changed after rebase",
+          "assignee": null,
+          "attempts": 1,
+          "is_last": true
+        }
+      ],
+      "last": {
+        "pr": 301,
+        "card": "t_gamma0",
+        "branch": "wt/t_gamma0",
+        "result": "error",
+        "at": "2026-11-19T12:29:00+00:00",
+        "error": "gh pr merge failed: checks changed after rebase"
+      }
+    }
+  },
+  "rows": [
+    {
+      "project": "alpha",
+      "position": 1,
+      "pr": 101,
+      "card": "t_alpha1",
+      "branch": "wt/t_alpha1",
+      "state": "queued",
+      "age_s": 95,
+      "enqueued_at": "2026-11-19T12:28:25+00:00",
+      "last_result": null,
+      "detail": null,
+      "assignee": "worker-a",
+      "attempts": 0,
+      "is_last": false
+    },
+    {
+      "project": "alpha",
+      "position": 2,
+      "pr": 102,
+      "card": "t_alpha2",
+      "branch": "wt/t_alpha2",
+      "state": "queued",
+      "age_s": 3725,
+      "enqueued_at": "2026-11-19T11:27:55+00:00",
+      "last_result": null,
+      "detail": null,
+      "assignee": "worker-b",
+      "attempts": 1,
+      "is_last": false
+    },
+    {
+      "project": "alpha",
+      "position": null,
+      "pr": 103,
+      "card": "t_alpha3",
+      "branch": "wt/t_alpha3",
+      "state": "gating",
+      "age_s": 45,
+      "enqueued_at": "2026-11-19T12:29:15+00:00",
+      "last_result": null,
+      "detail": null,
+      "assignee": "worker-c",
+      "attempts": 0,
+      "is_last": false
+    },
+    {
+      "project": "alpha",
+      "position": null,
+      "pr": 99,
+      "card": "t_alpha0",
+      "branch": "wt/t_alpha0",
+      "state": "merged",
+      "age_s": 7200,
+      "enqueued_at": "2026-11-19T10:30:00+00:00",
+      "last_result": "merged",
+      "detail": null,
+      "assignee": null,
+      "attempts": 1,
+      "is_last": true
+    },
+    {
+      "project": "beta",
+      "position": 1,
+      "pr": 201,
+      "card": "t_beta1",
+      "branch": "wt/t_beta1",
+      "state": "queued",
+      "age_s": 93784,
+      "enqueued_at": "2026-11-18T10:26:56+00:00",
+      "last_result": "retry",
+      "detail": "gate timed out\nretry scheduled",
+      "assignee": "worker-d",
+      "attempts": 2,
+      "is_last": false
+    },
+    {
+      "project": "beta",
+      "position": null,
+      "pr": 198,
+      "card": "t_beta0",
+      "branch": "wt/t_beta0",
+      "state": "resolve",
+      "age_s": 86430,
+      "enqueued_at": "2026-11-18T12:29:30+00:00",
+      "last_result": "conflict",
+      "detail": "shared.txt, app.swift",
+      "assignee": null,
+      "attempts": 1,
+      "is_last": true
+    },
+    {
+      "project": "gamma",
+      "position": null,
+      "pr": 301,
+      "card": "t_gamma0",
+      "branch": "wt/t_gamma0",
+      "state": "failed",
+      "age_s": 60,
+      "enqueued_at": "2026-11-19T12:29:00+00:00",
+      "last_result": "error",
+      "detail": "gh pr merge failed: checks changed after rebase",
+      "assignee": null,
+      "attempts": 1,
+      "is_last": true
+    }
+  ],
+  "count": 7,
+  "queued": 3,
+  "speak": "7 merge-queue rows, 3 queued."
+}

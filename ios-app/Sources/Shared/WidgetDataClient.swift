@@ -298,6 +298,21 @@ struct WidgetDataClient {
                                              value: String(min(max(limit, 1), 500)))])
     }
 
+    /// Dataset 8 — `GET /v1/merge-queue`, the local queue's read-only rows.
+    /// `board` narrows to the project whose registry board matches, the same
+    /// `?board=` the route and `hscc kanban monitor --board` take. Order,
+    /// positions and states belong to `MergeQueueFeed.from`, the one projection
+    /// the widget, the desktop tile and the menu bar dropdown share.
+    func mergeQueue(board: String? = nil) async -> Result<MergeQueueLite, WidgetDataFailure> {
+        var query: [URLQueryItem] = []
+        if let board = board?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !board.isEmpty {
+            query.append(URLQueryItem(name: "board", value: board))
+        }
+        return await load(WidgetDataPath.mergeQueue, as: MergeQueueLite.self,
+                          queryItems: query)
+    }
+
     // MARK: - Core read
 
     /// The only place a request is built. Private, and the ONLY non-GET-free

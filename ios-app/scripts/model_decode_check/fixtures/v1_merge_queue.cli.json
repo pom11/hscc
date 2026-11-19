@@ -1,0 +1,109 @@
+{
+ "fixture": "v1_merge_queue.json",
+ "generated_by": "ios-app/scripts/merge_queue_cli_parity.py",
+ "source_module": "hscc_daemon/kanban_live.py::merge_queue_table",
+ "tables": {
+  "alpha": {
+   "header": [
+    "Pos",
+    "PR",
+    "Card",
+    "Branch",
+    "State",
+    "Age",
+    "Last result"
+   ],
+   "rows": [
+    [
+     "1",
+     "#101",
+     "t_alpha1",
+     "wt/t_alpha1",
+     "queued",
+     "1m",
+     "-"
+    ],
+    [
+     "2",
+     "#102",
+     "t_alpha2",
+     "wt/t_alpha2",
+     "queued",
+     "1h02m",
+     "-"
+    ],
+    [
+     "-",
+     "#103",
+     "t_alpha3",
+     "wt/t_alpha3",
+     "gating",
+     "45s",
+     "-"
+    ],
+    [
+     "-",
+     "#99",
+     "t_alpha0",
+     "wt/t_alpha0",
+     "merged",
+     "2h00m",
+     "merged"
+    ]
+   ]
+  },
+  "beta": {
+   "header": [
+    "Pos",
+    "PR",
+    "Card",
+    "Branch",
+    "State",
+    "Age",
+    "Last result"
+   ],
+   "rows": [
+    [
+     "1",
+     "#201",
+     "t_beta1",
+     "wt/t_beta1",
+     "queued",
+     "1d2h",
+     "retry"
+    ],
+    [
+     "-",
+     "#198",
+     "t_beta0",
+     "wt/t_beta0",
+     "resolve",
+     "1d0h",
+     "conflict"
+    ]
+   ]
+  },
+  "gamma": {
+   "header": [
+    "Pos",
+    "PR",
+    "Card",
+    "Branch",
+    "State",
+    "Age",
+    "Last result"
+   ],
+   "rows": [
+    [
+     "-",
+     "#301",
+     "t_gamma0",
+     "wt/t_gamma0",
+     "failed",
+     "1m",
+     "error"
+    ]
+   ]
+  }
+ }
+}

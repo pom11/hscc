@@ -41,6 +41,7 @@ struct DashboardView: View {
                 setupInvite
             } else {
                 needsMeSection
+                mergeQueueSection
                 clusterSection
                 clusterMonitorSection
                 clusterStatusSection
@@ -180,6 +181,73 @@ struct DashboardView: View {
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
+        }
+    }
+
+    // MARK: - Merge queue (card MQ5)
+
+    /// The local queue's rows, in the CLI's order. Hidden when the queue is
+    /// empty — there is no "nothing queued" row in a menu an operator opens to
+    /// look at work. A failed read is not empty: it says why.
+    @ViewBuilder
+    private var mergeQueueSection: some View {
+        if let failure = dashboard.snapshot.mergeQueueFailure {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                sectionTitle("Merge queue")
+                Label("Merge queue unavailable: \(failure)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if let feed = dashboard.snapshot.mergeQueue, !feed.rows.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                HStack {
+                    sectionTitle("Merge queue")
+                    Spacer()
+                    Text("\(feed.queued) queued")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundColor(feed.queued > 0
+                                         ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                }
+                ForEach(feed.rows.prefix(4)) { row in
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(row.project) · \(row.prLabel)")
+                                .font(.caption.weight(.medium).monospacedDigit())
+                                .foregroundColor(Theme.Semantic.onSurface)
+                                .lineLimit(1)
+                            Text("\(row.cells[2]) · \(row.cells[3]) · \(row.cells[6])")
+                                .font(.caption2)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(row.state)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundColor(mergeStateColor(row.state))
+                            Text(row.ageLabel)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                }
+                if feed.rows.count > 4 {
+                    Text("+\(feed.rows.count - 4) more")
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+        }
+    }
+
+    private func mergeStateColor(_ state: String) -> Color {
+        switch state {
+        case "merged": return Theme.Semantic.ok
+        case "resolve", "failed": return Theme.Semantic.bad
+        case "rebasing", "gating", "merging": return Theme.Semantic.warn
+        default: return Theme.Semantic.onSurfaceMuted
         }
     }
 

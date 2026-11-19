@@ -68,6 +68,11 @@ real_models=(
   # same newest-first order, unacknowledged filter, age and body-first-line
   # rules the widget and the macOS dropdown draw.
   Sources/Shared/NeedsMeReading.swift
+  # The merge-queue projection (card MQ5): the decode gate runs the same
+  # route→surface projection the widget and the macOS dropdown draw, and
+  # compares its CLI-shaped cells against a golden generated from
+  # `hscc_daemon/kanban_live.py::merge_queue_table`.
+  Sources/Shared/MergeQueueReading.swift
   # The history series model (t_2681d3de): the tile's GPU% trend is built from
   # ClusterHistorySeriesSet + the pixel-column downsampler, both Foundation-only,
   # so the join, the reduction and the extremes-preserving property are executed
