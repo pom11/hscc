@@ -43,7 +43,7 @@ No cell below is `declared-but-placeholder` or `unknown`.
 ## 1. iOS widgets × family
 
 Every widget type under `ios-app/Sources/HSCCWidgets/` is listed. The bundle at
-`HSCCWidgetsBundle.swift` contains exactly these seven widgets; there are no
+`HSCCWidgetsBundle.swift` contains exactly these eight widgets; there are no
 additional `Widget` types in that directory.
 
 | Widget | systemSmall | systemMedium | systemLarge | accessoryInline | accessoryCircular | accessoryRectangular | Source |
