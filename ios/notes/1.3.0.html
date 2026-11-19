@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSCC 1.3.0 — release notes</title>
+<style>body{margin:0;padding:28px 20px 56px;background:#000;color:#fff;font:17px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Helvetica,Arial,sans-serif}main{max-width:640px;margin:0 auto}h1,h2{color:#FF5722}a{color:#FF5722}code{font:0.93em ui-monospace,SFMono-Regular,Menlo,monospace}.foot{margin-top:36px;color:#777;font-size:.86rem}</style>
+</head>
+<body>
+<main>
+<h1>HSCC apps 1.3.0</h1><h2>Added</h2><ul><li><strong>Needs me</strong> widget: what is waiting on you, from <code>hscc notify list</code>.</li><li><strong>Merge Queue</strong> widget (iOS, Lock Screen, macOS) and a merge-queue section in the menu bar.</li><li><strong>Cluster Graph</strong> widget: Swift Charts over <code>/v1/cluster/history</code> at every size, plus a small sparkline and a GRAPHS section in the macOS dropdown.</li></ul><h2>Changed</h2><ul><li>One history source for every widget (<code>/v1/cluster/history</code>); <code>/v1/metrics/history</code> is retired.</li><li>Monitor tables match the CLI view-model; Cluster Lock Screen note has one source.</li><li>Each widget is registered from one manifest file.</li></ul><h2>Removed</h2><ul><li>App notifications (APNs registration and alerts). Use the Needs me widget.</li></ul>
+<p class="foot"><a href="https://pom11.github.io/hscc/">HSCC</a> · 1.3.0</p>
+</main>
+</body>
+</html>
