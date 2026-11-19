@@ -337,11 +337,18 @@ extension MonitorSample {
 /// `total (n)` rows the CLI appends per model.
 ///
 /// `cells(wide:)` is the row, and width is part of the ROW and not a filter on
-/// it: the CLI builds both shapes through one `row()` helper that slices
-/// `rest[:6]`, so for a `down` backend the reason lands in `Routes` when wide
-/// and in `Run` when narrow. That is the CLI's behaviour, mirrored rather than
-/// "fixed"; the fields below describe the WIDE row, and `cells(wide: false)`
-/// drops `Routes` and `Prompt t/s` exactly as the CLI does.
+/// it: the CLI builds both shapes through one `row(node, port, model, routes,
+/// *rest)` helper that splices `rest[:6]` in after `routes` (only when wide) and
+/// appends `rest[6]` (only when wide). So the columns the narrow shape drops are
+/// `Routes` and `Prompt t/s`, and nothing moves position within `rest`.
+///
+/// For a `down` backend that means the reason is `rest[0]` — the RUN column — in
+/// BOTH shapes, and `Routes` still holds the alias list on the wide row. It is
+/// not, as an earlier version of this comment claimed, a cell that lands in
+/// `Routes` when wide and in `Run` when narrow: the code below writes
+/// `run = reason` unconditionally because that is what `cluster_live.py` does,
+/// and a future card that trusted the old wording would have retargeted the
+/// wrong column. Mirrored rather than "fixed".
 struct CLIMonitorServingRow: Equatable, Identifiable {
     /// Wide: every column. Narrow (`width < WIDE_MIN`): the same minus
     /// `Routes` and `Prompt t/s`, in the CLI's order.
