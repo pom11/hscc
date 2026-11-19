@@ -40,6 +40,8 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
   echo "error: no macOS SDK (is Xcode installed?)" >&2; exit 1; }
 
+. scripts/swift_source_groups.sh
+
 WIDGET=Sources/HSCCWidgets/CardsRunningWidget.swift
 ACTIVITY=Sources/Shared/CardsRunningActivity.swift
 PROJECTION=Sources/Shared/CardsRunningProjection.swift
@@ -167,9 +169,7 @@ for name in cards-row-metric cards-reading-rules; do
 done
 
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/check" \
-     Sources/Shared/SharedModels.swift \
-     Sources/Shared/SharedStore.swift \
-     Sources/Shared/WidgetDataClient.swift \
+     "${SWIFT_GROUP_WIDGET_CLIENT[@]}" \
      Sources/Shared/CardsRunningProjection.swift \
      "$TMP/SlicedRules.swift" \
      scripts/model_decode_check/ThemeStub.swift \

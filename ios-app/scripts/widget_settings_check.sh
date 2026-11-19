@@ -953,6 +953,7 @@ widget_kind_for() {
     ProjectsWidget) echo widgetProjects ;;
     BoardStatusWidget) echo widgetBoardStatus ;;
     NeedsMeWidget) echo widgetNeedsMe ;;
+    ClusterGraphWidget) echo widgetClusterGraph ;;
     *) echo "" ;;
   esac
 }

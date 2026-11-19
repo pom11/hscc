@@ -17,6 +17,8 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
   echo "error: no macOS SDK (is Xcode installed?)" >&2; exit 1; }
 
+. scripts/swift_source_groups.sh
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -67,9 +69,7 @@ echo "compiling the real widget + shared sources + harness into a macOS CLI..."
 real_sources=(
   "$SUBJECT"
   Sources/HSCCWidgets/WidgetRendering.swift
-  Sources/Shared/WidgetDataClient.swift
-  Sources/Shared/SharedModels.swift
-  Sources/Shared/SharedStore.swift
+  "${SWIFT_GROUP_WIDGET_CLIENT[@]}"
 )
 harness_sources=(
   scripts/projects_widget_check/ThemeStub.swift

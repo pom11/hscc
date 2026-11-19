@@ -54,6 +54,10 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
   echo "error: no macOS SDK (is Xcode installed?)" >&2; exit 1; }
 
+# The shared client group carries NeedsMeReading.swift, which declares the
+# AlertsLite the client's alerts() read returns. Declared once for every gate.
+. scripts/swift_source_groups.sh
+
 WIDGET=Sources/HSCCWidgets/BoardStatusWidget.swift
 SUBJECT=Sources/HSCCWidgets/BoardStatusReading.swift
 HARNESS=scripts/board_status_widget_check/main.swift
@@ -161,9 +165,7 @@ echo ""
 echo "compiling the real widget rules + real models + harness into a macOS CLI..."
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/board_status_widget_check" \
      "$SUBJECT" \
-     Sources/Shared/SharedModels.swift \
-     Sources/Shared/SharedStore.swift \
-     Sources/Shared/WidgetDataClient.swift \
+     "${SWIFT_GROUP_WIDGET_CLIENT[@]}" \
      scripts/model_decode_check/ThemeStub.swift \
      "$HARNESS" 2>"$TMP/compile.err"; then
   echo "error: failed to compile the widget's own sources — see below" >&2

@@ -65,6 +65,8 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+. scripts/swift_source_groups.sh
+
 CARDS_SRC=Sources/Shared/CardsRunningActivity.swift
 CLUSTER_SRC=Sources/Shared/ClusterHealthActivity.swift
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
@@ -111,10 +113,8 @@ cp scripts/live_activity_rehydration_check/main.swift "$OUT/main.swift"
 # the macOS SDK (model_decode_check.sh compiles the same pair).
 swiftc -o "$OUT/check" \
   "$OUT/main.swift" "$OUT/SlicedRules.swift" \
-  Sources/Shared/SharedModels.swift \
+  "${SWIFT_GROUP_WIDGET_CLIENT[@]}" \
   Sources/Shared/ClusterNodeTally.swift \
-  Sources/Shared/SharedStore.swift \
-  Sources/Shared/WidgetDataClient.swift \
   Sources/Shared/CardsRunningProjection.swift \
   Sources/Shared/ClusterMonitorViewModel.swift \
   scripts/model_decode_check/ThemeStub.swift 2>&1 || {
