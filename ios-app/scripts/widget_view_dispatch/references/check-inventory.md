@@ -146,6 +146,32 @@ pre-split and post-split aggregate run.
    `WIDGET SURFACE GATE CHECK FAILED — …` and exits 1. On a fully green run the output is
    byte-identical to the baseline.
 
+## Surface added after the split — `widgetClusterGraph` → `widget_view_dispatch/widgetClusterGraph.sh`
+
+`t_e0e324da` registers the Cluster Graph widget (t_f4551339). The tables above are the
+`c270ba84` baseline and were left alone: this entry extends the inventory rather than
+re-totalling it.
+
+| id | asserts (`ok:` text verbatim where shared) |
+|---|---|
+| `graph-3a` | `widget_gate_families <provider> home-screen-only` → `supportedFamilies are Home Screen sizes only — no complication body that could need a label`. **First caller of this mode in the manifest** — every shipped surface has since gained an accessory family, so the branch had no caller at all until now. Negative-proven by adding `.accessoryInline` to the literal `supportedFamilies` array (the `#else` macOS arm here, because the iOS arm reads a named list) → FAIL by name. |
+| `graph-3b×4` | `widget_gate_no_short_gate_label` on each of the four files the widget ships (provider, entry, views, metrics) → `no shortGateLabel in a widget with no accessory family (the absence is proven, not assumed)`. Proving the absence per file, not once for the widget, is what catches a label added later to the entry or to a view. Negative-proven on the entry and on a view. |
+| `graph-4` | `widget_gate_registry_key <provider> widgetClusterGraph` → `cadence and pause come from WidgetSurfaceKind.widgetClusterGraph (one registry, one write path)`. New coverage: `cluster_graph_check.sh` proves the surface HAS a settings key in `SharedStore`; nothing proved the widget READS it, and a widget can hold a key it never consults and ignore a pause someone can see in Settings. |
+| `graph-5` | `widget_gate_paused_factory <provider> "status: .paused"` → `the provider returns the entry's own paused factory (status: .paused)`. There is no `.paused(...)` factory here and none was invented to satisfy the helper: `ClusterGraphEntry.status` is one value, so naming the paused case IS this entry's way of saying paused. |
+| `graph-2` | `widget_gate_one_paused_copy <entry>` → `one paused copy, owned by the entry (gateLine)`. Measured on the entry's file, not the provider's — the reason gate (2) is callable on its own now. |
+| `graph-7` + `graph-8a..d` | `widget_gate_cadence <provider> cluster_graph_cadence` — END-ANCHORED marker pair, slice contains `nextRefreshDate`, then the four executed cadence checks. Negative-proven twice: renaming the marker fails it by name, and making the `Off` branch return a date fails the executed table (that mutation also proves a child's non-zero exit is not swallowed by the aggregator — aggregate rc=1 with no green banner). |
+| `graph-own-1` | `widget_gate_rule_has_owner scripts/cluster_graph_check.sh 'if !entry.configured \|\| entry.paused {'` → `… is owned by scripts/cluster_graph_check.sh (delegation verified here, not duplicated)`. Replaces the helper's gate (1), which is NOT measured here. |
+| `graph-own-2` | `widget_gate_rule_has_owner scripts/cluster_graph_check.sh '[ "$pause_at" -lt "$read_at" ]' …`. Replaces the helper's gate (6). This widget ships INVITE before PAUSE deliberately — `status` is single-valued, so `configured` and `paused` cannot both be true and whoever asks first decides the sentence the operator reads; asking paused first would let a device that lost its token while the surface was off print "Paused in Settings" forever. What the fleet ordering protects (a paused surface issues zero requests) is what the owner measures, and it holds either way round. |
+
+**Checks: 14** (10 structural + 4 executed cadence). Run rc=0. The aggregate run after
+this entry is 113 stdout lines / 92 `ok:` / 0 `FAIL:`, and its diff against the baseline
+for the same tree is additive only — the six shipped surfaces print byte-identical output.
+
+Both delegations above are two-sided: deleting either rule from
+`cluster_graph_check.sh` reddens this surface file, and an accessory family added to the
+SHARED `clusterGraphFamilies` list reddens `cluster_graph_check.sh` while this file stays
+green — which is the test that the ownership split is real rather than declared.
+
 ## Not touched by this card
 
 `widget_settings_check.sh` (same append-only smell, separate card), `merge_base_check.sh`,
