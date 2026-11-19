@@ -157,8 +157,16 @@ struct FleetProjection: Equatable {
     let tally: ClusterNodeTally
     let nodes: [FleetNodeLine]
     let serving: ServingSummary
-    /// `hscc cluster status`'s workload count: distinct `workload_id`s across
-    /// the host table. Nil when the route sent workloads without ids.
+    /// Distinct `workload_id`s across the host table — counted from
+    /// `/v1/cluster/monitor`, the route this projection is built from. It is NOT
+    /// `hscc cluster status`'s workload count, which an earlier version of this
+    /// line claimed: that is a different number with a different owner,
+    /// `ClusterStatusSummary.jobs = response.workloads.count`
+    /// (`Sources/HSCCWidgets/ClusterWidgetMetrics.swift:69-77`), read off the
+    /// status route and drawn in exactly one place — the `fleet == nil` fallback
+    /// line of `text(for:)`. The two routes can disagree about the same refresh,
+    /// so a surface that shows both has to name which verb it answered.
+    /// Nil when the route sent workloads without ids.
     let jobs: Int?
 
     init?(projecting response: MonitorResponse?) {
