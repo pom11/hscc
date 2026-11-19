@@ -163,6 +163,19 @@ def test_each_leg_job_runs_on_the_platform_the_selector_chose():
     )
 
 
+def test_the_scripts_leg_checks_out_full_history():
+    """The scripts leg reconstructs the pre-migration CHANGELOG.md from
+    ``git log`` (test_changelog_fragments.py). actions/checkout defaults to
+    depth 1, which made that test red on Ubuntu while it passed in a full
+    local clone; only the scripts leg needs the history."""
+    text = _text()
+    leg_job = text[text.index("  leg:\n") : text.index("\n  legs:\n    name: legs")]
+    assert "fetch-depth: ${{ matrix.leg != 'scripts' && 1 || 0 }}" in leg_job, (
+        "the scripts leg needs full git history; every other leg stays shallow "
+        "(note: GitHub expressions treat 0 as falsy, so the ternary is inverted)"
+    )
+
+
 def test_the_legs_job_does_not_cancel_a_push_to_main():
     text = _text()
     m = re.search(r"cancel-in-progress: (.+)", text)

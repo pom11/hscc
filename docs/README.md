@@ -32,7 +32,7 @@ backtick-quoted index entry here:
 Find a file by what it is: [Reference](#reference) · [Roadmap &
 handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigations--top-level-audits)
 · [design/](#design) · [ops/](#ops) · [template-examples/](#template-examples) ·
-[verification/](#verification) · [audits/](#audits).
+[verification/](#verification) · [reports/](#reports) · [audits/](#audits).
 
 ## Reference
 
@@ -77,6 +77,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 ## design/
 
 - `docs/design/2026-11-19-main-orchestrator-design.md` — design for the ONE main orchestrator (named at bootstrap, default `general`): its own board is the kanban default, cluster authority except LIVE publish, daemon-owned wake-ups, `hscc orch inject` to project orchestrators, `hscc notify` alert feed (`list`/`ack`; push dropped 2026-11-19). **live** (built as cards M1–M10).
+- `docs/design/2026-11-19-merge-queue-design.md` — design for the daemon-owned local merge queue (MQ1): per-repo FIFO of green PRs in its own worktree, atomic ledger, rebase → gates → force-with-lease → squash merge, conflicts/red gates handed back to the card's worker. **live**
 - `docs/design/2026-10-15-template-declarations.md` — spec: template-declared `endpoints:`, `proxy:` and caps ("the template is the declaration, apply is the writer"). **live** — and the doc's own **2026-10-19 addendum** supersedes its §2.3/§6.2 details (nested `gateways.litellm.router_settings` read order, engine file moved to `src/sparkrun/plugins/litellm/engine.py`, blessed defaults).
 - `docs/design/media-serving.md` — media workstream M0 design: image/video model servers on the Sparks behind the `:4000` proxy (runtime per model, OpenAI facade contract, LiteLLM registration, template `kind`, VRAM co-tenancy, NAS staging, LAN-only boundary). **proposed** — depends on the support matrix of PR #117 (`docs/design/media-serving-support-matrix.md`, branch `wt/t_165c208f`).
 - `docs/design/2026-09-30-project-session-continuity.md` — design: project session continuity across surfaces (Approach 1); verified live in `docs/audits/session-continuity-verify-2026-09-30.md`. **live**
@@ -128,6 +129,10 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
 ## verification/
 
 - `docs/verification/WS3-verification.md` — verification record: native 0.17 profile API (workstream 3). **record**
+
+## reports/
+
+- `docs/reports/t_23bf61f3-ci-pytest-leg.md` — final state of the card that put the 12-leg pytest roster in CI (`pytest-legs`): push/PR leg selection, per-leg matrix, venv cache, the advisory/enforce switch, and the measured wall times. **record** (t_23bf61f3)
 
 ## audits/
 
