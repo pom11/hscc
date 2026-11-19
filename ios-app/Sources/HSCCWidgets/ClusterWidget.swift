@@ -54,6 +54,10 @@ struct ClusterTimelineProvider: TimelineProvider {
         let (monitorOutcome, statusOutcome) = await (monitorTask, statusTask)
 
         let fleet = monitorOutcome.value.flatMap(FleetProjection.init(projecting:))
+        // The same decoded response, projected by the CLI view-model. No third
+        // request: one read, two projections, so the tally above the table and
+        // the table itself can never come from different refreshes.
+        let monitor = monitorOutcome.value.flatMap { ClusterMonitorViewModel.project($0) }
         let status = statusOutcome.value.flatMap(ClusterStatusSummary.init)
         let failure = monitorOutcome.failure ?? statusOutcome.failure
 
@@ -80,6 +84,7 @@ struct ClusterTimelineProvider: TimelineProvider {
 
         return ClusterEntry(date: .now,
                             fleet: fleet,
+                            monitor: monitor,
                             status: status,
                             failure: failure,
                             configured: true,

@@ -33,9 +33,14 @@ trap 'rm -rf "$TMP"' EXIT
 SUBJECT=Sources/HSCCWidgets/ClusterWidget.swift
 VIEWS=Sources/HSCCWidgets/ClusterWidgetViews.swift
 METRICS=Sources/HSCCWidgets/ClusterWidgetMetrics.swift
+READING=Sources/HSCCWidgets/CLIMonitorTableReading.swift
+TABLE=Sources/HSCCWidgets/CLIMonitorHostTableView.swift
+MONVIEWS=Sources/HSCCWidgets/MonitorViews.swift
+MODEL=Sources/Shared/ClusterMonitorViewModel.swift
 TALLY=Sources/Shared/ClusterNodeTally.swift
 STORE=Sources/Shared/SharedStore.swift
-for f in "$SUBJECT" "$VIEWS" "$METRICS" "$TALLY" "$STORE" \
+for f in "$SUBJECT" "$VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" "$MODEL" \
+         "$TALLY" "$STORE" \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
@@ -90,6 +95,50 @@ fail_when_absent "circular uses the up/total gauge" "$VIEWS" 'Gauge(value:'
 fail_when_absent "the projection uses the shared FleetProjection" "$METRICS" 'typealias ClusterFleet = FleetProjection'
 fail_when_absent "status jobs come from workloads.count" "$METRICS" 'response.workloads.count'
 
+# ---------------------------------------------------------------------------
+# The CLI host table (t_2d1c12dc): `systemMedium` IS `host_table`.
+#
+# The executed half below proves the cells, the titles, the verdicts and the
+# row budget. These structural proofs cover what an executed check cannot see:
+# that the two CLI-shaped tiles share the ONE table view, and that no tile has
+# quietly re-typed a column name (a transcription is a column that can drift
+# from the CLI while every executed assertion still passes).
+# ---------------------------------------------------------------------------
+echo ""
+echo "CLI host-table proofs (the medium tile draws host_table)"
+
+fail_when_absent "the cluster medium draws the shared CLI table" "$VIEWS" 'CLIMonitorHostTableView(rows:'
+fail_when_absent "the monitor medium draws the SAME table" "$MONVIEWS" 'CLIMonitorHostTableView(rows:'
+fail_when_absent "both entries hand it rows through the gate-checked accessor" "$VIEWS" 'entry.cliHostRows'
+fail_when_absent "and so does the monitor entry" "$MONVIEWS" 'entry.cliHostRows'
+fail_when_absent "the drawn titles are the CLI's own column list" "$READING" 'CLIMonitorHostRow.columns'
+fail_when_absent "the drawn cells are the CLI's own row" "$READING" 'row.cells'
+fail_when_absent "the verdicts come from the view-model" "$READING" 'ClusterMetricLevel'
+
+# No CLI title re-typed into a body. A grep for the CLI's own header words in
+# the view/metrics files means a second copy of the column list exists, and a
+# second copy is a column that drifts.
+report "no CLI column title is transcribed into a widget body" \
+  "$(grep -n '"CPU Temp"\|"GPU Temp"\|"GPU Power"\|"Swap%"' "$VIEWS" "$MONVIEWS" "$METRICS")"
+
+# A family that reaches `entry.monitor` directly is a family that skipped
+# `cliHostRows`, which is the one place unconfigured / paused / "nodes" off are
+# refused. Numbers on a paused surface is the t_5c554c5b failure again.
+report "no family reaches entry.monitor directly (rows go through cliHostRows)" \
+  "$(grep -n 'entry\.monitor' "$VIEWS" "$MONVIEWS")"
+
+# The reading layer stays Foundation-only so the checks below can compile and RUN
+# it. The comment lines are excluded — the file's own header explains why it must
+# not name a Colour, and prose is not a colour (same rule the paused-copy count
+# learned on #341).
+report "the reading layer names no SwiftUI and no Colour, so it is executed below" \
+  "$(grep -n 'import SwiftUI\|Color' "$READING" | grep -v '^[0-9]*:[[:space:]]*//')"
+
+# The tile draws cells; it does not write any. Every `Text` in it takes a value
+# from the reading layer or the view-model.
+report "the table view composes no cell text of its own" \
+  "$(grep -n 'Text(\s*"' "$TABLE")"
+
 # §7: the workload projection may name ids only — no recipe path, image or
 # container name may even be decoded.
 wl=$(sed -n '/^struct MonitorWorkload/,/^}/p' Sources/Shared/SharedModels.swift)
@@ -106,6 +155,8 @@ echo "executed proofs (macOS compile of the real widget + shared sources)"
 xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$METRICS" \
   "$TALLY" \
+  "$MODEL" \
+  "$READING" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

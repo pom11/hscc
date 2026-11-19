@@ -83,6 +83,13 @@ struct ClusterEntry: TimelineEntry {
     let date: Date
     /// The CLI rows, or nil when the monitor route sent no host list.
     let fleet: ClusterFleet?
+    /// `hscc cluster monitor`'s host table for this refresh — the nine
+    /// already-formatted cells per host (`CLIMonitorHostRow`), or nil when the
+    /// monitor read did not answer. `fleet` above is what the glance surfaces
+    /// project and this is what the CLI-shaped medium tile draws, and both come
+    /// out of the SAME decoded response, so the headline tally and the table
+    /// under it cannot disagree about how many hosts there are.
+    let monitor: ClusterMonitorViewModel?
     /// `hscc cluster status`'s counts, or nil when that read did not answer.
     let status: ClusterStatusSummary?
     /// What stopped this refresh being live. Nil while live.
@@ -99,6 +106,7 @@ struct ClusterEntry: TimelineEntry {
 
     init(date: Date,
          fleet: ClusterFleet?,
+         monitor: ClusterMonitorViewModel? = nil,
          status: ClusterStatusSummary? = nil,
          failure: WidgetDataFailure? = nil,
          configured: Bool,
@@ -107,6 +115,7 @@ struct ClusterEntry: TimelineEntry {
          showSections: Set<String> = ClusterEntry.availableSections) {
         self.date = date
         self.fleet = fleet
+        self.monitor = monitor
         self.status = status
         self.failure = failure
         self.configured = configured
@@ -126,6 +135,23 @@ struct ClusterEntry: TimelineEntry {
         }
         if up == 0 && total > 0 { return .hot }
         return up == total ? .calm : .warm
+    }
+
+    /// The host rows a CLI-shaped surface (the medium tile) may draw, or nil
+    /// when something else owns the surface: the device is unconfigured, the
+    /// surface is paused, the operator switched the "nodes" section off, or the
+    /// read carried no host list.
+    ///
+    /// Nil and an empty array are deliberately different (§6 rule 1): nil means
+    /// "there is no table here, draw the entry's own gate or failure copy",
+    /// while a table with zero rows would read as "the route says no hosts".
+    /// The gate states are re-checked here rather than trusting the caller,
+    /// because a family that reached `monitor` directly would be a family that
+    /// draws numbers on a paused surface.
+    var cliHostRows: [CLIMonitorHostRow]? {
+        guard configured, !paused, showSections.contains("nodes") else { return nil }
+        guard let monitor, !monitor.hostRows.isEmpty else { return nil }
+        return monitor.hostRows
     }
 
     /// The one short string an accessory renders when it has nothing live.
@@ -173,50 +199,89 @@ struct ClusterEntry: TimelineEntry {
         ClusterEntry(date: date, fleet: nil, configured: true, paused: true)
     }
 
-    /// Placeholder/first-render data. Sample only: `placeholder(in:)` never runs
+    /// First-render / gallery data. Sample only: `placeholder(in:)` never runs
     /// through the provider's fetch path and can never replace a real entry.
+    /// It carries the CLI table too, so the gallery shows the medium tile as
+    /// the operator will meet it rather than as an empty frame.
     static let placeholder = ClusterEntry(date: .now,
                                           fleet: sampleFleet,
+                                          monitor: sampleMonitor,
                                           configured: true,
                                           paused: false)
 
-    private static let sampleFleet: ClusterFleet? = {
-        func sample(_ hostname: String, gpu: String, gpuTemp: String, cpuTemp: String) -> MonitorSample {
-            MonitorSample(hostname: hostname, uptime_sec: nil, cpu_usage_pct: nil,
-                          mem_used_pct: nil, mem_total_mb: nil, mem_used_mb: nil,
-                          gpu_name: nil, gpu_util_pct: gpu, gpu_mem_used_pct: nil,
-                          cpu_temp_c: cpuTemp, gpu_temp_c: gpuTemp, cpu_load_1m: nil)
+    /// One sample payload, projected BOTH ways: the glance projection the
+    /// small/large/accessory surfaces draw and the CLI cell table the medium
+    /// tile draws. From one `MonitorResponse` on purpose — a second, hand-typed
+    /// sample would be a second truth about what the fleet looks like, and the
+    /// gallery would then show a headline tally that does not match its own
+    /// table.
+    private static let sampleResponse = MonitorResponse(
+        json: MonitorPayload(timestamp: nil, hosts: sampleHosts),
+        serving: sampleServing,
+        serving_error: nil,
+        serving_proxy_error: nil,
+        speak: "sample")
+
+    private static let sampleFleet = FleetProjection(projecting: sampleResponse)
+
+    private static let sampleMonitor = ClusterMonitorViewModel.project(sampleResponse)
+
+    /// The sample hosts, in route order. The values cover the threshold bands
+    /// the medium tile paints — a calm pair, a warm one (CPU 87.3 %, RAM 91.2 %,
+    /// 84.9 °C, 93.7 % of the power limit) and a critical one (91.2 °C, 88 °C,
+    /// 98.3 % of the limit) — plus the two ways Swap goes to `-`: no swap
+    /// configured (`swap_total_mb` "0") and the metric never read (absent).
+    private static let sampleHosts: [MonitorNode] = {
+        func sample(_ hostname: String, jobs: String, cpu: String, ram: String,
+                    swapUsed: String?, swapTotal: String?, gpu: String,
+                    gpuTemp: String, cpuTemp: String,
+                    power: String, powerLimit: String) -> MonitorSample {
+            MonitorSample(hostname: hostname,
+                          cpu_usage_pct: cpu,
+                          mem_used_pct: ram,
+                          gpu_util_pct: gpu,
+                          cpu_temp_c: cpuTemp,
+                          gpu_temp_c: gpuTemp,
+                          swap_total_mb: swapTotal,
+                          swap_used_mb: swapUsed,
+                          gpu_power_w: power,
+                          gpu_power_limit_w: powerLimit,
+                          sparkrun_jobs: jobs)
         }
-        let hosts = [
-            MonitorNode(host: "192.0.2.11", error: nil,
-                        sample: sample("node-1", gpu: "0", gpuTemp: "63", cpuTemp: "70"),
+        func host(_ address: String, _ label: String, jobs: String, cpu: String,
+                  ram: String, swapUsed: String?, swapTotal: String?, gpu: String,
+                  gpuTemp: String, cpuTemp: String, power: String,
+                  workload: String) -> MonitorNode {
+            MonitorNode(host: address, error: nil,
+                        sample: sample(label, jobs: jobs, cpu: cpu, ram: ram,
+                                       swapUsed: swapUsed, swapTotal: swapTotal,
+                                       gpu: gpu, gpuTemp: gpuTemp, cpuTemp: cpuTemp,
+                                       power: power, powerLimit: "200"),
                         used_slots: nil, free_slots: nil,
-                        workloads: [MonitorWorkload(workload_id: "a", cluster_id: nil)]),
-            MonitorNode(host: "192.0.2.12", error: nil,
-                        sample: sample("node-2", gpu: "0", gpuTemp: "63", cpuTemp: "68"),
-                        used_slots: nil, free_slots: nil,
-                        workloads: [MonitorWorkload(workload_id: "a", cluster_id: nil)]),
-            MonitorNode(host: "192.0.2.13", error: nil,
-                        sample: sample("node-3", gpu: "96", gpuTemp: "78", cpuTemp: "87"),
-                        used_slots: nil, free_slots: nil,
-                        workloads: [MonitorWorkload(workload_id: "b", cluster_id: nil)]),
-            MonitorNode(host: "192.0.2.14", error: nil,
-                        sample: sample("node-4", gpu: "96", gpuTemp: "74", cpuTemp: "82"),
-                        used_slots: nil, free_slots: nil,
-                        workloads: [MonitorWorkload(workload_id: "b", cluster_id: nil)]),
+                        workloads: [MonitorWorkload(workload_id: workload, cluster_id: nil)])
+        }
+        return [
+            host("192.0.2.11", "node-1", jobs: "1", cpu: "12.4", ram: "45.6",
+                 swapUsed: "0", swapTotal: "2048", gpu: "0",
+                 gpuTemp: "63", cpuTemp: "70", power: "12.50", workload: "a"),
+            host("192.0.2.12", "node-2", jobs: "0", cpu: "8.1", ram: "91.2",
+                 swapUsed: "128", swapTotal: "2048", gpu: "0",
+                 gpuTemp: "63", cpuTemp: "68", power: "9.75", workload: "a"),
+            host("192.0.2.13", "node-3", jobs: "1", cpu: "87.3", ram: "62.0",
+                 swapUsed: nil, swapTotal: "0", gpu: "96",
+                 gpuTemp: "78", cpuTemp: "84.9", power: "187.4", workload: "b"),
+            host("192.0.2.14", "node-4", jobs: "0", cpu: "5.0", ram: "10.0",
+                 swapUsed: "0", swapTotal: nil, gpu: "0",
+                 gpuTemp: "88", cpuTemp: "91.2", power: "196.5", workload: "b"),
         ]
-        let serving = [
-            ServingRow(node: "192.0.2.11", port: "8001", model: "model-a", routes: [],
-                       running: 0, waiting: 0, kv: 0.2, gen_tps: 6.1, prompt_tps: 10,
-                       prompt_total: nil, gen_total: nil, error: nil),
-            ServingRow(node: "192.0.2.13", port: "8002", model: "model-b", routes: [],
-                       running: 3, waiting: 0, kv: 0.4, gen_tps: 6.2, prompt_tps: 12,
-                       prompt_total: nil, gen_total: nil, error: nil),
-        ]
-        return FleetProjection(projecting: MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: hosts),
-                                                           serving: serving,
-                                                           serving_error: nil,
-                                                           serving_proxy_error: nil,
-                                                           speak: "sample"))
     }()
+
+    private static let sampleServing: [ServingRow] = [
+        ServingRow(node: "192.0.2.11", port: "8001", model: "model-a", routes: [],
+                   running: 0, waiting: 0, kv: 0.2, gen_tps: 6.1, prompt_tps: 10,
+                   prompt_total: nil, gen_total: nil, error: nil),
+        ServingRow(node: "192.0.2.13", port: "8002", model: "model-b", routes: [],
+                   running: 3, waiting: 0, kv: 0.4, gen_tps: 6.2, prompt_tps: 12,
+                   prompt_total: nil, gen_total: nil, error: nil),
+    ]
 }
