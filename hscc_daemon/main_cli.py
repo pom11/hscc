@@ -1,0 +1,449 @@
+"""HSCC ``main`` CLI verb — the main orchestrator's own tmux pane (M4).
+
+The 2026-11-19 design (docs/design/2026-11-19-main-orchestrator-design.md) gives
+the cluster ONE main orchestrator, named at bootstrap (default ``general``).
+It lives in a normal interactive Hermes REPL so the operator can talk to it and
+so ``hscc orch inject`` can reach it. This module owns that pane's lifecycle:
+
+* :func:`start` — ensure EXACTLY ONE tmux pane runs ``hermes -p <main> chat``.
+  An existing pane is reused. When none exists, a window named after the
+  profile is opened in the operator's tmux session (or, with no server at all,
+  a detached session named after the profile). It NEVER kills another pane or
+  window, and never selects/switches the operator's current window.
+* :func:`status` — read-only report: name, board, pane and busy/idle. Pane
+  discovery and the busy marker are ``hscc-api/repl_inject``'s, the same ones
+  ``hscc orch inject`` uses, so the two surfaces cannot disagree.
+
+The pane matcher is never copied here (GAP-C-3): discovery calls
+``repl_inject.hermes_panes()`` and busy state calls ``repl_inject.is_busy()``.
+Tests inject both the repl module and the tmux runner, so no suite touches a
+real tmux server.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+VALID_SUBCOMMANDS = ("start", "status")
+SUB_HELP = ("--help", "-h")
+
+HELP_TEXT = """\
+hscc main — the main orchestrator's own tmux pane.
+
+Subcommands:
+  start            Ensure one tmux pane runs the main orchestrator
+  status [--json]  Report name, board, pane and busy/idle state
+
+`start` reuses a pane that already runs the profile, opens a window named
+after the profile in the operator's tmux session when none exists, and never
+kills another pane or window. With no tmux server it creates a detached
+session named after the profile.
+`status` uses the same pane matcher and busy marker as `hscc orch inject`.
+"""
+
+SUBCOMMAND_HELP = {
+    "start": """\
+Usage: hscc main start
+
+Ensure exactly ONE tmux pane is running the main orchestrator's REPL
+(`hermes -p <main profile> chat`). A running pane is reused as-is.
+When none exists, a window named after the profile is created in the
+operator's tmux session; if no tmux server is running, a detached session
+named after the profile is created instead.
+
+Never kills another pane or window and never switches the operator's
+current window. Re-run is idempotent.
+""",
+    "status": """\
+Usage: hscc main status [--json]
+
+Read-only report for the main orchestrator: its name, board, the tmux pane
+running it, and busy/idle. Pane discovery and the busy marker are the same
+ones `hscc orch inject` uses, so the two always agree.
+
+--json prints the machine-readable receipt (name, profile, board, state,
+running, busy, pane, target).
+""",
+}
+
+
+class MainPaneError(Exception):
+    """A pane operation could not be completed (reported, never a traceback)."""
+
+
+# --------------------------------------------------------------------------- #
+# Identity + module seams
+# --------------------------------------------------------------------------- #
+
+def _load_main_orch():
+    """Import ``hscc-roles/main_orch.py`` (the one identity resolver)."""
+    roles_dir = Path(__file__).resolve().parent.parent / "hscc-roles"
+    if str(roles_dir) not in sys.path:
+        sys.path.insert(0, str(roles_dir))
+    import main_orch  # noqa: PLC0415 — sibling plugin, path added above
+    return main_orch
+
+
+def load_repl_inject():
+    """Import ``repl_inject`` from the sibling hscc-api plugin dir, or None.
+
+    Same loader shape as ``orch_waker.load_repl_inject`` / ``kanban_pause``:
+    the module may already be importable in-process, otherwise hscc-api sits
+    beside hscc_daemon in the repo AND the deployed plugins layout.
+    """
+    try:
+        import repl_inject  # noqa: F401  (already importable)
+        return repl_inject
+    except ImportError:
+        pass
+    api_dir = Path(__file__).resolve().parent.parent / "hscc-api"
+    if not api_dir.is_dir():
+        return None
+    if str(api_dir) not in sys.path:
+        sys.path.insert(0, str(api_dir))
+    try:
+        import repl_inject  # noqa: F401
+        return repl_inject
+    except ImportError:
+        return None
+
+
+def _hermes_root() -> str:
+    """The Hermes install root from ``HERMES_HOME`` (profile-scoped aware)."""
+    home = (os.environ.get("HERMES_HOME")
+            or os.path.join(os.path.expanduser("~"), ".hermes"))
+    home = os.path.expanduser(home)
+    if os.path.basename(os.path.dirname(home)) == "profiles":
+        return os.path.dirname(os.path.dirname(home))
+    return home
+
+
+def find_hermes_bin(explicit=None):
+    """Locate the ``hermes`` CLI: explicit arg, ``HERMES_BIN``, venv, PATH."""
+    root = _hermes_root()
+    candidates = [
+        explicit,
+        os.environ.get("HERMES_BIN"),
+        os.path.join(root, "hermes-agent", "venv", "bin", "hermes"),
+        os.path.join(root, "bin", "hermes"),
+        shutil.which("hermes"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _under_pytest() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def run_tmux(argv):
+    """Run one tmux command; return ``(returncode, stdout, stderr)``.
+
+    Hermeticity guard: under pytest the ORIGINAL seam raises instead of
+    executing, so a test that forgets to inject a runner cannot touch the
+    operator's real tmux server.
+    """
+    if _under_pytest() and run_tmux is _ORIG_RUN_TMUX:
+        raise MainPaneError(
+            "real tmux execution is disabled under pytest "
+            "(hermeticity guard) — inject a runner")
+    cp = subprocess.run(["tmux", *[str(a) for a in argv]],
+                        capture_output=True, text=True)
+    return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+
+_ORIG_RUN_TMUX = run_tmux
+
+_SESSION_FORMAT = "#{session_name}\t#{session_attached}\t#{session_activity}"
+
+
+# --------------------------------------------------------------------------- #
+# Discovery + tmux session choice
+# --------------------------------------------------------------------------- #
+
+def _profile_panes(repl, profile):
+    """Panes running ``profile``'s Hermes REPL, via repl_inject's discovery."""
+    if repl is None:
+        raise MainPaneError(
+            "repl_inject not importable (hscc-api plugin missing) — cannot "
+            "resolve the main orchestrator's pane")
+    try:
+        panes = repl.hermes_panes()
+    except Exception as exc:  # noqa: BLE001 — report, never crash the CLI
+        raise MainPaneError(f"cannot discover Hermes panes: {exc}") from exc
+    return [p for p in panes if p.get("profile") == profile]
+
+
+def _sessions(runner):
+    """Existing tmux sessions as dicts, or ``[]`` when no server is running."""
+    rc, out, err = runner(["list-sessions", "-F", _SESSION_FORMAT])
+    if rc != 0:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[0]:
+            continue
+        try:
+            activity = int(parts[2])
+        except ValueError:
+            activity = 0
+        rows.append({"name": parts[0], "attached": parts[1] == "1",
+                     "activity": activity})
+    return rows
+
+
+def _choose_session(rows, runner):
+    """The operator's tmux session: current if inside tmux, else newest.
+
+    Prefers an attached session over a detached one, then the most recently
+    active. Deterministic for tests and for an operator with several sessions.
+    """
+    if os.environ.get("TMUX"):
+        rc, out, _err = runner(["display-message", "-p", "#S"])
+        if rc == 0 and out.strip():
+            return out.strip()
+    attached = [r for r in rows if r["attached"]]
+    pool = attached or rows
+    pool = sorted(pool, key=lambda r: (r["activity"], r["name"]), reverse=True)
+    return pool[0]["name"]
+
+
+def _receipt(name, profile, board, **extra):
+    return {"name": name, "profile": profile, "board": board, **extra}
+
+
+# --------------------------------------------------------------------------- #
+# start
+# --------------------------------------------------------------------------- #
+
+def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
+          hermes_bin=None):
+    """Ensure exactly one tmux pane runs the main orchestrator's REPL.
+
+    Returns ``{ok, action, name, profile, board, pane, target, session,
+    command, detail}``. Never raises for an expected refusal (ambiguous
+    panes, missing Hermes/tmux, a failed tmux command) — the caller prints
+    the detail and exits non-zero.
+    """
+    try:
+        main_orch = _load_main_orch()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "action": "resolver-error", "detail": str(exc)}
+    name = main_orch.main_name(hscc_dir)
+    profile = profile or main_orch.main_profile(hscc_dir)
+    board = main_orch.main_board(hscc_dir)
+    repl = repl if repl is not None else load_repl_inject()
+
+    try:
+        panes = _profile_panes(repl, profile)
+    except MainPaneError as exc:
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "discovery-failed", "detail": str(exc)}
+    if len(panes) == 1:
+        pane = panes[0]
+        return {**_receipt(name, profile, board), "ok": True,
+                "action": "reused", "pane": pane.get("pane"),
+                "target": pane.get("target"), "session": None,
+                "command": None, "detail": "already running"}
+    if len(panes) > 1:
+        where = ", ".join(f"{p.get('pane')}@{p.get('target')}" for p in panes)
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "ambiguous", "pane": None, "target": None,
+                "session": None, "command": None,
+                "detail": (f"{len(panes)} tmux panes run profile {profile!r} "
+                           f"({where}); close the extras — refusing to pick "
+                           "one or kill another pane")}
+
+    binary = find_hermes_bin(hermes_bin)
+    if not binary:
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "missing-hermes", "pane": None, "target": None,
+                "session": None, "command": None,
+                "detail": ("hermes CLI not found (set HERMES_BIN or install "
+                           "the Hermes venv)")}
+
+    # `chat` is what repl_inject recognises as a REPL; a bare `hermes -p X`
+    # would run, but `hscc orch inject` could never resolve it.
+    command = [binary, "-p", profile, "chat"]
+    run = runner or run_tmux
+    try:
+        sessions = _sessions(run)
+        if sessions:
+            session = _choose_session(sessions, run)
+            rc, out, err = run(
+                ["new-window", "-d", "-t", f"={session}", "-n", profile,
+                 "-P", "-F", "#{pane_id}", "--", *command])
+            action = "created-window"
+        else:
+            session = profile
+            rc, out, err = run(
+                ["new-session", "-d", "-s", profile, "-n", profile,
+                 "-P", "-F", "#{pane_id}", "--", *command])
+            action = "created-session"
+    except (OSError, MainPaneError) as exc:
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "tmux-error", "pane": None, "target": None,
+                "session": None, "command": command, "detail": str(exc)}
+    if rc != 0:
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": "create-failed", "pane": None, "target": None,
+                "session": session, "command": command,
+                "detail": (err or out or
+                           f"tmux exited {rc}")}
+    return {**_receipt(name, profile, board), "ok": True, "action": action,
+            "pane": out.strip() or None, "target": None, "session": session,
+            "command": command, "detail": "started"}
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+
+def status(*, profile=None, hscc_dir=None, repl=None):
+    """Read-only report: name, board, pane and busy/idle.
+
+    ``state`` is ``busy`` / ``idle`` for exactly one pane, ``not-running``
+    when none exists, ``ambiguous`` when several do (never guessed between),
+    and ``unknown`` when the pane exists but its screen could not be read.
+    """
+    try:
+        main_orch = _load_main_orch()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "state": "error", "detail": str(exc)}
+    name = main_orch.main_name(hscc_dir)
+    profile = profile or main_orch.main_profile(hscc_dir)
+    board = main_orch.main_board(hscc_dir)
+    repl = repl if repl is not None else load_repl_inject()
+
+    try:
+        panes = _profile_panes(repl, profile)
+    except MainPaneError as exc:
+        return {**_receipt(name, profile, board), "ok": False,
+                "state": "unknown", "running": False, "busy": None,
+                "pane": None, "target": None, "panes": [],
+                "detail": str(exc)}
+
+    if not panes:
+        return {**_receipt(name, profile, board), "ok": True,
+                "state": "not-running", "running": False, "busy": None,
+                "pane": None, "target": None, "panes": [],
+                "detail": "no pane"}
+    if len(panes) > 1:
+        return {**_receipt(name, profile, board), "ok": True,
+                "state": "ambiguous", "running": False, "busy": None,
+                "pane": None, "target": None,
+                "panes": [p.get("target") for p in panes],
+                "detail": f"{len(panes)} panes run profile {profile!r}"}
+
+    pane = panes[0]
+    try:
+        busy = bool(repl.is_busy(pane.get("pane")))
+        state = "busy" if busy else "idle"
+        detail = "busy" if busy else "idle"
+    except Exception as exc:  # noqa: BLE001 — honest unknown, never a guess
+        busy = None
+        state = "unknown"
+        detail = f"cannot read pane state: {exc}"
+    return {**_receipt(name, profile, board), "ok": True, "state": state,
+            "running": True, "busy": busy, "pane": pane.get("pane"),
+            "target": pane.get("target"), "panes": [pane.get("target")],
+            "detail": detail}
+
+
+# --------------------------------------------------------------------------- #
+# Human rendering + CLI dispatch
+# --------------------------------------------------------------------------- #
+
+def _start_lines(result):
+    if result.get("ok") and result.get("action") == "reused":
+        return [f"main orchestrator: {result['name']} already running in "
+                f"pane {result.get('pane')} ({result.get('target')})"]
+    if result.get("ok"):
+        where = (f"tmux window {result['profile']} in session "
+                 f"{result.get('session')}" if result.get("action") ==
+                 "created-window" else
+                 f"tmux session {result.get('session')}")
+        return [f"main orchestrator: {result['name']} started in {where} "
+                f"(pane {result.get('pane')})"]
+    lines = [f"error: {result.get('detail') or 'could not start the main orchestrator'}"]
+    if result.get("action") == "missing-hermes":
+        lines.append("  fix: install the Hermes venv or set HERMES_BIN")
+    elif result.get("action") in ("missing-repl", "discovery-failed"):
+        lines.append("  fix: deploy the hscc-api plugin beside hscc_daemon")
+    elif result.get("action") in ("create-failed", "tmux-error"):
+        lines.append("  fix: check that tmux can start (tmux list-sessions)")
+    return lines
+
+
+def _status_lines(result):
+    lines = [f"main orchestrator: {result.get('name')}",
+             f"  board: {result.get('board')}"]
+    state = result.get("state")
+    if state in ("busy", "idle", "unknown"):
+        lines.append(f"  pane: {result.get('pane')} "
+                     f"({result.get('target')})")
+        lines.append(f"  state: {state}")
+    elif state == "ambiguous":
+        where = ", ".join(str(t) for t in result.get("panes") or [])
+        lines.append("  pane: ambiguous")
+        lines.append(f"  state: {len(result.get('panes') or [])} panes run "
+                     f"the profile ({where}); close the extras")
+    else:
+        lines.append("  pane: none")
+        lines.append("  state: not-running")
+        lines.append("  start it: hscc main start")
+    if not result.get("ok") and result.get("detail"):
+        lines.append(f"  detail: {result['detail']}")
+    return lines
+
+
+def cmd_main(argv):
+    """Dispatch ``hscc main <subcommand>``; returns an exit code."""
+    argv = list(argv)
+    if not argv or argv[0] in SUB_HELP:
+        print(HELP_TEXT)
+        return 0
+
+    raw = list(argv)
+    if len(raw) > 1 and any(a in SUB_HELP for a in raw[1:]):
+        print(SUBCOMMAND_HELP.get(raw[0], HELP_TEXT))
+        return 0
+
+    json_mode = "--json" in raw
+    args = [a for a in raw if a != "--json"]
+    sub = args[0]
+    rest = args[1:]
+
+    if sub == "start":
+        if rest:
+            print(f"error: unknown argument for 'main start': {rest[0]}")
+            return 1
+        result = start()
+        if json_mode:
+            import json
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print("\n".join(_start_lines(result)))
+        return 0 if result.get("ok") else 1
+    if sub == "status":
+        if rest:
+            print(f"error: unknown argument for 'main status': {rest[0]}")
+            return 1
+        result = status()
+        if json_mode:
+            import json
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print("\n".join(_status_lines(result)))
+        return 0 if result.get("ok") else 1
+
+    print(f"Error: unknown main subcommand: {sub}")
+    print(f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")
+    return 1
