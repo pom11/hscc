@@ -254,6 +254,12 @@ targets:
       # The large / extra-large table layout (t_9e64d9d9), same file the iOS
       # widget target compiles. Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
+      # The history-trend projection (t_5ae8cfcf): the iOS widget target compiles
+      # it, so the desktop target compiles it too. Foundation-only, and the rule
+      # it owns — a metric the route did not report stays a gap and never becomes
+      # 0.0 — is the same rule the desktop tiles are held to, so leaving it out
+      # would give one platform a chart rule the other cannot reach.
+      - path: ../ios-app/Sources/Shared/MetricsHistoryTrend.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift
