@@ -453,7 +453,7 @@ serves both widgets in every row below; `ClusterWidgetViews.swift` and
 | field | systemSmall | systemMedium | systemLarge | systemExtraLarge | accessoryRectangular | accessoryCircular | accessoryInline |
 |---|---|---|---|---|---|---|---|
 | H1 Host | CLI† `SmallGrid` | CLI† `MedTable` | CLI† `Tables` | CLI† `Tables` | — | — | — |
-| H2 Jobs | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | agg `Fleet` (`N jobs` = count of `hosts[].workloads[].workload_id` fleet-wide, not the CLI's per-host cell) | — | — |
+| H2 Jobs | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | agg `Fleet` (`N jobs` = the count of DISTINCT `hosts[].workloads[].workload_id` across the host table — a fleet-wide figure, not the CLI's per-host cell) | — | — |
 | H3 CPU% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
 | H4 RAM% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
 | H5 Swap% | — | CLI `MedTable` | CLI `Tables` | CLI `Tables` | — | — | — |
@@ -628,7 +628,7 @@ This is the point of the exercise. Ordered by how surprising the gap is.
 | `idle hosts` (C6) on iOS | `cluster status` | decoded into `ClusterStatusSummary.idleHosts` (`ClusterWidgetMetrics.swift:71,77`) and never read by any view. The macOS dropdown does draw it. |
 | `idle hosts` the host **list** (C7) | `cluster status`, as a dim line | drawn nowhere, on either platform. macOS draws the count only — deliberately, because those lines are raw sparkrun status text containing node addresses (§7). |
 | `Swap%` (H5) on any surface except the medium/large/XL tables | `host_table` | the small tile's four columns are GPU%/GPU Temp/CPU Temp/GPU Power, so Swap% (and CPU%, RAM%, Jobs) are absent from `systemSmall` on both platforms. |
-| `Jobs` (H2) as the CLI prints it | `host_table` | the only fleet-wide "N jobs" on Lock Screen families is `FleetProjection.jobs` — a count of `hosts[].workloads[].workload_id`, a different source than the CLI's `sample.sparkrun_jobs`. Same word, two numbers. |
+| `Jobs` (H2) as the CLI prints it | `host_table` | the only fleet-wide "N jobs" on Lock Screen families is `FleetProjection.jobs` — the count of **distinct** `hosts[].workloads[].workload_id` read off the monitor route, a different source from the CLI's per-host `sample.sparkrun_jobs`. Same word, two numbers. Its own doc comment calls it "`hscc cluster status`'s workload count", which is a third thing: the Cluster widget does separately fetch `cluster status` and use `workloads.count` for that number, but only in the no-monitor-data fallback line. |
 | `total (n)` per model (S12) on `systemSmall`, the accessories, both Live Activities | `serving_table` | only `Tables` (large/XL) and the macOS dropdown keep the per-model total rows. Everywhere else they are collapsed into one run/wait line, which loses *which model* the queue belongs to. |
 | `N1` host-tally wording | title line `— N host(s) —` | no surface prints the CLI's phrase; every surface invents its own tally form (`4/4 up`, `3/4`, `9+`, `4 hosts`). |
 | `N3 serving — proxy :PORT` | `render()` | no surface prints this line, so **the proxy port appears nowhere in either app** — yet every serving row on four surfaces came from that proxy, and `MacDrop` is the only surface that even labels the section as `serving`. This is the single most consequential missing note: two clusters behind different proxies render identically. |
