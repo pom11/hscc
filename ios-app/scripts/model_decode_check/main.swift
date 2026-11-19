@@ -829,6 +829,8 @@ c.check(ClusterHistoryResponse.self, "v1_cluster_history_6h_engine_only.json",
         "ClusterHistoryResponse (a metrics= projection that excludes the host series)")
 c.check(ClusterHistoryResponse.self, "v1_cluster_history_15m.json",
         "ClusterHistoryResponse (window=15m, tier 0, ring not resident here)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_tier_axis.json",
+        "ClusterHistoryResponse (tier axis: tier 1 over an explicit since/until)")
 
 c.assertions("v1_cluster_history_6h.json", "the history decode shape the chart reads") {
     let payload = try JSONDecoder().decode(
@@ -848,6 +850,9 @@ c.assertions("v1_cluster_history_6h.json", "the history decode shape the chart r
         && payload.engines.first?.kv == 0.125
     let storeKeys = Mirror(reflecting: payload.store!).children.compactMap { $0.label }
     ok = ok && !storeKeys.contains("path")
+    // The two keys t_b611b56e added to the model: which axis answered, and where
+    // the rows came from, as a code.
+    ok = ok && payload.axis == "window" && payload.source == "sqlite_store"
     // `tier0_resident` is a measurement of the 2 s ring taken inside the route's
     // tier-0 branch alone (hscc-api/routes_cluster.py, PR #417), so a tier-1
     // answer is null: a tier the route never read cannot report residency. A
@@ -891,6 +896,27 @@ c.assertions("v1_cluster_history_15m.json", "an empty tier 0 explains itself") {
                 && (payload.max_fields ?? []).isEmpty && payload.hosts.isEmpty
                 && (payload.note ?? "").contains("window=1h"),
              "tier=\(payload.tier) resident=\(String(describing: payload.tier0Resident)) note=\(payload.note ?? "")")
+}
+
+c.assertions("v1_cluster_history_tier_axis.json",
+             "the tier axis is stated, and so is the span it served") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_tier_axis.json"))
+    // The axis must be READ off the payload, not inferred: on this axis `window`
+    // is a derived span label, and a surface that parsed it as a preset would
+    // plot a 1-hour chart from a 10-minute answer. `since`/`until` are the pair
+    // the server actually served (it clamps to the tier's retention), so the
+    // chart draws those and not the ones it asked for.
+    let span = payload.window_s ?? -1
+    c.expect("v1_cluster_history_tier_axis.json",
+             "axis=tier, source stated as a code, window a derived span label, and since/until the served pair",
+             payload.axis == "tier" && payload.source == "sqlite_store"
+                && payload.tier == 1 && payload.resolution_s == 60
+                && payload.window == "\(span)s"
+                && !["15m", "1h", "6h", "24h", "7d"].contains(payload.window)
+                && payload.until == payload.since + span && span > 0
+                && !payload.hosts.isEmpty && !payload.engines.isEmpty,
+             "axis=\(String(describing: payload.axis)) source=\(String(describing: payload.source)) window=\(payload.window) since=\(payload.since) until=\(payload.until)")
 }
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that

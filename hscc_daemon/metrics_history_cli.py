@@ -88,6 +88,25 @@ _FLAGS = ("--window", "--tier", "--since", "--until", "--node", "--metrics",
 #: The window preset used when neither axis is given — the route's default.
 DEFAULT_WINDOW = "1h"
 
+#: Which of the route's two request axes answered, on the wire as `axis`. The
+#: route's `AXIS_WINDOW` / `AXIS_TIER`; copied for the same reason as the name
+#: rule below. Stated rather than inferred, because on the tier axis `window`
+#: is `null` and a reader that guesses from the keys will guess a preset name
+#: that was never sent.
+AXIS_WINDOW = "window"
+AXIS_TIER = "tier"
+
+#: Where the served rows came from, on the wire as `source` — the four codes
+#: ``routes_cluster`` writes, copied verbatim. A client must branch on this code
+#: and read `note` for the sentence, because the English of `note` is prose that
+#: may be reworded while the code stays. A CLI run never owns the daemon's 2 s
+#: ring, so tier 0 answers `recorder_ring_absent` here unless a recorder happens
+#: to be resident in this very process.
+SOURCE_RING = "recorder_ring"
+SOURCE_RING_ABSENT = "recorder_ring_absent"
+SOURCE_STORE = "sqlite_store"
+SOURCE_STORE_ABSENT = "sqlite_store_absent"
+
 #: A host name as the recorder keys it — the same character rule
 #: ``routes_cluster._HISTORY_NODE_RE`` applies to ``?node=``, kept as a local
 #: copy rather than an import because the daemon leg runs without the API
@@ -400,6 +419,13 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
     payload = {
         "window": opts["window"],
         "window_s": span,
+        # Which axis answered, stated rather than left to be inferred: on the
+        # tier axis `window` is None, and a reader that guesses from the keys
+        # would guess a preset name that was never asked for.
+        "axis": AXIS_WINDOW if opts["window"] is not None else AXIS_TIER,
+        # Written by the one branch that reads anything, on every path out of
+        # here. A code, not prose: `note` says it in English and may be reworded.
+        "source": None,
         "tier": tier,
         "resolution_s": tier_bucket(mh, tier),
         "resolution": resolution_label(mh, tier),
@@ -417,8 +443,15 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
         # for "the fleet served nothing".
         "hosts_included": keep_host is None or bool(keep_host),
         "engines_included": keep_engine is None or bool(keep_engine),
+        # `tier0_resident`, `tier1_rows` and `tier2_rows` start as None because
+        # nothing has been measured yet — the route does the same, and an
+        # initial `True`/`0` here would be a default wearing a measurement's
+        # name (the exact defect PR #417 removed from the route's copy of this
+        # block). Each is written only by the branch that reads it.
         "store": {"path": mh.db_path(hscc_dir), "exists": False,
-                  "db_bytes": 0, "tier0_resident": True},
+                  "db_bytes": 0, "bound_bytes": mh.size_bound_bytes(),
+                  "tier1_rows": None, "tier2_rows": None,
+                  "tier0_resident": None},
         "hosts": [], "engines": [],
         "counts": {"hosts": 0, "engines": 0},
         "note": "",
@@ -428,6 +461,10 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
     if tier == 0:
         recorder = mh.resident_recorder()
         payload["store"]["tier0_resident"] = recorder is not None
+        # The store was never opened on this path, so its row counts stay None:
+        # a `0` here would claim the file was counted and found empty.
+        payload["source"] = SOURCE_RING if recorder is not None \
+            else SOURCE_RING_ABSENT
         if recorder is None:
             payload["note"] = (
                 "tier 0 is the sampler's in-memory ring and lives in the "
@@ -445,7 +482,13 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
             payload["store"]["exists"] = exists
             payload["store"]["db_bytes"] = (
                 os.path.getsize(store.path) if exists else 0)
+            payload["source"] = (SOURCE_STORE if exists
+                                 else SOURCE_STORE_ABSENT)
             if not exists:
+                # Not a default: there is no store, so there is nothing to
+                # count. That is a measured absence, and it costs no handle.
+                payload["store"]["tier1_rows"] = 0
+                payload["store"]["tier2_rows"] = 0
                 payload["note"] = (
                     "the recorder has not written its store yet "
                     f"({store.path}); the durable tiers are empty until it "
@@ -456,6 +499,14 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
                                                    until=until, host=name)
                 payload["engines"] = store.engine_rows(tier, since=since,
                                                        until=until, node=name)
+                # The store's own counts, read while this handle is open — the
+                # route folds the same two facts into this same block rather
+                # than publish a second top-level `stats`.
+                stats = store.stats()
+                payload["store"]["tier1_rows"] = stats.get("tier1_rows")
+                payload["store"]["tier2_rows"] = stats.get("tier2_rows")
+                payload["store"]["bound_bytes"] = stats.get(
+                    "bound_bytes", mh.size_bound_bytes())
             except Exception as exc:                # a broken store is stated
                 payload["error"] = f"{type(exc).__name__}: {exc}"
                 payload["note"] = f"history read failed: {payload['error']}"

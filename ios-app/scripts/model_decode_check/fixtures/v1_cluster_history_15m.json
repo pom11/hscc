@@ -1,4 +1,5 @@
 {
+ "axis": "window",
  "counts": {
   "engines": 0,
   "hosts": 0
@@ -34,12 +35,16 @@
  "resolution": "2s",
  "resolution_s": 2,
  "since": 1794999000,
- "speak": "The 15 m window is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points.",
+ "source": "recorder_ring_absent",
+ "speak": "The 2 s tier is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points.",
  "store": {
+  "bound_bytes": 10485760,
   "db_bytes": 16384,
   "exists": true,
   "path": "/Users/example/.hscc/metrics/history.db",
-  "tier0_resident": false
+  "tier0_resident": false,
+  "tier1_rows": null,
+  "tier2_rows": null
  },
  "tier": 0,
  "tier_summary": "raw 2 s samples from the recorder's in-memory ring \u2014 no averaging, and no peak columns",

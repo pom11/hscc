@@ -375,6 +375,281 @@ def test_a_metrics_filter_that_names_no_engine_metric_excludes_the_series(
     assert api["engines"] and api["engines_included"] is True
 
 
+# ── the second request axis: `tier` + explicit `since`/`until` ─────────────
+#
+# Folded in from the retired `GET /v1/metrics/history` (the ruling is in
+# t_447cc7fc): the preset axis anchors to `now` and cannot ask about last night,
+# and this axis is the whole reason the survivor needed a change at all. Every
+# test here compares the route against the recorder's own read of the SAME
+# fixture state, because the property a client depends on is "the span the
+# response states is the span the rows were selected by" — and a clamp is
+# exactly the thing that can break it silently.
+
+def _tier1_bucket_starts(store_dir):
+    """The bucket starts actually present at tier 1, from the store itself."""
+    store = mh.MetricsStore(hscc_dir=str(store_dir))
+    try:
+        return sorted({r["ts"] for r in store.host_rows(1)})
+    finally:
+        store.close()
+
+
+def test_the_tier_axis_returns_the_recorders_read_of_the_span_it_reported(
+        running, token, pinned_clock, store_dir):
+    """The parity leg: rows == ``host_rows``/``engine_rows`` for the
+    (tier, since, until, node) the route itself reported, oracle being the
+    recorder rather than a re-derived anything."""
+    since = NOW - 6 * mh.TIER1_BUCKET_S
+    until = NOW - 2 * mh.TIER1_BUCKET_S
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=1&since={since}&until={until}")
+    assert status == 200, api
+    assert api["axis"] == "tier" and api["tier"] == 1
+    assert api["resolution"] == "60s" and api["resolution_s"] == 60
+    assert (api["since"], api["until"]) == (since, until), "no clamp was due"
+    assert api["window_s"] == until - since
+    assert api["note"] == "", api["note"]
+    store = mh.MetricsStore(hscc_dir=str(store_dir))
+    try:
+        want_hosts = store.host_rows(1, since=since, until=until, host=None)
+        want_engines = store.engine_rows(1, since=since, until=until, node=None)
+    finally:
+        store.close()
+    assert want_hosts and api["hosts"] == want_hosts
+    assert want_engines and api["engines"] == want_engines
+    # `window` on this axis is a derived label, never a preset name the request
+    # never used — a client reading it must not think it asked for `1h`.
+    assert api["window"] == f"{until - since}s"
+    assert api["window"] not in ("15m", "1h", "6h", "24h", "7d")
+
+
+def test_tier_alone_serves_the_tiers_whole_depth_without_claiming_a_preset(
+        running, token, pinned_clock, store_dir):
+    """`tier` with no span is the tier's retention, anchored at now.
+
+    The default has to be *some* span, and the only defensible one is "as deep as
+    this tier goes" — a smaller one would be a second invented preset, which is
+    the thing this axis exists to avoid.
+    """
+    status, api = get(running, token, "/v1/cluster/history?tier=1")
+    assert status == 200, api
+    assert api["axis"] == "tier"
+    assert api["until"] == NOW and api["since"] == NOW - mh.TIER1_WINDOW_S
+    assert api["window_s"] == mh.TIER1_WINDOW_S and api["note"] == ""
+    assert api["hosts"], "the fixture's rows must be inside the tier's own depth"
+
+
+def test_since_and_until_are_inclusive_bucket_starts_at_both_ends(
+        running, token, pinned_clock, store_dir):
+    """Both ends inclusive — the loser's semantics, ported, and pinned at both.
+
+    A span of one instant has to return that instant's bucket, not nothing: that
+    is what separates `ts >= since AND ts <= until` from a half-open range, and a
+    half-open range would answer a one-bucket request with an empty chart.
+    """
+    starts = _tier1_bucket_starts(store_dir)
+    assert starts, "fixture produced no tier-1 buckets"
+    mid = starts[len(starts) // 2]
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=1&since={mid}&until={mid}")
+    assert status == 200, api
+    assert api["hosts"], "an inclusive single-bucket span answered empty"
+    assert {r["ts"] for r in api["hosts"]} == {mid}
+    assert api["window_s"] == 0
+    assert api["since"] == api["until"] == mid
+
+
+def test_a_span_deeper_than_the_tiers_retention_is_clamped_and_said(
+        running, token, pinned_clock, store_dir):
+    """The clamp is stated, not just applied: `since` reports what was served and
+    `note` names the number that moved and the retention that moved it.
+
+    A silently shortened span is the worst shape a history route can have — the
+    chart looks like a quiet fleet for the hours the route quietly dropped.
+    """
+    asked = NOW - 2 * mh.TIER1_WINDOW_S               # two days at a 24 h tier
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=1&since={asked}&until={NOW}")
+    assert status == 200, api
+    assert api["since"] == NOW - mh.TIER1_WINDOW_S, api["since"]
+    assert api["until"] == NOW and api["window_s"] == mh.TIER1_WINDOW_S
+    assert "deeper than tier 1 keeps" in api["note"], api["note"]
+    assert str(asked) in api["note"], api["note"]          # names what was asked
+    assert str(mh.TIER1_WINDOW_S) in api["note"], api["note"]
+    # The served rows are the clamped span's, not the asked one's.
+    store = mh.MetricsStore(hscc_dir=str(store_dir))
+    try:
+        want = store.host_rows(1, since=api["since"], until=api["until"])
+    finally:
+        store.close()
+    assert api["hosts"] == want and api["hosts"]
+
+
+def test_an_until_in_the_future_is_clamped_to_now_and_said(running, token,
+                                                           pinned_clock,
+                                                           store_dir):
+    asked = NOW + 3600
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=1&since={NOW - 600}&until={asked}")
+    assert status == 200, api
+    assert api["until"] == NOW and api["since"] == NOW - 600
+    assert api["window_s"] == 600
+    assert "in the future" in api["note"], api["note"]
+    assert str(asked) in api["note"], api["note"]
+
+
+def test_the_clamp_still_fires_where_a_tier_0_span_is_deeper_than_900_s(
+        running, token, pinned_clock, store_dir):
+    """Tier 0 clamps to its own 15-minute ring, not to some other tier's number."""
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=0&since={NOW - 3600}&until={NOW}")
+    assert status == 200, api
+    assert api["window_s"] == mh.TIER0_WINDOW_S == 900
+    assert api["since"] == NOW - 900
+    assert "deeper than tier 0 keeps (900 s)" in api["note"], api["note"]
+
+
+@pytest.mark.parametrize("path,needle", [
+    ("/v1/cluster/history?window=1h&tier=1", "cannot be asked together"),
+    ("/v1/cluster/history?window=1h&tier=1&since=1", "cannot be asked together"),
+    ("/v1/cluster/history?window=1h&since=1795000000",
+     "'since'/'until' need 'tier'"),
+    ("/v1/cluster/history?until=1795000000", "'since'/'until' need 'tier'"),
+    ("/v1/cluster/history?tier=3", "tier must be 0, 1 or 2"),
+    ("/v1/cluster/history?tier=one", "tier must be 0, 1 or 2"),
+    ("/v1/cluster/history?tier=1&since=abc", "since must be epoch seconds"),
+    ("/v1/cluster/history?tier=1&until=1795000000&since=abc",
+     "since must be epoch seconds"),
+])
+def test_the_axes_are_mutually_exclusive_and_the_span_is_validated(
+        running, token, pinned_clock, store_dir, path, needle):
+    """Exactly one axis, and a range that cannot be served is a 400.
+
+    `window` + `tier` is a 400 rather than a documented precedence because the two
+    denote two different spans; a client that silently got `window`'s span would
+    have no way to learn its `since`/`until` were ignored. `since`/`until` without
+    `tier` is the same fault one key over.
+    """
+    status, api = get(running, token, path)
+    assert status == 400, (path, status, api)
+    assert api["error"]["code"] == "bad_request", path
+    assert needle in api["error"]["message"], (path, api["error"])
+    assert api["error"]["speak"], path
+
+
+def test_a_span_that_runs_backwards_is_a_400_not_an_empty_chart(
+        running, token, pinned_clock, store_dir):
+    status, api = get(running, token,
+                      f"/v1/cluster/history?tier=1&since={NOW}&until={NOW - 600}")
+    assert status == 400, api
+    assert "cannot run backwards" in api["error"]["message"], api["error"]
+    assert api["error"]["speak"] == "since must not be after until."
+
+
+def test_source_says_where_the_rows_came_from_as_a_code(running, token,
+                                                        pinned_clock,
+                                                        store_dir, ring):
+    """A client branches on `source`, never on the English of `note`.
+
+    Four codes, and the two pairs are the two distinctions that matter: ring vs
+    store (which tier answered) and present vs absent (whether anything was
+    there to read). `recorder_ring` here is the resident-ring fixture; the
+    deployed `recorder_ring_absent` has its own test below.
+    """
+    status, api = get(running, token, "/v1/cluster/history?tier=0")
+    assert status == 200, api
+    assert api["source"] == "recorder_ring" and api["axis"] == "tier"
+    assert api["hosts"], "a resident ring must actually serve rows"
+    status, api = get(running, token, "/v1/cluster/history?tier=1")
+    assert status == 200 and api["source"] == "sqlite_store"
+    assert api["axis"] == "tier"
+    status, api = get(running, token, "/v1/cluster/history?window=1h")
+    assert status == 200 and api["source"] == "sqlite_store"
+    assert api["axis"] == "window"
+
+
+def test_an_unreadable_tier_0_is_a_source_code_and_not_only_a_note(
+        running, token, pinned_clock, store_dir):
+    status, api = get(running, token, "/v1/cluster/history?tier=0&since=%d" % (NOW - 60))
+    assert status == 200, api
+    assert api["source"] == "recorder_ring_absent" and api["axis"] == "tier"
+    assert api["hosts"] == [] and api["store"]["tier0_resident"] is False
+    assert "daemon" in api["note"] and "1-minute" in api["speak"]
+
+
+def test_the_store_block_carries_the_recorders_size_facts(running, token,
+                                                          pinned_clock,
+                                                          store_dir):
+    """`bound_bytes`/`tier1_rows`/`tier2_rows` are folded INTO `store`.
+
+    A second top-level `stats` would be a second name for facts the same block
+    already describes — and two places to disagree is how the `tier0_resident`
+    default got away with lying for a release.
+    """
+    status, api = get(running, token, "/v1/cluster/history?tier=1")
+    assert status == 200, api
+    assert "stats" not in api, "the size facts belong in `store`, not beside it"
+    store = mh.MetricsStore(hscc_dir=str(store_dir))
+    try:
+        want1, want2 = store.count(1), store.count(2)
+    finally:
+        store.close()
+    assert api["store"]["tier1_rows"] == want1 and want1 > 0
+    assert api["store"]["tier2_rows"] == want2 and want2 > 0
+    assert api["store"]["bound_bytes"] == mh.size_bound_bytes()
+
+
+def test_the_tier_0_branch_never_reports_row_counts_it_did_not_count(
+        running, token, pinned_clock, store_dir):
+    """The #417 rule, applied to the keys this card adds.
+
+    Tier 0 answers from memory and never opens the store, so it cannot know the
+    row counts: `None`, even though the store on disk is full of rows. A `0`
+    there would be a default wearing a measurement's name — the exact defect
+    `tier0_resident` shipped with.
+    """
+    mh.close_sampler()
+    status, api = get(running, token, "/v1/cluster/history?tier=0&since=%d" % (NOW - 60))
+    assert status == 200, api
+    store = mh.MetricsStore(hscc_dir=str(store_dir))
+    try:
+        assert store.count(1) > 0                      # rows really are there
+    finally:
+        store.close()
+    assert api["store"]["tier1_rows"] is None
+    assert api["store"]["tier2_rows"] is None
+    assert api["store"]["bound_bytes"] == mh.size_bound_bytes()
+    assert api["store"]["tier0_resident"] is False
+
+
+#: The top-level keys #407 shipped. This card is additive only, so a window-axis
+#: answer may differ from this set by exactly the two keys the ruling names.
+_407_TOP_LEVEL_KEYS = {
+    "window", "window_s", "tier", "resolution_s", "resolution", "tier_summary",
+    "max_fields", "since", "until", "node", "metrics", "hosts_included",
+    "engines_included", "store", "hosts", "engines", "counts", "note", "speak",
+}
+
+
+def test_the_window_axis_gained_only_axis_and_source(running, token,
+                                                     pinned_clock,
+                                                     store_dir):
+    """#407's shape is unchanged: this card adds `axis` and `source`, nothing else.
+
+    The regression half of "additive only" — every caller shipped before the tier
+    axis keeps working, so the deletion card can retire the loser without a
+    second client change riding on it.
+    """
+    status, api = get(running, token, "/v1/cluster/history?window=1h")
+    assert status == 200, api
+    assert set(api) - _407_TOP_LEVEL_KEYS == {"axis", "source"}, sorted(
+        set(api) - _407_TOP_LEVEL_KEYS)
+    assert api["axis"] == "window" and api["source"] == "sqlite_store"
+    # The default is still #407's, so a caller that names no axis is unaffected.
+    assert api["window"] == "1h" and api["window_s"] == 3600
+    assert api["since"] == NOW - 3600 and api["until"] == NOW
+
+
 # ── validation: a clear 400 naming the rule, never a silent empty answer ───
 
 @pytest.mark.parametrize("path,needle", [
@@ -387,7 +662,6 @@ def test_a_metrics_filter_that_names_no_engine_metric_excludes_the_series(
     ("/v1/cluster/history?node=%20", "must be 'all' or one host name"),
     ("/v1/cluster/history?node=two%20hosts", "is not a host name"),
     ("/v1/cluster/history?node=a/b", "is not a host name"),
-    ("/v1/cluster/history?tier=1", "'tier' is not supported"),
     ("/v1/cluster/history?host=192.0.2.10", "'host' is not supported"),
 ])
 def test_every_parameter_is_validated_with_an_actionable_400(
@@ -397,6 +671,26 @@ def test_every_parameter_is_validated_with_an_actionable_400(
     assert api["error"]["code"] == "bad_request", path
     assert needle in api["error"]["message"], (path, api["error"])
     assert api["error"]["speak"], path
+
+
+def test_the_unknown_key_error_names_the_whole_allowed_set(running, token,
+                                                           pinned_clock,
+                                                           store_dir):
+    """One 400 that lists every parameter, so a client fixes the call in one
+    round trip instead of discovering the axes one rejected key at a time.
+
+    `host=` staying out of that list is the decision, not an oversight:
+    `host_rollup.host` and `engine_rollup.node` are two column names for one
+    identity, so `node=` filters both series and a second machine key would be a
+    second way to ask the same question.
+    """
+    status, api = get(running, token, "/v1/cluster/history?bogus=1")
+    assert status == 400, api
+    message = api["error"]["message"]
+    for key in ("node", "metrics", "window", "tier", "since", "until"):
+        assert f"'{key}'" in message, (key, message)
+    assert "'host'" not in message, (
+        "host= must not be advertised as supported: %s" % message)
 
 
 def test_a_blank_param_is_the_same_request_as_no_param(running, token,
@@ -498,6 +792,9 @@ def test_a_read_does_not_create_the_store(tmp_path):
                                   path="/v1/cluster/history?window=24h")
         assert status == 200, api
         assert api["hosts"] == [] and api["store"]["exists"] is False
+        assert api["source"] == "sqlite_store_absent", (
+            "the client must be able to tell 'no store yet' from 'store read', "
+            "as a code and not by parsing `note`")
         assert "not written its store yet" in api["note"]
         assert not os.path.exists(db), f"the read created {db}"
         assert not os.path.exists(os.path.dirname(db))

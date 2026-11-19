@@ -174,11 +174,14 @@ let kanbanRunningBody = Data(#"""
 /// reported — a `null` that must stay nil, because a 0.0 would draw a node that
 /// never answered as an idle one. `store.path` is on the wire and deliberately
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
-/// `store.tier0_resident` is `null` here and that is not a missing field: the
-/// route reads the 2 s ring only inside its tier-0 branch, so at tier 1 nobody
-/// measured it (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`).
+/// `axis`/`source` ARE declared: which axis answered and where the rows came
+/// from are facts a chart branches on, and a key the model does not declare is
+/// invisible to it however much the server states it. `store.tier0_resident` is
+/// `null` here and that is not a missing field: the route reads the 2 s ring only
+/// inside its tier-0 branch, so at tier 1 nobody measured it
+/// (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`).
 let historyBody = Data(#"""
-{"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
+{"window":"6h","window_s":21600,"axis":"window","source":"sqlite_store","tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
  "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
  "since":1794978300,"until":1794999900,"node":"192.0.2.10",
@@ -200,7 +203,7 @@ let historyBody = Data(#"""
 /// tier-1 case alone could not tell "the route answered null" from "the `store`
 /// object never decoded at all" — both read as `nil`.
 let historyTier0Body = Data(#"""
-{"window":"15m","window_s":900,"tier":0,"resolution_s":2,"resolution":"2s",
+{"window":"15m","window_s":900,"axis":"window","source":"recorder_ring_absent","tier":0,"resolution_s":2,"resolution":"2s",
  "tier_summary":"raw 2 s samples from the recorder's in-memory ring, no averaging, and no peak columns",
  "max_fields":[],"since":1794999000,"until":1794999900,"node":"all",
  "hosts_included":true,"engines_included":true,"hosts":[],"engines":[],
@@ -305,6 +308,8 @@ func runAll() async {
               payload.tier == 1 && payload.tier0Resident == nil
                 && payload.store?.exists == true
                 && payload.store?.db_bytes == 3355443)
+        check("history states which axis answered and where the rows came from",
+              payload.axis == "window" && payload.source == "sqlite_store")
         let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
         check("the store's server path is never decoded",
               !historyFields.contains("path"))
@@ -319,7 +324,29 @@ func runAll() async {
     check("history's path carries no query string of its own",
           historyRequest?.url?.path == "/v1/cluster/history")
 
-    // 1c. The same field where the route DID read the ring. Without this case the
+    // 1c. The tier axis. `since`/`until` are the reason this axis exists (a
+    //     preset is anchored to `now` and cannot ask about last night), so they
+    //     must leave as real query items — and the DEFAULTED `window` must not
+    //     ride along: the route answers 400 when both axes are named, and a
+    //     defaulted parameter is exactly how every refresh would 400 while the
+    //     call still compiled.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    _ = await client.clusterHistory(node: "192.0.2.10", tier: 1,
+                                    since: 1794978300, until: 1794999900)
+    let tierRequest = StubTransport.requests.last
+    let tierQuery = tierRequest?.url?.query ?? ""
+    check("history's tier/since/until/node are real query items",
+          tierQuery.contains("tier=1")
+            && tierQuery.contains("since=1794978300")
+            && tierQuery.contains("until=1794999900")
+            && tierQuery.contains("node=192.0.2.10"))
+    check("the tier axis drops the defaulted window preset (both axes = a 400 "
+          + "on every refresh): \(tierQuery)",
+          !tierQuery.contains("window="))
+    check("the tier axis still uses the bare allowlisted path",
+          tierRequest?.url?.path == "/v1/cluster/history")
+
+    // 1d. The same field where the route DID read the ring. Without this case the
     //     tier-1 assertion above is worthless: `tier0Resident == nil` would also
     //     hold if the model simply never read the flag, or if the `store` object
     //     failed to decode. A `false` at tier 0 is a measurement, and the reason a
@@ -338,6 +365,8 @@ func runAll() async {
               payload.hosts.isEmpty && payload.engines.isEmpty
                 && payload.tier0Resident == false
                 && (payload.note ?? "").contains("window=1h"))
+        check("a tier-0 answer says as a code that the ring was not readable here",
+              payload.axis == "window" && payload.source == "recorder_ring_absent")
     case .failure(let failure):
         check("tier-0 history should decode, got \(String(reflecting: failure))", false)
     }

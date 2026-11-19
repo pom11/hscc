@@ -230,14 +230,42 @@ struct WidgetDataClient {
     /// `false` at tier 0 means "this server cannot see it", which a chart must
     /// render as a gap with a reason, not as a quiet fleet — and `note` is where
     /// that reason is written, not the flag.
-    func clusterHistory(window: String = "1h",
+    ///
+    /// TWO AXES, exactly one per call. `window` is a preset anchored to `now`;
+    /// `tier` + `since`/`until` is a raw tier over an explicit span, for "the hour
+    /// around last night's slow run", and anchors to nothing. The route 400s when
+    /// both are named, so passing `tier:` here drops `window` rather than sending
+    /// it — `window` has a default, and a defaulted preset riding along on the
+    /// tier axis would 400 every refresh. `since`/`until` are inclusive
+    /// epoch-second bucket starts; the server clamps the span to the tier's own
+    /// retention and reports the pair it served, so read them back off the
+    /// response instead of assuming the request was honoured.
+    ///
+    /// An out-of-range `tier` is clamped rather than forwarded: it is a coding bug
+    /// in the surface, and a 400 on every refresh is worse than a chart drawing
+    /// the nearest real tier.
+    func clusterHistory(window: String? = "1h",
                         node: String = "all",
-                        metrics: [String] = []) async -> Result<ClusterHistoryResponse, WidgetDataFailure> {
-        var query: [URLQueryItem] = [URLQueryItem(name: "window", value: window),
-                                     URLQueryItem(name: "node", value: node)]
+                        metrics: [String] = [],
+                        tier: Int? = nil,
+                        since: Int? = nil,
+                        until: Int? = nil) async -> Result<ClusterHistoryResponse, WidgetDataFailure> {
+        var query: [URLQueryItem] = [URLQueryItem(name: "node", value: node)]
         if !metrics.isEmpty {
             query.append(URLQueryItem(name: "metrics",
                                       value: metrics.joined(separator: ",")))
+        }
+        if let tier {
+            query.append(URLQueryItem(name: "tier",
+                                      value: String(min(max(tier, 0), 2))))
+            if let since {
+                query.append(URLQueryItem(name: "since", value: String(since)))
+            }
+            if let until {
+                query.append(URLQueryItem(name: "until", value: String(until)))
+            }
+        } else if let window, !window.isEmpty {
+            query.append(URLQueryItem(name: "window", value: window))
         }
         return await load(WidgetDataPath.clusterHistory,
                           as: ClusterHistoryResponse.self, queryItems: query)

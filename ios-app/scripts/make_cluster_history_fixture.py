@@ -144,6 +144,13 @@ CASES = (
     ("v1_cluster_history_6h_engine_only.json",     {"window": "6h",
                                                      "metrics": "gen_tps,run"}),
     ("v1_cluster_history_15m.json",                {"window": "15m"}),
+    # The `tier` axis (t_b611b56e): an explicit span rather than a preset
+    # anchored to `now`. Committed so the decoder is exercised against the bytes
+    # the new axis really returns — `axis: "tier"`, and a `window` that is a
+    # derived span label instead of a preset name the request never used.
+    ("v1_cluster_history_tier_axis.json",          {"tier": "1",
+                                                    "since": str(NOW - 900),
+                                                    "until": str(NOW - 300)}),
 )
 
 

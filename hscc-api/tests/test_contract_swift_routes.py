@@ -1226,3 +1226,297 @@ def test_metrics_history_tier_reaches_the_server_as_a_query_item():
             f"(sends {sorted(sent)})")
     assert "WidgetDataPath.metricsHistory" in body, (
         "the read must go through the allowlisted path constant, not a literal")
+
+
+# --------------------------------------------------------------------------- #
+# The CANONICAL history route's shape (t_b611b56e)
+# --------------------------------------------------------------------------- #
+#
+# The same three assertions as the section above, re-expressed against
+# `ClusterHistory*` — which is what `t_447cc7fc` ruled canonical and what
+# `t_2c629557` leaves standing. They are deliberately independent of
+# `test_routes_metrics.py` and of the metrics-history fixtures: the day the
+# losing route's tests are deleted, these must still be the gate, so nothing here
+# imports from that file or names its path.
+#
+# Why the same three, and not new ones: a metric on this route is optional in
+# Swift by design (the server writes `null` for "this node did not report it"),
+# so a key the route renames, drops or adds decodes to `nil` on the phone. No
+# exception, no 4xx, no red test — just a chart with a hole in it. These three
+# are what make that class of drift fail loudly:
+#
+#   1. every key the route emits for a row is declared by the Swift decoder (or
+#      provably unrequestable),
+#   2. a bucket's average and its peak are different numbers, and a host that
+#      never answered is null and not zero,
+#   3. `clusterHistory()` transmits every parameter it supports as a real
+#      `URLQueryItem` through the allowlisted path constant — welding a query into
+#      the path is the defect class that hid the `/v1/sessions` `profile` filter,
+#      and it compiles fine while every refresh 400s.
+
+CLUSTER_HISTORY_BASE = 1_794_999_900        # aligned to 2 s, 60 s AND 300 s
+CH_HOST_A, CH_HOST_B = "192.0.2.10", "192.0.2.11"    # TEST-NET-1, never a node
+CH_PORT = "8000"
+CH_MODEL = "org/Qwen-Test"
+
+#: Row keys that are bucket metadata rather than a fact a chart plots: the tier
+#: and the bucket width, both of which the response already states at the top
+#: level. Everything else in a row has to reach the phone to be worth sending.
+CH_ROW_METADATA_KEYS = {"tier", "res"}
+
+
+def _ch_sample(ts, host, **over):
+    s = {"timestamp": str(int(ts)), "hostname": host,
+         "cpu_usage_pct": "10.0", "cpu_temp_c": "44",
+         "gpu_util_pct": "80", "gpu_temp_c": "60", "gpu_power_w": "120.0",
+         "mem_used_pct": "30", "swap_used_mb": "100", "swap_total_mb": "1000",
+         "swap_used_pct": "", "gpu_mem_used_mb": "40000",
+         "gpu_clock_mhz": "1800", "net_recv_bytes_s": "1000",
+         "net_send_bytes_s": "2000", "sparkrun_jobs": "1"}
+    s.update(over)
+    return s
+
+
+def _ch_frame(ts, host=CH_HOST_A, gpu_temp="60", gpu_power="120.0",
+              error=None, sample=True):
+    """A `sparkrun cluster monitor --json` frame, in the collector's CSV names.
+
+    An empty string is "not reported", never a zero — which is the half the
+    null-preservation assertion is about.
+    """
+    entry = {"host": host, "error": error, "sample": None,
+             "workloads": [], "used_slots": 0, "free_slots": 1}
+    if sample:
+        entry["sample"] = _ch_sample(ts, host, gpu_temp_c=gpu_temp,
+                                     gpu_power_w=gpu_power)
+    return {"timestamp": float(ts), "hosts": [entry]}
+
+
+def _ch_serving(ts):
+    return [{"node": CH_HOST_A, "port": CH_PORT, "model": CH_MODEL,
+             "running": 2, "waiting": 1, "kv": 0.125, "gen_tps": 31.5,
+             "prompt_tps": 12.0}]
+
+
+def _cluster_history_rows(tmp_path):
+    """Fill the store through the recorder's OWN write path, then read tier 1
+    back through the canonical route. Returns the payload.
+
+    The ticks are the whole point: host A answers twice inside ONE 60 s bucket at
+    60 °C / 120 W and then 90 °C / 200 W, so that bucket's average (75 °C, 160 W)
+    and its peak (90 °C, 200 W) are different numbers and no route can confuse one
+    for the other; host B fails in the same bucket, so its row is nulls plus an
+    error. Rows arrive via `MetricsRecorder.tick` -> `rollup` -> `write_rollup`,
+    as in production, and the route's clock is pinned so the default tier-1 span
+    cannot drift past the fixture.
+    """
+    import sys
+    import types
+    daemon = Path(_REPO_ROOT) / "hscc_daemon"
+    if str(daemon) not in sys.path:
+        sys.path.insert(0, str(daemon))
+    import metrics_history as mh
+    import routes_cluster
+
+    base = CLUSTER_HISTORY_BASE
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    rec.tick(_ch_frame(base + 10, gpu_temp="60", gpu_power="120.0"),
+             _ch_serving(base + 10), base + 10)
+    rec.tick(_ch_frame(base + 10, host=CH_HOST_B, error="collect failed",
+                       sample=False), None, base + 10)
+    rec.tick(_ch_frame(base + 40, gpu_temp="90", gpu_power="200.0"),
+             _ch_serving(base + 40), base + 40)
+    rec.tick(_ch_frame(base + 70), _ch_serving(base + 70), base + 70)  # closes :00
+    rec.store.close()
+
+    original = routes_cluster._history_now
+    routes_cluster._history_now = lambda: float(base + 700)
+    try:
+        ctx = types.SimpleNamespace(hscc_dir=str(tmp_path))
+        status, payload = routes_cluster.handle_cluster_history(
+            None, ctx, {"tier": "1"}, b"")
+    finally:
+        routes_cluster._history_now = original
+    assert status == 200, payload
+    return payload
+
+
+def _cluster_host_row(payload, host, ts):
+    rows = [r for r in payload["hosts"]
+            if r.get("host") == host and r.get("ts") == ts]
+    assert rows, f"no {host} row at bucket {ts} in %r" % (payload["hosts"],)
+    return rows[0]
+
+
+def _cluster_history_requestable():
+    """The metric names a widget can ask for — the raw values of Swift's
+    `ClusterHistoryMetric`, parsed from the source rather than copied.
+
+    This set, not the recorder's full column list, is the honest boundary for
+    "must the decoder declare it?": a key no case names can never reach a chart,
+    while a key a case names is one `metrics=` request away from being plotted.
+    """
+    src = (Path(_REPO_ROOT) / "ios-app/Sources/Shared/ClusterHistorySeries.swift"
+           ).read_text()
+    start = src.index("enum ClusterHistoryMetric:")
+    end = src.find("\n    var ", start)
+    region = src[start:end if end > start else len(src)]
+    return set(re.findall(r'\bcase\s+\w+\s*=\s*"([a-z0-9_]+)"', region))
+
+
+def _swift_struct_field_types(source, struct):
+    """{field: declared type} for one Decodable struct, straight from the source.
+
+    Derived rather than copied so the gate cannot drift, and it answers the
+    question `_swift_decodable_fields` cannot: whether a field is optional.
+    """
+    for name, body in _METRICS_STRUCT_RE.findall(source):
+        if name == struct:
+            return {m.group(1): m.group(2).strip()
+                    for m in re.finditer(r"^\s*let\s+(\w+)\s*:\s*([^{;\n]+)",
+                                         body, re.M)}
+    return {}
+
+
+def test_cluster_history_row_keys_are_declared_in_swift(tmp_path):
+    """1/3 — every key the route puts in a row must exist in the Swift decoder.
+
+    `ClusterHistoryPoint` is deliberately sparse: the recorder carries every field
+    it samples and a model that declared all of them would fail to decode the
+    first time the recorder adds one. So the assertion is two-sided rather than
+    blanket — a key a widget CAN request must be declared, and a key the route
+    emits must be either declared or provably unrequestable. That is the version
+    with teeth: an undeclared `gpu_temp_c` fails, and so does a new recorder
+    column that someone adds to `ClusterHistoryMetric` without adding to the
+    model.
+    """
+    import sys
+    daemon = Path(_REPO_ROOT) / "hscc_daemon"
+    if str(daemon) not in sys.path:
+        sys.path.insert(0, str(daemon))
+    import metrics_history as mh
+
+    structs = _swift_decodable_fields(METRICS_SHARED_MODELS.read_text())
+    declared = structs.get("ClusterHistoryPoint", set())
+    assert declared, (
+        "ClusterHistoryPoint vanished from SharedModels.swift — the graph widget "
+        "can no longer decode the canonical history route at all")
+
+    requestable = _cluster_history_requestable()
+    assert requestable, (
+        "ClusterHistoryMetric's raw values could not be parsed — the gate would "
+        "be comparing an empty set and passing on nothing")
+    advertised_but_undeclared = sorted(requestable - declared)
+    assert not advertised_but_undeclared, (
+        "the widget can request %s but the decoder does not declare it, so "
+        "metrics=%s plots a flat empty series with no error anywhere"
+        % (", ".join(advertised_but_undeclared), advertised_but_undeclared[0]))
+
+    payload = _cluster_history_rows(tmp_path)
+    assert payload["hosts"] and payload["engines"], (
+        "fixture produced no rows, so this test would pass on nothing: %r"
+        % payload)
+    # A recorder column no `ClusterHistoryMetric` case names cannot reach a chart,
+    # so the sparse model is allowed to omit it. Anything else is a hole.
+    never_requestable = (set(mh.HOST_COLUMNS) | set(mh.ENGINE_KEYS)) - requestable
+    for label, rows in (("host", payload["hosts"]), ("engine", payload["engines"])):
+        emitted = {k for row in rows for k in row}
+        unexplained = sorted(emitted - declared - CH_ROW_METADATA_KEYS
+                             - never_requestable)
+        assert not unexplained, (
+            "the route emits %s key(s) the Swift decoder does not declare, so "
+            "they decode to nil on the phone and the chart draws a hole with no "
+            "error anywhere: %s" % (label, ", ".join(unexplained)))
+
+
+def test_cluster_history_average_is_not_its_peak_and_a_silent_host_stays_null(
+        tmp_path):
+    """2/3 — the peak is the fact a chart is usually drawn to show, and `null` is
+    a missing reading rather than an idle node.
+
+    The fixture makes average and peak differ on purpose (60 °C then 90 °C in one
+    bucket): a route that copied the average into the peak column, or dropped the
+    peak, fails HERE rather than in a screenshot. And host B never answered, so a
+    `0.0` where its temperature should be would draw a dead node as a quiet one.
+    """
+    payload = _cluster_history_rows(tmp_path)
+    row = _cluster_host_row(payload, CH_HOST_A, CLUSTER_HISTORY_BASE)
+
+    assert row["gpu_temp_c"] == 75.0, row["gpu_temp_c"]
+    assert row["gpu_temp_c_max"] == 90.0, row["gpu_temp_c_max"]
+    assert row["gpu_temp_c"] != row["gpu_temp_c_max"], (
+        "the fixture stopped making average and peak differ, so this assertion "
+        "would pass on a route that copies one into the other")
+    assert row["gpu_power_w"] == 160.0 and row["gpu_power_w_max"] == 200.0
+
+    # The peak columns are also named, not merely present: a surface that checks
+    # the vocabulary before drawing would otherwise skip them.
+    assert payload["max_fields"] == ["cpu_temp_c_max", "gpu_temp_c_max",
+                                     "gpu_power_w_max"]
+    for peak in payload["max_fields"]:
+        assert peak in row, "%s is named but not carried" % peak
+        assert peak in row and row[peak] is not None
+
+    failed = _cluster_host_row(payload, CH_HOST_B, CLUSTER_HISTORY_BASE)
+    assert failed["error"] == "collect failed"
+    for key in ("gpu_temp_c", "gpu_temp_c_max", "gpu_power_w", "cpu_usage_pct",
+                "mem_used_pct"):
+        assert failed[key] is None, "%s arrived as %r, not null" % (key,
+                                                                    failed[key])
+
+    # ...and the decoder half of the same fact: every field the recorder can
+    # legitimately leave null is declared OPTIONAL. A non-optional `Double` there
+    # is worse than a missing key — it either fails the decode for the whole
+    # payload or, with a default, turns "no answer" into a plotted 0.
+    declared = _swift_struct_field_types(METRICS_SHARED_MODELS.read_text(),
+                                         "ClusterHistoryPoint")
+    assert declared, "ClusterHistoryPoint has no fields to inspect"
+    for field in ("gpu_temp_c", "gpu_temp_c_max", "gpu_power_w",
+                  "gpu_power_w_max", "cpu_temp_c", "cpu_usage_pct",
+                  "mem_used_pct", "gpu_mem_used_mb", "kv", "gen_tps",
+                  "prompt_tps", "run", "wait", "n", "error"):
+        assert field in declared, "%s is not declared in ClusterHistoryPoint" % field
+        assert declared[field].endswith("?"), (
+            "%s is declared `%s`: the recorder stores null for a reading the node "
+            "never gave, and a non-optional field turns that into a zero on the "
+            "chart" % (field, declared[field]))
+
+
+def test_cluster_history_sends_every_parameter_as_a_real_query_item():
+    """3/3 — `clusterHistory()` transmits each of its six parameters properly.
+
+    `tier` and `since`/`until` are the ones a 400 is waiting for, and `window` is
+    the one the tier axis must NOT send (the route rejects both axes at once). The
+    widget client is outside `REQUIRED_QUERY_PARAMS`, which parses HSCCClient, so
+    this is the only place the class of defect gets caught: a query welded into
+    the path is percent-encoded by URLComponents into `%3F`, the handler never
+    sees it, and the call compiles and 400s on every refresh forever.
+    """
+    src = METRICS_WIDGET_CLIENT.read_text()
+    assert 'static let clusterHistory = "/v1/cluster/history"' in src, (
+        "the canonical history path must stay a bare path with no query welded "
+        "into it")
+    assert not re.search(r'static let clusterHistory\s*=\s*"[^"]*\?', src), (
+        "a `?` in the path constant is the escaped-query defect class")
+
+    start = src.index("func clusterHistory(")
+    rest = src[start:]
+    end = rest.find("\n    func ", 10)
+    body = rest[:end] if end > 0 else rest
+    sent = set(re.findall(r'URLQueryItem\(name:\s*"([^"]+)"', body))
+    for param in ("window", "tier", "since", "until", "node", "metrics"):
+        assert param in sent, (
+            "clusterHistory() does not transmit `%s` as a URLQueryItem "
+            "(sends %s)" % (param, sorted(sent)))
+    assert "WidgetDataPath.clusterHistory" in body, (
+        "the read must go through the allowlisted path constant, not a literal")
+    assert '"/v1/cluster/history"' not in body, (
+        "the call site must use WidgetDataPath.clusterHistory; a literal path "
+        "here bypasses the closed allowlist that makes 'no mutation calls' a "
+        "property of this file")
+    # The axes are mutually exclusive on the route, so the client must be able to
+    # drop the defaulted `window` rather than send both and 400.
+    assert re.search(r"if let tier", body) and re.search(r"} else if let window",
+                                                        body), (
+        "clusterHistory() must send `tier` (with since/until) OR `window`, never "
+        "both — the route 400s the pair")
