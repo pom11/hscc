@@ -32,6 +32,11 @@ import pytest
 import api_server
 import routes_orchestrator
 import routes_session  # noqa: F401  (registers the new /session route)
+# Must stay AFTER `import routes_orchestrator`: that import puts hscc-roles on
+# sys.path (routes_orchestrator's _ROLES_DIR block), and `main_orch` is the
+# resolver's owner of the main-orchestrator identity — the thing the three
+# project-less cases below derive their expectation from instead of restating.
+import main_orch
 from hermes_gap import require_hermes_state
 from routes_orchestrator import (
     OrchestratorError,
@@ -160,28 +165,113 @@ def test_resolve_no_session_honest_none(tmp_path, monkeypatch):
     assert sid is None
 
 
-def test_resolve_general_sentinel_is_honest(tmp_path, monkeypatch):
-    """None / 'general' resolve to the main orchestrator (no session).
+@pytest.fixture
+def sealed_hscc_dir(tmp_path, monkeypatch):
+    """Point ``HSCC_DIR`` at an empty dir so no operator-stored name leaks in.
 
-    The sentinel is no longer the retired ``general-orch`` catch-all: M1 made
-    the bootstrap-stored main name (default ``general``) the one identity for
-    profile, session and board. The expectation comes from that resolver, not
-    a second hardcoded name, so this test keeps its intent — an honest
-    no-session result for the project-less identity — without spelling the
-    retired profile.
+    The main-orchestrator identity is read from ``~/.hscc/main-orchestrator.json``
+    by ``main_orch.stored_name()``. Sealing the root makes the fallback
+    (:data:`main_orch.DEFAULT_NAME`) deterministic, exactly as
+    ``hscc-roles/tests/test_main_orch.py``'s ``hscc_dir`` fixture does, so these
+    three cases answer the same way on a bootstrapped host and on a bare one.
     """
-    monkeypatch.setenv("HSCC_DIR", str(tmp_path / "hscc-state"))
+    root = tmp_path / "hscc"
+    root.mkdir()
+    monkeypatch.setenv("HSCC_DIR", str(root))
+    return root
+
+
+def test_resolve_projectless_identity_is_the_stored_main_orchestrator(
+        tmp_path, monkeypatch, sealed_hscc_dir):
+    """None / 'general' resolve to the ONE named main orchestrator (no session).
+
+    PR #432 (`f1e2477e`, "roles: one named main orchestrator") amended this
+    expectation: it retired the ``general-orch`` catch-all as the DEFAULT for a
+    project-less request and made the bootstrap-stored main name (``general``
+    while nothing is stored) the one identity for profile, session and board —
+    ``changelog.d/t_c6eccd49.md`` is the contract text. The expectation is
+    DERIVED from ``main_orch``, the owner of that identity, instead of restated
+    as a literal here, so a rename cannot rot this pin the way #432 rotted the
+    assertion it replaced.
+    """
     reg = _write_registry(tmp_path, [])
     state = tmp_path / "state.db"
     _make_state_db(state).close()
     _point_profile_db_at(monkeypatch, state)
 
-    expected = routes_orchestrator.main_profile()
+    # The precondition the fallback case stands on (the fixture sealed it).
+    assert main_orch.stored_name(hscc_dir=str(sealed_hscc_dir)) is None
+    name = main_orch.main_name(hscc_dir=str(sealed_hscc_dir))
+    assert name == main_orch.main_profile(hscc_dir=str(sealed_hscc_dir))
+    assert name == "general"        # DEFAULT_NAME, spelled once, for the reader
+
     for proj in (None, "general"):
         profile, title, sid = resolve_named_session_id(proj, registry_path=reg)
-        assert profile == expected
-        assert title == expected
+        assert profile == name
+        assert title == name
         assert sid is None
+
+
+def test_resolve_projectless_identity_follows_a_stored_main_name(
+        tmp_path, monkeypatch, sealed_hscc_dir):
+    """The derived expectation above is not vacuous: store a name and it moves.
+
+    Guards against the test passing because it hardcodes the default. #432's
+    contract is "the stored name IS the identity", so a resolver that ignored
+    the stored document must fail here even while the default case stays green.
+    """
+    reg = _write_registry(tmp_path, [])
+    state = tmp_path / "state.db"
+    _make_state_db(state).close()
+    _point_profile_db_at(monkeypatch, state)
+
+    main_orch.store_name("ops", hscc_dir=str(sealed_hscc_dir),
+                         registry_path="/nonexistent.yaml",
+                         profiles_dir=str(tmp_path / "profiles"))
+    assert main_orch.main_profile(hscc_dir=str(sealed_hscc_dir)) == "ops"
+
+    for proj in (None, "general", "ops"):   # the stored name is also accepted
+        profile, title, sid = resolve_named_session_id(proj, registry_path=reg)
+        assert profile == "ops"
+        assert title == "ops"
+        assert sid is None
+
+
+def test_resolve_explicit_legacy_general_orch_still_resolves_catch_all(
+        tmp_path, monkeypatch, sealed_hscc_dir):
+    """The half of #432 that is easy to lose: an EXPLICITLY named `general-orch`
+    still resolves to the legacy catch-all, never to the main orchestrator.
+
+    #432 removed `GENERAL_PROFILE`/`GENERAL_BOARD` as the DEFAULT for a
+    project-less request but kept the legacy identity reachable for an existing
+    install that still spells the old name (the resolver routes it through
+    `orchestrators._legacy_general_identity()`). Dropping this case would delete
+    the only coverage of that path in this leg — the sibling roles coverage is
+    `hscc-roles/tests/test_main_orch.py::
+    test_resolver_keeps_the_explicit_legacy_catch_all_working`, which checks the
+    resolver dict, not this API-side 3-tuple.
+
+    The literals here are deliberate. A pin that read `main_orch.
+    LEGACY_GENERAL_PROFILE` would still pass if that constant were renamed while
+    real installs keep calling `general-orch`, so this is the one assertion in
+    the file that must spell the wire name. The grep guard
+    (`hscc-roles/tests/test_main_orch.py::
+    test_no_hardcoded_old_profile_or_board_literals_outside_resolver`) skips
+    `tests/` paths, so it stays green.
+    """
+    reg = _write_registry(tmp_path, [])
+    state = tmp_path / "state.db"
+    _make_state_db(state).close()
+    _point_profile_db_at(monkeypatch, state)
+
+    profile, title, sid = resolve_named_session_id("general-orch",
+                                                   registry_path=reg)
+    assert profile == "general-orch"
+    assert title == "general"
+    assert sid is None
+    # Distinct from the main orchestrator: the legacy path must not have been
+    # quietly folded onto the new one.
+    assert profile != main_orch.main_profile(hscc_dir=str(sealed_hscc_dir))
 
 
 def test_resolve_uses_registry_persisted_session_as_title(tmp_path, monkeypatch):

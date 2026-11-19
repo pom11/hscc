@@ -239,10 +239,17 @@ and `test_session_discovery.py::test_real_sessiondb_read_only_discovers_telegram
 `hermes_state.SessionDB`).
 
 `hscc-api/tests/test_session_resolver.py`: `test_resolve_returns_real_session_id`,
-`test_resolve_no_session_honest_none`, `test_resolve_general_sentinel_is_honest`,
+`test_resolve_no_session_honest_none`,
+`test_resolve_projectless_identity_is_the_stored_main_orchestrator`,
+`test_resolve_projectless_identity_follows_a_stored_main_name`,
+`test_resolve_explicit_legacy_general_orch_still_resolves_catch_all` (the last
+three are t_facdaa48's: the first renamed from
+`test_resolve_general_sentinel_is_honest`, the other two new — the stored-name
+case and the explicit-`general-orch` case),
 `test_resolve_uses_registry_persisted_session_as_title`,
 `test_endpoint_no_session_honest`, `test_endpoint_known_session_returns_id`
-(each builds a real `hermes_state.SessionDB` through the module's one `_db()` helper).
+(each builds a real `hermes_state.SessionDB` through the module's one
+`_make_state_db()` helper).
 
 ## Why option 2, not option 1
 
