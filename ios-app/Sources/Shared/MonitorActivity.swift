@@ -66,6 +66,10 @@ struct MonitorActivityAttributes: ActivityAttributes {
         public var hostRowsDropped: Int? = nil
         /// The serving table's per-model `total (n)` rows.
         public var servingTotals: [MonitorServingTotalMetric]? = nil
+        /// `total (n)` rows the push cap left out, so the `+N more` under a
+        /// totals list is the truth about the fleet rather than about the list
+        /// this region happened to be handed.
+        public var servingTotalsDropped: Int? = nil
         /// The serving table's aggregate Run/Wait. nil = never told, which is
         /// NOT zero.
         public var servingRunning: Int? = nil

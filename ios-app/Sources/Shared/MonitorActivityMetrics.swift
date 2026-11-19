@@ -277,12 +277,12 @@ enum MonitorSurfaceReading {
                                         servingWaiting: summary.waiting,
                                         nodesUp: out.nodesUp,
                                         nodesTotal: out.nodesTotal)
-        // A glance that repeats one number twice reads as two facts. When the
-        // leading metric had to fall back to the serving count (nothing thermal
-        // or busy was reported), the trailing slot shows the host tally
-        // instead — the other thing the read actually told us.
-        if out.primary?.kind == .serving, out.secondary?.kind == .serving {
-            out.secondary = tallyMetric(nodesUp: out.nodesUp, nodesTotal: out.nodesTotal)
+        // A glance that repeats one number twice reads as two facts. The
+        // trailing slot is dropped rather than filled with a duplicate of the
+        // leading one — the compact region then shows one metric, which is the
+        // honest reading of a payload that only told us one thing.
+        if out.primary?.kind != nil, out.primary?.kind == out.secondary?.kind {
+            out.secondary = nil
         }
         return out
     }
@@ -436,10 +436,12 @@ enum MonitorSurfaceReading {
         return "+\(dropped) more"
     }
 
-    /// The Lock Screen's host rows: at most `lockScreenHostRows`, and the
-    /// count hidden by BOTH caps (the push cap the driver applied and the one
-    /// this region applies) reported together, so a `+N more` is never a lie
-    /// about how much of the fleet is missing.
+    /// The Lock Screen's host rows: at most `lockScreenHostRows`, plus how many
+    /// of the rows it was GIVEN the region did not draw. The rows the DRIVER's
+    /// cap left out are a separate number (`MonitorSurfacePayload.hostRowsDropped`,
+    /// pushed as `hostRowsDropped`), and a surface adds the two before it prints
+    /// `+N more` — a count of one clip alone would understate how much of the
+    /// fleet is missing, which is the same lie as drawing a short table silently.
     static func lockScreenHostRows(_ rows: [MonitorHostMetric]) -> (shown: [MonitorHostMetric], dropped: Int) {
         let shown = Array(rows.prefix(MonitorSurfaceLimits.lockScreenHostRows))
         return (shown, max(0, rows.count - shown.count))

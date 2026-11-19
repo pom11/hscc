@@ -96,8 +96,11 @@ struct HSCCLiveActivityMonitor: Widget {
                     let totals = MonitorSurfaceReading.islandServingTotals(state.servingTotals ?? [])
                     VStack(alignment: .leading, spacing: 3) {
                         if !rows.shown.isEmpty {
+                            // The region's own clip PLUS what the push cap left
+                            // out, so `+N more` is a statement about the fleet
+                            // rather than about the list this region was handed.
                             MonitorHostTable(rows: rows.shown,
-                                             dropped: rows.dropped,
+                                             dropped: rows.dropped + (state.hostRowsDropped ?? 0),
                                              dense: true,
                                              style: style)
                         }
@@ -106,6 +109,12 @@ struct HSCCLiveActivityMonitor: Widget {
                                 .font(style.font(size: 9))
                                 .foregroundColor(MonitorLevelColour.color(total.loadLevel, style: style))
                                 .lineLimit(1)
+                        }
+                        if let more = MonitorSurfaceReading.moreText(
+                            dropped: totals.dropped + (state.servingTotalsDropped ?? 0)) {
+                            Text(more)
+                                .font(style.font(size: 9))
+                                .foregroundColor(style.secondaryTextColor)
                         }
                         if rows.shown.isEmpty, let aggregate = MonitorSurfaceReading.servingSummaryText(
                             running: state.servingRunning, waiting: state.servingWaiting) {
@@ -134,7 +143,10 @@ struct HSCCLiveActivityMonitor: Widget {
                         .font(style.font(size: 11, weight: .semibold))
                         .foregroundColor(MonitorLevelColour.color(secondary.level, style: style))
                         .lineLimit(1)
-                } else {
+                } else if state.primary?.kind != .tally {
+                    // The tally is the last thing to fall back to, and only when
+                    // the leading metric is not already the tally — the same
+                    // number in both halves of a glance reads as two facts.
                     Text(MonitorSurfaceCopy.tally(up: state.nodesUp, total: state.nodesTotal))
                         .font(style.font(size: 11, weight: .semibold))
                         .foregroundColor(MonitorStateColour.color(state.state, style: style))
@@ -454,7 +466,7 @@ struct LockScreenMonitorView: View {
             } else {
                 let shown = MonitorSurfaceReading.lockScreenHostRows(rows)
                 MonitorHostTable(rows: shown.shown,
-                                 dropped: shown.dropped,
+                                 dropped: shown.dropped + (state.hostRowsDropped ?? 0),
                                  dense: false,
                                  style: style)
             }
@@ -501,7 +513,8 @@ struct LockScreenMonitorView: View {
                             .foregroundColor(style.secondaryTextColor)
                     }
                 }
-                if let more = MonitorSurfaceReading.moreText(dropped: totals.dropped) {
+                if let more = MonitorSurfaceReading.moreText(
+                    dropped: totals.dropped + (state.servingTotalsDropped ?? 0)) {
                     Text(more)
                         .font(style.font(.caption2))
                         .foregroundColor(style.secondaryTextColor)

@@ -155,6 +155,7 @@ enum MonitorContent {
                                                       hostRows: showsNodes ? surface.hostRows : nil,
                                                       hostRowsDropped: showsNodes ? surface.hostRowsDropped : nil,
                                                       servingTotals: showsNodes ? surface.servingTotals : nil,
+                                                      servingTotalsDropped: showsNodes ? surface.servingTotalsDropped : nil,
                                                       servingRunning: showsNodes ? surface.servingRunning : nil,
                                                       servingWaiting: showsNodes ? surface.servingWaiting : nil,
                                                       primary: showsNodes ? surface.primary : nil,

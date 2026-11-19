@@ -688,7 +688,10 @@ private enum StoredJSON: Decodable {
 /// `100.64.0.1` (the docs/tests placeholder) or the LAN address §7 forbids.
 private let dottedQuadRE = try! NSRegularExpression(pattern: #"\d{1,3}(?:\.\d{1,3}){3}"#)
 
-private func holdsDottedQuad(_ s: String) -> Bool {
+/// Internal (not `private`) because `monitor_surfaces.swift` scans the Live
+/// Activity's pushed state with the SAME validator, and two regexes that are
+/// supposed to mean the same thing is how one of them stops matching.
+func holdsDottedQuad(_ s: String) -> Bool {
     dottedQuadRE.firstMatch(in: s, range: NSRange(location: 0, length: s.utf16.count)) != nil
 }
 
@@ -918,6 +921,14 @@ c.assertions("v1_cluster_history_tier_axis.json",
                 && !payload.hosts.isEmpty && !payload.engines.isEmpty,
              "axis=\(String(describing: payload.axis)) source=\(String(describing: payload.source)) window=\(payload.window) since=\(payload.since) until=\(payload.until)")
 }
+// ---- Monitor Live Activity surfaces (t_1685f884) — same arrangement: the
+// checks are in monitor_surfaces.swift, the calls are here. They exercise
+// `MonitorSurfaceReading`, the code the Lock Screen, compact, expanded and
+// minimal surfaces actually call, against the same goldens — so a surface that
+// picks the wrong column, invents a fleet average, colours an absent metric, or
+// truncates silently fails here rather than on a lock screen.
+monitorActivitySurfaces(c)
+monitorActivityEdgeSurfaces(c)
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
