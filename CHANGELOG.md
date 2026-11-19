@@ -11,6 +11,2246 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.16.0] - 2026-11-19
+
+### Added
+- **The main orchestrator is now documented as the shipped default.** The root
+  README has a "The main orchestrator" section covering the bootstrap name
+  prompt (default `general`), its own board being the machine-wide kanban
+  current board, its tmux pane, the four daemon-owned wake-ups, its
+  everything-except-LIVE-publish authority, `hscc notify` / APNs reach, and the
+  one-time APNs key setup (`~/.hscc/apns.json`, never the repo). The bootstrap,
+  roles, cluster, API, fleet/autodown and project docs plus the bundled `hscc`
+  skill now say main orchestrator where they used to describe `general-orch`,
+  the `orchestrator` role, or the legacy `default` board as current.
+
+- **An isolated end-to-end bootstrap test covers the whole main-orchestrator
+  install.** With a temp `HERMES_HOME`/`HSCC_DIR`, `--skip-node-recovery` and a
+  fake sparkrun fleet it proves: fresh `--yes` -> profile `general` + board
+  `general` current + the four wake-ups listed by the installed
+  `hscc main wakeups list`; a fresh custom name lands on profile, board and
+  wake-ups; and an upgrade from `general-orch` + `orchestrator` + the legacy
+  `default` board keeps every profile/file/card, retires both SOULs, copies
+  (never moves) the legacy memory/sessions, resolves the main name, and is a
+  byte-identical no-op on a second run.
+
+- **`scripts/bump_formula.py` now emits the `h2` sdist closure when the release
+  requires it.** `venv.pip_install resources` runs with `--no-deps` and never
+  reads `requirements.txt`, so a new SOT pin is inert for brew users. The bump
+  reads the release tarball's `requirements.txt` and adds pinned `h2`, `hpack`
+  and `hyperframe` resource blocks when absent (existing blocks are never
+  rewritten), so the next release installs the HTTP/2 support the APNs sender
+  needs.
+- **The request-budget ruling for metrics history is now written where the
+  budget lives.** `ios-app/docs/WIDGET_DATA_CONTRACT.md` — the file that is the
+  input every widget and Live Activity card reads — never mentioned the history
+  read at all, and the only sentence recording how it fits §2's "≤ 2 requests
+  per surface per refresh" sat in a comment on the route being retired, so it
+  would have vanished with that route. §2 now states the call: history is a
+  **surface of its own** making **one** request on its own cadence, the cluster
+  tile keeps exactly its two (`cluster/monitor` + `cluster/status`) and grows no
+  third. §5.6 registers the surface and the rules its chart must honour — one
+  request, one axis per call, `resolution_s` as the only honest axis label, a
+  `nil` metric stays a gap, an average never drawn alone where a peak column
+  exists, an empty answer being a process fact rather than an idle fleet, and a
+  failed read keeping the last-known window instead of drawing zeros. §8 makes
+  the ruling something the next cards must not re-litigate, and §9 records that
+  the route has **no measured wire size** — the deployed build answers 404 for
+  it, so §2's ≤ 16 KB soft ceiling is unverified for history and no card may
+  quote a figure for it until §9's measurement runs.
+- **`WidgetDataClient.clusterHistory` says what it is.** Its doc comment read
+  "Dataset 5", a label the contract's §3 does not use for it and which the
+  retirement of the other history route would have left as the only surviving
+  description of the surface. It now names the surface, its one request, and the
+  §2 ceiling it sits inside, so the budget decision is readable at the call site
+  as well as in the contract.
+- **The Monitor Live Activity shows the cluster's metrics on every surface, not
+  a summary.** The Lock Screen draws one row per host — the CLI's own GPU%,
+  GPU °C, CPU °C and W cells, in the CLI's own units and rounding — with
+  `N run · M wait` behind each host and the per-engine `total (n)` rows
+  underneath; the expanded Dynamic Island keeps the hottest host plus the
+  serving totals; compact leading is the single hottest temperature (total GPU%
+  when no host reports one) with the busiest host's utilisation trailing it, and
+  minimal carries the same single primary. The rules are
+  `MonitorSurfaceReading` in `ios-app/Sources/Shared/MonitorActivityMetrics.swift`
+  on Foundation only, so the surfaces, the unit tests and the two gates decide
+  the same thing from the same code. The app-side driver stays the only fetcher;
+  the extension reads no network.
+- **The pushed state is capped and never silent about the cap.** Six host rows go
+  into the activity (`MonitorSurfaceLimits.maxPushedHostRows`, sized against
+  ActivityKit's ~4 KB state budget — the state is persisted by the system, so
+  every cell costs disk in the extension's group container); the remainder is
+  counted as `+N more` next to `nodesTotal`, never a table that quietly stops. A
+  host the route answered with no readable cell reads "not sampled" rather than a
+  row of zeros, and a metric that cannot be read pushes `nil`, which is a
+  different fact from zero and draws `—`.
+- **A stale activity now admits it is stale, and a dead fleet stops claiming to
+  serve.** `MonitorActivityClock.staleAfter` (180 s = 3× the driver's cadence —
+  an extension gets no timer of its own) dims a row the driver never refreshed,
+  and the driver no longer pushes a `running` state after a terminal read
+  (`DriverPolicy.terminalReadClearsRunning`): a failed poll now updates the row
+  instead of leaving "serving" on the lock screen indefinitely. Both are measured
+  at the `ActivityKit` seam in `MonitorActivitySurfaceTests`, which stubs the
+  framework rather than linking it — Swift Testing's macro library is not
+  registered in the generated `HSCCLiveActivityMonitorTests` target, which
+  `ios-app/docs/BASELINE.md` now records.
+- **The iOS app now receives the cluster's push alerts while it is closed.**
+  After notification permission is granted (alert + sound only), the app asks
+  APNs for its device token and POSTs it to `/v1/devices` on **every saved
+  cluster** through the normal `HSCCClient`, so each cluster's multi-address
+  failover order and bearer token apply unchanged. Registration repeats on
+  launch, on foreground and after the cluster list changes; the server treats
+  it as an idempotent refresh, which is also how a sandbox -> production token
+  corrects itself. The token stays in the App Group on the phone and is never
+  logged or displayed.
+
+- **Foreground pushes and the existing local alerts share one path.** The
+  existing `UNUserNotificationCenterDelegate` already presents banners while
+  the app is open and routes a tap's `hscc_url`; remote alerts use the same
+  delegate. `NeedsOperatorNotifier` / `OperatorAlert` still power the local
+  condition poll, so nothing regressed for events the app notices itself.
+
+- **Settings gained an honest push status and a real Send test.** The
+  Notifications section shows permission/registration state ("Push enabled —
+  registered with N clusters", or the actual failure), keeps the per-class
+  toggles, and its **Send test** button calls the active cluster's
+  `POST /v1/devices/test` — the same push `hscc notify test` sends — after
+  refreshing this phone's registration. The server's `speak` line is shown,
+  so "not sent (no_config/no_devices/all_failed)" is never mistaken for
+  success.
+
+- **The app's entitlement is production for the Ad Hoc build.** `project.yml`
+  writes `aps-environment=$(HSCC_APS_ENVIRONMENT)`: development for Debug,
+  production for Release, matching how `release_adhoc.sh` archives with
+  automatic distribution signing.
+- **CI now runs the test roster, so a red leg can block a merge.**
+  `scripts/run_tests.sh` was the repo's only test gate and appeared in no
+  workflow — `grep -rn run_tests .github/workflows/` matched nothing, and
+  `gh pr checks 443` / `#446` each returned only `compile` and `guard`. So a red
+  leg could not stop a merge, and "the gate ran and passed" was indistinguishable
+  from "the gate was never run" (whether anyone ran it locally is not observable
+  from the repo, and this entry does not claim it). Measured consequence:
+  `hscc-api/tests/test_contract_swift_routes.py` was red on `main` for 1h40m
+  (`704f1cb8` #443 → `ce8e87f3` #452) with three PRs merged on top of it, and
+  stopped being red only when the feature under test was deleted.
+  New: `.github/workflows/pytest-legs.yml`. `pull_request` runs the legs its
+  touched paths can break, decided by `.github/scripts/decide_legs.sh` and
+  `.github/scripts/leg_select.py`, which **fails closed** — a path it cannot
+  attribute widens to the full suite rather than shrinking. `push` to `main`
+  runs ALL twelve legs as the backstop; `workflow_dispatch` runs the operator's
+  choice. Each leg is a **parallel matrix job** (wall time is the slowest leg,
+  not the sum) and the test venv is cached on `requirements.txt`.
+  Enforcement is one repository variable, `HSCC_TESTS_ENFORCE`, in the same
+  advisory-then-blocking shape as `address-guard.yml`; a leg that could not run
+  at all is red either way. The stable check for branch protection is
+  `pytest-legs / legs`. Each leg is a parallel matrix job (Ubuntu, except
+  `hscc_daemon` on macOS because it imports `select.kqueue`), so wall time is
+  the slowest leg: the first full-suite run measured **5m54s** cold-cache
+  (run `44550168746`), with `hscc-api` at 5m31s.
+- **`scripts/run_tests.sh` gained leg selection (`HSCC_TEST_LEGS`).** It had no
+  selection mechanism at all — extra argv goes to pytest, so `run_tests.sh
+  hscc-api` ran all twelve legs and handed `hscc-api` to pytest as a path. That
+  is why the roster never reached CI: a job that must run everything is either
+  slow (~25 min on a loaded host) or not run, and the repo had chosen "not run"
+  by omission. Unset means the whole roster, unchanged; an unknown leg name exits
+  **64** before any leg starts, because a typo that silently ran nothing would
+  report green — the exact failure mode this gate exists to close. The selection
+  is always printed, so a redirected log distinguishes "3 legs, selected" from
+  "12 legs, full suite".
+- **The `systemSmall` tile's GPU cells now trend instead of guessing.** Each
+  host's GPU% digit keeps a real sparkline under it, fed by
+  `GET /v1/cluster/history` (the recorder's stored series): one request per
+  refresh for the small family, reduced to the track width by the existing
+  pixel-column downsampler so the drawn line can never hide the series' true
+  peak, and painted by the same `ClusterMetricLevel` verdict as the digit
+  above it. The tile now fetches history only for `systemSmall` and drops the
+  `cluster/status` read for that one family, so no family exceeds the two
+  requests per refresh §2 allows.
+- **No fake trend.** A host the recorder has no usable series for — the
+  history read failed, the host never reported GPU utilisation, or fewer than
+  two readable points exist — keeps the single-sample bar the tile drew
+  before; the view never draws a flat line it assembled from one sample.
+- **The VoiceOver sentence names the trend it drew.** A tiled host whose
+  sparkline was drawn speaks `GPU% trend 62 to 94`; a host without one does
+  not claim a trend.
+- **The `systemMedium` Cluster and Monitor tiles now draw
+  `hscc cluster monitor`'s host table.** One row per host with the CLI's own
+  nine columns in the CLI's own order — Host, Jobs, CPU%, RAM%, Swap%, GPU%,
+  CPU Temp, GPU Temp, GPU Power — under the CLI's own header row. Every string
+  in the table is `CLIMonitorHostRow.cells` and every title is
+  `CLIMonitorHostRow.columns` from the shared view-model, so the units (`" C"`,
+  `" W"`), the rounding (`{:.0f}`/`{:.1f}`/`{:.2f}` per column) and the `-` for
+  an unreadable metric are the CLI's, not a widget's guess at them. The tile
+  owns layout and colour only.
+  `ios-app/Sources/HSCCWidgets/CLIMonitorTableReading.swift` holds the columns,
+  the row cap and the accessibility sentence on Foundation only, which is what
+  lets `scripts/cluster_widget_check.sh` execute the table against the committed
+  fixture; `CLIMonitorHostTableView.swift` is the SwiftUI grid and owns exactly
+  one decision — which slot of the operator's palette a threshold verdict
+  paints. Temps and power are coloured through the view-model's
+  `cpuTempLevel`/`gpuTempLevel`/`gpuPowerLevel` (and CPU/RAM through
+  `cpuLevel`/`memLevel`); an ok cell stays in plain ink, because the CLI prints
+  every cell in the default style and a green wall of numbers would stop
+  looking like the CLI. The Host column draws `displayLabel`, never the wire
+  address (§7), and the operator's WidgetStyle drives every font, colour,
+  density and the header/icon switches, as on the other families. Both entries
+  carry the view-model from the same read that produces their glance projection
+  (still two requests), and reach the table only through `cliHostRows`, the one
+  place unconfigured, paused and "nodes" switched off are refused.
+- **The Lock Screen accessories on the Cluster and Monitor tiles now answer one
+  question: is the cluster hot, and is it working.** `accessoryInline`,
+  `accessoryCircular` and `accessoryRectangular` draw the four numbers
+  `hscc cluster monitor`'s rows add up to — the hottest temperature anywhere in
+  the fleet (naming its host and its sensor), the fleet's GPU load, its power
+  draw in watts, and the running/waiting queue. `accessoryInline` is one honest
+  line (hottest temperature + the one queue fact that matters);
+  `accessoryCircular` is a capacity ring of the GPU load with the wattage under
+  it as its secondary; `accessoryRectangular` is the row of metrics with their
+  units, then the whole queue and how many hosts the read covers.
+- **The numbers come from the CLI's view-model, not from a second calculation.**
+  `ios-app/Sources/Shared/ClusterLockScreen.swift` projects
+  `ClusterMonitorViewModel` (t_61ed3f5e) and owns one copy rule for all three
+  families, so the temperature a Lock Screen shows IS the CLI's `CPU Temp` /
+  `GPU Temp` cell for that host — including its rounding — and the two tiles
+  cannot describe the same fleet differently. GPU load is a MEAN over the hosts
+  that reported one (a sum of percentages is not a percentage) and is labelled
+  `avg` wherever it appears; watts ARE summed. Both carry `hostsReporting` /
+  `hostsListed` and print `3/7` when they differ. A metric no host reported is
+  a dash that keeps its unit (`— W`), never a zero; a monitor read that never
+  answered leaves the accessory on the reason/age copy rather than a row of
+  dashes. `cluster_widget_check.sh` executes the projection and the copy
+  against the committed capture — 93 checks, 37 of them the four numbers, their
+  reductions, their bounds and their nil-is-not-zero cases.
+- **`hscc notify` now posts to a durable alert feed instead of firing one
+  desktop notification.** The main orchestrator needs one place to tell the
+  operator something needs a human — a LIVE publish waiting for approval, a
+  break it could not fix, a release it shipped — and the iOS/macOS apps need
+  one place to read it. `hscc notify "<title>" "<body>" [--level
+  info|action|critical] [--key <dedupe-key>]` is an authenticated client of
+  `POST /v1/alerts` (token auth through the same central gate as every other
+  route), so it does not become a second writer beside the API. The store is
+  `~/.hscc/alerts.json`, bounded to the last 500 alerts, with monotonic ids
+  that survive restarts; a mutation takes an `fcntl` lock and replaces the
+  document atomically, so the CLI and the API can write on one host without
+  losing a row. A bare `hscc notify "<message>"` keeps working as the legacy
+  one-argument form (title `HSCC`), and `--json` prints the API payload for
+  scripts.
+
+- **Dedupe is per condition, rate limits are per key and global.** A keyed
+  alert with unchanged title/body/level returns the existing alert with
+  `deduped: true` instead of re-alerting; changed content is a changed
+  condition and alerts again. Acknowledging an alert clears its dedupe slot,
+  so a condition that recurs after the operator has seen it is news again.
+  Independently, a key may emit at most once per `PER_KEY_MIN_INTERVAL_S` (60)
+  and the feed at most `GLOBAL_MAX_PER_WINDOW` (30) per minute; suppression is
+  a 200 with `rate_limited: true` and `retry_after_s`, never an error, so a
+  looping producer cannot turn into notification spam.
+
+- **`GET /v1/alerts?since=<id>&limit=<n>` and `POST /v1/alerts/<id>/ack`
+  complete the feed for the apps.** `since` is exclusive and rows ascend by
+  id; without it the newest page is returned (default 100, cap 500) so a first
+  launch can render a screenful. `next_since`, `latest_id` and `has_more` are
+  the paging cursor, and ack is idempotent (the first `acked_at` is kept) and
+  404s for an id no longer in the bounded feed. The push sender is a no-op
+  seam (`hscc_daemon/alert_push.py`, `sent: false`, `reason: no_transport`)
+  that card N2 fills; a sender failure never fails or hides the alert, and the
+  response never claims a push happened. Documented in
+  `hscc-api/docs/WIDGET_ROUTES.md`.
+
+- **Store rules, route contract and the real CLI path are all pinned.**
+  `hscc_daemon/tests/test_alerts.py` covers dedupe, ack-clears, both rate
+  limits, the 500-alert bound, since paging, corrupt-store recovery and the
+  push seam; `hscc-api/tests/test_routes_alerts.py` drives create/dedupe/rate
+  limit/paging/ack/auth over loopback HTTP; `hscc_daemon/tests/test_notify_cli.py`
+  drives `hscc_daemon.hscc.main` with the words an operator types and asserts
+  the title/body boundary reaches the verb unjoined (the old dispatcher
+  `" ".join(args[1:])` would have merged them).
+* `GET /v1/metrics/history?tier=&host=&node=&since=&until=`: the recorder t_81af8884 built is now readable, so a widget can chart history instead of re-drawing one ~15-minute snapshot. `tier` is required — `0` is the 2 s ring (15 min), `1` the 1-minute roll-ups (24 h), `2` the 5-minute roll-ups (7 d) — and an absent or out-of-range tier is a 400, because which resolution a chart is drawing is the one thing a client may not guess. Tiers 1 and 2 are read from `~/.hscc/metrics/history.db` through the store's own `host_rows`/`engine_rows`; tier 0 comes from the recorder in the process that holds it. Documented in `hscc-api/docs/WIDGET_ROUTES.md` and registered in the widget-route contract set, so the doc, the route and the Swift decoder are pinned to each other.
+* The route passes the recorder's field names through UNRENAMED and its `None`s UNCOALESCED — a rename is how a chart silently reads nil for a real number, and a `None` flattened to `0` draws a node that never answered as an idle one. The peaks ride alongside the averages (`gpu_temp_c` is the bucket's mean, `gpu_temp_c_max` what it reached) and `fields.host_peaks` names them, so a temperature or power chart cannot quietly draw only the mean and hide the throttle spike the peak columns exist for. `fields` publishes the whole vocabulary for the same reason: no client hardcodes a column list.
+* Tier 0's emptiness is stated, not implied. The ring lives in the daemon's memory and the API is a separate process on this fleet (`hscc start-daemon` vs `api_server serve`), so the route reads the recorder only if this process already has one and NEVER calls `get_sampler()` — constructing one from a GET would spawn a second `sparkrun cluster monitor` and a second writer on the roll-up watermarks. `tier0.readable_here` + `source`/`reason` say which of "just restarted", "no samples yet" and "not this process" an empty window means, and `stats()` rides along so `exists: false` reads as "nothing has been rolled up yet" rather than 24 quiet hours. A GET never creates the store: an absent file reports `sqlite_store_absent`, it does not leave a schema-only database in the operator's state dir.
+* iOS/macOS: `MetricsHistoryResponse` with its node/engine row shapes, the sixth audited read on `WidgetDataClient` (`metricsHistory(tier:host:node:since:until:)`, tier clamped into range rather than forwarded), and `MetricsTrend` — a Foundation-only chart projection that keeps a `nil` metric a gap a surface can count and caption rather than a flat zero, and exposes each series' peak beside its average, scaling the axis by the higher of the two so a spike cannot clip.
+- **`ios-app/Sources/Shared/ClusterMonitorViewModel.swift` — one shared
+  cluster-monitor view-model for the apps.** Every string `hscc cluster monitor`
+  puts in its host table and its per-engine serving table is now produced once,
+  in Swift, from the same decoded payload: nine host cells (Jobs, CPU%, RAM%,
+  Swap as used/total, GPU%, CPU Temp, GPU Temp, GPU Power), the serving rows with
+  their per-model `total (n)` rows, and the CLI's width rule at
+  `cluster_live.WIDE_MIN`. `MonitorSample` and `ServingRow` gained the fields the
+  route was already sending, so no printed column is missing from the model. The
+  widget cards draw these cells instead of re-deriving them.
+  `sparkrun_job_names` stays undeclared on purpose (§7); the decode check names
+  the omission by re-encoding a decoded sample rather than asserting it in prose.
+  Threshold colours are the view-model's own — the CLI colours serving load,
+  never a temperature or a wattage — and are documented where they are declared.
+- **The daemon can now push alerts to the operator's phone and Mac through
+  APNs.** `hscc_daemon/apns.py` is the real transport behind N1's
+  `alert_push.send` seam: ES256 token-auth JWTs from a `.p8` key (key id, team
+  id, key path/keychain item and optional topics come from `~/.hscc/apns.json`,
+  never the repo), HTTP/2 POSTs to `/3/device/<token>`, and an alert-only
+  payload (`aps.alert.title/body`, `sound=default` for `action`/`critical`,
+  `thread-id` = the alert key). Every newly created alert in the feed is pushed
+  to every registered device once, after the write; a delivery failure never
+  fails or hides the alert.
+
+- **Devices register with `POST /v1/devices` and the roster is
+  `~/.hscc/devices.json`.** `{platform: ios|macos, token, bundle_id, env:
+  production|development}` is validated, normalised and stored as an idempotent
+  refresh per `(platform, token)`; responses and `GET /v1/devices` carry a
+  derived id, never the token. APNs `410` / `BadDeviceToken` /
+  `DeviceTokenNotForTopic` prunes the rejected row; transient failures keep it.
+  `POST /v1/devices/test` is the transport self-check and `hscc notify test`
+  drives it through the same authenticated API path, so `hscc notify test`
+  sends a real test push without adding a row to the alert feed.
+
+- **The one dependency is `h2`, and doctor warns when push is unconfigured.**
+  APNs requires HTTP/2; the venv already carries the pinned `httpx`, which
+  gains HTTP/2 with the minimal `h2` package (`httpx[http2]`), so no second HTTP
+  stack or crypto wheel is added — ES256 signing uses the system `openssl`
+  already present on macOS/Linux. The doctor row (WARN, never fatal) says "no
+  APNs key configured" and prints the one-time steps: Apple developer portal ->
+  Keys -> new key with APNs, enable Push Notifications on app ids
+  `ro.parsec.hscc.*`. Device tokens, JWTs and key material are never logged or
+  echoed; transport errors are reported by exception class, not URL. The brew
+  tap needs a matching `h2` resource block before a release ships this to brew
+  users (the requirement file's comment names that release step).
+- **The main orchestrator now has ONE merged SOUL: board duties plus cluster
+  authority.** `hscc-roles` generates the profile named at bootstrap (default
+  `general`) with the old general catch-all's board work and the `orchestrator`
+  role's cluster authority in a single identity. Its SOUL says it knows every
+  registry project, orchestrator profile and board; answers "what is happening"
+  from live state first (boards and cards, orchestrator panes via
+  `hscc orch inject --dry-run` and pane tails, PRs and checks, `hscc status` /
+  `hscc doctor`, the proxy) and never from memory alone, in short plain answers;
+  keeps standing watch cards parked `blocked` with a `watch` reason so the
+  dispatcher never hands them to a worker, and works them on wake-ups (stuck or
+  failing cards, wedged panes, drift into meta/side cards, duplicate cards,
+  cards completed while their PR is not on main); and talks to other
+  orchestrators only through `hscc orch inject` (steer when busy, plain when
+  idle) and the board tools, in English. Its authority is everything — models,
+  boards, cards, other orchestrators, reviews, merges, settings, node recovery,
+  and releases end to end including the post-release CLI upgrade + bootstrap
+  with the post-bootstrap checks (profiles YAML-compare, kanban caps, autodown
+  status) — except a LIVE publish, which raises an alert with `hscc notify` and
+  waits for the operator's OK. The standing rules are written into the same
+  SOUL: autodown exactly as the operator set it, no built apps installed on the
+  gateway host, public-repo rules, no attribution lines, no destructive git or
+  `rm -r` without the operator, and fleet access only through sparkrun/hscc.
+
+- **Existing installs migrate without losing anything, and re-running is a
+  no-op.** `orch-all` creates the main profile when it is missing, copies the
+  legacy catch-all's `memories/` and `sessions/` into it per file —
+  destination wins, the source is never moved or deleted — and marks both the
+  legacy catch-all and the legacy cluster-wide role retired in their SOULs
+  ("retired — use `<main>`"), leaving both profiles on disk. `generate` also
+  stamps the legacy cluster-wide role retired on every run, so a regeneration
+  cannot re-mint a competing authority. The migration never rewrites a config
+  file; the generator's existing YAML merge keeps every operator key.
+- **`hscc kanban monitor` now draws the local merge queue.** One "merge queue"
+  table per project with FIFO position, PR, card, branch, state
+  (`queued`/`rebasing`/`gating`/`merging`/`resolve`/`merged`/`failed`), age and
+  last result. The daemon stamps `stage` on its in-flight claim as it moves
+  through rebase -> gates -> merge, and records the PR's head branch when the
+  claim first reads `gh pr view`, so the table is not guessing. `--json` carries
+  the same rows under `merge_queue`; `--board` narrows to that project.
+- **`GET /v1/merge-queue` serves exactly those rows, read-only and token-gated.**
+  The route calls `hscc_daemon.merge_queue.view()` — the same function the
+  monitor renders — so the CLI and the API cannot disagree about a position or
+  state. `?board=<slug>` mirrors `hscc kanban monitor --board`; the queue ledger
+  is only read, never ticked.
+- **`hscc project review --queue` gains a `merge` column** (`--json`:
+  `merge_state`/`merge_pr`) showing where each awaiting-review card's PR sits in
+  the local queue. A standalone flightdeck install without `hscc_daemon` renders
+  the old queue with `-`.
+- The design's audited widget route roster (`WidgetDataPath.all` /
+  `EXPECTED_EXTENSION_ROUTES`) and `hscc-api/docs/WIDGET_ROUTES.md` now name
+  `/v1/merge-queue`.
+- **The daemon now wakes the main orchestrator on a schedule.** Four wake-ups
+  ship by default — cluster health every 2 h, orchestrator sweep every 3 h,
+  project memory refresh daily at 07:00 local, settings/skills review weekly
+  Monday 07:30 — and each fires a short self-contained prompt into the main
+  orchestrator's pane through the existing `hscc orch inject` path with
+  `--mode auto` (queued while busy, never interrupting a running turn). The
+  prompts live with the schedule and name the SOUL duty they serve. A missing
+  pane is skipped and logged, and `hscc doctor` reports it with the
+  `hscc main start` fix.
+
+- **`hscc main wakeups list|set <name> <schedule>|enable|disable <name>`** is
+  the operator surface. Schedules accept `every 2h`, `daily 07:00` and
+  `weekly Monday 07:30` (local time), and `--json` returns the machine
+  receipt (schedule, enabled, last fire, next due, last result and prompt).
+  Config is written through the module's own atomic writer into
+  `~/.hscc/main_wakeups.json`; last-fired and the last delivery result are
+  persisted in `~/.hscc/state/main_wakeups.json`, so a daemon restart neither
+  double-fires an occurrence nor forgets when it last ran.
+- **A "Merge Queue" widget mirrors `hscc kanban monitor`'s merge-queue tables
+  1:1.** iOS `systemSmall` (queued count + the live stage), `systemMedium`
+  (the CLI table, top 3 rows), `systemLarge` (up to 8 rows + the last merged
+  row), `accessoryCircular` / `accessoryRectangular` / `accessoryInline`, and
+  the macOS small/medium/large sizes through the same files by path. Every
+  cell is the CLI's own column string — Pos, PR, Card, Branch, State, Age and
+  Last result — produced by `MergeQueueTableReading`, which is compared against
+  goldens generated from `hscc_daemon/kanban_live.py::merge_queue_table`.
+- **The macOS menu bar dropdown gains a "Merge queue" section**, hidden while
+  the queue is empty; a failed read says why instead of disappearing. It draws
+  the same rows, in the same order, from `GET /v1/merge-queue` through the
+  shared `WidgetDataClient` — no queue steering, no git/gh, no second client.
+- **The surface is registered like every other widget.** Its own
+  `WidgetSurfaceKind.widgetMergeQueue` entry gives it an Active switch and a
+  cadence in Settings, and it carries the shared `WidgetStyle`, failover client
+  and live/stale/failed/empty states. `WIDGET_COVERAGE.md` records the family
+  matrix and the field-by-field mapping.
+- **The main orchestrator's board is now the kanban default.** Bootstrap runs
+  a new stage after profile provisioning that creates the board named by the
+  stored main-orchestrator identity (`main_board()`, default `general`) with
+  `hermes kanban boards create` — idempotent, so a re-run reports the existing
+  board — and then makes it the machine-wide current board with
+  `hermes kanban boards switch`. A card created without an explicit `board=`
+  therefore lands on the main orchestrator's board, never on whichever project
+  board was switched to last. The legacy `default` board is untouched and keeps
+  every card it already holds; `--dry-run` prints the planned board write and
+  performs none. The stage is non-fatal and warns with the one-line fix if the
+  Hermes CLI or the switch fails.
+- **`hscc doctor` has a `kanban current board (main orchestrator)` row.** It
+  compares Hermes' `get_current_board()` with `main_board()` and reads
+  read-only; when they differ it WARNs with the exact
+  `hermes kanban boards switch <name>` fix (or "re-run hscc-bootstrap") without
+  sinking preflight. A missing Hermes kanban library or an unreadable current
+  board renders as an honest unverifiable warning, never a pass.
+- The card-creating paths in `hscc_daemon` / `hscc-api` were swept: the only
+  hscc-API card creation (`POST /v1/cards`) already requires an explicit
+  `board`, and the daemon has no boardless create path, so nothing silently
+  falls back to the global pointer.
+* `hscc_daemon/metrics_history.py`: cluster and serving metrics now have a history. Until this card the only "history" the daemon had was `/v1/daemon/history`, the automated-action timeline, and the widgets refreshed about every 15 minutes — so anything that happened between two refreshes was gone, and a question like "was the GPU thermal-throttling during last night's slow run" had no answer. The daemon's new `metrics_history` stream keeps three tiers: every 2 s for the last 15 minutes in memory (450 points per node), 1-minute averages with peaks for the temperatures and power for 24 hours on disk, and the same at 5 minutes for 7 days.
+* Each coarser tier rolls up from the finer one and is never sampled separately, and every roll-up stores the peak as well as the average for `cpu_temp_c`, `gpu_temp_c` and `gpu_power_w` — an average alone reports a 500 W spike as a calm 113 W, which is the misreading that matters. The 5-minute peak is exact rather than approximate, because the largest 2 s reading inside a minute is that minute's stored peak.
+* The sampler is the cluster monitor's own: the stream ticks `cluster_live.HostStream` and `cluster_live.ServingPoller` — the two sources `hscc cluster monitor --live` already renders, at its own 2 s default interval. `HostStream` holds one long-running `sparkrun cluster monitor` child whose ssh channels stay open for its life, so a tick reads the newest line that already arrived rather than opening anything. No second poller was added to the fleet, and a test pins it structurally (an AST sweep for process/socket use) and by class identity.
+* Tiers 1 and 2 live in one bounded sqlite file, `~/.hscc/metrics/history.db`, with `WITHOUT ROWID` tables keyed `(tier, ts, host)` and `(tier, ts, node, port)` — not one JSON object per sample. Tier 0 is memory-only by design, and it is stated rather than hidden: it is EMPTY immediately after a daemon restart, and the minute that was open when the daemon died goes with it.
+* The per-node fields are sparkrun's own `MonitorSample` names (`cpu_usage_pct`, `cpu_temp_c`, `gpu_util_pct`, `gpu_temp_c`, `gpu_power_w`, `mem_used_pct`, `swap_used_mb`/`_total_mb`/derived `_used_pct`, `gpu_mem_used_mb`, `gpu_clock_mhz`, `net_recv_bytes_s`, `net_send_bytes_s`, plus `sparkrun_jobs`), and per engine the serving load the monitor renders (`run`, `wait`, `kv`) with generated and prompt tokens-per-second derived from vLLM's counters by `cluster_live.rates`. An unreported reading stays `None`; it is never stored as 0.0, which would draw a node that never answered as an idle one.
+* `hscc verify` covers the new stream like any other: `PERIODIC_INTERVALS["metrics_history"]` is the cadence's single source of truth, the tick stamps `~/.hscc/state/metrics_history.json` on every path including the one where the sampler failed, and the daemon terminates the monitor child on its stop path so a restart cannot orphan a child holding ssh channels open.
+- **Every orchestrator SOUL now carries the operator's anti-churn rules.**
+  One shared block in `hscc-roles/generator.py` (`_ANTI_CHURN_RULES`) is
+  appended to both the main orchestrator's and every per-project
+  `<project>-orch` operational block, so a regeneration emits it exactly once
+  and the rules text has a single source of truth. The six rules: done means
+  merged (never complete a card whose PR is open); you land a worker's green PR
+  yourself in the same turn and rebase your own open PRs instead of carding
+  them; at most 2 cards in flight on the same area; small findings stay in the
+  PR (a new card only for a real defect, after checking no card or PR already
+  covers it); do not wait on the operator except for a LIVE publish (plus a
+  project's own reserved steps); and always pass the board explicitly on every
+  kanban call. Operator-appended `## ` sections still survive regeneration.
+- **`ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift` — the small tile is now
+  a grid, not a single number.** `systemSmall` draws up to four hosts across four
+  of `hscc cluster monitor`'s own host columns (GPU%, GPU Temp, CPU Temp, GPU
+  Power) with the serving totals (run/wait, and how many models they came from)
+  underneath, so the densest surface the app has reports sixteen host readings
+  instead of one tally. Each cell is read out of `CLIMonitorHostRow` at the index
+  its CLI column name resolves to — never a hand-picked field — so a renamed
+  column falls back to `-` and goes red in the decode check rather than silently
+  mislabelling a value. Temps and power are coloured by the view-model's own
+  thresholds, serving totals by the CLI's `_load_style`, and every font and colour
+  comes from the stored `WidgetStyle`. A host that never sampled keeps its line as
+  dashes at level `.unknown`, and a route that sent no serving section renders `-`
+  for run and wait; only an empty list is allowed to say zero.
+- **`ios-app/Sources/Shared/ClusterMonitorTables.swift` — what the two biggest
+  monitor surfaces draw, decided once and off the view files.** The
+  cluster/monitor widgets' `systemLarge` and `systemExtraLarge` bodies now render
+  the CLI's own tables: the nine-column host table, the serving table with its
+  per-model `total (n)` rows, and — extra-large only — the six fields
+  `host_table()` has no column for (VRAM used/total, GPU clock, net recv/send
+  per second, uptime, fan %, load 1/5/15). A column here is a *selection* of
+  `CLIMonitorHostRow`/`CLIMonitorServingRow`, never a re-formatting, so a widget
+  cell and a terminal cell cannot round differently; the one deliberate
+  difference (the widget prints `displayLabel` where the CLI prints the wire
+  host, §7) is pinned by name in the decode check. The layout is Foundation-only
+  for the same reason the view-model is: a rule inside a file that imports
+  WidgetKit is a rule no gate can run. It carries the row caps and the `+N more`
+  line, so a clipped table says how much it hid instead of reading as a smaller
+  fleet.
+- **`ios-app/Sources/HSCCWidgets/ClusterMonitorTableViews.swift` — the two tiles
+  paint the same tables, from one implementation.** `systemLarge` stacks the host
+  table over the serving table; `systemExtraLarge` sets them side by side and adds
+  the per-host detail line. Cluster and Monitor declare `.systemExtraLarge` on iOS
+  as well now, so iPad gets it too. Every colour and font comes from
+  `WidgetStyle`, so the operator's palette, design, weight, text scale and density
+  reach the new elements; `ok` prints in the operator's text colour and only a
+  crossed threshold carries hue, because a table where every ordinary reading is
+  green makes the alarming cells stop being alarming (the CLI styles serving load
+  and never a temperature). Whether a table may be drawn at all stays the entry's
+  decision (`entry.tables`), so no body can paint a live-looking table on a paused
+  or unconfigured tile.
+- **A local merge queue now lands green PRs one at a time per project.**
+  `hscc_daemon/merge_queue.py` keeps a durable FIFO in
+  `~/.hscc/merge-queue-state.json` (atomic replace + fsync, recovered to the
+  queue head after a daemon restart) and runs each PR in its own worktree under
+  `~/.hscc/merge-queue/<project>/`: fetch, real `git rebase origin/main`,
+  project gates, `git push --force-with-lease`, then
+  `gh pr merge --squash --delete-branch`. A conflict or red gate aborts
+  cleanly, comments the conflicted files / gate tail on the PR, hands the card
+  back to its worker as a resolve step through the `hermes kanban` CLI, and
+  drops it from the queue.
+- **Opt-in per project through the flightdeck registry.** A new optional
+  `merge_queue: {enabled, gates, timeout_s}` key is parsed and round-tripped by
+  `flightdeck.core.registry`; `hscc`'s own defaults are the address guard, the
+  pytest legs, and the relevant `build_check.sh` when `ios-app/` or
+  `macos-app/` changed. Auto-enqueue picks up cards whose PR is open, not
+  draft, mergeable and green.
+- **`hscc merge-queue status|list|add|remove|pause|resume|enable|disable
+  <project> [--json]`** steers it, and the daemon's `merge_queue` stream ticks
+  once a minute. Design: `docs/design/2026-11-19-merge-queue-design.md`.
+- **The cluster-health Live Activity now reports load, not just liveness, on all
+  four surfaces.** The Lock Screen shows one row per host with the CLI's `GPU%`,
+  `GPU Temp` and `GPU Power` cells beside the host label, plus the fleet's total
+  reported draw and the serving `run · wait` totals; the Dynamic Island leads with
+  the busiest GPU's utilisation (or the hottest GPU's temperature when no host
+  reported utilisation) with the node tally as its secondary, expands to the host
+  lines with the serving totals beside them, and in minimal state draws that one
+  primary metric. Every string is `CLIMonitorHostRow`'s cell from
+  `Sources/Shared/ClusterMonitorViewModel.swift` and every serving total is
+  `ServingSummary`'s — the same view-model the widget tiles draw and the same
+  `hscc cluster monitor` output `cluster_monitor_cli_parity.py` pins — so the
+  units, the rounding and the `-` for a metric a host could not read are the
+  CLI's, not the activity's. Colours come from the view-model's own verdicts
+  (`gpuTempLevel`, `gpuPowerLevel` against the host's own `gpu_power_limit_w`,
+  `loadLevel` for the queue) painted through the operator's `WidgetStyle` palette
+  and `WidgetFonts`; an ok cell stays in plain ink, as on the widget tiles. A
+  metric that was never told draws nothing rather than a zero, a host that
+  reported an error is named as down with the CLI's dashes, and where the fixed
+  height of a surface clips the host list the `+n` that follows counts against the
+  count the route itself named — while the peak and the total stay computed over
+  EVERY host, so a clip can never change what the compact region claims.
+  `ClusterHealthActivityDriver` still owns the refresh: it hands the same two
+  responses to `ClusterHealthProjection.signals` and decides nothing about content.
+* `GET /v1/cluster/history` gains a second request axis, so the canonical
+  history route can answer "the hour around last night's slow run" and not only
+  "the last hour": `&tier=0|1|2&since=<epoch>&until=<epoch>` alongside the
+  existing `&window=15m|1h|6h|24h|7d`. Exactly one axis at a time — `window` and
+  `tier` together are a 400 naming both, and `since`/`until` without `tier` are a
+  400, because a preset anchors to `now` and a raw tier does not. Neither key
+  still means `window=1h`, so every caller of #407 is unaffected.
+  `since`/`until` are inclusive epoch-second bucket starts and the span is
+  clamped to the tier's own retention (900 s / 86 400 s / 604 800 s).
+* The response says which axis it answered (`axis: "window" | "tier"`), where
+  the data came from as a **code** rather than as the English of `note`
+  (`source: recorder_ring | recorder_ring_absent | sqlite_store |
+  sqlite_store_absent`), and what it actually served (`since`/`until` are the
+  clamped pair, `window_s` the served span, `note` names the clamp). The
+  recorder's `bound_bytes`, `tier1_rows` and `tier2_rows` are folded into the
+  existing `store` block — there is no second top-level `stats`.
+* `hscc cluster history` states the same two facts, because the route and the
+  CLI are one surface read two ways and its own parity test refuses to let them
+  diverge: the payload gains `axis` and `source`, `store` gains
+  `bound_bytes`/`tier1_rows`/`tier2_rows`, and `store.tier0_resident` is now
+  `null` rather than `true` at tiers 1-2, where a CLI run never read the ring.
+- **`ios-app/Sources/Shared/ClusterHistorySeries.swift` — the shared chart layer
+  for `GET /v1/cluster/history` (t_c7f57783's route).** One place holds the two
+  rules a history surface cannot be trusted to re-derive: the metric set a
+  widget may request (`ClusterHistoryMetric`, whose raw values ARE the
+  recorder's own column names — `HOST_KEYS`/`HOST_COLUMNS`/`ENGINE_KEYS`, so
+  `?metrics=` never carries an invented key), and the reduction from a series
+  down to the widget's pixel width. That reduction buckets per PIXEL COLUMN and
+  emits each column's minimum AND maximum, so a sparkline drawn into 40 points
+  still holds the peak of 600 samples; a stride thin would drop whichever
+  extreme was not on a multiple of N, and the widget would then print a
+  temperature the fleet never reached. The result carries the true min/max with
+  their timestamps alongside the drawn points, so a caption reads the data and
+  not the survivors. `null` stays `null` (never `0`, never interpolated), an
+  empty answer keeps the payload's own reason (`hosts_included` false means the
+  `metrics=` filter excluded that series; `store.tier0_resident` false means the
+  2 s ring lives in the daemon process — a gap with a reason, not a quiet
+  fleet), and the only helper that merges series REFUSES a mixed set, because
+  folding a 2 s sample and a 5-minute average into one column is exactly the
+  min/max lie this exists to prevent. `ClusterHistoryPoint` gained the two
+  columns the payload already sends and the card's metric list needs:
+  `gpu_mem_used_mb` (VRAM as the recorder stores it — megabytes; there is no
+  stored total to make a percentage from) and `prompt_tps`. The App Group still
+  never sees `store.path`: the model leaves that key undeclared.
+- **The macOS menu bar dropdown grows a `GRAPHS` section: per-node
+  temperature and utilisation history, drawn as charts.** One more read rides
+  the dropdown's existing refresh loop — a single `GET /v1/cluster/history?window=15m`
+  for all nodes and the four host metrics (CPU°C, GPU°C, GPU%, CPU%), the
+  canonical history route per DECISION-t_447cc7fc; the retired
+  `/v1/metrics/history` is not read here. `15m` is the operator's amendment:
+  the menu bar refreshes faster than a home-screen widget, so it defaults to
+  the recorder's 2-second tier — and the section prints the step the ROUTE
+  reported (`15m · every 2 s · 4 nodes`), because the same rows mean different
+  charts at 2 s, 1 m and 5 m and a sparse series must never read as live data.
+  The charts are the iOS graph tile's (`t_f4551339`): `ClusterGraphMarks`, the
+  shared Swift Charts view, compiled into the menu bar app BY PATH, so the
+  dropdown embeds the marks rather than a macOS copy of them and the two
+  surfaces cannot drift into two different charts. What the dropdown supplies is
+  its own measured width: the panel is pinned at 360 pt minus the `lg` padding,
+  the two unit groups split that row, and the resulting pixel integer is BOTH
+  what the series are reduced to and what the axis labels are counted from — the
+  rule the marks' own file states, so an axis in the dropdown cannot claim a
+  density its buckets do not have. Under each mini, the numbers the chart cannot
+  say out loud: each line's current and the window's true peak (the extreme over
+  every point, before any thinning), formatted by the shared caption, whose
+  decimal places are the CLI's own column precisions. A metric the node never
+  reported renders `—` rather than 0, a node with no samples at all gets the dash
+  in the chart's place rather than a flat line, and an empty answer keeps a
+  reason — the payload's own note when it sent one, otherwise the shared layer's,
+  which distinguishes "the 2 s ring lives in the daemon process" from "nothing is
+  stored at this window". Nothing in the section re-derives a series, a min/max,
+  a unit or a tier.
+- **The desktop graph tile ships all four home sizes.** `systemExtraLarge` was
+  missing from the macOS arm of `supportedFamilies` while the Cluster, Monitor,
+  Cards Running and Kanban tiles all ship it; WidgetKit withholds only the
+  accessory families on macOS. The extra-large arm already existed in the
+  dispatch and passes its own family into the panel layout, and the chart width
+  is measured per tile, so the wider desktop size gets a wider reduction and more
+  axis labels rather than a stretched large. Platform-conditional branch: this is
+  inside the existing `#else` (macOS) arm of `supportedFamilies`; the iOS arm
+  still reads `WidgetFamily.clusterGraphFamilies`, and the dropdown's own layout
+  has no platform branch at all — it is macOS-only code that consumes
+  platform-common views.
+- **`macos-app/scripts/widget_parity_check.sh` now covers the graph tile.** It
+  pinned Cluster and Monitor only, and the graph widget's own gate iterates the
+  iOS family list, so a macOS arm quietly offering three of the four sizes was
+  invisible to both. It also refuses a `macos-app/project.yml` where the app
+  target stops compiling the graph marks and their projection: those files live
+  in the widget extension, so dropping them takes the charts out of the dropdown
+  while both build gates stay green, because the widget target compiles the same
+  paths either way.
+- **The macOS menu bar app now surfaces the operator alert feed.** While it
+  runs it polls `GET /v1/alerts?since=<id>` every 5 s through the existing
+  GET-only `WidgetDataClient` (a new `alertFeed` read on its closed allowlist)
+  and posts one local `UNUserNotificationCenter` banner per new alert. The
+  dropdown gained an **Alerts** section with the newest six rows, a `N new`
+  badge, and a small dot beside the menu bar H; the count stays visible while
+  the dropdown is open and clears when it closes (viewing is local — no `ack`
+  is sent to the server).
+
+- **Polling, not APNs, for the Mac.** Receiving remote pushes in a Developer
+  ID + notarized build needs `aps-environment` and its provisioning story;
+  the feed is already authenticated and cheap, and the card's preferred path
+  was the poll. So the Mac registers no device token and the entitlement is
+  unchanged. A first launch (or a feed cleared under the stored cursor) is a
+  baseline and notifies nothing, so reopening the app never replays history.
+  A burst is coalesced to five banners plus one "earlier alerts" line, and
+  cursors/unseen counts are stored per saved cluster.
+- **The main orchestrator now has ONE name, asked once at bootstrap and stored
+  under `~/.hscc`.** `hscc-bootstrap`'s stage-3 interview asks
+  `Main orchestrator name [general]:` only when no name is stored yet; `--yes`
+  takes the stored name or `general`, and `--dry-run` prints the planned
+  `~/.hscc/main-orchestrator.json` write without performing it. Re-running
+  bootstrap never changes a stored name — the writer refuses an overwrite even
+  if a future caller forgets the check. Names are validated as lowercase
+  `[a-z0-9-]` slugs, and rejected when they are a role profile from
+  `hscc-roles/roles/*.yaml`, a registry project (whose `<project>-orch` already
+  owns the identity), an existing `<name>-orch` profile on disk, or end in
+  `-orch` themselves. The default `general` is exempt from the
+  `<name>-orch` / project collision checks: every pre-migration install still
+  has `general-orch` on disk (retired, never deleted).
+- **`hscc-roles/main_orch.py` is the single resolver** — `main_name()`,
+  `main_profile()` and `main_board()` read the stored name and fall back to
+  `general` when nothing is stored. `orchestrators.resolve_orchestrator()` now
+  returns that identity for no project/`general` (profile, session and board
+  are all the chosen name), while the legacy `general-orch` catch-all still
+  resolves when explicitly named. `GENERAL_PROFILE`/`GENERAL_BOARD` are gone;
+  `orch-all`, `provision-check`, the generator's cluster-authority recognition
+  and the API's role-profile sweep all read the resolver instead. The legacy
+  `orchestrator` role profile remains supported on disk — this card does not
+  rewrite SOULs or migrate profiles (that is the next card).
+- **The "Needs me" widget: the main orchestrator's alert feed on the Home
+  Screen and the Mac.** One read of `GET /v1/alerts` through the shared
+  read-only `WidgetDataClient` (closed allowlist, multi-address failover), then
+  one Foundation-only projection (`ios-app/Sources/Shared/NeedsMeReading.swift`):
+  newest first like `hscc notify list`, unacknowledged rows only, the CLI's
+  age vocabulary (`2m`/`3h`/`4d`), and the body reduced to its first line. iOS
+  ships `systemSmall` (count + newest title + age), `systemMedium` (top 3:
+  level/title/age), `systemLarge` (up to 8 with the body first line), and
+  `accessoryCircular` (count), `accessoryRectangular` (newest title) and
+  `accessoryInline` (`"N need you"` / `"nothing needs you"`). Critical/action
+  use the operator's accent (`#FF5722` by default), info the secondary role;
+  empty reads `"Nothing needs you"` with the update age. macOS compiles the
+  same widget by path at small/medium/large and adds a "Needs you" section at
+  the top of the menu bar dropdown, hidden when the feed is empty. It is
+  registered in the widget settings/appearance registry, the widget bundle, the
+  dispatch/style/settings gates and both platform project specs.
+- **The alert feed is a documented widget dataset.** `WIDGET_ROUTES.md` maps
+  every drawn field back to `GET /v1/alerts` (`acked` filter, id order, `ts`
+  age, title, body first line, level) and says the apps still post nothing and
+  register for nothing; `WIDGET_COVERAGE.md` lists both platforms' families.
+- **`v1_alerts.json` fixture + parity.** The fixture is shape-faithful with
+  placeholder text only (the live feed is private), and
+  `test_alerts_api_matches_notify_list` pins the route and `hscc notify list`
+  to the same rows and order before the projection applies the unacknowledged
+  filter.
+* `GET /v1/cluster/history?node=<host|all>&metrics=a,b&window=15m|1h|6h|24h|7d`
+  is the read side of the metrics recorder (t_81af8884) — the first route on this
+  server that answers about the past instead of the now, and the reason the
+  recorder exists: the widgets refresh about every 15 minutes, so everything
+  between two refreshes used to be gone. It reads the recorder's own read API and
+  nothing else — `MetricsStore.host_rows`/`engine_rows` for the durable tiers,
+  `MetricsRecorder.tier0_points` for the 2 s ring — so a request triggers no
+  sample, no ssh call and no sparkrun child, and `hscc-api`'s test fixture poisons
+  every live backing plus the `subprocess`/exec layer to prove it. `?window=` picks
+  the tier, and the response states the tier and the resolution it served
+  (`tier`, `resolution_s`, `resolution`, `tier_summary`, `max_fields`) because a
+  chart must never plot a 2-second point and a 5-minute point as the same width.
+  `hosts[]`/`engines[]` are the recorder's rows with the recorder's key names and
+  its nulls untouched — a field a node never reported stays `null`, because an
+  empty value would draw a node that never answered as an idle one. `metrics=` is
+  a projection of those rows, never a second query: dropping the peak column from
+  a request drops `*_max` from the rows. Documented in
+  `hscc-api/docs/WIDGET_ROUTES.md` and in the Swift widget-route contract, so an
+  iOS surface can call it (t_c7f57783).
+
+* `metrics_history.resident_recorder()` — the process-wide `MetricsRecorder`, or
+  `None` when this process hosts none. The read side needs it because the 2 s ring
+  is memory-only and the API server is its own process
+  (`hscc_daemon/api_launchd.py` starts `python -m api_server serve`), so the API
+  cannot see the daemon's ring; `None` distinguishes "not readable from here" from
+  "resident and empty", which the deployed sampler is for seconds after every
+  restart. It is deliberately *not* `get_sampler()`, which constructs on first use
+  and would start a second `sparkrun cluster monitor` stream (t_81af8884's one
+  stream per process) just to answer a read (t_c7f57783).
+
+* `hscc-api/tests/test_cluster_history_parity.py` — parity for every tier, not
+  just one: the recorder's own `tick()` builds one store, the same store is served
+  over HTTP and read back through the recorder's own read API, and the rows are
+  asserted equal, row by row, for the 1 h, 6 h, 24 h (tier 1) and 7 d (tier 2)
+  windows plus the tier-0 ring. The oracle is always the recorder — the test never
+  re-derives a mean, so a route that re-aggregated would fail rather than agree
+  with itself (t_c7f57783).
+- **`macos-app/scripts/widget_parity_check.sh` — the desktop tile's density is
+  now measured against the phone tile's, by path.** `HSCCMacWidgets` compiles the
+  iOS widget sources by path rather than by copy, which means the macOS desktop
+  widget is exactly as dense as the two `project.yml` file lists agree — and until
+  now nothing checked that they did. The gate asserts the two targets' shared
+  source sets are equal (a source only the phone compiles is a rule the desktop
+  cannot reach, and a desktop-only path is a copy or a stale entry), that every
+  listed path exists on disk so the equality is not a set comparison over
+  filenames no compiler will open, and that all four desktop families — small,
+  medium, large, extra-large — are declared in the `#else` (non-iOS)
+  `supportedFamilies` arm, dispatched to an arm of their own, and draw a view
+  that differs from the family above them. The last check is the one that matters
+  for this card: an extra-large arm that reuses the large view compiles, ships,
+  and silently drops the six fields the CLI host table has no column for. It also
+  pins those six (VRAM, GPU clock, Net, Up, Fan, Load) to the shared layout model
+  so a value cannot be re-derived per platform, and refuses a `system*` family
+  hidden behind `#if os(iOS)` — only the three accessory families may be
+  iOS-only.
+- **A card handed back for resolve now tells its worker exactly how to land
+  the fix.** The merge queue's conflict and red-gate handbacks carry the
+  branch recorded on the PR (`wt/<card>` or the card's own branch) and the
+  four steps: rebase onto `origin/main`, fix the conflict or failing gate,
+  `git push --force-with-lease origin <own branch>`, then hand the card back.
+  The merge queue keeps landing green PRs; the worker only ever touches its
+  own branch.
+- **Force-push is fenced to the run's own card branch.** A new committed
+  `.githooks/pre-push` (detector: `scripts/worker_push_guard.py`, armed by the
+  same `core.hooksPath` install as the address guard, so every worker worktree
+  inherits it) refuses a non-fast-forward update to `main`, a tag, or any
+  branch other than `HERMES_KANBAN_BRANCH` (falling back to
+  `wt/$HERMES_KANBAN_TASK`). Non-worker processes — the operator, orchestrators
+  and the merge-queue daemon in its own worktree — are untouched.
+- **The main orchestrator now has its own tmux pane.** `hscc main start`
+  ensures EXACTLY ONE pane runs `hermes -p <main profile> chat`, the command
+  `hscc orch inject` resolves. An existing pane is reused with no tmux write;
+  when none exists a window named after the profile is created in the
+  operator's tmux session (current session when run inside tmux, else the
+  attached/most-recent one), detached so the operator's current window is
+  never switched. With no tmux server at all, it creates a detached session
+  named after the profile. It refuses on ambiguity instead of guessing, and
+  never kills or selects another pane/window.
+
+- **`hscc main status [--json]` reports name, board, pane and busy/idle.**
+  Pane discovery and the busy marker are `hscc-api/repl_inject`'s — the same
+  matcher and `msg=interrupt` detection `hscc orch inject` uses — so the two
+  surfaces cannot disagree. States are `busy`, `idle`, `not-running`,
+  `ambiguous` (never a guessed pane) and `unknown` (the screen could not be
+  read); the JSON receipt always carries `name`, `profile`, `board`, `state`,
+  `running`, `busy`, `pane` and `target`.
+
+- **Bootstrap calls `hscc main start` at the end.** It runs after the daemon
+  stage unless `--dry-run`, `--skip-roles`, or no tmux server exists; the last
+  case prints `hscc main start` as the one-line fix instead of starting a tmux
+  server itself. The stage is non-fatal and reports the CLI's own receipt.
+
+- **The retired `general-orch` expectation in the session resolver test is
+  gone.** `test_resolve_general_sentinel_is_honest` now takes its expected
+  profile/session from `main_orch` (the bootstrap-stored name, default
+  `general`) and still asserts the honest no-session result.
+- **`hscc notify list` and `hscc notify ack <id>`.** `list` reads the same
+  authenticated `GET /v1/alerts` feed newest first, with `--since <id>`,
+  `--limit <n>` and `--json`; each human row carries the id, age, level and
+  dedupe key. `ack` posts `/v1/alerts/<id>/ack`, the contract the feed already
+  exposed. The API stays the single writer, so CLI and app readers share one
+  dedupe/rate-limit policy.
+* `hscc cluster history` prints what the history route serves, from a terminal:
+  `hscc cluster history [--window 15m|1h|6h|24h|7d] [--tier 0|1|2 [--since TS]
+  [--until TS]] [--node <host|all>] [--metrics a,b] [--json]`. Before this the
+  stored series had no CLI verb at all, so an operator looking at a trend that
+  seemed wrong had no way to print the rows it was drawn from. The flag surface
+  is `GET /v1/cluster/history`'s, decided in t_447cc7fc: `--window` and `--tier`
+  are mutually exclusive, `--since`/`--until` need `--tier`, and neither axis
+  defaults differently from the route. `--host` does not exist — `--node` is the
+  one machine filter, because `host_rollup.host` and `engine_rollup.node` are two
+  column names for one machine.
+* The verb reads the recorder's store directly (`host_rows` / `engine_rows` /
+  `tier0_points`) — never over HTTP, never through `metrics_history.get_sampler()`,
+  which constructs a Sampler and would spawn a second `sparkrun cluster monitor`
+  and a second roll-up watermark writer. It dispatches before the cluster engine
+  loads, so reading history that is already on disk needs neither sparkrun nor the
+  engine. `hscc-api/tests/test_cluster_history_cli_parity.py` drives the route and
+  the CLI on one fixture state and compares them row for row.
+* A human table of temperature or power shows the peak beside the average it is
+  the peak of (`gpu_temp_c` then `gpu_temp_c_max`, named by the store's own
+  `MAX_KEYS`), field names are sparkrun's `MonitorSample` names verbatim, and a
+  value a node never reported prints as `—`, never as `0` — `--json` keeps `null`.
+  Emptiness is stated rather than implied: `--tier 0` from a CLI process says the
+  2 s ring lives in the sampling process, and a recorder that has not written its
+  store yet says so, instead of printing a zero-row table that reads as an idle fleet.
+- **`ios-app/Sources/Shared/ClusterGraphReading.swift` — what each size of the
+  new history graph widget draws, and the numbers beside it.** A graph widget is
+  four widgets: `systemSmall` shows ONE metric as a sparkline with its current,
+  min and max; `systemMedium` shows one node's temperatures plus GPU utilisation
+  with their current values; `systemLarge`/`systemExtraLarge` show small
+  multiples, one panel per node carrying CPU°C, GPU°C, GPU%, CPU%, W, RAM%, KV%
+  and tok/s with axis labels and a legend. Which metrics a size draws, which
+  `metrics=` list one request carries for it, and how the eight split between
+  `hosts[]` and `engines[]` (KV% and tok/s are engine rows keyed `node:port`, so
+  a node's panel has to attribute them rather than assume every metric is keyed
+  by host) are rules, and a rule inside a view is a rule no gate can run. They
+  are here instead, Foundation-only, and they declare no metric, no bucketing and
+  no downsampling of their own — the metric vocabulary, the per-metric projection
+  and the min/max-preserving pixel reduction all stay
+  `ClusterHistorySeries.swift`'s (`t_b6512c2e`), and the two thresholds this file
+  applies to a whole series (temperature 80/90°C, percent-used 85/95) are
+  `ClusterMonitorViewModel.swift`'s (`t_61ed3f5e`), restated only because the
+  view-model bands the last sample while a chart bands every point — the gate
+  builds real `CLIMonitorHostRow`s at the four band edges of each pair and fails
+  if the two rules ever disagree. Two more things live here because they are
+  facts rather than layout: the pixel width that drives the reduction is the same
+  integer that decides how many axis labels fit, so the axis can never state a
+  time the polyline does not have; and the served resolution is spelled out of
+  `resolution_s` ("every 2 s" against "every 5 m") so a sparse seven-day chart
+  cannot be read as live 2-second data. A metric with no declared band — GPU
+  utilisation, wattage, KV occupancy, token rates — comes back
+  `.unthresholded`, not `.ok`: the wattage verdict the view-model makes divides by
+  `gpu_power_limit_w`, and no such column was ever stored, so a green line there
+  would be this file inventing a verdict.
+- **The widget itself: `GraphWidget.swift`, `GraphWidgetEntry.swift`,
+  `GraphWidgetMetrics.swift`, `GraphWidgetViews.swift`.** A Swift Charts surface
+  over the canonical `GET /v1/cluster/history` read (`DECISION-t_447cc7fc`) — one
+  read through `WidgetDataClient.clusterHistory`, never the retired
+  `/v1/metrics/history`, and never a second HTTP client. Configured through an
+  `AppIntent` like every other configurable surface: node (one node, or unset for
+  every node), metric set (temps / utilisation / power / memory / serving) and
+  window (15 minutes up to 7 days, the 15-minute tier being the default the
+  operator ruled, since a thermal excursion is the one thing a chart shows that a
+  number cannot). The density rule, the family list, the axis-label count and the
+  pixel width that drives the reduction are `GraphWidgetMetrics.swift`'s, kept
+  free of view types so a macOS harness can execute them; the four family bodies
+  carry the one-step configured/paused gate, and no accessory family is declared,
+  so the surface stays home-screen-only and the macOS target keeps compiling it by
+  path. Fonts and colours come from the style store like every other element, so
+  `WidgetStyle`/theme customisation reaches the chart, the axis labels and the
+  threshold bands rather than only the text.
+- **`ios-app/scripts/cluster_graph_check.sh` + `scripts/cluster_graph_check/`.** A
+  chart lies by SHAPE, which is what no compile and no decode can see: a 40-pixel
+  draw that dropped the spike, a hole in the data joined into a straight line, a
+  7-day axis claiming 2-second resolution, a missing reading drawn as a zero, GPU%
+  and degrees on one axis. The gate compiles the real projection layer plus the
+  real wire types and the monitor view-model into a macOS CLI and runs the rules
+  against the route's own committed fixtures; a second leg covers the WidgetKit
+  half no macOS harness can compile at all. `CLUSTER_GRAPH_NEGATIVE_TEST=1` breaks
+  the layer deliberately and the run fails — a harness that cannot fail is
+  worthless.
+- **The macOS menu bar dropdown now draws `hscc cluster monitor` and
+  `hscc cluster status`, and the menu bar title can carry the fleet's thermal
+  load.** Two new sections sit under the existing Cluster one: **GPU**, one row
+  per host across four of `host_table`'s own columns (GPU%, GPU Temp, CPU Temp,
+  GPU Power) with the CLI's column names as the header, then the serving table
+  at the CLI's narrow width (Run, Wait, KV%, In, Out) with its per-model
+  `total (n)` rows and the CLI's own `no backends behind the proxy` / `In/Out =
+  tokens since each engine started` lines; backend rows are capped at what the
+  pane fits and the count of hidden rows is stated rather than the rows being
+  silently dropped, while the `total` rows are never capped away behind a long
+  backend list; and **Cluster status**, the
+  `cluster status` workload rows (name + tp/pp) with `total hosts` / `idle
+  hosts` and each node's `used`/`free` slots. Every cell is a string out of
+  `ClusterMonitorViewModel` — the view-model `cluster_monitor_cli_parity.py`
+  pins against the CLI's own `host_table`/`serving_table` — read at the index
+  its CLI column NAME resolves to, so the dropdown cannot re-round, re-unit or
+  re-abbreviate anything, and a renamed CLI column degrades to `-` instead of
+  mislabelling a value. Host and node identity is the `.NNN` display label,
+  never the address (§7), and `idle_hosts` is drawn as a COUNT only: those
+  strings are raw `sparkrun status` lines containing node addresses.
+- `MenuBarStat` gained two dense title stats — **GPU load + watts** (the mean
+  GPU% over the hosts that reported one, `48% · 195 W`) and **Hottest temp +
+  watts** (`49 C · 195 W`, the CLI's own cell for the winning host and sensor).
+  Both are the icon-alone shape: a metric no host reported is absent, never a
+  `0` or a `-` that reads as a measurement, and the host and sensor the title
+  dropped survive in its VoiceOver sentence and in the dropdown row it came
+  from.
+
+### Changed
+- **`ios-app/scripts/model_decode_check/fixtures/` + `widget_data_client_check` —
+  `store.tier0_resident` stops being read as a fleet-wide claim.** The route takes
+  that measurement inside its tier-0 branch alone (`hscc-api/routes_cluster.py`
+  since PR #417 / `d6a2d64e`), so a `window=6h` or `window=7d` payload answers
+  `null` for it: a tier that never read the 2 s ring cannot report residency.
+  Regenerating
+  `scripts/make_cluster_history_fixture.py` against the route at that commit moved
+  the three durable fixtures from `true` to `null` on exactly that line each, and
+  left the tier-0 fixture byte-identical at `false` — the same generator, pinned
+  clock and store, so those `true`s were stale bytes labelled as measured route
+  bytes rather than a second shape. The harness's `payload.tier0Resident == true`
+  check ran against the tier-1 body and is replaced by the pair that states the
+  truth: a tier-1 payload leaves it `nil` (asserted beside `store.exists`/`db_bytes`,
+  so the `nil` is the wire's `null` and not a `store` that failed to decode), while
+  a tier-0 payload answers `false` and carries its gap reason on `note`. That reason
+  stays gated where it always lived — `note` -> `ClusterHistorySeries.reason` — and
+  the flag is no longer asked to stand in for it. `ClusterHistoryStore` is unchanged
+  (`Bool?`): `null` is a real value on the wire at tiers 1-2; the doc comments that
+  described the old default now describe the measurement.
+- **The canonical-history ruling and the monitor-table parity fixes land in dependency order.**
+  `#458` repointed the last Swift metrics-history reader onto `GET /v1/cluster/history`
+  and added the trip-wire guard (`00081c65`); `#441` then retired
+  `GET /v1/metrics/history` — route, decoders, tests, allowlist entry and doc
+  section (`8d5d6e1c`) — with the duplicated `peakCompanion` declared once in
+  `ClusterHistorySeries.swift`. `#453` closes the `ClusterMonitorTables`/view-model
+  divergence: serving presence is read from the wire key rather than the absence
+  of an error, one `CLIMonitorNote` owner words the note line for both apps, and
+  the two comments that described behaviour the code does not have are corrected.
+- **`ClusterMonitorViewModel.hasServingSection` now means what its name and doc
+  said: the route sent a `serving` section.** It read `servingError == nil`, which
+  is a different fact — a clean poll of a response that carried no `serving` key
+  at all has no error and still has nothing to show, and the new small tile
+  rendered exactly that case as "0 running, 0 waiting". Presence is now captured
+  at projection time from the wire key, because `response.serving ?? []` has
+  already flattened "empty list" and "no key" into one array by the time anything
+  downstream could ask. Told-empty still prints `0` (nothing is running) and
+  not-told prints `-`; the decode check pins both arms.
+- `ClusterSmallGridView.swift` is in `widget_style_check.sh`'s file list, so the
+  densest surface cannot drift away from the operator's stored fonts and colours
+  without the style gate naming it.
+- **`ios-app/scripts/cluster_widget_check.sh` — the "no load average" claim now
+  says what it covers.** It used to assert, over the whole cluster file set, that
+  the load average the CLI host table does not print is gone. Extra-large draws
+  the route's load 1/5/15 on the one size with room for it, so the ban keeps its
+  teeth exactly where the tile mirrors `cluster monitor`'s own output and points
+  at the file that owns the XL-only fields, rather than going quietly false.
+  `ios-app/docs/WIDGET_COVERAGE.md` had the same drift in the other direction: it
+  stated that no iOS widget declares `.systemExtraLarge`, which stopped being
+  true for Cluster and Monitor here, and it is corrected rather than left to rot.
+- **Two comments described behaviour the code does not have; no code moved.**
+  `CLIMonitorServingRow` claimed the `down` backend's reason "lands in `Routes`
+  when wide and in `Run` when narrow" — `serving_table`'s own
+  `row(node, port, model, routes, *rest)` puts the reason at `rest[0]`, the Run
+  column, in both shapes, which is why the code below the comment has always
+  written `run = reason` unconditionally. `FleetProjection.jobs` claimed to be
+  `hscc cluster status`'s workload count while computing it from
+  `/v1/cluster/monitor`; the status figure is `ClusterStatusSummary.jobs`, a
+  different number, on a different route, drawn in one fallback line, and the
+  two can disagree for the same refresh. Both wordings are now what the code
+  does, with the file and line of the number they name — the kind of comment a
+  future card can retarget a column or a route from without being misled.
+- **`Sources/Shared/MetricsHistoryTrend.swift` is compiled by the desktop widget
+  target too.** It was in `HSCCWidgets` and missing from `HSCCMacWidgets`, so the
+  history-trend projection — including its rule that a metric the route did not
+  report stays a gap and never becomes `0.0` — was reachable from the phone and
+  unreachable from the desktop. The two lists are equal again, and the gate above
+  keeps them equal.
+- **Anti-churn rule 2 now names the merge queue as the landing owner.** In
+  `hscc-roles/generator.py`'s single shared `_ANTI_CHURN_RULES` block, an
+  orchestrator on a queue-enabled project reviews the diff and enqueues with
+  `hscc merge-queue add <project> <pr>` — it never rebases or merges by hand.
+  Projects without the queue keep the old rule verbatim: review and land the
+  worker's green PR yourself, and rebase your own open PRs rather than carding
+  them. Live profiles were not regenerated.
+- **The main orchestrator's reach is the feed, not a phone push.** Its SOUL,
+  the root README, the design doc and `WIDGET_ROUTES.md` now say: record what
+  the operator must act on with `hscc notify`; they see it with
+  `hscc notify list` or by asking, and are told directly when they are in the
+  conversation. The design's push goal is marked dropped by the operator.
+- **The hscc-api Swift drift gate retires the two device call sites instead of
+  pretending the server still serves them.** `RETIRED_CLIENT_ROUTES` pins that
+  `/v1/devices` and `/v1/devices/test` have no registered route; the app-side
+  call sites are already gone.
+- **`ios-app/scripts/widget_view_dispatch/common.sh` — each widget-surface check
+  is now callable on the file it actually measures.** `widget_surface_gate`
+  assumed a widget keeps provider, entry and family bodies in one Swift file, so
+  all seven of its checks took a single path; the Cluster Graph widget splits
+  them three ways, and one extra "bodies file" argument would still have left
+  the entry's gate copy in a third file. The checks are now separate functions
+  and `widget_surface_gate` is their composition in the same order, so the six
+  shipped surfaces call it exactly as before — proved by diffing the aggregate
+  run's stdout against the pre-refactor baseline rather than by asserting it. The
+  label-absence half of the home-screen-only rule is split out so a split-file
+  widget can prove the absence in every file it ships, and
+  `widget_gate_rule_has_owner` is added for a rule a surface delegates to a
+  sibling gate: it tests that the owner still carries the rule, because a claim
+  that lives only in a comment is the claim that silently disappears.
+- **Widget registration is generated from one file per widget, so two widget
+  PRs no longer fight over the same lines.** Measured on the last 100 squash
+  merges: `ios-app/project.yml` (25 commits) and `macos-app/project.yml` (24)
+  were the top two hot spots, then `ios-app/docs/WIDGET_COVERAGE.md` (14),
+  `ios-app/scripts/model_decode_check/main.swift` (11), the
+  `WidgetSurfaceKind`/label settings list and `HSCCWidgetsBundle.swift`. Every
+  widget card appended to those same registration lines; the first merge broke
+  the rest and each rebase became a new card.
+- **The source of truth is now `ios-app/widgets/<id>.json`** (one file per
+  widget or Live Activity). `ios-app/scripts/widget_registry.py --write`
+  generates the surface enum, the widget bundle list, the settings names/icons,
+  the WIDGET_COVERAGE family rows and the per-widget decode roster.
+  `--check` fails if any generated record is missing, extra, or if a widget
+  source on disk has no manifest owner. No behaviour changes: the same 14
+  surfaces, the same 9 widgets, the same names and icons.
+- **Both widget targets compile the widget directory as one computed source
+  entry** in `project.yml` (`Sources/HSCCWidgets` and
+  `../ios-app/Sources/HSCCWidgets`), so adding a widget file no longer edits
+  either spec. `build_check.sh`, `check_sources.sh` and
+  `widget_parity_check.sh` now expand directory entries.
+- **`WIDGET_COVERAGE.md` keeps the prose but delegates its family tables** to
+  `ios-app/docs/WIDGET_COVERAGE.widgets.generated.md`.
+- **`.gitattributes` marks only the generated append-only record lists
+  `merge=union`**: the enum, bundle list, settings labels, coverage rows and
+  decode roster. A test performs the real `git merge-file --union` for two
+  branches that add different widgets and requires both records to survive with
+  one header and balanced braces. Nothing else is union-marked.
+
+### Removed
+* `GET /v1/metrics/history` is retired; `GET /v1/cluster/history` is the single
+  history contract (`t_447cc7fc`). The two routes had grown up side by side over
+  the same recorder and disagreed about everything a client has to branch on —
+  the path, `host=` versus `node=`, a per-series `tier0.readable_here` versus
+  `store.tier0_resident`, and a `fields`/`stats` block versus `max_fields` and
+  `store`. The recorder itself is untouched: `~/.hscc/metrics/history.db`, its
+  three tiers and `hscc cluster history` all stand, and the CLI's two axes
+  (`--window` or `--tier/--since/--until`) are the canonical route's axes.
+
+  What left with it: `hscc-api/routes_metrics.py` and its 24 tests — every
+  assertion still a property of the surviving route was ported into
+  `hscc-api/tests/test_cluster_history_parity.py` first, and the ones that were
+  not are named in that file (they asserted keys the survivor does not carry,
+  which would have meant adding fields to the surviving contract, not keeping
+  one); the `ClusterHistory*`-duplicate decoders `MetricsHistoryResponse`,
+  `MetricsHostRow` and `MetricsEngineRow`; `WidgetDataPath.metricsHistory` and
+  its read, so the audited allowlist is back to ten paths with exactly one
+  history read in it; and the route's section of `WIDGET_ROUTES.md`, whose
+  `null`-is-not-zero and average-plus-peak rules now live in the single
+  `GET /v1/cluster/history` section.
+
+  The duplicate trend projection (`MetricsHistoryTrend.swift`, `MetricsTrend`)
+  did not survive either, and the two rules it encoded did: a metric the route
+  did not report stays `nil` — a gap a surface counts and captions, never a
+  `0.0` — and an average is never drawn alone for a field that has a peak. They
+  are rule 3 of `ios-app/Sources/Shared/ClusterHistorySeries.swift` now, reached
+  through `ClusterHistoryMetric.peakCompanion` and
+  `ClusterHistoryResponse.historyPair(for:)`, and asserted by
+  `ios-app/scripts/cluster_history_chart_check.sh`. `hasLiveTier0`'s job is
+  served by the survivor's own `store.tier0_resident` and `note`, which state it
+  per served tier instead of as one flag for the whole payload.
+- **The iOS and macOS apps no longer carry notifications — neither push nor
+  local.** Operator decision 2026-11-19. iOS lost remote-notification
+  registration, the APNs device-token upload to `/v1/devices`, the
+  push entitlement and its build setting, notification authorization, and the
+  `NotificationCoordinator` / `NeedsOperatorNotifier` / `OperatorAlert` /
+  `PushRegistrar` files with their foreground and background polling. The
+  Settings **Notifications** row, per-class toggles and **Send test** are gone.
+  The app delegate that remains is `LaunchAppDelegate`: it only registers the
+  Live Activities' BGAppRefreshTask identifiers and runs their launch sweeps.
+  The macOS menu bar app lost the 5 s `GET /v1/alerts` poll, the local
+  notification posts and permission request, and the Alerts section, unseen
+  badge and menu-bar dot. Widgets and Live Activities were not
+  touched beyond removing calls into the deleted notifier types.
+- **The shared extension client no longer names the alert feed.** `GET
+  /v1/alerts` left `WidgetDataPath.all` and the app-only decode types
+  (`AlertFeedAlert`, `AlertFeedPage`) are deleted, so a widget or Live Activity
+  has no path to the feed. The backend routes, store and APNs sender are
+  unchanged; they simply have no app consumer. The client allowlist gate now
+  pins the smaller audited set.
+- **Push is gone from the server side.** The APNs transport
+  (`hscc_daemon/apns.py`), the device roster (`hscc_daemon/devices.py`), the
+  `alert_push` sender seam, `POST /v1/devices`, `POST /v1/devices/test`,
+  `hscc notify test`, the doctor's APNs row, and the `h2` pin (plus its
+  release-only formula closure) are removed. A created alert no longer carries
+  a `push` field; the feed still persists, dedupes and rate-limits exactly as
+  before. Push was dropped by the operator on 2026-11-19: nothing to configure
+  in the Apple developer portal.
+
+### Fixed
+- **The Cluster Lock Screen no longer re-types the CLI's serving note.**
+  `CLILockScreenCopy.voice` printed its own copy of `no backends behind the
+  proxy`, the exact sentence `CLIMonitorNote.noBackends` owns; it now reads
+  that owner's `text`, so the words exist once and cannot drift from the CLI's
+  dim line. The missing-section case — where the CLI prints nothing at all —
+  keeps the app's neutral `serving poll did not answer`.
+- **`cluster_widget_check.sh` can no longer print PASSED while a check is
+  red.** The compiled harness printed `CLUSTER WIDGET CHECK PASSED` whenever
+  its executed proofs passed, even when a structural proof above it had
+  already failed and the shell was about to exit 1. The harness now reports
+  only its own `executed proofs passed — N checks` line; the gate's single
+  PASSED verdict — or the new FAILED line — is printed by the shell after
+  every check's rc is known.
+- **Every tracked widget source now has a manifest owner.** `ClusterWidget`
+  (`ClusterWidget.swift`, `ClusterWidgetMetrics.swift`,
+  `ClusterWidgetViews.swift`) and `ProjectsWidget` are declared as
+  `ios-app/widgets/cluster_widget.json` and `projects_widget.json`, and the four
+  files shared with Monitor (`CLIMonitorHostTableView.swift`,
+  `CLIMonitorTableReading.swift`, `ClusterSmallGrid.swift`,
+  `ClusterSmallGridView.swift`) are owned by `_shared.json`. The eight sources
+  that made `widget_registry.py --check` exit 1 on clean main now have exactly
+  one owner each.
+- **The settings screen can list and pause ClusterWidget and ProjectsWidget
+  again.** Both widgets are in the generated widget bundle, and the missing
+  manifests were the only reason `widget_settings_check.sh` reported "no
+  registry case" for them; its surface-coverage section is green without a
+  hand-written case.
+- **`board_status_widget_check.sh` reads the directory-entry project.yml
+  shape.** Since t_f98764f8 the HSCCWidgets target lists
+  `- path: Sources/HSCCWidgets`, so counting per-file lines found 0. The gate
+  now accepts a file listed directly or contained by a listed directory, and
+  says which files are compiled.
+- **CI runs every offline app gate instead of a hand-named few.** The
+  `app-build-checks` workflow now runs `widget_registry.py --check` and globs
+  every `ios-app/scripts/*_check.sh` and `macos-app/scripts/*_check.sh`; only
+  the four that need the live API or a live capture are announced as skipped,
+  and the two compile gates stay in their SDK-guarded steps. The probe runner
+  also exposes `ios-app/widgets/` to its unmodified control copy, so the
+  backtick probe judges the real gate rather than a tree with no manifests.
+- **The workflow fetches full history** so `merge_base_check.sh` can resolve
+  `origin/main`; that gate never fetches on its own.
+- **Metrics history has one read path in Swift again: `GET /v1/cluster/history`.**
+  `DECISION-t_447cc7fc` ruled `/v1/metrics/history` retired and
+  `/v1/cluster/history` canonical, but `main` was split while that was decided:
+  `WidgetDataClient.clusterHistory` and the shared series layer read the
+  canonical route while `MetricsHistoryTrend.swift` still projected a series off
+  the retired one, and `WidgetDataPath.all` — the closed set that exists so the
+  reads an extension may make are *enumerable and reviewable* — carried both.
+  A tile that renders a history series could therefore pick the stale endpoint
+  with a plausible line of code, and nothing would have noticed: it compiles, it
+  decodes, it charts a route the ruling retired. `MetricsHistoryTrend.swift` is
+  now `ClusterHistoryTrend.swift`, its `make()` takes a `ClusterHistoryResponse`,
+  and its field type IS the canonical `ClusterHistoryMetric` — the trend-local
+  `MetricsTrendField` enum, which listed the same columns a second time (and one
+  the canonical decoder does not even declare, `gpu_clock_mhz`), is gone. The two
+  rules it owns came across verbatim, because they are the contract and not the
+  endpoint: a metric the node never reported stays a `nil` a surface can count
+  and caption rather than flattening to `0`, and a series exposes the bucket's
+  peak beside its average and scales the y-axis by the higher of the two, so a
+  throttle spike cannot be clipped off the chart. The retired read
+  (`WidgetDataPath.metricsHistory` and `WidgetDataClient.metricsHistory(tier:…)`)
+  is deleted, so the audited set holds one history path and §2's
+  "≤ 2 requests per surface per refresh" is decidable again. The endpoint itself
+  still answers — its retirement is the API-side card's, and it must keep working
+  until nothing reads it — and its decoders are still compiled and decoded, now
+  by the client gate directly rather than through a request.
+- **A history series drawn over `node=all` names the machine it drew.** The
+  canonical route answers `node` with the filter that was applied, and `all` is
+  its "every machine" spelling rather than a host name; matching it against a
+  row's `host` yields an empty series that reads exactly like an empty fleet. The
+  projection falls back to the first host present and reports it, and says which
+  host it drew in its own caption.
+- **The tap's `ruamel.yaml` resource is named `ruamel-yaml`, so
+  `brew audit --strict hscc` is green again.** Homebrew compares a resource's
+  name with the PyPI package name in its sdist url, reading `.` and `_` as `-`,
+  so the SOT spelling `resource "ruamel.yaml"` had kept the tap's audit red
+  since `74a3159` — the one problem `brew audit --strict hscc` reported on the
+  untouched tap at `e94ab8a`, before any h2 or 2.15.13 work. The url and sha256
+  are unchanged: only the Homebrew resource name moved, and the drift guard's
+  PEP 503 `canonical()` maps both spellings to `ruamel-yaml`, so
+  `scripts/tests/test_formula_dep_drift.py` stays green.
+
+- **`scripts/bump_formula.py` emits audit-clean resource names.** When a
+  release adds a dependency closure, `_render_resource` now writes the PEP 503
+  form (`ruamel-yaml`) instead of the SOT spelling (`ruamel.yaml`), so a future
+  closure cannot re-red the tap audit. The url keeps the sdist's real filename.
+  Covered by `test_inserted_resource_names_are_audit_clean`.
+- **The five widget gates compile the shared client through one source group.**
+  `WidgetDataClient.alerts()` returns `AlertsLite`, declared in
+  `NeedsMeReading.swift`, but each gate carried its own hand-copied compile
+  list and none of them included that file, so `board_status`,
+  `cards_running`, `kanban_monitor`, `projects` and `live_activity_rehydration`
+  all failed on main with "cannot find type 'AlertsLite' in scope". The shared
+  files now live in `ios-app/scripts/swift_source_groups.sh`; a gate compiles
+  the whole group, so a future dependency lands once instead of five times.
+
+- **The macOS dropdown gate derives its grid dependency from the same group.**
+  `ClusterSmallGrid.swift` builds its trend from `ClusterHistorySeriesSet` and
+  `ClusterHistoryDownsampler` in `ClusterHistorySeries.swift`, which
+  `cli_dropdown_check.sh` did not compile — "cannot find
+  'ClusterHistoryDownsampler' in scope". The gate now takes the shared
+  cluster-grid group, prefixed for the sibling tree, so the iOS and macOS
+  compiles cannot disagree about the grid's dependencies.
+
+- **`widget_settings_check.sh` accepts the graph surface that already shipped.**
+  The golden harness was regenerated for `.widgetClusterGraph`'s empty content
+  row, and the widget-bundle-to-registry map learned `ClusterGraphWidget`, so
+  the surface-coverage assertions no longer report a shipped widget missing
+  from Settings.
+
+- **`no_op_handler_check.sh` no longer reads the kanban column label as a TODO
+  marker.** The marker search now removes Swift string literals first (with
+  escapes and multiline strings handled), then checks code and comments. The
+  real TODO/FIXME/unimplemented check is unchanged: `Text("TODO") // FIXME`
+  still fails on the FIXME, and a marker in a comment still fails.
+- **`ios-app/scripts/generate.sh` can now be invoked from the repo root.** It
+  `cd`s to `ios-app/` at the top and then rebuilt its own path from
+  `${BASH_SOURCE[0]}` to reach the `check_sources.sh` pre-flight — but
+  `${BASH_SOURCE[0]}` is the path the CALLER typed, not where the file lives, so
+  from the repo root that path resolved against `ios-app/` and doubled the
+  directory: `bash ios-app/scripts/generate.sh` died with
+  `ios-app/scripts/check_sources.sh: No such file or directory` on a file that
+  exists and is executable. The ENOENT read as a missing gate when the gate was
+  healthy; only the documented `cd ios-app && scripts/generate.sh` worked. The
+  script now resolves its own directory once, before the `cd`, and derives every
+  self-path from it — the same rule the gate-self-path trap documents. Both
+  invocations from both cwds (and an absolute path from an unrelated cwd) run the
+  pre-flight and generate; the pre-flight still refuses to generate a tree whose
+  `Sources/` carries a file `project.yml` does not name, from either cwd.
+- **The `hscc-bootstrap` pytest leg is green on the Ubuntu runner without
+  weakening the checks.** Three host assumptions were fixed at their cause.
+  The launchd gateway cases now pin `sys.platform` to `darwin` (the Linux
+  `systemd` branch keeps its own explicit test), because the row branches on
+  the platform before it ever calls the injected probe. The doctor-row suites
+  now stub the FATAL `sparkrun` check in their private-home helpers — and
+  `test_main_board` creates the `<HERMES_HOME>/hermes-agent` marker — so a
+  runner without the operator's tools/install can no longer sink a verdict
+  about an unrelated row; the models-served case likewise puts its install
+  marker where `_hermes_ok()` actually looks instead of falling back to the
+  real `~/.hermes`. The fake-node "no systemctl" fixture now builds a PATH
+  with `base64`/`bash` but without `systemctl`, so Ubuntu's real binary is not
+  discovered and the node reports `NO_SYSTEMD` (the missing-binary fact)
+  rather than `NO_BUS` (a bus fault).
+- **The Cluster Graph widget root now resolves `WidgetStyle` once and paints its
+  rendering-mode background in the file the style gate reads.**
+  `GraphWidgetViews.swift` owns the one resolution, `containerBackground` and
+  `widgetRenderingAdaptation`; `GraphWidget.swift` stays the provider and family
+  list. `widget_style_check.sh` now includes the graph view file in
+  `WIDGET_VIEWS`, so the surface's style resolution and background adapter are
+  measured instead of skipped, and it derives the expected widget root count
+  from the source (8 today) instead of pinning it — the graph root had reached
+  main outside both checks.
+- **`ios-app/Sources/HSCCWidgets/GraphWidget.swift` — the desktop now offers the
+  size its own layouts already implement.** The widget declared its sizes twice:
+  the iOS arm read the shared positive list `WidgetFamily.clusterGraphFamilies`
+  (small, medium, large, extra-large) while the `#else` arm hardcoded a list of
+  three. `GraphWidgetMetrics.swift` maps `.systemExtraLarge` to the small-multiples
+  density and `GraphWidgetViews.swift` carries a `case .systemExtraLarge:` arm, and
+  the desktop target compiles both files by path — so macOS built, shipped and
+  gated a layout it could never be asked to draw, and no gate compared the two
+  arms. This was not a platform constraint: Apple's widget HIG lists system extra
+  large as supported on the Mac desktop and in Notification Center, and names
+  iPhone as the platform that does not support it; `systemExtraLarge` is documented
+  available on macOS and is `@available` there (only tvOS and watchOS mark it
+  unavailable, unlike the four `accessory*` cases, which really are
+  macOS-unavailable — which is why a widget that names one needs the guard this one
+  no longer needs). The two arms are now one call reading the shared list, so the
+  drift is structurally impossible rather than policed. A per-platform asymmetry is
+  allowed again only if it is written: an arm that omits a family from the shared
+  list must name it in a `// families-omit: .systemX — reason` marker.
+- **`ios-app/scripts/cluster_graph_check.sh` — the family leg now reads every
+  `supportedFamilies` arm instead of one list and a pinned count.** §1 extracted
+  the shared list, required a dispatch arm per name, and separately asserted the
+  list held four entries — the count form the fleet's own doctrine bans, because a
+  dropped size fails as a number rather than by its name and the next legitimate
+  size edit gets "fixed" by editing the gate. It now extracts every
+  `supportedFamilies` call site in the widget file, labels each with the platform
+  arm it sits in (`#if os(iOS)` / `#else` / unguarded), resolves whether it reads
+  the shared list or a literal, and for every family that arm offers requires both
+  its own dispatch arm in the views file and a non-nil entry in the density map —
+  so neither half of the drift fails silently: a family reaching `default:` draws
+  another size's layout, and a family the map skips draws nothing. An arm offering
+  fewer sizes than the shared list must justify each omission with a written
+  `families-omit` marker. A call site the extractor cannot resolve — multi-line, or
+  resolving to no family at all — is a refusal, never a clean run. The sizes the
+  widget must offer are pinned by name, not by count. §1's weaker duplicate
+  (a grep for the literal text of the iOS call, which passed while the desktop arm
+  disagreed with it) is deleted rather than kept alongside, so the claim keeps one
+  owner, and `widget_view_dispatch/widgetClusterGraph.sh` now delegates the
+  no-accessory rule to this gate the same way it already delegates the other two,
+  because that check greps a `supportedFamilies([...])` literal and a widget
+  reading a named list has none — a green that measures nothing.
+- **`ios-app/scripts/cluster_graph_check.sh` §1 — the family leg now checks that
+  every platform which BUILDS the widget is offered a size at all, and reads each
+  arm's own reason.** Two shapes the rewritten leg still could not see, both found
+  in review and both confirmed by probe to print a clean run:
+
+  An `#if os(iOS)` around the `supportedFamilies` call with no `#else`. The desktop
+  then compiles the widget with no `supportedFamilies` at all, WidgetKit picks a
+  family by itself, and every per-arm measurement stayed green because each one
+  reads only the arm it found — strictly worse than the bug this card was opened
+  for, and the likeliest reintroduction, because the text written about this file
+  says the guard "is real and must stay". The arms' conditions are now resolved
+  into the platforms they can be true on (`os(...)` disjunctions, the `#else` arm as
+  their complement), and a run whose arms do not reach a platform that builds the
+  file fails by naming that platform. The desktop half is measured, not assumed:
+  `macos-app/project.yml` has to name the file for the rule to apply, so the gate
+  cannot demand an arm for a platform that does not compile it. An arm whose
+  condition the gate cannot resolve (`canImport`, `&&`, `#elseif`) refuses rather
+  than guessing both platforms.
+
+  A `families-omit` reason was matched anywhere in the file while its own failure
+  text said "on that arm", so a reason written on the desktop arm silenced an
+  undocumented iOS drop (probe: rc=0). The extractor now carries each arm's own
+  line span and the marker has to fall inside the span of the arm that owes it — and
+  it reads the raw file with comments stripped per line, because a stripped copy's
+  line numbers do not match the file the marker is searched in.
+
+  Four legs cover this (`L11`–`L14`): the one-armed guard fails naming macOS, a
+  reason on the wrong arm fails naming the iOS arm and the size, the same
+  asymmetries justified on their own arms pass (the rule is a scope, not a ban), and
+  an accessory family planted as a literal still reddens the surface file's
+  home-screen-only check — the narrower claim
+  `widget_view_dispatch/references/check-inventory.md` is now allowed to make for
+  `graph-3a`. That inventory also
+  gained the `graph-own-3` row for the delegation this card added, and its counts
+  now point at the run that prints them instead of carrying a number.
+* `GET /v1/cluster/history` no longer claims a tier-0 residency it never
+  measured: `store.tier0_resident` is written only by the branch that reads the
+  2 s ring, so it is `true`/`false` when the served `tier` is 0 and `null` at
+  tiers 1-2, where nobody measured it. It used to start as `true`, which made a
+  `window=6h`/`7d` payload claim a resident recorder in a process that hosts none
+  (measured on #413's iOS fixtures). The key stays on the wire and `note`/`speak`
+  remain the signal for an empty tier-0 answer, so no client that parses the
+  shape has to change.
+- **A typo can no longer run a live fleet migration.** The operator
+  systemd unit-name migration (`hscc-bootstrap/migrate_systemd_unit_name.py`)
+  now parses with argparse: `--help`/`-h` prints usage and exits 0, unknown or
+  contradictory flags exit 2, and all of those paths finish before host
+  discovery or any transport call. The default is a read-only dry-run plan;
+  only an explicit `--apply` may write unit state (prefix abbreviations are
+  disabled, so `--app` cannot become `--apply`).
+- **The same unknown-flag hole is closed on every other bootstrap entry point
+  that touches nodes or live state.** `install_autoreboot.py`,
+  `install_gpu_clock_cap.py` and `install_notifier_mask.py` now default to a
+  dry-run plan and need `--apply` to write; `install_payload.py`,
+  `install_scripts.py`, `preserve_autodown.py`, `install_hooks.py`,
+  `install_triggers.py` and `ensure_review_feature.py` now reject unknown
+  flags before doing any work. The live bootstrap stages pass `--apply`
+  explicitly, and the operator hints in `bootstrap.sh` and the READMEs do too.
+- **The same audit covers the cron scripts that mutate live state.**
+  `scripts/dep_pr_watcher.py` and `scripts/escalate_watcher_run.py` now reject
+  unknown flags before a pass; the other mutating scripts already parsed with
+  argparse or required an explicit `--apply` (`migrate_changelog_fragments.py`,
+  `worktree_prune.py`), and the read-only ones cannot change live state.
+- **`migrate_systemd_unit_name.migrate_node()` resolves the deployed runtime
+  copy** (`$PLUGINS` or `~/.hermes/plugins`) when a direct caller does not pass
+  `pkgs`, matching the CLI and the runtime the node actually executes.
+- Tests execute the real scripts as subprocesses with fake `ssh`, `sparkrun`,
+  `sudo`, `systemctl` and friends first on `PATH` (each fake fails the test if
+  invoked), proving `--help`, unknown flags and no-args never reach the fleet.
+- **The bootstrap board stage can no longer write a kanban root outside the
+  home it was told to install into.** `main_board.ensure` now resolves the root
+  Hermes' own kanban layer would use — `HERMES_KANBAN_HOME` first, otherwise
+  `HERMES_HOME` with Hermes' rules — and refuses unless it is equal to or under
+  the target root, naming both roots and the pin that caused the mismatch. That
+  includes a "throwaway" `HERMES_HOME` placed inside the native `~/.hermes`,
+  which Hermes resolves back to the live tree. `hscc main start` applies the
+  same guard before it launches the main orchestrator's REPL, so the other
+  path that shares the Hermes-binary lookup cannot start an orchestrator
+  pointed at a foreign board. A refused run runs no `hermes kanban boards
+  create|switch` at all.
+- **The board stage no longer drives the Hermes CLI into a home Hermes has
+  never initialised.** Hermes writes `<root>/config.yaml` when it first runs,
+  and the board stage ran six stages before the plugin/toolset wiring stage, so
+  a first install could reach wiring with a home Hermes had already touched —
+  making a first install indistinguishable from a re-install (t_6f4895aa).
+  `main_board.ensure` now defers with `hermes-not-started` while the target home
+  has no `config.yaml`; the bootstrap warning names the fix: start Hermes once,
+  then re-run bootstrap. On a home where Hermes has already run, the board is
+  still created and made current as before.
+- **The README lint no longer rejects `ruby -c`, and the allow-list entry is
+  now pinned by a test.** The CMD-BINARY rule in `scripts/readme_lint.py`
+  flags any quoted command whose head is neither an hscc verb, a repo-local
+  script, nor on the external-CLI allow-list. `ruby` was missing from that
+  list, so the sentence in `scripts/README.md` that documents the cask render
+  gate tripped it. The quoted command is real, so the allow-list was the side
+  that was wrong: `ruby_check` in `scripts/bump_formula.py` and
+  `scripts/bump_cask.py` runs `ruby -c` on the tap's Ruby formula and cask
+  before the tap is touched, and each refuses the bump when ruby is absent
+  rather than passing silently — a formula or cask that does not parse breaks
+  `brew tap` for every user. `ruby` is admitted narrowly: on `EXTERNAL`, where
+  the head simply passes, not on `INTERPRETERS`, which would go on to demand a
+  first script argument that a `-c` invocation does not have. The rule itself
+  is untouched and an unknown binary with a flag still fails.
+- **The large and extra-large monitor tiles no longer read a missing serving
+  section as a present-and-empty one.** `ClusterMonitorTables.hasServingSection`
+  answered `servingError == nil`, so a clean poll of a response that carried no
+  `serving` key at all — no error, and nothing said about engines — reported
+  that a serving section existed, and the two biggest sizes drew it as a table.
+  Presence is now captured at projection time from the wire key
+  (`response.serving != nil`) into `toldServingSection`, the same field and the
+  same reasoning `ClusterMonitorViewModel` has carried since the small tile was
+  fixed: `response.serving ?? []` has already flattened "absent" into "empty" by
+  the time anyone asks, so an absent section is silence and never a zero
+  (§6 rule 1). `model_decode_check/monitor_tables.swift` builds the payload a
+  fixture cannot express and pins the case, plus a twins-agree assertion that
+  the layout copy and the cell copy answer one way for the same bytes — the
+  reason the two files exist is layout versus cells, not two answers.
+- **The phone now says what the desktop says when the proxy route map is
+  unreachable.** `ClusterMonitorTables.proxyError` was projected and then drawn
+  by no iOS view, so a large or extra-large tile met the same failure the menu
+  bar names out loud and reported nothing. The sentence, its precedence (proxy
+  failure, then poll failure, then the empty table), the CLI's
+  `(showing last known routes)` suffix rule and which line `render()` styles
+  `warn` rather than `dim` now have one owner, `CLIMonitorNote`, in the
+  Foundation-only shared view-model file that both apps already compile;
+  `MonitorServingColumn` draws it and `DashboardFleetReading` prints the same
+  value, so the desktop keeps no wording of its own and a per-platform
+  re-wording has nowhere to live. `cluster_widget_check.sh` bans a string
+  literal of those words anywhere in `ios-app/Sources` outside the owner. A
+  serving section that was reported and came back empty now gets the CLI's own
+  `no backends behind the proxy` instead of a header row with nothing under it;
+  a section nobody sent still gets silence. `Copy.tokensNote` remains a
+  desktop-only caption.
+- **The landing page advertised a `hscc notify` contract the CLI no longer
+  has.** The generated command region of `site/index.html` was last
+  regenerated by `a65695a6`, before #436 reworded the command, so the public
+  page still read `hscc notify "message"` — "send a desktop notification" —
+  while `hscc --help` and `site/COPY.md` both say
+  `hscc notify "<title>" "<body>"` (an alert on the feed the iOS and macOS
+  apps read, `--level` / `--key`, `hscc notify test` for a push). Regenerated
+  with `python3 scripts/gen_site_commands.py --help-file
+  scripts/tests/fixtures/hscc_help_landing.txt --write` — the fixture, not the
+  live CLI, because `--write` stamps the version line from whichever help
+  source it read and the gate pins the page to the fixture's 2.15.11. The diff
+  is the one replaced `<li>` inside the `COMMANDS:BEGIN` / `COMMANDS:END`
+  markers and nothing else.
+* The metrics recorder's tier 2 rolled the serving series up with the host series
+  instead of omitting it. `MetricsRecorder.rollups()` read tier 1's engine rows
+  into a local and then folded only the host rows, so the 5-minute tier — the one
+  `window=7d` serves — held no per-engine row at all, and `_fold_engines`'
+  documented "rows from the tier below give an n-weighted mean" had nothing to
+  fold. Found by the read route's tier-by-tier parity test, which asks the
+  recorder what it holds before asking the route. `rollup()` already tells the two
+  row shapes apart, so both reads now go into one fold (t_c7f57783).
+- **The `scripts` pytest leg is green on `main` and on the Ubuntu runner.**
+  Four independent reds, each fixed at its cause rather than skipped:
+  `docs/README.md` now enumerates the tracked
+  `docs/design/2026-11-19-merge-queue-design.md` and
+  `docs/reports/t_23bf61f3-ci-pytest-leg.md` (DOC-UNLISTED); the `leg` job's
+  checkout checks out full history for the `scripts` leg only, because
+  `test_migration_is_lossless_on_the_live_changelog` pins the pre-migration
+  `CHANGELOG.md` blob from `git log` and a depth-1 clone left it reconstructing
+  HEAD's pointer-only `[Unreleased]` (empty moved set); the sibling-capability
+  probe ignores the interpreter already running the leg, since setup-python's
+  `python3.13` on the CI venv IS that interpreter (empty `SIBLING_DROPPED`);
+  and the heartbeat gate accepts Linux's `HH:MM:SS` from `ps -o time`, not just
+  macOS's `MM:SS.ss`. Pinned by a workflow-shape test and a
+  current-interpreter-probe test.
+
+- **`t_25768c9d` needs no tap change.** `requirements.txt` no longer pins `h2`:
+  the operator dropped APNs push and `t_d8245988` removed the pin and its
+  release-only formula closure. The local tap branch/commit staged for that
+  card is left in place, unpushed; the formula drift guard is green without it.
+- **`ios-app/scripts/widget_view_dispatch/widgetClusterGraph.sh` — the Cluster
+  Graph surface is now covered by the fleet's own widget-surface gate.**
+  `t_f4551339` shipped the widget as a configurable Home Screen surface — it
+  reads the registry, pauses, paces itself from `AppGroupWidgetSettings` and
+  gates `configured || paused` in one step in all three bodies — but added no
+  per-surface check file and no `MANIFEST` line, so `widget_view_dispatch_check.sh`
+  never ran a check against it. The gap was silent by construction: the
+  aggregator's orphan guard catches a file with no manifest entry, never a
+  surface with no file, so a registered `WidgetSurfaceKind` case could simply be
+  uncovered and nothing printed. The new file proves the registry read
+  (`setting(for: .widgetClusterGraph)`, which no gate checked — the settings key
+  existing in `SharedStore` is not the same claim as the widget consulting it),
+  the paused entry, the single owner of the paused sentence, the absence of a
+  Lock Screen label in each of the four files the widget ships, and the cadence
+  executed off the committed `cluster_graph_cadence` slice. It is the first
+  caller of `home-screen-only` families mode in the manifest — every shipped
+  surface has since moved to accessory mode, so that branch was dead code until
+  now and is negative-proven here twice. Two of the helper's seven checks are
+  deliberately not run: the one-step gate and the order inside the fetch, where
+  this widget ships invite-before-pause on purpose because
+  `ClusterGraphEntry.status` is single-valued and whoever asks first decides the
+  sentence the operator reads. Both belong to `cluster_graph_check.sh`; rather
+  than copy them, the file asserts the owning gate still carries each rule's own
+  pattern, so deleting a rule there reddens this gate instead of orphaning it.
+  Aggregate run rc=0, and its diff against the pre-change baseline is additive
+  only — the six shipped surfaces print byte-identical output.
+- **`hscc --help` now names every dispatched top-level command.**
+  `merge-queue` was live — dispatched at `main()`, present in
+  `COMMAND_HELP`, `hscc help merge-queue` exited 0 — yet absent from the
+  primary help surface. `heal-clear`, `heal-status` and `start-daemon` were in
+  the same blind spot. All four are listed on `hscc --help`, and
+  `hscc_daemon/tests/test_unknown_command_hint.py` now pins every
+  `TOP_LEVEL_COMMANDS` entry against the rendered surface.
+- **The cron watchers stamp through the checkout's `cron_watchers.py`, never a
+  deployed `~/.hermes/plugins` copy.** `_stamp_module` imported
+  `hscc_daemon.cron_watchers` first, so on a live install an older deployed
+  package shadowed the tree under test and the end-to-end stamp test loaded
+  `~/.hermes/plugins/hscc_daemon/cron_watchers.py` instead of the checkout
+  file. Both `scripts/dep_pr_watcher.py` and
+  `scripts/escalate_watcher_run.py` now load the sibling file by path first;
+  the deployed path is only the fallback when the script itself runs from
+  `~/.hermes/scripts`.
+- **The `hscc-roles` leg is green on `main` again: the `marketing` worker
+  profile now has a role spec.** `hscc-roles/tests/test_generator.py::test_every_hscc_owned_worker_profile_has_role_spec`
+  was red on a pristine `origin/main`, naming `marketing` — a profile under
+  `~/.hermes/profiles/` whose SOUL carries the generated-worker signature but
+  which has no `hscc-roles/roles/<name>.yaml`. That is the drift the assert
+  exists for: `generate` loops over specs, so a profile with no spec is skipped
+  forever and never picks up a base-identity improvement. The profile is real,
+  not stray — its `profile.yaml` description is verbatim
+  `hscc-roles/author.py:create_role()`'s routing template (down to that
+  function's `rules.. Do NOT` double-period artifact) with the default preload
+  list, and it completed dispatched board work (card t_2b2faddb, PR #387). So
+  the fix is the missing data, not a wider test: `roles/marketing.yaml` was
+  minted by calling `author.create_role()` with the description recovered from
+  the live SOUL, which reproduces the bytes `hscc create marketing "..."` would
+  have written. Proven non-destructive against live state rather than assumed —
+  `generator.compose_soul(spec, base_identity)` now equals the live
+  `~/.hermes/profiles/marketing/SOUL.md` byte for byte, and the spec's
+  `routing_description` and `preload_skills` equal what is in that profile's
+  `profile.yaml` and `config.yaml`, so a `generate` run stays a no-op for it.
+  The assert itself is untouched: hide the new spec and the test goes red
+  naming `marketing` again. The three docs that state the roster size (the
+  `hscc-roles` roster census, `docs/FLEET.md`, the root README) move 26 → 27 and
+  name the role, so the census claim stays true.
+- **`hscc-api/tests/test_session_resolver.py` had no coverage left for the
+  legacy `general-orch` catch-all, and its project-less test still carried the
+  pre-#432 name.** The card opened against a real red at main's tip: the file
+  asserted `profile == "general-orch"` for `resolve_named_session_id(None)` /
+  `("general")`, while PR #432 (`f1e2477e`, "roles: one named main orchestrator")
+  had made no project / `general` resolve to the ONE stored main orchestrator.
+  PR #444 (`c7010aea`) re-pointed that assertion at the resolver while this card
+  was in flight, so the red is gone — but the rewrite left two gaps this card
+  closes: `general-orch` disappeared from the file without a companion case, so
+  #432's "the legacy catch-all still resolves when explicitly named" had no
+  holder on the API side, and the test was still named
+  `test_resolve_general_sentinel_is_honest` for a contract it no longer stated.
+  Renamed to `test_resolve_projectless_identity_is_the_stored_main_orchestrator`,
+  its docstring now names #432 as the PR that amended the expectation, and the
+  expectation is derived from `main_orch` (the identity's owner) rather than
+  restated as a literal — so a rename cannot rot this pin again. The resolver and
+  `main_orch` were not touched: #432's merged contract is the authority.
+
+### Verified
+- `ios-app/scripts/cluster_widget_check.sh` exits 0 with exactly one PASSED
+  line: all structural proofs plus 125 executed checks. A planted
+  `"proxy /v1/model/info` literal made it print `CLUSTER WIDGET CHECK FAILED`
+  with rc 1 and no PASSED line; the file was then restored byte-identically
+  and the gate re-ran green.
+- `ios-app/scripts/build_check.sh` (78/39/6/22 files, 0 errors, 0 warnings)
+  and `macos-app/scripts/build_check.sh` (37/39 files, 0 errors, 0 warnings)
+  are clean; `widget_parity_check.sh`, `widget_view_dispatch_check.sh`,
+  `widget_style_check.sh`, `widget_data_client_check.sh`,
+  `projects_widget_check.sh`, `cards_running_widget_check.sh`,
+  `kanban_monitor_widget_check.sh`, `cluster_graph_check.sh` and
+  `model_decode_check.sh` (349/349) are green.
+- `python3 scripts/address_guard.py --tracked` is clean.
+- `hscc-bootstrap/tests/test_bootstrap_main_orch_e2e.py`: 3 passed — fresh
+  `--yes`, fresh custom name, and upgrade + idempotent re-run, each driving the
+  real `bootstrap.sh` in a throwaway home.
+- `scripts/tests/test_bump_formula.py` and `scripts/tests/test_formula_dep_drift.py`:
+  92 passed, 1 skipped — including new tests for release-driven h2 emission,
+  old releases staying untouched, existing h2 blocks never being rewritten, and
+  the flow-level commit/re-run behavior.
+- The real verbs were smoke-tested against temp state: `hscc main wakeups list
+  --json` from the bootstrapped sandbox, and `bump_formula.py` as a subprocess
+  against a fabricated tap.
+- `bash ios-app/scripts/build_check.sh`, `bash ios-app/scripts/widget_data_client_check.sh`
+  and `bash ios-app/scripts/model_decode_check.sh` run on the branch; the first
+  two compile the real `WidgetDataClient.swift` that this change edits.
+  `check_sources.sh` and `python3 scripts/changelog_fragments.py check` run in
+  the same commit (no file added under `Sources/`, so `project.yml` is
+  untouched).
+- The 404 behind §5.6's missing byte figure is a measurement, not an inference:
+  `GET /v1/cluster/history` returns `not_found / unknown route` against the
+  running API on the audit host while `GET /v1/cluster/monitor` and
+  `GET /v1/cluster/status` return 200 from the same process, so the deployed
+  build predates the route and no payload size exists to quote. The address was
+  derived at runtime from `hscc api status` and appears nowhere in the repo.
+- Every symbol named in §5.6 was grepped in `SharedModels.swift`,
+  `ClusterHistorySeries.swift` and `WidgetDataClient.swift` before being
+  written down, including `axis`, `source`, `max_fields`, `hosts_included`,
+  `engines_included`, `store.tier0_resident`, `missingCount` and `gapColumns`.
+- `python3 ios-app/scripts/widget_registry.py --check` passes: 14 surfaces
+  (9 widgets, 5 Live Activities), every generated file current, every tracked
+  widget source owned.
+- `scripts/tests/test_widget_registry.py` passes (4 tests); the whole `scripts`
+  pytest leg is green.
+- Every offline app gate passes, run the same way CI now runs them:
+  `board_status_widget_check.sh`, `widget_settings_check.sh`,
+  `projects_widget_check.sh`, `cluster_widget_check.sh`,
+  `cluster_graph_check.sh`, `cards_running_widget_check.sh`,
+  `kanban_monitor_widget_check.sh`, `widget_view_dispatch_check.sh`,
+  `probes_check.sh` and the rest of both script trees.
+- iOS and macOS compile gates are clean: `ios-app/scripts/build_check.sh`
+  and `macos-app/scripts/build_check.sh` (0 errors, 0 warnings).
+- `python3 scripts/address_guard.py --tracked` is clean.
+- **A guard now fails if any Swift source asks for a history path other than the
+  canonical one.** `ios-app/scripts/history_route_guard_check.sh` strips comments
+  and scans every `.swift` under `ios-app/Sources` and `macos-app/Sources` (its
+  file count is its own to print) on three legs: no `metrics/history` in code, so
+  the ruling can still be documented in prose without tripping it while any
+  spelling of the path in code — literal, welded query, or a fragment of a
+  concatenation — is caught; every literal naming a history route must be one of
+  a set the script names exactly, with `/v1/daemon/history` allowed BY NAME
+  because it is a different dataset (the automated-action timeline) rather than
+  by pattern; and the canonical constant must still exist, still be used, and
+  still be the only history path in the audited set — so the guard cannot be
+  silenced by deleting the canonical read instead of the stale one. It was seen
+  to bite rather than assumed to: `HISTORY_ROUTE_GUARD_NEGATIVE_TEST=1` plants a
+  `metrics/history` read, a second `…/history` path, and a client whose canonical
+  constant was deleted, and the run fails unless each one goes red; a hand-plant
+  into `WidgetDataClient.swift` itself also went red on all three legs and was
+  restored byte-identically (sha256 before == after) and re-run green.
+  `hscc-api/tests/test_contract_swift_routes.py`'s derived extension-route set no
+  longer lists `/v1/metrics/history`, because nothing asks for it any more; its
+  client-side `tier`-as-query-item assertion moved to where that read now lives
+  (the canonical `clusterHistory()` assertion already covers the class, and more
+  strictly), while the retired route's own row-key and peak-column assertions
+  stay — a route that is retired is not a route that is removed.
+  `ios-app/scripts/build_check.sh`, `macos-app/scripts/build_check.sh`,
+  `model_decode_check.sh`, `widget_data_client_check.sh`,
+  `cluster_history_chart_check.sh`, `check_sources.sh`, `check_theme.sh`,
+  `macos-app/scripts/widget_parity_check.sh` and
+  `python3 scripts/address_guard.py --tracked` were each run on the branch.
+- Every offline `ios-app/scripts/*_check.sh` and `macos-app/scripts/*_check.sh`
+  passes, including the four gates named on the card. `fleet_stats_render_check`
+  and `monitor_activity_check` are live-capture checks and were not run.
+- `ios-app/scripts/build_check.sh` and `macos-app/scripts/build_check.sh` both
+  report 0 errors and 0 warnings for every target.
+- **The failing case reproduces on the pre-fix tree and the fix is measured on
+  the post-fix tree, not asserted.** A detached worktree of `origin/main` fails
+  `bash ios-app/scripts/generate.sh` from the repo root with the doubled
+  directory and RC 1; the fixed script passes `bash`/`./`-exec × `ios-app/`/repo
+  root plus an absolute-path invocation from `/`, each run printing the
+  pre-flight's own sync line and the resolved team on every target. Teeth are
+  re-proven after the fix rather than assumed: a stray untracked file under
+  `Sources/` that `project.yml` does not name makes the run exit 1 naming it
+  `NOT COMPILED` from both cwds, with `xcodegen` never reached.
+- **The trap is unique to this script — scanned, not assumed.** An awk walk of
+  every tracked `*.sh` in the repo, flagging any `${BASH_SOURCE[0]}` used on a
+  line after a `cd`, names `ios-app/scripts/generate.sh` and nothing else; every
+  other gate uses it only on its own `cd` line, where it is still the caller's
+  path but evaluated before anything moved. `heredoc_backtick_check.sh` stays
+  green with the new comment block in place.
+- **`ios-app/scripts/model_decode_check` runs the surface rules, not just the
+  models.** For both committed `/v1/cluster/monitor` captures it decodes the
+  shared `MonitorResponse`, projects it through `ClusterMonitorViewModel`, and
+  asserts what each surface is allowed to show: the lock screen's columns come
+  from the CLI view-model, at most `maxPushedHostRows` hosts are pushed and the
+  drop count accounts for every host the route listed, a degraded read pushes a
+  nil table rather than zeros, no pushed string is a dotted-quad (§7, with a
+  control that reports when the fixture holds no address to find and a tamper
+  that proves the scan bites), the glance metric never duplicates the primary,
+  and the aggregate Run/Wait is the serving section's own sum. 124/124 checks
+  over 58 fixtures became 157/157 over 64 — the new fixture is the live capture,
+  with the tailnet host substituted for RFC 5737 TEST-NET-1 addresses and the
+  container names stripped (§7).
+- **`monitor_activity_check` now measures the payload it ships, and can fail.**
+  It was still handing `MonitorContent.make` the app's parallel
+  `ClusterMonitorResponse` after the driver moved to the shared `MonitorResponse`
+  — so it no longer compiled — and it printed only the per-node meters. It now
+  builds the state from the shared decode and prints the cluster half too, with
+  the cap, the drop count, the aggregate sum and the §7 scan asserted on the live
+  bytes; the three Foundation-only Shared files are injected whole rather than
+  block by block, so the rules under test are the shipped ones. `run.py` called
+  `main()` and discarded its return value, which made the script exit 0 however
+  many FAILs it had printed; it exits with the harness's status now. Green
+  offline against both real captures, red with rc=1 when a host row is labelled
+  with its wire address.
+- `hscc-bootstrap/tests` on macOS: **1251 passed** (the same full file set the
+  leg runs).
+- `hscc-bootstrap/tests` in a Linux `python:3.13-slim` container with
+  `requirements.txt` + `pytest==9.1.1` (the CI interpreter/deps): **1211 passed,
+  40 skipped**, i.e. the 18 former reds plus the rest of the leg.
+- The 18 previously failing node ids were also run as a standalone selection
+  on both platforms: **18 passed** on Linux and macOS.
+- `python3 scripts/address_guard.py --tracked` clean.
+- `ios-app/scripts/build_check.sh`: all four targets compile with 0 errors and
+  0 warnings (compile only, as the card requires).
+- `ios-app/scripts/check_sources.sh`: the new `Notify/PushRegistrar.swift` is in
+  the app target's explicit source list.
+- `ios-app/scripts/notify_check.sh`: the pure `NeedsOperatorNotifier` engine
+  still passes unchanged, proving the local path was kept rather than replaced.
+- `hscc-api/tests/test_routes_devices.py` and
+  `hscc_daemon/tests/test_notify_cli.py`: the `/v1/devices` contract and the
+  `hscc notify test` argv path the new button depends on stay green.
+- New pins, executed rather than text-matched: `test_leg_select.py` asserts
+  **every leg in the live `DIRS` array is selected by a change inside its own
+  directory** (the card's named gate), so a leg added to the runner without a
+  map entry fails; `test_decide_legs.py` builds a throwaway git repo where main
+  moved after the branch point and proves the PR diff is taken from the merge
+  base (a two-dot diff would run an unrelated leg), and that push/dispatch/
+  unusable-base all select the full roster; `test_leg_verdict.py` executes every
+  advisory/blocking branch, including a `pytest exit 143` kill and a truncated
+  log; `test_pytest_legs_workflow.py` pins the triggers, the parallel leg matrix,
+  the stable `legs` verdict job, the venv cache, and `set +e` around the runner
+  (without it GitHub's `bash -e` aborts before `rc=$?` and the whole
+  classification is dead code).
+- Selector rules are grepped, not invented: `hscc_daemon` widens to
+  `hscc-cluster`/`hscc-project`/`hscc-api` (real imports at
+  `hscc-cluster/tests/test_launch_guard.py:31`,
+  `hscc-project/tests/smoke_dispatch_guard.py:37`,
+  `hscc-api/tests/test_cluster_history_parity.py:41` and four more), and
+  `macos-app`/`ios-app` widen to `scripts` because `scripts/tests/test_site_landing.py:46,49-50,305-347`
+  is the only Python reader of those trees.
+- **Full suite on GitHub, run `44550168746` (PR #467): success, 5m54s wall**
+  (15:01:46Z → 15:07:40Z, cold venv cache) across all 12 legs. `hscc-api` is the
+  long pole at 5m31s; `hscc_daemon` (macOS) 2m38s; the rest ≤2m12s. The first
+  runner run (`44539504053`) is why `requirements-ci.txt` exists — four legs died
+  at collection on imports only their tests make — and why `hscc_daemon` is the
+  one macOS job (`select.kqueue` at `hscc_daemon/event_driven.py:240`).
+- The one prerequisite red this card was handed,
+  `hscc-bootstrap/tests/test_bootstrap_isolated.py::test_fresh_home_says_not_wired_instead_of_claiming_success`
+  (owner t_ea59a6ba), is green on the runner in every run above; the site command
+  region passed with #447 and the tap dependency closure with #451.
+- **`ios-app/scripts/cluster_widget_check.sh` now executes the medium tile's
+  table instead of describing it.** The gate compiles
+  `CLIMonitorTableReading.swift` with the real view-model on the macOS SDK and
+  asserts, per host of the committed fixture, that the drawn cells are
+  byte-identical to `CLIMonitorHostRow.cells`, that the drawn titles are the
+  CLI's own `columns`, which five columns carry a threshold verdict and which
+  four carry none, that the four-row budget of the size and its `+n` agree with
+  the route's host count, and that no drawn cell is a dotted-quad address. The
+  gate states (`paused`, `unconfigured`, section off, no host list) are executed
+  through `cliHostRows` rather than grepped. Structural proofs cover what an
+  executed check cannot see: both CLI-shaped tiles draw the ONE table view, no
+  column title is transcribed into a widget body, and no family reaches
+  `entry.monitor` directly. Six mutations were run — a cell suffix, drawing the
+  wire address in Host, a changed row cap, a dropped column, a bypassed
+  `cliHostRows`, and the table removed from the body — and each reddened the
+  gate with the file restored byte-identically afterwards.
+- **`GET /v1/cluster/history` — seven stored columns are drawn by nothing.** The
+  coverage pass found seven `hosts[]` columns the route serves at every tier that
+  no surface renders and no configuration can even request, because none of them
+  is in the client's metric enum: `swap_used_mb`, `swap_total_mb`,
+  `swap_used_pct`, `gpu_clock_mhz`, `net_recv_bytes_s`, `net_send_bytes_s`,
+  `sparkrun_jobs`. They are GAP-1 to GAP-7 in the gaps section, each with the
+  axis it would need. Recorded alongside them: no peak column is reachable at any
+  surface's default window (`15m` refuses them), the serving metrics and VRAM
+  exist only behind an explicit metric-set pick, and the menu bar's graphs section
+  is fixed to four metrics and capped at four nodes per refresh.
+* `hscc-api/tests/test_cluster_history_parity.py` pins both halves: every durable
+  window against a store with no resident recorder answers `tier0_resident`
+  `None` with the key still present, and `window=15m` in the same process still
+  answers `false`. Mutation-probed at the commit that adds it: reverting the
+  default to `True`, and claiming residency from the durable branch, each redden
+  that test. 28 passed in the parity file.
+- **`ios-app/scripts/cluster_monitor_cli_parity.py` — the monitor parity golden
+  comes from the CLI, not from a reading of it.** The script runs the real
+  `host_table()` / `serving_table()` / `render()` out of
+  `hscc_daemon/cluster_live.py` over a fixture's bytes and records the cell
+  strings the CLI produced plus its plain-text render; `model_decode_check` then
+  compares `ClusterMonitorViewModel` against that at three levels (column labels,
+  every cell in both widths, the cells against a line of the CLI's own text). A
+  transcribed golden would only ever test the transcription. It refuses a fixture
+  carrying a private address, so the rule cannot be laundered into the golden.
+  Two fixtures ship with it: a sanitized capture of the live route and an edge
+  fixture for the shapes a capture cannot hold (no sample, no `running`, null
+  `kv`, `G`-band tokens, 30-character error truncation, the width boundary).
+  `model_decode_check.sh` prints its own before/after counts; this card's run is
+  in its PR.
+- `hscc_daemon/tests/test_apns.py` pins the JWT header/claims and reuse window
+  (same token inside 50 minutes, fresh `iat` after), verifies a real ES256
+  signature with a throwaway P-256 key, drives a fake transport for payload
+  shape/sound/thread-id, prunes on 410 and `BadDeviceToken`, keeps rows on 503,
+  and asserts no device token or JWT reaches the result or logs. The same file
+  covers registration refresh/validation and the doctor verdicts;
+  `hscc-api/tests/test_routes_devices.py` drives register/refresh/list/test-push
+  over loopback HTTP through the real auth gate; `hscc_daemon/tests/
+  test_notify_cli.py` drives the actual `hscc notify test` argv path;
+  `hscc-bootstrap/tests/test_doctor_apns.py` pins the row's pytest fence,
+  injected verdict and missing-module row.
+- **The fresh, upgrade and idempotence paths are pinned in a temp
+  HERMES_HOME/HSCC_DIR.** `hscc-roles/tests/test_main_orch_migration.py` covers
+  a fresh install (main profile created, no legacy profile invented, full SOUL
+  contract including the roster and every standing rule), an upgrade with an
+  existing catch-all and cluster role (missing memories/sessions copied,
+  existing main memory/sessions untouched, both sources still present, both
+  SOULs retired with their old content preserved), a byte-identical second run
+  (no file rewritten, no duplicate retirement marker, no `migration` block),
+  destination-directory creation, config keys surviving main-profile
+  generation (`__config_version`, `browser`, operator memory/compression
+  values) and legacy configs never being rewritten. A real-CLI smoke run of
+  `hscc.py orch-all --hermes-home` on a seeded throwaway home reproduced the
+  upgrade (copied + retired on run 1, no-op on run 2), and `hscc.py generate`
+  marked the legacy role retired with its config preserved.
+- `hscc_daemon/tests/test_merge_queue.py`: view positions/states/branches/ages,
+  the live `gating` stage while a gate runs, the terminal `resolve` row, and the
+  board filter.
+- `hscc_daemon/tests/test_kanban_live.py`: the monitor attaches the same view
+  and renders one table per project.
+- `hscc-api/tests/test_routes_merge_queue.py`: the route's rows are the CLI
+  view's rows; `?board=` filters; the token audit and Swift-route contract stay
+  green.
+- `hscc-project/tests/test_review.py`: the review queue carries the merge state
+  and renders the `merge` column.
+- Smoke-tested the real CLI verbs against a throwaway `HOME`/`HSCC_HOME`:
+  `hscc kanban monitor --json` (merge_queue rows present) and
+  `hscc project review --queue` (merge column), plus `GET /v1/merge-queue` over
+  the in-process test server.
+- `hscc_daemon/tests/test_main_wakeups.py` drives the feature with injected
+  time, delivery and config/state paths: interval/daily/weekly schedule math,
+  first-tick seeding, restart persistence (no duplicate inside the window and
+  no forgotten next fire), busy -> `queue` through `--mode auto`, missing-pane
+  skip + persisted doctor verdict, corrupt-config fallback, the config writer's
+  canonical schema and unknown-key preservation, the daemon stream
+  registration, and the `hscc main wakeups` CLI round trip. The real CLI verb
+  is smoke-tested against a temp `HSCC_DIR`.
+- `ios-app/scripts/model_decode_check.sh`: `v1_merge_queue.json` decodes against
+  `MergeQueueLite`, and `MergeQueueTableReading`'s columns/cells equal the
+  committed CLI golden for all three project tables; ages pin `45s`, `1m`,
+  `1h02m`, `2h00m`, `1d2h` and `1d0h`, and newline flattening matches the CLI.
+  The golden is generated by `ios-app/scripts/merge_queue_cli_parity.py` from
+  the real `merge_queue_table`, not transcribed.
+- `ios-app/scripts/widget_view_dispatch_check.sh` (new
+  `widgetMergeQueue.sh` surface): six families gate paused and unconfigured,
+  the paused copy has one owner, the provider pauses before building the client,
+  and the cadence slice runs Off/negative/5/60 minutes.
+- `ios-app/scripts/widget_style_check.sh`, `widget_settings_check.sh` and
+  `sf_symbol_check.sh`: style resolution, accessory tinting, registry coverage
+  and the `arrow.triangle.merge` glyph.
+- Both compile gates are clean: `ios-app/scripts/build_check.sh` (76/37/5/21
+  files, 0 errors, 0 warnings) and `macos-app/scripts/build_check.sh`
+  (35/37, 0 errors, 0 warnings), plus `widget_parity_check.sh` (37 shared
+  sources on both widget targets).
+- `scripts/gen_site_commands.py` no longer accepts a signature the CLI does
+  not publish. Measured with mutation probes at `ce8e87f3` on the pre-fix tree:
+  rewriting the copy card's notify bullet to `hscc notify --frobnicate XYZ`
+  gave `align()` zero problems and rendered `hscc notify --frobnicate XYZ` onto
+  the page, because `command_key()` reduced `notify <message>`, `notify
+  "<title>" "<body>"` and `notify --frobnicate XYZ` all to `notify`. After the
+  change the same rewrite is rejected by name. The two probes are kept as
+  `test_generator_refuses_a_signature_the_cli_does_not_take` and
+  `test_generator_refuses_an_argument_the_cli_dropped`.
+- The stricter rule is a subset check, not an equality check, and the count is
+  the reason: at `ce8e87f3` an equality rule would have rejected 17 of the 40
+  copy bullets (`hscc cluster down` for the CLI's `cluster down [--dry-run]`,
+  `hscc api start` for `api <cmd>`, `hscc template apply <name> --confirm` for
+  `template apply <name> [--confirm] [--force-recreate]` and 14 more), i.e. an
+  exception per verb. The subset rule rejected 1 — the live `notify` drift.
+  `test_argument_check_is_not_vacuous` pins both numbers.
+- `test_fixture_is_the_repos_own_help` replaces the installed bottle as the
+  fixture's oracle. A released bottle cannot serve that role: measured at
+  `ce8e87f3`, the bottle installed on the card's host reported `hscc 2.15.13` —
+  the repo's own `VERSION` — while printing `notify <message>` and no `main`
+  line, and the fixture agreed with it. Same version string, older surface:
+  that is how a version check cannot be the guard, and how the drift stayed
+  green. `test_installed_cli_agrees_when_it_is_this_tree` keeps the bottle
+  comparison and skips with the counts in its reason when the bottle is
+  demonstrably not this tree.
+- `scripts/tests/test_site_landing.py`: 25 passed → 29 passed / 1 skipped
+  (the bottle skip). The full `scripts/tests` leg at this branch's base
+  `7e0ff7fa` is 502 passed, 4 skipped, 3 failed; all three are
+  `test_widget_registry.py`, and they fail identically in a clean
+  `origin/main` worktree at `7e0ff7fa` (widget sources with no manifest
+  owner), so they are main's red, not this diff.
+- Smoke-tested the real entry points, not only pytest: `python3
+  scripts/gen_site_commands.py --help-file
+  scripts/tests/fixtures/hscc_help_landing.txt` exits 0 on the committed
+  pair, and the same run with COPY's notify bullet rewritten to `hscc notify
+  --frobnicate XYZ` exits 1, names `--frobnicate`, and leaves the page
+  byte-identical under `--write`. `hscc main` prints its help in a sandbox
+  HOME. `python3 scripts/address_guard.py --tracked` clean.
+- `hscc-roles/tests/`: 172 passed across `test_anti_churn_rules.py`,
+  `test_generator.py`, `test_main_orch.py`, `test_orch_sync.py` and
+  `test_role_soul_check.py` — including block-exactly-once for default and
+  custom main names plus project orchestrators, idempotent regeneration with
+  an operator-appended section, the `orch-sync` re-render path, and a grep
+  guard that the rules text has no second copy in code.
+- The real verbs were smoke-tested against a throwaway `HERMES_HOME` /
+  `HSCC_DIR` with a fixture registry: `hscc.py generate`,
+  `hscc.py orch demo` and `hscc.py orch general` all exited 0, and both
+  generated SOULs contain the block exactly once. Live profiles were not
+  regenerated; the next bootstrap applies the block.
+- **`ios-app/scripts/model_decode_check/cluster_small_grid.swift` — the tile the
+  small widget draws is now executed, not just compiled.** The grid's data half is
+  Foundation-only, so `model_decode_check.sh` compiles the shipped
+  `ClusterSmallGrid.swift` and runs it against the committed monitor fixtures:
+  every cell against the CLI golden where a golden exists, the four-host cap and
+  the count of hosts it dropped, the down host and the empty-string host both
+  printing `-`, the two power-limit shapes (`""` and `0` W are both no verdict),
+  the not-told serving section against the told-but-idle one, and the bar
+  fraction's clamp. It also scans every string the tile would draw for a dotted
+  quad: the CLI's Host column is the node's address, and the tile's row label is
+  the view-model's display label instead (§7) — so the guarantee is measured on the
+  densest surface rather than assumed. `model_decode_check.sh` prints its own
+  before/after counts; this card's run is in its PR.
+- **`ios-app/scripts/model_decode_check/monitor_tables.swift` — the table layout
+  is executed, not described.** New checks in `model_decode_check`: every column
+  a plan names has the CLI's header word and the CLI's cell string at the same
+  index of the same row (with the `displayLabel` column excluded both ways — the
+  widget's cell is the label, the CLI's stays the wire host); the drawn serving
+  columns are the CLI's narrow row minus `Gen t/s`; the six detail fields are
+  pinned by exact inputs (the SI bytes/s steps, the 1024-based VRAM GB rule, a
+  load member that keeps its slot when unreadable) and by the two committed
+  captures — including that the live GB10's empty `gpu_mem_used_mb`/`gpu_fan_pct`
+  render as dashes and never as zeroes, and that a host which never sampled has
+  no number anywhere. The three clip functions are run against a twelve-host
+  fleet so a plan that says N draws N and pairs it with the right `+N more`,
+  including the detail block, which has no header of its own to make an
+  over-long list obvious. The structural gates gained the matching teeth:
+  `cluster_widget_check.sh` and `widget_view_dispatch/widgetMonitor.sh` fail if a
+  large/extra-large body stops routing through the shared table block or decides
+  the table gate for itself.
+- `hscc_daemon/tests/test_merge_queue.py`: throwaway bare origin + clone cover
+  a clean rebase/push/squash merge, FIFO one-PR-per-tick, conflict -> resolve
+  handback with an aborted rebase, red gate tail handback, restart mid-run
+  recovery from the persisted in-flight entry, pause leaving the queue
+  untouched, the checks-green predicate, and hscc's conditional app build
+  gates.
+- `hscc-project/tests/test_registry.py`: absent / round-tripped `merge_queue`
+  plus malformed shapes raising `RegistryError`.
+- Smoke-tested the real CLI against a throwaway `HOME`: `hscc.py merge-queue
+  status`, `add`, `list`, `pause`, `resume`, `remove`, `enable`, `disable`
+  and `--help`, including `--json`.
+- **`ios-app/scripts/live_activity_rehydration_check.sh` now executes the load
+  rules instead of describing them.** The gate decodes the committed
+  `/v1/cluster/monitor` fixture — the same bytes `model_decode_check` decodes and
+  the same bytes `cluster_monitor_cli_parity.py` generated the CLI's goldens from
+  — and asserts per host that the drawn label is the view-model's `displayLabel`
+  and never a dotted-quad address, and that each cell is that view-model's cell;
+  the cell literals themselves are quoted from the CLI's own golden for those
+  bytes, so the surface is checked against the CLI rather than against itself. It
+  executes the states a surface can lie in: a host list that is absent, an empty
+  host list, a host that answered with an error and no sample, a fleet idle but
+  reporting, a wattage with no limit read, a queue with work in it and a queue
+  without, and the tally switched off — asserting on both sides that the first set
+  draws nothing and the second draws its real value. It pins that the peak GPU and
+  the total draw survive the clip, that the two budgets (Lock Screen, expanded
+  Island) are read from the constants the view clips to, that a payload carrying
+  only a host line is not the empty one the launch sweep ends, and that an older
+  payload without any of the new keys still decodes. The budget constants moved
+  onto `ClusterHealthProjection` (re-exported by the attributes type) so the view
+  and the gate cannot drift, and a fixture the harness cannot read fails the run
+  by name instead of skipping quietly.
+- **The new assertions were proven by mutation, on both sides.** Restoring
+  `hasServingSection` to its old `servingError == nil` reddened exactly two
+  checks — the absent-key case read as a section, and the twins disagreed — with
+  the file restored byte-identically afterwards. Planting the CLI's
+  `no backends behind the proxy` in a widget file outside the owner reddened the
+  single-owner ban and nothing else. The note words are asserted against the
+  terminal's literal sentences in both apps' harnesses (not against a shared
+  constant, which would survive a re-wording of the owner), and the header
+  caption is pinned inside the CLI's own rendered golden text. Both
+  `build_check.sh` runs, `model_decode_check.sh`, `cluster_widget_check.sh` and
+  `macos-app/scripts/cli_dropdown_check.sh` are green with no check dropped; the
+  banner lines are in the pull request body rather than transcribed here.
+* The three shape assertions that made `/v1/metrics/history` drift loud are now
+  expressed against the survivor, so retiring the loser leaves nothing
+  uncovered: every key the route puts in a row is declared by
+  `ClusterHistoryPoint`; average and peak are different numbers on a fixture
+  that makes them differ (60 °C then 90 °C → avg 75, max 90) and a host that
+  never answered stays null; and `clusterHistory()` transmits each of its six
+  parameters as a real `URLQueryItem` through `WidgetDataPath.clusterHistory`.
+* `hscc-api/tests/test_cluster_history_parity.py` covers the `since`/`until`
+  axis against the recorder's own read of the same fixture state, and the
+  read-only AST sweep stays green (no `get_sampler()` in the read path).
+- **`ios-app/scripts/cluster_history_chart_check.sh` — executes the history
+  chart layer, and the fixtures it runs against are the route's own bytes.**
+  The gate compiles the real `ClusterHistorySeries.swift` plus the real wire
+  types into a macOS CLI and asserts the behaviour a decode gate cannot see:
+  the spike survives a 40-pixel draw (and the same-size stride thin provably
+  loses it, so the assertion cannot pass vacuously), a gap never becomes a
+  number, the ends of the line survive, and mixed tiers are refused. Its second
+  leg compares the Swift metric keys against
+  `hscc_daemon/metrics_history.py`'s own tuples — a rename in the recorder
+  reddens this gate instead of emptying a chart — and re-checks every fixture
+  key against the same tuples. `ios-app/scripts/make_cluster_history_fixture.py`
+  produces those fixtures: it fills a store through `MetricsRecorder.tick` and
+  calls `handle_cluster_history`, so `model_decode_check.sh` now decodes four
+  handler-generated payloads (`v1_cluster_history_6h|7d|6h_engine_only|15m`)
+  rather than a hand-typed shape. One measured correction along the way:
+  the store's columns are sqlite `REAL`, so `run`/`wait` arrive as `2.0`/`1.0` —
+  the model's `Int?` holds only because `JSONDecoder` converts an integral
+  number losslessly, and the fixture now pins that too.
+- `scripts/tests/test_site_landing.py`: 24 passed / 1 failed → **25 passed**
+  off `origin/main`, with the regeneration as the only change.
+- `scripts/tests`: 2 failed / 467 passed / 3 skipped → **1 failed / 468 passed /
+  3 skipped**. The one survivor is
+  `test_formula_dep_drift.py::test_formula_resources_match_requirements_sot`
+  (`h2` pinned in `requirements.txt` but with no `resource` block in the
+  external tap formula), which its own card owns.
+- **The cluster widgets’ large/XL tables, the Cluster/Monitor Lock Screen
+  accessories and the Monitor Live Activity are on current `main`.** #409’s
+  large/XL table work had already landed via #424 (`d385a3ca`), so it was closed
+  as superseded; #415 and #423 were rebased onto `main` preserving both sides’
+  newer widget work, and merged after the iOS/macOS compile, decode, widget and
+  address gates passed. No product behaviour changed beyond the rebases.
+- `macos-app/scripts/build_check.sh`: HSCCMac and HSCCMacWidgets compile with
+  0 errors and 0 warnings (compile only).
+- New `macos-app/scripts/alert_feed_check.sh` (also wired into the
+  `app-build-checks` workflow): compiles and RUNS the shipped `AlertFeed`
+  policy over fixtures — first-launch baseline, `next_since` vs `latest_id`
+  paging, burst coalescing, feed-reset re-baseline, duplicate rows, level
+  fallback, persisted-state round-trip — then greps the 5 s cadence, the
+  `since` read, the absence of APNs registration/`aps-environment`, and the
+  dropdown/H wiring.
+- `ios-app/scripts/widget_data_client_check.sh`: the allowlist check now
+  expects `/v1/alerts` deliberately, and the client's GET-only / no-write
+  structural legs stay green.
+- `hscc_daemon/tests/test_alerts.py` and
+  `hscc-api/tests/test_routes_alerts.py`: the feed contract the Mac consumes
+  (exclusive `since`, `next_since`, `latest_id`, `acked_at` null) passes.
+- **The interview, the resolver and the no-hardcoding rule are pinned by
+  tests.** `hscc-bootstrap/tests/test_bootstrap_main_orch.py` extracts the
+  exact `ask_main_orch_name` shell function and runs it against a throwaway
+  `HSCC_DIR`/`HERMES_HOME` for stored, unstored, `--yes`, `--dry-run` and
+  invalid-then-valid answers (asserting the dry run writes nothing).
+  `hscc-roles/tests/test_main_orch.py` covers the `general` fallback, stored
+  precedence, overwrite refusal, every validation arm and a grep guard that no
+  `GENERAL_PROFILE`/`GENERAL_BOARD`/`general-orch` literal or
+  `name == "orchestrator"` lookup returns outside the resolver (docs and tests
+  excepted).
+- `ios-app/scripts/build_check.sh`: HSCC 75 files, HSCCWidgets 30,
+  HSCCLiveActivity 5, HSCCLiveActivityMonitor 20 — 0 errors, 0 warnings.
+- `macos-app/scripts/build_check.sh`: HSCCMac 27 files, HSCCMacWidgets 30 —
+  0 errors, 0 warnings.
+- `model_decode_check.sh` 300/300 checks over 70 fixtures,
+  `widget_data_client_check.sh`, `widget_style_check.sh`,
+  `widget_settings_check.sh` and `widget_view_dispatch_check.sh` all pass.
+- `hscc-api/tests/test_routes_alerts.py` and
+  `test_widget_route_parity.py` pass; `scripts/address_guard.py --tracked`
+  clean.
+- `ios-app/scripts/build_check.sh`: HSCC, HSCCWidgets, HSCCLiveActivity and
+  HSCCLiveActivityMonitor compile with 0 errors and 0 warnings.
+- `macos-app/scripts/build_check.sh`: HSCCMac and HSCCMacWidgets compile with
+  0 errors and 0 warnings.
+- `ios-app/scripts/check_sources.sh`: 95 Swift files, all listed in
+  `project.yml`.
+- `ios-app/scripts/widget_data_client_check.sh`: passes, including the reduced
+  audited allowlist and the GET-only/no-mutation structural legs.
+- `hscc-api/tests/test_contract_swift_routes.py`: 21 passed — every remaining
+  Swift route still resolves against the server, and the audit doc still
+  mirrors the contract matrices.
+- `python3 scripts/address_guard.py --tracked`: clean.
+- `hscc_daemon/tests/test_merge_queue.py`: the conflict and red-gate handbacks
+  name `git rebase origin/main`, `git push --force-with-lease origin
+  wt/t_card` and the "never force-push main or any other branch" rule.
+- `scripts/tests/test_worker_push_guard.py`: own branch allowed (including
+  `HERMES_KANBAN_BRANCH` override and the `wt/<task>` fallback); `main`,
+  another card branch and a tag refused; fast-forward/create allowed;
+  non-worker runs untouched; the real `.githooks/pre-push` driven through git's
+  stdin contract for all three verdicts.
+- `hscc-roles/tests/test_anti_churn_rules.py`: the new rule-2 wording, the
+  retained manual fallback, and the single-source grep guard.
+- `hscc_daemon/tests/test_main_cli.py` drives the real `start`/`status` code
+  with a fake repl module and a recording fake tmux runner: reuse with zero
+  tmux calls, window creation with `-d`/`-n <profile>`/`-p <profile> chat`,
+  current-session preference, detached-session fallback, ambiguity refusal
+  with no kill/select, stored-name resolution, missing Hermes/repl/tmux
+  failures, and busy/idle/not-running/ambiguous/unknown status. CLI help is
+  pinned inert, `status --json` is the machine contract, and the unified
+  `hscc main` branch is dispatched. `hscc-bootstrap/tests/test_bootstrap_main_pane.py`
+  runs the shipped bootstrap function verbatim: dry-run plans, `--skip-roles`
+  skips, no tmux server prints the fix, and a real server invokes exactly
+  `main start` through the shim (or the deployed module fallback).
+- `hscc-api/tests`: **1215 passed, 1 skipped**. At the branch point the same
+  suite was **3 failed, 1223 passed, 1 skipped** — the two `/v1/devices`
+  confirm/registration checks and the missing `GET /v1/alerts` extension-roster
+  entry (main's later app-notification removal took the alert read out of the
+  widget client, so the final tip does not need that roster line).
+- `hscc_daemon/tests`: **3924 passed, 1 skipped**. Relevant files:
+  `test_notify_cli.py` (post/list/ack argv and real HTTP), `test_alerts.py`
+  (store rules without the deleted push seam).
+- `hscc-bootstrap/tests/test_doctor.py` + `test_doctor_row_registry.py`:
+  **147 passed** after removing the APNs row. `hscc-roles` generator/migration
+  tests: **99 passed**. `scripts/tests/test_bump_formula.py`: **80 passed,
+  1 skipped**. `scripts/tests/test_site_landing.py`: **25 passed**.
+- Smoke-tested the real verb in a temp `HSCC_HOME` against a loopback stub:
+  `hscc notify list --api …` printed `#2 … critical key=node-down` above
+  `#1 …` and `hscc notify ack 2 --api …` printed `alert 2 acknowledged`.
+- `python3 scripts/address_guard.py --tracked`: clean (no output).
+- `hscc --help` in a fresh temporary HOME lists `merge-queue`, `heal-clear`,
+  `heal-status` and `start-daemon`; `hscc help merge-queue` and
+  `hscc merge-queue --help` both exit 0.
+- `scripts/tests/test_escalate_watcher_run.py` (the end-to-end doctor-verdict
+  test included) and `scripts/tests/test_dep_pr_watcher.py` are green on this
+  live-install host; the stamp module resolves
+  `<checkout>/hscc_daemon/cron_watchers.py`, not `~/.hermes/plugins`.
+- `hscc_daemon/tests/test_unknown_command_hint.py`,
+  `test_toplevel_cli_help_f5.py`, `test_unified_cli.py` and
+  `scripts/tests/test_site_landing.py` are green; `site/index.html` was
+  regenerated from the repo's own help and `site/COPY.md` gained the four
+  missing command bullets.
+- `python3 scripts/address_guard.py --tracked` is clean.
+- **A new gate executes the dropdown's CLI parity, and the macOS targets still
+  compile clean.** `macos-app/scripts/cli_dropdown_check.sh` compiles the
+  shipped reading layer together with the real models and the widget's own CLI
+  column reading, runs it over the committed fixtures against the goldens
+  `cluster_monitor_cli_parity.py` wrote, prints its own check counts, and is
+  proven by mutation: five edits to the reading layer and one tamper of a
+  committed golden each turn it red by name, every one restored
+  byte-identically and re-run green. `macos-app/scripts/build_check.sh` prints
+  its own per-target file counts (the proof the new dropdown files are wired
+  into `HSCCMac`),
+  `ios-app/scripts/build_check.sh` and `ios-app/scripts/model_decode_check.sh`
+  were re-run to show the shared view-model and both iOS widget targets are
+  untouched, and `python3 scripts/address_guard.py --tracked` is clean. No
+  shared `Sources/Shared` file and no iOS source changed: the dropdown consumes
+  the view-model and the widget grid's own Foundation-only column reading
+  (`ClusterSmallGrid.Column`, `ClusterSmallGrid.Row`) by path rather than
+  growing a second table implementation in `macos-app/`.
+- `python3 ios-app/scripts/widget_registry.py --check` passes: 14 surfaces
+  (9 widgets, 5 Live Activities), every generated record current and every
+  widget source owned.
+- `scripts/tests/test_widget_registry.py` passes (4 tests, including the union
+  merge proof); the whole `scripts` pytest leg is green.
+- iOS and macOS compile gates are clean: `ios-app/scripts/build_check.sh`
+  (78/39/6/22 files, 0 errors, 0 warnings) and
+  `macos-app/scripts/build_check.sh` (37/39, 0 errors, 0 warnings), plus
+  `widget_parity_check.sh` (39 shared sources on both widget targets).
+- The touched widget gates run green: `widget_view_dispatch_check.sh`,
+  `widget_settings_check.sh`, `widget_style_check.sh`,
+  `widget_data_client_check.sh`, `cluster_graph_check.sh`,
+  `projects_widget_check.sh` and `model_decode_check.sh`
+  (349/349 checks over 72 fixtures). `python3 scripts/address_guard.py
+  --tracked` is clean.
+* `test_resolve_explicit_legacy_general_orch_still_resolves_catch_all` (new): an
+  explicitly named `general-orch` still resolves to the legacy catch-all
+  (`("general-orch", "general", None)`) and `profile != main_orch.main_profile()`,
+  so the retired path cannot be quietly folded onto the main orchestrator. The
+  wire-name literals are deliberate — deriving them from
+  `main_orch.LEGACY_GENERAL_PROFILE` would keep passing if that constant were
+  renamed while existing installs keep calling `general-orch`. The roles leg's
+  `test_main_orch.py::test_resolver_keeps_the_explicit_legacy_catch_all_working`
+  pins the resolver dict; nothing pinned this leg's 3-tuple.
+* `test_resolve_projectless_identity_follows_a_stored_main_name` (new): stores
+  `ops` via `main_orch.store_name` and pins `None` / `general` / `ops` all
+  resolve to `("ops", "ops", None)` — the case that keeps the derived expectation
+  above from passing vacuously on the default. A resolver that stopped consulting
+  the stored document fails here while the default case stays green.
+* All three cases share a `sealed_hscc_dir` fixture, so the answer no longer
+  depends on whether bootstrap had stored a name on the running host (the card's
+  reproduction had to seal `HOME` to get a stable `1 failed`).
+* Mutation-probed at the commit that adds them: restoring the pre-#432
+  `_legacy_general_identity()` return for the project-less case reddens both
+  project-less tests; making `general-orch` unresolvable reddens only the new
+  legacy test; making `main_orch` ignore the stored document reddens only the
+  stored-name test.
+* `hscc-api/tests/test_session_resolver.py`: 10 -> **12** cases, green.
+* Whole `hscc-api` leg at `07d45c85` (base `origin/main` `1b431c36`): **3 failed,
+  1223 passed, 1 skipped**. None of the 3 is this diff. At this card's own base
+  `704f1cb8` the identical leg is **2 failed / 1222 passed / 1 skipped** without
+  the diff and **2 failed / 1224 passed / 1 skipped** with it — the diff moves
+  zero tests red and adds two green. The third red is `1b431c36`-only and
+  reproduces with nothing applied (measured over `test_contract_swift_routes.py`
+  + `test_session_resolver.py` in a clean detached worktree: the same
+  **3 failed / 28 passed**). All three are carded off this one:
+  `t_8d153e99` (`POST /v1/devices`, `POST /v1/devices/test` ungated mutations,
+  from #436) and `t_cef2a294` (`GET /v1/alerts` missing from the audited
+  extension-route roster, from #446).
+* Both doc gates the card named are green here: `test_contract_swift_routes.py
+  -k audit_doc` -> 2 passed (the citation half went green at main when #440
+  landed, and stays green over this diff).
+
+### Docs
+- **`ios-app/README.md` states the failure mode bare `xcodegen generate` leaves
+  behind, which nothing outside the script's own header said.** The section that
+  tells you to use `generate.sh` explained the per-target signing problem but not
+  what the bare command does: reproduced on a throwaway worktree with
+  `HSCC_DEVELOPMENT_TEAM` unset, `xcodegen generate` exits 0 and writes the
+  literal `${HSCC_DEVELOPMENT_TEAM}` string as the team on every target — an
+  invalid id that errors only later, in Xcode — where the same tree through
+  `generate.sh` prints the resolved id per target and leaves no placeholder
+  behind. The paragraph also names the deliberate contrast on the desktop side
+  (`macos-app/scripts/generate.sh` refuses outright unless the variable is
+  exported, it never auto-detects), and records that either invocation now works.
+  It also stops under-counting the verification loop, which covers all four
+  targets including `HSCCLiveActivityMonitor`.
+- `ios-app/RELEASE.md` gained the one-time push setup: enable **Push
+  Notifications** on the app id, let automatic signing add
+  `aps-environment` to the Ad Hoc profile (regenerate it if the archive asks),
+  keep Release at production, and configure the APNs key in `~/.hscc/apns.json`
+  on the cluster — never in the repo. `ios-app/docs/notify-operator-plan.md`
+  now says the APNs path it deferred is built and that the local decision
+  engine still runs beside it, and `ios-app/README.md`'s source map names
+  `PushRegistrar` next to the local notifier.
+- **`ios-app/docs/WIDGET_COVERAGE.md` — a field × surface matrix for
+  `hscc cluster monitor` and `hscc cluster status`, with the gaps named.** The
+  page previously answered only "does this family exist and render at all"; it
+  now answers "which CLI field does this surface draw, and which file decides
+  it". One row per column the CLI itself adds — nine from `host_table()`, eleven
+  from `serving_table()` (two of them wide-only), the `total (n)` row, the seven
+  lines around the tables, and the seven labels `render_cluster_status` prints —
+  against one column per iOS family, each Live Activity surface of both cluster
+  activities, each desktop family and the menu bar title. A cell distinguishes
+  the CLI's own cell string from a value the app formats itself from the same
+  reading, which is the difference the parity work was for and the thing a
+  headline/detail table could not express. Section 12 is the gap list: `Routes`,
+  `Prompt t/s`, the per-row `Gen t/s`, `container`, the idle-host list, the
+  proxy-port line and the `In/Out = tokens since each engine started` legend are
+  printed by the CLI and drawn by no surface at all. Section 9a corrects a
+  premise the family has been carrying: GPU power limit, VRAM, clock, fan, net,
+  uptime and load are not `cluster monitor` columns — `cluster_live.py` prints
+  none of them, they are route fields, and the power limit is never shown even
+  though it is the denominator of the watt cell's colour. The duplicated
+  per-family table in §5a and the compile counts in §4 are gone rather than
+  corrected: a second copy of a matrix and a transcribed gate tally both rot,
+  and the §4 one already had.
+- `hscc-api/docs/WIDGET_ROUTES.md` gained the alert-feed rows and a field
+  table for `POST /v1/alerts`, the `since` paging read and ack; the
+  `hscc notify` lines in `hscc_daemon/README.md` and `site/COPY.md` now
+  describe the feed rather than a desktop notification. The push transport
+  itself (APNs, device registration) is deliberately absent — N2 owns it, and
+  its seam is documented where the sender will live.
+- **The `POST /v1/orchestrator/chat` citation in the API contract audit doc
+  points into `_validate_prompt()` again.** The live required-body-field table
+  cited `routes_orchestrator.py:1970-1975` — the six-line window (the `def` line
+  through the 400 `missing required field 'prompt'` line) written at `72f65838`
+  (PR #355). PR #432 (`f1e2477e`) landed four hunks in that same file at `:10`,
+  `:126`, `:975` and `:1028`, a net +4 lines, and every line below them moved
+  down by four: `_validate_prompt` slid from `1970` to `1974`, so the cited
+  range fell outside the handler it names. The citation gate
+  `test_audit_doc_citations_still_point_inside_their_handler` reads a citation as
+  an anchor into the named handler's `ast` span, so a drifted anchor is a red
+  leg, not a typo. Re-pointed
+  to `routes_orchestrator.py:1974-1979` (the same six lines, line for line, at
+  the `b4fd8764` tree) with the `(_validate_prompt)` label kept, and the span
+  confirmed through `api_server.ROUTES` — `POST ^/v1/orchestrator/chat$` resolves
+  to `handle_orchestrator_chat`, which validates `prompt` by calling
+  `_validate_prompt` — rather than by guessing. The doc's other five live-table
+  anchors were re-checked against the same rule and still resolve.
+- **`ios-app/docs/WIDGET_COVERAGE.md` — the Cluster Graph matrix.** The graph
+  widget is added to both family tables (iOS section 1, macOS section 3) and a
+  new section 5c records, for each family — small, medium, large, extraLarge and
+  the macOS menu bar's GRAPHS section — which metrics and which windows it
+  renders, in which panel, by which file, with the tier every window lands on
+  (`15m` → 2 s, `1h`/`6h`/`24h` → 60 s, `7d` → 300 s) and the default window each
+  surface uses, so a seven-day chart and a two-second chart are never read as the
+  same claim. Accessory families are recorded as absent because the surface is
+  gated home-screen-only. Metrics are named by their wire key so a row can be
+  checked against a capture.
+- `hscc-api/docs/WIDGET_ROUTES.md` documents `POST /v1/devices`,
+  `GET /v1/devices` and `POST /v1/devices/test` plus the APNs payload and
+  pruning rules; `hscc_daemon/README.md` lists `apns.py`/`devices.py`, the new
+  `~/.hscc` state files and `hscc notify test`.
+- **The landing page now lists `hscc main`.** The generated command region of
+  `site/index.html` was missing the verb entirely. `main start|status|wakeups`
+  entered `hscc --help` at `6e06b53d` (#448); the page's list is generated from
+  `scripts/tests/fixtures/hscc_help_landing.txt`, whose last commit was
+  `a65695a6` (#390) — earlier than #448 — and the drift test never compared
+  that fixture with this repo's own help, only with the installed bottle. The
+  fixture's `notify` entry was stale the same way. Refreshing it from the
+  repo's own help adds the one `<li>` for `hscc main` (its prose is the copy
+  card's, in `site/COPY.md`) and brings the fixture's version line to the
+  repo's own `VERSION`. The fixture is now checked against the repo's own
+  rendered `--help`, and that mattered before this shipped: #456 (`3073e15c`)
+  reworded the entry to `notify <title> <body> | list | ack <id>` while this
+  work was in flight, and the new guard reddened on it at once.
+- **`ios-app/docs/WIDGET_COVERAGE.md` now matches the widget tree on `main`:**
+  nine iOS/macOS widgets (Projects, CardsRunning, KanbanMonitor, BoardStatus,
+  Cluster, Monitor, Needs Me, Cluster Graph and Merge Queue), the same nine
+  files compiled into `HSCCMacWidgets`, and the five Live Activities. The
+  Cluster Graph and Merge Queue rows are present, the macOS XL list names
+  Cluster Graph, and there are no notification widget or Live Activity rows.
+  The field matrices now record what merged after the first measurement pass:
+  the accessory families draw the CLI temperature cells through
+  `CLILockScreenMetrics` (#415), and the Monitor Live Activity draws the CLI
+  host and `total (n)` rows through `MonitorActivityMetrics` (#423). The
+  hardcoded decode tally in the Needs me section is replaced by the gate's own
+  `N/N` banner, like the other gates.
+- `ios-app/docs/notify-operator-plan.md` is marked dropped (the plan is kept
+  only as the record of the removed design). `WIDGET_COVERAGE.md` states that
+  notifications are out of scope and widgets/Live Activities are unaffected;
+  `WIDGET_DATA_CONTRACT.md` records the alert feed's removal from the client
+  allowlist. `ios-app/README.md`, `ios-app/RELEASE.md`, `macos-app/README.md`
+  and the root README lost the push/device setup and describe the no-alert
+  behaviour. The main-orchestrator design carries the dated operator update.
+* The `cluster` group help lists `history` on the same 80-column budget the
+  group-help gate enforces, its usage block prints the two flag axes, and the
+  README "Common tasks" table gains the row that points an operator at it:
+  `look back at the stored series, not just the present`.
 ## [2.15.13] - 2026-11-18
 
 ### Added
