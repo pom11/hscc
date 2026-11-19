@@ -27,6 +27,9 @@
 #   installed_version_cmd: shell command printing the deployed version (optional)
 #   version_file:          file in the repo holding the source version (default VERSION)
 #   deployed_at_cmd:       shell command printing the unix timestamp of last deploy (optional)
+#   merge_queue:           local merge-queue opt-in (optional; default off)
+#                          {enabled: bool, gates: [cmd, ...], timeout_s: int}
+#                          gates run in the queue worktree before a squash merge
 #
 # Placeholder names and paths below -- replace with your own project keys,
 # checkout paths, board slugs, and legacy topic ids.
