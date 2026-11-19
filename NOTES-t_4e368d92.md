@@ -93,14 +93,34 @@ Interpreter `~/.hermes/hermes-agent/venv/bin/python` (the runner's own `PY`).
 - `hscc-api/tests/`: **1225 passed, 1 failed, 1 skipped** in 322 s
 - `changelog_fragments.py check`: `OK — [Unreleased] is pointer, 46 fragment
   entries consistent`
-- `scripts/run_tests.sh`: see the card comment / completion metadata.
+- `bash scripts/run_tests.sh`: **9/12 legs green, 3 red** (exit 1). Full log:
+  `~/.hermes/profiles/backend-engineer/cache/scratch/t4e368d92_roster.log`.
 
-**The one `hscc-api` failure is not ours.**
-`test_contract_swift_routes.py::test_audit_doc_citations_still_point_inside_their_handler`
-is t_342b3ea3's stale-citation red. Verified pre-existing on an untouched
-worktree at `7c51a316`: `1 failed, 20 deselected in 0.10s`. That card completed
-separately; until its PR merges, `run_tests.sh` still cannot be green fleet-wide
-for *any* branch — this one included.
+### The 3 red legs are main's own, not this branch's
+
+Four failing tests, **each reproduced on an untouched worktree at `7c51a316`**:
+
+| leg | test | also red at `7c51a316`? |
+|---|---|---|
+| hscc-bootstrap | `test_bootstrap_isolated.py::test_fresh_home_says_not_wired_instead_of_claiming_success` | yes (1 failed in 14.84 s) |
+| hscc-api | `test_contract_swift_routes.py::test_audit_doc_citations_still_point_inside_their_handler` | yes (1 failed, 20 deselected) |
+| scripts | `test_formula_dep_drift.py::test_formula_resources_match_requirements_sot` | yes |
+| scripts | `test_site_landing.py::test_page_command_region_matches_the_generated_one` | yes |
+
+`test_formula_resources_match_requirements_sot` reads
+`/Users/desac/dev/homebrew-hscc/Formula/hscc.rb` — outside the repo, operator-side
+tap drift (`h2` pinned in `requirements.txt`, no `resource` block). The bootstrap
+one is the known "fresh home / degraded mode leaks real host state" class.
+The api one is t_342b3ea3's.
+
+The api leg on **this** branch fails on exactly one test, and it is that
+citation test (`grep` of the leg section returns only that header) — so this
+branch adds **zero** red and clears the sentinel red it was filed for.
+
+**Consequence for the fleet:** `run_tests.sh` cannot be green for *any* branch
+until the citation card merges, and the bootstrap + scripts reds need their own
+cards — they are not this card's scope and are not caused by it.
+
 
 ## LEFT
 
