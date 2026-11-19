@@ -266,6 +266,10 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
+      # The Monitor Live Activity's surface payload + its "what shows where"
+      # rules (t_1685f884). Foundation-only, which is what lets
+      # `model_decode_check.sh` RUN the rules the shipped surfaces use.
+      - path: Sources/Shared/MonitorActivityMetrics.swift
       # Running-cards Live Activity attributes + its pure reading/orphan rules
       # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
       # and into the monitor extension (which renders the activity).
@@ -632,6 +636,11 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/MonitorActivity.swift
+      # The payload the app pushes and the rules deciding which metric each
+      # surface draws (t_1685f884). The extension draws those strings and maps
+      # the pushed `ClusterMetricLevel` onto Theme colours — it never projects a
+      # payload or re-derives a threshold itself.
+      - path: Sources/Shared/MonitorActivityMetrics.swift
       - path: Sources/Shared/CardsRunningActivity.swift
       # The stored row type `RunningCardMetric(row:)` projects from. Foundation
       # only, so the extension can compile the one mapping without touching the
