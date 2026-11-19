@@ -315,6 +315,9 @@ targets:
       # print. Foundation-only, so `model_decode_check.sh` can execute it.
       - path: Sources/Shared/ClusterMonitorTables.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # The alert-feed wire types + projection ("Needs me", card R3). The client
+      # names AlertsLite, so every target that compiles the client compiles this.
+      - path: Sources/Shared/NeedsMeReading.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
       - path: Sources/Shared/ConnectionAddressProbe.swift
@@ -472,6 +475,9 @@ targets:
       # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
       # through WidgetDataClient — see the file header.
       - path: Sources/HSCCWidgets/BoardStatusWidget.swift
+      # The main orchestrator's alert feed ("Needs me", card R3): one read of
+      # GET /v1/alerts through WidgetDataClient, projected by NeedsMeReading.swift.
+      - path: Sources/HSCCWidgets/NeedsMeWidget.swift
       # Rendering-mode adaptation (t_1143c19b): one shared palette swap for
       # WidgetKit's fullColor / accented / vibrant modes, used by the iOS
       # widgets and the macOS desktop extension alike.
@@ -483,6 +489,10 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # The alert-feed projection and its last-known snapshot (card R3),
+      # Foundation-only so the decode gate executes the same order/filter/age
+      # rules the widget and the macOS dropdown draw.
+      - path: Sources/Shared/NeedsMeReading.swift
       # `ClusterFleet`'s host tally IS this projection (t_f2867fb3) — the
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
@@ -649,6 +659,7 @@ targets:
       # The projection's failure vocabulary (`WidgetDataFailure`) is declared
       # here; Foundation/Security only, and the extension still never fetches.
       - path: Sources/Shared/WidgetDataClient.swift
+      - path: Sources/Shared/NeedsMeReading.swift
       - path: Sources/Shared/ClusterHealthActivity.swift
       - path: Sources/Shared/BoardProgressActivity.swift
       # Needed by the projection block inside the file above — the extension

@@ -77,6 +77,16 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// the project list, which is the reason #341 refused to let the monitor
     /// panel borrow `.widgetMonitor`'s entry either.
     case widgetProjects = "widget.projects"
+    /// The "Needs me" widget (card R3): the main orchestrator's unacknowledged
+    /// alert-feed rows — what still needs the operator — read from
+    /// `GET /v1/alerts` and projected by `NeedsMeReading.swift`.
+    ///
+    /// It gets its own entry rather than borrowing another widget's: the feed
+    /// is the one surface whose pause switch an operator may genuinely want
+    /// (silencing the tile must not silence the cluster monitor), and its
+    /// cadence is independent of every card/board read. No notifications are
+    /// involved: this is a read-only widget, not an alert delivery channel.
+    case widgetNeedsMe = "widget.needsMe"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -275,7 +285,8 @@ extension WidgetSurfaceKind {
     var isLiveActivity: Bool {
         switch self {
         case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
+             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+             .widgetNeedsMe:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityCards, .liveActivityBoardProgress: return true
@@ -298,7 +309,7 @@ extension WidgetSurfaceKind {
     /// screen then hides the pickers rather than writing a value nothing reads.
     var supportsScope: Bool {
         switch self {
-        case .liveActivityCards: return false
+        case .liveActivityCards, .widgetNeedsMe: return false
         // Every other surface keeps true: main grew this switch since this
         // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
         // widgetProjects all landed from main), and a new case has to be
@@ -360,6 +371,10 @@ extension WidgetSurfaceKind {
         // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
         // control the operator can touch and nothing obeys.
         case .widgetProjects: return []
+        // The "Needs me" tile is one list (unacknowledged alerts) with no
+        // optional part: level, title, body first line and age are the row.
+        // A section toggle here would either empty the surface or do nothing.
+        case .widgetNeedsMe: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this

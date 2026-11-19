@@ -268,6 +268,9 @@ EXPECTED_EXTENSION_ROUTES = {
     # below, because a route whose keys drift from the decoder fails silently —
     # the chart reads nil and nothing anywhere errors.
     ("GET", "/v1/metrics/history"),
+    # Card R3: the "Needs me" widget and macOS dropdown read the alert feed.
+    # Writes/acks stay CLI-only; the extension client is GET-only.
+    ("GET", "/v1/alerts"),
 }
 
 

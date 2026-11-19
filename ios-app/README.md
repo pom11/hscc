@@ -244,7 +244,8 @@ file-by-file disposition of the remaining console files is
     same commit's run printed 98). The check count is higher than the file
     count because some fixtures decode against more than one model and the
     widget blocks assert derived values too. The widget / Live Activity
-    payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
+    payloads (`docs/WIDGET_DATA_CONTRACT.md` §3 plus the card-R3 alert feed)
+    decode
     here too — which is why the two mirror harnesses that used to re-declare
     them (`shared_model_check.swift`, `widget_kanban_decode_check.swift`) were
     deleted by t_595a5fee: a mirror that drifts is the exact failure this

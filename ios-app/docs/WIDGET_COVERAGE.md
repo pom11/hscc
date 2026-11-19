@@ -9,7 +9,9 @@ the dispatch selects). The Cluster and Monitor surfaces were refurbished by the
 sibling card; the Kanban Monitor, Board Status and Projects widgets plus the
 Board Progress Live Activity were refurbished by CARD B3; the Cards widget and
 CardsRunning Live Activity by CARD B2. Every surface reads the fields in
-`hscc-api/docs/WIDGET_ROUTES.md`.
+`hscc-api/docs/WIDGET_ROUTES.md`. Card R3 adds the "Needs me" widget (the alert
+feed) on both platforms and the macOS dropdown's "Needs you" section; it has no
+Live Activity.
 
 Legend:
 
@@ -25,7 +27,7 @@ No cell below is `declared-but-placeholder` or `unknown`.
 ## 1. iOS widgets × family
 
 Every widget type under `ios-app/Sources/HSCCWidgets/` is listed. The bundle at
-`HSCCWidgetsBundle.swift` contains exactly these six widgets; there are no
+`HSCCWidgetsBundle.swift` contains exactly these seven widgets; there are no
 additional `Widget` types in that directory.
 
 | Widget | systemSmall | systemMedium | systemLarge | accessoryInline | accessoryCircular | accessoryRectangular | Source |
@@ -36,6 +38,7 @@ additional `Widget` types in that directory.
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`BoardStatusCircularView`) | declared-and-renders (`BoardStatusRectangularView`) | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
 | Cluster | declared-and-renders (`SmallClusterWidget`) | declared-and-renders (`MediumClusterWidget`) | declared-and-renders (`LargeClusterWidget`) | declared-and-renders (`InlineClusterWidget`) | declared-and-renders (`CircularClusterWidget`) | declared-and-renders (`RectangularClusterWidget`) | `ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift` |
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
+| NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`NeedsMeCircular`) | declared-and-renders (`NeedsMeRectangular`) | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
 
 Coverage note: every iOS widget contains a `.systemExtraLarge` branch in its view
 switch. **Cluster and Monitor declare `.systemExtraLarge` in `supportedFamilies`
@@ -78,11 +81,14 @@ Monitor and CardsRunning.
 | CardsRunning | declared-and-renders (`CardsRunningSmallView`) | declared-and-renders (`CardsRunningMediumView`) | declared-and-renders (`CardsRunningLargeView`) | declared-and-renders (`CardsRunningLargeView` — XL reuses the large renderer) | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift` |
 | KanbanMonitor | declared-and-renders (`SmallKanbanMonitor`) | declared-and-renders (`MediumKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | declared-and-renders (`LargeKanbanMonitor`) | `ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift` |
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
+| NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | absent | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
 
 The two remaining `absent` XL cells (Projects and Board Status) are the
-documented macOS family split, not a defect: all six widgets ship
+documented macOS family split, not a defect: all seven widgets ship
 small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
-Running (CARD B2) also ship `systemExtraLarge`.
+Running (CARD B2) also ship `systemExtraLarge`. Needs Me is deliberately
+small/medium/large on macOS: its data is a three-to-eight-row list, so an XL
+cell would repeat the large renderer rather than add a column.
 
 ## 4. Compile results
 
@@ -90,10 +96,10 @@ Commands, run in this worktree:
 
 ```text
 $ bash ios-app/scripts/build_check.sh
-HSCC: 73 files, 0 error(s), 0 warning(s)
-HSCCWidgets: 18 files, 0 error(s), 0 warning(s)
+HSCC: 75 files, 0 error(s), 0 warning(s)
+HSCCWidgets: 30 files, 0 error(s), 0 warning(s)
 HSCCLiveActivity: 5 files, 0 error(s), 0 warning(s)
-HSCCLiveActivityMonitor: 15 files, 0 error(s), 0 warning(s)
+HSCCLiveActivityMonitor: 20 files, 0 error(s), 0 warning(s)
 full compile clean, 0 warnings (compile only — never built or run on a device)
 ```
 
@@ -106,8 +112,8 @@ fetches.
 
 ```text
 $ bash macos-app/scripts/build_check.sh
-HSCCMac: 20 files, 0 error(s), 0 warning(s)
-HSCCMacWidgets: 18 files, 0 error(s), 0 warning(s)
+HSCCMac: 27 files, 0 error(s), 0 warning(s)
+HSCCMacWidgets: 30 files, 0 error(s), 0 warning(s)
 full compile clean, 0 warnings (compile only — never built or run)
 ```
 
@@ -217,6 +223,36 @@ iOS Small/Medium/Large and the three accessory families, macOS
 Small/Medium/Large/XL, the Live Activity's four surfaces, and the blind/stale
 rules (no `0 running` from a blind read, no fresh-looking cache).
 
+## 5c. Needs me widget (card R3)
+
+```text
+$ bash ios-app/scripts/model_decode_check.sh
+ALL DECODE CHECKS PASSED — 300/300 checks (over 70 committed fixtures) decoded against the real models
+```
+
+`v1_alerts.json` is the alert-feed fixture (shape from `routes_alerts.py`, all
+text placeholder). The check executes the real `NeedsMeFeed.from` projection and
+pins the contract the families draw:
+
+| Family | Headline | Detail | Rows |
+|---|---|---|---|
+| systemSmall | unacknowledged count | newest title + age | none |
+| systemMedium | count + updated age | — | top 3: level, title, age |
+| systemLarge | count + updated age | — | up to 8, each with the body first line |
+| accessoryInline | `"3 need you"` / `"nothing needs you"` | — | none |
+| accessoryCircular | count | — | none |
+| accessoryRectangular | newest title | age + count line | none |
+
+Order is newest-first (descending id), the same presentation `hscc notify list`
+produces by reversing the route's ascending page. Rows with `acked: true` are
+excluded; `hscc notify list` keeps them as history with its `(acked)` marker.
+Levels `critical`/`action` use the operator's accent (`#FF5722` by default) and
+`info` the secondary role — system-tinted on the Lock Screen. Empty is
+`"Nothing needs you"` with the update age; a stale read keeps its real rows and
+names the reason and age; a failed read names the reason. The macOS menu bar
+dropdown renders the same projection in a "Needs you" section at the top,
+hidden when empty.
+
 ## 6. Shipped feature checklist
 
 | Feature | PR | Merge commit on `main` | Evidence |
@@ -224,7 +260,7 @@ rules (no `0 running` from a blind read, no fresh-looking cache).
 | Multi-address clusters with automatic failover | #371 | `64f8361f` | `ios-app/Sources/Shared/SharedStore.swift`, `ios-app/Sources/Shared/WidgetDataClient.swift`, `ios-app/Sources/HSCC/SettingsStore.swift` |
 | Block-H app icon and black/orange dark-only theme | #372 | `e0b88ff7` | `ios-app/Sources/HSCC/Views/Theme.swift`, `ios-app/Sources/HSCC/Views/HSCCMark.swift`, `ios-app/assets-master/appicon-*.svg` |
 | Widget style model, App Group storage and appearance editor | #373 | `8bab4521` | `ios-app/Sources/HSCC/WidgetSettingsStore.swift`, `ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift`, `ios-app/Sources/Shared/SharedStore.swift` |
-| Widget style applied to every widget and Live Activity | #375 | `14b080dc` | all six widget roots under `ios-app/Sources/HSCCWidgets/` and all five Live Activity configurations; `ios-app/scripts/widget_style_check.sh` |
+| Widget style applied to every widget and Live Activity | #375 | `14b080dc` | all seven widget roots under `ios-app/Sources/HSCCWidgets/` and all five Live Activity configurations; `ios-app/scripts/widget_style_check.sh` |
 | macOS menu-bar app | #374 | `d9b78273` | `macos-app/Sources/HSCCMac/` (menu-bar-only app, `LSUIElement`) |
 | macOS desktop widgets | #376 | `a3da0180` | `HSCCMacWidgets` target in `macos-app/project.yml`; `ios-app/Sources/HSCCWidgets/WidgetRendering.swift` |
 | GitHub Pages OTA install | #377 | `b5691c09` | `ios-app/scripts/publish_pages.sh`, `ios-app/scripts/make_manifest.py` |

@@ -1,0 +1,52 @@
+{
+  "alerts": [
+    {
+      "id": 41,
+      "ts": "2026-11-19T10:00:00Z",
+      "title": "Example critical alert",
+      "body": "Example body line one.\nExample body line two.",
+      "level": "critical",
+      "key": "fixture/live",
+      "acked": false,
+      "acked_at": null
+    },
+    {
+      "id": 42,
+      "ts": "2026-11-19T11:00:00Z",
+      "title": "Example acknowledged alert",
+      "body": "This row is history and must not need the operator.",
+      "level": "action",
+      "key": null,
+      "acked": true,
+      "acked_at": "2026-11-19T11:05:00Z"
+    },
+    {
+      "id": 43,
+      "ts": "2026-11-19T12:00:00Z",
+      "title": "Example info alert",
+      "body": "Example body line one.",
+      "level": "info",
+      "key": null,
+      "acked": false,
+      "acked_at": null
+    },
+    {
+      "id": 44,
+      "ts": "2026-11-19T12:28:00Z",
+      "title": "Example action alert",
+      "body": "Example body line one.\nExample body line two.",
+      "level": "action",
+      "key": "fixture/action",
+      "acked": false,
+      "acked_at": null
+    }
+  ],
+  "count": 4,
+  "since": null,
+  "limit": 100,
+  "oldest_id": 41,
+  "latest_id": 44,
+  "next_since": 44,
+  "has_more": false,
+  "speak": "4 alerts."
+}

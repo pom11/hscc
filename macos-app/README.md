@@ -2,7 +2,7 @@
 
 Menu-bar-only macOS client for the same HSCC API the iOS app reads. Part 1 is
 the XcodeGen project, the menu bar app and Settings. Part 2 (t_1143c19b) adds
-`HSCCMacWidgets`, a WidgetKit extension that puts the same six widgets on the
+`HSCCMacWidgets`, a WidgetKit extension that puts the same seven widgets on the
 desktop and in Notification Center. Both targets join the iOS app's App Group.
 Part 3 installs the app with Homebrew (cask) and publishes signed, notarized
 releases.
@@ -18,7 +18,7 @@ Sonoma (14) or newer, and upgrades with `brew upgrade --cask hscc-widgets`.
 
 **Add the desktop widgets:** right-click an empty part of the desktop →
 **Edit Widgets** (or click the widget gallery at the bottom of Notification
-Center), search for **HSCC**, then drag any of the six widgets onto the desktop.
+Center), search for **HSCC**, then drag any of the seven widgets onto the desktop.
 The first launch may ask for permission to open the app; after that the tiles
 read the clusters saved in the app.
 
@@ -47,8 +47,8 @@ running-card count or nodes-up/total.
 ## Desktop widgets
 
 The `HSCCMacWidgets` extension compiles the iOS widget sources **by path** from
-`ios-app/Sources/HSCCWidgets`: the same six widgets, providers, configuration
-intents and views. There is no macOS copy to drift. All six offer
+`ios-app/Sources/HSCCWidgets`: the same seven widgets, providers, configuration
+intents and views. There is no macOS copy to drift. All seven offer
 `systemSmall`/`systemMedium`/`systemLarge`; Cluster and Monitor also offer
 `systemExtraLarge`. The accessory families are iOS-only and are guarded with
 `#if os(iOS)` inside the shared files.

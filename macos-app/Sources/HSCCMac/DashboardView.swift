@@ -40,6 +40,7 @@ struct DashboardView: View {
             if !dashboard.snapshot.configured {
                 setupInvite
             } else {
+                needsMeSection
                 clusterSection
                 clusterMonitorSection
                 clusterStatusSection
@@ -117,6 +118,67 @@ struct DashboardView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.Semantic.accent)
+        }
+    }
+
+    // MARK: - Needs you (alert feed, card R3)
+
+    /// The main orchestrator's unacknowledged alerts. Hidden when the feed is
+    /// empty — there is no "nothing needs you" row in a menu an operator opens
+    /// to look at work. A failed read is not empty: it says why, in the shared
+    /// client's address-free words.
+    @ViewBuilder
+    private var needsMeSection: some View {
+        if let failure = dashboard.snapshot.needsMeFailure {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                sectionTitle("Needs you")
+                Label("Alert feed unavailable: \(failure)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if let feed = dashboard.snapshot.needsMe, !feed.items.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                HStack {
+                    sectionTitle("Needs you")
+                    Spacer()
+                    Text("\(feed.count)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundColor(Theme.Semantic.accent)
+                }
+                ForEach(feed.items.prefix(3)) { item in
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                        Circle()
+                            .fill(item.level.isUrgent
+                                  ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                            .frame(width: 6, height: 6)
+                            .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.title)
+                                .font(.caption.weight(.medium))
+                                .foregroundColor(Theme.Semantic.onSurface)
+                                .lineLimit(1)
+                            if !item.bodyFirstLine.isEmpty {
+                                Text(item.bodyFirstLine)
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Text(item.ageLabel())
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(item.level.isUrgent
+                                             ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                    }
+                }
+                if feed.count > 3 {
+                    Text("+\(feed.count - 3) more")
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
         }
     }
 

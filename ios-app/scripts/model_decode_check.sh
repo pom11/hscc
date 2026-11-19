@@ -64,6 +64,10 @@ real_models=(
   # file ever needs SwiftUI, the rules have leaked into it — move them out
   # rather than stubbing a UI framework here.
   Sources/Shared/MonitorActivityMetrics.swift
+  # The alert-feed projection ("Needs me", card R3): the decode gate runs the
+  # same newest-first order, unacknowledged filter, age and body-first-line
+  # rules the widget and the macOS dropdown draw.
+  Sources/Shared/NeedsMeReading.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

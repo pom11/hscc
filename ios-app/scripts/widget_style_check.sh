@@ -29,6 +29,7 @@ WIDGET_VIEWS=(
   Sources/HSCCWidgets/ProjectsWidget.swift
   Sources/HSCCWidgets/KanbanMonitorWidget.swift
   Sources/HSCCWidgets/CardsRunningWidget.swift
+  Sources/HSCCWidgets/NeedsMeWidget.swift
   Sources/HSCCLiveActivity/HSCCLiveActivity.swift
   Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
   Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
@@ -146,8 +147,8 @@ adapter_ok=1
   && grep -q 'Color.clear' "$ADAPTER" \
   && grep -q 'systemTinted(for:' "$ADAPTER" \
   || adapter_ok=0
-if [ "$nbg" -eq 6 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq 6 ] && [ "$adapter_ok" -eq 1 ]; then
-  ok "all 6 widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
+if [ "$nbg" -eq 7 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq 7 ] && [ "$adapter_ok" -eq 1 ]; then
+  ok "all 7 widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
 else
   bad "a widget root does not paint containerBackground through the rendering-mode adapter (roots=$nbg wrapped=$nadapt bg=$bgok adapter=$adapter_ok)"
 fi

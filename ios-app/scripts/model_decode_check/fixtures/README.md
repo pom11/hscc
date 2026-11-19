@@ -162,7 +162,7 @@ in the same commit — struct, fixture and `main.swift` block always move togeth
 
 ## Widget / Live Activity payload additions (t_595a5fee, 2026-11-17)
 
-`SharedModels.swift` narrowed to the five datasets of
+`SharedModels.swift` narrowed to the widget datasets of
 `docs/WIDGET_DATA_CONTRACT.md` §3, and `main.swift` now decodes those types too.
 Eight fixtures, provenance stated per file because the repo's rule is that a
 fixture is a capture unless labelled otherwise:
@@ -215,6 +215,16 @@ fixture is a capture unless labelled otherwise:
     two-row capture whose rows are both `running` at `age_days: 0`, so the tile's
     queue-depth derivation (`ready` + `todo`) and §5.3's oldest-first row order
     were exercised by nothing at all.
+
+## Needs me alert feed (card R3, 2026-11-19)
+
+- `v1_alerts.json` — **shape-faithful, placeholder text only**. `GET /v1/alerts`
+  is the operator's private alert feed, so this fixture is not a live capture;
+  its keys, `alerts[]` object shape, envelope counters and `...Z` timestamps are
+  read off `hscc-api/routes_alerts.py` + `hscc_daemon/alerts.py::_public`, and
+  every title/body/key is an example string. It includes one acknowledged row so
+  the projection's unacknowledged filter is exercised, and two body lines so the
+  large family's first-line reduction is exercised rather than assumed.
 
 ## Stored-shape additions (t_438aa6ce, 2026-11-17)
 
