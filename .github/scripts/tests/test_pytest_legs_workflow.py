@@ -8,24 +8,29 @@ it is the one whose whole job is to block things.
 
 Parsed by an indent walk over the few lines that matter rather than by a YAML
 library: `.github/scripts` is a leg that must run under a THIN interpreter (the
-stamp's sibling env carries pytest and nothing else), and the micro-notify lesson
-is that a hand-rolled walk over the keys you actually care about is both dep-free
-and less surprising than a full loader that reads bare `on:` as boolean True.
+stamp's sibling env carries pytest and nothing else), so a PyYAML import here
+would make the gate's own tests depend on a package the CI posture does not
+guarantee.
 
 What is pinned, in order of the damage each prevents:
 
-  1. both `push` and `pull_request` triggers. A workflow that triggers on push
-     only never runs on a PR head, so a required check built on it blocks every
-     PR forever;
-  2. exactly one job, and the check name branch protection has to be typed by
-     hand ("pytest-legs / legs") is derived from `name:` + job id, so both are
-     pinned;
-  3. the enforcement switch is the repository VARIABLE (vars.HSCC_TESTS_ENFORCE),
+  1. both `push` (main only) and `pull_request` triggers. A workflow that
+     triggers on push only never runs on a PR head, so a required check built on
+     it blocks every PR forever; all-branch push would pay for a duplicate run on
+     every PR commit and would make the main-only backstop ambiguous;
+  2. the stable check name branch protection has to type by hand
+     ("pytest-legs / legs") is the final job, and it always runs so a failed
+     matrix cannot leave the required check missing;
+  3. one matrix leg per leg, in parallel — the roster must not become the sum of
+     its durations;
+  4. the enforcement switch is the repository VARIABLE (vars.HSCC_TESTS_ENFORCE),
      not a literal in this file — the operator's advisory/blocking decision must
      not be editable by a diff;
-  4. the fail-closed couplets: the leg list produced by the decide step is the
-     only thing the run step consumes, and the non-test-failure exit codes are
-     gated BEFORE the advisory branch is reached.
+  5. the fail-closed couplets live in tested scripts, not inline YAML: push ->
+     full roster is decide_legs.sh, and "could not run is red before advisory"
+     is leg_verdict.sh;
+  6. `-e` is disabled around the runner, because GitHub's `bash -e` would abort
+     the step before rc=$? and turn a classified red into an opaque error.
 """
 
 import re
@@ -36,8 +41,12 @@ WORKFLOWS = REPO / ".github" / "workflows"
 WF = WORKFLOWS / "pytest-legs.yml"
 
 
+def _text():
+    return WF.read_text(encoding="utf-8")
+
+
 def _lines():
-    return WF.read_text(encoding="utf-8").splitlines()
+    return _text().splitlines()
 
 
 def _top_keys():
@@ -64,7 +73,7 @@ def test_the_file_is_where_a_leg_is_supposed_to_live():
     # The premise of the card, restated as a regression guard: grep of the
     # workflows dir used to match nothing for run_tests.
     assert WF.exists()
-    assert "scripts/run_tests.sh" in WF.read_text(encoding="utf-8")
+    assert "scripts/run_tests.sh" in _text()
     hits = [p.name for p in WORKFLOWS.glob("*.yml") if "run_tests.sh" in p.read_text(encoding="utf-8")]
     assert hits == ["pytest-legs.yml"], f"expected exactly one workflow to run the roster, got {hits}"
 
@@ -75,44 +84,69 @@ def test_both_pr_and_push_triggers_stay():
     assert sorted(_block_keys("on")) == sorted(["push", "pull_request", "workflow_dispatch"])
 
 
-def test_exactly_one_job_and_the_check_name_branch_protection_types():
+def test_push_is_main_only():
+    """`push:` on every branch doubles every PR run and blurs where the
+    full-suite backstop lives; decide_legs.sh decides push -> all legs."""
+    text = _text()
+    assert "  push:\n    branches: [main]\n" in text
+
+
+def test_the_final_gate_has_the_check_name_branch_protection_types():
     jobs = _block_keys("jobs")
-    assert jobs == ["legs"], (
-        f"branch protection requires the check by name ('pytest-legs / legs'); "
+    assert jobs == ["select", "leg", "legs"], (
+        "branch protection requires the check by name ('pytest-legs / legs'); "
         f"the job set is now {jobs}"
     )
-    assert re.search(r"^name: pytest-legs$", WF.read_text(encoding="utf-8"), re.MULTILINE)
-
-
-def test_the_run_step_is_wired_to_the_decide_step_and_not_to_a_literal():
-    text = WF.read_text(encoding="utf-8")
-    assert "id: legs" in text
-    assert 'LEGS: ${{ steps.legs.outputs.legs }}' in text, (
-        "the run step must consume the selector's output; a literal leg list here "
-        "re-creates the 'green because nothing ran' problem inside the gate"
+    assert re.search(r"^  legs:\n    name: legs$", _text(), re.MULTILINE)
+    assert "    if: always()" in _text(), (
+        "the verdict job must run even when a matrix leg fails, or the required "
+        "check disappears instead of going red"
     )
-    assert "HSCC_TEST_LEGS=" in text
 
 
-def test_enforcement_is_a_repository_variable_and_fails_open_on_nothing():
-    text = WF.read_text(encoding="utf-8")
+def test_one_parallel_job_per_leg_from_the_selector_output():
+    text = _text()
+    assert "matrix:\n        leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in text or (
+        "leg: ${{ fromJSON(needs.select.outputs.matrix) }}" in text
+    ), "the matrix must consume the selector's JSON, not a literal leg list"
+    assert "fail-fast: false" in text, "one red leg must not cancel the others"
+    assert "bash .github/scripts/decide_legs.sh" in text
+    assert "bash .github/scripts/leg_verdict.sh \"$rc\" \"$log\"" in text
+
+
+def test_the_runner_is_invoked_with_the_matrix_leg_only():
+    text = _text()
+    assert 'HSCC_TEST_LEGS="$LEG"' in text
+    assert "HSCC_TEST_PY:" in text, "the cached venv must be the interpreter the leg runs under"
+
+
+def test_enforcement_is_a_repository_variable_with_a_per_run_override():
+    text = _text()
     assert "${{ vars.HSCC_TESTS_ENFORCE }}" in text, (
         "advisory-vs-blocking must be an operator setting, not an edit to this file "
         "(same shape as address-guard.yml's ADDRESS_GUARD_ENFORCE)"
     )
-    # A variable named ENFORCE is never allowed to fail OPEN on capitalisation.
-    assert re.search(r"case \"\$enforcelc\" in\s+true\|1\|yes\)", text), (
-        "the enforce test must normalise case and accept 1/yes, so 'True' cannot "
-        "silently downgrade the job to advisory"
-    )
-    # ...and the harness-broken case is decided BEFORE the advisory branch.
-    harness = text.index("pytest exit (0|[2-9]|1[0-9])")
-    advisory = text.index("::warning::a test leg is red")
-    assert harness < advisory, "a leg that could not run must not reach advisory mode"
+    assert "FORCED_ENFORCE: ${{ github.event.inputs.enforce }}" in text
+
+
+def test_a_failing_runner_cannot_abort_the_step_before_it_is_classified():
+    """GitHub runs `bash -e`; with -e on, `rc=$?` after a failing runner never
+    executes. The verdict script would never be reached."""
+    text = _text()
+    run = text.index("bash scripts/run_tests.sh")
+    assert "set +e" in text[:run], "no `set +e` before the runner: rc=$? is dead code"
+    assert text.index("set +e") < run
+
+
+def test_the_venv_is_cached_and_the_pip_cache_is_kept():
+    text = _text()
+    assert "actions/cache@v4" in text
+    assert "hashFiles('requirements.txt')" in text
+    assert "cache: pip" in text
 
 
 def test_the_legs_job_does_not_cancel_a_push_to_main():
-    text = WF.read_text(encoding="utf-8")
+    text = _text()
     m = re.search(r"cancel-in-progress: (.+)", text)
     assert m and "pull_request" in m.group(1), (
         "cancelling a full-suite run on main destroys the backstop, and a "

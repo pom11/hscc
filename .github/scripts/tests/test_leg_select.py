@@ -209,10 +209,40 @@ def test_cli_writes_the_output_contract_a_workflow_reads(tmp_path):
     assert proc.returncode == 0, proc.stderr
     written = out.read_text(encoding="utf-8")
     assert "legs=hscc-api scripts\n" in written, written
+    assert 'matrix=["hscc-api", "scripts"]\n' in written, written
     assert "full_suite=false\n" in written, written
     # ...and the human-readable half, because a job log has to answer "why these
     # legs" without re-running anything.
     assert "SELECTED 2/12" in proc.stdout, proc.stdout
+
+
+def test_cli_all_selects_the_whole_roster_without_a_diff(tmp_path):
+    """The push-to-main backstop: no paths, no stdin, no base/head."""
+    out = tmp_path / "gh_output"
+    proc = subprocess.run(
+        [sys.executable, str(SELECTOR), "--all", "--github-output", str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 0, proc.stderr
+    written = out.read_text(encoding="utf-8")
+    assert f"legs={' '.join(leg_select.roster())}\n" in written
+    assert f"matrix={leg_select.legs_json(leg_select.roster())}\n" in written
+    assert "full_suite=true\n" in written
+    assert "FULL SUITE" in proc.stdout
+
+
+def test_cli_all_refuses_to_be_combined_with_paths(tmp_path):
+    proc = subprocess.run(
+        [sys.executable, str(SELECTOR), "--all", "--path", "hscc-api/x.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "--all cannot be combined" in proc.stderr
 
 
 def test_cli_reports_a_widening_in_the_log(tmp_path):

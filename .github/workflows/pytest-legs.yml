@@ -10,9 +10,9 @@ name: pytest-legs
 # ran and passed" was indistinguishable from "the gate was never run". Measured
 # consequence: hscc-api/tests/test_contract_swift_routes.py was red on main for
 # 1h40m (704f1cb8 #443 -> ce8e87f3 #452) with three PRs merged on top of it, and
-# stopped being red only when the feature under test was deleted. What is
-# observable is the structural fact; this file does NOT claim anyone did or did
-# not run the suite locally, which is not observable from the repo.
+# stopped being red only when the feature under test was deleted. That is the
+# structural fact this file closes; whether anyone ran the suite locally is not
+# observable from the repo and is not claimed either way.
 #
 # WHICH LEGS (decision 1). Full matrix on every PR is not free — the roster is
 # ~25 min on a loaded Spark host (measured at 540f8a8b: hscc-bootstrap alone is
@@ -20,14 +20,26 @@ name: pytest-legs
 # clicked through, which is worse than no gate. So:
 #
 #   pull_request  -> the legs the touched paths can break, decided by
-#                    .github/scripts/leg_select.py. That map FAILS CLOSED: a path
-#                    it cannot attribute widens to the whole suite, and every
-#                    leg in DIRS is covered by a rule for its own directory
-#                    (pinned by .github/scripts/tests/test_leg_select.py).
+#                    .github/scripts/decide_legs.sh +
+#                    .github/scripts/leg_select.py. That map FAILS CLOSED: a
+#                    path it cannot attribute widens to the whole suite, and
+#                    every leg in DIRS is covered by a rule for its own
+#                    directory (pinned by test_leg_select.py).
 #   push to main  -> EVERY leg. This is the backstop for a wrong map: a
 #                    selection bug on a PR becomes a visible red on main within
 #                    minutes of merge instead of the next "clear the red" card.
-#   dispatch      -> operator's choice, for "run just hscc-api on this branch".
+#                    The push trigger is restricted to main so a PR does not pay
+#                    for a second, identical run on every branch commit; the
+#                    full-suite decision is made by decide_legs.sh and executed
+#                    by its test, not just asserted in this comment.
+#   dispatch      -> the operator's choice (`legs` input), else the full roster.
+#
+# COST. One job per leg, in PARALLEL (fail-fast: false), so wall time is the
+# slowest selected leg rather than the sum of the roster, and the gate's duration
+# does not grow with the roster. The Python venv is cached on requirements.txt
+# and each leg only installs into it on a cache miss. The measured wall time of
+# the first full-suite run and of a single-leg PR run is reported in the PR and
+# in docs/reports/t_23bf61f3-ci-pytest-leg.md.
 #
 # BLOCKING OR ADVISORY (decision 2). Same shape as address-guard.yml: one
 # repository variable, not an edit to this file.
@@ -40,7 +52,7 @@ name: pytest-legs
 #                                      ("True"/"TRUE"/"1"/"yes" count too: a
 #                                      variable named ENFORCE is never allowed to
 #                                      fail OPEN on capitalisation)
-#     a leg that could not run at all fails EITHER way — see LEGS COULD NOT RUN.
+#     a leg that could not run at all fails EITHER way — see leg_verdict.sh.
 #
 # Start advisory, for the reason the body of this card gives: a required check
 # that is red for a reason nobody can fix teaches everyone to click through red.
@@ -64,6 +76,7 @@ name: pytest-legs
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -82,13 +95,60 @@ permissions:
 
 concurrency:
   group: pytest-legs-${{ github.ref }}
-  # A superseded push to the same PR is worth cancelling at ~25 min a run. Pushes
-  # to main never are: a CANCELLED check counts against branch protection, and a
-  # cancelled full-suite run on main loses the backstop this file exists to keep.
+  # A superseded push to the same PR is worth cancelling at minutes per leg.
+  # Pushes to main never are: a CANCELLED check counts against branch
+  # protection, and a cancelled full-suite run on main loses the backstop this
+  # file exists to keep.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  legs:
+  select:
+    name: select
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.decide.outputs.legs }}
+      leg_count: ${{ steps.decide.outputs.leg_count }}
+      matrix: ${{ steps.decide.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The touched-path diff needs the merge base, so no shallow clone.
+          fetch-depth: 0
+
+      - name: Decide which legs this change must run
+        id: decide
+        # All dynamic values reach the shell through the environment, never
+        # inlined into the script, so a branch name cannot inject commands.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INPUT_LEGS: ${{ github.event.inputs.legs }}
+        run: bash .github/scripts/decide_legs.sh
+
+      - name: Refuse a zero-leg selection
+        # A matrix built from an empty list runs no job and would leave the gate
+        # job green — the "green because nothing ran" failure this file closes.
+        env:
+          COUNT: ${{ steps.decide.outputs.leg_count }}
+          MATRIX: ${{ steps.decide.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          echo "legs=${MATRIX}"
+          if [ -z "${COUNT}" ] || [ "${COUNT}" -lt 1 ]; then
+            echo "::error::the selector produced no legs; refusing to report green"
+            exit 1
+          fi
+
+  leg:
+    name: leg ${{ matrix.leg }}
+    needs: select
+    strategy:
+      # One red leg must not hide the rest: every selected leg reports, and the
+      # verdict for all of them is taken by the `legs` job below.
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.select.outputs.matrix) }}
     runs-on: ubuntu-latest
     # The suite is designed to run THIN: every hermes-integration case skips
     # through a named probe module when hermes is not importable
@@ -104,143 +164,91 @@ jobs:
     # macos-latest — that is a one-line decision, not a redesign.
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The touched-path diff needs the merge base, so no shallow clone.
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           # 3.13, to match the sibling interpreter the dual-interpreter stamp
           # already runs the roster under (~/miniconda3/envs/p313) rather than
-          # adding a third CPython posture nobody stamps.
+          # adding a third CPython posture nobody stamps. The pip cache is the
+          # wheel cache; the venv itself is cached below.
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
-      - name: Install the test dependencies
+      - name: Restore the test venv
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: test-venv-${{ runner.os }}-${{ runner.arch }}-py313-${{ hashFiles('requirements.txt') }}
+
+      - name: Build the test venv
         # requirements.txt is the deployed plugin dependency set; pytest is the
         # only extra. Nothing here installs hermes, which is the point: the
         # hermes-gap probes must skip, and they skip LOUDLY under -rs.
+        if: steps.venv.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
-          python -m pytest --version
-          python -c 'import sys; print("python", sys.version)'
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt pytest
+          .venv/bin/python -m pytest --version
 
-      - name: Decide which legs this change must run
-        id: legs
+      - name: Run leg ${{ matrix.leg }}
+        # The exit code is decided by leg_verdict.sh, not by continue-on-error,
+        # so the advisory switch cannot turn a "could not run" into a pass.
         env:
-          # All dynamic values reach the shell through the environment, never
-          # inlined into the script, so a branch name cannot inject commands.
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_SHA: ${{ github.sha }}
-          INPUT_LEGS: ${{ github.event.inputs.legs }}
-        run: |
-          set -uo pipefail
-          CHANGED="${RUNNER_TEMP}/changed.txt"
-          : >"$CHANGED"
-
-          if [ -n "${INPUT_LEGS// }" ]; then
-            echo "legs=${INPUT_LEGS}" >>"$GITHUB_OUTPUT"
-            echo "full_suite=false" >>"$GITHUB_OUTPUT"
-            echo "legs: FORCED by workflow_dispatch input -> ${INPUT_LEGS}"
-            echo "reason=dispatch-input" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          base=""; head=""
-          case "${EVENT}" in
-            pull_request) base="${BASE_SHA}"; head="${PR_HEAD_SHA}" ;;
-            push)         base="${PUSH_BEFORE}"; head="${PUSH_SHA}" ;;
-            *)            base=""; head="" ;;
-          esac
-
-          # Anything we cannot diff (new branch, force-push with the old sha gone,
-          # a bare dispatch) means "we do not know what changed" — and not knowing
-          # runs everything. That is the same fail-closed rule the map uses.
-          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "no usable base (${base:-none}) -> FULL suite"
-            echo "legs=" >>"$GITHUB_OUTPUT"
-            echo "full_suite=true" >>"$GITHUB_OUTPUT"
-            echo "reason=no-diffable-base" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if ! git diff --name-only "$base" "$head" >"$CHANGED"; then
-            echo "git diff ${base}..${head} failed -> FULL suite"
-            echo "legs=" >>"$GITHUB_OUTPUT"
-            echo "full_suite=true" >>"$GITHUB_OUTPUT"
-            echo "reason=diff-failed" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "changed files:"; sed 's/^/  /' "$CHANGED"
-          # The selector prints the widening and the final roster; its exit is
-          # not a verdict, so it is checked explicitly rather than assumed.
-          if ! python .github/scripts/leg_select.py \
-                 --paths-file "$CHANGED" --github-output "$GITHUB_OUTPUT"; then
-            echo "::error::leg_select could not read the roster from scripts/run_tests.sh"
-            exit 1
-          fi
-          echo "reason=map" >>"$GITHUB_OUTPUT"
-
-      - name: Run the selected legs
-        # The exit code is decided here, not by continue-on-error, so the
-        # advisory/blocking switch cannot turn a "could not run" into a pass.
-        env:
+          LEG: ${{ matrix.leg }}
           ENFORCE: ${{ vars.HSCC_TESTS_ENFORCE }}
           FORCED_ENFORCE: ${{ github.event.inputs.enforce }}
-          LEGS: ${{ steps.legs.outputs.legs }}
+          HSCC_TEST_PY: ${{ github.workspace }}/.venv/bin/python
         run: |
+          # GitHub runs `bash -e`; the runner is EXPECTED to fail, so `-e` must
+          # be off or rc=$? never executes (a red leg would become an opaque
+          # step error with no verdict and no advisory branch).
+          set +e
           set -uo pipefail
-          LOG="${RUNNER_TEMP}/legs.log"
+          log="${RUNNER_TEMP}/leg.log"
           # Leg names come from scripts/run_tests.sh's roster, never from user
           # text; HSCC_TEST_LEGS with an unknown name exits 64 before any leg.
-          if [ -n "${LEGS:-}" ]; then
-            export HSCC_TEST_LEGS="$LEGS"
-          fi
-          # 0 disables the per-leg heartbeat watcher here: it exists so a human
-          # watching a 25-minute local file can tell slow from stopped, and a CI
-          # log streams live already.
-          export HSCC_LEG_HEARTBEAT_SECONDS=0
-          bash scripts/run_tests.sh >"$LOG" 2>&1
+          HSCC_TEST_LEGS="$LEG" \
+          HSCC_LEG_HEARTBEAT_SECONDS=0 \
+            bash scripts/run_tests.sh >"$log" 2>&1
           rc=$?
-          cat "$LOG"
+          cat "$log"
 
-          echo "### pytest legs" >>"$GITHUB_STEP_SUMMARY"
-          sed -n '/━━━ Summary ━━━/,$p' "$LOG" >>"$GITHUB_STEP_SUMMARY" || true
+          {
+            echo "### ${LEG}"
+            sed -n '/━━━ Summary ━━━/,$p' "$log" || true
+          } >>"$GITHUB_STEP_SUMMARY"
 
-          if [ "$rc" -eq 0 ]; then
-            echo "legs: ALL GREEN"
-            exit 0
-          fi
-          if [ "$rc" -eq 64 ]; then
-            echo "::error::the leg selection was rejected by scripts/run_tests.sh (exit 64) — nothing ran"
-            exit 64
-          fi
+          bash .github/scripts/leg_verdict.sh "$rc" "$log"
 
-          # LEGS COULD NOT RUN — red in advisory mode too. run_tests.sh returns 1
-          # for any failed leg, and pytest's own usage/internal/no-tests-collected
-          # codes arrive in the summary as "pytest exit N" with N != 1. A leg that
-          # collected zero tests is the silent-green case this whole gate exists
-          # to close, so it is never allowed to read as advisory noise.
-          if grep -Eq 'pytest exit (0|[2-9]|1[0-9])' "$LOG"; then
-            echo "::error::a leg exited with a non-test-failure code (see the Summary above) — the harness, not a test, is broken"
+  legs:
+    name: legs
+    # The stable check name branch protection types ("pytest-legs / legs").
+    # Per-leg jobs are a matrix with dynamic names; this job is the one verdict
+    # that says "every selected leg passed / was advisory-green".
+    needs: [select, leg]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          SELECT_RESULT: ${{ needs.select.result }}
+          LEG_RESULT: ${{ needs.leg.result }}
+        run: |
+          set -euo pipefail
+          echo "select: ${SELECT_RESULT}"
+          echo "leg matrix: ${LEG_RESULT}"
+          if [ "${SELECT_RESULT}" != "success" ]; then
+            echo "::error::leg selection did not complete — nothing trustworthy ran"
             exit 1
           fi
-
-          # A real test failure: advisory unless the repository variable says
-          # enforce. Normalised so a capitalised ENFORCE can never fail OPEN.
-          enforcelc="$(printf '%s' "${ENFORCE:-}" | tr '[:upper:]' '[:lower:]')"
-          if [ "${FORCED_ENFORCE:-}" = "true" ]; then enforcelc=true; fi
-          case "$enforcelc" in
-            true|1|yes)
-              echo "::error::a test leg is red — see the Summary above"
-              exit "$rc"
-              ;;
-          esac
-          echo "::warning::a test leg is red (advisory: HSCC_TESTS_ENFORCE is not set to true) — see the Summary above"
-          exit 0
+          if [ "${LEG_RESULT}" != "success" ]; then
+            # leg_verdict.sh already turned an advisory test failure green; this
+            # is reached only for an enforced red or a harness failure.
+            echo "::error::at least one selected leg is red or could not run"
+            exit 1
+          fi
+          echo "all selected legs green"

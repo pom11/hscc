@@ -52,7 +52,8 @@ Usage:
   leg_select.py                       # paths on stdin, one per line
   leg_select.py --paths-file FILE     # ...or from a file
   leg_select.py --path P [--path P]   # ...or as argv
-  leg_select.py --github-output F     # also append "legs=<space-joined>"
+  leg_select.py --all                 # the whole roster, no diff (push to main)
+  leg_select.py --github-output F     # also append legs= and matrix= for a job
 
 Exit: 0 always (choosing legs is not a verdict); 2 on a usage/harness problem,
 because a selector that fails silently would hand CI an empty leg list.
@@ -60,6 +61,7 @@ because a selector that fails silently would hand CI an empty leg list.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -153,6 +155,11 @@ def _per_leg_rules(legs: list[str]) -> list[tuple[tuple[str, ...], object]]:
     return [((f"{leg}/",), (leg,)) for leg in legs]
 
 
+def legs_json(legs: list[str]) -> str:
+    """The `strategy.matrix.leg` JSON array a workflow reads from this module."""
+    return json.dumps(legs)
+
+
 def select_legs(paths: list[str], legs: list[str] | None = None) -> tuple[list[str], list[str]]:
     """Return (legs to run, paths that forced the full suite).
 
@@ -200,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=_DESCRIPTION)
     ap.add_argument("--paths-file", help="file of changed paths, one per line")
     ap.add_argument("--path", action="append", default=[], help="a changed path (repeatable)")
-    ap.add_argument("--github-output", help="append legs=<...> to this GITHUB_OUTPUT file")
+    ap.add_argument("--all", action="store_true", help="the whole roster (push to main)")
+    ap.add_argument("--github-output", help="append legs=, leg_count=, matrix= and full_suite= to this GITHUB_OUTPUT file")
     ap.add_argument("--leg", action="append", default=[], help="override the roster (tests only)")
     args = ap.parse_args(argv)
 
@@ -211,19 +219,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     paths: list[str] = list(args.path)
-    if args.paths_file:
+    if args.all:
+        if paths or args.paths_file:
+            print("leg_select: --all cannot be combined with paths", file=sys.stderr)
+            return 2
+    elif args.paths_file:
         try:
             paths.extend(Path(args.paths_file).read_text(encoding="utf-8").splitlines())
         except OSError as exc:
             print(f"leg_select: cannot read {args.paths_file}: {exc}", file=sys.stderr)
             return 2
-    if not args.paths_file and not args.path:
+    elif not args.path:
         if sys.stdin.isatty():
             print("leg_select: no paths on stdin and none on argv", file=sys.stderr)
             return 2
         paths.extend(sys.stdin.read().splitlines())
 
-    legs, widen = select_legs(paths, all_legs)
+    if args.all:
+        legs, widen = list(all_legs), []
+    else:
+        legs, widen = select_legs(paths, all_legs)
+        if not legs:  # pragma: no cover - select_legs never returns empty today
+            print("leg_select: selected zero legs", file=sys.stderr)
+            return 2
 
     # Human-readable, always: a job log has to answer "why only these legs?"
     print(f"changed paths considered: {len([p for p in paths if p.strip()])}")
@@ -238,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.github_output, "a", encoding="utf-8") as fh:
             fh.write(f"legs={' '.join(legs)}\n")
             fh.write(f"leg_count={len(legs)}\n")
+            # One job per leg is a JSON array the workflow hands to
+            # `strategy.matrix.leg`; legs= stays for humans and for a dispatch.
+            fh.write(f"matrix={legs_json(legs)}\n")
             fh.write(f"full_suite={'true' if len(legs) == len(all_legs) else 'false'}\n")
     return 0
 
