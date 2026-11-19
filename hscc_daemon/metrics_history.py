@@ -789,8 +789,17 @@ class MetricsRecorder:
             rows = self.store.host_rows(1, since=start, until=hi)
             if not rows:
                 break        # this bucket has not rolled up yet; stop, retry later
-            engines = self.store.engine_rows(1, since=start, until=hi)
-            self.store.write_rollup(*rollup(rows, 2, TIER2_BUCKET_S))
+            # BOTH series of the tier below roll up, in ONE fold. `rollup` takes
+            # a single list and tells the shapes apart itself
+            # (``_host_samples`` / ``_engine_entries`` each skip the other's
+            # rows), which is why the two reads are concatenated rather than
+            # folded by two calls — and why the reading of this line that drops
+            # the engine rows is not merely untidy: it leaves `engine_rollup`
+            # with no tier-2 rows at all, so the 7 d window can serve the node
+            # series and nothing else. (Found by t_c7f57783's read-route parity
+            # test, which is exactly what a parity test is for.)
+            points = rows + self.store.engine_rows(1, since=start, until=hi)
+            self.store.write_rollup(*rollup(points, 2, TIER2_BUCKET_S))
             self.store.set_watermark("tier2_closed_through", start + TIER2_BUCKET_S)
             did["tier2_buckets"] += 1
         # ── retention: each tier prunes by its OWN window ──
@@ -960,6 +969,30 @@ def close_sampler() -> None:
         s, _sampler = _sampler, None
     if s is not None:
         s.close()
+
+
+def resident_recorder() -> "MetricsRecorder | None":
+    """The process-wide ``MetricsRecorder``, or None when this process hosts none.
+
+    WHY THIS EXISTS (t_c7f57783). Tier 0 is memory-only, so it belongs to the
+    one process that samples — the daemon. The API server is a *separate*
+    process (``hscc_daemon/api_launchd.py`` starts its own
+    ``python -m api_server serve``), and a read route in that process has no way
+    to see the daemon's ring. ``get_sampler()`` cannot answer that question
+    because it CONSTRUCTS on first use, which spawns a
+    ``sparkrun cluster monitor`` child — a read route must never sample the
+    fleet, so it must never call it.
+
+    The two answers are different facts and callers must not have to guess
+    between them: None means "tier 0 is not readable from this process", while
+    an empty ``tier0_points()`` means "this process does sample and has nothing
+    yet" (the stated post-restart state). Returning the recorder rather than the
+    ring keeps this one name for the whole tier-0 read, so a caller goes through
+    the recorder's own API instead of touching ``_sampler``.
+    """
+    with _sampler_lock:
+        sampler = _sampler
+    return sampler.recorder if sampler is not None else None
 
 
 def check_metrics_history(now=None, hscc_dir=None) -> dict:

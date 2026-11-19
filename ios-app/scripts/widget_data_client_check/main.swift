@@ -6,7 +6,7 @@ import Foundation
 // real SharedModels.swift + SharedStore.swift) through a stubbed transport and
 // asserts the four promises the pivot rests on:
 //
-//   1. READ-ONLY: the fetch allowlist is exactly the nine audited read routes,
+//   1. READ-ONLY: the fetch allowlist is exactly the ten audited read routes,
 //      a mutating-looking path is refused BEFORE the transport sees anything,
 //      and every request that does go out is a GET with the app's headers.
 //   2. TIMEOUT: the per-request ceiling is on the request (and clamped), so an
@@ -133,6 +133,25 @@ let kanbanRunningBody = Data(#"""
  "count":1,"speak":"1 running","boards":["hscc"]}
 """#.utf8)
 
+/// `/v1/cluster/history`'s answer for `window=6h` (tier 1): the recorder's rows
+/// with the recorder's own key names, including one node whose GPU never
+/// reported — a `null` that must stay nil, because a 0.0 would draw a node that
+/// never answered as an idle one. `store.path` is on the wire and deliberately
+/// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
+let historyBody = Data(#"""
+{"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
+ "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
+ "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
+ "since":1794978300,"until":1794999900,"node":"192.0.2.10",
+ "metrics":["gpu_util_pct","gen_tps"],"hosts_included":true,"engines_included":true,
+ "hosts":[{"tier":1,"ts":1794978300,"host":"192.0.2.10","gpu_util_pct":94.0,"gpu_power_w":160.5,"gpu_power_w_max":480.0,"n":30,"error":null},
+          {"tier":1,"ts":1794978360,"host":"192.0.2.10","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
+ "engines":[{"tier":1,"ts":1794978300,"node":"192.0.2.10","port":"8000","model":"org/Qwen-Test","run":2,"wait":1,"kv":12.5,"gen_tps":40.0,"n":30,"error":null}],
+ "counts":{"hosts":2,"engines":1},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":true},
+ "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
+"""#.utf8)
+
 // MARK: - Harness
 
 var failures: [String] = []
@@ -187,8 +206,8 @@ func runAll() async {
     let audited: Set<String> = [
         "/v1/projects", "/v1/mobile/summary",
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
-        "/v1/cluster/monitor", "/v1/cluster/status", "/v1/daemon/host",
-        "/v1/autodown/status",
+        "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
+        "/v1/daemon/host", "/v1/autodown/status",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
@@ -197,6 +216,41 @@ func runAll() async {
                      "/v1/projects/hscc/sync"] {
         check("refused \(mutation)", !WidgetDataPath.isReadPath(mutation))
     }
+
+    // 1b. The history read: which tier answered must survive decoding (a chart
+    //     cannot tell a 2 s point from a 5 min one any other way), a stored null
+    //     must stay nil, and the window must travel as a real query item.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    let history = await client.clusterHistory(window: "6h", node: "192.0.2.10",
+                                              metrics: ["gpu_util_pct", "gen_tps"])
+    switch history {
+    case .success(let payload):
+        check("history states the tier and resolution it served",
+              payload.window == "6h" && payload.tier == 1
+                && payload.resolution_s == 60 && payload.resolution == "60s")
+        check("history keeps a stored null as nil, not as a zero",
+              payload.hosts.count == 2 && payload.hosts[1].gpu_power_w == nil
+                && payload.hosts[1].error == "collect failed")
+        check("history keeps the peak the average erased",
+              payload.hosts[0].gpu_power_w == 160.5
+                && payload.hosts[0].gpu_power_w_max == 480.0)
+        check("history names the peak columns it carried",
+              payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"])
+        check("history reports whether the 2 s ring was readable",
+              payload.tier0Resident == true)
+        let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
+        check("the store's server path is never decoded",
+              !historyFields.contains("path"))
+    case .failure(let failure):
+        check("history should decode, got \(String(reflecting: failure))", false)
+    }
+    let historyRequest = StubTransport.requests.last
+    check("history's window/node/metrics are real query items",
+          historyRequest?.url?.query?.contains("window=6h") == true
+            && historyRequest?.url?.query?.contains("node=192.0.2.10") == true
+            && historyRequest?.url?.query?.contains("metrics=") == true)
+    check("history's path carries no query string of its own",
+          historyRequest?.url?.path == "/v1/cluster/history")
 
     // 2. A refused path never reaches the transport — no request, no side effect.
     StubTransport.arm(.http(status: 200, body: Data("{}".utf8)))

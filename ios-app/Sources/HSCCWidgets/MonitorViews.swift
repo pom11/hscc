@@ -8,8 +8,9 @@ import WidgetKit
 // One text model (`MonitorEntry.text(for:)`) drives every family, so the
 // circular gauge, the Lock Screen line and the large table cannot disagree.
 // The headline is the node tally; the detail is the models/throughput line;
-// the rows are the CLI's per-node host/serving rows; the footer is the daemon
-// host's health block.
+// the rows are the CLI's per-node host/serving rows, except on `systemMedium`,
+// which draws `hscc cluster monitor`'s host table itself
+// (`CLIMonitorHostTableView`); the footer is the daemon host's health block.
 // ---------------------------------------------------------------------------
 
 struct MonitorWidget: Widget {
@@ -187,21 +188,25 @@ struct MediumMonitorWidget: View {
     let entry: MonitorEntry
 
     var body: some View {
-        let text = entry.text(for: .medium)
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "gauge.with.dots.needle.bottom.50percent").widgetIcon(style)
-                MonitorHeadline(entry: entry, size: 26)
+                    .font(style.font(size: 9))
+                    .foregroundColor(style.secondaryTextColor)
+                // Same trade as the cluster tile's medium: the numeral gives
+                // nine columns of CLI text the room it was spending on itself.
+                MonitorHeadline(entry: entry, size: 15)
                 Spacer(minLength: 0)
                 MonitorDetail(entry: entry, surface: .medium)
             }
             .widgetHeader(style)
-            if !text.rows.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(text.rows.enumerated()), id: \.offset) { index, row in
-                        MonitorNodeRowView(row: row, node: node(of: entry, at: index), compact: true)
-                    }
-                }
+            // The CLI's host table, the same view the cluster tile's medium
+            // draws (`CLIMonitorHostTableView`) — one table for both tiles, so
+            // the two surfaces cannot grow different ideas of what the CLI
+            // prints. The daemon-host line stays in the footer, where
+            // `MonitorEntry.text(for:)` puts it.
+            if let rows = entry.cliHostRows {
+                CLIMonitorHostTableView(rows: rows)
             }
             Spacer(minLength: 0)
             MonitorFooter(entry: entry, surface: .medium)

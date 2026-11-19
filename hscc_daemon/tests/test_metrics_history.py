@@ -797,3 +797,72 @@ def test_a_broken_store_reports_itself_in_the_state(tmp_path):
     out = mh.check_metrics_history(now=BASE + 62)
     assert out["ok"] is False and "OperationalError" in out["error"]
     assert state.read_state(mh.STREAM_NAME)["error"]
+
+
+# ── the cross-process read seam (t_c7f57783: GET /v1/cluster/history) ──────
+#
+# Tier 0 lives in the sampler's process and the API server is a different
+# process, so the read route asks "does THIS process own the ring?" rather than
+# "give me a sampler". These two tests are what keep that question answerable:
+# the first pins that answering it never constructs a Sampler (constructing one
+# spawns `sparkrun cluster monitor` — a read route that sampled the fleet would
+# be the second poller this module's whole design exists to avoid), and the
+# second pins the other answer, "resident, and empty right after a restart",
+# which is a different fact from "not resident here".
+
+def test_resident_recorder_answers_without_building_a_sampler(monkeypatch):
+    def _no_construction(*args, **kwargs):
+        raise AssertionError("resident_recorder() must never construct a Sampler")
+    monkeypatch.setattr(mh, "Sampler", _no_construction)
+    mh.close_sampler()
+    assert mh.resident_recorder() is None
+    # The distinction this seam exists for: get_sampler() DOES construct on
+    # first use, which is exactly why a read route must not call it.
+    with pytest.raises(AssertionError, match="must never construct"):
+        mh.get_sampler()
+
+
+def test_resident_recorder_is_the_owner_of_the_tier0_ring(tmp_path):
+    rec = mh.MetricsRecorder(hscc_dir=str(tmp_path))
+    mh.set_sampler(mh.Sampler(host_stream=FakeStream(2), serving=FakePoller(),
+                              recorder=rec))
+    assert mh.resident_recorder() is rec
+    assert mh.resident_recorder().tier0_points() == []    # resident AND empty
+    rec.tick(frame(BASE), engines(), BASE)
+    assert [p["ts"] for p in mh.resident_recorder().tier0_points()] == [BASE]
+
+
+def test_tier2_rolls_the_serving_series_up_with_the_host_series(tmp_path):
+    """The 7 d tier is the only one a week-long chart can read, and the widgets
+    draw their serving table from it — so per-engine rows have to roll up too,
+    not stop at tier 1.
+
+    The load-bearing number is the weighted mean: minutes 0-3 answered 30 times
+    at 100 tok/s and minute 4 answered 6 times at 0. The true 5-minute value is
+    95.24 tok/s; a plain mean of the minute averages says 80, and a fold that
+    forgot the engine rows says nothing at all — which is what this line used to
+    do (t_c7f57783's read-route parity test found it: `rollups()` read tier 1's
+    engine rows into a local and then folded only the host rows, leaving
+    `engine_rollup` empty for tier 2).
+    """
+    store = mh.MetricsStore(hscc_dir=str(tmp_path))
+    rec = mh.MetricsRecorder(store=store)
+    per_minute = [30, 30, 30, 30, 6, 30]
+    gen_tps = [100.0, 100.0, 100.0, 100.0, 0.0, 100.0]
+    for m, (count, tps) in enumerate(zip(per_minute, gen_tps)):
+        minute = BASE + m * 60
+        for i in range(count):
+            t = minute + i * 2
+            rec.tick(frame(t), engines(gen_tps=tps), t)
+    t2 = store.engine_rows(2)
+    assert len(t2) == 1, "the 5-minute bucket produced no engine row"
+    row = t2[0]
+    assert (row["tier"], row["ts"]) == (2, BASE)
+    assert (row["node"], row["port"], row["model"]) == (HOST, "8001",
+                                                        "org/Model-A")
+    assert row["gen_tps"] == pytest.approx(12000 / 126, abs=1e-4)
+    assert row["n"] == 126
+    # The host series of the same bucket is still there — one fold, two series.
+    assert store.count(2) == 1
+    assert store.host_rows(2)[0]["ts"] == BASE
+    store.close()
