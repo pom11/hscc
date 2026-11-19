@@ -557,11 +557,14 @@ struct ClusterGraphEmptyView: View {
 /// `cluster_graph_check.sh` iterates `WidgetFamily.clusterGraphFamilies` and
 /// requires an arm for each name.
 struct ClusterGraphWidgetView: View {
-    @Environment(\.widgetStyle) private var style
     let entry: ClusterGraphEntry
 
     var body: some View {
-        ClusterGraphCanvas(family: entry.family) { pixelWidth, axisLabelCount in
+        // ONE resolution for the surface, and the root paints the stored
+        // background through the rendering-mode adapter. A second resolution
+        // anywhere in this file is what `widget_style_check.sh` refuses.
+        let style = WidgetStyle.resolved(for: .widgetClusterGraph)
+        return ClusterGraphCanvas(family: entry.family) { pixelWidth, axisLabelCount in
             Group {
                 switch entry.family {
                 case .systemSmall:
@@ -590,5 +593,9 @@ struct ClusterGraphWidgetView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .containerBackground(for: .widget) {
+            WidgetSurfaceBackground(style: style)
+        }
+        .widgetRenderingAdaptation(style: style)
     }
 }
