@@ -1,4 +1,4 @@
-HSCC — Hermes Spark Cluster Control   v2.15.11
+HSCC — Hermes Spark Cluster Control   v2.15.13
 Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
 Usage:  hscc <command> [args]        hscc help <command>   for details
 Daemon control
@@ -55,12 +55,16 @@ Cluster & templates
   kanban <cmd>
       Board hygiene: blocked (show/recover), stale (list/archive)
   cards monitor [--live] One live panel per running card, streaming its worker
+  main start|status|wakeups Main orchestrator pane and daemon wake-up schedule
   orch inject <p> "<msg>" Inject into a running Hermes REPL pane (tmux)
   orch waker status|enable|disable
       The built-in orchestrator waker (daemon-resident)
 
 Utility
-  notify <message>     Send a desktop notification
+  notify <title> <body>
+      Post an alert to the HSCC alert feed (the apps read it)
+                       flags: --level info|action|critical --key <dedupe-key>
+                       requires the API: hscc api start
   bootstrap [flags]
       Run the HSCC installer from any layout (repo, plugins, brew)
                        flags pass through: --yes --dry-run --force --no-backup

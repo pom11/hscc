@@ -20,16 +20,22 @@ public audience:
      sentences and every template row must appear in the page.
   4. **The command list cannot drift from the CLI** — scripts/gen_site_commands.py
      — and the page stays self-contained (no CDN, no web font, no private
-     address) and usable at phone width.
+     address) and usable at phone width. Two separate agreements live here: the
+     fixture is the repo's own `hscc --help` (an installed bottle lags main and
+     once agreed with a stale fixture, which read as a passing guard), and the
+     copy card may not advertise an argument the CLI does not take — only the
+     wording and the presentation of a signature are its own.
 """
 
 from __future__ import annotations
 
 import html as html_mod
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -685,19 +691,205 @@ def test_page_command_region_matches_the_generated_one():
                    "--quiet"]) == 0, "site/index.html drifted from `hscc --help`"
 
 
-def test_live_cli_and_fixture_agree_on_the_command_list():
-    """A fixture cannot hide drift from a CLI change, so compare both parses."""
+# ── what the fixture is allowed to be an oracle for (t_88d896f3) ────────────
+#
+# The fixture used to be checked against one thing: the installed bottle. That
+# comparison cannot fail in the way it was written to catch. Measured on this
+# host at `ce8e87f3`: `/opt/homebrew/bin/hscc` reports `hscc 2.15.13`, the same
+# version string as the repo's `VERSION`, and still prints `notify <message>`
+# with no `main` line at all — while `hscc_daemon/hscc.py` publishes
+# `notify <title> <body>` and `main start|status|wakeups`. The fixture was
+# `notify <message>` with no `main` line either. Two stale things agreeing is
+# a green light, not a guard, and the drift it let through is the one the page
+# carried: the public page advertised a `notify` argument the CLI had already
+# renamed, and the missing `main` verb never appeared at all.
+#
+# So the fixture's oracle is now the repo's own help — the only tree the page
+# can be held to at HEAD. The bottle stays checked, but only for what it can
+# honestly answer, and it says so out loud when it cannot.
+
+def _parse(text: str) -> list[dict]:
+    import gen_site_commands as g
+
+    return g.parse_help(text)
+
+
+def _render_repo_help() -> str:
+    """The repo's own ``hscc --help``, as an operator would see it.
+
+    Same posture ``scripts/hscc_cli_help_audit.py``'s ``Prober._env`` uses for
+    every help probe — sandboxed HOME, 80 columns, no colour, the repo first on
+    PYTHONPATH — because that is the posture the help-surface gate measures in.
+    The Prober itself is not instantiated: it holds ports, seeds canaries and
+    arms a tripwire for a walk of 331 probes, and this renders one inert
+    top-level ``--help``.
+    """
+    import gen_site_commands as g
+
+    home = Path(tempfile.mkdtemp(prefix="hscc-site-help-"))
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CONDA_")
+           and k not in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE",
+                         "HERMES_DELEGATED_CHILD_CONTEXT", "HSCC_SPARKRUN_BIN",
+                         "COLUMNS")}
+    env.update({"HOME": str(home), "PYTHONPATH": str(REPO), "COLUMNS": "80",
+                "NO_COLOR": "1", "TERM": "dumb", "HSCC_THEME": "dark"})
+    proc = subprocess.run([sys.executable, "-m", "hscc_daemon.hscc", "--help"],
+                          env=env, cwd=str(home), capture_output=True,
+                          text=True, timeout=120, check=False)
+    assert proc.returncode == 0, (
+        f"rendering the repo's own help failed ({proc.returncode}): "
+        f"{proc.stderr.strip()[:300]}")
+    return g.strip_ansi(proc.stdout)
+
+
+@pytest.fixture(scope="module")
+def repo_help_groups() -> list[dict]:
+    return _parse(_render_repo_help())
+
+
+def test_fixture_is_the_repos_own_help(repo_help_groups):
+    """The anti-rot guard: the fixture is the repo's help, not a bottle's.
+
+    Groups, order and the full entry text — argument shapes included, since
+    `command_key()` throws them away and that is exactly what let a stale
+    signature survive. The version line is deliberately not compared: it is
+    not parsed, so a release bump must not redden this gate.
+    """
+    fixture = _parse(HELP_FIXTURE.read_text(encoding="utf-8"))
+    assert fixture == repo_help_groups, (
+        "scripts/tests/fixtures/hscc_help_landing.txt no longer describes "
+        "THIS repo's `hscc --help`. Refresh it from the repo's own help "
+        "(not the installed bottle, which lags main), then regenerate the "
+        "page: python3 scripts/gen_site_commands.py --help-file "
+        "scripts/tests/fixtures/hscc_help_landing.txt --write\n"
+        f"fixture says:   {fixture}\n"
+        f"repo help says: {repo_help_groups}")
+
+
+def test_installed_cli_agrees_when_it_is_this_tree(repo_help_groups):
+    """The bottle is a lagging artifact — so it is only an oracle at all when
+    it renders exactly what this tree renders.
+
+    The old form of this test compared the bottle with the fixture and passed
+    while both were stale (see the block above). Now the three must agree, and
+    when the installed CLI is demonstrably not this tree the test says which
+    one it is instead of quietly green-lighting a two-stale comparison.
+    """
     import gen_site_commands as g
 
     if shutil.which("hscc") is None:
         pytest.skip("hscc is not installed on this host")
-    live = g.parse_help(g.fetch_help(None))
-    fixture = g.parse_help(HELP_FIXTURE.read_text(encoding="utf-8"))
-    assert [(x["name"], x["sigs"]) for x in live] == \
-        [(x["name"], x["sigs"]) for x in fixture], (
-        "the installed CLI changed its command surface; regenerate the page "
-        "(python3 scripts/gen_site_commands.py --write) and refresh "
-        "scripts/tests/fixtures/hscc_help_landing.txt")
+    live = _parse(g.fetch_help(None))
+    if live != repo_help_groups:
+        n_live = sum(len(x["sigs"]) for x in live)
+        n_repo = sum(len(x["sigs"]) for x in repo_help_groups)
+        pytest.skip(
+            f"the installed hscc lists {n_live} commands and this tree's help "
+            f"lists {n_repo}: the bottle is not this tree, and a lagging "
+            "bottle cannot gate main. The fixture's oracle is the repo's own "
+            "help, pinned by test_fixture_is_the_repos_own_help")
+    assert _parse(HELP_FIXTURE.read_text(encoding="utf-8")) == live
+
+
+
+# ── the copy card cannot advertise an argument the CLI does not take ────────
+#
+# align() renders BOTH the signature and the prose out of site/COPY.md; the CLI
+# supplied only the group, the order and the count. The one cross-check was
+# key_matches() over command_key(), which stops at the first non-bare-lowercase
+# word — so `notify <message>`, `notify "<title>" "<body>"` and
+# `notify --frobnicate XYZ` all keyed to `notify`, a nonsense signature passed
+# the gate, and a CLI-side reword was invisible to every gate in the leg. Both
+# were measured at `ce8e87f3`; the two tests below are those probes, kept.
+
+def _copy_groups():
+    import gen_site_commands as g
+
+    return g.parse_copy_block(COPY_MD.read_text(encoding="utf-8"))
+
+
+def _rows_and_problems(help_text: str, copy_groups=None):
+    import gen_site_commands as g
+
+    return g.align(g.parse_help(help_text),
+                   copy_groups if copy_groups is not None else _copy_groups())
+
+
+def test_generator_refuses_a_signature_the_cli_does_not_take(tmp_path):
+    """The nonsense-sig probe: `--frobnicate` is not presentation, it is a lie.
+
+    Rewriting the copy card's notify bullet to an option the CLI has never
+    had used to align() cleanly and render straight onto the page — only the
+    `--write` step stood between it and a published false claim.
+    """
+    copy = _copy_groups()
+    bullet = [it for grp in copy for it in grp["items"]
+              if it["sig"].startswith("notify")]
+    assert bullet, "the copy card no longer has a notify bullet; teach this test"
+    bullet[0]["sig"] = "notify --frobnicate XYZ"
+    rows, problems = _rows_and_problems(
+        HELP_FIXTURE.read_text(encoding="utf-8"), copy)
+    assert problems, "a signature the CLI does not have aligned cleanly"
+    assert "--frobnicate" in " ".join(problems)
+    assert [r["sig"] for r in rows if r["sig"].startswith("notify")] == [
+        "notify --frobnicate XYZ"], "the row is still built from the copy card"
+
+
+def test_generator_refuses_an_argument_the_cli_dropped(tmp_path):
+    """The help-side probe, in the direction that can actually mislead.
+
+    The CLI renaming an argument the page still advertises is the drift that
+    reaches a user: they type what the page says and the CLI rejects it. A
+    cosmetic reword of the help side (same arguments, different presentation)
+    stays invisible on purpose — the copy card owns presentation, and the page
+    stays true. See the module docstring of gen_site_commands.py.
+    """
+    grown = HELP_FIXTURE.read_text(encoding="utf-8").replace(
+        "  notify <title> <body>", "  notify <title>")
+    _, problems = _rows_and_problems(grown)
+    assert problems, "the page still advertises <body> and the gate looked away"
+    assert "body" in " ".join(problems)
+
+
+def test_argument_check_is_not_vacuous():
+    """The rule bites on the committed pair, and is not an equality rule.
+
+    Both halves matter. Without the first the check could pass because nothing
+    ever has arguments; without the second someone "tightens" it back to
+    comparing the CLI's argument list exactly and the copy card has to be
+    given an exception per verb. Measured at `ce8e87f3`: 17 of the 40 bullets
+    then live would fail equality — `hscc cluster down` for the CLI's
+    `cluster down [--dry-run]`, `hscc api start` for `api <cmd>`, `hscc
+    template apply <name> --confirm` for `template apply <name> [--confirm]
+    [--force-recreate]`, and 14 more.
+    """
+    import gen_site_commands as g
+
+    cli_flat = [(gr["name"], s) for gr in _parse(
+        HELP_FIXTURE.read_text(encoding="utf-8")) for s in gr["sigs"]]
+    copy_flat = [it for gr in _copy_groups() for it in gr["items"]]
+    assert len(cli_flat) == len(copy_flat)
+
+    both = [c["sig"] for (hg, hsig), c in zip(cli_flat, copy_flat)
+            if g.argument_vocabulary(hsig) and g.argument_vocabulary(c["sig"])]
+    assert both, ("no row has arguments on both sides — the vocabulary check "
+                  "is comparing nothing and cannot be trusted")
+
+    unequal = [c["sig"] for (hg, hsig), c in zip(cli_flat, copy_flat)
+               if g.argument_vocabulary(hsig) != g.argument_vocabulary(c["sig"])]
+    assert len(unequal) >= 10, (
+        f"only {len(unequal)} bullets differ from the CLI's argument list; "
+        "the copy card stopped enriching signatures — if you are about to "
+        "make this an equality rule, count them first (it was 17 of 40)")
+
+
+def test_copy_page_agreement_is_clean():
+    """The committed fixture and copy card agree with no problems at all."""
+    _, problems = _rows_and_problems(HELP_FIXTURE.read_text(encoding="utf-8"))
+    assert problems == [], "site/COPY.md and the CLI disagree:\n  " + "\n  ".join(
+        problems)
+
 
 
 def test_generator_fails_when_the_page_is_missing_a_command(tmp_path):

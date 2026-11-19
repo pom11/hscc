@@ -102,10 +102,14 @@ Which model each template serves lives in the template itself — check
 The whole tool is one command, `hscc`. This is every command group, in the order
 the tool lists them.
 
-<!-- COMMANDS:BEGIN — generated from `hscc --help` (hscc 2.15.11) plus
+<!-- COMMANDS:BEGIN — generated from `hscc --help` (repo VERSION) plus
      `hscc help <group>` for the groups that take subcommands. Format contract
      for the drift test: one bullet per top-level command, in `hscc --help`
-     order, as `- `hscc <cmd>` — plain one-line explanation`. Keep the markers. -->
+     order, as `- `hscc <cmd>` — plain one-line explanation`. Keep the markers.
+     The wording is the card's; the arguments are not — every option and
+     placeholder inside `hscc ...` has to be one `hscc --help` publishes for
+     that command, and scripts/gen_site_commands.py refuses to render a page
+     that advertises one the CLI does not take. -->
 
 ### Daemon control
 
@@ -167,6 +171,8 @@ The background watcher that does the checking and the healing.
   (list and archive), and a live board monitor.
 - `hscc cards monitor` — one live panel per running card, streaming what its
   worker is doing.
+- `hscc main` — the main orchestrator's own pane: bring it up, see whether it is
+  busy, and edit the wake-up schedule the watcher fires into it.
 - `hscc orch inject` — send a message into a running agent's session.
 - `hscc orch waker` — the built-in orchestrator waker: `status`, `enable`,
   `disable`.
