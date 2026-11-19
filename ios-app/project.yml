@@ -485,6 +485,18 @@ targets:
       # The widget's count rules on Foundation only, so
       # scripts/board_status_widget_check.sh can compile and execute them.
       - path: Sources/HSCCWidgets/BoardStatusReading.swift
+      # The history graph widget (t_f4551339): Swift Charts over
+      # `GET /v1/cluster/history`. Four files on purpose — the projection rules
+      # live in `Sources/Shared/ClusterGraphReading.swift` (Foundation-only, so a
+      # macOS harness executes them), the one `WidgetFamily` dependency in
+      # `GraphWidgetMetrics.swift`, the entry and its last-known series in
+      # `GraphWidgetEntry.swift`, and the configuration intent, provider and
+      # `Widget` in `GraphWidget.swift`. Home-screen families only; the dispatch
+      # gives each declared size its own arm.
+      - path: Sources/HSCCWidgets/GraphWidget.swift
+      - path: Sources/HSCCWidgets/GraphWidgetEntry.swift
+      - path: Sources/HSCCWidgets/GraphWidgetMetrics.swift
+      - path: Sources/HSCCWidgets/GraphWidgetViews.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift

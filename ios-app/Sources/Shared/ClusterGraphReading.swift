@@ -270,14 +270,149 @@ enum ClusterGraphRule {
     }
 }
 
+// MARK: - Unit groups (the small multiples inside one panel)
+
+/// The unit a mini-chart's axis can carry.
+///
+/// WHY A PANEL IS A ROW OF MINIS AND NOT ONE CHART WITH EIGHT LINES: the card's
+/// large panel lists CPU°C, GPU°C, GPU%, CPU%, W, RAM%, KV% and tok/s, and those
+/// are four different units. Eight lines on one axis would make every line's
+/// height a claim about a scale it is not drawn on — a 90 W spike and a 90%
+/// spike would be the same height and mean different things. So a panel is small
+/// multiples GROUPED BY UNIT, each with its own labelled axis, and every metric
+/// the card names is still present and still in the legend. That is the card's
+/// "small multiples ... with axis labels and a legend", and it is the only
+/// reading of it that does not lie about a scale.
+enum ClusterGraphUnit: String, CaseIterable, Equatable {
+    case temperature
+    case percent
+    case power
+    case throughput
+    case count
+
+    /// The group a metric belongs to, derived from the shared layer's OWN `unit`
+    /// rather than from a second list of metrics: a rename in
+    /// `ClusterHistoryMetric.unit` moves the metric to `.count` (an unlabelled
+    /// axis) instead of silently keeping it on a °C axis, and
+    /// `cluster_graph_check.sh` asserts every metric the card's panel lists has a
+    /// named unit, so the drift is a red gate rather than a wrong axis.
+    static func of(_ metric: ClusterHistoryMetric) -> ClusterGraphUnit {
+        switch metric.unit {
+        case "\u{00B0}C": return .temperature
+        case "%": return .percent
+        case " W": return .power
+        case " tok/s": return .throughput
+        default: return .count
+        }
+    }
+
+    /// The axis caption. A unit the metric set never uses is never drawn, so
+    /// this is the only place the words live.
+    var axisLabel: String {
+        switch self {
+        case .temperature: return "\u{00B0}C"
+        case .percent: return "%"
+        case .power: return "W"
+        case .throughput: return "tok/s"
+        case .count: return ""
+        }
+    }
+}
+
+/// One mini-chart: one unit, the lines that share it, and the domain the axis is
+/// drawn over. The domain comes from the lines' own extremes — never from a
+/// guessed 0...100 — so a fleet that never left 40 °C does not get a chart whose
+/// interesting band is 60 % of the height.
+struct ClusterGraphMini: Equatable, Identifiable {
+    let unit: ClusterGraphUnit
+    let axisLabel: String
+    let lines: [ClusterGraphLine]
+    let axisFloor: Double
+    let axisCeiling: Double
+
+    /// Unique inside one chart: `minis(from:)` emits at most one mini per unit.
+    var id: String { unit.rawValue }
+
+    /// The legend entries this mini contributes: metric label + colour rule.
+    var legend: [ClusterGraphLegendEntry] {
+        lines.map { ClusterGraphLegendEntry(metric: $0.metric, tint: $0.tint, label: $0.label) }
+    }
+}
+
+/// One legend row: which metric a colour is.
+struct ClusterGraphLegendEntry: Equatable {
+    let metric: ClusterHistoryMetric
+    let tint: ClusterGraphTint
+    /// The identity the line belongs to, so a per-node legend can name its node.
+    let label: String
+}
+
+extension ClusterGraphReading {
+    /// Group a panel's lines by unit and derive each group's axis domain.
+    ///
+    /// Groups keep `ClusterGraphUnit.allCases` order, so the panels of a widget
+    /// are laid out in the same order for every node and two nodes' panels can be
+    /// compared by eye. A unit with no lines is not drawn at all.
+    static func minis(from lines: [ClusterGraphLine]) -> [ClusterGraphMini] {
+        var grouped: [ClusterGraphUnit: [ClusterGraphLine]] = [:]
+        for line in lines {
+            grouped[ClusterGraphUnit.of(line.metric), default: []].append(line)
+        }
+        return ClusterGraphUnit.allCases.compactMap { unit in
+            guard let group = grouped[unit], !group.isEmpty else { return nil }
+            let lows = group.compactMap { $0.minimum }
+            let highs = group.compactMap { $0.maximum }
+            guard let low = lows.min(), let high = highs.max() else {
+                // Nothing reported: the axis still has to exist for the chart to,
+                // and 0...1 is the only domain that claims nothing about the data.
+                return ClusterGraphMini(unit: unit, axisLabel: unit.axisLabel,
+                                        lines: group, axisFloor: 0, axisCeiling: 1)
+            }
+            let top = max(high, low + 1)
+            // Only temperatures get a raised floor: `temperatureAxisFloor` exists
+            // because a thermal excursion from 60 to 88 °C must not read flat. For
+            // every other unit a floor of 0 is the honest baseline — a utilisation
+            // that sat at 3 % was quiet, and trimming the axis to make it look
+            // busy would be the same lie in the other direction.
+            let floor = unit == .temperature
+                ? ClusterGraphBandRule.temperatureAxisFloor(maximum: high)
+                : 0
+            return ClusterGraphMini(unit: unit,
+                                    axisLabel: unit.axisLabel,
+                                    lines: group,
+                                    axisFloor: min(floor, low),
+                                    axisCeiling: max(top, floor + 1))
+        }
+    }
+
+    /// The legend for a whole chart: one entry per metric, in the order the
+    /// metrics were asked for, so the legend and the request can be read against
+    /// each other.
+    static func legend(for lines: [ClusterGraphLine]) -> [ClusterGraphLegendEntry] {
+        var seen = Set<ClusterHistoryMetric>()
+        var out: [ClusterGraphLegendEntry] = []
+        for line in lines where !seen.contains(line.metric) {
+            seen.insert(line.metric)
+            out.append(ClusterGraphLegendEntry(metric: line.metric,
+                                               tint: line.tint,
+                                               label: line.label))
+        }
+        return out
+    }
+}
+
+
 // MARK: - Threshold bands
 
 /// One painted band of a value range, for the temperature charts the card asks
 /// for ("threshold bands for temperatures").
-struct ClusterGraphBand: Equatable {
+struct ClusterGraphBand: Equatable, Identifiable {
     let from: Double
     let to: Double
     let level: ClusterMetricLevel
+
+    /// Stable within one chart: two bands never share both edges and a level.
+    var id: String { "\(from)-\(to)-\(level.rawValue)" }
 }
 
 /// The two verdict pairs this file applies, and the only numbers in it that look
@@ -518,35 +653,42 @@ enum ClusterGraphReading {
                         reduced: reduced)
     }
 
-    /// The panels of a small-multiples chart, one per node, in sorted identity
-    /// order so two renders of the same payload draw the same layout.
+    /// The panels of a small-multiples chart, from ALREADY-PROJECTED series.
+    ///
+    /// This is the real function; the `response:` form below is a two-line
+    /// projection into it. The widget's stale path needs it: a last-known series
+    /// array is what a widget can keep in the App Group, and a panel chart that
+    /// only worked from a fresh payload would mean the stale chart is a different
+    /// chart — different grouping, different attribution rules, different legend.
     ///
     /// Engine metrics are attributed to the node that runs them: an engine row's
-    /// identity is `node:port` (the recorder separates engines by port because
-    /// one host can run two backends on two GPUs), and a panel draws the engine
-    /// lines whose host part equals the panel's host. A panel with no engine rows
-    /// simply has no engine lines — it does not draw a zero.
-    static func panels(response: ClusterHistoryResponse,
+    /// identity is `node:port` (the recorder separates engines by port because one
+    /// host can run two backends on two GPUs), and a panel draws the engine lines
+    /// whose host part equals the panel's host. A panel with no engine rows simply
+    /// has no engine lines — it does not draw a zero.
+    static func panels(series: [ClusterHistorySeries],
                        metrics: [ClusterHistoryMetric],
                        pixelWidth: Int,
-                       limit: Int? = nil) -> [ClusterGraphPanel] {
+                       limit: Int? = nil,
+                       fallbackHosts: [String] = []) -> [ClusterGraphPanel] {
         guard !metrics.isEmpty else { return [] }
-        let hosts = hostIdentities(response: response, metrics: metrics)
+        let hosts = hostIdentities(series: series, metrics: metrics,
+                                   fallbackHosts: fallbackHosts)
         var panels: [ClusterGraphPanel] = []
         for host in hosts {
             var lines: [ClusterGraphLine] = []
             for metric in metrics {
-                let set = ClusterHistorySeriesSet.make(response, for: metric)
                 switch metric.seriesKind {
                 case .host:
-                    for series in set.series where series.identity == host {
-                        lines.append(line(metric: metric, series: series,
-                                         pixelWidth: pixelWidth))
+                    for owned in series where owned.metric == metric && owned.identity == host {
+                        lines.append(line(metric: metric, series: owned,
+                                          pixelWidth: pixelWidth))
                     }
                 case .engine:
-                    for series in set.series where engineHost(series.identity) == host {
-                        lines.append(line(metric: metric, series: series,
-                                         pixelWidth: pixelWidth))
+                    for owned in series where owned.metric == metric
+                        && engineHost(owned.identity) == host {
+                        lines.append(line(metric: metric, series: owned,
+                                          pixelWidth: pixelWidth))
                     }
                 }
             }
@@ -560,33 +702,42 @@ enum ClusterGraphReading {
         return panels
     }
 
-    /// The nodes a small-multiples chart has a row for: every host that appears
-    /// in a host-series the chart draws, so a panel never exists with no metric
-    /// of its own. Sorted by code point so the layout is stable.
-    static func hostIdentities(response: ClusterHistoryResponse,
-                               metrics: [ClusterHistoryMetric]) -> [String] {
+    static func panels(response: ClusterHistoryResponse,
+                       metrics: [ClusterHistoryMetric],
+                       pixelWidth: Int,
+                       limit: Int? = nil) -> [ClusterGraphPanel] {
+        var all: [ClusterHistorySeries] = []
+        for metric in metrics {
+            all.append(contentsOf: ClusterHistorySeriesSet.make(response, for: metric).series)
+        }
+        return panels(series: all, metrics: metrics, pixelWidth: pixelWidth, limit: limit,
+                      fallbackHosts: response.hosts.compactMap { $0.host })
+    }
+
+    /// The nodes a panel chart has a row for, from projected series: every host
+    /// that appears in a host series this chart draws, so a panel never exists
+    /// with no metric of its own.
+    static func hostIdentities(series: [ClusterHistorySeries],
+                               metrics: [ClusterHistoryMetric],
+                               fallbackHosts: [String] = []) -> [String] {
         var seen = Set<String>()
         for metric in metrics where metric.seriesKind == .host {
-            for set in [ClusterHistorySeriesSet.make(response, for: metric)] {
-                for identity in set.identities where identity != "?" {
-                    seen.insert(identity)
-                }
+            for owned in series where owned.metric == metric && owned.identity != "?" {
+                seen.insert(owned.identity)
             }
         }
         // A chart whose only metrics are engine ones still needs panels: take the
-        // engine rows' own host part, and when even that is absent, fall back to
-        // the payload's host list so the widget can say "excluded" with a name.
+        // engine rows' own host part.
         if seen.isEmpty {
-            for metric in metrics where metric.seriesKind == .engine {
-                for set in [ClusterHistorySeriesSet.make(response, for: metric)] {
-                    for identity in set.identities {
-                        if let host = engineHost(identity) { seen.insert(host) }
-                    }
-                }
+            for owned in series where owned.metric.seriesKind == .engine {
+                if let host = engineHost(owned.identity) { seen.insert(host) }
             }
         }
+        // Last resort: the payload's own host list. A panel with no lines still
+        // names the node it is empty for, which is a truer sentence than the
+        // whole chart disappearing.
         if seen.isEmpty {
-            for row in response.hosts { if let host = row.host { seen.insert(host) } }
+            for host in fallbackHosts where host != "?" { seen.insert(host) }
         }
         return seen.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
     }
