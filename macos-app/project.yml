@@ -93,6 +93,10 @@ targets:
       # number: both re-expose `ClusterMonitorViewModel`'s CLI-parity cells.
       - path: Sources/HSCCMac/DashboardFleetReading.swift
       - path: Sources/HSCCMac/DashboardFleetSection.swift
+      # The "graphs" section of the dropdown (t_be4e1a48): per-node history
+      # over the canonical /v1/cluster/history, projected by the shared chart
+      # layer. An extension of DashboardView, so it rides the app target.
+      - path: Sources/HSCCMac/DashboardGraphsView.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
       # No alert-feed files: the 2026-11-19 operator decision removed every
