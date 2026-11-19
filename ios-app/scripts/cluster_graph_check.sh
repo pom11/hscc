@@ -31,6 +31,14 @@
 # FAILS. A harness that cannot fail is worthless:
 #   export CLUSTER_GRAPH_NEGATIVE_TEST=1
 #
+# THE STRUCTURAL LEG'S OWN NEGATIVE PROOF is a separate harness, because nothing can
+# execute these legs for you — they mutate tracked Swift and must restore it. No count
+# is quoted here on purpose: a number in a comment drifts the day a leg is added, and a
+# drifted count reads like the harness is describing a different file.
+#   scripts/cluster_graph_check/negative_legs.sh
+# Run it whenever §1 changes. It asserts the mutation applied before it trusts the rc,
+# so a leg that measures nothing reports BROKEN rather than looking like a pass.
+#
 # Usage: ios-app/scripts/cluster_graph_check.sh
 
 set -uo pipefail
@@ -172,28 +180,281 @@ views_code="$(code_text "$views_file")"
 intent_code="$(code_text "$intent_file")"
 widget_code="$(code_text "${widget_files[@]}")"
 
-# 1. One dispatch arm per declared family. This is the t_b3ae3809 failure: a
-#    family in `supportedFamilies` whose body was reached through `default:`
-#    drew another size's layout, and nothing in a compile or a decode could see
-#    it. The list is read from the code, never transcribed here.
-declared=$(awk '/static let clusterGraphFamilies/,/^    \]/' <<<"$families_code" \
+# 1. One dispatch arm and one density entry for every size each PLATFORM ARM
+#    offers, and a written reason for every size an arm leaves out. Two failure
+#    classes live here, both invisible to a compile:
+#      * t_b3ae3809 — a family in `supportedFamilies` whose body was reached
+#        through `default:` drew another size's layout.
+#      * t_4311500c — the widget declared its sizes twice, once per platform, and
+#        the desktop arm hardcoded three of the shared list's four. The density map
+#        and the dispatch switch carried the fourth, so the desktop compiled,
+#        shipped and gated a layout it could never be asked to draw — and the check
+#        that used to sit here read the shared list and grepped the text of the
+#        iOS call, so it printed "reads the same positive list" while the other
+#        arm disagreed. A grep for one arm's text cannot see the other arm.
+#    The widget MAY keep a per-platform arm; what it may not do is offer a size
+#    nothing draws, repeat the shared list as a literal, or drop a size without
+#    writing why. Nothing below is transcribed: the shared list and every arm's
+#    list are extracted at run time, and a call site that cannot be resolved is a
+#    refusal rather than a clean run.
+shared_list=$(awk '/static let clusterGraphFamilies/,/^    \]/' <<<"$families_code" \
   | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
-if [ -z "$declared" ]; then
+if [ -z "$shared_list" ]; then
   sfail "no family list found in $families_file — the positive list is gone"
-else
-  for fam in $declared; do
-    if has "$views_code" "case .$fam:"; then
-      sok "$fam has its own arm in $views_file"
-    else
-      sfail "$fam is declared but has no dispatch arm in $views_file (it would draw via default:)"
-    fi
-  done
 fi
-fam_count=$(printf '%s\n' $declared | sed '/^$/d' | wc -l | tr -d ' ')
-if [ "$fam_count" -eq 4 ]; then
-  sok "the widget declares the card's four sizes (small, medium, large, extraLarge)"
+
+# The sizes this widget owes the operator, pinned BY NAME. A count is the wrong
+# pin and this leg used one (`fam_count -eq 4`): a dropped size then fails as a
+# number instead of naming itself, and the next size decision gets "resolved" by
+# editing the gate rather than by a decision.
+for fam in systemSmall systemMedium systemLarge systemExtraLarge; do
+  if printf '%s\n' $shared_list | grep -qx -- "$fam"; then
+    sok "$fam is in the widget's positive family list"
+  else
+    sfail "$fam is missing from clusterGraphFamilies in $families_file — if dropping it is a decision, land it with this check edited in the same commit"
+  fi
+done
+
+# The family -> density map, sliced so `default: return nil` cannot be mistaken for
+# coverage. A size the map skips resolves to nil, and the provider's
+# `family.clusterGraphDensity ?? .sparkline` would then draw it with a layout it was
+# never designed for — the same lie as a missing dispatch arm, one file later.
+density_region=$(awk '/var clusterGraphDensity/{f=1} f {print} f && /^    \}$/ {exit}' <<<"$families_code")
+if [ -z "$density_region" ]; then
+  sfail "could not slice clusterGraphDensity out of $families_file — the density-coverage checks below would be vacuous"
+  density_fams=""
 else
-  sfail "the widget declares $fam_count sizes, not the card's four"
+  density_fams=$(awk '/case \.system/ && /return \./ {print}' <<<"$density_region" \
+    | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
+  sok "$(printf '%s\n' $density_fams | sed '/^$/d' | wc -l | tr -d ' ') families get a density from the map (a size missing here draws via the provider's fallback)"
+fi
+
+# --- helpers for the family-arm pass -------------------------------------------
+# arm_reach <condition> <flip> — which of the two platforms that build this widget
+# (iOS, macOS) an `#if` condition can be true on, as a space list; "unknown" when the
+# gate cannot resolve the condition. Restricted to the shipped platforms on purpose:
+# the question is never "which of Swift's platforms", only "does an app that compiles
+# this file get a family list at all". flip=1 asks for the `#else` arm, i.e. the
+# complement inside {ios, macos}. `os(tvOS)` resolves to NOTHING — it reaches neither
+# app. Anything that is not a plain `os(...)` disjunction (`canImport`, `&&`,
+# `#elseif`, `targetEnvironment`) comes back unknown rather than guessed at: a guessed
+# condition is how a gate starts printing green for a platform it never measured, and
+# that is precisely the shape the t_4311500c re-review found (an `#if os(iOS)` guard
+# with no `#else` — the arm-nobody-reads bug in its one-armed form).
+arm_reach() {
+  local c="$1" flip="$2" parts part out="" comp
+  if [ -z "$c" ]; then printf 'ios macos\n'; return; fi   # unguarded: every platform
+  c=$(printf '%s' "$c" | tr 'A-Z' 'a-z' | tr -d ' \t')
+  parts=$(printf '%s' "$c" | tr '|' '\n')
+  # HERE-STRING, not a pipe: `out` has to survive the loop (same trap as the arm loop).
+  while IFS= read -r part; do
+    [ -n "$part" ] || continue
+    case "$part" in
+      'os(ios)')   out="$out ios" ;;
+      'os(macos)') out="$out macos" ;;
+      'os('*)      ;;                                    # another platform: reaches neither
+      *) printf 'unknown\n'; return ;;
+    esac
+  done <<< "$parts"
+  if [ "$flip" = 1 ]; then
+    comp=""
+    case " $out " in *" ios "*) ;; *) comp="$comp ios" ;; esac
+    case " $out " in *" macos "*) ;; *) comp="$comp macos" ;; esac
+    out="$comp"
+  fi
+  printf '%s\n' "$out"
+}
+
+# omit_reason_in_span <span text> <family> — does THIS span carry a `families-omit`
+# marker naming <family> and actually saying why (the em dash is the reason separator)?
+# The span is one arm's own line range, so a reason written for the desktop arm cannot
+# excuse a size the iOS arm dropped (re-review item 2: the failure text always said
+# "on that arm" while the grep read the whole file). One grep over a here-string — a
+# pipeline here would let `grep -q` + pipefail turn a real match into a false negative
+# (see the note on `has`).
+omit_reason_in_span() {
+  grep -Eq "^[[:space:]]*//[[:space:]]*families-omit:.*\.${2}([^A-Za-z]|$).*—" <<<"$1"
+}
+
+# Does the DESKTOP target compile this file? The macOS half of the coverage rule below
+# is only owed when the answer is yes — demanding an arm for a platform that does not
+# build the file would be a false red, and "the desktop builds it" is a fact the desktop
+# project states, not an inference from the shared list being valid on macOS.
+# `mac_project` has sat unused since the weaker duplicate check was deleted; this is the
+# job it was declared for.
+macos_builds=0
+if [ -f "$mac_project" ] \
+   && grep -Eq "^[[:space:]]*-[[:space:]]*path:.*GraphWidget\.swift[[:space:]]*$" "$mac_project"; then
+  macos_builds=1
+fi
+
+# Every supportedFamilies call site, labelled with the platform arm it sits in AND the
+# line span that arm owns. Fields, separated by ASCII unit separator (037 — NOT a tab:
+# `read` classifies a tab as IFS whitespace and COLLAPSES runs of it, so the unguarded
+# arm's empty condition field shifted every later field left and the pass failed on a
+# clean file. A non-whitespace separator keeps an empty field empty):
+#   arm label | condition text | flip (1 = the #else arm) | span start | span end | call text
+# The span is what makes both arm-nobody-reads shapes measurable: a `families-omit`
+# reason has to fall inside the span of the arm that owes it, and the spans together
+# say whether every platform that builds this file gets a supportedFamilies call at all.
+# This pass runs over the RAW file and strips comments line by line with the same rule
+# `code_text` applies, instead of reading a comment-stripped copy: the copy's line
+# numbers do not match the file the marker is searched in, and that mismatch is what
+# made the marker check file-global. Arm boundaries stay anchored at line start, so
+# prose mentioning `#if os(iOS)` cannot invent one, and `#if`/`#elseif`/`#else`/
+# `#endif` are tracked on a stack so an inner guard cannot steal the outer arm's span.
+arm_sites=$(awk '
+  BEGIN { depth = 0; label[0] = "all platforms"; cond[0] = ""; flip[0] = 0; start[0] = 1; np[0] = 0 }
+  function flush(d, endline,   i) {
+    for (i = 1; i <= np[d]; i++)
+      print label[d] "\037" cond[d] "\037" flip[d] "\037" start[d] "\037" endline "\037" pend[d, i]
+    np[d] = 0
+  }
+  {
+    line = $0
+    p = index(line, "//")
+    if (p > 0) {
+      tail = substr(line, p + 2); q = index(tail, "\"")
+      line = substr(line, 1, p - 1) (q > 0 ? substr(tail, q) : "")
+    }
+    gsub(/^[ \t]+/, "", line); gsub(/[ \t]+$/, "", line)
+    if (line ~ /^#[ \t]*if[ \t]/) {
+      c = line; sub(/^#[ \t]*if[ \t]*/, "", c)
+      depth++; label[depth] = c; cond[depth] = c; flip[depth] = 0; start[depth] = NR; np[depth] = 0
+      next
+    }
+    if (line ~ /^#[ \t]*elseif/) {
+      flush(depth, NR - 1)
+      c = line; sub(/^#[ \t]*elseif[ \t]*/, "", c)
+      # An elseif narrows the arm before it, so the chain is not modelled here. Hand
+      # the resolver the text as something it will refuse rather than let the bare
+      # os(...) term claim coverage the chain may not have.
+      label[depth] = c " elseif"; cond[depth] = "elseif(" c ")"; flip[depth] = 0; start[depth] = NR
+      next
+    }
+    if (line ~ /^#[ \t]*else([ \t]|$)/) {
+      flush(depth, NR - 1)
+      label[depth] = cond[depth] " else"; flip[depth] = 1; start[depth] = NR
+      next
+    }
+    if (line ~ /^#[ \t]*endif/) {
+      if (depth > 0) { flush(depth, NR - 1); depth-- }
+      next
+    }
+    if (line ~ /supportedFamilies\(/) {
+      gsub(/[ \t]+/, " ", line)
+      np[depth]++; pend[depth, np[depth]] = line
+    }
+  }
+  END { for (d = depth; d >= 0; d--) flush(d, NR) }
+' "$intent_file")
+if [ -z "$arm_sites" ]; then
+  sfail "no supportedFamilies call in $intent_file — the widget would offer whatever WidgetKit defaults to, and a leg that finds nothing must not print clean"
+else
+  # A HERE-STRING, not a pipe: piped into a while loop the whole body runs in a
+  # subshell and every struct_fail it sets would be discarded with it.
+  ios_reached=0; macos_reached=0; unresolved_arms=""
+  while IFS="$(printf '\037')" read -r arm arm_cond arm_flip arm_start arm_end site; do
+    [ -n "$arm" ] || continue
+    # Which shipped platforms can this arm be true on? Measured FIRST, before any
+    # check below can `continue` past it: a site that fails a later rule is still a
+    # site the compiler reaches on its platform, and coverage must not silently lose
+    # it. An arm whose condition cannot be resolved is remembered and refused after
+    # the loop — guessing here is what let the one-armed `#if os(iOS)` pass green.
+    cov=$(arm_reach "$arm_cond" "$arm_flip")
+    if [ "$cov" = unknown ]; then
+      unresolved_arms="$unresolved_arms [$arm]"
+    else
+      case " $cov " in *" ios "*) ios_reached=1 ;; esac
+      case " $cov " in *" macos "*) macos_reached=1 ;; esac
+    fi
+    case "$site" in
+      *")"*) ;;
+      *) sfail "$intent_file has a supportedFamilies call spanning more than one line on the [$arm] arm — this leg refuses rather than measure nothing"
+         continue ;;
+    esac
+    if printf '%s' "$site" | grep -q 'WidgetFamily\.clusterGraphFamilies'; then
+      arm_fams="$shared_list"
+      arm_src="the shared list"
+    else
+      arm_fams=$(printf '%s' "$site" | grep -o '\.system[A-Za-z]*' | sed 's/^\.//' | sort -u)
+      arm_src="a literal list of its own"
+    fi
+    if [ -z "$arm_fams" ]; then
+      sfail "the [$arm] arm's supportedFamilies call resolves to NO family ($site) — an unresolvable list is a refusal, never a clean run"
+      continue
+    fi
+    sok "the [$arm] arm declares $(printf '%s\n' $arm_fams | sed '/^$/d' | wc -l | tr -d ' ') size(s) via $arm_src, each measured below"
+
+    for fam in $arm_fams; do
+      if ! printf '%s\n' $shared_list | grep -qx -- "$fam"; then
+        sfail "the [$arm] arm offers $fam, which is not in $families_file's clusterGraphFamilies — no layout layer knows that size"
+      fi
+      if has "$views_code" "case .$fam:"; then
+        sok "$fam (offered on the [$arm] arm) has its own dispatch arm in $views_file"
+      else
+        sfail "$fam is offered on the [$arm] arm but has no dispatch arm in $views_file — it would draw through default:"
+      fi
+      if ! printf '%s\n' $density_fams | grep -qx -- "$fam"; then
+        sfail "$fam is offered on the [$arm] arm but $families_file maps it to no density — it would draw on the provider's fallback layout"
+      fi
+    done
+
+    # A literal arm is only defensible when it says something the shared list does
+    # not. A literal repeating the shared list is a second list with nothing to say,
+    # and a second list nothing reads is exactly how the desktop drifted.
+    if [ "$arm_src" = "a literal list of its own" ]; then
+      lit=$(printf '%s\n' $arm_fams | tr '\n' ' ')
+      sha=$(printf '%s\n' $shared_list | tr '\n' ' ')
+      if [ "$lit" = "$sha" ]; then
+        sfail "the [$arm] arm repeats the shared list as a literal instead of reading WidgetFamily.clusterGraphFamilies — a duplicate list is the drift that started t_4311500c"
+      else
+        sok "the [$arm] arm's literal differs from the shared list, so it is a decision rather than a duplicate"
+      fi
+    fi
+
+    # And every size the arm leaves OUT has to be justified IN THAT ARM, in writing:
+    # "an unwritten asymmetry gets fixed by the next person" is the whole reason this
+    # card exists — and a reason written on the OTHER arm fixes nothing over there. The
+    # span comes from the same extractor that found the call, so the marker is looked
+    # for in the lines that arm actually owns. Previously the grep read the whole file
+    # (and did it through a pipe, where grep -q + pipefail can lose a real match), so
+    # one desktop reason silenced an undocumented iOS drop — re-review item 2, against
+    # a failure text that has always said "on that arm".
+    arm_span=$(awk -v s="$arm_start" -v e="$arm_end" 'NR>=s && NR<=e' "$intent_file")
+    omissions=""
+    for fam in $shared_list; do
+      if printf '%s\n' $arm_fams | grep -qx -- "$fam"; then continue; fi
+      omissions="$omissions $fam"
+      if omit_reason_in_span "$arm_span" "$fam"; then
+        sok "the [$arm] arm omits $fam and $intent_file:$arm_start-$arm_end writes why (families-omit marker)"
+      else
+        sfail "the [$arm] arm omits $fam from the shared list with no written reason on that arm (lines $arm_start-$arm_end) — offer it, or add a '// families-omit: .$fam — <reason>' marker inside that span"
+      fi
+    done
+    if [ -z "$omissions" ]; then
+      sok "the [$arm] arm omits none of the shared families, so no families-omit marker is owed"
+    fi
+  done <<< "$arm_sites"
+
+  # Do the arms, TAKEN TOGETHER, reach every platform that builds this file? This is
+  # the one-armed form of the bug this card was opened for: `#if os(iOS)` around the
+  # call with no `#else` deletes the desktop's family list entirely, WidgetKit then
+  # picks a size by itself, and every per-arm measurement above stays green because
+  # each one reads only the arm it found. The reason the other arm is owed is measured
+  # rather than assumed: $mac_project names this file, so the desktop really does
+  # compile it, and the iOS app compiles everything under Sources/ by being the iOS app.
+  if [ -n "$unresolved_arms" ]; then
+    sfail "the$unresolved_arms arm's supportedFamilies condition is not a plain os(...) disjunction this gate can resolve, so it cannot tell which platform the call reaches — an unresolvable arm is a refusal, never a clean run (rewrite the guard as os(...), or teach arm_reach the condition)"
+  elif [ "$macos_builds" -eq 1 ] && [ "$macos_reached" -eq 0 ]; then
+    sfail "no supportedFamilies arm reaches macOS while $mac_project compiles $intent_file — the desktop tile would get NO supportedFamilies at all and WidgetKit would pick its size: the arm-nobody-reads bug of t_4311500c in its one-armed form (#if os(iOS) with no #else)"
+  elif [ "$ios_reached" -eq 0 ]; then
+    sfail "no supportedFamilies arm reaches iOS while $intent_file builds into the iOS app — the Home Screen widget would take WidgetKit's default family and every size the operator can pick would be gone"
+  elif [ "$macos_builds" -eq 1 ]; then
+    sok "the supportedFamilies arms together reach both platforms that build $intent_file (iOS: Sources/, macOS: $mac_project names it)"
+  else
+    sok "the supportedFamilies arms reach iOS, the only platform that builds $intent_file ($mac_project does not name it)"
+  fi
 fi
 
 # 2. Home-screen-only. No accessory family anywhere: the card asks for Home
@@ -208,11 +469,12 @@ if has "$widget_code" "\.accessory"; then
 else
   sok "no accessory family anywhere in the graph widget (home-screen-only holds)"
 fi
-if has "$intent_code" "supportedFamilies(WidgetFamily.clusterGraphFamilies)"; then
-  sok "supportedFamilies reads the same positive list the dispatch is checked against"
-else
-  sfail "supportedFamilies no longer reads WidgetFamily.clusterGraphFamilies (list and arms can drift)"
-fi
+# The single-source claim used to sit here as a grep for the TEXT of one arm's call
+# (`supportedFamilies(WidgetFamily.clusterGraphFamilies)`). It is deleted rather than
+# kept alongside §1, because that grep passed while the desktop arm hardcoded a
+# different list — grepping one arm's text cannot see the other arm, and a second
+# owner of a weaker version of a rule is how a rule stops being true without any gate
+# printing anything. §1 now compares every arm by its RESOLVED families instead.
 
 # 3. The family → density map is a positive list written out per size, because
 #    WidgetFamily is Int-backed off-iOS and the harness cannot execute this side.

@@ -33,6 +33,17 @@ GRAPH_GATE=scripts/cluster_graph_check.sh
 # fails it by name.
 widget_gate_families "$PROVIDER" home-screen-only
 
+# ...and the half of that rule its literal grep cannot reach. This widget hands
+# `supportedFamilies` the named list from GraphWidgetMetrics.swift, so the file has
+# never contained a `supportedFamilies([...])` literal for that grep to look at — an
+# `ok` from a pattern that cannot match is a check wearing a comment, and it has been
+# printing since the surface was registered. The claim itself (no accessory family
+# ANYWHERE in the widget, list resolved, all four shipped files) belongs to
+# cluster_graph_check.sh §2, so it is delegated and the delegation is tested: delete
+# the rule there and this file reddens by name instead of the rule quietly orphaning.
+widget_gate_rule_has_owner "$GRAPH_GATE" '\.accessory' \
+  "no accessory family anywhere in the graph widget (home-screen-only)"
+
 # (3, inverse) and the same absence in the three files that do NOT declare
 # supportedFamilies: a label added later to the entry or to a view is exactly the
 # drift this rule refuses, and one call per shipped file is what catches it.
