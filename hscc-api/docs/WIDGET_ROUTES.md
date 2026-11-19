@@ -209,7 +209,7 @@ must never have to guess whether a point is 2 seconds or 5 minutes wide:
 | `hosts` | array | the recorder's `host_rollup` rows, key names unchanged: `tier`, `ts`, `host`, the `HOST_KEYS` averages, the three `*_max`, `n`, `error` |
 | `engines` | array | the recorder's `engine_rollup` rows: `tier`, `ts`, `node`, `port`, `model`, `run`, `wait`, `kv`, `gen_tps`, `prompt_tps`, `n`, `error` |
 | `counts` | object | `{hosts, engines}` — the row counts served |
-| `store` | object | `{path, exists, db_bytes, tier0_resident, error}` |
+| `store` | object | `{path, exists, db_bytes, tier0_resident, error}` — `tier0_resident` is a tier-0 measurement only; see below |
 | `note` | string | why the answer is empty when it is (fresh install, ring not resident) |
 | `error` | string | present only when the store read failed, with the real reason |
 | `speak` | string | window + resolution + how much data came back |
@@ -228,6 +228,17 @@ deployed topology the API cannot see the daemon's ring. The route then answers
 so and point at `window=1h` — it does not return an empty list as if the fleet
 had been quiet. When the route *does* own the ring (a test, or any process that
 hosts the sampler) it serves it verbatim.
+
+**`store.tier0_resident` means what its name says, and only at `tier == 0`.** It
+is written by the one branch that reads the ring, so it is `true`/`false` when
+the served `tier` is 0 and `null` when it is not: at tiers 1-2 nobody measured
+the ring, and `null` is what that says. It used to start as `true`, which let a
+`window=6h` payload claim a resident ring in a process that hosts no recorder at
+all (measured on #413's fixtures — `true` at tiers 1 and 2, `false` at tier 0,
+same generator, same process). The key is always present, so the shape clients
+parse is unchanged, and `note`/`speak` stay the honest signal for an empty
+answer. `test_cluster_history_parity.py` pins both halves: `None` at every
+durable window against a store with nothing resident, `false` at tier 0.
 
 Rejected with `400 bad_request` (message + `speak`), never a silent empty
 answer: an unknown `window`; a `metrics` name the recorder does not store for
