@@ -37,11 +37,20 @@ import Foundation
 //      asserted by fixture, not by golden. Nothing in here may claim CLI
 //      authority for them, and nothing in the CLI parity goldens covers them.
 //
-// The unknown is a dash (`FleetFormat.dash`), never `0` and never blank: the
-// route sends `""` for a metric a node could not read, and the live capture in
+// The unknown is a dash, never `0` and never blank: the route sends `""` for a
+// metric a node could not read, and the live capture in
 // `v1_cluster_monitor_live.json` proves it — every GB10 host there has an
 // EMPTY `gpu_mem_used_mb`, `gpu_fan_pct` and `gpu_power_limit_w`, so VRAM and
 // fan are dashes on real data and the dash is the honest rendering.
+//
+// It is `CLIMonitorFormat.dash` (a hyphen) and NOT `FleetFormat.dash` (an em
+// dash) on purpose, and the reason is the row above this block. The detail
+// line sits under `CLIMonitorHostTableView` on both surfaces that draw it, and
+// that table's cells are `cluster_live.py`'s `_cell` output — a hyphen. Two
+// dash glyphs one spacing value apart read as two different kinds of absence,
+// and only one of them is the glyph the CLI prints. `FleetFormat.dash` belongs
+// to the fleet SENTENCES (headline, detail, footer), which are prose and are
+// nowhere near a table.
 //
 // SURFACES: `.large` and `.extraLarge` only. Every other surface answers nil
 // ("no table for you") rather than getting a silently shrunk table; a surface
@@ -111,14 +120,14 @@ struct ClusterMonitorHostDetail: Equatable, Identifiable {
         if let used = sample?.gpuMemUsedMB, let total = sample?.gpuMemTotalMB, total > 0 {
             vram = String(format: "%.1f/%.1fG", used / 1024, total / 1024)
         } else {
-            vram = FleetFormat.dash
+            vram = CLIMonitorFormat.dash
         }
         // The used PERCENTAGE is what the threshold reads — the route sends it
         // directly (`gpu_mem_used_pct`) rather than this file dividing, which is
         // the same reason the CLI's Swap column is computed from its own parts.
         vramLevel = ClusterMetricLevel.level(sample?.gpuMemUsedPct, warn: 85, critical: 95)
 
-        clock = sample?.gpuClockMHz.map { String(format: "%.0f MHz", $0) } ?? FleetFormat.dash
+        clock = sample?.gpuClockMHz.map { String(format: "%.0f MHz", $0) } ?? CLIMonitorFormat.dash
 
         // Net recv/send per second, SI steps (1000), one decimal above bytes.
         // The route counts BYTES PER SECOND off a counter, so 1024-based units
@@ -130,24 +139,24 @@ struct ClusterMonitorHostDetail: Equatable, Identifiable {
         // `MonitorSample.uptimeText` is the app's ONE uptime rule ("2d 11h"),
         // already used by the daemon-host block; re-deriving it here would put
         // a second rounding on the same seconds.
-        uptime = sample?.uptimeText ?? FleetFormat.dash
+        uptime = sample?.uptimeText ?? CLIMonitorFormat.dash
 
-        fan = sample?.gpuFanPct.map { String(format: "%.0f%%", $0) } ?? FleetFormat.dash
+        fan = sample?.gpuFanPct.map { String(format: "%.0f%%", $0) } ?? CLIMonitorFormat.dash
 
         // Load 1/5/15 at one decimal, in the kernel's order. A missing member
         // keeps its slot as a dash: `1.4 — 1.6` says which one is unreadable,
         // while dropping it would make the 15-minute number look like the 5.
         let loads = [sample?.cpuLoad1m, sample?.cpuLoad5m, sample?.cpuLoad15m]
         load = loads.allSatisfy { $0 == nil }
-            ? FleetFormat.dash
-            : loads.map { $0.map { String(format: "%.1f", $0) } ?? FleetFormat.dash }
+            ? CLIMonitorFormat.dash
+            : loads.map { $0.map { String(format: "%.1f", $0) } ?? CLIMonitorFormat.dash }
                   .joined(separator: " ")
     }
 
     /// The bytes/s → human rate rule described above. `nil` is "not told",
     /// which is a dash, not `0 B/s` (§6 rule 1).
     static func rate(_ bytesPerSecond: Double?) -> String {
-        guard let value = bytesPerSecond, value >= 0 else { return FleetFormat.dash }
+        guard let value = bytesPerSecond, value >= 0 else { return CLIMonitorFormat.dash }
         if value < 1_000 { return String(format: "%.0f B/s", value) }
         if value < 1_000_000 { return String(format: "%.1f KB/s", value / 1_000) }
         if value < 1_000_000_000 { return String(format: "%.1f MB/s", value / 1_000_000) }

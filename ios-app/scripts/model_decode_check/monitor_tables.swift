@@ -37,13 +37,13 @@ import Foundation
 func monitorRateRules(_ c: DecodeCheck) {
     let label = "detail rate rule (SI steps, dash for unreadable)"
     let cases: [(Double?, String)] = [
-        (nil, FleetFormat.dash),
+        (nil, CLIMonitorFormat.dash),
         (0, "0 B/s"),
         (999, "999 B/s"),
         (1_000, "1.0 KB/s"),
         (1_418_500, "1.4 MB/s"),
         (2_400_000_000, "2.4 GB/s"),
-        (-1, FleetFormat.dash),
+        (-1, CLIMonitorFormat.dash),
     ]
     for (input, want) in cases {
         let got = ClusterMonitorHostDetail.rate(input)
@@ -93,23 +93,23 @@ func monitorDetailRules(_ c: DecodeCheck) {
     // not a utilisation anyone can read, and `0/-` would be a false zero.
     let half = detail("192.0.2.32", sample(vramUsed: "8192"))
     c.expect("monitor-tables", "\(label): VRAM with no total is a dash",
-             half.vram == FleetFormat.dash && half.vramLevel == .unknown,
+             half.vram == CLIMonitorFormat.dash && half.vramLevel == .unknown,
              "got \(half.vram) / \(half.vramLevel.rawValue)")
 
     // A missing load member keeps its slot: the two that answered must not
     // slide left into the 15-minute position.
     let partial = detail("192.0.2.33", sample(load1: "1.0", load15: "3.0"))
     c.expect("monitor-tables", "\(label): an unreadable load member keeps its slot",
-             partial.load == "1.0 \(FleetFormat.dash) 3.0", "got \(partial.load)")
+             partial.load == "1.0 \(CLIMonitorFormat.dash) 3.0", "got \(partial.load)")
 
     // Nothing reported at all is one dash for load, and no invented number for
     // any other field.
     let none = detail("192.0.2.34", sample())
     c.expect("monitor-tables", "\(label): nothing reported is a dash in every field",
-             none.load == FleetFormat.dash && none.fan == FleetFormat.dash
-                && none.vram == FleetFormat.dash && none.clock == FleetFormat.dash
-                && none.uptime == FleetFormat.dash
-                && none.net == "↓\(FleetFormat.dash) ↑\(FleetFormat.dash)",
+             none.load == CLIMonitorFormat.dash && none.fan == CLIMonitorFormat.dash
+                && none.vram == CLIMonitorFormat.dash && none.clock == CLIMonitorFormat.dash
+                && none.uptime == CLIMonitorFormat.dash
+                && none.net == "↓\(CLIMonitorFormat.dash) ↑\(CLIMonitorFormat.dash)",
              "load=\(none.load) fan=\(none.fan) net=\(none.net) up=\(none.uptime)")
 
     // The six fields, in the order the block prints them, with a threshold on
@@ -302,8 +302,8 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
                 + "\(tables.servingRows.last?.run ?? "nil")")
     let liveDetail = tables.details[0]
     c.expect("monitor-tables", "\(label): live — an unreadable VRAM reading is a dash, never 0",
-             liveDetail.vram == FleetFormat.dash && liveDetail.vramLevel == .unknown
-                && liveDetail.fan == FleetFormat.dash,
+             liveDetail.vram == CLIMonitorFormat.dash && liveDetail.vramLevel == .unknown
+                && liveDetail.fan == CLIMonitorFormat.dash,
              "vram=\(liveDetail.vram) level=\(liveDetail.vramLevel.rawValue) fan=\(liveDetail.fan)")
     c.expect("monitor-tables", "\(label): live — clock, uptime and net are the route's numbers",
              liveDetail.clock == "806 MHz" && liveDetail.uptime == "22d 2h"
@@ -351,8 +351,8 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
     let down = edgeTables.details.first { $0.id == "192.0.2.22" }
     let downFields = down.map { [$0.vram, $0.clock, $0.uptime, $0.fan, $0.load] } ?? []
     c.expect("monitor-tables", "\(label): edge — the host that never sampled has dashes everywhere, no zeroes",
-             downFields.count == 5 && downFields.allSatisfy { $0 == FleetFormat.dash }
-                && down?.net == "↓\(FleetFormat.dash) ↑\(FleetFormat.dash)",
+             downFields.count == 5 && downFields.allSatisfy { $0 == CLIMonitorFormat.dash }
+                && down?.net == "↓\(CLIMonitorFormat.dash) ↑\(CLIMonitorFormat.dash)",
              "got \(down.map { "\($0.vram)|\($0.clock)|\($0.uptime)|\($0.fan)|\($0.load)|\($0.net)" } ?? "nil")")
     c.expect("monitor-tables", "\(label): edge — an errored host keeps its detail line",
              edgeTables.details.contains { $0.id == "192.0.2.22" })

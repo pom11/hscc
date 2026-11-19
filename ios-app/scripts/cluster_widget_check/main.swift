@@ -470,9 +470,129 @@ expect(lockGroup, "the sample entry draws the same four numbers as its own rows"
        ClusterEntry.placeholder.lockScreen?.hostCount
         == ClusterEntry.placeholder.fleet?.tally.nodesTotal)
 
+// The two biggest surfaces (t_9e64d9d9, re-integrated on t_5cc43192).
+//
+// This card's subject is that ONE host-table stack exists, so what is executed
+// here is the seam between the two halves rather than the pixels of either:
+// that the big surfaces' serving rows ARE main's rows, that the row budget is
+// the plan's and nobody else's, and that the "may a table be drawn at all"
+// answer the big sizes get is the same object `cliHostRows` already gave the
+// medium tile.
+// ---------------------------------------------------------------------------
+let bigGroup = "big_tables"
+
+let bigPlan = ClusterMonitorTableLayout.plan(for: .large)
+let xlPlan = ClusterMonitorTableLayout.plan(for: .extraLarge)
+expect(bigGroup, "large has a plan with a taller host budget than medium's 4",
+       bigPlan != nil && (bigPlan?.hostRowLimit ?? 0) > 4)
+expect(bigGroup, "only extra-large gets the per-host detail block",
+       bigPlan?.showsHostDetail == false && xlPlan?.showsHostDetail == true)
+expect(bigGroup, "small, medium and the accessories draw NO table from this stack",
+       [FleetSurface.small, .medium, .inline, .circular, .rectangular]
+           .allSatisfy { ClusterMonitorTableLayout.plan(for: $0) == nil })
+expect(bigGroup, "the serving table's narrow row never carries the aggregate-only columns",
+       (bigPlan?.servingColumns ?? []).isEmpty == false
+        && !(bigPlan?.servingColumns ?? []).contains(.genTps)
+        && !(bigPlan?.servingColumns ?? []).contains(.promptTps))
+
+// THE anti-duplicate assertion: the serving rows the big surfaces draw are
+// main's rows, passed through. A re-projection here would be the second model
+// this card exists to delete, and it could only be caught by comparing the two
+// lists — a grep cannot see a field-by-field copy that happens to agree today.
+let bigTables = ClusterMonitorTables.project(monitor)
+expect(bigGroup, "the big surfaces project at all on the fixture", bigTables != nil)
+expect(bigGroup, "the drawn serving rows are main's servingRows, verbatim",
+       bigTables?.servingRows == viewModel.servingRows)
+expect(bigGroup, "and that includes the total the header line prints",
+       bigTables?.servingRows.count == viewModel.servingRows.count)
+expect(bigGroup, "the plan clips the serving table and counts what it clipped",
+       ClusterMonitorTableLayout.visibleServingRows(viewModel.servingRows,
+                                                    plan: xlPlan!).count
+        == min(viewModel.servingRows.count, xlPlan!.servingRowLimit)
+        && ClusterMonitorTableLayout.overflowLine(
+            shown: ClusterMonitorTableLayout.visibleServingRows(viewModel.servingRows,
+                                                                plan: xlPlan!).count,
+            total: viewModel.servingRows.count)
+            == (viewModel.servingRows.count > xlPlan!.servingRowLimit
+                ? "+\(viewModel.servingRows.count - xlPlan!.servingRowLimit) more" : nil))
+
+// `nil` is "the route sent no serving section"; `[]` is "it sent one and it is
+// empty". The two are different facts and an earlier revision of this file
+// printed zeroes for the first one.
+let servingAbsent = MonitorResponse(json: MonitorPayload(timestamp: nil,
+        hosts: [tableNode(11)]), serving: nil,
+        serving_error: nil, serving_proxy_error: nil, speak: "")
+let servingEmpty = MonitorResponse(json: MonitorPayload(timestamp: nil,
+        hosts: [tableNode(11)]), serving: [],
+        serving_error: nil, serving_proxy_error: nil, speak: "")
+expect(bigGroup, "no serving key is silence",
+       ClusterMonitorTables.project(servingAbsent)?.hasServingSection == false)
+expect(bigGroup, "an empty serving key is an empty section, not silence",
+       ClusterMonitorTables.project(servingEmpty)?.hasServingSection == true
+        && ClusterMonitorTables.project(servingEmpty)?.servingRows.isEmpty == true)
+
+// The XL-only fields. A sample that does not carry them prints `-`, never `0`:
+// an absent reading drawn as a zero is §6 rule 1, and these six fields are the
+// ones the CLI's host table does not print at all.
+let bareDetail = ClusterMonitorHostDetail(host: MonitorNode(
+    host: "192.0.2.11", error: nil, sample: MonitorSample(hostname: "node-11"),
+    used_slots: nil, free_slots: nil, workloads: nil))
+expect(bigGroup, "an unreported XL field is a dash, not a zero",
+       [bareDetail.vram, bareDetail.clock,
+        bareDetail.uptime, bareDetail.fan, bareDetail.load]
+        .allSatisfy { $0 == "-" })
+// Net is the one field that keeps its arrows when both directions are unknown:
+// `↓- ↑-` still says which way is which, where a bare dash would leave the
+// reader to guess whether the row was about receive or send. Literal hyphens,
+// not `CLIMonitorFormat.dash`, so this pins the GLYPH too — an em dash here
+// would put two kinds of absence one spacing value apart inside one table.
+expect(bigGroup, "an unreported net rate keeps its direction and dashes its number",
+       bareDetail.net == "↓- ↑-")
+expect(bigGroup, "extra-large draws one detail line per host the plan allows",
+       ClusterMonitorTableLayout.visibleDetails(
+           ClusterMonitorTables.project(monitor)?.details ?? [], plan: xlPlan!).count
+        == min(ClusterMonitorTables.project(monitor)?.details.count ?? 0,
+               xlPlan!.hostRowLimit))
+
+// One gate per entry, executed: the big sizes answer with the SAME object the
+// medium tile answers with, because `tables` is built on `cliHostRows`.
+//
+// Built the way `ClusterWidget.timeline` builds it — the projected blocks are an
+// init argument, so an entry that was never given them has none. That is
+// fail-closed by construction (forget the argument and the big surfaces draw
+// nothing), and it is why this is a separate fixture from `liveEntry`, which
+// main's own assertions built without the blocks and must not change.
+let bigEntry = ClusterEntry(date: .now, fleet: fleet, monitor: viewModel,
+                            tableData: bigTables, configured: true, paused: false)
+expect(bigGroup, "configured + live: the big surfaces get their blocks",
+       bigEntry.tables != nil)
+expect(bigGroup, "the blocks a live entry carries are the ones it was projected from",
+       bigEntry.tables == bigTables)
+expect(bigGroup, "an entry that was never given blocks has none, not empty ones",
+       liveEntry.tables == nil)
+expect(bigGroup, "paused: no blocks, exactly as no rows",
+       ClusterEntry.paused().tables == nil && ClusterEntry.paused().cliHostRows == nil)
+expect(bigGroup, "unconfigured: no blocks",
+       ClusterEntry.unconfigured.tables == nil)
+// The projected blocks are still refused here: the gate is `cliHostRows`, so a
+// caller that projected tables and then switched `nodes` off cannot get a table
+// out from the side door.
+let noNodesWithTables = ClusterEntry(date: .now, fleet: fleet, monitor: viewModel,
+                                     tableData: bigTables, configured: true,
+                                     paused: false, showSections: ["state", "models"])
+expect(bigGroup, "'nodes' off: no blocks and no rows together",
+       noNodes.tables == nil && noNodes.cliHostRows == nil)
+expect(bigGroup, "'nodes' off refuses even blocks that were already projected",
+       noNodesWithTables.tables == nil)
+expect(bigGroup, "no host list is no blocks, not empty blocks",
+       ClusterEntry(date: .now, fleet: nil, configured: true,
+                    paused: false).tables == nil)
+expect(bigGroup, "the gallery sample carries the big blocks too",
+       ClusterEntry.placeholder.tables != nil)
+
 print("")
 if failures.isEmpty {
-    print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")
+    print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction, one host-table stack")
     exit(0)
 }
 print("FAILURES: \(failures.count) of \(checks)")

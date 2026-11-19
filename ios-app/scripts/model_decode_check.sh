@@ -51,12 +51,13 @@ real_models=(
   # no simulator. Its SwiftUI half lives in ClusterSmallGridView.swift and is
   # covered structurally by widget_style_check.sh / cluster_widget_check.sh.
   Sources/HSCCWidgets/ClusterSmallGrid.swift
-  # The large/XL table layout (t_9e64d9d9): which columns and rows the two
-  # biggest monitor surfaces draw, and the six fields only they print. Layout
-  # lives outside the view files so this harness can RUN it. It names
-  # `FleetSurface` and `FleetFormat.dash`, so the file that owns them is
-  # compiled here too — a harness that skipped a dependency would either not
-  # compile or, worse, test a copy of the rule.
+  # The large/XL table layout (t_9e64d9d9, re-integrated by t_5cc43192): which
+  # columns and rows the two biggest monitor surfaces draw, and the six fields
+  # only they print. Layout lives outside the view files so this harness can RUN
+  # it. It names `FleetSurface` (ClusterNodeTally.swift) and
+  # `CLIMonitorFormat.dash` (ClusterMonitorViewModel.swift, already above), so
+  # both owning files are compiled here too — a harness that skipped a
+  # dependency would either not compile or, worse, test a copy of the rule.
   Sources/Shared/ClusterNodeTally.swift
   Sources/Shared/ClusterMonitorTables.swift
   # The Live Activity's surface rules (t_1685f884): Foundation-only on purpose,
