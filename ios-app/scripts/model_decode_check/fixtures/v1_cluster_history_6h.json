@@ -793,7 +793,7 @@
   "error": null,
   "exists": true,
   "path": "/Users/example/.hscc/metrics/history.db",
-  "tier0_resident": true
+  "tier0_resident": null
  },
  "tier": 1,
  "tier_summary": "1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
