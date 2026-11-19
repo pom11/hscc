@@ -957,6 +957,18 @@ struct ClusterHistoryPoint: Decodable {
 struct ClusterHistoryResponse: Decodable, Speakable {
     let window: String
     let window_s: Int?
+    /// Which axis the request asked on: `"window"` is a preset anchored to `now`,
+    /// `"tier"` an explicit `since`/`until` span. On the tier axis `window` is a
+    /// derived span label (`"3600s"`), never a preset name. Stated by the server
+    /// so a surface never infers the axis from which keys happen to be non-null.
+    let axis: String?
+    /// Where the rows came from, as a CODE — `recorder_ring`,
+    /// `recorder_ring_absent`, `sqlite_store`, `sqlite_store_absent`. A chart
+    /// branches on this, not on the English of `note`: an absent ring is drawn as
+    /// a gap with a reason, and that decision needs a stable value to compare, not
+    /// a sentence the server may reword. `nil` only on a failed read, which
+    /// `error` states.
+    let source: String?
     let tier: Int
     let resolution_s: Int
     let resolution: String
