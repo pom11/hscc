@@ -78,15 +78,31 @@ wvd_finish() { [ "$FAILURES" -eq 0 ]; }
 # lands, it is two lines, not another forty greps.
 # ---------------------------------------------------------------------------
 
-# widget_surface_gate <file> <slice-marker> <paused-factory-literal>
-#                     <min gated bodies> <awk program naming the fetch fn>
-#                     <registry key without the leading dot>
-#                     [families mode: "accessory" (default) | "home-screen-only"]
-widget_surface_gate() {
-  file="$1"; slice="$2"; factory="$3"; want="$4"; region_re="$5"; key="$6"
-  families="${7:-accessory}"
-  [ -f "$file" ] || { wbad "missing $file"; return; }
+# ---------------------------------------------------------------------------
+# The seven checks are separate functions and widget_surface_gate is their
+# composition, in the order the pre-split harness ran them.
+#
+# WHY SEPARATE. widget_surface_gate was written for a widget that keeps its
+# provider, its entry and its family bodies in ONE Swift file, so every check
+# below measures "$file". The Cluster Graph widget (t_f4551339) does not: its
+# provider, cadence slice, registry read and supportedFamilies are in
+# GraphWidget.swift, its gate copy is in GraphWidgetEntry.swift, and its gated
+# bodies are in GraphWidgetViews.swift. One extra file argument would not have
+# covered that — the checks need a file EACH, not the widget's file plus one —
+# so a surface whose code is split names the file per check, and a surface whose
+# code is in one file calls widget_surface_gate exactly as before: same
+# signature, same order, same verdict text. The six shipped surfaces are
+# byte-identical in output; that was proved by diffing the aggregate run before
+# and after the move rather than by asserting it here.
+#
+# Each function guards its own file, so a standalone call cannot grep a path
+# that is not there and read "absent" as "clean".
+# ---------------------------------------------------------------------------
 
+# (1) widget_gate_bodies_gate_both <file> <min gated bodies>
+widget_gate_bodies_gate_both() {
+  file="$1"; want="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (1) Every family that can draw live data gates on BOTH states in ONE step,
   # so no family can forget the second state and reach a number.
   n=$(grep -c 'if !entry.configured || entry.paused' "$file")
@@ -95,7 +111,13 @@ widget_surface_gate() {
   else
     wbad "only $n bodies gate on !configured||paused (want >= $want) — a family can draw data on a paused surface"
   fi
+}
 
+# (2) widget_gate_one_paused_copy <file> — the file that owns the entry's gate
+# copy is the entry's own file, which for a split widget is not the provider's.
+widget_gate_one_paused_copy() {
+  file="$1"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (2) The paused copy belongs to the entry, once: six families drawing six
   # different paused messages is the same drift this file's header exists for.
   # Comment lines are excluded — a header bullet that QUOTES the copy is not a
@@ -107,7 +129,12 @@ widget_surface_gate() {
   else
     wbad "\"Paused in Settings\" appears $n times (want exactly 1 — the copy must be owned by the entry)"
   fi
+}
 
+# (3) + (3b) widget_gate_families <file> <families mode>
+widget_gate_families() {
+  file="$1"; families="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (3) The label rule, and (3b) the invite-first rule inside it. What is
   # asserted depends on whether the widget has any accessory family at all: a
   # Lock Screen ring or inline row has no room for a pane, so it must draw the
@@ -121,14 +148,7 @@ widget_surface_gate() {
     else
       wok "supportedFamilies are Home Screen sizes only — no complication body that could need a label"
     fi
-    # A comment is not a body: the doc comment on an entry's `gateLine` explains
-    # WHY there is no label rule, and that prose must not count as a site (the
-    # same rule check (2) learned the hard way on #341).
-    if grep 'shortGateLabel' "$file" | grep -v '^[[:space:]]*//' | grep -q .; then
-      wbad "$file carries a shortGateLabel no body can reach (no accessory family in supportedFamilies) — unreachable copy rots, delete it or add the family and switch this call to accessory mode"
-    else
-      wok "no shortGateLabel in a widget with no accessory family (the absence is proven, not assumed)"
-    fi
+  widget_gate_no_short_gate_label "$file"
   else
     # Two shapes are legitimate — the body draws `Text(entry.shortGateLabel)`
     # directly (kanban monitor), or the body draws the entry's own inline line and
@@ -162,14 +182,49 @@ widget_surface_gate() {
       fi
     fi
   fi
+}
 
+# (3, inverse half) widget_gate_no_short_gate_label <file>
+#
+# Split out of the home-screen-only branch so a widget whose code is spread over
+# several files can prove the absence in EVERY file it ships, not only in the one
+# that declares supportedFamilies — a shortGateLabel added later to the entry or
+# to a view file is exactly what this rule exists to refuse, and one call per
+# file is what catches it. widget_gate_families calls it, so the home-screen-only
+# verdict text has one owner and cannot drift from it.
+widget_gate_no_short_gate_label() {
+  file="$1"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
+    # A comment is not a body: the doc comment on an entry's `gateLine` explains
+    # WHY there is no label rule, and that prose must not count as a site (the
+    # same rule check (2) learned the hard way on #341).
+    if grep 'shortGateLabel' "$file" | grep -v '^[[:space:]]*//' | grep -q .; then
+      wbad "$file carries a shortGateLabel no body can reach (no accessory family in supportedFamilies) — unreachable copy rots, delete it or add the family and switch this call to accessory mode"
+    else
+      wok "no shortGateLabel in a widget with no accessory family (the absence is proven, not assumed)"
+    fi
+}
+
+# (4) widget_gate_registry_key <file> <registry key without the leading dot>
+#     The file that reads the registry is the provider's file.
+widget_gate_registry_key() {
+  file="$1"; key="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (4) Cadence and pause come from the shared registry, not a private default.
   if grep -qF "setting(for: .$key)" "$file"; then
     wok "cadence and pause come from WidgetSurfaceKind.$key (one registry, one write path)"
   else
     wbad "$file reads its cadence somewhere other than WidgetSurfaceKind.$key"
   fi
+}
 
+# (5) widget_gate_paused_factory <file> <paused-factory-literal>
+#     The literal is whatever the widget's own entry uses to say paused. It is
+#     not always a factory: a widget whose status is ONE value (an enum) builds
+#     its paused entry by naming that case, and naming the case is the claim.
+widget_gate_paused_factory() {
+  file="$1"; factory="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (5) A paused entry is built by the entry's own factory — no projection, no
   # counts, no failure pane.
   if grep -qF "$factory" "$file"; then
@@ -177,7 +232,12 @@ widget_surface_gate() {
   else
     wbad "the provider does not build its paused entry with $factory"
   fi
+}
 
+# (6) widget_gate_pause_before_client <file> <awk program naming the fetch fn>
+widget_gate_pause_before_client() {
+  file="$1"; region_re="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (6) Paused is decided BEFORE the client exists. Line order IS the claim
   # (a paused surface must spend zero of §2's request budget), and it is
   # measured INSIDE the function that owns both, because `makeIfConfigured()`
@@ -195,7 +255,12 @@ widget_surface_gate() {
       wbad "inside the fetch, paused is NOT decided before the client is built (active=$a client=$c)"
     fi
   fi
+}
 
+# (7) widget_gate_cadence <file> <slice-marker>
+widget_gate_cadence() {
+  file="$1"; slice="$2"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
   # (7) The cadence, EXECUTED. The marker match is END-ANCHORED, so a marker
   # that grew a suffix cannot keep this table green while the name it claims to
   # cover is gone (that negative was run: suffixing the marker fails it by name).
@@ -244,4 +309,57 @@ SWIFT
     "$CW/bin" || wbad "$slice cadence assertions failed"
   fi
   rm -rf "$CW"
+}
+
+# ---------------------------------------------------------------------------
+# widget_gate_rule_has_owner — the opt-in half for a rule a surface DELIBERATELY
+# does not measure here because another gate owns it.
+#
+# The fleet's rule is one owner per rule: moving a claim into the aggregator
+# means deleting it from where it was, and a claim that belongs to a sibling gate
+# must not be copied here just because the helper happens to have a check for it.
+# But "a sibling gate owns that" is then a sentence in a comment, and this repo
+# does not carry sentences a run never tests — a rule that lives only in prose is
+# the rule that silently disappears the day someone edits the other gate.
+#
+# So the delegation is measured: the owning script must exist and still carry the
+# check, matched on the pattern the check itself greps for (not on its wording,
+# so a reworded message cannot make this red while the rule is intact). Delete
+# the rule there and this run goes red and names the file that has to hold it.
+# ---------------------------------------------------------------------------
+
+# widget_gate_rule_has_owner <owning-script> <marker the owner must still carry>
+#                            <the rule, as one line for the verdict>
+widget_gate_rule_has_owner() {
+  owner="$1"; marker="$2"; rule="$3"
+  if [ ! -f "$owner" ]; then
+    wbad "$rule is delegated to $owner, which does not exist — the rule has no owner"
+  elif ! grep -qF -- "$marker" "$owner"; then
+    wbad "$rule is delegated to $owner, which no longer carries [$marker] — reinstate it there or measure it here, but do not leave the rule ownerless"
+  else
+    wok "$rule is owned by $owner (delegation verified here, not duplicated)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# widget_surface_gate — the composition the one-file widgets call. Same seven
+# checks, same order, same verdict text as before the split into functions.
+# ---------------------------------------------------------------------------
+
+# widget_surface_gate <file> <slice-marker> <paused-factory-literal>
+#                     <min gated bodies> <awk program naming the fetch fn>
+#                     <registry key without the leading dot>
+#                     [families mode: "accessory" (default) | "home-screen-only"]
+widget_surface_gate() {
+  file="$1"; slice="$2"; factory="$3"; want="$4"; region_re="$5"; key="$6"
+  families="${7:-accessory}"
+  [ -f "$file" ] || { wbad "missing $file"; return; }
+
+  widget_gate_bodies_gate_both "$file" "$want"
+  widget_gate_one_paused_copy "$file"
+  widget_gate_families "$file" "$families"
+  widget_gate_registry_key "$file" "$key"
+  widget_gate_paused_factory "$file" "$factory"
+  widget_gate_pause_before_client "$file" "$region_re"
+  widget_gate_cadence "$file" "$slice"
 }

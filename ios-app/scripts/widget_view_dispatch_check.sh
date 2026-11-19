@@ -47,6 +47,10 @@ MANIFEST=(
   widgetProjects
   widgetMonitor
   widgetNeedsMe
+  # Appended, not inserted: the list stays the order the surfaces ran in, and a
+  # new surface joins at the end so two cards adding one cannot fight over the
+  # middle of the array.
+  widgetClusterGraph
 )
 
 # One xcrun call for the whole run instead of one per surface, so a machine
