@@ -22,6 +22,7 @@ The generalises the preserve precedent that previously covered only
 ``autodown.json`` (bootstrap.sh + preserve_autodown.py).
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -654,16 +655,22 @@ if __name__ == "__main__":
     import json
     import sys
 
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Copy the repo payload into the deployed plugins directory.")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="overwrite without preserving deployed files first")
+    # Operator opt-in: overwrite drifted deployed files without the
+    # preserve-and-flag ceremony (mirrors bootstrap.sh --force).
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite drifted deployed files without the flag")
+    ns = ap.parse_args()
+
     boot_dir = Path(__file__).resolve().parent
     repo_root = os.environ.get("REPO_ROOT") or str(boot_dir.parent)
     plugins_dir = os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
-    no_backup = "--no-backup" in sys.argv
-    # Operator opt-in: overwrite drifted deployed files without the
-    # preserve-and-flag ceremony (mirrors bootstrap.sh --force).
-    force = "--force" in sys.argv
-
     result = install_payload_profiles(repo_root, plugins_dir, DEFAULT_PAYLOAD,
-                                      backup=not no_backup, force=force)
+                                      backup=not ns.no_backup, force=ns.force)
     print(json.dumps(result, indent=2))
     # Non-zero exit when drift was flagged and not forced: bootstrap turns this
     # into a loud operator warning without failing the install (the copy and

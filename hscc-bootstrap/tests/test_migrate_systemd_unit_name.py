@@ -450,10 +450,100 @@ def test_cli_dry_run_reports_and_writes_nothing(monkeypatch, capsys):
 def test_cli_json_shape_and_failure_exit_code(monkeypatch, capsys):
     monkeypatch.setattr(m, "_default_ssh",
                         lambda h, cmd, to=120: fault(m.RC_NO_BUS, "NO_BUS", "no bus"))
-    assert m.main(["--json", "--hosts", NODE]) == 1
+    assert m.main(["--apply", "--json", "--hosts", NODE]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False and payload["failed"] == [NODE]
+    assert payload["dry_run"] is False
     assert payload["unit_name"] == NEW and payload["legacy_unit_name"] == OLD
+
+
+def test_cli_defaults_to_dry_run_even_with_hosts(monkeypatch, capsys):
+    res = Responder({"probe": ok(LEGACY_LIVE)})
+    monkeypatch.setattr(m, "_default_ssh", lambda h, cmd, to=120: res(cmd, to))
+
+    assert m.main(["--json", "--hosts", NODE]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True and payload["nodes"][0]["outcome"] == m.DRY_RUN
+    assert res.modes == ["probe"], "the default must never write on a node"
+
+
+def test_cli_apply_is_the_only_live_path(monkeypatch, capsys):
+    res = Responder({"probe": [ok(LEGACY_LIVE), ok(CANONICAL)],
+                     "enable-new": ok(ENABLED_NEW), "retire-old": ok(CANONICAL)})
+    monkeypatch.setattr(m, "_default_ssh", lambda h, cmd, to=120: res(cmd, to))
+
+    assert m.main(["--apply", "--json", "--hosts", NODE]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is False and payload["migrated"] == [NODE]
+    assert res.modes == ["probe", "enable-new", "retire-old", "probe"]
+
+
+def test_cli_help_exits_0_and_never_contacts_a_node(monkeypatch, capsys):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("--help discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("--help contacted a node"))
+    for flag in ("--help", "-h"):
+        with pytest.raises(SystemExit) as exc:
+            m.main([flag])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "usage:" in out and "--apply" in out
+
+
+@pytest.mark.parametrize("argv", [
+    ["--definitely-not-a-flag"],
+    ["--app"],                      # argparse prefix abbreviation must stay off
+    ["--apply", "--dry-run"],       # contradictory modes
+    ["--hosts"],                    # flag without its value
+])
+def test_cli_unknown_or_bad_args_exit_2_and_never_contact_a_node(
+        monkeypatch, capsys, argv):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("bad args discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("bad args contacted a node"))
+    with pytest.raises(SystemExit) as exc:
+        m.main(argv)
+    assert exc.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_cli_no_args_prints_usage_and_never_contacts_a_node(monkeypatch, capsys):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("no args discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("no args contacted a node"))
+    assert m.main([]) == 2
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_cli_help_unknown_and_no_args_never_invoke_ssh_or_sparkrun(tmp_path):
+    """The real process, with fake fleet tools first on PATH.
+
+    The fake tools write a marker if ANYTHING invokes them, so this is not a
+    monkeypatched promise: argparse must decide before the module reaches the
+    fleet. A previous turn ran ``--help`` and migrated every node.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "fleet-tool-called"
+    for tool in ("ssh", "sparkrun"):
+        p = bin_dir / tool
+        p.write_text(f"#!/bin/sh\necho {tool} >> {marker}\nexit 99\n")
+        p.chmod(0o755)
+    env = os.environ.copy()
+    env.update({"PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                "HERMES_HOME": str(tmp_path / "hermes"),
+                "HSCC_HOME": str(tmp_path / "hscc")})
+
+    cases = [(["--help"], 0), (["--definitely-not-a-flag"], 2), ([], 2)]
+    for args, rc in cases:
+        res = subprocess.run([sys.executable, m.__file__, *args], env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert res.returncode == rc, (args, res.returncode, res.stdout, res.stderr)
+    assert not marker.exists(), (
+        f"--help/unknown/no-args invoked a fleet tool: {marker.read_text()}")
 
 
 def test_production_transport_is_the_sparkrun_bridge(monkeypatch):

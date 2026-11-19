@@ -75,6 +75,7 @@ body; the doctor card asserts against this exact value)::
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -425,21 +426,41 @@ def _hosts_from_detect() -> list[str]:
     return list(cluster.get("hosts") or []) if cluster else []
 
 
+def _parser():
+    """Strict CLI: a typo must never turn into a live sysctl write on the fleet."""
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Install the panic-to-reboot sysctls on every cluster node. "
+                    "The default is a dry-run plan; pass --apply to write.")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true",
+                      help="write /etc/sysctl.d/90-hscc-autoreboot.conf and apply it")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="explicitly select the default dry-run plan")
+    ap.add_argument("--hosts", nargs="+", metavar="HOST", default=None,
+                    help="node addresses, comma- or space-separated (default: "
+                         "sparkrun cluster list)")
+    return ap
+
+
 def main(argv=None) -> int:
     """CLI used by bootstrap.sh. Prints one JSON summary line; exit 0 iff no node failed."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    dry_run = "--dry-run" in argv
+    parser = _parser()
+    if not argv:
+        parser.print_help()
+        return 2
+    ns = parser.parse_args(argv)
     hosts: list[str] = []
-    if "--hosts" in argv:
-        i = argv.index("--hosts")
-        hosts = [h for h in argv[i + 1:] if not h.startswith("--")]
+    for tok in ns.hosts or []:
+        hosts.extend(h for h in tok.split(",") if h)
     if not hosts:
         hosts = _hosts_from_detect()
     if not hosts:
         print(json.dumps({"results": [], "ok": False, "skipped_reason": None,
                           "error": "no hosts: pass --hosts or configure a sparkrun cluster"}))
         return 2
-    summary = install_fleet(hosts, dry_run=dry_run)
+    summary = install_fleet(hosts, dry_run=not ns.apply)
     print(json.dumps(summary))
     return 0 if summary["ok"] else 1
 

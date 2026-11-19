@@ -54,7 +54,12 @@ constraint). It reaches nodes only through the sanctioned sparkrun bridge
 (``hscc-cluster/clusterlib.ssh_cmd`` -> ``sparkrun_bridge``, the same resolution
 ``install_notifier_mask`` / ``install_autoreboot`` use), never via hand-rolled
 ssh, and tests inject a fake transport so no test can open a socket.
-``--dry-run`` writes nothing anywhere and is the shape the operator reviews first.
+
+The CLI parses with argparse and defaults to a DRY-RUN PLAN: only an explicit
+``--apply`` may write on a node. ``--help``/``-h`` prints usage and exits 0,
+unknown flags exit 2, and no arguments print usage and exit 2 — all three before
+any host discovery or transport call. A typo can therefore no longer run a live
+fleet migration.
 
 It never touches the operator's launchd job or plist: the whole module is
 Linux/systemd --user only.
@@ -65,6 +70,7 @@ documented placeholder convention (10.0.0.x for a LAN node).
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -589,16 +595,19 @@ def _plan_text(state: Dict[str, Any]) -> str:
 
 
 def migrate_node(node: str, *, ssh_cmd: Runners, dry_run: bool = False,
-                 timeout: int = 120, pkgs: str = "") -> Dict[str, Any]:
+                 timeout: int = 120, pkgs: Optional[str] = None) -> Dict[str, Any]:
     """Converge ONE node onto the canonical unit name. Never raises.
 
     ``ssh_cmd(command, timeout)`` is the injected transport; the caller binds the
     node into it (production: :func:`_default_ssh`; tests: a fabricated
     responder). Nothing here opens a socket, so no test can touch the fleet.
+    ``pkgs`` defaults to the same ``$PLUGINS``/``~/.hermes/plugins`` the CLI
+    uses, so a direct caller migrates the runtime the node actually runs.
     """
     try:
         return _migrate(node, ssh_cmd=ssh_cmd, dry_run=dry_run,
-                        timeout=timeout, pkgs=pkgs)
+                        timeout=timeout,
+                        pkgs=_default_pkgs() if pkgs is None else pkgs)
     except Exception as e:  # a per-node fault must not abort a fleet pass
         return NodeResult(node, FAILED,
                           message=f"{node}: unexpected {type(e).__name__}: {e}"
@@ -692,7 +701,7 @@ def _migrate(node: str, *, ssh_cmd: Runners, dry_run: bool, timeout: int,
 
 # ── fleet pass + report ─────────────────────────────────────────────────────
 def migrate_fleet(nodes: List[str], *, ssh_factory: Callable[[str], Runners],
-                  dry_run: bool = False, pkgs: str = "") -> Dict[str, Any]:
+                  dry_run: bool = False, pkgs: Optional[str] = None) -> Dict[str, Any]:
     results = [migrate_node(n, ssh_cmd=ssh_factory(n), dry_run=dry_run,
                             pkgs=pkgs) for n in nodes]
     if dry_run:
@@ -788,6 +797,11 @@ def _hosts_from_detect() -> List[str]:
     return list(cluster.get("hosts") or []) if cluster else []
 
 
+def _default_pkgs() -> str:
+    """The deployed runtime copy: ``$PLUGINS`` or ``~/.hermes/plugins``."""
+    return os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
+
+
 def _pkgs_from_args(argv: List[str]) -> str:
     """PYTHONPATH for the node-side emitter.
 
@@ -802,29 +816,65 @@ def _pkgs_from_args(argv: List[str]) -> str:
         i = argv.index("--pkgs")
         if i + 1 < len(argv):
             return argv[i + 1]
-    return os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
+    return _default_pkgs()
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The CLI contract: dry-run unless ``--apply`` is explicit.
+
+    ``allow_abbrev=False`` matters as much as the flags: argparse would otherwise
+    accept a harmless-looking prefix (``--app``) as ``--apply`` and turn a typo
+    into a live fleet migration.
+    """
+    ap = argparse.ArgumentParser(
+        prog="migrate_systemd_unit_name.py",
+        description="Retire the legacy hscc_daemon.service unit on every cluster "
+                    "node and converge on the canonical one. The default is a "
+                    "read-only dry-run plan; pass --apply to write.",
+        allow_abbrev=False,
+    )
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true",
+                      help="perform the migration on every node (writes unit "
+                           "state; without this the run only probes and prints "
+                           "the plan)")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="explicitly select the default dry-run plan (writes "
+                           "nothing anywhere)")
+    ap.add_argument("--hosts", nargs="+", metavar="HOST", default=None,
+                    help="node addresses, comma- or space-separated (default: "
+                         "sparkrun cluster list)")
+    ap.add_argument("--pkgs", default=None,
+                    help="PYTHONPATH for the node-side emitter (default: $PLUGINS "
+                         "or ~/.hermes/plugins)")
+    ap.add_argument("--json", action="store_true", help="JSON report")
+    ap.add_argument("--bootstrap-lines", action="store_true",
+                    help="OK|/WARN| report lines")
+    return ap
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI for the operator. Read-only unless you drop ``--dry-run``.
+    """CLI for the operator. Read-only unless ``--apply`` is passed.
 
-    ``--dry-run`` writes nothing anywhere and prints the per-node plan — the
-    shape to review before scheduling the real run. ``--hosts a,b`` names nodes
-    (default: ``sparkrun cluster list``). ``--json`` / ``--bootstrap-lines`` pick
-    the report shape. There is no flag that changes the enable-new-before-retire
+    ``--help``/``-h`` and every argument error exit before host discovery or any
+    transport call, so they cannot touch a node. With no arguments at all the
+    usage is printed and the exit is 2 (a deliberate invocation must at least
+    say ``--dry-run`` or name hosts). ``--hosts a,b`` names nodes (default:
+    ``sparkrun cluster list``). ``--json`` / ``--bootstrap-lines`` pick the
+    report shape. There is no flag that changes the enable-new-before-retire
     ordering: that ordering is the safety property.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    dry_run = "--dry-run" in argv
-    as_json = "--json" in argv
-    as_lines = "--bootstrap-lines" in argv
+    parser = _parser()
+    if not argv:
+        parser.print_help()
+        return 2
+    ns = parser.parse_args(argv)
+    as_json = ns.json
+    as_lines = ns.bootstrap_lines
     hosts: List[str] = []
-    if "--hosts" in argv:
-        i = argv.index("--hosts")
-        for tok in argv[i + 1:]:
-            if tok.startswith("--"):
-                break
-            hosts.extend(h for h in tok.split(",") if h)
+    for tok in ns.hosts or []:
+        hosts.extend(h for h in tok.split(",") if h)
     if not hosts:
         hosts = _hosts_from_detect()
     if not hosts:
@@ -834,7 +884,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     summary = migrate_fleet(hosts, ssh_factory=lambda h: (
         lambda cmd, to, _host=h: _default_ssh(_host, cmd, to)),
-        dry_run=dry_run, pkgs=_pkgs_from_args(argv))
+        dry_run=not ns.apply, pkgs=_pkgs_from_args(argv))
     if as_lines:
         print("\n".join(bootstrap_lines(summary)))
     else:

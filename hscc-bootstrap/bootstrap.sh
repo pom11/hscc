@@ -583,10 +583,10 @@ hdr "Install: snap firmware-notifier mask (log-churn quarantine)"
 if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
   warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
 elif $DRY_RUN; then
-  plan "snap firmware-notifier mask: install_notifier_mask.py --hosts $HOSTS_CSV --dry-run --bootstrap-lines (masks 2 user units per node, read-back verified; writes NOTHING in dry-run; the firmware-updater snap itself untouched)"
+  plan "snap firmware-notifier mask: install_notifier_mask.py --apply --hosts $HOSTS_CSV --bootstrap-lines (masks 2 user units per node, read-back verified; the live run needs --apply, without it the module writes NOTHING; the firmware-updater snap itself untouched)"
 elif [ ! -f "$BOOT_DIR/install_notifier_mask.py" ]; then
   warn "install_notifier_mask.py missing from $BOOT_DIR — the notifier restart loop keeps running (see hscc-bootstrap/README.md)"
-elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || NM_RC=$?; then
+elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --apply --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || NM_RC=$?; then
   # The module prints OK|/WARN| for EVERY node on both exit paths, so the
   # per-node detail is rendered whether or not rc says "all good"; a non-zero rc
   # only ADDS the closing warning, it never replaces the detail with a dump.
@@ -609,15 +609,15 @@ hdr "Install: GPU clock cap (cooler nodes, ~same speed)"
 # Non-fatal, never silently green: the doctor check 'GPU clock cap
 # (node-recovery)' stays red until every node reads back capped.
 # Value / opt-out: node_recovery.gpu_clock_cap_mhz (int, or false) in
-# ~/.hscc/cluster.json. Undo: install_gpu_clock_cap.py --uninstall --hosts ...
+# ~/.hscc/cluster.json. Undo: install_gpu_clock_cap.py --uninstall --apply --hosts ...
 if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
   warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
 elif $DRY_RUN; then
-  plan "GPU clock cap: install_gpu_clock_cap.py --hosts $HOSTS_CSV (systemd unit hscc-gpu-clock-cap.service running nvidia-smi -lgc 0,<cap> + read-back; writes NOTHING in dry-run)"
+  plan "GPU clock cap: install_gpu_clock_cap.py --apply --hosts $HOSTS_CSV (systemd unit hscc-gpu-clock-cap.service running nvidia-smi -lgc 0,<cap> + read-back; the live run needs --apply, without it the module only plans)"
 elif [ ! -f "$BOOT_DIR/install_gpu_clock_cap.py" ]; then
   warn "install_gpu_clock_cap.py missing from $BOOT_DIR — GPUs stay on auto clocks"
 else
-  GC_RC=0; GC_OUT=$("$PYBIN" "$BOOT_DIR/install_gpu_clock_cap.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || GC_RC=$?
+  GC_RC=0; GC_OUT=$("$PYBIN" "$BOOT_DIR/install_gpu_clock_cap.py" --apply --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || GC_RC=$?
   while IFS= read -r GC_LINE; do
     case "$GC_LINE" in
       OK\|*)   ok "${GC_LINE#OK|}" ;;
@@ -770,12 +770,12 @@ hdr "Install: node-recovery sysctls (panic-to-reboot)"
 # the rest of the install (and the other nodes) still complete.
 if $SKIP_NODE_RECOVERY; then warn "skipped (--skip-node-recovery)"
 elif $DRY_RUN; then
-  plan "node-recovery sysctls: install_autoreboot.py --hosts $HOSTS (drop-in + sysctl --system + read-back; --dry-run writes nothing on any node)"
+  plan "node-recovery sysctls: install_autoreboot.py --apply --hosts $HOSTS (drop-in + sysctl --system + read-back; the live run needs --apply, without it the module only plans)"
 else
   # 2>&1 keeps a transport traceback visible in the report instead of lost;
   # the summariser below picks the LAST line that parses as JSON, so noise
   # cannot turn a good result into a false "not verified".
-  if AR_JSON=$("$PYBIN" "$BOOT_DIR/install_autoreboot.py" --hosts "${HOST_ARR[@]}" 2>&1); then
+  if AR_JSON=$("$PYBIN" "$BOOT_DIR/install_autoreboot.py" --apply --hosts "${HOST_ARR[@]}" 2>&1); then
     AR_STATUS=$("$PYBIN" -c '
 import json, sys
 raw = sys.argv[1]
@@ -790,7 +790,7 @@ for line in reversed(raw.splitlines()):
         continue
     break
 if not isinstance(d, dict):
-    print("WARN|unparseable output — run: hscc-bootstrap/install_autoreboot.py --hosts ... manually")
+    print("WARN|unparseable output — run: hscc-bootstrap/install_autoreboot.py --apply --hosts ... manually")
     sys.exit(0)
 if d.get("skipped_reason"):
     print("OK|node-recovery sysctls skipped — " + str(d["skipped_reason"]))
@@ -817,7 +817,7 @@ if not rs:
 elif failed:
     print("WARN|some nodes FAILED — those nodes can still wedge without rebooting")
 ' "$AR_JSON" 2>/dev/null)
-    [ -z "$AR_STATUS" ] && AR_STATUS="WARN|summary unavailable — run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+    [ -z "$AR_STATUS" ] && AR_STATUS="WARN|summary unavailable — run: $PYBIN $BOOT_DIR/install_autoreboot.py --apply --hosts $HOSTS"
     while IFS= read -r AR_LINE; do
       case "$AR_LINE" in
         OK\|*)   ok "${AR_LINE#OK|}" ;;
@@ -826,7 +826,7 @@ elif failed:
       esac
     done <<< "$AR_STATUS"
   else
-    warn "node-recovery sysctls FAILED to run — nodes may still never reboot on a kernel wedge. Run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+    warn "node-recovery sysctls FAILED to run — nodes may still never reboot on a kernel wedge. Run: $PYBIN $BOOT_DIR/install_autoreboot.py --apply --hosts $HOSTS"
   fi
 fi
 

@@ -104,8 +104,10 @@ One auto-start service per host, one name per platform: launchd label
 `hscc_daemon.service` is retired — `hscc install`/`uninstall` and
 `systemd-setup.sh` purge it so a host cannot end up with two enabled units for
 one daemon. Nodes installed before that change keep it until the operator runs
-`hscc-bootstrap/migrate_systemd_unit_name.py`; readers (`restart_daemon.sh`,
-`hscc-cluster/bootstrap.sh`) probe both names until then.
+`hscc-bootstrap/migrate_systemd_unit_name.py --apply` (without `--apply` the
+script only probes and prints the per-node plan; `--help` touches nothing);
+readers (`restart_daemon.sh`, `hscc-cluster/bootstrap.sh`) probe both names
+until then.
 
 Also read-only verbs: `verify`, `stats [days]`, `throughput`, `autoscale`,
 `escalate`, and the groups `cluster`, `template`, `profiles`, `project`, `api`,

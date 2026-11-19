@@ -48,6 +48,7 @@ seam and never contact a node.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -469,9 +470,39 @@ def parse_hosts(argv: List[str]) -> List[str]:
     return hosts
 
 
+def _parser() -> argparse.ArgumentParser:
+    """Strict CLI: a typo must never turn into a live GPU-clock write on the fleet."""
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Install the GPU clock cap on every cluster node. The "
+                    "default is a dry-run plan; pass --apply to write.")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true",
+                      help="install (or with --uninstall, remove) the cap")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="explicitly select the default dry-run plan")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="remove the cap instead of installing it (needs --apply)")
+    ap.add_argument("--hosts", nargs="+", metavar="HOST", default=None,
+                    help="node addresses, comma- or space-separated (default: "
+                         "sparkrun cluster list)")
+    ap.add_argument("--config", default=None,
+                    help="cluster.json to read the cap / opt-out from")
+    ap.add_argument("--bootstrap-lines", action="store_true",
+                    help="OK|/WARN| report lines")
+    return ap
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    hosts = parse_hosts(argv)
+    parser = _parser()
+    if not argv:
+        parser.print_help()
+        return 2
+    ns = parser.parse_args(argv)
+    hosts: List[str] = []
+    for tok in ns.hosts or []:
+        hosts.extend(h for h in tok.split(",") if h)
     if not hosts:
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
@@ -482,11 +513,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"ok": False, "error": "no hosts: pass --hosts or configure a "
                                                 "sparkrun cluster"}))
         return 2
-    config_path = argv[argv.index("--config") + 1] if "--config" in argv else None
     summary = cap_fleet(hosts, ssh_factory=_default_ssh_factory(),
-                        dry_run="--dry-run" in argv, uninstall="--uninstall" in argv,
-                        config_path=config_path)
-    if "--bootstrap-lines" in argv:
+                        dry_run=not ns.apply, uninstall=ns.uninstall,
+                        config_path=ns.config)
+    if ns.bootstrap_lines:
         print("\n".join(bootstrap_lines(summary)))
     else:
         print(json.dumps(summary, indent=2))

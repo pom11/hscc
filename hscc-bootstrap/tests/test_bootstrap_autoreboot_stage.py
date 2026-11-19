@@ -44,6 +44,8 @@ def run(payload: str) -> str:
 def test_stage_exists_and_flag_wired():
     text = BOOT.read_text()
     assert "install_autoreboot.py" in text
+    assert 'install_autoreboot.py" --apply --hosts' in text, \
+        "a live stage must say --apply explicitly; the default is a dry-run plan"
     assert "--skip-node-recovery) SKIP_NODE_RECOVERY=true" in text
     assert "if $SKIP_NODE_RECOVERY; then" in text
 
@@ -82,7 +84,7 @@ def test_stdout_noise_cannot_hide_the_json():
 def test_garbage_output_warns_with_a_recipe():
     out = run("definitely not json")
     assert out.startswith("WARN|unparseable")
-    assert "install_autoreboot.py --hosts" in out
+    assert "install_autoreboot.py --apply --hosts" in out
 
 
 def test_empty_results_flag_config_not_fleet():

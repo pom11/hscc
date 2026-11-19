@@ -33,6 +33,7 @@ Config via env (sensible defaults):
   HSCC_ESCALATED_STATE dedup state file                         (default: ~/.hscc/escalated.json)
 """
 
+import argparse
 import json
 import os
 import sys
@@ -236,6 +237,10 @@ def run_with_failure_stamp():
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Escalate long-failing kanban tasks to the strong tier.",
+    ).parse_args()
     # This runs as its own process from the `hscc-escalate-watcher` cron, so it
     # never passes through run_daemon_loop and does not inherit the daemon's
     # private umask. Without this it recreates ~/.hscc/escalated.json 0644 —

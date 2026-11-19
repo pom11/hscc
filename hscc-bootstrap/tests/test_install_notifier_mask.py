@@ -976,3 +976,39 @@ def test_real_script_state_mode_reads_pre_mask_state(tmp_path):
     offenders = [ln for ln in node.systemctl_calls().splitlines()
                  if mutating.match(ln)]
     assert offenders == [], f"state mode must not mutate, ran: {offenders}"
+
+
+# ── CLI safety: help / unknown / no args must never reach a node ────────────
+
+def test_cli_help_unknown_noargs_never_touch_the_fleet(monkeypatch, capsys):
+    def forbidden(*_a, **_k):
+        pytest.fail("CLI reached the fleet before parsing was settled")
+
+    monkeypatch.setattr(nm, "_default_ssh", forbidden)
+    monkeypatch.setattr(nm, "_hosts_from_detect", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        nm.main(["--help"])
+    assert exc.value.code == 0 and "usage:" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        nm.main(["--typo"])
+    assert exc.value.code == 2 and "usage:" in capsys.readouterr().err
+    assert nm.main([]) == 2 and "usage:" in capsys.readouterr().out
+
+
+def test_cli_defaults_to_dry_run_and_apply_is_the_only_write_path(monkeypatch, capsys):
+    seen = {}
+
+    def fake_fleet(nodes, **kw):
+        seen.update(kw)
+        return {"ok": True, "dry_run": kw.get("dry_run"), "enabled": True,
+                "config_error": "", "target": {"units": [], "mask_dir": "",
+                "snap_untouched": ""}, "nodes": [], "masked": [], "opted_out": [],
+                "needing_attention": []}
+
+    monkeypatch.setattr(nm, "mask_fleet", fake_fleet)
+    assert nm.main(["--hosts", "192.0.2.1"]) == 0
+    assert seen["dry_run"] is True and seen["unmask"] is False
+    assert nm.main(["--unmask", "--hosts", "192.0.2.1"]) == 0
+    assert seen["dry_run"] is True and seen["unmask"] is True
+    assert nm.main(["--apply", "--hosts", "192.0.2.1"]) == 0
+    assert seen["dry_run"] is False

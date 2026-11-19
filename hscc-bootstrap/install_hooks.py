@@ -34,6 +34,7 @@ there reports ``skipped`` rather than failing — the guard belongs to the
 repository.
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -249,15 +250,20 @@ def posture(repo_root=None):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    dry_run = "--dry-run" in argv
-    check_only = "--check" in argv
-    args = [a for a in argv if a not in ("--dry-run", "--check")]
-    repo_root = args[0] if args else None
-    if check_only:
-        p = posture(repo_root)
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Arm the repo's commit-time address guard (core.hooksPath).")
+    ap.add_argument("repo_root", nargs="?", default=None)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would change without writing")
+    ap.add_argument("--check", action="store_true",
+                    help="only report whether the hook is armed")
+    ns = ap.parse_args(argv)
+    if ns.check:
+        p = posture(ns.repo_root)
         print(json.dumps(p))
         return 0 if p["state"] == "armed" else 1
-    res = install_hooks(repo_root, dry_run=dry_run)
+    res = install_hooks(ns.repo_root, dry_run=ns.dry_run)
     print(json.dumps(res))
     return 0 if res["action"] in ("installed", "verified") else 1
 

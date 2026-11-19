@@ -54,8 +54,9 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    Unprivileged by construction — the mask lives in the user's own
    `~/.config/systemd/user/` and there is no `sudo` in the module or the
    generated script. Idempotent (already-masked → no-op, zero new `systemctl`
-   calls), `--dry-run` plans without writing, and every mask is confirmed by
-   reading the state back from the node. **The firmware-updater snap itself is
+   calls), the default is a read-only plan (`--dry-run` names it explicitly),
+   only `--apply` writes, and every mask is confirmed by reading the state back
+   from the node. **The firmware-updater snap itself is
    untouched** — `fwupd` updates stay wanted and operator-run. Non-fatal
    (`--skip-node-recovery` to opt out of the node-recovery stages;
    `node_recovery: {firmware_notifier_mask: false}` in `~/.hscc/cluster.json`
@@ -73,7 +74,8 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    SM clock at or under the cap). Set the value with
    `node_recovery: {gpu_clock_cap_mhz: 1900}` or turn it off with `false` in
    `~/.hscc/cluster.json` (off does not remove an installed cap — run
-   `install_gpu_clock_cap.py --uninstall --hosts ...`). Doctor check:
+   `install_gpu_clock_cap.py --uninstall --apply --hosts ...`). The default is
+   a read-only plan; only `--apply` writes. Doctor check:
    `GPU clock cap (node-recovery)`.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official
