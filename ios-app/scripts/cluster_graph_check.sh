@@ -31,6 +31,12 @@
 # FAILS. A harness that cannot fail is worthless:
 #   export CLUSTER_GRAPH_NEGATIVE_TEST=1
 #
+# THE STRUCTURAL LEG'S OWN NEGATIVE PROOF is a separate harness, because nothing can
+# execute these ten legs for you — they mutate tracked Swift and must restore it:
+#   scripts/cluster_graph_check/negative_legs.sh
+# Run it whenever §1 changes. It asserts the mutation applied before it trusts the rc,
+# so a leg that measures nothing reports BROKEN rather than looking like a pass.
+#
 # Usage: ios-app/scripts/cluster_graph_check.sh
 
 set -uo pipefail
