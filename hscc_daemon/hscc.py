@@ -407,9 +407,9 @@ def _get_help_text():
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
-        # main group (M4): the main orchestrator's own pane. Same F5 rule.
-        *_entry("main start|status",
-                "Main orchestrator tmux pane (start/status)"),
+        # main group (M4/M5): the main orchestrator's own pane + wake-ups.
+        *_entry("main start|status|wakeups",
+                "Main orchestrator pane and daemon wake-up schedule"),
         # orch group (t_5da7fd56): dispatched at main() and listed in
         # COMMAND_HELP, so the main banner must show it too (F5 surface-honesty
         # rule: a live command must not hide from the primary help surface).
@@ -580,13 +580,15 @@ COMMAND_HELP = {
             "  (the daemon-resident orchestrator waker; status also\n"
             "  takes [--json])\n"
             "  Usage: hscc orch <subcommand> [args]",
-    # main group (M4): the main orchestrator's own tmux pane. Lines authored
-    # <=76 for the same (B)-gate reason as orch above.
-    "main": "The main orchestrator's own tmux pane.\n"
+    # main group (M4/M5): the main orchestrator's own tmux pane + the daemon's
+    # wake-up schedule. Lines authored <=76 for the same (B)-gate reason.
+    "main": "The main orchestrator's pane and wake-ups.\n"
             "  Subcommands: start  status [--json]\n"
+            "  wakeups list|set <name> <schedule>|enable|disable <name>\n"
             "  start ensures ONE pane runs hermes -p <main profile>,\n"
             "  reusing a running pane; never kills another pane/window.\n"
             "  status reports pane, busy/idle, board and name.\n"
+            "  wakeups edits the daemon-fired schedule (--json).\n"
             "  Usage: hscc main <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",

@@ -48,6 +48,13 @@ PERIODIC_INTERVALS = {
     # stays a no-op that STILL stamps, so the stream never goes dark and
     # staleness never false-fires on a deliberately-disabled feature.
     "orch_waker": 30,
+    # M5 (the main orchestrator's wake-ups): the daemon-owned schedule tick
+    # (check_main_wakeups -> main_wakeups.tick). 30 s is only the CHECK cadence;
+    # each wake-up's own schedule is evaluated inside the tick and the state
+    # file persists last-fired, so a restart neither double-fires nor forgets.
+    # A missing pane is a persisted skip, not a retry every tick — the tick
+    # advances the schedule and doctor reads the skip stamp.
+    "main_wakeups": 30,
     # GAP-F-4 (t_51931733): the paused-board enforcer tick
     # (check_kanban_enforce -> kanban_pause.enforce_tick -> enforce). 60 s
     # matches the dispatcher/engine_wedge supervision class: when nothing is
@@ -711,6 +718,7 @@ def run_daemon_loop():
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
     from . import orch_waker
+    from . import main_wakeups
     from . import kanban_pause
     from .proxy_stall import check_proxy_stall
     from .stream_silence import check_stream_silence
@@ -792,6 +800,10 @@ def run_daemon_loop():
         # take another stream down — and its state file feeds the same
         # per-stream staleness math as every other stream.
         "orch_waker": orch_waker.check_orch_waker,
+        # M5: the daemon-owned main-orchestrator wake-ups. Same supervised
+        # thread machinery as every stream; the tick never raises and stamps
+        # state/main_wakeups.json on every path (including all-disabled).
+        "main_wakeups": main_wakeups.check_main_wakeups,
         # GAP-F-4 (t_51931733): the paused-board enforcer's check body. Same
         # machinery as every stream above: its own supervised
         # _run_supervised_periodic thread (error isolation + respawn), and its
