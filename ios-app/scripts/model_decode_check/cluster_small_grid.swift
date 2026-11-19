@@ -247,4 +247,168 @@ func clusterSmallGridChecks(_ c: DecodeCheck) {
     ck("gsmall:edge:rows", "\(edgeTile.rows.count)",
        "\(min((edgePair.0.json?.hosts ?? []).count, ClusterSmallGrid.maxHosts))",
        "the edge fixture also gets one row per host, up to the cap")
+
+    // ---- The GPU% trend (t_2681d3de) --------------------------------------
+    // The tile's sparkline is not a decoration the view draws on faith: it is
+    // a series the recorder sent, reduced by the pixel-column downsampler,
+    // joined to the grid by the payload's own host identity. Every number the
+    // trend speaks must be found in the fixture bytes, and every way the
+    // recorder CAN fail to answer (excluded series, tier-0 note, one point,
+    // all-null points) must produce NO trend — a flat line drawn from nothing
+    // would be exactly the fake trend this card was written to forbid.
+
+    // The no-history case first: the shipped grid before this card had no
+    // series at all, and it must still have none when the read is absent.
+    ck("gsmall:trend:none",
+       ClusterSmallGrid.tile(from: view, history: nil)?.hasTrends == true ? "yes" : "no", "no",
+       "no history answer means no trend on any cell — the bars keep their meaning")
+
+    guard let histData = try? c.load("v1_cluster_history_6h.json"),
+          let hist = try? JSONDecoder().decode(ClusterHistoryResponse.self, from: histData)
+    else {
+        c.expect("gsmall:trend:fixture",
+                 "\(label): the tier-1 history fixture must load for the trend checks", false,
+                 "v1_cluster_history_6h.json did not load and decode")
+        return
+    }
+    ck("gsmall:trend:fixture:tier", "\(hist.tier)", "1",
+       "the fixture joined against is the durable 1-minute tier the tile asks for")
+
+    /// Readable GPU-utilisation points the fixture carries for one host — the
+    /// tile's join requires two, so the expectation below is computed from the
+    /// bytes, never carried as prose.
+    func readableGPU(_ host: String) -> [Double] {
+        hist.hosts.filter { $0.host == host }
+            .sorted { $0.ts < $1.ts }
+            .compactMap { $0.gpu_util_pct }
+    }
+    let liveIDs = Array(view.hostRows.prefix(ClusterSmallGrid.maxHosts).map { $0.host })
+    let joinable = liveIDs.filter { readableGPU($0).count >= 2 }
+    ck("gsmall:trend:fixture:overlap", joinable.isEmpty ? "vacuous" : "joined", "joined",
+       "the monitor and history fixtures really do share at least one host with two "
+       + "readable points (a vacuous join would make every check below silent)")
+    guard let joinedID = joinable.first else { return }
+
+    let trendTile = ClusterSmallGrid.tile(from: view, history: hist)
+    let trendRows = (trendTile?.rows ?? []).filter { row in
+        row.cells.contains { $0.column == .gpuUtil && $0.trend != nil }
+    }
+    ck("gsmall:trend:joined", "\(trendRows.count)", "\(joinable.count)",
+       "one sparkline per host the recorder can answer for, and no more")
+    let barFallbackRows = (trendTile?.rows ?? []).filter { row in
+        guard let gpu = row.cells.first(where: { $0.column == .gpuUtil }) else { return false }
+        return gpu.trend == nil && gpu.fraction != nil
+    }
+    ck("gsmall:trend:barfallback", "\(trendRows.count + barFallbackRows.count)",
+       "\(trendTile?.rows.count ?? -1)",
+       "every drawn row carries either a trend or the single-sample bar — a row "
+       + "the recorder cannot answer for falls back, it never goes blank or flat")
+
+    guard let joinedRow = trendRows.first,
+          let gpuCell = joinedRow.cells.first(where: { $0.column == .gpuUtil }),
+          let trend = gpuCell.trend else {
+        c.expect("gsmall:trend:shape", "\(label): the joined host must carry a trend", false,
+                 "join computed \(joinable) but no cell trend arrived")
+        return
+    }
+    let vals = readableGPU(joinedID)
+    ck("gsmall:trend:speechmin", trend.minText, String(format: "%.0f", vals.min() ?? -1),
+       "the spoken minimum is the fixture's own lowest value for this host, "
+       + "formatted the way the CLI formats the GPU% column")
+    ck("gsmall:trend:speechmax", trend.maxText, String(format: "%.0f", vals.max() ?? -1),
+       "the spoken maximum is the fixture's own highest value — the reduction "
+       + "may thin the polyline but never move the peak")
+    let preserved: Bool = {
+        guard let series = ClusterHistorySeriesSet.make(hist, for: ClusterSmallGrid.trendMetric)
+            .series.first(where: { $0.identity == joinedID }) else { return false }
+        return ClusterHistoryDownsampler.downsample(
+            series, pixelWidth: ClusterSmallGrid.sparkPixelColumns).extremesPreserved
+    }()
+    ck("gsmall:trend:extremes", preserved ? "yes" : "no", "yes",
+       "the pixel-column reduction this tile uses preserved the series extremes")
+    let latestLevel = ClusterMetricLevel.level(vals.last, warn: ClusterSmallGrid.gpuUtilWarn,
+                                               critical: ClusterSmallGrid.gpuUtilCritical)
+    ck("gsmall:trend:level", "\(trend.level)", "\(latestLevel)",
+       "the trend is painted by the band of its LATEST reading, the same verdict "
+       + "style the digit above it takes — not by a comparison the view made")
+    ck("gsmall:trend:verts",
+       trend.segments.reduce(0) { $0 + $1.count } >= 2 ? "yes" : "no", "yes",
+       "the drawn polyline has real vertices (a one-point 'trend' is refused)")
+    let trendSummary = trendTile?.accessibilitySummary ?? ""
+    ck("gsmall:trend:ax", trendSummary.contains("trend \(trend.minText) to \(trend.maxText)")
+        ? "yes" : "no", "yes",
+       "VoiceOver speaks the trend only because the sparkline was drawn")
+    ck("gsmall:trend:noaddr",
+       "\(trendSummary.split(separator: ".").filter { showsAddress(String($0)) }.count)", "0",
+       "the join key is the payload's host address and it never reaches a spoken "
+       + "string — the whole tile sentence still carries no dotted quad (§7)")
+
+    // Every way the recorder answers "nothing usable", the tile must answer
+    // "no trend" — never a zero, a dot, or a line assembled from one sample.
+    func hp(ts: Int, host: String, gpu: Double?) -> ClusterHistoryPoint {
+        ClusterHistoryPoint(ts: ts, n: 1, host: host, node: nil, port: nil, model: nil,
+                            error: nil, cpu_usage_pct: nil, cpu_temp_c: nil,
+                            gpu_util_pct: gpu, gpu_temp_c: nil, gpu_power_w: nil,
+                            gpu_power_w_max: nil, gpu_temp_c_max: nil, cpu_temp_c_max: nil,
+                            mem_used_pct: nil, gpu_mem_used_mb: nil, run: nil, wait: nil,
+                            kv: nil, gen_tps: nil, prompt_tps: nil)
+    }
+    func histResponse(_ points: [ClusterHistoryPoint], tier: Int = 1, res: Int = 60,
+                      hostsIncluded: Bool = true, note: String? = nil,
+                      axis: String = "window", source: String? = "sqlite_store")
+            -> ClusterHistoryResponse {
+        // The tile asks on the `window` axis of the durable store — the two
+        // fields #425 added, stated rather than inferred. A synthetic case
+        // that wanted the daemon ring would say `recorder_ring*` here; the
+        // tile's trend rules never read these codes (they gate on usable
+        // points and `hosts_included`), so an absent ring is refused for the
+        // same reason as any other answer with < 2 readable numbers.
+        ClusterHistoryResponse(window: ClusterSmallGrid.trendWindow, window_s: 3600,
+                               axis: axis, source: source, tier: tier,
+                               resolution_s: res, resolution: "1 minute", tier_summary: nil,
+                               max_fields: [], since: 0, until: 3600, node: "all",
+                               hosts_included: hostsIncluded, engines_included: false,
+                               hosts: points, engines: [], note: note, error: nil,
+                               speak: "synthetic", store: nil)
+    }
+    func trendCase(_ name: String, _ response: ClusterHistoryResponse, _ want: String,
+                   _ why: String) {
+        let t = ClusterSmallGrid.tile(from: view, history: response)
+        ck("gsmall:trend:\(name)", (t?.hasTrends ?? false) ? "yes" : "no", want, why)
+    }
+    trendCase("single", histResponse([hp(ts: 0, host: joinedID, gpu: 42)]), "no",
+              "one readable point is a sample, not a series — the bar stays")
+    trendCase("allnull", histResponse((0..<4).map { hp(ts: $0 * 60, host: joinedID, gpu: nil) }),
+              "no", "a host that never reported GPU% has no trend and no zero either")
+    trendCase("excluded", histResponse([], hostsIncluded: false, note: "hosts filtered out"),
+              "no", "a metrics= filter that excluded the host series draws no line")
+    guard let t0Data = try? c.load("v1_cluster_history_15m.json"),
+          let t0 = try? JSONDecoder().decode(ClusterHistoryResponse.self, from: t0Data) else {
+        c.expect("gsmall:trend:t0fixture", "\(label): the tier-0 fixture must load", false,
+                 "v1_cluster_history_15m.json did not load and decode")
+        return
+    }
+    trendCase("tier0", t0, "no",
+              "the 2 s ring the API cannot serve stays 'no trend', not a flat line")
+    let flat = histResponse((0..<5).map { hp(ts: $0 * 60, host: joinedID, gpu: 42) })
+    let flatTrend = ClusterSmallGrid.tile(from: view, history: flat)?.rows
+        .first(where: { $0.id == joinedID })?.cells.first { $0.column == .gpuUtil }?.trend
+    ck("gsmall:trend:flat", flatTrend != nil ? "yes" : "no", "yes",
+       "a genuinely flat series IS a trend — it has the two readable points a line needs")
+    ck("gsmall:trend:flatcentred",
+       "\(flatTrend?.segments.first?.filter { $0.y == 0.5 }.count ?? -1)",
+       "\(flatTrend?.segments.first?.count ?? -2)",
+       "a flat series draws as the centred layout line (min == max leaves no height "
+       + "to distribute), not as a line glued to an invented floor")
+    let gapped = histResponse([hp(ts: 0, host: joinedID, gpu: 30),
+                               hp(ts: 60, host: joinedID, gpu: 31),
+                               hp(ts: 120, host: joinedID, gpu: 32),
+                               hp(ts: 3600, host: joinedID, gpu: 70),
+                               hp(ts: 3660, host: joinedID, gpu: 71)])
+    let gapTrend = ClusterSmallGrid.tile(from: view, history: gapped)?.rows
+        .first(where: { $0.id == joinedID })?.cells.first { $0.column == .gpuUtil }?.trend
+    let gapVerdict = (gapTrend?.segments.count ?? -1) >= 2 ? "split" : "joined"
+    ck("gsmall:trend:gap", gapVerdict, "split",
+       "an hour the recorder did not answer draws as a GAP, never as a "
+       + "straight line between the two nearest numbers")
 }

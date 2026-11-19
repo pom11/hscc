@@ -236,10 +236,26 @@ if grep -q 'let wantsHost = family.showsDaemonHost' "$SUBJECT"; then
 else
   wbad "the daemon-host read is not decided by the family"
 fi
-if grep -q 'case \.systemSmall, \.systemMedium, \.systemLarge, \.systemExtraLarge:' "$VIEWS"; then
-  wok "showsDaemonHost positive-lists the Home Screen sizes"
+# t_2681d3de moved the SMALL size out of this list and into the history
+# read below: the small grid draws no daemon-host line, so the size pays for
+# the series behind its GPU% sparklines instead (two reads per refresh, §2).
+# The positive list is what stays refused; the arm swap below is what pays.
+if grep -q 'case \.systemMedium, \.systemLarge, \.systemExtraLarge:' "$VIEWS"; then
+  wok "showsDaemonHost positive-lists the three Home Screen sizes that draw it"
 else
   wbad "showsDaemonHost is not the positive list the gate can execute"
+fi
+if grep -A3 'var wantsHostHistory: Bool {' "$VIEWS" | grep -A1 'case \.systemSmall' \
+     | grep -q 'return true'; then
+  wok "systemSmall pays for the recorder series instead"
+else
+  wbad "systemSmall does not pay for cluster/history — the sparkline has no source"
+fi
+n=$(grep -c '\$0\.clusterHistory(' "$SUBJECT")
+if [ "$n" -eq 1 ]; then
+  wok "exactly one clusterHistory() read (in the family-gated helper)"
+else
+  wbad "expected exactly 1 clusterHistory() read, got $n"
 fi
 guard_line=$(grep -n 'guard enabled else' "$SUBJECT" | head -1 | cut -d: -f1)
 host_line=$(grep -n '\$0.daemonHost()' "$SUBJECT" | head -1 | cut -d: -f1)

@@ -72,12 +72,45 @@ struct MonitorWidgetView: View {
 }
 
 extension WidgetFamily {
+    /// The families that pay for `GET /v1/daemon/host`. The small tile gave
+    /// that budget slot to the recorder's series (t_2681d3de) and draws no
+    /// daemon-host line in its grid anyway — so when the grid has nothing to
+    /// grid, its pane names the failure it actually has, instead of printing
+    /// a "Daemon up" this size did not pay to ask about. Wide families keep
+    /// the read; the snapshot store keeps the last host state either way.
     var showsDaemonHost: Bool {
         switch self {
-        case .systemSmall, .systemMedium, .systemLarge, .systemExtraLarge:
+        case .systemMedium, .systemLarge, .systemExtraLarge:
             return true
         default:
             return false
+        }
+    }
+
+    /// The families that pay for `GET /v1/cluster/history`. Only the small
+    /// tile grids per-host sparklines; no other surface earns a third read,
+    /// and no family exceeds §2's two requests because each swap is exclusive
+    /// (`wantsHostHistory` and `showsDaemonHost`/`showsStatus` never both
+    /// answer true for one family).
+    var wantsHostHistory: Bool {
+        switch self {
+        case .systemSmall:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The families that pay for `GET /v1/cluster/status` in the cluster
+    /// widget. `systemSmall` trades it for the history read: the small tile
+    /// draws neither the jobs count nor the total-hosts line, so the read
+    /// bought pixels the size never shows.
+    var showsStatus: Bool {
+        switch self {
+        case .systemSmall:
+            return false
+        default:
+            return true
         }
     }
 }
