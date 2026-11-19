@@ -447,16 +447,17 @@ func runAll() async {
     //      tier), and a metric the node never reported stays `nil` — it must
     //      not reach a chart as a flat 0.
     StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
-    let history = await client.metricsHistory(tier: 1, host: "dgx-01",
-                                              since: 1795000000, until: 1795000120)
-    let historyURL = StubTransport.requests.last?.url?.absoluteString ?? ""
-    check("history carries tier=1", historyURL.contains("tier=1"))
+    let metricsRead = await client.metricsHistory(tier: 1, host: "dgx-01",
+                                                  since: 1795000000,
+                                                  until: 1795000120)
+    let metricsURL = StubTransport.requests.last?.url?.absoluteString ?? ""
+    check("history carries tier=1", metricsURL.contains("tier=1"))
     check("history carries host and the inclusive window",
-          historyURL.contains("host=dgx-01") && historyURL.contains("since=1795000000")
-            && historyURL.contains("until=1795000120"))
+          metricsURL.contains("host=dgx-01") && metricsURL.contains("since=1795000000")
+            && metricsURL.contains("until=1795000120"))
     check("history path stayed clean",
           StubTransport.requests.last?.url?.path == "/v1/metrics/history")
-    if case .success(let payload) = history {
+    if case .success(let payload) = metricsRead {
         check("history decodes its node rows", payload.hosts.count == 2 && payload.tier == 1)
         check("an unreported metric is nil, never 0",
               payload.hosts[1].gpu_temp_c == nil
@@ -485,7 +486,7 @@ func runAll() async {
         check("the field vocabulary comes from the server, not a hardcoded list",
               payload.fields?.host_peaks == ["gpu_temp_c_max"])
     } else {
-        check("history should decode, got \(String(reflecting: history))", false)
+        check("history should decode, got \(String(reflecting: metricsRead))", false)
     }
     StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
     _ = await client.metricsHistory(tier: 9)
