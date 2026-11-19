@@ -317,18 +317,33 @@ struct ClusterGraphWidget: Widget {
         }
         .configurationDisplayName("Cluster Graph")
         .description("Temperature, utilisation, power, memory and serving history per node — dense at every size.")
-        // Home Screen sizes only. No accessory family is declared: the card asks
-        // for small/medium/large/extraLarge, `widget_view_dispatch` gates this
-        // surface as home-screen-only (which asserts the INVERSE — no accessory in
-        // the list and no Lock Screen label rule in this file), and a chart of a
-        // series in a Lock Screen complication is either a picture with no numbers
-        // or a number with no chart. The `#if` is not decoration: WidgetKit marks
-        // `.accessory*` unavailable on macOS and the desktop target compiles this
-        // file by path, so an unguarded accessory list breaks the macOS gate.
-        #if os(iOS)
+        // ONE list, read on both platforms. Home Screen sizes only: no accessory
+        // family is declared, `widget_view_dispatch` gates this surface as
+        // home-screen-only (which asserts the INVERSE — no accessory in the list and
+        // no Lock Screen label rule in this file), and a chart of a series in a Lock
+        // Screen complication is either a picture with no numbers or a number with no
+        // chart.
+        //
+        // There is deliberately no `#if os(iOS)` around this line, and the reason is
+        // not taste. WidgetKit marks the four `accessory*` cases
+        // `@available(macOS, unavailable)`, which is exactly why a widget naming one
+        // needs a guard — this widget names none, and `cluster_graph_check.sh` §2
+        // fails the surface if one ever appears. The four sizes it does name are all
+        // valid on the desktop: Apple's widget HIG lists system extra large as
+        // supported on the Mac desktop and in Notification Center, and names iPhone as
+        // the platform that does not support it, and `systemExtraLarge` carries only
+        // tvOS/watchOS unavailability in the macOS `WidgetKit.swiftinterface`. The
+        // desktop target also already compiles this list's own definition,
+        // `GraphWidgetMetrics.swift`, which names `.systemExtraLarge` unguarded — so
+        // the guard here protected nothing. What it did protect was a second,
+        // desktop-only list of three sizes, which left the desktop compiling, shipping
+        // and gating a small-multiples layout, a density mapping and a dispatch arm
+        // for a size it never offered (t_4311500c).
+        //
+        // A per-platform asymmetry is allowed again only if it is WRITTEN: an arm that
+        // omits a family from `clusterGraphFamilies` has to name it in a
+        // `// families-omit: .systemX — reason` marker on that arm, or §1 of that gate
+        // reddens it by name. An unwritten asymmetry is what this line used to be.
         .supportedFamilies(WidgetFamily.clusterGraphFamilies)
-        #else
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
-        #endif
     }
 }
