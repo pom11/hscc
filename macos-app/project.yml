@@ -154,9 +154,10 @@ targets:
       - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
       - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
       # The status colour rule the marks ask for (`ClusterMetricLevel.color`)
-      # lives with the small-grid cell model, and the marks refuse to grow a
-      # second one — so that view file and the cell model behind it come along.
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
+      # lives with the small-grid tile view, and the marks refuse to grow a
+      # second one — so that view comes along. The cell model behind it
+      # (`ClusterSmallGrid.swift`) is already listed above, listed ONCE on
+      # purpose: swiftc refuses a source file named twice in one module.
       - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
       # The large / extra-large table layout (t_9e64d9d9), same file the iOS
       # widget target compiles. Foundation-only.
