@@ -324,8 +324,13 @@ def extra_resources_for(requirements_text: str) -> list:
 
 
 def _render_resource(entry: dict) -> str:
+    # ``brew audit --strict`` compares a resource's name with the PyPI package
+    # name from its url, reading ``.`` and ``_`` as ``-``: the SOT spelling
+    # ``ruamel.yaml`` must be declared ``ruamel-yaml``. Emit that canonical
+    # spelling so a newly added closure cannot turn the tap's audit red.
+    name = _canonical(entry["name"])
     return "\n".join((
-        f'  resource "{entry["name"]}" do',
+        f'  resource "{name}" do',
         f'    url "{entry["url"]}"',
         f'    sha256 "{entry["sha256"]}"',
         "  end",

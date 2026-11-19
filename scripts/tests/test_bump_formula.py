@@ -298,6 +298,25 @@ def test_no_release_only_resource_closures_are_known():
     assert bf.extra_resources_for("# comment\nsome-future-dep>=1\n") == []
 
 
+def test_inserted_resource_names_are_audit_clean():
+    """`brew audit --strict` requires a resource name to match the PyPI package
+    name with `.`/`_` read as `-`; the SOT spelling `ruamel.yaml` is what turned
+    the tap audit red (t_10df1a54). The url keeps the sdist's real filename."""
+    entry = {"name": "ruamel.yaml",
+             "url": "https://files.pythonhosted.org/packages/aa/bb/"
+                    "ruamel.yaml-0.18.16.tar.gz",
+             "sha256": "a" * 64}
+    assert bf._render_resource(entry).splitlines()[0] == '  resource "ruamel-yaml" do'
+
+    new, added = bf.rewrite_formula(formula_text(), "2.13.0", NEW_SHA,
+                                    extra_resources=[entry])
+    assert '  resource "ruamel-yaml" do' in new
+    assert '  resource "ruamel.yaml" do' not in new
+    assert "ruamel.yaml-0.18.16.tar.gz" in new
+    inserted = [change for change in added if change[1] == ""]
+    assert inserted and 'resource "ruamel-yaml" do' in inserted[0][2]
+
+
 @pytest.mark.parametrize("bad", ["", "deadbeef", "Z" * 64, "1" * 63, "1" * 65,
                                  "1" * 32 + " " * 32, None])
 def test_rewrite_refuses_a_nonsense_digest(bad):
