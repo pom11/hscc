@@ -407,6 +407,9 @@ def _get_help_text():
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
+        # main group (M4): the main orchestrator's own pane. Same F5 rule.
+        *_entry("main start|status",
+                "Main orchestrator tmux pane (start/status)"),
         # orch group (t_5da7fd56): dispatched at main() and listed in
         # COMMAND_HELP, so the main banner must show it too (F5 surface-honesty
         # rule: a live command must not hide from the primary help surface).
@@ -577,6 +580,14 @@ COMMAND_HELP = {
             "  (the daemon-resident orchestrator waker; status also\n"
             "  takes [--json])\n"
             "  Usage: hscc orch <subcommand> [args]",
+    # main group (M4): the main orchestrator's own tmux pane. Lines authored
+    # <=76 for the same (B)-gate reason as orch above.
+    "main": "The main orchestrator's own tmux pane.\n"
+            "  Subcommands: start  status [--json]\n"
+            "  start ensures ONE pane runs hermes -p <main profile>,\n"
+            "  reusing a running pane; never kills another pane/window.\n"
+            "  status reports pane, busy/idle, board and name.\n"
+            "  Usage: hscc main <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -635,8 +646,8 @@ TOP_LEVEL_COMMANDS = (
     "start", "stop", "status", "check", "watch", "triggers", "notify",
     "plist", "install", "uninstall", "log", "bootstrap", "update",
     "cluster", "template", "profiles", "project", "api", "autodown",
-    "kanban", "cards", "orch", "verify", "stats", "throughput", "autoscale",
-    "escalate", "start-daemon", "heal-clear", "heal-status",
+    "kanban", "cards", "orch", "main", "verify", "stats", "throughput",
+    "autoscale", "escalate", "start-daemon", "heal-clear", "heal-status",
 )
 
 # ── template group help surface (t_9032f96b) ───────────────────────────────
@@ -2215,6 +2226,13 @@ def main():
     # group listing instead.
     if cmd == "orch":
         rc = _handle_orch(args[1:])
+        sys.exit(rc)
+
+    # 'main' group (M4) — the main orchestrator's own tmux pane. Help is
+    # intercepted inside cmd_main (before any pane discovery), like orch.
+    if cmd == "main":
+        from hscc_daemon.main_cli import cmd_main
+        rc = cmd_main(args[1:])
         sys.exit(rc)
 
     # Per-command help for the daemon verbs (t_5132deb3: the branch used to

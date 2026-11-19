@@ -120,6 +120,50 @@ ask_main_orch_name() {
   fi
 }
 
+# ── main orchestrator pane (M4, t_d6dee427) ────────────────────────────────
+# `hscc main start` ensures exactly one tmux pane runs the main orchestrator's
+# REPL (window named after the profile; a running pane is reused; no other
+# pane/window is ever killed). Bootstrap never starts a tmux server itself: with
+# no server it prints how to start the pane later. Self-contained for tests
+# (PYBIN, PLUGINS, HSCC_DIR, HERMES_HOME, DRY_RUN, SKIP_ROLES, MAIN_ORCH_NAME,
+# say/ok/warn/plan).
+start_main_orchestrator() {
+  local _name _hscc _out _rc
+  _name="${MAIN_ORCH_NAME:-general}"
+  if $SKIP_ROLES; then
+    warn "main orchestrator pane: skipped (--skip-roles)"
+    return 0
+  fi
+  if $DRY_RUN; then
+    plan "main orchestrator pane: hscc main start (one tmux pane; window named $_name; reuses a running pane)"
+    return 0
+  fi
+  if ! command -v tmux >/dev/null 2>&1 || ! tmux list-sessions >/dev/null 2>&1; then
+    warn "main orchestrator pane: no tmux server — start it later: hscc main start"
+    say "  (hscc main start creates a detached tmux session named $_name)"
+    return 0
+  fi
+  _hscc="$(dirname "$PYBIN")/hscc"
+  if [ -x "$_hscc" ]; then
+    _out=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      "$_hscc" main start 2>&1)
+  elif command -v hscc >/dev/null 2>&1; then
+    _out=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      hscc main start 2>&1)
+  else
+    _out=$(PYTHONPATH="$PLUGINS${PYTHONPATH:+:$PYTHONPATH}" \
+      HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      "$PYBIN" -m hscc_daemon.hscc main start 2>&1)
+  fi
+  _rc=$?
+  if [ $_rc -eq 0 ]; then
+    ok "main orchestrator pane: $_out"
+  else
+    warn "main orchestrator pane not started: $_out"
+    warn "  fix: hscc main start"
+  fi
+}
+
 # ── brew libexec detection (t_bc5a3fee) ─────────────────────────────────────
 # The brew tap (homebrew-hscc) extracts the release tarball under
 # <prefix>/libexec/hscc-<ver>/ and puts `hscc` on PATH through brew itself.
@@ -850,6 +894,10 @@ if $SKIP_DAEMON; then warn "skipped"; else
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
+hdr "Install: main orchestrator pane"
+# hscc main start (reuses a running pane; no tmux server => prints the command)
+start_main_orchestrator
+
 hdr "Done"
 if $DRY_RUN; then
   ok "DRY RUN complete — NOTHING was installed (every planned write is above, marked '→ plan:')."
