@@ -17,8 +17,15 @@ Commands:
                            Build/refresh all role profiles from roles/*.yaml
                            (the legacy cluster-wide role is generated retired
                            in favour of the stored main orchestrator)
-  create <name> <desc...>  Author a new role spec from a description
-  list                     List role specs and whether their profile exists
+  create <name> <desc...>  Author a new role spec from a description AND report
+                           what git must do to keep it: an untracked spec is
+                           deleted by the next re-sync of the deployed plugin dir
+                           while the profile it minted survives (t_f2630ca3)
+  list                     List role specs and whether their profile exists, then
+                           census spec coverage — a worker-signature profile with
+                           no spec fails the command (exit 1, the same condition
+                           the hscc-roles leg asserts); a spec missing from
+                           `git ls-files` is a warning
   validate                 Validate every role spec (load + required fields)
   autonomy [on|off]        Show or set the fleet autonomy flag
   orch <project|general> [--registry P] [--hermes-home DIR]

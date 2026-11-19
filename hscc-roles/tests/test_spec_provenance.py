@@ -196,7 +196,7 @@ def test_provenance_reports_unknown_when_git_will_not_answer(repo, monkeypatch):
 
 
 def test_provenance_never_raises_when_git_is_absent(repo, monkeypatch):
-    root, roles = repo
+    _root, roles = repo
     path = roles / "seo.yaml"
     path.write_text(_spec_text("seo"), encoding="utf-8")
 
