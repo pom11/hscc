@@ -123,6 +123,8 @@ The background watcher that does the checking and the healing.
 - `hscc uninstall` — remove that auto-start and stop the watcher.
 - `hscc plist` — print the auto-start config without installing it.
 - `hscc log` — read what the watcher has been saying.
+- `hscc start-daemon` — run the watcher loop in the foreground yourself
+  (normally launchd runs it).
 
 ### Health & monitoring
 
@@ -140,6 +142,9 @@ The background watcher that does the checking and the healing.
   it.
 - `hscc escalate` — which failures are waiting for a human, without touching
   them.
+- `hscc heal-clear <node>` — clear one machine's heal-breaker strikes; this
+  mutates the ledger, and `--help` clears nothing.
+- `hscc heal-status` — list the heal-breaker strikes per machine, read-only.
 
 ### Cluster & templates
 
@@ -169,6 +174,8 @@ The background watcher that does the checking and the healing.
   `disable`, `wake`, `cancel`.
 - `hscc kanban` — board hygiene: blocked cards (list and recover), stale cards
   (list and archive), and a live board monitor.
+- `hscc merge-queue` — the local queue of green PRs: `status`, `list`, `add`,
+  `remove`, `pause`, `resume`, `enable`, `disable`.
 - `hscc cards monitor` — one live panel per running card, streaming what its
   worker is doing.
 - `hscc main` — the main orchestrator's own pane: bring it up, see whether it is

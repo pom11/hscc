@@ -185,6 +185,26 @@ class TestBehavioural:
         assert len(items) == len(set(items)), f"duplicate in hint: {items}"
         assert all(i and i == i.strip() for i in items), items
 
+
+class TestPrimaryHelpSurface:
+    """Every dispatched top-level verb is NAMED on the primary `hscc --help`
+    surface (F5, t_88d896f3): `merge-queue` was live and helped, yet absent
+    from `hscc --help`, so the primary surface told a reader it did not exist.
+    Entries are matched at the usage column, so a verb that only survives as a
+    substring of another word does not count."""
+
+    def test_every_top_level_command_is_named_in_help(self, monkeypatch):
+        rc, out = _main(monkeypatch, ["--help"])
+        assert rc == 0, out
+        missing = [
+            verb for verb in unified.TOP_LEVEL_COMMANDS
+            if not re.search(rf"^\s{{2}}{re.escape(verb)}(?:\s|$)",
+                             out, re.MULTILINE)
+        ]
+        assert not missing, (
+            f"dispatched verbs hidden from `hscc --help`: {missing} — list "
+            f"them on the primary surface or document why they are help-only")
+
     @pytest.mark.parametrize("verb", sorted(unified.TOP_LEVEL_COMMANDS))
     def test_listed_verb_is_a_real_argv_shape(self, verb):
         """Every listed verb must at least survive argv shaping: it has to be

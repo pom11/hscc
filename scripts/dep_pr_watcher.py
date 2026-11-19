@@ -39,21 +39,18 @@ def _stamp_module():
     than kept quiet.
 
     Importable from both homes: the repo checkout (``scripts/../hscc_daemon``)
-    and the installed runtime (``~/.hermes/plugins``).
+    and the installed runtime (``~/.hermes/plugins``). The checkout's file is
+    loaded BY PATH and always wins: importing the package first let a live
+    install's deployed copy shadow the tree under test — and stamp through
+    older code (t_77db1513). The deployed path is only the fallback when this
+    script itself runs from ``~/.hermes/scripts`` (where the sibling does not
+    exist).
     """
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(os.path.dirname(here), "hscc_daemon", "cron_watchers.py"),
         os.path.expanduser("~/.hermes/plugins/hscc_daemon/cron_watchers.py"),
     ]
-    plugins = os.path.expanduser("~/.hermes/plugins")
-    if os.path.isdir(plugins) and plugins not in sys.path:
-        sys.path.insert(0, plugins)
-    try:
-        from hscc_daemon import cron_watchers as cw  # deployed package
-        return cw
-    except ImportError:
-        pass
     try:
         import importlib.util
         path = next((p for p in candidates if os.path.isfile(p)), None)
