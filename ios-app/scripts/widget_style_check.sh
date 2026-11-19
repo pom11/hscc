@@ -19,6 +19,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 WIDGET_VIEWS=(
   Sources/HSCCWidgets/ClusterWidgetViews.swift
+  # The history graph root lives here, not in GraphWidget.swift (which owns the
+  # provider and family list): this file resolves the surface's style once and
+  # paints its rendering-mode background.
+  Sources/HSCCWidgets/GraphWidgetViews.swift
   Sources/HSCCWidgets/MonitorViews.swift
   # The shared systemSmall tile (t_9e110d88). It is in this list because it is
   # the file that draws the densest surface: its fonts and colours must come from
@@ -147,8 +151,11 @@ adapter_ok=1
   && grep -q 'Color.clear' "$ADAPTER" \
   && grep -q 'systemTinted(for:' "$ADAPTER" \
   || adapter_ok=0
-if [ "$nbg" -eq 7 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq 7 ] && [ "$adapter_ok" -eq 1 ]; then
-  ok "all 7 widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
+# The expectation is the number of roots FOUND in the source, not a pinned
+# count: a new widget root must add its own adapter call, and the gate must not
+# need a number edit (which is how the graph surface reached main unchecked).
+if [ "$nbg" -gt 0 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq "$nbg" ] && [ "$adapter_ok" -eq 1 ]; then
+  ok "all $nbg widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
 else
   bad "a widget root does not paint containerBackground through the rendering-mode adapter (roots=$nbg wrapped=$nadapt bg=$bgok adapter=$adapter_ok)"
 fi

@@ -305,15 +305,14 @@ struct ClusterGraphWidget: Widget {
     let kind = "ClusterGraphWidget"
 
     var body: some WidgetConfiguration {
-        let style = WidgetStyle.resolved(for: .widgetClusterGraph)
-        return AppIntentConfiguration(kind: kind,
-                                      intent: ClusterGraphConfigurationIntent.self,
-                                      provider: ClusterGraphTimelineProvider()) { entry in
+        // The root view resolves the stored style ONCE and paints the
+        // rendering-mode background (GraphWidgetViews.swift), like every other
+        // widget root. Keeping it there means this file stays the provider and
+        // family list, and `widget_style_check.sh` reads the same file for both.
+        AppIntentConfiguration(kind: kind,
+                               intent: ClusterGraphConfigurationIntent.self,
+                               provider: ClusterGraphTimelineProvider()) { entry in
             ClusterGraphWidgetView(entry: entry)
-                .containerBackground(for: .widget) {
-                    WidgetSurfaceBackground(style: style)
-                }
-                .widgetRenderingAdaptation(style: style)
         }
         .configurationDisplayName("Cluster Graph")
         .description("Temperature, utilisation, power, memory and serving history per node — dense at every size.")
