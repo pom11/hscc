@@ -936,7 +936,17 @@ def handle_cluster_history(server, ctx, query, body):
         "engines_included": engines_included,
     }
 
-    tier0_resident = True
+    # `tier0_resident` is a MEASUREMENT, not a default. It answers exactly one
+    # question — "could THIS process read the 2 s ring?" — and that question only
+    # exists when tier 0 is the tier being served. So it starts as None
+    # ("nobody measured") and is written only by the tier-0 branch. It used to
+    # start as True, which let a `window=6h`/`7d` payload claim a resident ring in
+    # a process that hosts no recorder at all (measured on #413's fixtures: the
+    # tier-1 and tier-2 bytes said `true`, the `window=15m` bytes from the same
+    # generator in the same process said `false`). `note`/`speak` stay the honest
+    # signal for an empty tier-0 answer; this key only says what its name says,
+    # and only where it was actually asked.
+    tier0_resident = None
     error = None
     try:
         if tier == 0:

@@ -306,6 +306,34 @@ def test_window_15m_says_the_ring_is_not_here_rather_than_nothing_happened(
     assert status2 == 200 and api2["hosts"] and api2["store"]["exists"] is True
 
 
+def test_a_durable_tier_never_claims_a_tier0_residency_it_did_not_measure(
+        running, token, pinned_clock, store_dir):
+    """The flag is a measurement of tier 0, or it is silent — never a default.
+
+    It used to be initialised to `True` and written only inside the tier-0
+    branch, so every durable window answered `tier0_resident: true` in a process
+    that hosts no recorder at all, while `window=15m` in the same process answered
+    `false`. A tier this route never read must not speak for it: `None` is the
+    only honest answer, and the key stays on the wire so the shape is unchanged.
+    """
+    mh.close_sampler()                              # the deployed topology
+    assert mh.resident_recorder() is None           # ... really, nothing resident
+    for window, tier in (("1h", 1), ("6h", 1), ("24h", 1), ("7d", 2)):
+        status, api = get(running, token, f"/v1/cluster/history?window={window}")
+        assert status == 200, api
+        assert api["tier"] == tier
+        assert "tier0_resident" in api["store"], "key must stay on the wire"
+        assert api["store"]["tier0_resident"] is None, (window, api["store"])
+        # The tier it DID read is still stated as a measurement: served, present,
+        # and not smuggling a gap into an answer that has none.
+        assert api["store"]["exists"] is True and api["hosts"]
+        assert api["note"] == "" and "ring" not in api["speak"]
+    # And tier 0 in the same process still measures it: `false`, not unknown.
+    status, api = get(running, token, "/v1/cluster/history?window=15m")
+    assert status == 200 and api["tier"] == 0
+    assert api["store"]["tier0_resident"] is False
+
+
 # ── metrics= is a projection of the recorder's rows, not a second query ────
 
 def test_metrics_projection_keeps_identity_and_the_named_fields_only(
