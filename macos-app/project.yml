@@ -235,6 +235,22 @@ targets:
       - path: ../ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift
       - path: ../ios-app/Sources/HSCCWidgets/BoardStatusReading.swift
+      # The history graph widget (t_f4551339). REQUIRED here, not optional: this
+      # target compiles `HSCCWidgetsBundle.swift` by path, and that bundle declares
+      # `ClusterGraphWidget()`, so leaving these four out is a "cannot find
+      # ClusterGraphWidget in scope" failure on the macOS gate rather than a
+      # missing tile. `ClusterGraphReading.swift` is the Foundation-only half the
+      # shared marks project (no WidgetKit, so the macOS swiftc harnesses can
+      # execute it too); `GraphWidgetViews.swift` holds `ClusterGraphMarks`, which
+      # takes an explicit pixel width and axis label count precisely so the
+      # menu-bar dropdown (t_be4e1a48) can embed it at 360 pt instead of wrapping a
+      # copy. Nothing in these files declares a second history read: the fetch is
+      # `WidgetDataClient.clusterHistory` = `GET /v1/cluster/history`.
+      - path: ../ios-app/Sources/Shared/ClusterGraphReading.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidget.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
       # The one rendering-mode adapter (fullColor / accented / vibrant), shared
       # with the iOS extension rather than reimplemented for macOS.
       - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift

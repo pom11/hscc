@@ -41,5 +41,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         KanbanMonitorWidget()
         ProjectsWidget()
         BoardStatusWidget()
+        ClusterGraphWidget()
     }
 }

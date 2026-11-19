@@ -21,6 +21,7 @@ extension WidgetSurfaceKind {
         case .widgetCardsRunning: return "Running Cards Widget"
         case .widgetKanbanMonitor: return "Kanban Monitor Widget"
         case .widgetProjects: return "Projects Widget"
+        case .widgetClusterGraph: return "Cluster Graph Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
@@ -58,6 +59,13 @@ extension WidgetSurfaceKind {
         // nothing in the gate set looked at displayIcon. No neighbour row in this
         // list uses a folder glyph.
         case .widgetProjects: return "folder.badge.gearshape"
+        // The same glyph the graph widget draws in its own header, so the settings
+        // row and the widget are visibly the same thing. Checked through the
+        // NSImage(systemSymbolName:) call `sf_symbol_check.sh` uses — a name that
+        // resolves nowhere renders a BLANK row. Distinct from the Board Progress
+        // row's `chart.bar.xaxis`: that bubble is counts over a board, this is a
+        // series over time.
+        case .widgetClusterGraph: return "chart.xyaxis.line"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
         // Health, not a gauge: this surface answers "is the fleet up", which is

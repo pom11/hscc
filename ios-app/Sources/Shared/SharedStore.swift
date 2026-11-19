@@ -414,6 +414,18 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// the project list, which is the reason #341 refused to let the monitor
     /// panel borrow `.widgetMonitor`'s entry either.
     case widgetProjects = "widget.projects"
+    /// The "Cluster Graph" widget (t_f4551339): the recorder's stored series drawn
+    /// as a chart — one metric sparkline at small, one node's temps plus GPU% at
+    /// medium, one panel per node at large and extra-large.
+    ///
+    /// The raw value is permanent the moment an installed device writes it, so it
+    /// is named once here: after the surface the widget calls itself
+    /// (`configurationDisplayName("Cluster Graph")`, kind `ClusterGraphWidget`).
+    /// Deliberately NOT a reuse of `widgetCluster` or `widgetMonitor` — those two
+    /// draw instants and this one draws a series, they are fetched from different
+    /// routes, and switching the instant tile off must never blank a chart the
+    /// operator reads for a trend.
+    case widgetClusterGraph = "widget.clusterGraph"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -612,7 +624,8 @@ extension WidgetSurfaceKind {
     var isLiveActivity: Bool {
         switch self {
         case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
+             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+             .widgetClusterGraph:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityCards, .liveActivityBoardProgress: return true
@@ -636,6 +649,14 @@ extension WidgetSurfaceKind {
     var supportsScope: Bool {
         switch self {
         case .liveActivityCards: return false
+        // The graph widget's answer is scoped by NODE and WINDOW, both of which the
+        // operator already picks in the widget's own configuration sheet
+        // (`ClusterGraphConfigurationIntent`). `GET /v1/cluster/history` takes no
+        // board parameter — it answers 400 for any query key outside
+        // `node`/`metrics`/`window` — so a board picker here would write a value
+        // nothing reads, which is exactly the control this property exists to
+        // suppress.
+        case .widgetClusterGraph: return false
         // Every other surface keeps true: main grew this switch since this
         // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
         // widgetProjects all landed from main), and a new case has to be
@@ -697,6 +718,18 @@ extension WidgetSurfaceKind {
         // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
         // control the operator can touch and nothing obeys.
         case .widgetProjects: return []
+        // The graph widget is the same ruling, and the question is sharper here
+        // because a chart has obvious-looking parts: a "legend" or "bands" toggle
+        // would each remove something the widget's own card calls a requirement
+        // (a legend on the small-multiples sizes, threshold bands for
+        // temperatures), and a "min/max" toggle on the small size would empty the
+        // caption that is half of what that size is for. The metric SET and the
+        // window are already controls the operator can see, in the widget's own
+        // configuration sheet — a second copy of either in this store would be a
+        // Toggle the sheet never reads. So: nothing here is optional, and
+        // `WidgetSurfaceEditor` hides its whole "Show Content" group for exactly
+        // this case.
+        case .widgetClusterGraph: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this
