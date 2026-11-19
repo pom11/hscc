@@ -9,12 +9,19 @@ this host (no device attached; sim render is blocked by a revoked cert, per
 t_b6a8c450). What this check proves is the DATA half honestly: given the real
 /cluster/monitor + /daemon/host responses, the real decoders + the real
 `MonitorContent.make` produce the exact ContentState the extension would render
-(per-node CPU/RAM/GPU + daemon-host machine data, section-aware).
+(per-node CPU/RAM/GPU + daemon-host machine data, section-aware) — and since
+t_1685f884, the cluster metrics the surfaces draw (host table, serving totals,
+glance metrics) through the real `MonitorSurfaceReading` rules.
 
-It compiles the REAL source (SharedModels-free — the driver's decode structs +
-MonitorContent derivation from MonitorActivityDriver.swift, and the
-MonitorActivityAttributes/ContentState from Shared/MonitorActivity.swift),
-fetches LIVE JSON from the API, decodes it, and prints the derived ContentState.
+It compiles the REAL source — the driver's decode structs + MonitorContent
+derivation from MonitorActivityDriver.swift, the attributes from
+Shared/MonitorActivity.swift, and the three Foundation-only Shared files
+(ClusterNodeTally, ClusterMonitorViewModel, MonitorActivityMetrics) injected
+WHOLE rather than block by block, so the rules under test are the shipped ones
+and not a hand-picked subset that goes stale the next time the rules reach for
+one more helper. It fetches LIVE JSON, decodes it as the SHARED
+`MonitorResponse` (the type the driver decodes this route as), and prints what
+each surface would draw.
 
 Usage: ios-app/scripts/monitor_activity_check/run.py
 Requires the daemon's token file (~/.hscc/api-token) + a reachable API
@@ -65,6 +72,26 @@ def lit(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def strip_import(src):
+    """Drop the file's own `import Foundation` (the harness has exactly one
+    import block) so a WHOLE source file can be injected verbatim."""
+    return src.replace("import Foundation\n", "", 1)
+
+
+WHOLE_FILES = [
+    # (path, why the whole file rather than an extracted block)
+    (("ios-app", "Sources", "Shared", "ClusterNodeTally.swift"),
+     "ServingSummary + FleetFormat + the tally: `MonitorContent.make` and the "
+     "surface rules below both call into it"),
+    (("ios-app", "Sources", "Shared", "ClusterMonitorViewModel.swift"),
+     "the CLI-identical formatters the pushed cells come from, and "
+     "ClusterMetricLevel — the verdicts the surfaces colour themselves from"),
+    (("ios-app", "Sources", "Shared", "MonitorActivityMetrics.swift"),
+     "the t_1685f884 surface rules themselves: what goes on the Lock Screen, "
+     "the compact, the expanded and the minimal, and nothing else"),
+]
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser()
@@ -88,12 +115,17 @@ def main():
     # from that too.
     models_src = open(os.path.join(REPO, "ios-app", "Sources", "HSCC", "Models.swift")).read()
     shared_models_src = open(os.path.join(REPO, "ios-app", "Sources", "Shared", "SharedModels.swift")).read()
-    tally_src = open(os.path.join(REPO, "ios-app", "Sources", "Shared", "ClusterNodeTally.swift")).read()
     serving_row = extract_block(shared_models_src, r"struct ServingRow:")
+    # The SHARED monitor decode + its nested payload: the driver decodes the
+    # route as `MonitorResponse` (t_1685f884) — the same type the widget fetches
+    # and the type `ClusterMonitorViewModel` projects the CLI's tables from — so
+    # this harness has to decode the same shape the app does, not the app's
+    # parallel `ClusterMonitorResponse`.
+    monitor_response = extract_block(shared_models_src, r"struct MonitorResponse:")
+    monitor_payload = extract_block(shared_models_src, r"struct MonitorPayload:")
     monitor_node = extract_block(shared_models_src, r"struct MonitorNode:")
     monitor_sample = extract_block(shared_models_src, r"struct MonitorSample:")
     monitor_workload = extract_block(shared_models_src, r"struct MonitorWorkload:")
-    serving_summary = extract_block(tally_src, r"struct ServingSummary:")
     cluster_mon = extract_block(models_src, r"struct ClusterMonitorResponse:")
     cluster_payload = extract_block(models_src, r"struct ClusterMonitorPayload:")
     cluster_host = extract_block(models_src, r"struct ClusterMonitorHost:")
@@ -111,17 +143,28 @@ def main():
     # have. The driver's decode structs use `Decodable`; the enum uses
     # `MonitorActivityAttributes.ContentState` — all present. Good.
 
+    # WHOLE files, not extracted blocks, for the three Foundation-only ones the
+    # surface rules need: the alternative is this harness guessing which five of
+    # their declarations the rules happen to call THIS week, and going red (or
+    # worse, silently measuring less) every time that set changes.
+    whole = "\n\n".join(
+        "// ---- %s ----\n%s" % (os.path.join(*parts),
+                                 strip_import(open(os.path.join(REPO, *parts)).read()))
+        for parts, _reason in WHOLE_FILES)
+
     models = "\n".join([
         attrs, node_metric, host_metric,
-        serving_row, serving_summary,
+        serving_row, monitor_response, monitor_payload,
         monitor_node, monitor_sample, monitor_workload,
         cluster_mon, cluster_payload, cluster_host, node_sample,
         daemon_host, daemon_cpu, daemon_mem, daemon_disk,
         monitor_content,
+        whole,
     ])
     # The app's `Speakable` protocol isn't part of the harness; strip the
     # conformance (mirrors widget_datapath_live/run.py).
     models = models.replace("Decodable, Speakable", "Decodable")
+    models = models.replace("Codable, Speakable", "Codable")
     # `ActivityAttributes` is unavailable on macOS (the harness compiles for the
     # macOS SDK). The harness only needs the ContentState/NodeMetric/HostMetric
     # types that MonitorContent.make returns — the protocol conformance is
@@ -190,4 +233,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # `sys.exit`, not a bare call: `main()` returns the harness's exit code and
+    # `monitor_activity_check.sh` ends with this command, so calling main and
+    # dropping its result made every FAIL print exit 0 — a gate that reports a
+    # failure and cannot fail the build. Found by tampering with the very rule
+    # this file checks (§7) and watching the FAIL line come back with rc 0.
+    sys.exit(main())
