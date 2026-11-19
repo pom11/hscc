@@ -79,6 +79,13 @@ struct ClusterMonitorHostDetail: Equatable, Identifiable {
          ClusterMonitorField(label: "Load", value: load, level: nil)]
     }
 
+    /// The same line for VoiceOver, which cannot read a run-coloured `Text`
+    /// into words worth hearing. Built from the already-formatted strings, so
+    /// it is the same prose the eyes get.
+    var accessibilityLine: String {
+        ([label] + fields.map { "\($0.label) \($0.value)" }).joined(separator: ", ")
+    }
+
     init(host: MonitorNode) {
         let sample = host.sample
         id = host.host
@@ -301,6 +308,14 @@ enum ClusterMonitorTableLayout {
     static func visibleServingRows(_ rows: [CLIMonitorServingRow],
                                    plan: ClusterMonitorTablePlan) -> [CLIMonitorServingRow] {
         Array(rows.prefix(plan.servingRowLimit))
+    }
+
+    /// One detail line per host, clipped like the tables: the XL block shows at
+    /// most the plan's host rows, and the clip is a layout rule in this file —
+    /// a view that clipped too would be a second owner of it.
+    static func visibleDetails(_ details: [ClusterMonitorHostDetail],
+                               plan: ClusterMonitorTablePlan) -> [ClusterMonitorHostDetail] {
+        Array(details.prefix(plan.hostRowLimit))
     }
 
     /// `+N more` for a clipped block, or nil when nothing was clipped. `total`

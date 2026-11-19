@@ -61,6 +61,13 @@ struct MonitorEntry: TimelineEntry {
     /// site and the table would have silently never arrived. A required
     /// argument makes each new entry site say what it carries.
     let monitor: ClusterMonitorViewModel?
+    /// The two tables the large/extra-large surfaces draw (t_9e64d9d9) — the
+    /// same `GET /v1/cluster/monitor` response as `fleet`, never a third read,
+    /// and required for the reason above. Named apart from `monitor` because the
+    /// two are different projections of that one read: `monitor` is the CLI
+    /// view-model the medium table and the small grid draw, this is the
+    /// large/extra-large LAYOUT.
+    let tableData: ClusterMonitorTables?
     /// The daemon-host machine data, or nil when that read did not answer.
     let daemonHost: MonitorDaemonHost?
     let failure: WidgetDataFailure?
@@ -70,6 +77,13 @@ struct MonitorEntry: TimelineEntry {
     let lastKnownNodeCount: Int
 
     static let availableSections = WidgetSurfaceKind.widgetMonitor.availableSections
+
+    /// The tables a large/extra-large body may draw, or nil — the same gate
+    /// `text(for:)` runs first, so a paused or unconfigured tile cannot paint a
+    /// live-looking table. One owner for the rule, not one per body.
+    var tables: ClusterMonitorTables? {
+        (!configured || paused) ? nil : tableData
+    }
 
     var shortGateLabel: String {
         if !configured { return "Set up in HSCC" }
@@ -160,7 +174,7 @@ struct MonitorEntry: TimelineEntry {
 
     static let unconfigured = MonitorEntry(date: .now, state: .unconfigured,
                                            configured: false, paused: false,
-                                           fleet: nil, monitor: nil, daemonHost: nil,
+                                           fleet: nil, monitor: nil, tableData: nil, daemonHost: nil,
                                            failure: nil, refreshMinutes: 5,
                                            showSections: availableSections,
                                            lastKnownAgeMinutes: nil,
@@ -168,7 +182,7 @@ struct MonitorEntry: TimelineEntry {
 
     static func paused(_ date: Date = .now) -> MonitorEntry {
         MonitorEntry(date: date, state: .paused, configured: true, paused: true,
-                     fleet: nil, monitor: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
+                     fleet: nil, monitor: nil, tableData: nil, daemonHost: nil, failure: nil, refreshMinutes: 0,
                      showSections: availableSections,
                      lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
     }
@@ -177,6 +191,7 @@ struct MonitorEntry: TimelineEntry {
                                           configured: true, paused: false,
                                           fleet: ClusterEntry.placeholder.fleet,
                                           monitor: ClusterEntry.placeholder.monitor,
+                                          tableData: ClusterEntry.placeholder.tableData,
                                           daemonHost: sampleDaemonHost,
                                           failure: nil, refreshMinutes: 5,
                                           showSections: availableSections,
@@ -252,7 +267,7 @@ struct MonitorTimelineProvider: TimelineProvider {
                                 // when the monitor read gave no host list, and
                                 // `FleetProjection` refuses an empty one, so a
                                 // view-model built from it would hold zero rows.
-                                monitor: nil, daemonHost: last?.daemonHost,
+                                monitor: nil, tableData: nil, daemonHost: last?.daemonHost,
                                 failure: failure, refreshMinutes: refreshMinutes,
                                 showSections: showSections,
                                 lastKnownAgeMinutes: failure?.showsStaleData == true ? age : nil,
@@ -271,6 +286,7 @@ struct MonitorTimelineProvider: TimelineProvider {
 
         return MonitorEntry(date: .now, state: state, configured: true, paused: false,
                             fleet: fleet, monitor: monitor,
+                            tableData: ClusterMonitorTables.project(monitorOutcome.value),
                             daemonHost: daemonHost, failure: failure,
                             refreshMinutes: refreshMinutes, showSections: showSections,
                             lastKnownAgeMinutes: nil, lastKnownNodeCount: 0)
