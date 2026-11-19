@@ -317,7 +317,6 @@ struct ExtraLargeMonitorWidget: View {
 /// an accessory refresh refuses that request, and a ring has no room for a second
 /// machine's health. A ring with no measured percentage draws the gated line,
 /// never an empty ring (which would read as an idle fleet).
->>>>>>> 7c8ee4d0 (feat(ios-app): Monitor tile's lock-screen accessories draw the same four numbers)
 struct CircularMonitorWidget: View {
     @Environment(\.widgetStyle) private var style
     let entry: MonitorEntry
