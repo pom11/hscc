@@ -32,6 +32,14 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    bit; `skipped`, never faked, for a non-checkout or a hookless revision).
    Non-fatal: a skipped/failed stage warns that the guard is INACTIVE.
 4. **Install: skills / role profiles / ~/.hscc + serving.json**.
+4a. **Install: main orchestrator board** — creates the board named by the
+   stored main-orchestrator identity (default `general`) and makes it the
+   kanban **current** board, so cards created without an explicit `board=` land
+   there instead of on whichever project board was switched to last.
+   `hermes kanban boards create` is idempotent and the switch is the same
+   pointer write the CLI makes; the legacy `default` board keeps its cards.
+   The doctor row kanban current board (main orchestrator) warns (never
+   fatal) on drift with the one-line `hermes kanban boards switch <name>` fix.
 4b. **Install: snap firmware-notifier mask (log-churn quarantine)** —
    `install_notifier_mask.py` masks snap firmware-updater's crash-looping desktop
    notifier **and the timer that starts it** for the desktop user on every
