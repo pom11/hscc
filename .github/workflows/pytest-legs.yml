@@ -1,0 +1,246 @@
+name: pytest-legs
+
+# Server-side pytest gate for the 12-leg roster in scripts/run_tests.sh
+# (t_23bf61f3).
+#
+# WHY. Before this file, the repo's only test gate appeared in NO workflow:
+# `grep -rn run_tests .github/workflows/` matched nothing, and `gh pr checks 443`
+# / `gh pr checks 446` each returned only `compile` (app-build-checks) and
+# `guard` (address-guard). So a red leg could not block a merge — and "the gate
+# ran and passed" was indistinguishable from "the gate was never run". Measured
+# consequence: hscc-api/tests/test_contract_swift_routes.py was red on main for
+# 1h40m (704f1cb8 #443 -> ce8e87f3 #452) with three PRs merged on top of it, and
+# stopped being red only when the feature under test was deleted. What is
+# observable is the structural fact; this file does NOT claim anyone did or did
+# not run the suite locally, which is not observable from the repo.
+#
+# WHICH LEGS (decision 1). Full matrix on every PR is not free — the roster is
+# ~25 min on a loaded Spark host (measured at 540f8a8b: hscc-bootstrap alone is
+# 285 s), and a gate that makes every unrelated flake a merge blocker gets
+# clicked through, which is worse than no gate. So:
+#
+#   pull_request  -> the legs the touched paths can break, decided by
+#                    .github/scripts/leg_select.py. That map FAILS CLOSED: a path
+#                    it cannot attribute widens to the whole suite, and every
+#                    leg in DIRS is covered by a rule for its own directory
+#                    (pinned by .github/scripts/tests/test_leg_select.py).
+#   push to main  -> EVERY leg. This is the backstop for a wrong map: a
+#                    selection bug on a PR becomes a visible red on main within
+#                    minutes of merge instead of the next "clear the red" card.
+#   dispatch      -> operator's choice, for "run just hscc-api on this branch".
+#
+# BLOCKING OR ADVISORY (decision 2). Same shape as address-guard.yml: one
+# repository variable, not an edit to this file.
+#
+#   Settings -> Secrets and variables -> Actions -> Repository variables
+#     HSCC_TESTS_ENFORCE unset, empty or "false" -> advisory: a red leg is a
+#                                          warning annotation and the job stays
+#                                          green (you see it, nothing blocks)
+#     HSCC_TESTS_ENFORCE=true       -> the job goes RED on a failed leg
+#                                      ("True"/"TRUE"/"1"/"yes" count too: a
+#                                      variable named ENFORCE is never allowed to
+#                                      fail OPEN on capitalisation)
+#     a leg that could not run at all fails EITHER way — see LEGS COULD NOT RUN.
+#
+# Start advisory, for the reason the body of this card gives: a required check
+# that is red for a reason nobody can fix teaches everyone to click through red.
+# There is one such red on main today —
+# hscc-bootstrap/tests/test_bootstrap_isolated.py::
+# test_fresh_home_says_not_wired_instead_of_claiming_success (owner t_ea59a6ba),
+# measured red at 540f8a8b in a standalone run. With leg selection a PR that does
+# not touch hscc-bootstrap/ does not run that leg, so the gate is usable on day
+# one; make it required when that one is green on the runner.
+#
+# To make it block once it is green, require the check "pytest-legs / legs" in
+# branch protection (PRs only, like address-guard's option b):
+#
+#   gh api -X PUT repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks \
+#     -f strict=true -f contexts[]=legs
+#
+# Two facts carried over from address-guard.yml: a check is only selectable once
+# it has run successfully in the repo within 7 days, and a workflow that triggers
+# on push but NOT pull_request never runs on the PR head and leaves a PR
+# permanently blocked — so keep BOTH triggers.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: "Space-separated legs to run (empty = decide from the diff; full roster on push)"
+        required: false
+        default: ""
+      enforce:
+        description: "Force the blocking posture for this run only (true = a red leg fails the job)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pytest-legs-${{ github.ref }}
+  # A superseded push to the same PR is worth cancelling at ~25 min a run. Pushes
+  # to main never are: a CANCELLED check counts against branch protection, and a
+  # cancelled full-suite run on main loses the backstop this file exists to keep.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  legs:
+    runs-on: ubuntu-latest
+    # The suite is designed to run THIN: every hermes-integration case skips
+    # through a named probe module when hermes is not importable
+    # (scripts/run_tests.sh's "the sibling interpreter is THIN on purpose" block
+    # and docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md), and `-rs`
+    # makes each skip reason visible in this log. A GitHub runner with
+    # requirements.txt and no hermes is exactly that posture.
+    #
+    # KNOWN GAP, stated rather than hidden: ubuntu-latest does not cover
+    # macOS-specific behaviour. The Apple clients are covered by
+    # app-build-checks.yml (macos-latest, swiftc-only). If a leg ever goes green
+    # here and red on a Spark host because of the OS, change runs-on to
+    # macos-latest — that is a one-line decision, not a redesign.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The touched-path diff needs the merge base, so no shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.13, to match the sibling interpreter the dual-interpreter stamp
+          # already runs the roster under (~/miniconda3/envs/p313) rather than
+          # adding a third CPython posture nobody stamps.
+          python-version: "3.13"
+
+      - name: Install the test dependencies
+        # requirements.txt is the deployed plugin dependency set; pytest is the
+        # only extra. Nothing here installs hermes, which is the point: the
+        # hermes-gap probes must skip, and they skip LOUDLY under -rs.
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+          python -m pytest --version
+          python -c 'import sys; print("python", sys.version)'
+
+      - name: Decide which legs this change must run
+        id: legs
+        env:
+          # All dynamic values reach the shell through the environment, never
+          # inlined into the script, so a branch name cannot inject commands.
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+          INPUT_LEGS: ${{ github.event.inputs.legs }}
+        run: |
+          set -uo pipefail
+          CHANGED="${RUNNER_TEMP}/changed.txt"
+          : >"$CHANGED"
+
+          if [ -n "${INPUT_LEGS// }" ]; then
+            echo "legs=${INPUT_LEGS}" >>"$GITHUB_OUTPUT"
+            echo "full_suite=false" >>"$GITHUB_OUTPUT"
+            echo "legs: FORCED by workflow_dispatch input -> ${INPUT_LEGS}"
+            echo "reason=dispatch-input" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base=""; head=""
+          case "${EVENT}" in
+            pull_request) base="${BASE_SHA}"; head="${PR_HEAD_SHA}" ;;
+            push)         base="${PUSH_BEFORE}"; head="${PUSH_SHA}" ;;
+            *)            base=""; head="" ;;
+          esac
+
+          # Anything we cannot diff (new branch, force-push with the old sha gone,
+          # a bare dispatch) means "we do not know what changed" — and not knowing
+          # runs everything. That is the same fail-closed rule the map uses.
+          if [ -z "$base" ] || [ -z "$head" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "no usable base (${base:-none}) -> FULL suite"
+            echo "legs=" >>"$GITHUB_OUTPUT"
+            echo "full_suite=true" >>"$GITHUB_OUTPUT"
+            echo "reason=no-diffable-base" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git diff --name-only "$base" "$head" >"$CHANGED"; then
+            echo "git diff ${base}..${head} failed -> FULL suite"
+            echo "legs=" >>"$GITHUB_OUTPUT"
+            echo "full_suite=true" >>"$GITHUB_OUTPUT"
+            echo "reason=diff-failed" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed files:"; sed 's/^/  /' "$CHANGED"
+          # The selector prints the widening and the final roster; its exit is
+          # not a verdict, so it is checked explicitly rather than assumed.
+          if ! python .github/scripts/leg_select.py \
+                 --paths-file "$CHANGED" --github-output "$GITHUB_OUTPUT"; then
+            echo "::error::leg_select could not read the roster from scripts/run_tests.sh"
+            exit 1
+          fi
+          echo "reason=map" >>"$GITHUB_OUTPUT"
+
+      - name: Run the selected legs
+        # The exit code is decided here, not by continue-on-error, so the
+        # advisory/blocking switch cannot turn a "could not run" into a pass.
+        env:
+          ENFORCE: ${{ vars.HSCC_TESTS_ENFORCE }}
+          FORCED_ENFORCE: ${{ github.event.inputs.enforce }}
+          LEGS: ${{ steps.legs.outputs.legs }}
+        run: |
+          set -uo pipefail
+          LOG="${RUNNER_TEMP}/legs.log"
+          # Leg names come from scripts/run_tests.sh's roster, never from user
+          # text; HSCC_TEST_LEGS with an unknown name exits 64 before any leg.
+          if [ -n "${LEGS:-}" ]; then
+            export HSCC_TEST_LEGS="$LEGS"
+          fi
+          # 0 disables the per-leg heartbeat watcher here: it exists so a human
+          # watching a 25-minute local file can tell slow from stopped, and a CI
+          # log streams live already.
+          export HSCC_LEG_HEARTBEAT_SECONDS=0
+          bash scripts/run_tests.sh >"$LOG" 2>&1
+          rc=$?
+          cat "$LOG"
+
+          echo "### pytest legs" >>"$GITHUB_STEP_SUMMARY"
+          sed -n '/━━━ Summary ━━━/,$p' "$LOG" >>"$GITHUB_STEP_SUMMARY" || true
+
+          if [ "$rc" -eq 0 ]; then
+            echo "legs: ALL GREEN"
+            exit 0
+          fi
+          if [ "$rc" -eq 64 ]; then
+            echo "::error::the leg selection was rejected by scripts/run_tests.sh (exit 64) — nothing ran"
+            exit 64
+          fi
+
+          # LEGS COULD NOT RUN — red in advisory mode too. run_tests.sh returns 1
+          # for any failed leg, and pytest's own usage/internal/no-tests-collected
+          # codes arrive in the summary as "pytest exit N" with N != 1. A leg that
+          # collected zero tests is the silent-green case this whole gate exists
+          # to close, so it is never allowed to read as advisory noise.
+          if grep -Eq 'pytest exit (0|[2-9]|1[0-9])' "$LOG"; then
+            echo "::error::a leg exited with a non-test-failure code (see the Summary above) — the harness, not a test, is broken"
+            exit 1
+          fi
+
+          # A real test failure: advisory unless the repository variable says
+          # enforce. Normalised so a capitalised ENFORCE can never fail OPEN.
+          enforcelc="$(printf '%s' "${ENFORCE:-}" | tr '[:upper:]' '[:lower:]')"
+          if [ "${FORCED_ENFORCE:-}" = "true" ]; then enforcelc=true; fi
+          case "$enforcelc" in
+            true|1|yes)
+              echo "::error::a test leg is red — see the Summary above"
+              exit "$rc"
+              ;;
+          esac
+          echo "::warning::a test leg is red (advisory: HSCC_TESTS_ENFORCE is not set to true) — see the Summary above"
+          exit 0
