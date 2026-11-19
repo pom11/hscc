@@ -322,3 +322,61 @@ def test_hermes_homes_keeps_exported_home_first_over_its_root(tmp_path):
     assert hermes_python.hermes_homes(
         {"HERMES_HOME": str(profile)}, home=str(tmp_path)) == \
         [str(profile), str(root)]
+
+
+# --------------------------------------------------------------------------- #
+# kanban_root / kanban_root_refusal — the fail-closed board-root contract
+# --------------------------------------------------------------------------- #
+
+def test_kanban_root_defaults_to_the_native_home(tmp_path):
+    assert hermes_python.kanban_root({}, home=str(tmp_path)) == \
+        str(tmp_path / ".hermes")
+
+
+def test_kanban_root_honours_a_custom_home_outside_the_native_one(tmp_path):
+    sandbox = tmp_path / "sandbox"
+    assert hermes_python.kanban_root(
+        {"HERMES_HOME": str(sandbox)}, home=str(tmp_path / "home")) == \
+        str(sandbox)
+
+
+def test_kanban_root_walks_a_profile_home_up_to_its_root(tmp_path):
+    root = tmp_path / "srv" / "hermes"
+    profile = root / "profiles" / "worker"
+    assert hermes_python.kanban_root(
+        {"HERMES_HOME": str(profile)}, home=str(tmp_path)) == str(root)
+
+
+def test_kanban_root_resolves_a_home_inside_the_native_root_back_to_it(
+        tmp_path):
+    """The t_d39c720e trap: a throwaway under ~/.hermes is still the live tree."""
+    native = tmp_path / ".hermes"
+    throwaway = native / "scratch" / "throwaway"
+    assert hermes_python.kanban_root(
+        {"HERMES_HOME": str(throwaway)}, home=str(tmp_path)) == str(native)
+
+
+def test_kanban_root_honours_hermes_kanban_home_first(tmp_path):
+    pin = tmp_path / "pinned"
+    assert hermes_python.kanban_root(
+        {"HERMES_HOME": str(tmp_path / "home"), "HERMES_KANBAN_HOME": str(pin)},
+        home=str(tmp_path)) == str(pin)
+
+
+def test_kanban_root_refusal_allows_the_target_and_its_subdirs(tmp_path):
+    target = tmp_path / "sandbox"
+    assert hermes_python.kanban_root_refusal(
+        str(target), {"HERMES_HOME": str(target)}) is None
+    assert hermes_python.kanban_root_refusal(
+        str(target), {"HERMES_HOME": str(target),
+                      "HERMES_KANBAN_HOME": str(target / "kanban-home")}) is None
+
+
+def test_kanban_root_refusal_is_fail_closed_and_names_both_roots(tmp_path):
+    target = tmp_path / "sandbox"
+    foreign = tmp_path / "foreign"
+    detail = hermes_python.kanban_root_refusal(
+        str(target), {"HERMES_HOME": str(target),
+                      "HERMES_KANBAN_HOME": str(foreign)})
+    assert detail and str(target) in detail and str(foreign) in detail
+    assert "HERMES_KANBAN_HOME" in detail

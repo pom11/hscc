@@ -433,9 +433,18 @@ fi
 # same pointer write the CLI makes. The legacy `default` board keeps its cards.
 # Runs after profile provisioning so the name is stored and its board can share
 # the identity. Non-fatal: a failed board stage warns with the one-line fix.
+#
+# FAIL-CLOSED ORDER (t_abe94f61, t_6f4895aa): main_board.ensure refuses when the
+# kanban root Hermes would resolve is outside the target HERMES_HOME (a stale
+# HERMES_KANBAN_HOME, or a home inside the native ~/.hermes that resolves back
+# to live state), and it DEFERS while that home has no config.yaml. The deferral
+# is deliberate: driving the CLI here initialises the home first (SOUL, logs,
+# board — config.yaml on a first-run init), so the wiring stage below can no
+# longer tell a genuinely fresh machine from a re-install. Start Hermes once,
+# then re-run bootstrap.
 hdr "Install: main orchestrator board"
 if $DRY_RUN; then
-  plan "main orchestrator board: $PYBIN $BOOT_DIR/main_board.py ensure (hermes kanban boards create + switch; writes $HERMES_HOME/kanban; the default board keeps its cards)"
+  plan "main orchestrator board: $PYBIN $BOOT_DIR/main_board.py ensure (hermes kanban boards create + switch; writes $HERMES_HOME/kanban; the default board keeps its cards; deferred until Hermes has initialised the home)"
 elif BOARD_JSON=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
     "$PYBIN" "$BOOT_DIR/main_board.py" ensure 2>&1); then
   BOARD_NAME=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
@@ -445,8 +454,15 @@ else
   BOARD_ERR=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
     'import json,sys;print(json.load(sys.stdin).get("detail") or "?")' 2>/dev/null \
     || printf '%s' "$BOARD_JSON")
+  BOARD_ACTION=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin).get("action") or "")' 2>/dev/null \
+    || true)
   warn "main orchestrator board not ensured: $BOARD_ERR"
-  warn "  fix: hermes kanban boards create ${MAIN_ORCH_NAME:-general} --switch"
+  if [ "$BOARD_ACTION" = "hermes-not-started" ]; then
+    warn "  fix: start Hermes once (it creates $HERMES_HOME/config.yaml), then re-run hscc-bootstrap"
+  else
+    warn "  fix: hermes kanban boards create ${MAIN_ORCH_NAME:-general} --switch"
+  fi
 fi
 
 # Guarded review-skill fan-out (t_bc611809): the dispatcher force-injects

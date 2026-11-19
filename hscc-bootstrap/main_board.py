@@ -17,6 +17,14 @@ Two surfaces:
   five-field Check dict; drift is a WARNING (fix with one ``boards switch``),
   never a reason to abort an install.
 
+Both surfaces fail closed on a foreign kanban root. :func:`ensure` refuses
+when the root Hermes would use (``HERMES_KANBAN_HOME`` else the root derived
+from ``HERMES_HOME``) is outside the home this run was told to install into,
+and defers while that home has no ``config.yaml`` (Hermes has never run there).
+The deferral is what lets a genuinely fresh install reach the wiring stage
+still config-less, so it reports ``NOT WIRED`` instead of a true-but-misleading
+"config wired".
+
 No live state is written by the check. Tests drive both surfaces with an
 injected runner / kanban library, so no suite needs the operator's boards.
 """
@@ -50,6 +58,49 @@ def _load_main_orch():
 def main_board(hscc_dir=None) -> str:
     """The board slug bootstrap must create and switch to."""
     return _load_main_orch().main_board(hscc_dir)
+
+
+def _load_hermes_python():
+    """Import ``hscc_daemon/hermes_python.py`` (the canonical kanban-root rule).
+
+    Deferred + path-guarded, same pattern as ``backup_util``/``apply_patches``:
+    the module ships beside this plugin in both the repo and the deployed
+    plugins payload. ``None`` is a hard failure for the guard below, never a
+    reason to skip it.
+    """
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        pass
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+    try:
+        from hscc_daemon import hermes_python
+        return hermes_python
+    except Exception:
+        return None
+
+
+def _kanban_root_refusal(board=None) -> dict:
+    """The fail-closed guard result for the home this run targets.
+
+    Returns the refusal dict to return from :func:`ensure`, or an empty dict
+    when the resolved kanban root is under the target home. HERMES_HOME is
+    honoured only for a root outside the native ``~/.hermes`` (Hermes' own
+    rule), so a "throwaway" home placed inside the live tree is refused too.
+    """
+    hermes_python = _load_hermes_python()
+    if hermes_python is None:
+        return {"ok": False, "board": board or "", "action": "guard-unavailable",
+                "detail": "cannot load the kanban-root guard "
+                          "(hscc_daemon/hermes_python.py) — refusing to write "
+                          "board state"}
+    detail = hermes_python.kanban_root_refusal(_hermes_root())
+    if not detail:
+        return {}
+    return {"ok": False, "board": board or "", "action": "kanban-root-refused",
+            "detail": detail}
 
 
 def _hermes_root() -> str:
@@ -102,6 +153,22 @@ def ensure(hscc_dir=None, *, hermes_bin=None, runner=None) -> dict:
     except Exception as exc:  # noqa: BLE001 — report, never crash bootstrap
         return {"ok": False, "board": "", "action": "resolver-error",
                 "detail": f"cannot resolve the main board: {exc}"}
+    refusal = _kanban_root_refusal(board)
+    if refusal:
+        return refusal
+    # Hermes creates <root>/config.yaml on its first run. Without it the wiring
+    # stage (six stages later) has nothing to wire and must still be able to
+    # report NOT WIRED; driving the CLI here initialises the home first (SOUL,
+    # logs, board — and config.yaml on a first-run init) and makes a fresh
+    # machine look like a re-install (t_6f4895aa).
+    config = os.path.join(_hermes_root(), "config.yaml")
+    if not os.path.isfile(config):
+        return {"ok": False, "board": board, "action": "hermes-not-started",
+                "detail": (f"Hermes has not initialised {_hermes_root()!r} "
+                           f"(no config.yaml); deferring board creation so the "
+                           f"install stays visibly NOT WIRED. Start Hermes once, "
+                           f"then re-run hscc-bootstrap (or: hermes kanban "
+                           f"boards create {board} --switch)")}
     binary = find_hermes_bin(hermes_bin)
     if not binary:
         return {"ok": False, "board": board, "action": "missing-hermes",

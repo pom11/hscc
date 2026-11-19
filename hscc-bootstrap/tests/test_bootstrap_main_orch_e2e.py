@@ -5,8 +5,11 @@ pointer, pane start, daemon wake-ups). This file drives the REAL installer in a
 throwaway HERMES_HOME / HSCC_DIR with a fake sparkrun fleet, so the pieces are
 proven to meet in the shipped order:
 
-  * fresh ``--yes`` install -> profile ``general``, board ``general`` current,
-    the four daemon wake-ups visible through ``hscc main wakeups list``;
+  * fresh ``--yes`` install on a host where Hermes has run once -> profile
+    ``general``, board ``general`` current, the four daemon wake-ups visible
+    through ``hscc main wakeups list``;
+  * a first install where Hermes has NEVER run -> the board stage defers, the
+    home stays config-less and the wiring stage reports NOT WIRED (t_6f4895aa);
   * fresh install with a custom name -> the same, named by the answer;
   * upgrade from an install carrying ``general-orch`` + ``orchestrator`` +
     the legacy ``default`` board -> nothing deleted, both SOULs retired, the
@@ -54,13 +57,21 @@ def _payload_tree(tmp_path):
     return root
 
 
-def _sandbox(tmp_path):
-    """Throwaway home + fake sparkrun + a real Hermes venv (symlinked dir)."""
+def _sandbox(tmp_path, *, hermes_initialised=True):
+    """Throwaway home + fake sparkrun + a real Hermes venv (symlinked dir).
+
+    ``hermes_initialised`` writes the ``config.yaml`` Hermes creates on its
+    first run. A real install on a healthy host has one; ``False`` models a
+    machine where Hermes has never been started (t_6f4895aa).
+    """
     home = tmp_path / "home"
     hermes = home / ".hermes"
     (hermes / "hermes-agent" / "venv").mkdir(parents=True)
     (hermes / "hermes-agent" / "venv").rmdir()
     (hermes / "hermes-agent" / "venv").symlink_to(REAL_HERMES_AGENT / "venv")
+    if hermes_initialised:
+        (hermes / "config.yaml").write_text("_config_version: 52\n",
+                                            encoding="utf-8")
     hscc = home / ".hscc"
     hscc.mkdir()
     binp = home / "bin"
@@ -191,7 +202,33 @@ def test_fresh_yes_install_creates_general_profile_board_and_wakeups(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, f"bootstrap failed:\n{out[-4000:]}"
     assert "HSCC installed" in out
+    assert "config wired (" in out, \
+        "a home Hermes already initialised must report the wiring it did"
     _assert_installed(sandbox, "general")
+
+
+@needs_runtime
+def test_first_install_before_hermes_ever_ran_defers_the_board_and_stays_unwired(
+        tmp_path):
+    """t_6f4895aa: on a genuinely fresh home the board stage must not run the
+    Hermes CLI. Doing so creates config.yaml, and the wiring stage six stages
+    later then reports "config wired" on a machine nothing ever wired."""
+    tree = _payload_tree(tmp_path)
+    sandbox = _sandbox(tmp_path, hermes_initialised=False)
+    proc = _bootstrap(tree, sandbox)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, f"bootstrap failed:\n{out[-4000:]}"
+    assert "NOT WIRED" in out, out[-2000:]
+    assert "config wired (" not in out, \
+        "claimed success on a home where Hermes has never run"
+    assert not (sandbox["hermes"] / "config.yaml").exists(), \
+        "a bootstrap stage created Hermes' config.yaml before Hermes did"
+    assert not (sandbox["hermes"] / "kanban").exists(), \
+        "a bootstrap stage drove the Hermes CLI into a home it never initialised"
+    assert _current_board(sandbox) == "default", \
+        "the main board must not be created before Hermes initialised the home"
+    # The identity/profile work still happened; only the board is deferred.
+    assert (sandbox["hermes"] / "profiles" / "general" / "SOUL.md").is_file()
 
 
 @needs_runtime
