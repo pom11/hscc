@@ -229,6 +229,127 @@ func monitorActivitySurfaces(_ c: DecodeCheck) {
     }
 }
 
+/// One row of the glance-rule table: what was told, and what the two slots must
+/// come back with. `nil` fields are part of the expectation (a slot that must
+/// stay empty is as much a rule as a slot that must hold a number).
+private struct GlanceCase {
+    let name: String
+    let nodes: [MonitorNode]
+    let serving: [ServingRow]?
+    let wantPrimary: MonitorPrimaryMetric?
+    let wantSecondary: MonitorPrimaryMetric?
+}
+
+/// The glance ladder, on payloads this file builds.
+///
+/// WHY SYNTHETIC, and what that bought: both committed captures put the hottest
+/// CPU temperature and the hottest GPU temperature on the SAME host (measured:
+/// `.13` holds both in the live capture, `node-11` in the edge one), so the
+/// ORDER of `primaryMetric` — "GPU heat first" — is invisible in them. The first
+/// version of this file "proved" that order off the edge fixture and passed a
+/// mutation that swapped the two branches, because picking the hottest-CPU row
+/// and then printing its GPU column happened to be the same answer. A rule a
+/// mutation cannot redden is not being checked, so the order is pinned here on
+/// hosts built so the two maxima sit on different machines.
+func monitorActivityGlanceLadder(_ c: DecodeCheck) {
+    let fixture = "monitor glance ladder (built, not captured)"
+    /// A host built to carry EXACTLY the columns a case is about. Reusing a
+    /// node that also carries a temperature was this file's own first bug: the
+    /// "no heat at all" case inherited a GPU temp from a borrowed node and the
+    /// rule correctly led with heat, which read like a broken rule.
+    func made(_ host: String, _ hostname: String, util: String? = nil,
+              cpuTemp: String? = nil, gpuTemp: String? = nil) -> MonitorNode {
+        MonitorNode(host: host, error: nil,
+                    sample: MonitorSample(hostname: hostname, gpu_util_pct: util,
+                                          cpu_temp_c: cpuTemp, gpu_temp_c: gpuTemp),
+                    used_slots: nil, free_slots: nil, workloads: nil)
+    }
+    let hotCPU = made("192.0.2.50", "hot-cpu", util: "10", cpuTemp: "90", gpuTemp: "40")
+    let hotGPU = made("192.0.2.51", "hot-gpu", util: "88", cpuTemp: "10", gpuTemp: "55")
+    let quiet = made("192.0.2.52", "quiet")
+    let queue = (try? JSONDecoder().decode(
+        [ServingRow].self,
+        from: Data(#"[{"node":"192.0.2.50","port":"8000","model":"org/Model-A","running":3,"waiting":2}]"#.utf8))) ?? []
+    let busy = (try? JSONDecoder().decode(
+        [ServingRow].self,
+        from: Data(#"[{"node":"192.0.2.50","port":"8000","model":"org/Model-A","running":3,"waiting":0}]"#.utf8))) ?? []
+
+    let cases: [GlanceCase] = [
+        GlanceCase(name: "GPU heat outranks a hotter CPU on another host",
+                   nodes: [hotCPU, hotGPU], serving: nil,
+                   wantPrimary: MonitorPrimaryMetric(kind: .gpuTemp, value: "55°C", label: "hot-gpu", level: .ok),
+                   wantSecondary: MonitorPrimaryMetric(kind: .tally, value: "2/2 up", label: nil, level: nil)),
+        GlanceCase(name: "no GPU heat at all, so CPU heat leads",
+                   nodes: [made("192.0.2.50", "hot-cpu", cpuTemp: "61.9"), quiet], serving: nil,
+                   wantPrimary: MonitorPrimaryMetric(kind: .cpuTemp, value: "62°C", label: "hot-cpu", level: .ok),
+                   wantSecondary: MonitorPrimaryMetric(kind: .tally, value: "2/2 up", label: nil, level: nil)),
+        GlanceCase(name: "no heat at all, so the busiest host's GPU utilization leads",
+                   nodes: [made("192.0.2.50", "idle-one", util: "10"),
+                           made("192.0.2.51", "busy-one", util: "88")], serving: nil,
+                   wantPrimary: MonitorPrimaryMetric(kind: .gpuUtil, value: "88%", label: "busy-one", level: .warn),
+                   wantSecondary: MonitorPrimaryMetric(kind: .tally, value: "2/2 up", label: nil, level: nil)),
+        GlanceCase(name: "a queue is all there is: the run count leads, the queue trails",
+                   nodes: [quiet], serving: queue,
+                   wantPrimary: MonitorPrimaryMetric(kind: .serving, value: "3 run", label: nil, level: .warn),
+                   wantSecondary: MonitorPrimaryMetric(kind: .waiting, value: "2 wait", label: nil, level: .warn)),
+        GlanceCase(name: "an idle queue is the run count, in the CLI's ok, and it is not repeated",
+                   nodes: [quiet], serving: busy,
+                   wantPrimary: MonitorPrimaryMetric(kind: .serving, value: "3 run", label: nil, level: .ok),
+                   wantSecondary: nil),
+        GlanceCase(name: "hosts and nothing else: the tally leads and the duplicate slot is dropped",
+                   nodes: [quiet], serving: nil,
+                   wantPrimary: MonitorPrimaryMetric(kind: .tally, value: "1/1 up", label: nil, level: nil),
+                   wantSecondary: nil),
+        GlanceCase(name: "a tie goes to the host the route listed first, and the label names it",
+                   nodes: [made("192.0.2.50", "hot-cpu", gpuTemp: "40"),
+                           made("192.0.2.53", "also-hot", gpuTemp: "40")], serving: nil,
+                   wantPrimary: MonitorPrimaryMetric(kind: .gpuTemp, value: "40°C", label: "hot-cpu", level: .ok),
+                   wantSecondary: MonitorPrimaryMetric(kind: .tally, value: "2/2 up", label: nil, level: nil)),
+    ]
+
+    for one in cases {
+        let payload = MonitorSurfaceReading.payload(nodes: one.nodes, serving: one.serving)
+        c.expect(fixture, "\(one.name)",
+                 payload.primary == one.wantPrimary && payload.secondary == one.wantSecondary,
+                 "primary \(String(describing: payload.primary)) (want \(String(describing: one.wantPrimary))), "
+                 + "secondary \(String(describing: payload.secondary)) (want \(String(describing: one.wantSecondary)))")
+    }
+
+    // The control for the case above: the two maxima really are on different
+    // hosts. If a future edit makes them the same host, the ordering case stops
+    // proving anything and this names that, instead of the suite going quiet.
+    c.expect(fixture, "control — the ordering case's hottest CPU and hottest GPU are on different hosts",
+             MonitorSurfaceReading.hottestRow(rows: [hotCPU, hotGPU].map { CLIMonitorHostRow(node: $0) },
+                                              key: { $0.cpuTempC })?.displayLabel == "hot-cpu"
+             && MonitorSurfaceReading.hottestRow(rows: [hotCPU, hotGPU].map { CLIMonitorHostRow(node: $0) },
+                                                 key: { $0.gpuTempC })?.displayLabel == "hot-gpu",
+             "both maxima are on one host, so the ordering case above is vacuous")
+
+    // The same argument one level down, on the row-picking itself. Swapping the
+    // two `if let row = hottestRow(...)` branches in `primaryMetric` — i.e.
+    // "look for the hottest CPU first, then print whatever GPU temperature that
+    // host happens to have" — is a real edit someone could make, and NEITHER
+    // committed capture reddens it: in both of them the hottest CPU and the
+    // hottest GPU are the same host, so the wrong branch still prints the right
+    // cell. This constructed pair is what separates the two branches: the
+    // hottest CPU is on `cpu-hot`, the hottest GPU on `gpu-hot`.
+    let twoHosts = [
+        MonitorNode(host: "192.0.2.60", error: nil,
+                    sample: MonitorSample(hostname: "cpu-hot", cpu_temp_c: "70", gpu_temp_c: "40"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+        MonitorNode(host: "192.0.2.61", error: nil,
+                    sample: MonitorSample(hostname: "gpu-hot", cpu_temp_c: "55", gpu_temp_c: "91"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+    ]
+    let ordered = MonitorSurfaceReading.primaryMetric(nodes: twoHosts, servingRunning: nil,
+                                                      servingWaiting: nil, nodesUp: 2, nodesTotal: 2)
+    c.expect(fixture, "control — the glance rule follows GPU heat across hosts, not the hottest CPU's row",
+             ordered?.kind == .gpuTemp && ordered?.value == "91°C" && ordered?.label == "gpu-hot"
+             && ordered?.level == .critical,
+             "primary \(String(describing: ordered)) — expected the hottest GPU (91 C on gpu-hot), "
+             + "not the hottest CPU host's gpu cell")
+}
+
 /// The edge capture: 7 hosts (two unreachable, one with no sample at all, one
 /// on the tailnet, one whose GPU columns are `-`), one down backend row, three
 /// model totals with a non-empty queue. Everything the honest-degrade rules
@@ -293,10 +414,11 @@ func monitorActivityEdgeSurfaces(_ c: DecodeCheck) {
                  && surface.servingRunning == 3 && surface.servingWaiting == 4,
                  "secondary \(String(describing: surface.secondary)), aggregate \(String(describing: surface.servingRunning))/\(String(describing: surface.servingWaiting))")
 
-        // The primary rule is an ORDER, and this fixture is what makes the order
-        // observable: 87.25 C of CPU heat is hotter than 71.5 C of GPU heat, so a
-        // re-ordered rule prints `87°C` and goes red here.
-        c.expect(fixture, "\(label): GPU heat outranks CPU heat even when the CPU is hotter",
+        // On THIS capture the hottest CPU and the hottest GPU are the same host
+        // (`node-11`, 87.25 C against 71.5 C), so this check pins which host and
+        // cell the glance picked from real bytes — it cannot see the ORDER of the
+        // rule, and `monitorActivityGlanceLadder` is the one that does.
+        c.expect(fixture, "\(label): the glance metric names the hottest-GPU host and its cell",
                  surface.primary?.kind == .gpuTemp && surface.primary?.value == "72°C"
                  && surface.primary?.label == "node-11" && surface.primary?.level == .ok,
                  "primary \(String(describing: surface.primary))")

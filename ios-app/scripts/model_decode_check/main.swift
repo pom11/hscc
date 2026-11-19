@@ -929,6 +929,7 @@ c.assertions("v1_cluster_history_tier_axis.json",
 // truncates silently fails here rather than on a lock screen.
 monitorActivitySurfaces(c)
 monitorActivityEdgeSurfaces(c)
+monitorActivityGlanceLadder(c)
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
