@@ -821,8 +821,13 @@ def test_generator_refuses_a_signature_the_cli_does_not_take(tmp_path):
 
     Rewriting the copy card's notify bullet to an option the CLI has never
     had used to align() cleanly and render straight onto the page — only the
-    `--write` step stood between it and a published false claim.
+    `--write` step stood between it and a published false claim. So this drives
+    the real entry point with `--write` against a copy of the page: the
+    generator has to refuse, leave the page byte-identical, and name the
+    argument it refused.
     """
+    import gen_site_commands as g
+
     copy = _copy_groups()
     bullet = [it for grp in copy for it in grp["items"]
               if it["sig"].startswith("notify")]
@@ -834,6 +839,19 @@ def test_generator_refuses_a_signature_the_cli_does_not_take(tmp_path):
     assert "--frobnicate" in " ".join(problems)
     assert [r["sig"] for r in rows if r["sig"].startswith("notify")] == [
         "notify --frobnicate XYZ"], "the row is still built from the copy card"
+
+    # ...and --write must not publish it.
+    card = tmp_path / "COPY.md"
+    card.write_text(COPY_MD.read_text(encoding="utf-8").replace(
+        '- `hscc notify "<title>" "<body>"`', '- `hscc notify --frobnicate XYZ`'),
+        encoding="utf-8")
+    page = tmp_path / "index.html"
+    before = INDEX_HTML.read_text(encoding="utf-8")
+    page.write_text(before, encoding="utf-8")
+    assert g.main(["--help-file", str(HELP_FIXTURE), "--copy", str(card),
+                   "--page", str(page), "--write", "--quiet"]) == 1, (
+        "--write published a signature the CLI does not have")
+    assert page.read_text(encoding="utf-8") == before, "--write touched the page"
 
 
 def test_generator_refuses_an_argument_the_cli_dropped(tmp_path):
