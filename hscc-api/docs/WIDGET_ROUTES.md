@@ -26,6 +26,7 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
 | `POST /v1/alerts` | `hscc notify` (main orchestrator, daemon, operators) | `routes_alerts.handle_post_alert` | `hscc_daemon.alerts.post_alert` — the same store/rules `hscc notify` reaches over HTTP |
 | `GET /v1/alerts?since=<id>` | "Needs me" widget, macOS menu bar dropdown (`NeedsMeWidget.swift` / `DashboardView.swift`) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
+| `GET /v1/merge-queue` | widget/extension read of the local queue; `hscc kanban monitor`'s per-project tables | `routes_merge_queue.handle_merge_queue` | `hscc_daemon.merge_queue.view` — exactly the rows `hscc kanban monitor` renders (and `hscc project review --queue` reads for its `merge` column) |
 | `POST /v1/alerts/<id>/ack` | CLI only (`hscc notify ack`); the apps are read-only | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
 
 
@@ -376,6 +377,33 @@ orchestrator answers healthy, the status read reports `state: "up"`,
 **read-only** — it does not rewrite the file. The daemon's own disabled-state
 cycle performs the same reconcile (debounced) so the file heals too.
 
+## GET /v1/merge-queue
+
+Source: `hscc_daemon/merge_queue.py::view()` — the same rows
+`hscc kanban monitor` renders as its per-project "merge queue" tables, and the
+same ledger (`~/.hscc/merge-queue-state.json`) the daemon's queue tick owns.
+The route is a pure read: it never ticks the queue, runs git/gh, or writes the
+ledger. `?board=<slug>` narrows to the project whose registry `board` matches,
+mirroring `hscc kanban monitor --board`.
+
+| field | type | meaning |
+|---|---|---|
+| `projects` | object | project name → `{enabled, paused, repo, queue_len, rows, last}` |
+| `projects[].rows` | array | that project's queue rows, FIFO first |
+| `rows` | array | every project's rows flattened, in registry order |
+| `count` / `queued` | integer | all rows / rows whose state is `queued` |
+| `rows[].project` | string | registry project name |
+| `rows[].position` | integer/null | FIFO position (`1` is next); null for the in-flight claim and the last-outcome row |
+| `rows[].pr` | integer/null | PR number |
+| `rows[].card` | string/null | card id the resolve handback targets |
+| `rows[].branch` | string/null | the PR's head branch (`gh pr view`'s `headRefName`), recorded when the daemon first claims the PR |
+| `rows[].state` | string | `queued`, `rebasing`, `gating`, `merging`, `resolve`, `merged` or `failed` |
+| `rows[].age_s` | number/null | seconds since enqueue for live rows, since the outcome for a last-result row |
+| `rows[].last_result` | string/null | this row's recorded result (`merged`, `conflict`, `red-gate`, `error`) or `retry` |
+| `rows[].detail` | string/null | conflicted files, the failing gate, or the recorded error |
+| `rows[].is_last` | bool | true on the project's last-outcome row when it is no longer queued |
+| `speak` | string | one-line summary |
+
 ## GET /v1/metrics/history
 
 Source: `hscc_daemon/metrics_history.py` — `MetricsStore.host_rows` /
@@ -546,7 +574,9 @@ you"` with the update age; a failed read renders the shared client's reason
   the same fixture state and asserts equal rows/numbers (card t_8743f98c).
   Its `test_alerts_api_matches_notify_list` pins the alert route and
   `hscc notify list` to the same rows/order before `NeedsMeFeed` applies the
-  unacknowledged filter (card R3).
+  unacknowledged filter (card R3), and
+  `test_merge_queue_api_matches_the_monitor_view` pins `/v1/merge-queue` to
+  `merge_queue.view()` — the rows `hscc kanban monitor` draws (card MQ4).
   builds one SQLite board, serves it through the route's flightdeck seam and
   through `hscc_daemon.kanban_live.collect` (the function behind
   `hscc kanban monitor --json`), and asserts identical status histograms.

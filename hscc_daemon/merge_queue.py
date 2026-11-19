@@ -39,6 +39,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 
 STREAM_NAME = "merge_queue"
 STATE_VERSION = 1
@@ -192,20 +193,24 @@ def _find_entry(queue, pr):
     return None
 
 
-def add_to_queue(project, pr, card=None, assignee=None, state=None,
-                 path=None):
+def add_to_queue(project, pr, card=None, assignee=None, branch=None,
+                 state=None, path=None):
     """Append a PR to ``project``'s FIFO (idempotent by PR number)."""
     with _lock, _file_lock():
         doc = state if state is not None else load_state(path)
         q = _queue(doc, project)
-        if _find_entry(q, pr) is None:
+        existing = _find_entry(q, pr)
+        if existing is None:
             q.append({
                 "pr": int(pr),
                 "card": card,
                 "assignee": assignee,
+                "branch": branch,
                 "enqueued_at": _now_iso(),
                 "attempts": 0,
             })
+        elif branch and not existing.get("branch"):
+            existing["branch"] = branch
         save_state(doc, path)
         return doc
 
@@ -263,18 +268,184 @@ def load_projects(registry_path=None):
         return []
 
 
+def _config_from_row(row):
+    """The effective queue config from one ``load_projects`` row."""
+    raw = row.get("merge_queue")
+    cfg = dict(raw) if isinstance(raw, dict) else {}
+    cfg["name"] = row["name"]
+    cfg["repo"] = row["repo"]
+    cfg["board"] = row.get("board")
+    cfg["enabled"] = bool(cfg.get("enabled", False))
+    return cfg
+
+
 def project_config(project, registry_path=None):
     """The effective queue config for ``project`` (registry + defaults)."""
     for row in load_projects(registry_path):
         if row["name"] == project:
-            raw = row.get("merge_queue")
-            cfg = dict(raw) if isinstance(raw, dict) else {}
-            cfg["name"] = project
-            cfg["repo"] = row["repo"]
-            cfg["board"] = row.get("board")
-            cfg["enabled"] = bool(cfg.get("enabled", False))
-            return cfg
+            return _config_from_row(row)
     return None
+
+
+# ── read-only rows (CLI monitor + GET /v1/merge-queue) ─────────────────────
+
+#: States a row can carry. ``queued``/``merged``/``resolve``/``failed`` are
+#: ledger outcomes; ``rebasing``/``gating``/``merging`` are the live stages the
+#: daemon stamps on its in-flight claim as it moves through the queue.
+MERGE_QUEUE_STATES = (
+    "queued", "rebasing", "gating", "merging", "resolve", "merged", "failed",
+)
+
+_OUTCOME_STATES = {
+    "merged": "merged",
+    "already-merged": "merged",
+    "conflict": "resolve",
+    "red-gate": "resolve",
+    "error": "failed",
+}
+
+
+def outcome_state(result):
+    """Map a recorded ledger result to a row state in ``MERGE_QUEUE_STATES``."""
+    return _OUTCOME_STATES.get(str(result or ""), "failed")
+
+
+def _epoch(iso_value):
+    if not iso_value:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(str(iso_value))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def _age_seconds(iso_value, now_s):
+    stamp = _epoch(iso_value)
+    if stamp is None:
+        return None
+    return max(0, int(now_s - stamp))
+
+
+def _row(project, state, *, entry=None, last=None, position=None, now_s):
+    """One merge-queue row: the table's columns, plus the fields JSON needs."""
+    entry = entry if isinstance(entry, dict) else {}
+    last = last if isinstance(last, dict) else None
+    if last is not None:
+        stamp = last.get("at")
+        last_result = last.get("result")
+        detail = last.get("error") or last.get("gate")
+        conflicted = last.get("conflicted")
+        if conflicted:
+            detail = ", ".join(str(c) for c in conflicted)
+    else:
+        stamp = entry.get("enqueued_at")
+        last_result = "retry" if entry.get("last_error") else None
+        detail = entry.get("last_error")
+    return {
+        "project": project,
+        "position": position,
+        "pr": entry.get("pr") if entry.get("pr") is not None
+              else (last or {}).get("pr"),
+        "card": entry.get("card") or (last or {}).get("card"),
+        "branch": entry.get("branch") or (last or {}).get("branch"),
+        "state": state,
+        "age_s": _age_seconds(stamp, now_s),
+        "enqueued_at": stamp,
+        "last_result": last_result,
+        "detail": detail,
+        "assignee": entry.get("assignee"),
+        "attempts": int(entry.get("attempts") or 0),
+        "is_last": last is not None,
+    }
+
+
+def view(*, registry_path=None, state_path=None, board=None, now=None):
+    """The merge queue's rows — ONE read for the CLI monitor and the API route.
+
+    Returns every known project in registry order (then state-only projects)
+    with the queue entries at their FIFO positions, the in-flight claim in its
+    recorded stage, and the last terminal outcome when it is not already one of
+    those rows. ``board`` narrows to the project whose registry ``board``
+    matches, mirroring ``hscc kanban monitor --board``.
+    """
+    doc = load_state(state_path)
+    project_rows = load_projects(registry_path)
+    configs = {row["name"]: _config_from_row(row) for row in project_rows}
+    names = [row["name"] for row in project_rows]
+    names.extend(name for name in doc.get("projects", {})
+                 if name not in names)
+    names = list(dict.fromkeys(names))
+    now_s = float(time.time() if now is None else now)
+
+    out = {}
+    all_rows = []
+    for name in names:
+        ps = _project_state(doc, name)
+        cfg = configs.get(name)
+        if board is not None and (cfg or {}).get("board") != board:
+            continue
+        enabled = (bool((cfg or {}).get("enabled", False))
+                   if ps.get("enabled") is None else bool(ps.get("enabled")))
+        last = ps.get("last") if isinstance(ps.get("last"), dict) else None
+        rows = []
+        shown = set()
+        queue = list(ps.get("queue") or [])
+        for position, entry in enumerate(queue, 1):
+            rows.append(_row(name, "queued", entry=entry, position=position,
+                             now_s=now_s))
+            if entry.get("pr") is not None:
+                shown.add(int(entry["pr"]))
+        flight = ps.get("in_flight")
+        if isinstance(flight, dict) and flight:
+            rows.append(_row(name, flight.get("stage") or "rebasing",
+                             entry=flight, now_s=now_s))
+            if flight.get("pr") is not None:
+                shown.add(int(flight["pr"]))
+        if last and last.get("pr") is not None:
+            pr = int(last["pr"])
+            if pr in shown:
+                for row in rows:
+                    if row.get("pr") is not None and int(row["pr"]) == pr:
+                        row["last_result"] = last.get("result")
+                        row["detail"] = (last.get("error") or last.get("gate")
+                                         or row.get("detail"))
+            else:
+                rows.append(_row(
+                    name, outcome_state(last.get("result")),
+                    entry={"pr": pr, "card": last.get("card"),
+                           "branch": last.get("branch")},
+                    last=last, now_s=now_s))
+        out[name] = {
+            "enabled": enabled,
+            "paused": bool(ps.get("paused")),
+            "repo": (cfg or {}).get("repo"),
+            "queue_len": len(queue),
+            "rows": rows,
+            "last": last,
+        }
+        all_rows.extend(rows)
+    return {
+        "ok": True,
+        "generated_at": _now_iso(),
+        "projects": out,
+        "rows": all_rows,
+        "count": len(all_rows),
+        "queued": sum(1 for row in all_rows if row["state"] == "queued"),
+    }
+
+
+def card_states(*, registry_path=None, state_path=None, now=None):
+    """``{card_id: row}`` for the cards currently visible in the queue view."""
+    states = {}
+    for row in view(registry_path=registry_path, state_path=state_path,
+                    now=now)["rows"]:
+        card = row.get("card")
+        if card:
+            states[str(card)] = row
+    return states
 
 
 def _resolve_gates(cfg, worktree, git_runner):
@@ -587,11 +758,27 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
         info = pr_view(cfg["repo"], pr, runner=gh_runner)
         if _pr_ready(info):
             seen.add(pr)
-            ready.append({"pr": pr, "card": card, "assignee": assignee})
+            ready.append({"pr": pr, "card": card, "assignee": assignee,
+                          "branch": info.get("headRefName")})
     return ready
 
 
 # ── one PR ──────────────────────────────────────────────────────────────────
+
+def _update_flight(state_path, project, pr, **fields):
+    """Stamp progress on the in-flight claim (fresh read, under the lock).
+
+    The monitor reads ``stage`` so "rebasing" is not reported as "merging";
+    the branch is recorded here too, since a manually enqueued PR has no
+    branch until ``gh pr view`` answers.
+    """
+    with _file_lock():
+        doc = load_state(state_path)
+        flight = _project_state(doc, project).get("in_flight")
+        if flight and int(flight.get("pr", 0)) == int(pr):
+            flight.update(fields)
+            save_state(doc, state_path)
+
 
 def _handback(entry, cfg, body, handback, gh_runner):
     _comment_pr(cfg["repo"], entry["pr"], body, gh_runner)
@@ -617,6 +804,7 @@ def _finish(doc, project, state_path, ps, result, entry, **fields):
         ps["last"] = {
             "pr": entry.get("pr"),
             "card": entry.get("card"),
+            "branch": entry.get("branch"),
             "result": result,
             "at": _now_iso(),
             **fields,
@@ -638,6 +826,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     info = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
     if info is None:
         return _retry_or_drop(doc, state_path, project, entry, "gh pr view failed")
+    if info.get("headRefName"):
+        entry["branch"] = info["headRefName"]
     state = str(info.get("state", "")).upper()
     if state in ("MERGED", "CLOSED"):
         _finish(doc, project, state_path, ps, "already-" + state.lower(),
@@ -648,6 +838,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         _requeue_waiting(state_path, project, entry)
         return {"pr": entry["pr"], "result": "waiting"}
 
+    _update_flight(state_path, project, entry["pr"], stage="rebasing",
+                   branch=entry.get("branch"))
     try:
         worktree = ensure_worktree(cfg, root=root, git_runner=git_runner)
     except Exception as exc:
@@ -673,6 +865,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 "conflicted": conflicted}
 
     gates = _resolve_gates(cfg, worktree, git_runner)
+    _update_flight(state_path, project, entry["pr"],
+                   stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
     for command in gates:
         passed, output = _run_gate(command, worktree, timeout_s)
@@ -689,6 +883,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             return {"pr": entry["pr"], "result": "red-gate",
                     "gate": command}
 
+    _update_flight(state_path, project, entry["pr"], stage="merging")
     err = _push_branch(worktree, info, git_runner)
     if err:
         return _retry_or_drop(doc, state_path, project, entry, err)
@@ -821,6 +1016,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                             "pr": int(cand["pr"]),
                             "card": cand.get("card"),
                             "assignee": cand.get("assignee"),
+                            "branch": cand.get("branch"),
                             "enqueued_at": _now_iso(),
                             "attempts": 0,
                         })

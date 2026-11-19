@@ -384,3 +384,78 @@ def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
     assert "bash scripts/run_tests.sh" in gates
     assert "bash ios-app/scripts/build_check.sh" in gates
     assert "bash macos-app/scripts/build_check.sh" not in gates
+
+
+# ── read-only view (kanban monitor + GET /v1/merge-queue) ──────────────────
+
+def test_view_rows_carry_position_state_branch_age_and_last_result(tmp_path):
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, card="t_a", branch="wt/t_a", path=state)
+    mq.add_to_queue("alpha", 8, card="t_b", branch="wt/t_b", path=state)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    flight = ps["queue"].pop()          # PR 8 is now the claim, not queued
+    flight.update({"stage": "gating",
+                   "enqueued_at": "2026-11-19T00:00:00+00:00"})
+    ps["in_flight"] = flight
+    ps["last"] = {"pr": 9, "card": "t_c", "branch": "wt/t_c",
+                  "result": "conflict", "at": "2026-11-19T01:00:00+00:00",
+                  "conflicted": ["shared.txt"]}
+    mq.save_state(doc, state)
+
+    data = mq.view(state_path=state, registry_path=str(tmp_path / "none.yaml"),
+                   now=1_800_000_000)
+    rows = data["rows"]
+    assert [(r["position"], r["pr"], r["state"]) for r in rows] == [
+        (1, 7, "queued"), (None, 8, "gating"), (None, 9, "resolve")]
+    assert [r["branch"] for r in rows] == ["wt/t_a", "wt/t_b", "wt/t_c"]
+    assert rows[0]["age_s"] is not None
+    assert rows[1]["age_s"] is not None
+    assert rows[2]["last_result"] == "conflict"
+    assert rows[2]["detail"] == "shared.txt"
+    assert data["queued"] == 1 and data["count"] == 3
+    # One map for the review queue's per-card column.
+    assert mq.card_states(state_path=state, now=1_800_000_000)["t_b"]["state"] \
+        == "gating"
+
+
+def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
+                                                               monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["false"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_card", assignee="worker",
+                    path=_state(tmp_path))
+    seen = {}
+
+    def gate(command, worktree, timeout_s):
+        seen.update(mq.view(state_path=_state(tmp_path),
+                            registry_path=registry))
+        return False, "gate exploded"
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "red-gate"
+    assert [r["state"] for r in seen["rows"]] == ["gating"]
+    after = mq.view(state_path=_state(tmp_path), registry_path=registry)
+    assert [r["state"] for r in after["rows"]] == ["resolve"]
+    assert after["rows"][0]["detail"] == "false"
+
+
+def test_view_board_filter_keeps_only_that_projects_queue(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], name="alpha")
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("beta", 8, path=_state(tmp_path))
+
+    assert [r["project"] for r in mq.view(
+        state_path=_state(tmp_path), registry_path=registry)["rows"]] == [
+            "alpha", "beta"]
+    filtered = mq.view(state_path=_state(tmp_path), registry_path=registry,
+                       board="not-alpha")
+    assert filtered["rows"] == []

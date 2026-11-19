@@ -960,6 +960,21 @@ def attach_orchestrators(data, hermes_home=None, now=None):
     return data
 
 
+def attach_merge_queue(data, board=None, registry_path=None, state_path=None,
+                       now=None):
+    """Add ``data["merge_queue"]``: the local queue's rows, project by project.
+
+    One call to :func:`hscc_daemon.merge_queue.view` — the same read
+    ``GET /v1/merge-queue`` serves — so the monitor's table and the route can
+    never disagree about a PR's position or state. Read-only: the ledger is
+    parsed, never ticked.
+    """
+    from hscc_daemon import merge_queue
+    data["merge_queue"] = merge_queue.view(
+        registry_path=registry_path, state_path=state_path, board=board,
+        now=now)
+    return data
+
 
 # ── rendering ──────────────────────────────────────────────────────────────
 
@@ -1160,6 +1175,33 @@ def events_table(events, now_s) -> Table:
     return t
 
 
+def merge_queue_table(rows) -> Table:
+    """One project's merge-queue rows: FIFO position, PR, card, branch, state."""
+    t = _plain_table()
+    for col, just in (("Pos", "right"), ("PR", "right"), ("Card", "left"),
+                      ("Branch", "left"), ("State", "left"), ("Age", "right"),
+                      ("Last result", "left")):
+        t.add_column(col, justify=just, no_wrap=True)
+    state_style = {"queued": "dim", "rebasing": "warn", "gating": "warn",
+                   "merging": "warn", "resolve": "error", "merged": "ok",
+                   "failed": "error"}
+    for r in rows:
+        state = str(r.get("state") or "failed")
+        pos = "-" if r.get("position") is None else str(r["position"])
+        pr = "-" if r.get("pr") is None else f"#{r['pr']}"
+        result = r.get("last_result") or "-"
+        detail = r.get("detail")
+        if detail and not result:
+            result = str(detail)
+        t.add_row(
+            Text(pos, style="dim"), esc(pr), esc(r.get("card") or "-"),
+            esc(r.get("branch") or "-"),
+            Text(state, style=state_style.get(state, "")),
+            Text(fmt_age(r.get("age_s")), style="dim"),
+            esc(str(result).replace("\n", " ")))
+    return t
+
+
 def board_error_panel(errors, title="board read failed"):
     """A loud red panel listing EVERY board-read error.
 
@@ -1225,6 +1267,20 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
             ready_table(data["ready"], width)]))
     optional.append((len(live_boards) + 3, [
         Text(""), Text("boards", style="title"), boards_table(data["boards"])]))
+    mq = data.get("merge_queue") or {}
+    for name, proj in (mq.get("projects") or {}).items():
+        mq_rows = proj.get("rows") or []
+        if not mq_rows:
+            continue
+        flags = []
+        if proj.get("paused"):
+            flags.append("paused")
+        if not proj.get("enabled"):
+            flags.append("disabled")
+        suffix = f" ({', '.join(flags)})" if flags else ""
+        optional.append((len(mq_rows) + 3, [
+            Text(""), Text(f"merge queue — {name}{suffix}", style="title"),
+            merge_queue_table(mq_rows)]))
     if data["events"]:
         optional.append((len(data["events"]) + 3, [
             Text(""), Text("last hour", style="title"), events_table(data["events"], data["at"])]))
@@ -1250,8 +1306,9 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
             while True:
-                data = attach_orchestrators(attach_tokens(collect(
-                    kanban_db=kanban_db, board=board, registered_only=True)))
+                data = attach_merge_queue(attach_orchestrators(attach_tokens(collect(
+                    kanban_db=kanban_db, board=board, registered_only=True))),
+                    board=board)
                 live.update(render(data, interval, width=console.width, height=console.height),
                             refresh=True)
                 time.sleep(interval)
