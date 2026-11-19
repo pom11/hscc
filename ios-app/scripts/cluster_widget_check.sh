@@ -136,6 +136,31 @@ fail_when_absent "circular uses the up/total gauge" "$VIEWS" 'Gauge(value:'
 fail_when_absent "the projection uses the shared FleetProjection" "$METRICS" 'typealias ClusterFleet = FleetProjection'
 fail_when_absent "status jobs come from workloads.count" "$METRICS" 'response.workloads.count'
 
+# ---- The serving-block note line (t_b5d0ec18).
+#
+# ClusterMonitorTables projected proxyError and NO iOS view drew it: the phone
+# met the desktop's proxy-unreachable failure and said nothing while the menu bar
+# printed the terminal's line. The sentence, its precedence and its warn/dim rule
+# now live in ONE type -- CLIMonitorNote, in $MODEL, which all five iOS targets
+# and both macOS targets compile -- and $TABLE_VIEWS draws it.
+#
+# The leg with teeth is the last one. "the note appears" cannot rot into a lie on
+# its own, because a view could print its own re-worded sentence and still
+# satisfy an appearance grep; banning a string literal of the terminal's words
+# anywhere outside the owner is what keeps the appearance honest. The words
+# themselves are pinned by execution in two other gates -- model_decode_check/
+# monitor_tables.swift (against the CLI's own rendered golden) and macos-app/
+# scripts/cli_dropdown_check/main.swift (the dropdown's Tile.note).
+fail_when_absent "the note owner is declared in the shared view-model file" \
+  "$MODEL" 'enum CLIMonitorNote'
+fail_when_absent "both projections answer from that one owner" "$MODEL" \
+  'CLIMonitorNote.servingBlock(proxyError:'
+fail_when_absent "the serving column draws the owner line, not its own words" \
+  "$TABLE_VIEWS" 'MonitorTableNote(text: note.text'
+report "no iOS file outside the owner re-types the CLI note words" \
+  "$(grep -rn '"proxy /v1/model/info\|"no backends behind the proxy\|"serving poll failed' \
+        Sources --exclude=ClusterMonitorViewModel.swift)"
+
 # ---------------------------------------------------------------------------
 # The CLI host table (t_2d1c12dc): `systemMedium` IS `host_table`.
 #

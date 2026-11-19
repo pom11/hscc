@@ -272,9 +272,58 @@ let emptyTile = DashboardFleetReading.tile(from: ClusterMonitorViewModel.project
                                            response: emptySection)
 check("told-empty: run is the number 0", emptyTile?.totals.running == 0,
       "got \(String(describing: emptyTile?.totals.running))")
-check("told-empty: the CLI's own line is printed",
-      emptyTile?.note == DashboardFleetReading.Copy.noBackends,
+check("told-empty: the CLI's own line, verbatim",
+      emptyTile?.note == "no backends behind the proxy",
       "got \(emptyTile?.note ?? "nil")")
+
+// ---- The note line: one owner for both apps, so the words are pinned HERE.
+//
+// `Tile.note` is now `view.note?.text` — the shared `CLIMonitorNote` in
+// `ios-app/Sources/Shared/ClusterMonitorViewModel.swift`, which the iOS tables
+// block draws too. The pane no longer owns a single word of it, which is exactly
+// why these legs quote the terminal's own sentences rather than a `Copy.` symbol:
+// a comparison against a shared constant would still pass after somebody re-worded
+// the owner away from `cluster_live.py`. These are the CLI's bytes, and they are
+// the same bytes the phone now prints.
+let staleRoutes = MonitorResponse(json: live.json, serving: live.serving,
+                                  serving_error: nil,
+                                  serving_proxy_error: "connect timeout",
+                                  speak: live.speak)
+let staleTile = DashboardFleetReading.tile(from: ClusterMonitorViewModel.project(staleRoutes),
+                                           response: staleRoutes)
+check("proxy unreachable with rows: the CLI's line plus its routes suffix",
+      staleTile?.note == "proxy /v1/model/info unreachable: connect timeout"
+        + " (showing last known routes)",
+      "got \(staleTile?.note ?? "nil")")
+
+let staleNoRows = MonitorResponse(json: live.json, serving: [],
+                                  serving_error: nil,
+                                  serving_proxy_error: "connect timeout",
+                                  speak: live.speak)
+let staleNoRowsTile = DashboardFleetReading.tile(from: ClusterMonitorViewModel.project(staleNoRows),
+                                                 response: staleNoRows)
+check("proxy unreachable with NO rows: no suffix (the CLI prints it only `if rows`)",
+      staleNoRowsTile?.note == "proxy /v1/model/info unreachable: connect timeout",
+      "got \(staleNoRowsTile?.note ?? "nil")")
+
+let pollFailed = MonitorResponse(json: live.json, serving: live.serving,
+                                 serving_error: "proxy returned 500",
+                                 serving_proxy_error: nil, speak: live.speak)
+let pollTile = DashboardFleetReading.tile(from: ClusterMonitorViewModel.project(pollFailed),
+                                          response: pollFailed)
+check("serving poll failed: the app's own sentence (the CLI prints none)",
+      pollTile?.note == "serving poll failed: proxy returned 500",
+      "got \(pollTile?.note ?? "nil")")
+
+let bothFailed = MonitorResponse(json: live.json, serving: live.serving,
+                                 serving_error: "proxy returned 500",
+                                 serving_proxy_error: "connect timeout",
+                                 speak: live.speak)
+let bothTile = DashboardFleetReading.tile(from: ClusterMonitorViewModel.project(bothFailed),
+                                          response: bothFailed)
+check("both errors: the proxy line is the one a one-line pane prints",
+      bothTile?.note?.hasPrefix("proxy /v1/model/info") == true,
+      "got \(bothTile?.note ?? "nil")")
 
 // The fleet-down body has no table at all.
 let down = decoded(MonitorResponse.self, "v1_cluster_monitor_unavailable.json")
