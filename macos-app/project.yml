@@ -120,6 +120,9 @@ targets:
       # order/filter/age rules the iOS widget draws, so the dropdown and the
       # desktop tile cannot disagree.
       - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
+      # The merge queue's wire types, CLI cells and snapshot (MQ5): the dropdown
+      # draws the same rows/cells the widget extension does.
+      - path: ../ios-app/Sources/Shared/MergeQueueReading.swift
       # "Test connection" here runs the same per-address probe as iOS: one row
       # per saved address, one overall line, one last-working update.
       - path: ../ios-app/Sources/Shared/ConnectionAddressProbe.swift
@@ -284,6 +287,9 @@ targets:
       # The main orchestrator's alert feed ("Needs me", card R3), the same file
       # the iOS widget extension compiles.
       - path: ../ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift
+      # The local merge queue (MQ5): the same file the iOS widget extension
+      # compiles, so the desktop tile draws the CLI's rows and cells.
+      - path: ../ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift
       # The history graph widget (t_f4551339). REQUIRED here, not optional: this
       # target compiles `HSCCWidgetsBundle.swift` by path, and that bundle declares
       # `ClusterGraphWidget()`, so leaving these four out is a "cannot find
@@ -309,6 +315,9 @@ targets:
       - path: ../ios-app/Sources/Shared/SharedStore.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
       - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
+      # The client's `mergeQueue()` names `MergeQueueLite` (MQ5); the widget
+      # extension draws the same projection.
+      - path: ../ios-app/Sources/Shared/MergeQueueReading.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
       # The monitor view-model (t_61ed3f5e): the widget cards draw the CLI's
       # own host and serving cells rather than re-deriving units and rounding.

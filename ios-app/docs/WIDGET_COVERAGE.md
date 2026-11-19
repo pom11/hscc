@@ -43,7 +43,7 @@ No cell below is `declared-but-placeholder` or `unknown`.
 ## 1. iOS widgets × family
 
 Every widget type under `ios-app/Sources/HSCCWidgets/` is listed. The bundle at
-`HSCCWidgetsBundle.swift` contains exactly these eight widgets; there are no
+`HSCCWidgetsBundle.swift` contains exactly these nine widgets; there are no
 additional `Widget` types in that directory.
 
 | Widget | systemSmall | systemMedium | systemLarge | accessoryInline | accessoryCircular | accessoryRectangular | Source |
@@ -56,6 +56,7 @@ additional `Widget` types in that directory.
 | Monitor | declared-and-renders (`SmallMonitorWidget`) | declared-and-renders (`MediumMonitorWidget`) | declared-and-renders (`LargeMonitorWidget`) | declared-and-renders (`InlineMonitorWidget`) | declared-and-renders (`CircularMonitorWidget`) | declared-and-renders (`RectangularMonitorWidget`) | `ios-app/Sources/HSCCWidgets/MonitorViews.swift` |
 | NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`NeedsMeCircular`) | declared-and-renders (`NeedsMeRectangular`) | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
 | ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | absent — gated home-screen-only | absent — gated home-screen-only | absent — gated home-screen-only | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch), `GraphWidgetViews.swift` (bodies) |
+| MergeQueue | declared-and-renders (`SmallMergeQueue`) | declared-and-renders (`MediumMergeQueue`) | declared-and-renders (`LargeMergeQueue`) | declared-and-renders (`Text(entry.inlineLine)`) | declared-and-renders (`MergeQueueCircular`) | declared-and-renders (`MergeQueueRectangular`) | `ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift` |
 
 The ClusterGraph row is the graph widget added by #426; its three accessory
 cells are `absent` by configuration **and by gate**, not by a missing renderer —
@@ -63,14 +64,14 @@ cells are `absent` by configuration **and by gate**, not by a missing renderer �
 list `[.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]` and
 `widget_view_dispatch` gates the surface as `home-screen-only`, which asserts the
 inverse (no `.accessory*` in `supportedFamilies`, no `shortGateLabel`). The
-bundle is therefore **eight** widgets: the six this section's preamble was
-first written against, plus Needs Me and the graph widget.
+bundle is therefore **nine** widgets: the six this section's preamble was
+first written against, plus Needs Me, the graph widget and Merge Queue.
 
 Coverage note: every iOS widget contains a `.systemExtraLarge` branch in its view
 switch. **Cluster and Monitor declare `.systemExtraLarge` in `supportedFamilies`
 on iOS as well** (t_9e64d9d9): on iPad those two draw the `cluster monitor` host
 and serving tables side by side, so the family and the renderer are both live.
-The other four widgets still carry the branch without declaring the family, so
+The other widgets still carry the branch without declaring the family, so
 for them XL remains **absent** on iOS by configuration, not a missing renderer.
 
 ## 2. Live Activities × surface
@@ -95,10 +96,11 @@ Sources: `ios-app/Sources/HSCCLiveActivityMonitor/{MonitorLiveActivity,CardsRunn
 ## 3. macOS desktop widgets × family
 
 The macOS extension (`HSCCMacWidgets` in `macos-app/project.yml`) compiles the
-eight iOS widget files by path — the seven this section was first written against
-plus the graph widget's files, added by #426 and #442. On macOS the accessory
-families are unavailable, so they are not part of this table. `systemExtraLarge`
-is declared by Cluster, Monitor, Kanban Monitor, Cards Running and ClusterGraph.
+nine iOS widget files by path — the seven this section was first written against
+plus the graph widget's files (#426/#442) and `MergeQueueWidget.swift` (MQ5). On
+macOS the accessory families are unavailable, so they are not part of this
+table. `systemExtraLarge` is declared by Cluster, Monitor, Kanban Monitor, Cards
+Running and ClusterGraph.
 
 | Widget | systemSmall | systemMedium | systemLarge | systemExtraLarge | Source |
 |---|---|---|---|---|---|
@@ -110,6 +112,7 @@ is declared by Cluster, Monitor, Kanban Monitor, Cards Running and ClusterGraph.
 | BoardStatus | declared-and-renders (`BoardStatusSmallView`) | declared-and-renders (`BoardStatusMediumView`) | declared-and-renders (`BoardStatusLargeView`) | absent | `ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift` |
 | NeedsMe | declared-and-renders (`SmallNeedsMe`) | declared-and-renders (`MediumNeedsMe`) | declared-and-renders (`LargeNeedsMe`) | absent | `ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift` |
 | ClusterGraph | declared-and-renders (`ClusterGraphSmallWidget`) | declared-and-renders (`ClusterGraphMediumWidget`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemLarge`) | declared-and-renders (`ClusterGraphPanelWidget`, `family: .systemExtraLarge`) | `ios-app/Sources/HSCCWidgets/GraphWidget.swift` (dispatch + macOS `supportedFamilies` arm), `GraphWidgetViews.swift` (bodies) |
+| MergeQueue | declared-and-renders (`SmallMergeQueue`) | declared-and-renders (`MediumMergeQueue`) | declared-and-renders (`LargeMergeQueue`) | absent | `ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift` |
 
 The ClusterGraph row is compiled in by path (t_be4e1a48): `macos-app/project.yml`
 lists the graph widget's files in `HSCCMacWidgets.sources`, and the four desktop
@@ -122,11 +125,11 @@ wider pixel reduction and more axis labels. The same `ClusterGraphMarks` file is
 menu bar dropdown's GRAPHS section (§5d) reuse the widget's charts instead of
 forking them.
 
-The two remaining `absent` XL cells (Projects and Board Status) are the
-documented macOS family split, not a defect: all eight widgets ship
+The remaining `absent` XL cells (Projects, Board Status, Needs Me and Merge
+Queue) are the documented macOS family split, not a defect: all nine widgets ship
 small/medium/large, and Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
-Running (CARD B2) also ship `systemExtraLarge`. Needs Me is deliberately
-small/medium/large on macOS: its data is a three-to-eight-row list, so an XL
+Running (CARD B2) also ship `systemExtraLarge`. Needs Me and Merge Queue are
+deliberately small/medium/large on macOS: both are short row lists, so an XL
 cell would repeat the large renderer rather than add a column.
 
 ## 4. Compile results
@@ -354,6 +357,62 @@ memory (2), serving (5). The seven missing keys are gap rows; they are in §8,
 because "the route exposes it and nothing shows it" is the only kind of row this
 matrix cannot be read without.
 
+## 5e. Merge queue widget (card MQ5)
+
+```text
+$ bash ios-app/scripts/model_decode_check.sh
+$ bash ios-app/scripts/widget_view_dispatch_check.sh
+$ bash ios-app/scripts/widget_style_check.sh
+$ bash macos-app/scripts/widget_parity_check.sh
+```
+
+Each prints its own tally and exits nonzero on a failed expectation; the numbers
+are not transcribed here for the reason §5 gives.
+
+`v1_merge_queue.json` is the route's own envelope shape with placeholder
+project/card text. Its golden `v1_merge_queue.cli.json` is not transcribed:
+`ios-app/scripts/merge_queue_cli_parity.py` feeds the fixture's per-project rows
+into the REAL `hscc_daemon/kanban_live.py::merge_queue_table` and records the
+header and every cell. The decode gate then compares `MergeQueueTableReading`
+against that golden, one project table at a time.
+
+Families:
+
+| Family | Headline | Rows |
+|---|---|---|
+| systemSmall | queued count + the live stage (`gating #103`) | none |
+| systemMedium | queued count + live stage | the CLI table, first 3 rows |
+| systemLarge | queued count + live stage | the CLI table, first 8 rows + last merged |
+| accessoryInline | `"3 queued · gating #103"` / `"merge queue empty"` | none |
+| accessoryCircular | queued count | none |
+| accessoryRectangular | queued count + live stage | last merged line |
+
+Mapping table (CLI column → widget source). The widget's medium and large
+families draw these seven cells verbatim, in this order; the project name is
+the CLI's per-project table title, printed whenever the route's project changes.
+
+| CLI column (`merge_queue_table`) | Route field | Rendering rule, identical to the CLI |
+|---|---|---|
+| `Pos` | `rows[].position` | the integer, or `-` for the in-flight claim and a last-outcome row |
+| `PR` | `rows[].pr` | `#N`, or `-` when the route carried none |
+| `Card` | `rows[].card` | the card id, or `-` |
+| `Branch` | `rows[].branch` | the head branch recorded when the daemon claimed the PR, or `-` |
+| `State` | `rows[].state` | the raw state; colour only: `merged` ok, `resolve`/`failed` bad, `rebasing`/`gating`/`merging` warn, `queued` secondary |
+| `Age` | `rows[].age_s` | `fmt_age`: `45s` / `1m` / `1h02m` / `1d2h`, or `-` when the route sent no age |
+| `Last result` | `rows[].last_result` | the recorded result (`merged`, `conflict`, `red-gate`, `error`, `retry`), newlines flattened to spaces, or `-` |
+
+Row order is `rows[]` verbatim: registry project order, FIFO queued rows inside
+a project, the in-flight claim after them, then the project's last terminal
+outcome. The counts are the route's `queued` / `count`, never re-derived from a
+filtered page. `detail`, `assignee`, `attempts`, `enqueued_at` and `is_last` are
+carried by the route but are not CLI columns: `merge_queue_table` prints
+`last_result` in the Last result column even when a detail string exists, and
+the widget mirrors that rule instead of inventing a fallback. Empty is
+`"Nothing queued"` with the update age; a stale read keeps its real rows and
+names the reason and age; a failed read names the reason. The macOS menu bar
+dropdown draws the same rows in a "Merge queue" section, hidden when the queue
+is empty (a failed read still says why).
+
 ## 6. Shipped feature checklist
 
 | Feature | PR | Merge commit on `main` | Evidence |
@@ -368,6 +427,7 @@ matrix cannot be read without.
 | Notarized release and Homebrew cask | #379 | `f8325093` | `macos-app/scripts/release.sh`, `scripts/templates/hscc-widgets.cask.rb.tmpl`, `scripts/bump_cask.py` |
 | Cards widget + CardsRunning Live Activity refurbish | B2 `t_635bae56` | this PR | `ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift`, `ios-app/Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift`, `ios-app/Sources/Shared/CardsRunningProjection.swift`, `ios-app/scripts/cards_running_widget_check.sh` |
 | systemSmall GPU% sparkline fed by `GET /v1/cluster/history` | t_2681d3de | this PR | `ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift` (trend model, executed by `scripts/model_decode_check.sh` — `gsmall:trend:*`), `ClusterSmallGridView.swift` (polyline), `ClusterWidget.swift`/`MonitorWidget.swift` (family-gated history read, `scripts/cluster_widget_check.sh` §2-budget proofs) |
+| Merge queue widget + macOS dropdown section | MQ5 `t_785bb7bf` | this PR | `ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift`, `ios-app/Sources/Shared/MergeQueueReading.swift` (CLI cells, executed by `scripts/model_decode_check.sh`), `macos-app/Sources/HSCCMac/DashboardView.swift` |
 
 ## 7. Running-cards data mapping (B2)
 

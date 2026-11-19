@@ -6,7 +6,7 @@ import WidgetKit
 ///
 /// Hosted by the `HSCCWidgets` app-extension target on iOS and the
 /// `HSCCMacWidgets` target on macOS. Both targets compile THIS file and the
-/// seven widgets below by path; only the family lists and the rendering-mode
+/// nine widgets below by path; only the family lists and the rendering-mode
 /// adapter differ, under `#if os(...)` in those files.
 ///
 /// Families:
@@ -31,6 +31,9 @@ import WidgetKit
 ///   * systemSmall/Medium/Large + the three accessory families — Needs Me: the
 ///                     main orchestrator's unacknowledged alert-feed rows, with
 ///                     level, title, body first line and age (card R3).
+///   * systemSmall/Medium/Large + the three accessory families — Merge Queue:
+///                     the local queue's FIFO rows, live stages, ages and last
+///                     results, exactly the `hscc kanban monitor` table (MQ5).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
@@ -46,5 +49,6 @@ struct HSCCWidgetsBundle: WidgetBundle {
         BoardStatusWidget()
         NeedsMeWidget()
         ClusterGraphWidget()
+        MergeQueueWidget()
     }
 }

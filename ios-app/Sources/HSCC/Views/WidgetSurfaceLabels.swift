@@ -23,6 +23,7 @@ extension WidgetSurfaceKind {
         case .widgetProjects: return "Projects Widget"
         case .widgetNeedsMe: return "Needs Me Widget"
         case .widgetClusterGraph: return "Cluster Graph Widget"
+        case .widgetMergeQueue: return "Merge Queue Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"
@@ -68,6 +69,10 @@ extension WidgetSurfaceKind {
         // row's `chart.bar.xaxis`: that bubble is counts over a board, this is a
         // series over time.
         case .widgetClusterGraph: return "chart.xyaxis.line"
+        // The same glyph the widget itself draws in its header. Checked through
+        // the NSImage(systemSymbolName:) call sf_symbol_check.sh uses — the name
+        // resolves on this host and is distinct from the graph's chart glyph.
+        case .widgetMergeQueue: return "arrow.triangle.merge"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"
         // Health, not a gauge: this surface answers "is the fleet up", which is

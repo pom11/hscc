@@ -99,6 +99,16 @@ enum WidgetSurfaceKind: String, CaseIterable, Codable {
     /// routes, and switching the instant tile off must never blank a chart the
     /// operator reads for a trend.
     case widgetClusterGraph = "widget.clusterGraph"
+    /// The "Merge Queue" widget (card MQ5): the local merge queue's rows —
+    /// exactly the per-project tables `hscc kanban monitor` draws and
+    /// `GET /v1/merge-queue` serves, projected by `MergeQueueReading.swift`.
+    ///
+    /// Its own registry entry, not a reuse of another widget's: the queue has
+    /// its own read, its own cadence and its own pause switch, and switching
+    /// the kanban monitor off must never blank the queue. The raw value follows
+    /// the surface's own name (`configurationDisplayName("Merge Queue")`, kind
+    /// `MergeQueueWidget`) and is permanent once an installed device writes it.
+    case widgetMergeQueue = "widget.mergeQueue"
     /// The existing fleet-wake Live Activity.
     case liveActivityWake = "liveActivity.wake"
     /// The new monitor Live Activity (sibling card t_03d318cd).
@@ -298,7 +308,7 @@ extension WidgetSurfaceKind {
         switch self {
         case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
-             .widgetNeedsMe, .widgetClusterGraph:
+             .widgetNeedsMe, .widgetClusterGraph, .widgetMergeQueue:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityCards, .liveActivityBoardProgress: return true
@@ -322,6 +332,13 @@ extension WidgetSurfaceKind {
     var supportsScope: Bool {
         switch self {
         case .liveActivityCards, .widgetNeedsMe: return false
+        // The merge-queue widget draws every project's FIFO rows, in registry
+        // order, and its provider sends no `?board=` — the surface has no
+        // configuration intent. A board picker in Settings would write a value
+        // this widget never reads, so it is suppressed here (the route itself
+        // DOES honour `?board=`, which is why the client exposes it for a
+        // future scoped surface).
+        case .widgetMergeQueue: return false
         // The graph widget's answer is scoped by NODE and WINDOW, both of which the
         // operator already picks in the widget's own configuration sheet
         // (`ClusterGraphConfigurationIntent`). `GET /v1/cluster/history` takes no
@@ -407,6 +424,10 @@ extension WidgetSurfaceKind {
         // `WidgetSurfaceEditor` hides its whole "Show Content" group for exactly
         // this case.
         case .widgetClusterGraph: return []
+        // The merge queue is one list (FIFO rows) with no optional part: the
+        // position, PR, card, branch, state, age and last result ARE the row.
+        // A section toggle would either empty the surface or do nothing.
+        case .widgetMergeQueue: return []
         case .liveActivityWake: return ["state", "topology", "timing"]
         case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this

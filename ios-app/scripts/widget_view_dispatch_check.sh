@@ -51,6 +51,7 @@ MANIFEST=(
   # new surface joins at the end so two cards adding one cannot fight over the
   # middle of the array.
   widgetClusterGraph
+  widgetMergeQueue
 )
 
 # One xcrun call for the whole run instead of one per surface, so a machine
@@ -112,7 +113,7 @@ if [ -f "$MAC_SPEC" ] && grep -q '^  HSCCMacWidgets:' "$MAC_SPEC"; then
       mac_missing=1
     fi
   done
-  [ "$mac_missing" -eq 0 ] && echo "  ok: HSCCMacWidgets reuses all seven widget surfaces + the shared store/client/style by path"
+  [ "$mac_missing" -eq 0 ] && echo "  ok: HSCCMacWidgets reuses every widget surface + the shared store/client/style by path"
   [ "$mac_missing" -eq 0 ] || overall=1
 else
   echo "  FAIL: $MAC_SPEC has no HSCCMacWidgets target — the macOS desktop widgets are missing"

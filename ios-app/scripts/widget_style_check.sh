@@ -34,6 +34,7 @@ WIDGET_VIEWS=(
   Sources/HSCCWidgets/KanbanMonitorWidget.swift
   Sources/HSCCWidgets/CardsRunningWidget.swift
   Sources/HSCCWidgets/NeedsMeWidget.swift
+  Sources/HSCCWidgets/MergeQueueWidget.swift
   Sources/HSCCLiveActivity/HSCCLiveActivity.swift
   Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
   Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
