@@ -39,6 +39,12 @@ jobs:
       - name: macOS Sparkle wiring gate
         run: bash macos-app/scripts/update_check.sh
 
+      # HSCCMacWidgets compiles the iOS widget sources by path, so the desktop
+      # tile's density depends on two specs in two different projects agreeing.
+      # Pure text — no SDK, no compile — so it runs on every macOS runner.
+      - name: macOS widget parity gate
+        run: bash macos-app/scripts/widget_parity_check.sh
+
       - name: iOS compile gate
         run: |
           set +e
