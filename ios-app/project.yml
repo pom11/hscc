@@ -298,6 +298,10 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The chart projection for `GET /v1/metrics/history` (t_5ae8cfcf): keeps
+      # a not-reported metric a gap rather than a zero, and exposes each
+      # series' peak column next to its average. Foundation-only.
+      - path: Sources/Shared/MetricsHistoryTrend.swift
       - path: Sources/Shared/WidgetDataClient.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
@@ -459,6 +463,10 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # History chart points for a widget surface reading
+      # `GET /v1/metrics/history` (t_5ae8cfcf). Foundation-only, so the decode
+      # gate can exercise it without SwiftUI.
+      - path: Sources/Shared/MetricsHistoryTrend.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.

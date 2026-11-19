@@ -104,6 +104,42 @@ let summaryBody = Data(#"""
  "speak":"hscc: 20 open, 3 running, 750 done."}
 """#.utf8)
 
+/// The real `GET /v1/metrics/history?tier=1` shape (t_5ae8cfcf), built the way
+/// the recorder writes it: two node buckets where the first answered twice
+/// (so the bucket has a mean AND a peak) and the second host did not answer at
+/// all (so every metric is null and `error` carries why), plus one engine row.
+let metricsHistoryBody = Data(#"""
+{"tier":1,"tier_meta":{"tier":1,"resolution_s":60,"window_s":86400,"capacity":1440},
+ "since":null,"until":null,"host":null,"node":null,"source":"sqlite_store",
+ "hosts":[{"tier":1,"ts":1795000060,"host":"dgx-01","n":2,"error":null,
+           "cpu_usage_pct":30.0,"cpu_temp_c":null,"gpu_util_pct":80.0,
+           "gpu_temp_c":75.0,"gpu_power_w":160.0,"mem_used_pct":40.0,
+           "swap_used_mb":null,"swap_total_mb":null,"swap_used_pct":null,
+           "gpu_mem_used_mb":30000.0,"gpu_clock_mhz":1900.0,
+           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":3.0,
+           "cpu_temp_c_max":null,"gpu_temp_c_max":90.0,"gpu_power_w_max":200.0},
+          {"tier":1,"ts":1795000120,"host":"dgx-02","n":1,
+           "error":"ssh: collect failed","cpu_usage_pct":null,"cpu_temp_c":null,
+           "gpu_util_pct":null,"gpu_temp_c":null,"gpu_power_w":null,
+           "mem_used_pct":null,"swap_used_mb":null,"swap_total_mb":null,
+           "swap_used_pct":null,"gpu_mem_used_mb":null,"gpu_clock_mhz":null,
+           "net_recv_bytes_s":null,"net_send_bytes_s":null,"sparkrun_jobs":null,
+           "cpu_temp_c_max":null,"gpu_temp_c_max":null,"gpu_power_w_max":null}],
+ "engines":[{"tier":1,"ts":1795000060,"node":"dgx-01","port":"8000",
+             "model":"qwen3-coder","n":2,"error":null,"run":2.0,"wait":0.0,
+             "kv":61.5,"gen_tps":31.0,"prompt_tps":120.0}],
+ "counts":{"host_rows":2,"engine_rows":1},
+ "fields":{"host":["cpu_usage_pct","gpu_temp_c"],"host_peaks":["gpu_temp_c_max"],
+           "engine":["run","kv"],"engine_key":["node","port"],
+           "engine_identity":"(node, port)"},
+ "tier0":{"points":450,"capacity":450,"readable_here":false,
+          "source":"recorder_ring_absent",
+          "reason":"the 2-second ring lives in the daemon process, which is not this one"},
+ "stats":{"path":"/Users/op/.hscc/metrics/history.db","db_bytes":3355443,
+          "bound_bytes":10485760,"tier1_rows":5760,"tier2_rows":2016,"exists":true},
+ "speak":"1-minute metrics history: 2 node rows, 1 engine row."}
+"""#.utf8)
+
 /// The same payload with `done` removed — §6 rule 1 says this must NOT be
 /// readable as zero.
 let summaryMissingDoneBody = Data(#"""
@@ -188,7 +224,7 @@ func runAll() async {
         "/v1/projects", "/v1/mobile/summary",
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/daemon/host",
-        "/v1/autodown/status",
+        "/v1/autodown/status", "/v1/metrics/history",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
@@ -348,6 +384,69 @@ func runAll() async {
     _ = await client.mobileSummary(boards: ["hscc", "inc"])
     let scoped = StubTransport.requests.last?.url?.absoluteString ?? ""
     check("mobileSummary scopes boards", scoped.contains("boards=") && scoped.contains("hscc") && scoped.contains("inc"))
+
+    // 10b. Dataset 6 — `GET /v1/metrics/history` (t_5ae8cfcf). Three things
+    //      this gate exists to keep true: `tier` leaves as a query item (the
+    //      route 400s without it), an out-of-range tier is clamped rather than
+    //      forwarded (a 400 on every refresh is worse than the nearest real
+    //      tier), and a metric the node never reported stays `nil` — it must
+    //      not reach a chart as a flat 0.
+    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
+    let history = await client.metricsHistory(tier: 1, host: "dgx-01",
+                                              since: 1795000000, until: 1795000120)
+    let historyURL = StubTransport.requests.last?.url?.absoluteString ?? ""
+    check("history carries tier=1", historyURL.contains("tier=1"))
+    check("history carries host and the inclusive window",
+          historyURL.contains("host=dgx-01") && historyURL.contains("since=1795000000")
+            && historyURL.contains("until=1795000120"))
+    check("history path stayed clean",
+          StubTransport.requests.last?.url?.path == "/v1/metrics/history")
+    if case .success(let payload) = history {
+        check("history decodes its node rows", payload.hosts.count == 2 && payload.tier == 1)
+        check("an unreported metric is nil, never 0",
+              payload.hosts[1].gpu_temp_c == nil
+                && payload.hosts[1].error == "ssh: collect failed")
+        check("the peak rides beside the average",
+              payload.hosts[0].gpu_temp_c == 75.0 && payload.hosts[0].gpu_temp_c_max == 90.0)
+        check("engine identity is node+port, model is not the key",
+              payload.engines.first?.engineKey == "dgx-01:8000"
+                && payload.engines.first?.model == "qwen3-coder")
+        check("rows from the store read as a stored window", payload.hasStoredRows)
+        check("a ring in another process is not a live window",
+              payload.tier0?.readable_here == false && !payload.hasLiveTier0)
+        let trend = MetricsTrend.make(payload, field: .gpuTemp, host: "dgx-01")
+        check("the trend keeps the bucket's mean and its peak",
+              trend.points.count == 1 && trend.points[0].value == 75.0
+                && trend.points[0].peak == 90.0 && trend.hasPeaks)
+        check("the axis scales by the peak, not the mean", trend.upperBound == 90.0)
+        let unreported = MetricsTrend.make(payload, field: .gpuPower, host: "dgx-02")
+        check("a host that never answered is a gap, not a zero",
+              unreported.points.count == 1 && unreported.gaps == 1
+                && unreported.points[0].value == nil && unreported.upperBound == nil)
+        check("the caption names the gap instead of hiding it",
+              unreported.statusLine.contains("1 not reported"))
+        check("with no host named the series takes the first host present",
+              MetricsTrend.make(payload, field: .gpuTemp).host == "dgx-01")
+        check("the field vocabulary comes from the server, not a hardcoded list",
+              payload.fields?.host_peaks == ["gpu_temp_c_max"])
+    } else {
+        check("history should decode, got \(String(reflecting: history))", false)
+    }
+    StubTransport.arm(.http(status: 200, body: metricsHistoryBody))
+    _ = await client.metricsHistory(tier: 9)
+    check("an out-of-range tier is clamped, not forwarded",
+          StubTransport.requests.last?.url?.absoluteString.contains("tier=2") == true)
+    // A tier-0 read with nothing in it must not be able to claim a live window.
+    StubTransport.arm(.http(status: 200, body: Data(#"""
+    {"tier":0,"hosts":[],"engines":[],"tier0":{"points":0,"capacity":450,
+     "readable_here":true,"source":"recorder_ring"},"speak":"empty"}
+    """#.utf8)))
+    if case .success(let empty) = await client.metricsHistory(tier: 0) {
+        check("an empty ring is not a live window",
+              !empty.hasLiveTier0 && !empty.hasStoredRows)
+    } else {
+        check("an empty tier-0 response should still decode", false)
+    }
 
     // 11. The nil-shim the two pre-pivot providers still use keeps working.
     StubTransport.arm(.http(status: 200, body: kanbanRunningBody))
