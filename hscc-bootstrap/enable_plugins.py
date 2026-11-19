@@ -268,6 +268,11 @@ DASHBOARD_PUBLIC_URL = os.environ.get(
 # MUST get ``approve`` or every worker is born unable to run code. Only these
 # values are valid; an operator-set value outside the set (e.g. a deliberate
 # ``deny``) is preserved, never overwritten.
+#
+# That allowance is fleet-wide and branch-blind, so it is narrowed at the git
+# layer: ``.githooks/pre-push`` -> ``scripts/worker_push_guard.py`` (MQ3) refuses
+# a worker's non-fast-forward push unless the target is its own card branch.
+# Do not "fix" a force-push failure by widening this mode or removing the hook.
 SINGLE_QUERY_MODES = {"approve", "deny"}
 SINGLE_QUERY_MODE = os.environ.get("HSCC_SINGLE_QUERY_MODE", "approve")
 

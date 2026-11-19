@@ -232,6 +232,10 @@ def test_conflict_comments_pr_and_hands_card_back(tmp_path):
     assert "shared.txt" in result["processed"][0]["conflicted"]
     assert handed and handed[0][0] == "t_conflict"
     assert "shared.txt" in handed[0][2]
+    # MQ3: the handback is a resolve step for the card's OWN branch.
+    assert "git rebase origin/main" in handed[0][2]
+    assert f"git push --force-with-lease origin {pair['branch']}" in handed[0][2]
+    assert "Never force-push main or any other branch" in handed[0][2]
     assert gh.comments and "conflicted" in " ".join(gh.comments[0])
     doc = mq.load_state(_state(tmp_path))
     assert doc["projects"]["alpha"]["queue"] == []
@@ -240,6 +244,15 @@ def test_conflict_comments_pr_and_hands_card_back(tmp_path):
     wt = tmp_path / "queue" / "alpha"
     assert not (wt / ".git" / "rebase-merge").exists()
     assert not (wt / ".git" / "rebase-apply").exists()
+
+
+def test_resolve_instructions_name_the_card_branch():
+    """The push target is the branch recorded on the PR, else the card's own."""
+    named = mq.resolve_instructions("feature/recorded")
+    assert "git rebase origin/main" in named
+    assert "git push --force-with-lease origin feature/recorded" in named
+    fallback = mq.resolve_instructions(None)
+    assert "the branch recorded on your card" in fallback
 
 
 # ── red gate -> resolve handback ───────────────────────────────────────────
@@ -264,6 +277,9 @@ def test_red_gate_comments_tail_and_hands_card_back(tmp_path):
     assert "exit 7" in result["processed"][0]["gate"]
     assert handed and "BOOM" in handed[0][2]
     assert "BOOM" in " ".join(gh.comments[0])
+    # The red-gate handback carries the same own-branch resolve step.
+    assert "git rebase origin/main" in handed[0][2]
+    assert f"git push --force-with-lease origin {pair['branch']}" in handed[0][2]
     # Nothing was pushed or merged.
     assert gh.merged == []
     assert _git(pair["origin"], "rev-parse",

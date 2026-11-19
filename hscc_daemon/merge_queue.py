@@ -514,6 +514,29 @@ def _comment_pr(repo, pr, body, gh_runner):
         pass
 
 
+def resolve_instructions(branch):
+    """The resolve step a handed-back card's worker must follow (MQ3).
+
+    The PR's head branch IS the card branch (``wt/<card>`` or the branch the
+    card recorded), so it is the only ref the worker may force-push. The
+    pre-push guard (``.githooks/pre-push``) refuses main and every other
+    branch, so this text and the fence agree.
+    """
+    target = branch or "the branch recorded on your card"
+    return (
+        "Resolve it as this card's worker:\n"
+        "1. In your own card worktree: `git fetch origin && git rebase "
+        "origin/main`.\n"
+        "2. Fix the conflicted files / the failing gate, then re-run the "
+        "gate until it is green.\n"
+        f"3. Push back to YOUR card branch only: `git push --force-with-lease "
+        f"origin {target}`.\n"
+        "   Never force-push main or any other branch — the pre-push guard "
+        "refuses it.\n"
+        "4. Comment the result on the card and hand it back for review.\n"
+    )
+
+
 # ── auto-enqueue ────────────────────────────────────────────────────────────
 
 def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
@@ -638,7 +661,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if not ok:
         names = ", ".join(conflicted) if conflicted else "(files not reported)"
         body = (f"Merge queue: rebase onto origin/main conflicted.\n\n"
-                f"Conflicted files: {names}\n\n{output}")
+                f"Conflicted files: {names}\n\n"
+                f"{resolve_instructions(info.get('headRefName'))}\n"
+                f"{output}")
         _finish(doc, project, state_path, ps, "conflict", entry,
                 conflicted=conflicted)
         _handback(entry, cfg, body, handback, gh_runner)
@@ -653,7 +678,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         passed, output = _run_gate(command, worktree, timeout_s)
         if not passed:
             body = (f"Merge queue: gate failed after rebasing onto origin/main.\n\n"
-                    f"Gate: {command}\n\n{output}")
+                    f"Gate: {command}\n\n"
+                    f"{resolve_instructions(info.get('headRefName'))}\n"
+                    f"{output}")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command)
             _handback(entry, cfg, body, handback, gh_runner)

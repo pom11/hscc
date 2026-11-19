@@ -1,0 +1,37 @@
+#!/bin/sh
+# Branch-scoped force-push fence for dispatched kanban workers (MQ3).
+#
+# Why a committed hook: core.hooksPath lives in the COMMON git config and
+# install_hooks.py points it at .githooks, so every linked worktree — including
+# the kanban dispatcher's worker worktrees — runs this with no per-worktree
+# step. Detection lives in scripts/worker_push_guard.py ONLY; this file is
+# plumbing, mirroring .githooks/pre-commit -> scripts/address_guard.py.
+#
+# A worker run (HERMES_KANBAN_TASK set) may force-push only its own card branch
+# (HERMES_KANBAN_BRANCH, else wt/<task>). Non-fast-forward updates to main,
+# tags, or any other branch are refused. Non-worker processes are untouched.
+set -u
+
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pre-push (worker guard): cannot resolve the git top-level — push blocked." >&2
+  exit 1
+}
+GUARD="$TOP/scripts/worker_push_guard.py"
+[ -f "$GUARD" ] || {
+  echo "pre-push (worker guard): $GUARD is missing — push blocked." >&2
+  echo "  Restore it (git checkout -- scripts/worker_push_guard.py); do NOT bypass with --no-verify." >&2
+  exit 1
+}
+
+# Same interpreter preference as bootstrap: the Hermes venv python if present
+# at the repo root, else python3. The guard is stdlib-only either way.
+PY=""
+for cand in "$TOP/.venv/bin/python3" "$TOP/venv/bin/python3"; do
+  if [ -x "$cand" ]; then PY="$cand"; break; fi
+done
+[ -n "$PY" ] || PY=$(command -v python3 2>/dev/null) || {
+  echo "pre-push (worker guard): no python3 on PATH — push blocked." >&2
+  exit 1
+}
+
+exec "$PY" "$GUARD" --pre-push "$@"
