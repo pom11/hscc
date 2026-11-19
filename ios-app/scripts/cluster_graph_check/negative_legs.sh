@@ -132,11 +132,44 @@ m10() {
   awk -v s="$n" 'NR>=s && NR<=s+4 {next} {print}' "$GATE" > "$BK/out" && cp "$BK/out" "$GATE"
   bash -n "$GATE" || { echo "    (m10: owner no longer parses after removing the block)"; return 1; }
 }
+# L11 — the one-armed form of the shape this card exists to kill (re-review item 1):
+#       `#if os(iOS)` around the call with NO `#else`. The desktop then gets no
+#       supportedFamilies at all and WidgetKit picks the size, while every per-arm
+#       measurement stays green because each one reads only the arm it found. This is
+#       the MOST likely reintroduction — this card's parent text and the file's own old
+#       comment both said the `#if os(iOS)` "is real and must stay".
+m11() { printf '#if os(iOS)\n%s\n#endif\n' "$NEEDLE" > "$BK/b"; place "$W/GraphWidget.swift" "$NEEDLE" "$BK/b"; }
+# L12 — a `families-omit` reason written on the WRONG arm (re-review item 2). The iOS
+#       arm drops .systemSmall with nothing written, and the .systemSmall reason sits on
+#       the `#else` arm — where .systemSmall IS offered, so the reason is true there and
+#       excuses nothing here. File-wide marker matching let exactly this through (rc=0);
+#       the reason must fall inside the span of the arm that owes it.
+m12() { printf '#if os(iOS)\n        .supportedFamilies([.systemMedium, .systemLarge, .systemExtraLarge])\n#else\n        // families-omit: .systemSmall — desktop tiles start at medium\n        // families-omit: .systemExtraLarge — the desktop gallery caps at large\n        .supportedFamilies([.systemMedium, .systemLarge])\n#endif\n' > "$BK/b"; place "$W/GraphWidget.swift" "$NEEDLE" "$BK/b"; }
+# L13 — the same two asymmetries, each justified ON ITS OWN ARM. Must PASS: the span
+#       rule is a scope, not a ban, and without this leg L12 would only prove that a
+#       literal arm reddens, not that the marker was in the wrong place.
+m13() { printf '#if os(iOS)\n        // families-omit: .systemSmall — the iPhone small tile has no room for a chart\n        .supportedFamilies([.systemMedium, .systemLarge, .systemExtraLarge])\n#else\n        // families-omit: .systemSmall — desktop tiles start at medium too\n        // families-omit: .systemExtraLarge — the desktop gallery caps at large\n        .supportedFamilies([.systemMedium, .systemLarge])\n#endif\n' > "$BK/b"; place "$W/GraphWidget.swift" "$NEEDLE" "$BK/b"; }
 
-echo "sanity (the harness's needles must be unique):"
-echo "  '$NEEDLE' in GraphWidget.swift: $(grep -cF "$NEEDLE" "$W/GraphWidget.swift") (want 1)"
-echo "  'case .systemExtraLarge:' in Views: $(grep -cF 'case .systemExtraLarge:' "$W/GraphWidgetViews.swift") (want 1)"
-echo "  owner's accessory rule lines: $(grep -cF 'if has "$widget_code" "\.accessory"; then' "$GATE") (want 1)"
+echo "sanity (the harness's needles must be unique — ASSERTED):"
+# Every leg above plants and removes text BY NEEDLE, so a second occurrence of one
+# would make a mutation hit two places (or the wrong one) and the leg would then
+# assert something about a file it never shaped — the same "measured nothing" failure
+# class the BROKEN verdict exists for, arriving by another route. The block used to
+# PRINT these counts and carry on regardless: it informed nobody and refused nothing.
+sanity_bad=0
+check_needle() {   # <file> <pattern> — exactly one occurrence or the harness stops
+  local n
+  n=$(grep -cF -- "$2" "$1")
+  echo "  $n occurrence(s) of [$2] in $1 (want 1)"
+  if [ "$n" -ne 1 ]; then sanity_bad=1; fi
+}
+check_needle "$W/GraphWidget.swift" "$NEEDLE"
+check_needle "$W/GraphWidgetViews.swift" 'case .systemExtraLarge:'
+check_needle "$GATE" 'if has "$widget_code" "\.accessory"; then'
+if [ "$sanity_bad" -ne 0 ]; then
+  echo "REFUSING: a needle is not unique, so the legs below would assert nothing"
+  exit 1
+fi
 echo "control run (clean tree, want rc=0):"
 bash "$GATE" > "$BK/control.txt" 2>&1; echo "  rc=$? ok=$(grep -c '  ok: ' "$BK/control.txt")"
 echo "legs:"
@@ -150,6 +183,9 @@ leg  L7 0 "spanning more than one line" m7
 leg  L8 0 "no supportedFamilies call in" m8
 leg  L9 0 "resolves to NO family" m9
 run_leg L10 3 "no accessory family anywhere in the graph widget (home-screen-only) is delegated to" m10 nonzero
+leg  L11 0 "no supportedFamilies arm reaches macOS" m11
+leg  L12 0 "the [os(iOS)] arm omits systemSmall" m12
+run_leg L13 0 "structural leg: all checks passed" m13 zero
 echo "control run again (must match the first byte for byte):"
 bash "$GATE" > "$BK/control2.txt" 2>&1; echo "  rc=$? ok=$(grep -c '  ok: ' "$BK/control2.txt")"
 cmp -s "$BK/control.txt" "$BK/control2.txt" && echo "  control output BYTE-IDENTICAL" || echo "  !!! control drifted"
