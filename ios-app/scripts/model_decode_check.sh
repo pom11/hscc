@@ -51,6 +51,12 @@ real_models=(
   # no simulator. Its SwiftUI half lives in ClusterSmallGridView.swift and is
   # covered structurally by widget_style_check.sh / cluster_widget_check.sh.
   Sources/HSCCWidgets/ClusterSmallGrid.swift
+  # The history series model (t_2681d3de): the tile's GPU% trend is built from
+  # ClusterHistorySeriesSet + the pixel-column downsampler, both Foundation-only,
+  # so the join, the reduction and the extremes-preserving property are executed
+  # here against the committed tier-1/tier-2 fixtures rather than asserted in
+  # prose by the SwiftUI gate.
+  Sources/Shared/ClusterHistorySeries.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
