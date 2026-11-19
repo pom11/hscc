@@ -246,6 +246,10 @@ run_leg() {
   # HSCC_BUNDLE_PREFIX. Without this link the unmodified control copy fails to
   # find it, so the probe would be refusing a legitimate gate (t_d1a9eeb6).
   ln -s "${IOSAPP}/project.yml" "${root}/project.yml" 2>/dev/null
+  # Surface coverage reads the per-widget manifests under widgets/ (t_f98764f8).
+  # Without this link the control copy sees no manifests and reports every
+  # widget as unregistered — a harness fault, not a gate failure.
+  ln -s "${IOSAPP}/widgets" "${root}/widgets" 2>/dev/null
   # Sibling projects the gate reads as "../name" (macos-app today) have to exist
   # relative to the copy's PARENT, because the gate cds into the copy root and then
   # resolves MAC_APP="../macos-app" from there. Without this the control copy prints

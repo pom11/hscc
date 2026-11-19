@@ -141,15 +141,24 @@ report "the subject file imports Foundation only (no WidgetKit/SwiftUI/AppIntent
   "$(grep -nE '^import +(SwiftUI|WidgetKit|AppIntents)' "$SUBJECT")"
 
 # project.yml is the only place the gates see a file (check_sources.sh owns the
-# both-directions disk check; this one is the per-target half of it).
+# both-directions disk check; this one is the per-target half of it). Since
+# t_f98764f8 the target lists the computed widget DIRECTORY instead of one line
+# per file, so a file is compiled when the block names it directly OR names a
+# directory that contains it. Counting only the per-file form went red on main
+# ("want 2, got 0") while the directory entry was compiling both files.
 listed=$(python3 -c "
 import re
 spec = open('project.yml').read().split(chr(10) + 'targets:' + chr(10), 1)[1]
 blk = spec.split(chr(10) + '  HSCCWidgets:', 1)[1]
 blk = re.split(chr(10) + '  [A-Za-z][A-Za-z0-9_]*:' + chr(10), blk, maxsplit=1)[0]
-print(blk.count('Sources/HSCCWidgets/BoardStatusReading.swift')
-      + blk.count('Sources/HSCCWidgets/BoardStatusWidget.swift'))" 2>/dev/null)
-expect "both widget files are listed under the HSCCWidgets target" "2" "$listed"
+entries = [line.split('path:', 1)[1].strip()
+           for line in blk.splitlines()
+           if line.lstrip().startswith('- path:')]
+files = ['Sources/HSCCWidgets/BoardStatusReading.swift',
+         'Sources/HSCCWidgets/BoardStatusWidget.swift']
+print(sum(any(f == e or f.startswith(e.rstrip('/') + '/') for e in entries)
+          for f in files))" 2>/dev/null)
+expect "both widget files are compiled by the HSCCWidgets target" "2" "$listed"
 
 # Audit-3's invariant, for the six family bodies.
 if ! python3 "$ORDER" "$WIDGET"; then
