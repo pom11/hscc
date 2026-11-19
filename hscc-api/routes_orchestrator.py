@@ -10,11 +10,11 @@ endpoint.
 
 Project → orchestrator resolution reuses C1's ``hscc-roles/orchestrators.py``
 resolver (``resolve_orchestrator``), which maps project → ``<project>-orch`` /
-``<project>`` session / board / repo and the catch-all ``general`` →
-``general-orch`` / ``general`` / ``default``. We load that sibling plugin via
-the same sys.path pattern the API uses everywhere (routes_cluster loads the
-cluster engine, routes_project loads hscc-project). C1 shipped on an unmerged
-branch, so ``orchestrators.py`` is vendored into ``hscc-roles/`` verbatim.
+``<project>`` session / board / repo and the main orchestrator (the name stored
+by bootstrap, default ``general``) → that same name for profile/session/board,
+with no repo. We load that sibling plugin via the same sys.path pattern the API
+uses everywhere (routes_cluster loads the cluster engine, routes_project loads
+hscc-project).
 
 Transport (documented decision — see module docstring of the backing fn): we
 shell Hermes directly, ``hermes -p <profile> chat -Q --continue <session>
@@ -126,6 +126,7 @@ if _ROLES_DIR is not None and str(_ROLES_DIR) not in sys.path:
 from orchestrators import (                          # noqa: E402
     OrchestratorError,        # base error (e.g. project has no board)
     UnknownProjectError,      # project neither in registry nor 'general'
+    main_profile,             # the ONE main orchestrator's profile name
     resolve_orchestrator,     # project -> {profile, session, board, repo}
 )
 
@@ -974,10 +975,11 @@ def _ensure_role_profiles() -> "dict | None":
     :data:`SESSION_COMPACTION_THRESHOLD_TOKENS` declaratively, so NEW profiles
     are covered on the next run.
 
-    A role profile is ANY profile under the profile root that is not a
-    ``<project>-orch`` orchestrator (name does not end with ``-orch``). We
+    A role profile is ANY profile under the profile root that is not an
+    orchestrator: not a ``<project>-orch`` name and not the main orchestrator's
+    resolved profile (the bootstrap-stored name, default ``general``). We
     discover the set via ``hermes_cli.profiles.list_profiles()`` — the same
-    enumeration the CLI uses — so the current 26 names are never hardcoded and
+    enumeration the CLI uses — so the current names are never hardcoded and
     new profiles are picked up automatically. ``default`` counts as a role
     profile (it is not an orchestrator and wedges the same way).
 
@@ -1026,15 +1028,17 @@ def _ensure_role_profiles() -> "dict | None":
         return None
 
     set_, unchanged, orchestrators = [], [], []
+    main_orch_profile = main_profile()
     for info in infos:
         name = getattr(info, "name", None)
         if not isinstance(name, str) or not name:
             continue
-        if name.endswith("-orch"):
+        if name.endswith("-orch") or name == main_orch_profile:
             # Orchestrator: already covered by the per-project ensure path
-            # (_ensure_compaction_threshold on the resolved <project>-orch).
-            # This sweep deliberately does not touch them — extension, not
-            # rewrite — so their behaviour stays byte-identical.
+            # (_ensure_compaction_threshold on the resolved <project>-orch) or
+            # by the main-orchestrator chat path. This sweep deliberately does
+            # not touch them — extension, not rewrite — so their behaviour
+            # stays byte-identical.
             orchestrators.append(name)
             continue
         try:

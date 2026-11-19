@@ -32,6 +32,7 @@ except ImportError:
     USE_NATIVE_API = False
 
 import rolelib
+import main_orch
 
 # Worker role profiles must serve from the WORKER pool, not inherit the root
 # config (which points at the orchestrator node). We point them at the sparkrun
@@ -580,20 +581,34 @@ _PROJECT_ORCH_OPS = (
 )
 
 
+def _is_main_orchestrator(name):
+    """Is ``name`` the ONE main orchestrator (the bootstrap-stored name)?"""
+    try:
+        return name == main_orch.main_profile()
+    except Exception:  # pragma: no cover - resolver is pure, defensive only
+        return False
+
+
 def _is_orchestrator(name):
-    """The orchestrator family: the cluster-wide `orchestrator` plus any
-    per-project `<project>-orch` profile. They are NOT kanban workers."""
-    return name == "orchestrator" or name.endswith("-orch")
+    """The orchestrator family: the legacy cluster-wide role, the main
+    orchestrator, plus any per-project ``<project>-orch`` profile. They are NOT
+    kanban workers."""
+    return (name == main_orch.LEGACY_ORCHESTRATOR_ROLE
+            or _is_main_orchestrator(name)
+            or name.endswith("-orch"))
 
 
 def _is_project_orchestrator(name):
-    """A PER-PROJECT orchestrator (`<project>-orch`), not the cluster-wide one.
+    """A PER-PROJECT orchestrator (`<project>-orch`), not a cluster-wide one.
 
-    The cluster-wide `orchestrator` deliberately keeps the root config and is
-    never repointed. Per-project orchestrators are separate profiles that must
-    carry their own model block to be invocable directly.
+    The legacy cluster-wide role and the main orchestrator deliberately keep
+    the root config and are never repointed. Per-project orchestrators are
+    separate profiles that must carry their own model block to be invocable
+    directly.
     """
-    return name != "orchestrator" and name.endswith("-orch")
+    return (name != main_orch.LEGACY_ORCHESTRATOR_ROLE
+            and not _is_main_orchestrator(name)
+            and name.endswith("-orch"))
 
 
 def compose_soul(spec, base_identity):
@@ -601,12 +616,13 @@ def compose_soul(spec, base_identity):
 
     Orchestrators get an operational block that does NOT describe worktree
     execution (they are not workers); all other roles get the worker block.
-    The cluster-wide `orchestrator` is the only one with authority over the
-    physical cluster; per-project `<project>-orch` scopes that authority to its
-    own board.
+    The legacy cluster-wide role and the main orchestrator are the only ones
+    with authority over the physical cluster; per-project `<project>-orch`
+    scopes that authority to its own board.
     """
     name = spec["name"]
-    if name == "orchestrator":
+    if (name == main_orch.LEGACY_ORCHESTRATOR_ROLE
+            or _is_main_orchestrator(name)):
         ops = _ORCH_OPS
     elif _is_orchestrator(name):
         ops = _PROJECT_ORCH_OPS
@@ -979,9 +995,10 @@ def generate_profile(spec, base_identity):
     if delegation:
         config["delegation"] = delegation
     # Worker roles serve from the load-balanced worker proxy so their work runs
-    # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
-    # config (its own gateway-node model) and is never repointed; per-project
-    # orchestrators (<project>-orch) likewise keep the gateway-node model.
+    # on worker GPUs, not the orchestrator. The legacy cluster-wide role and the
+    # main orchestrator keep the root config (their own gateway-node model) and
+    # are never repointed; per-project orchestrators (<project>-orch) likewise
+    # keep the gateway-node model.
     if _is_project_orchestrator(name):
         # Per-project orchestrators (<project>-orch) need an EXPLICIT model
         # block. They were previously lumped in with the cluster-wide
@@ -1000,17 +1017,19 @@ def generate_profile(spec, base_identity):
         # project orche went null for ~84 min and wedged at the ratio floor).
         config["model"] = _strong_model_block()
         config["compression"] = _compression_block(existing_compression)
-    elif name == "orchestrator":
-        # Cluster-wide `orchestrator`: keeps the gateway-node strong model (root
-        # config) and is never repointed at the worker proxy. It must ALSO get
-        # the compaction compression block (threshold + threshold_tokens) merged
-        # over its existing block — it was the ONE profile the v1.14.2 fix
-        # (t_f2c2dbb5) missed, so a regeneration rewrote config.yaml without a
-        # compression block and then enable_plugins._ensure_compaction re-added
-        # a threshold-only block -> threshold_tokens came back null (2026-08-28
-        # incident) and the session reverted to the 196608 ratio floor. Emitting
-        # it here (through the SAME _compression_block) preserves an operator's
-        # threshold_tokens and never raises a lower value.
+    elif (name == main_orch.LEGACY_ORCHESTRATOR_ROLE
+          or _is_main_orchestrator(name)):
+        # Legacy cluster-wide role / main orchestrator: keeps the gateway-node
+        # strong model (root config) and is never repointed at the worker proxy.
+        # It must ALSO get the compaction compression block (threshold +
+        # threshold_tokens) merged over its existing block — it was the ONE
+        # profile the v1.14.2 fix (t_f2c2dbb5) missed, so a regeneration rewrote
+        # config.yaml without a compression block and then
+        # enable_plugins._ensure_compaction re-added a threshold-only block ->
+        # threshold_tokens came back null (2026-08-28 incident) and the session
+        # reverted to the 196608 ratio floor. Emitting it here (through the SAME
+        # _compression_block) preserves an operator's threshold_tokens and never
+        # raises a lower value.
         config["model"] = _strong_model_block()
         config["compression"] = _compression_block(existing_compression)
     elif not _is_orchestrator(name):

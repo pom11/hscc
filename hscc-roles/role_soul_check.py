@@ -28,7 +28,8 @@ signature, so that is the population: a worker is who actually runs under a
 role identity. Orchestrator-family SOULs (the cluster-wide ``orchestrator`` and
 any ``<project>-orch``) are deliberately EXCLUDED — ``orchestrators.py`` mints
 those dynamically and stamps them with the spec name of whatever shared spec it
-passes (e.g. ``general-orch`` carries ``## Role: orchestrator``), so a dir-name
+passes (e.g. the legacy general catch-all carries ``## Role: orchestrator``),
+so a dir-name
 comparison would red-flag a layout that is correct by construction. A dir with
 no worker signature is reported in the scanned count's summary, not judged.
 

@@ -247,8 +247,9 @@ like every other mutating endpoint.
 
 Project → orchestrator resolution follows the C1 convention
 (`hscc-roles/orchestrators.py`): a named project resolves to profile
-**`<project>-orch`** / named session **`<project>`**; `general` →
-**`general-orch`** / **`general`**.
+**`<project>-orch`** / named session **`<project>`**; absent/null resolves to
+the ONE **main orchestrator** named at bootstrap (`hscc-roles/main_orch.py`,
+default **`general`**) — its stored name is the profile, session and board.
 
 **Transport:** the API invokes Hermes directly —
 

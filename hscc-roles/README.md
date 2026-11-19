@@ -87,11 +87,15 @@ Conventions (do not invent alternatives):
 - orchestrator profile: `<project>-orch`   (e.g. `ecofire-app-orch`)
 - long-lived session:   `<project>`         (`hermes -p <P>-orch chat --continue <P>`)
 - board:                the project's existing board from the registry
-- catch-all:            `general` → `general-orch` / `general` / `default`
-                        (repo=None, not repo-scoped) — the DEFAULT when no
-                        project is specified.
+- main orchestrator:    the name stored at bootstrap (default `general`),
+                        used as its profile, session and board slug (repo=None)
+                        — the DEFAULT when no project is specified. The
+                        legacy catch-all (`general-orch` / `general` /
+                        `default`) still resolves when named explicitly.
 
-Two importable entry points (the HSCC API imports these):
+Importable entry points (the HSCC API imports these):
+- `main_orch.main_name()` / `main_profile()` / `main_board()` → the ONE main
+  orchestrator stored at bootstrap (default `general`); no hardcoded profile.
 - `orchestrators.resolve_orchestrator(project=None, path=None)` →
   `{"project","profile","session","board","repo-or-None"}`; raises
   `UnknownProjectError` for an unknown project.
@@ -162,9 +166,9 @@ re-stamps every generated profile and rewrites live profile state — is an
 operator action the check deliberately never takes.
 
 Orchestrator-family SOULs are excluded by design: `orchestrators.py` stamps a
-per-project orch with the name of the SHARED spec it passes (`general-orch`
-legitimately carries `## Role: orchestrator`), so judging it by dir name would
-red-flag a layout that is correct by construction.
+per-project orch with the name of the SHARED spec it passes (the legacy
+catch-all legitimately carries `## Role: orchestrator`), so judging it by dir
+name would red-flag a layout that is correct by construction.
 
 ## How to test / Links
 

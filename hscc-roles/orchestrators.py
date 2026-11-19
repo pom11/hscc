@@ -9,9 +9,13 @@ Conventions (operator-defined, DO NOT invent alternatives):
   * profile name: ``<project>-orch``            (e.g. ``ecofire-app-orch``)
   * session name: ``<project>``                  (``hermes -p <P>-orch chat --continue <P>``)
   * board:        the project's EXISTING board from the registry
-  * catch-all:    ``general`` -> ``general-orch`` / ``general`` / ``default``
-                  (repo=None, not repo-scoped) — the DEFAULT when no project
-                  is specified.
+  * main:         the ONE main orchestrator (see ``main_orch.py``), named at
+                  bootstrap (default ``general``); its profile and board are
+                  the same name. It is the DEFAULT when no project is named.
+
+The legacy catch-all (``general-orch`` / ``general`` / ``default``) remains an
+explicit alias so an existing install's old name still resolves; new code reads
+the main identity from the resolver, never from a hardcoded profile constant.
 
 The registry at ``~/.flightdeck/registry.yaml`` is the source of truth for
 which projects exist — we read it, never hardcode a project list. The path is
@@ -27,16 +31,42 @@ from typing import Optional
 import yaml
 
 import generator
+import main_orch
 
 # Registry default matches flightdeck's DEFAULT_REGISTRY (~/.flightdeck/registry.yaml).
 # Overridable with HSCC_REGISTRY so tests/provisioning can target a fixture.
 REGISTRY_PATH = os.environ.get("HSCC_REGISTRY", "~/.flightdeck/registry.yaml")
 
-# The catch-all orchestrator (not tied to any project).
-GENERAL_PROFILE = "general-orch"
-GENERAL_SESSION = "general"
-GENERAL_BOARD = "default"
-GENERAL_REPO = None
+
+def main_name(hscc_dir=None):
+    """The main orchestrator's stored name (default ``general``)."""
+    return main_orch.main_name(hscc_dir)
+
+
+def main_profile(hscc_dir=None):
+    """The main orchestrator's profile name."""
+    return main_orch.main_profile(hscc_dir)
+
+
+def main_board(hscc_dir=None):
+    """The main orchestrator's board slug."""
+    return main_orch.main_board(hscc_dir)
+
+
+def main_identity(hscc_dir=None):
+    """The resolver identity for the main orchestrator (repo=None)."""
+    return main_orch.main_identity(hscc_dir)
+
+
+def _legacy_general_identity():
+    """The pre-main catch-all identity, kept for an explicit old name."""
+    return {
+        "project": main_orch.LEGACY_GENERAL_SESSION,
+        "profile": main_orch.LEGACY_GENERAL_PROFILE,
+        "session": main_orch.LEGACY_GENERAL_SESSION,
+        "board": main_orch.LEGACY_GENERAL_BOARD,
+        "repo": None,
+    }
 
 
 class OrchestratorError(Exception):
@@ -87,23 +117,24 @@ def resolve_orchestrator(project: Optional[str] = None, path: Optional[str] = No
     is ``None`` for the project-less ``general`` orchestrator.
 
     ``project`` may be:
-      * ``None`` or ``"general"`` -> the catch-all orchestrator
-        (``general-orch`` / ``general`` / ``default`` / repo=None).
+      * ``None`` or ``"general"`` -> the main orchestrator (the name stored by
+        bootstrap; profile/session/board are all that name, default
+        ``general``).
+      * the stored main name itself -> the same identity.
+      * the legacy ``general-orch`` -> the old catch-all identity on an
+        existing install (explicitly requested, never the default).
       * a real registry project name -> ``<project>-orch`` / ``<project>`` /
         the project's registry ``board`` / the project's repo path.
 
     Raises :class:`UnknownProjectError` for any other name.
     """
-    if not project or project == GENERAL_SESSION:
-        return {
-            "project": GENERAL_SESSION,
-            "profile": GENERAL_PROFILE,
-            "session": GENERAL_SESSION,
-            "board": GENERAL_BOARD,
-            "repo": GENERAL_REPO,
-        }
+    main = main_identity()
+    name = str(project).strip() if project is not None else ""
+    if not name or name == "general" or name == main["project"]:
+        return main
+    if name == main_orch.LEGACY_GENERAL_PROFILE:
+        return _legacy_general_identity()
 
-    name = str(project).strip()
     for row in _load_projects(path):
         if row.get("name") == name:
             board = row.get("board")
