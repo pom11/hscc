@@ -875,21 +875,20 @@ def cmd_triggers():
         ))
 
 
-def cmd_notify(msg):
-    """Send a manual notification."""
-    from .desktop import send_macos_notification
-    from .state import now_iso
+def cmd_notify(argv):
+    """Post one alert to the HSCC feed (``hscc notify``).
 
-    console = _console()
+    Since the main-orchestrator card the verb is the CLI face of
+    ``POST /v1/alerts`` (see :mod:`hscc_daemon.notify_cli`), not a direct
+    desktop notification: the feed is the durable record, the apps read it,
+    and auth/dedupe/rate-limiting live in the one place every producer shares.
+    A bare string is treated as the legacy one-argument message form.
+    """
+    from . import notify_cli
 
-    ts = now_iso()
-    title = f"HSCC Manual: {ts[:19]}"
-    console.print(f"Sending notification: {title}")
-    ok = send_macos_notification(title, msg, priority="normal")
-    console.print(make_status_panel(
-        f"Notification {'sent' if ok else 'failed'}",
-        status="ok" if ok else "error", title="notify",
-    ))
+    if isinstance(argv, str):
+        argv = [argv]
+    return notify_cli.main(list(argv or []))
 
 
 def cmd_heal(node=None, reason="", status_only=False):

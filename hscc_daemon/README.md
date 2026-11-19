@@ -89,7 +89,7 @@ not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 | `hscc check --repo <path>` | Address-guard posture for that checkout (armed / unarmed / armed-but-absent) |
 | `hscc watch [stream]` | Live-tail check results |
 | `hscc triggers` | Show trigger-engine rules + recent firings |
-| `hscc notify <msg>` | Send a manual macOS notification |
+| `hscc notify <title> <body>` | Post an alert to the HSCC alert feed (`POST /v1/alerts`; `--level`, `--key`) |
 | `hscc heal-status` | List per-node heal-breaker strikes (read-only) |
 | `hscc heal-clear <node>` | Clear one node's strikes after investigating (MUTATES the ledger) |
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |

@@ -313,31 +313,31 @@ class TestCmdTriggers:
 
 
 class TestCmdNotify:
-    """cmd_notify() sends a manual notification."""
+    """cmd_notify() posts the verb's argv to the alert feed via notify_cli."""
 
-    def test_notify_output(self, tmp_hfcc_dir, monkeypatch):
+    def test_notify_delegates_the_verb_argv(self, monkeypatch):
         from hscc_daemon import cli
-        from hscc_daemon import state as state_mod
-        from hscc_daemon import desktop
+        from hscc_daemon import notify_cli
 
-        state_dir = tmp_hfcc_dir / "state"
-        state_dir.mkdir()
-        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        calls = []
+        monkeypatch.setattr(notify_cli, "main",
+                            lambda argv: calls.append(list(argv)) or 0)
 
-        notified = []
-        def mock_notify(title, body, priority="normal"):
-            notified.append({"title": title, "body": body})
-            return True
+        rc = cli.cmd_notify("Hello World")
 
-        monkeypatch.setattr(desktop, "send_macos_notification", mock_notify)
+        assert rc == 0
+        assert calls == [["Hello World"]]
 
-        f = io.StringIO()
-        with redirect_stdout(f):
-            cli.cmd_notify("Hello World")
+    def test_notify_keeps_title_and_body_separate(self, monkeypatch):
+        from hscc_daemon import cli
+        from hscc_daemon import notify_cli
 
-        output = f.getvalue()
-        assert "notification" in output.lower() or "Sent" in output
-        assert len(notified) == 1
+        calls = []
+        monkeypatch.setattr(notify_cli, "main",
+                            lambda argv: calls.append(list(argv)) or 0)
+
+        assert cli.cmd_notify(["Title", "Body", "--level", "action"]) == 0
+        assert calls == [["Title", "Body", "--level", "action"]]
 
 
 class TestCmdLog:

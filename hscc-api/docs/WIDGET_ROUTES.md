@@ -24,6 +24,9 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/cluster/status` | Cluster widget | `routes_cluster.handle_cluster_status` | `hscc-cluster` engine `cmd_cluster_status` (`hscc cluster status`) |
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
+| `POST /v1/alerts` | `hscc notify` (main orchestrator, daemon, operators) | `routes_alerts.handle_post_alert` | `hscc_daemon.alerts.post_alert` — the same store/rules `hscc notify` reaches over HTTP |
+| `GET /v1/alerts?since=<id>` | iOS/macOS apps (alert feed poll) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
+| `POST /v1/alerts/<id>/ack` | iOS/macOS apps (mark seen) | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
 
 
 ## GET /v1/kanban/running
@@ -458,6 +461,48 @@ not zeros. Deploying the current `main` API closes that gap. `/v1/projects` on
 the live server already answers, but without the board-truth fields above —
 older clients decode only `{name, board}`, newer ones render `—` for missing
 counts.
+
+## Alert feed (card N1)
+
+The main orchestrator reaches the operator through one durable feed under
+`~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
+client of this route, not a second writer, so dedupe and rate limits cannot
+drift between producers. The push sender is a no-op seam today
+(`hscc_daemon/alert_push.py`); card N2 fills the APNs transport.
+
+### POST /v1/alerts
+
+Body: `title` (required, ≤200 chars), `body` (≤4000), `level`
+(`info|action|critical`, default `info`), `key` (optional dedupe identity,
+≤200). `201` means a new alert was stored; `200` means the same key/content was
+already live (`deduped: true`) or the rate limit suppressed it
+(`rate_limited: true`, with `retry_after_s`). Suppression is success, not an
+error. `push` reports the sender seam's answer for a created alert.
+
+| field | type | meaning |
+|---|---|---|
+| `alert.id` | integer | monotonic alert id, never reused |
+| `alert.ts` | string | UTC `...Z` creation time |
+| `alert.title` / `.body` | string | what the operator reads |
+| `alert.level` | string | `info` / `action` / `critical` |
+| `alert.key` | string/null | the dedupe identity, when given |
+| `alert.acked` / `.acked_at` | boolean/null | whether it has been seen, and when |
+| `created` / `deduped` / `rate_limited` | boolean | which path answered |
+| `reason` | string | `created`, `duplicate`, `rate_limited_key`, `rate_limited_global` |
+| `retry_after_s` | number/null | seconds until the rate limit frees a slot |
+
+### GET /v1/alerts?since=&lt;id&gt;&amp;limit=&lt;n&gt;
+
+`since` is exclusive; rows are ascending by id. Without `since` the newest
+`limit` alerts are returned (default 100, cap 500), so a first launch can render
+a screenful. `has_more` asks for another page; `next_since` is the cursor to
+advance; `latest_id` is the newest id the store holds.
+
+### POST /v1/alerts/&lt;id&gt;/ack
+
+Marks one alert acknowledged (idempotent — the first `acked_at` is kept) and
+clears its key's dedupe slot, so a condition that recurs after the operator has
+seen it can alert again. `404` when the id is not in the bounded feed.
 
 ## Parity tests
 

@@ -1091,6 +1091,7 @@ import routes_commands  # noqa: E402,F401  (registers /v1/commands — slash-com
 import routes_cron  # noqa: E402,F401  (registers /v1/cron/list — read-only scheduled-jobs roster)
 import routes_logs  # noqa: E402,F401  (registers /v1/logs — bounded redacted log tail)
 import routes_history  # noqa: E402,F401  (registers /v1/daemon/history — automated-action timeline)
+import routes_alerts  # noqa: E402,F401  (registers /v1/alerts — the operator alert feed behind hscc notify, card N1)
 import routes_metrics  # noqa: E402,F401  (registers /v1/metrics/history — the three metrics tiers for the widgets' charts, t_5ae8cfcf)
 
 # t_47f51a71: session-event wire contract — history read endpoint over the
