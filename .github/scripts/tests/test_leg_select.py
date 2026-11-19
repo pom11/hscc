@@ -137,6 +137,7 @@ def test_a_single_unattributable_path_among_known_ones_widens_everything():
         ".github/scripts/leg_select.py",
         "requirements.txt",
         "requirements-dev.txt",
+        "requirements-ci.txt",
         "install/install_payload.py",
         "conftest.py",
         ".githooks/pre-commit",

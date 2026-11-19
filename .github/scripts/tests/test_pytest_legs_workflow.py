@@ -141,8 +141,21 @@ def test_a_failing_runner_cannot_abort_the_step_before_it_is_classified():
 def test_the_venv_is_cached_and_the_pip_cache_is_kept():
     text = _text()
     assert "actions/cache@v4" in text
-    assert "hashFiles('requirements.txt')" in text
+    assert "hashFiles('requirements.txt', 'requirements-ci.txt')" in text
     assert "cache: pip" in text
+    assert "-r requirements-ci.txt" in text, (
+        "the test-only imports (websockets, mcp, sqlalchemy, numpy, Pillow, "
+        "setuptools) live in requirements-ci.txt; installing requirements.txt "
+        "alone makes four legs die at COLLECTION on the runner"
+    )
+
+
+def test_the_leg_job_runs_on_the_platform_the_suite_targets():
+    """ubuntu-latest was measured red: hscc_daemon/event_driven.py annotates
+    select.kqueue at class scope, which does not exist on Linux."""
+    text = _text()
+    leg_job = text[text.index("  leg:\n") : text.index("\n  legs:\n    name: legs")]
+    assert "    runs-on: macos-latest" in leg_job
 
 
 def test_the_legs_job_does_not_cancel_a_push_to_main():

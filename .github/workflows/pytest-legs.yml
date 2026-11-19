@@ -36,10 +36,10 @@ name: pytest-legs
 #
 # COST. One job per leg, in PARALLEL (fail-fast: false), so wall time is the
 # slowest selected leg rather than the sum of the roster, and the gate's duration
-# does not grow with the roster. The Python venv is cached on requirements.txt
-# and each leg only installs into it on a cache miss. The measured wall time of
-# the first full-suite run and of a single-leg PR run is reported in the PR and
-# in docs/reports/t_23bf61f3-ci-pytest-leg.md.
+# does not grow with the roster. The Python venv is cached on requirements.txt +
+# requirements-ci.txt and each leg only installs into it on a cache miss. The
+# measured wall time of the first full-suite run and of a single-leg PR run is
+# reported in the PR and in docs/reports/t_23bf61f3-ci-pytest-leg.md.
 #
 # BLOCKING OR ADVISORY (decision 2). Same shape as address-guard.yml: one
 # repository variable, not an edit to this file.
@@ -54,17 +54,14 @@ name: pytest-legs
 #                                      fail OPEN on capitalisation)
 #     a leg that could not run at all fails EITHER way — see leg_verdict.sh.
 #
-# Start advisory, for the reason the body of this card gives: a required check
-# that is red for a reason nobody can fix teaches everyone to click through red.
-# There is one such red on main today —
-# hscc-bootstrap/tests/test_bootstrap_isolated.py::
-# test_fresh_home_says_not_wired_instead_of_claiming_success (owner t_ea59a6ba),
-# measured red at 540f8a8b in a standalone run. With leg selection a PR that does
-# not touch hscc-bootstrap/ does not run that leg, so the gate is usable on day
-# one; make it required when that one is green on the runner.
+# Advisory by default, per the card's decision 2. The one red this card was
+# handed (hscc-bootstrap's test_fresh_home_says_not_wired_instead_of_claiming_success,
+# owner t_ea59a6ba) measures GREEN on the first runner-side full-suite run of
+# this workflow, so flipping HSCC_TESTS_ENFORCE to true and requiring the check
+# is a one-variable change once a green full suite is on record.
 #
-# To make it block once it is green, require the check "pytest-legs / legs" in
-# branch protection (PRs only, like address-guard's option b):
+# To make it block, require the check "pytest-legs / legs" in branch protection
+# (PRs only, like address-guard's option b):
 #
 #   gh api -X PUT repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks \
 #     -f strict=true -f contexts[]=legs
@@ -149,19 +146,14 @@ jobs:
       fail-fast: false
       matrix:
         leg: ${{ fromJSON(needs.select.outputs.matrix) }}
-    runs-on: ubuntu-latest
-    # The suite is designed to run THIN: every hermes-integration case skips
-    # through a named probe module when hermes is not importable
-    # (scripts/run_tests.sh's "the sibling interpreter is THIN on purpose" block
-    # and docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md), and `-rs`
-    # makes each skip reason visible in this log. A GitHub runner with
-    # requirements.txt and no hermes is exactly that posture.
-    #
-    # KNOWN GAP, stated rather than hidden: ubuntu-latest does not cover
-    # macOS-specific behaviour. The Apple clients are covered by
-    # app-build-checks.yml (macos-latest, swiftc-only). If a leg ever goes green
-    # here and red on a Spark host because of the OS, change runs-on to
-    # macos-latest — that is a one-line decision, not a redesign.
+    # macOS, not ubuntu. The first ubuntu run of this gate measured why:
+    # hscc_daemon/event_driven.py:240 annotates `Optional[select.kqueue]` at
+    # class scope, so the daemon leg dies at collection with
+    # `module 'select' has no attribute 'kqueue'` on Linux. The daemon runs on
+    # Spark Macs, so macOS is the posture these tests were written for. The
+    # Python-only steps are portable; the Apple clients are still covered by
+    # app-build-checks.yml (swiftc, no launch).
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -169,29 +161,32 @@ jobs:
         with:
           # 3.13, to match the sibling interpreter the dual-interpreter stamp
           # already runs the roster under (~/miniconda3/envs/p313) rather than
-          # adding a third CPython posture nobody stamps. The pip cache is the
-          # wheel cache; the venv itself is cached below.
+          # adding a third CPython posture nobody stamps. requirements-ci.txt
+          # carries the test-only imports (and requirements.txt); hermes is
+          # deliberately absent, so the hermes-gap probes SKIP and `-rs` prints
+          # each reason in the leg log.
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ci.txt
 
       - name: Restore the test venv
         id: venv
         uses: actions/cache@v4
         with:
           path: .venv
-          key: test-venv-${{ runner.os }}-${{ runner.arch }}-py313-${{ hashFiles('requirements.txt') }}
+          key: test-venv-${{ runner.os }}-${{ runner.arch }}-py313-${{ hashFiles('requirements.txt', 'requirements-ci.txt') }}
 
       - name: Build the test venv
-        # requirements.txt is the deployed plugin dependency set; pytest is the
-        # only extra. Nothing here installs hermes, which is the point: the
-        # hermes-gap probes must skip, and they skip LOUDLY under -rs.
+        # Exact pins, so a dependency release cannot turn this gate red between
+        # two unrelated PRs. Nothing here installs hermes; that is the point.
         if: steps.venv.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -r requirements.txt pytest
+          .venv/bin/python -m pip install -r requirements-ci.txt
           .venv/bin/python -m pytest --version
 
       - name: Run leg ${{ matrix.leg }}
