@@ -54,11 +54,13 @@ enum MonitorSurfaceLimits {
     static let maxPushedServingTotalRows = 4
     /// Host rows the Lock Screen draws.
     static let lockScreenHostRows = 4
-    /// Host rows the expanded island's bottom region draws — it has room for
-    /// about three one-line rows beside the headline.
-    static let islandHostRows = 3
-    /// Serving totals drawn under either table.
-    static let servingTotalRows = 3
+    /// Host rows the expanded island's bottom region draws, beside its header
+    /// row and the serving line — the region is roughly three lines tall.
+    static let islandHostRows = 2
+    /// `total (n)` lines the Lock Screen draws under its aggregate Run/Wait.
+    static let lockScreenServingTotals = 2
+    /// `total (n)` lines the expanded island draws.
+    static let islandServingTotals = 1
 }
 
 // MARK: - The pushed payload
@@ -94,6 +96,11 @@ struct MonitorHostMetric: Codable, Hashable {
     var gpuTempLevel: ClusterMetricLevel?
     var gpuUtilLevel: ClusterMetricLevel?
     var gpuPowerLevel: ClusterMetricLevel?
+    /// The CLI's `_load_style` verdict on THIS host's own queue, so the row's
+    /// run/wait tail is coloured by the rule rather than by a view guessing
+    /// what two numbers mean. nil when the serving table never answered for
+    /// this host — which is not "idle".
+    var servingLevel: ClusterMetricLevel?
     /// `host_table`'s error branch: the reason is in `cpuPct` and every numeric
     /// cell is `-`. A surface must say "not sampled" rather than draw a row of
     /// dashes a healthy host could also produce.
@@ -101,11 +108,12 @@ struct MonitorHostMetric: Codable, Hashable {
 }
 
 /// One `total (n)` row of the serving table — the CLI's per-model totals.
-struct MonitorServingTotalMetric: Codable, Hashable {
+struct MonitorServingTotalMetric: Codable, Hashable, Identifiable {
     /// `total (n)`, the CLI's own label (`n` = live backend rows, so a `down`
     /// backend is not counted).
     var label: String
-    /// Short model name (`org/model` → `model`, the CLI's `rsplit`).
+    /// Short model name (`org/model` → `model`, the CLI's `rsplit`). Unique
+    /// among total rows — the CLI keys its accumulator by it — so it is the id.
     var model: String
     var run: String
     var wait: String
@@ -114,6 +122,8 @@ struct MonitorServingTotalMetric: Codable, Hashable {
     var genTps: String
     /// The CLI's `_load_style` verdict on THIS model's queue.
     var loadLevel: ClusterMetricLevel
+
+    var id: String { model }
 }
 
 /// Which metric the island's compact and minimal surfaces lead with, and what
@@ -219,6 +229,9 @@ enum MonitorSurfaceReading {
                     gpuTempLevel: row.gpuTempLevel,
                     gpuUtilLevel: row.gpuUtilLevel,
                     gpuPowerLevel: row.gpuPowerLevel,
+                    servingLevel: match.map {
+                        CLIMonitorFormat.loadLevel(running: $0.running ?? 0, waiting: $0.waiting ?? 0)
+                    },
                     isFailure: row.error != nil)
             }
             out.hostRowsDropped = max(0, rows.count - shown.count)
@@ -264,6 +277,13 @@ enum MonitorSurfaceReading {
                                         servingWaiting: summary.waiting,
                                         nodesUp: out.nodesUp,
                                         nodesTotal: out.nodesTotal)
+        // A glance that repeats one number twice reads as two facts. When the
+        // leading metric had to fall back to the serving count (nothing thermal
+        // or busy was reported), the trailing slot shows the host tally
+        // instead — the other thing the read actually told us.
+        if out.primary?.kind == .serving, out.secondary?.kind == .serving {
+            out.secondary = tallyMetric(nodesUp: out.nodesUp, nodesTotal: out.nodesTotal)
+        }
         return out
     }
 
@@ -320,18 +340,23 @@ enum MonitorSurfaceReading {
         }
         if let servingRunning {
             return MonitorPrimaryMetric(kind: .serving,
-                                        value: FleetFormat.count(servingRunning, singular: "running", plural: "running"),
+                                        value: "\(servingRunning) run",
                                         label: nil,
                                         level: CLIMonitorFormat.loadLevel(running: servingRunning,
                                                                           waiting: servingWaiting ?? 0))
         }
-        if nodesUp != nil {
-            return MonitorPrimaryMetric(kind: .tally,
-                                        value: FleetFormat.up(nodesUp, nodesTotal),
-                                        label: nil,
-                                        level: nil)
-        }
-        return nil
+        return tallyMetric(nodesUp: nodesUp, nodesTotal: nodesTotal)
+    }
+
+    /// The host tally as a metric (`4/4 up`, or `— up` when the route never
+    /// counted hosts). Shared by primary and secondary so the same reading is
+    /// worded the same way in either slot.
+    static func tallyMetric(nodesUp: Int?, nodesTotal: Int?) -> MonitorPrimaryMetric? {
+        guard nodesUp != nil else { return nil }
+        return MonitorPrimaryMetric(kind: .tally,
+                                    value: FleetFormat.up(nodesUp, nodesTotal),
+                                    label: nil,
+                                    level: nil)
     }
 
     /// The host reporting the highest of one column, or nil when no host
@@ -426,10 +451,67 @@ enum MonitorSurfaceReading {
         return (shown, max(0, rows.count - shown.count))
     }
 
+    /// The `total (n)` lines the Lock Screen draws.
+    static func lockScreenServingTotals(_ totals: [MonitorServingTotalMetric]) -> (shown: [MonitorServingTotalMetric], dropped: Int) {
+        let shown = Array(totals.prefix(MonitorSurfaceLimits.lockScreenServingTotals))
+        return (shown, max(0, totals.count - shown.count))
+    }
+
+    /// The `total (n)` lines the expanded island draws.
+    static func islandServingTotals(_ totals: [MonitorServingTotalMetric]) -> (shown: [MonitorServingTotalMetric], dropped: Int) {
+        let shown = Array(totals.prefix(MonitorSurfaceLimits.islandServingTotals))
+        return (shown, max(0, totals.count - shown.count))
+    }
+
     /// The queue line for the Lock Screen / expanded footer: the aggregate the
     /// serving table reported, spelled out (the compact form abbreviates it).
     static func servingSummaryText(running: Int?, waiting: Int?) -> String? {
         guard let running, let waiting else { return nil }
         return "\(running) run · \(waiting) waiting"
     }
+
+    // MARK: - Host-table columns
+    //
+    // A lock-screen row cannot carry nine columns, so the surfaces show a
+    // SUBSET — and the subset, its headers and its values are decided HERE, not
+    // in the view, for two reasons: the header text comes from the view-model's
+    // own `CLIMonitorHostRow.columns` (a surface retyping "GPU Temp" is a string
+    // that can drift away from the column it labels), and `model_decode_check`
+    // can only assert what it can execute.
+
+    /// The four host columns the Lock Screen and the expanded island draw: the
+    /// utilization the operator asked about, both temperatures, and the power
+    /// draw. Selected from the CLI's own column names by position;
+    /// `monitor_surface_check` asserts these ARE the four names, so a reordered
+    /// `CLIMonitorHostRow.columns` fails by name instead of silently labelling
+    /// a wattage "GPU %".
+    static let detailHostColumns: [String] = [
+        CLIMonitorHostRow.columns[5],   // "GPU%"
+        CLIMonitorHostRow.columns[6],   // "CPU Temp"
+        CLIMonitorHostRow.columns[7],   // "GPU Temp"
+        CLIMonitorHostRow.columns[8],   // "GPU Power"
+    ]
+
+    /// The serving table's Run/Wait column names, same rule.
+    static var runColumnName: String { CLIMonitorServingRow.wideColumns[4] }
+    static var waitColumnName: String { CLIMonitorServingRow.wideColumns[5] }
+
+    /// One host's detail cells, in `detailHostColumns` order — the CLI's own
+    /// strings, so a lock-screen `87 C` is `cluster_live.py`'s `87 C`.
+    static func detailCells(_ row: MonitorHostMetric) -> [String] {
+        [row.gpuPct, row.cpuTemp, row.gpuTemp, row.gpuPower]
+    }
+
+    /// The verdict behind each detail cell, same order, for the surface to
+    /// paint. `nil` = no verdict, which renders neutral, never green.
+    static func detailLevels(_ row: MonitorHostMetric) -> [ClusterMetricLevel?] {
+        [row.gpuUtilLevel, row.cpuTempLevel, row.gpuTempLevel, row.gpuPowerLevel]
+    }
+
+    /// What a host whose sample never arrived says instead of four dashes. A
+    /// fixed phrase, deliberately NOT the route's own error text: the CLI
+    /// prints that reason in the CPU % column, and copying it into a Live
+    /// Activity's stored state would push a string this app does not control
+    /// into storage that outlives the read (§7).
+    static let notSampledText = "not sampled"
 }
