@@ -95,22 +95,24 @@ done <<< "$mac_list"
 # ---------------------------------------------------------------------------
 echo "macOS families — declared, dispatched, and distinguishable"
 
-# mac_families <file> — the supportedFamilies list inside the #else (non-iOS)
-# arm of the entry. Reading the whole file instead of that arm is what lets a
-# family offered ONLY on iOS satisfy a macOS assertion.
+# mac_families <file> — the supportedFamilies list that reaches macOS: the
+# #else (non-iOS) arm, or an unguarded/shared call. Reading the whole file
+# instead of that list is what lets a family offered ONLY on iOS satisfy a
+# macOS assertion. Since t_4311500c the graph widget has ONE shared list, so
+# an unguarded call is a macOS declaration too rather than a missing one.
 mac_families() {
   awk '
-    /#if os\(iOS\)/  { state = "ios" }
+    /^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { state = "ios" }
     /^[[:space:]]*#else/ { state = "mac" }
     /#endif/          { state = "" }
-    state == "mac" && /\.supportedFamilies\(/ { f = 1 }
+    state != "ios" && /\.supportedFamilies\(/ { f = 1 }
     f { print }
     f && /\]\)/ { f = 0 }
   ' "$1"
 }
 # ios_only_region <file> — the lines between #if os(iOS) and its #endif.
 ios_only_region() {
-  awk '/#if os\(iOS\)/ { f = 1; next } /#endif/ { f = 0 } f { print }' "$1"
+  awk '/^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { f = 1; next } /^[[:space:]]*#endif/ { f = 0 } f { print }' "$1"
 }
 # ios_families <file> — the supportedFamilies list inside the #if os(iOS) arm.
 # The mirror of mac_families: a family may be added on the phone and forgotten on
@@ -118,7 +120,7 @@ ios_only_region() {
 # meant to change the desktop list. Both directions are checked below.
 ios_families() {
   awk '
-    /#if os\(iOS\)/  { state = "ios" }
+    /^[[:space:]]*#if[[:space:]]+os\(iOS\)/ { state = "ios" }
     /^[[:space:]]*#else/ { state = "mac" }
     /#endif/          { state = "" }
     state == "ios" && /\.supportedFamilies\(/ { f = 1 }
@@ -236,6 +238,7 @@ echo "cluster graph tile — every desktop size declared+dispatched, and the mar
 # (the widget target compiles the same file either way).
 
 GRAPH=../ios-app/Sources/HSCCWidgets/GraphWidget.swift
+GRAPH_METRICS=../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
 GRAPH_VIEWS=../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
 GRAPH_ENTRY=../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
 GRAPH_READING=../ios-app/Sources/Shared/ClusterGraphReading.swift
@@ -244,6 +247,14 @@ if [ ! -f "$GRAPH" ] || [ ! -f "$GRAPH_VIEWS" ] || [ ! -f "$GRAPH_ENTRY" ] || [ 
   bad "a graph widget source is absent — the graph tile cannot be asserted"
 else
   gdeclared=$(mac_families "$GRAPH" | tr -d '[:space:]')
+  # The shared list is named (`WidgetFamily.clusterGraphFamilies`), not a
+  # literal, since t_4311500c. Resolve it to its members so the per-family
+  # assertions below still measure the sizes the desktop actually offers.
+  case "$gdeclared" in
+    *clusterGraphFamilies*)
+      gdeclared="$gdeclared$(sed -n '/static let clusterGraphFamilies/,/]/p' "$GRAPH_METRICS" | tr -d '[:space:]')"
+      ;;
+  esac
   if [ -z "$gdeclared" ]; then
     bad "ClusterGraphWidget: no macOS-arm supportedFamilies list in $GRAPH"
   else
@@ -280,17 +291,24 @@ else
       bad "ClusterGraphWidget: $gguarded system* arm(s) sit inside an #if os(iOS) region"
     fi
     gios=$(ios_families "$GRAPH" | tr -d '[:space:]')
-    gios_missing=""
-    for fam in $DESKTOP_FAMILIES; do
-      case "$gios" in
-        *".$fam"*) ;;
-        *) gios_missing="$gios_missing .$fam" ;;
-      esac
-    done
-    if [ -z "$gios_missing" ]; then
-      ok "ClusterGraphWidget: the iOS list still offers all four desktop families"
+    if [ -z "$gios" ]; then
+      # t_4311500c deleted the two per-platform arms in favour of one shared
+      # list, so there is no second list to mirror; the macOS assertions above
+      # already read the list both platforms use.
+      ok "ClusterGraphWidget: one shared supportedFamilies list serves iOS and macOS"
     else
-      bad "ClusterGraphWidget: iOS no longer offers$gios_missing — a desktop-side edit took a phone family away"
+      gios_missing=""
+      for fam in $DESKTOP_FAMILIES; do
+        case "$gios" in
+          *".$fam"*) ;;
+          *) gios_missing="$gios_missing .$fam" ;;
+        esac
+      done
+      if [ -z "$gios_missing" ]; then
+        ok "ClusterGraphWidget: the iOS list still offers all four desktop families"
+      else
+        bad "ClusterGraphWidget: iOS no longer offers$gios_missing — a desktop-side edit took a phone family away"
+      fi
     fi
   fi
 
