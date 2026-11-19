@@ -7,9 +7,9 @@ that looked wrong had no way to print the rows it drew. A chart that cannot be
 checked from a terminal is a chart nobody can debug.
 
 THE FLAG SURFACE IS THE ROUTE'S, NOT THIS MODULE'S (t_447cc7fc ruling). The
-canonical history read is ``/v1/cluster/history`` and ``/v1/metrics/history``
-is being retired behind it, so the CLI mirrors the canonical route's two
-axes and its one machine filter:
+canonical history read is ``/v1/cluster/history`` — ``/v1/metrics/history``
+was retired behind it by t_2c629557 — so the CLI mirrors the canonical route's
+two axes and its one machine filter:
 
     hscc cluster history [--window 15m|1h|6h|24h|7d]            # axis A, default 1h
                          [--tier 0|1|2 [--since TS] [--until TS]]   # axis B

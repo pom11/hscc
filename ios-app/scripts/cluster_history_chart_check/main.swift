@@ -483,6 +483,98 @@ check("two hosts reporting the same second keep BOTH readings",
         && ClusterHistoryExtremes(hostA.samples + hostB.samples)?.max == 89)
 
 // ===========================================================================
+// 5. An average is never drawn alone where the tier served a peak (rule 3)
+// ===========================================================================
+//
+// This section is the half of `MetricsHistoryTrend.swift` that t_2c629557
+// retired with the route: the gap rule and the average/peak pairing, asserted
+// over `ClusterHistoryResponse` instead of `MetricsHistoryResponse`. The rules
+// themselves did not change, only the type they hang off (t_447cc7fc).
+
+print("\n[5] the average/peak pairing (rule 3, carried over from the retired trend file)")
+
+let peakTable = allMetrics.compactMap { metric -> String? in
+    guard let companion = metric.peakCompanion else { return nil }
+    return "\(metric.rawValue)->\(companion.rawValue)"
+}
+check("the pairing table names exactly the recorder's three peak columns",
+      Set(peakTable) == ["cpu_temp_c->cpu_temp_c_max", "gpu_temp_c->gpu_temp_c_max",
+                         "gpu_power_w->gpu_power_w_max"],
+      peakTable.joined(separator: " "))
+check("a peak is nobody's average, and each peak points back at the average it belongs to",
+      allMetrics.filter { $0.isPeakField }.allSatisfy { $0.peakCompanion == nil }
+        && allMetrics.filter { $0.isPeakField }.allSatisfy {
+            $0.averageCompanion?.peakCompanion == $0
+        }
+        && allMetrics.filter { !$0.isPeakField }.allSatisfy { $0.averageCompanion == nil })
+
+if let served = history6h {
+    check("the 6 h answer states exactly the three peaks it served",
+          served.servedPeakFields == Set<ClusterHistoryMetric>(
+              [.cpuTempCMax, .gpuTempCMax, .gpuPowerWMax]),
+          served.servedPeakFields.map { $0.rawValue }.sorted().joined(separator: ","))
+    for average in [ClusterHistoryMetric.cpuTempC, .gpuTempC, .gpuPowerW] {
+        let pair = served.historyPair(for: average)
+        check("\(average.rawValue) comes paired with its peak on a rolled-up tier",
+              pair.peak != nil)
+        check("\(average.rawValue)'s peak is the same tier and step as its average",
+              pair.peak.map { $0.tier == pair.average.tier
+                && $0.resolutionS == pair.average.resolutionS } ?? false)
+        check("\(average.rawValue)'s peak covers exactly the identities its average does",
+              pair.peak.map { Set($0.identities) == Set(pair.average.identities) } ?? false,
+              "average=\(pair.average.identities) peak=\(pair.peak?.identities ?? [])")
+    }
+    check("a metric the recorder keeps no peak for is drawn alone and says so",
+          served.historyPair(for: .memUsedPct).peak == nil
+            && ClusterHistoryMetric.memUsedPct.peakCompanion == nil)
+}
+if let raw = tier0 {
+    check("tier 0 names no peak columns, so an average alone is legitimate there",
+          raw.servedPeakFields.isEmpty && raw.historyPair(for: .gpuTempC).peak == nil,
+          "max_fields=\(String(describing: raw.max_fields))")
+}
+
+// The magnitude half of the rule needs bytes whose peak is NOT its mean. The
+// route's own fixtures are flat — `make_cluster_history_fixture.py` fills one
+// value per column and the roll-up of a constant is that constant — so a strict
+// excursion is stated here rather than wished for out of a fixture.
+let excursionJSON = #"""
+{"window":"3600s","window_s":3600,"axis":"tier","source":"sqlite_store","tier":1,
+ "resolution_s":60,"resolution":"1 minute","tier_summary":"1 minute averages",
+ "max_fields":["gpu_temp_c_max"],
+ "since":1795000000,"until":1795000600,"node":"all",
+ "hosts_included":true,"engines_included":false,
+ "hosts":[
+   {"ts":1795000000,"host":"dgx-1","gpu_temp_c":40.0,"gpu_temp_c_max":91.0},
+   {"ts":1795000060,"host":"dgx-1","gpu_temp_c":null,"gpu_temp_c_max":null}],
+ "engines":[],"note":null,"error":null,
+ "speak":"1 minute averages over 1 host",
+ "store":{"exists":true,"db_bytes":4096,"tier0_resident":null,"error":null}}
+"""#
+var excursion: ClusterHistoryResponse?
+do {
+    excursion = try JSONDecoder().decode(ClusterHistoryResponse.self,
+                                         from: Data(excursionJSON.utf8))
+} catch {
+    check("the excursion payload decodes through the real model", false, "\(error)")
+}
+if let excursion, excursion.hosts.count == 2 {
+    let pair = excursion.historyPair(for: .gpuTempC)
+    let mean = pair.average.series.first?.extremes?.max
+    let peak = pair.peak?.series.first?.extremes?.max
+    check("the peak arrives beside the mean it belongs to", pair.peak != nil)
+    check("a surface that drew the mean alone would top out 51 C below the excursion",
+          mean == 40 && peak == 91,
+          "mean=\(String(describing: mean)) peak=\(String(describing: peak))")
+    check("the bucket nobody answered stays a countable gap, not a 0.0",
+          pair.average.series.first?.missingCount == 1
+            && pair.average.series.first?.samples.last?.value == nil
+            && pair.average.series.first?.readable.count == 1)
+    check("the pairing reads only the response it was handed, so it cannot mix tiers",
+          pair.peak?.tier == 1 && pair.peak?.resolutionS == 60)
+}
+
+// ===========================================================================
 // Summary
 // ===========================================================================
 

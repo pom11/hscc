@@ -34,20 +34,10 @@
 import Foundation
 
 extension ClusterHistoryMetric {
-    /// The peak column stored beside this average, when the recorder keeps one.
-    /// Only temps and power have peaks — the rest are honest as an average.
-    /// `nil` for a field the recorder does not peak, and for a peak column
-    /// itself (a peak has no peak of its own). Whether THIS answer carried the
-    /// column at all is a per-response fact — tier 0 stores none, which is why
-    /// `max_fields` exists and why `hasPeaks` is measured and never assumed.
-    var peakCompanion: ClusterHistoryMetric? {
-        switch self {
-        case .cpuTempC: return .cpuTempCMax
-        case .gpuTempC: return .gpuTempCMax
-        case .gpuPowerW: return .gpuPowerWMax
-        default: return nil
-        }
-    }
+    /// The peak column stored beside this average comes from
+    /// `ClusterHistorySeries.swift` — one canonical pairing for the whole
+    /// vocabulary, with the recorder's own MAX_KEYS as its reason. Only temps
+    /// and power have peaks, and a peak column has no peak of its own.
 
     /// The peak for this field out of one row, or nil — nil on tier 0 (a single
     /// sample has no peak to report) and on any field the recorder does not peak.

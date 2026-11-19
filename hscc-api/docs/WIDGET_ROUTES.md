@@ -255,6 +255,19 @@ idle, 0 W" for a node that never answered), and this route forwards it
 untouched. `metrics=` is a projection of those rows, not a second query: it
 drops columns, it never recomputes a mean.
 
+**A temperature or power chart draws the average AND its peak.** `gpu_temp_c` is
+the bucket's mean and `gpu_temp_c_max` is what it reached, and the peak column
+exists precisely because a 1-minute mean is what hides a throttle spike — a
+surface that plots the average alone is drawing the quieter fact on purpose.
+`max_fields` names the peak columns this answer carries (`[]` at tier 0, whose
+raw samples have no peak to report), and on the Swift side
+`ClusterHistoryMetric.peakCompanion` pairs every average with the peak stored
+beside it, so the pairing is one lookup instead of a convention each surface
+remembers differently. `hscc-api/tests/test_contract_swift_routes.py` holds the
+rule on the wire and `ios-app/scripts/cluster_history_chart_check.sh` holds it
+in the type. (Both rules arrived from the route t_2c629557 retired, which is
+where they were written down before this file had one history section.)
+
 **`window=15m` is honest about where tier 0 lives.** The 2 s ring is
 memory-only, and the API server is its own process
 (`hscc_daemon/api_launchd.py` starts `python -m api_server serve`), so in the
@@ -403,66 +416,6 @@ mirroring `hscc kanban monitor --board`.
 | `rows[].detail` | string/null | conflicted files, the failing gate, or the recorded error |
 | `rows[].is_last` | bool | true on the project's last-outcome row when it is no longer queued |
 | `speak` | string | one-line summary |
-
-## GET /v1/metrics/history
-
-Source: `hscc_daemon/metrics_history.py` — `MetricsStore.host_rows` /
-`MetricsStore.engine_rows` for tiers 1 and 2, and `MetricsRecorder.tier0_points`
-for tier 0. The route adds only `speak`, `fields` and the `tier0` block; it
-renames nothing, because the field names are sparkrun's `MonitorSample` names and
-a rename is how a chart silently reads `nil` for a real number. Card t_5ae8cfcf;
-the recorder itself is t_81af8884.
-
-`?tier=` is **required** (0, 1 or 2) and anything else is a 400: which resolution
-a chart draws is not something a client may guess. `host` filters node rows,
-`node` filters engine rows, `since`/`until` are inclusive epoch-second bucket
-starts. The tier decides the row source, not the client's preference:
-
-| tier | resolution | window | read from |
-|---|---|---|---|
-| 0 | 2 s | 15 min | the daemon process's memory ring |
-| 1 | 1 min | 24 h | `~/.hscc/metrics/history.db` |
-| 2 | 5 min | 7 d | the same file |
-
-| field | type | meaning |
-|---|---|---|
-| `tier` | integer | the tier that was answered (echoes the request) |
-| `tier_meta.resolution_s`, `tier_meta.window_s` | integer | 2/60/300 and 900/86400/604800 |
-| `source` | string | `sqlite_store`, `sqlite_store_absent`, `recorder_ring`, `recorder_ring_absent` |
-| `hosts[]` | array | one bucket per node; keys below, oldest `ts` first |
-| `hosts[].ts` | integer | bucket start, epoch seconds — the store's own key |
-| `hosts[].n` | integer | samples that went into the bucket (1 on tier 0) |
-| `hosts[].error` | string/null | why this bucket has no numbers, when it has none |
-| `hosts[].cpu_usage_pct`, `cpu_temp_c`, `gpu_util_pct`, `gpu_temp_c`, `gpu_power_w`, `mem_used_pct`, `swap_used_mb`, `swap_total_mb`, `swap_used_pct`, `gpu_mem_used_mb`, `gpu_clock_mhz`, `net_recv_bytes_s`, `net_send_bytes_s`, `sparkrun_jobs` | number/null | sparkrun's `MonitorSample` fields, verbatim |
-| `hosts[].cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max` | number/null | the bucket's peak, stored **beside** the average (tiers 1 and 2 only) |
-| `engines[]` | array | one bucket per backend; identity is `node` + `port` |
-| `engines[].run`, `wait`, `kv`, `gen_tps`, `prompt_tps` | number/null | serving counters for that bucket |
-| `counts.host_rows`, `counts.engine_rows` | integer | rows in this response |
-| `fields.host`, `fields.host_peaks`, `fields.engine`, `fields.engine_key` | array[string] | the vocabulary this response uses, so no client hardcodes a column list |
-| `tier0.points`, `tier0.capacity` | integer | the ring's depth: 0 right after a daemon restart is normal |
-| `tier0.readable_here`, `tier0.source`, `tier0.reason` | bool/string | whether this process could read the ring at all |
-| `stats.db_bytes`, `stats.bound_bytes`, `stats.tier1_rows`, `stats.tier2_rows`, `stats.exists` | integer/bool | the recorder's own `stats()`: the store's size against its stated 10 MiB bound |
-| `error` | string | present only when the read itself failed; the rows are then empty |
-| `speak` | string | one-line summary |
-
-Three reality rules, all three load-bearing:
-
-* **A `null` metric means "not reported", never 0.** A node that stopped
-  answering must not render as an idle one; the `error` field says why the bucket
-  is empty. A client that coalesces `null` to `0` forges an idle node.
-* **A temperature or power chart draws the average AND the peak.** `gpu_temp_c`
-  is the bucket's mean and `gpu_temp_c_max` is what it reached; the peak column
-  exists precisely because a 1-minute mean is what hides a throttle spike.
-  `fields.host_peaks` names the peak columns so a surface can check it drew them.
-* **Tier 0 is not "nothing happened" when it is empty.** The 2 s ring lives in the
-  daemon's memory and the API is a *separate process* (`hscc start-daemon` vs
-  `api_server serve`), so the route never constructs a sampler — constructing one
-  would start a second `sparkrun cluster monitor` and a second roll-up watermark
-  writer. `tier0.points` may honestly read 450 while `hosts` is empty; the pair
-  `tier0.readable_here` + `tier0.source`/`tier0.reason` is what a surface branches
-  on, and `hasLiveTier0` on the Swift side is the same rule in one call. An empty
-  tier-1 read whose `stats.exists` is false means the daemon has not rolled a
-  bucket up **yet** — not that the fleet was idle for 24 hours.
 
 ## Project rows (CARD A3)
 
