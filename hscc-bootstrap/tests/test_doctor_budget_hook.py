@@ -83,6 +83,11 @@ def _home(tmp_path, monkeypatch):
     # The loader honours PLUGINS first; clear it so no inherited worker value
     # can point the row at the operator's live plugin tree.
     monkeypatch.delenv("PLUGINS", raising=False)
+    # sparkrun is a FATAL preflight check. A CI/dev box that has not installed
+    # it must not sink this unrelated row's verdict; the probe itself is
+    # covered by test_doctor.TestSparkrunCheck.
+    monkeypatch.setattr(doctor, "_sparkrun_ok",
+                        lambda: doctor.Check("sparkrun", True, detail="stubbed"))
     return home
 
 

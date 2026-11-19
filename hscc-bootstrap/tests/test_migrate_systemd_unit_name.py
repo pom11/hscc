@@ -32,6 +32,7 @@ addresses are the documented 10.0.0.x placeholders.
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -663,9 +664,17 @@ class FakeNode:
         self.calls = self.root / "systemctl_calls"
         self.calls.write_text("")
         self.env = os.environ.copy()
+        # no_systemctl means this node has NO systemctl. Inheriting the
+        # runner's PATH finds Ubuntu's real /usr/bin/systemctl, which then
+        # answers a bus fault (NO_BUS) instead of the missing-binary verdict
+        # (NO_SYSTEMD) this fixture models. A PATH holding only the transport
+        # tools (see below) makes `command -v systemctl` fail without hiding
+        # base64/bash, which the remote-command wrapper itself needs.
+        path = (str(self.bin) if no_systemctl
+                else f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}")
         self.env.update({
             "HOME": str(self.home),
-            "PATH": f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}",
+            "PATH": path,
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "XDG_RUNTIME_DIR": str(self.root / "run"),
             "DBUS_SESSION_BUS_ADDRESS": "unix:path=/dev/null",
@@ -680,6 +689,15 @@ class FakeNode:
             p = self.bin / "systemctl"
             p.write_text(STUB_SYSTEMCTL)
             p.chmod(0o755)
+        else:
+            # The transport is `printf … | base64 -d | bash -s`. Keep those two
+            # reachable while the PATH still hides systemctl (which is the
+            # whole point: Ubuntu has a real /usr/bin/systemctl that would
+            # answer a bus fault instead of the missing-binary verdict).
+            for tool in ("base64", "bash"):
+                src = shutil.which(tool)
+                if src:
+                    (self.bin / tool).symlink_to(src)
         if legacy_file:
             (self.unit_dir / OLD).write_text(legacy_body)
         self._set(OLD, active="active", mainpid="4112")
@@ -695,7 +713,10 @@ class FakeNode:
             (self.state / f"{unit}.mainpid").write_text(str(kw["mainpid"]))
 
     def ssh_cmd(self, command, timeout=120):
-        res = subprocess.run(["bash", "-c", command], env=self.env,
+        # Absolute bash: the no_systemctl fixture empties PATH, and an argv[0]
+        # would otherwise be resolved through that env (FileNotFoundError on
+        # the very shell the node-side script needs).
+        res = subprocess.run(["/bin/bash", "-c", command], env=self.env,
                              capture_output=True, text=True, timeout=timeout)
         return {"ok": res.returncode == 0, "stdout": res.stdout,
                 "stderr": res.stderr, "code": res.returncode}
