@@ -176,7 +176,7 @@ let kanbanRunningBody = Data(#"""
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
 /// `store.tier0_resident` is `null` here and that is not a missing field: the
 /// route reads the 2 s ring only inside its tier-0 branch, so at tier 1 nobody
-/// measured it (`hscc-api/routes_cluster.py`, since `d47ae40f`).
+/// measured it (`hscc-api/routes_cluster.py`, since PR #417 / `d47ae40f`).
 let historyBody = Data(#"""
 {"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
