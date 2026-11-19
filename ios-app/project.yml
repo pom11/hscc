@@ -435,6 +435,7 @@ targets:
       # only, so scripts/model_decode_check.sh compiles and RUNS the exact rows
       # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
       - path: Sources/HSCCWidgets/ClusterSmallGrid.swift
+      - path: Sources/HSCCWidgets/ClusterSmallGridView.swift
       - path: Sources/HSCCWidgets/MonitorWidget.swift
       - path: Sources/HSCCWidgets/MonitorViews.swift
       # Projects surface (small + medium + large), t_d739d163. Its configuration

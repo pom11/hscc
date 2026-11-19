@@ -152,6 +152,12 @@ struct MonitorEntry: TimelineEntry {
         return [text.headline, text.detail].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// What the small tile draws (t_9e110d88): the same four CLI columns and
+    /// serving totals the cluster widget's small family draws, from this entry's
+    /// own `monitor` view-model. Nil means nothing to grid — the family falls
+    /// back to its daemon-health pane, whose copy `text(for:)` owns.
+    var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
+
     static let unconfigured = MonitorEntry(date: .now, state: .unconfigured,
                                            configured: false, paused: false,
                                            fleet: nil, monitor: nil, daemonHost: nil,

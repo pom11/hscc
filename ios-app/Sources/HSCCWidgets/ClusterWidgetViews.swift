@@ -8,7 +8,10 @@ import WidgetKit
 // plus the CLI's own host table on the one size that shows it
 // (`CLIMonitorHostTableView`). The layout decides how much of that text fits:
 //
-//   small      — one headline tally + the models/throughput line
+//   small      — the DENSE GRID (t_9e110d88): up to four hosts x the CLI's GPU%,
+//                GPU Temp, CPU Temp and GPU Power columns, plus the serving
+//                run/wait totals. `ClusterSmallGridView` draws it; when there
+//                are no rows to grid the family shows the gate pane instead.
 //   medium     — the CLI's host table: nine columns, one row per host
 //   large      — every node row with CPU/GPU temps and run/wait
 //   inline     — the headline + detail on one Lock Screen line
@@ -16,7 +19,9 @@ import WidgetKit
 //   rectangular— headline, detail, the first two node rows
 //
 // No view composes a number. `scripts/cluster_widget_check.sh` executes the
-// text model against the committed fixture and asserts each family's lines.
+// text model against the committed fixture and asserts each family's lines, and
+// `scripts/model_decode_check.sh` executes the small grid's own cell model
+// (`ClusterSmallGrid.swift`) against the CLI goldens.
 // ---------------------------------------------------------------------------
 
 struct ClusterWidget: Widget {
@@ -162,7 +167,20 @@ private struct ClusterNodeRowView: View {
 }
 
 // ---------------------------------------------------------------------------
-// Small — one headline number, one supporting line.
+// Small — the dense grid: up to four hosts x four CLI columns + run/wait.
+//
+// This is the family the "one number" failure belongs to, so it draws the
+// monitor payload rather than a summary of it: `ClusterSmallGridView` renders
+// the CLI's own GPU%, GPU Temp, CPU Temp and GPU Power cells for up to four
+// hosts, with the serving totals underneath and the hosts it could not fit
+// counted rather than dropped.
+//
+// The gate pane is the family's OTHER branch, and it is reached the same way for
+// all three no-data states: `ClusterEntry.smallTile` is nil when the entry is
+// unconfigured, paused or has no rows, and `ClusterEntry.text(for:)` — which
+// checks `!configured` before any paused copy — owns what that pane says. So the
+// invite-first invariant has one owner here too, and no branch can grid dashes
+// over a paused surface.
 // ---------------------------------------------------------------------------
 
 struct SmallClusterWidget: View {
@@ -170,6 +188,24 @@ struct SmallClusterWidget: View {
     let entry: ClusterEntry
 
     var body: some View {
+        if let tile = entry.smallTile {
+            // The tally and the age line come from the entry's own text model —
+            // this family does not compose a sentence, it lays one out.
+            let text = entry.text(for: .small)
+            ClusterSmallGridView(tile: tile,
+                                 headerIcon: "square.stack.3d.up",
+                                 headerWord: "CLUSTER",
+                                 tally: text.headline,
+                                 tallyColor: entry.heat.color(style),
+                                 footer: text.footer)
+        } else {
+            gatePane
+        }
+    }
+
+    /// Nothing to grid. The entry's gated text model says why: the setup
+    /// invite, "Paused", or the reason this refresh is not live.
+    private var gatePane: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Image(systemName: "square.stack.3d.up").widgetIcon(style)
@@ -180,7 +216,7 @@ struct SmallClusterWidget: View {
                     .foregroundColor(style.secondaryTextColor)
             }
             Spacer(minLength: 0)
-            ClusterHeadline(entry: entry, size: 32)
+            ClusterHeadline(entry: entry, size: 20)
             ClusterDetail(entry: entry, surface: .small)
             Spacer(minLength: 0)
             ClusterFooter(entry: entry, surface: .small)

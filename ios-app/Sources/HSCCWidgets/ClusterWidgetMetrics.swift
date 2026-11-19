@@ -126,6 +126,12 @@ struct ClusterEntry: TimelineEntry {
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
 
+    /// What the small tile draws (t_9e110d88): four of the CLI's host columns
+    /// across up to four hosts, plus the serving totals. Nil means there is
+    /// nothing to grid — the family then shows its gate pane (setup invite,
+    /// "Paused", or why the read failed), never a table of dashes.
+    var smallTile: ClusterSmallGrid.Tile? { ClusterSmallGrid.tile(from: monitor) }
+
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
     /// tally, not a second state word.

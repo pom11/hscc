@@ -52,6 +52,24 @@ enum ClusterSmallGrid {
     static let gpuUtilWarn: Double = 90
     static let gpuUtilCritical: Double = 95
 
+    /// The label for the column the host names sit in — read out of the
+    /// view-model's own column list, so the tile has exactly one vocabulary and
+    /// a renamed CLI column reddens `model_decode_check` instead of quietly
+    /// leaving a view with a hand-typed heading.
+    static var hostColumnLabel: String { CLIMonitorHostRow.columns.first ?? "Host" }
+
+    /// The serving columns the totals line labels itself with, spelled as the
+    /// CLI spells them (asserted against `serving_table`'s column list).
+    static let runColumnLabel = "Run"
+    static let waitColumnLabel = "Wait"
+
+    /// The one number-to-text rule of this tile: a count that was not told gets
+    /// the CLI's dash, never a `0` that reads as a measurement (§6 rule 1).
+    /// Every count on the surface goes through here so the dash has one owner.
+    static func countText(_ value: Int?) -> String {
+        value.map(String.init) ?? CLIMonitorFormat.dash
+    }
+
     /// The four columns of the grid, left to right. `CaseIterable` order IS
     /// the visual order, so the harness can walk the row without restating it.
     enum Column: String, CaseIterable, Identifiable {
@@ -201,6 +219,27 @@ enum ClusterSmallGrid {
         /// `host_table`'s count (the CLI title line's number).
         let hostCount: Int
         let totals: ServingTotals
+
+        /// One sentence for VoiceOver, built beside the cells it describes. The
+        /// view applies it with `children: .ignore`, so the tile is one element
+        /// that speaks the truth instead of twenty fragments a listener has to
+        /// reassemble — and the sentence cannot drift from the grid, because it
+        /// is composed from the same cells the grid draws.
+        var accessibilitySummary: String {
+            var parts: [String] = []
+            if hostCount > 0 {
+                parts.append("\(hostCount) host\(hostCount == 1 ? "" : "s")")
+            }
+            for row in rows {
+                parts.append(row.label + ": " + row.cells.map(\.text).joined(separator: ", "))
+            }
+            if hiddenHosts > 0 {
+                parts.append("\(hiddenHosts) more not shown")
+            }
+            parts.append("serving \(ClusterSmallGrid.countText(totals.running)) running, "
+                         + "\(ClusterSmallGrid.countText(totals.waiting)) waiting")
+            return parts.joined(separator: ". ")
+        }
     }
 
     /// Project the view-model onto the tile. Nil for a nil view-model (the read

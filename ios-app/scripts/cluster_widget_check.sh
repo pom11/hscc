@@ -38,9 +38,14 @@ TABLE=Sources/HSCCWidgets/CLIMonitorHostTableView.swift
 MONVIEWS=Sources/HSCCWidgets/MonitorViews.swift
 MODEL=Sources/Shared/ClusterMonitorViewModel.swift
 TALLY=Sources/Shared/ClusterNodeTally.swift
+# The systemSmall tile's data half (t_9e110d88): `ClusterWidgetMetrics.swift`
+# (the file this harness compiles) now carries the tile the small family draws, so
+# the harness must see that type too. It is Foundation-only, like everything else
+# compiled here; the view-model it reads is already `$MODEL`.
+GRID=Sources/HSCCWidgets/ClusterSmallGrid.swift
 STORE=Sources/Shared/SharedStore.swift
 for f in "$SUBJECT" "$VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" "$MODEL" \
-         "$TALLY" "$STORE" \
+         "$TALLY" "$GRID" "$STORE" \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
@@ -89,7 +94,20 @@ done
 fail_when_absent "large has its own layout" "$VIEWS" 'struct LargeClusterWidget'
 
 fail_when_absent "every family renders the shared text model" "$VIEWS" 'entry.text(for:'
-fail_when_absent "small is one headline + detail" "$VIEWS" 'ClusterHeadline(entry: entry, size: 32)'
+# The small family is the DENSE GRID now (t_9e110d88): up to four hosts x four CLI
+# columns plus the serving totals, drawn by ClusterSmallGridView. The old claim
+# here was "small is one headline + detail" (a 32pt number), which is exactly the
+# shape this card was written to end, so the anchor moved to the grid type. Two
+# arms stay asserted: the grid is reached through the entry's ONE gate step (so no
+# branch can grid dashes over a paused surface), and the headline the tile shows
+# beside it still comes from the shared text model rather than a re-composed
+# number. The size is deliberately not pinned — a font size is not a claim about
+# honesty, and pinning one is what made this anchor rot.
+fail_when_absent "small draws the dense grid" "$VIEWS" 'ClusterSmallGridView(tile:'
+fail_when_absent "small reaches the grid through the entry's gate" "$VIEWS" \
+  'if let tile = entry.smallTile'
+fail_when_absent "small's headline still comes from the shared text model" "$VIEWS" \
+  'ClusterHeadline(entry: entry, size:'
 fail_when_absent "circular uses the up/total gauge" "$VIEWS" 'Gauge(value:'
 
 fail_when_absent "the projection uses the shared FleetProjection" "$METRICS" 'typealias ClusterFleet = FleetProjection'
@@ -157,6 +175,7 @@ xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
   "$TALLY" \
   "$MODEL" \
   "$READING" \
+  "$GRID" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \

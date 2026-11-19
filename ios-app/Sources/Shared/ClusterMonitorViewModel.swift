@@ -516,6 +516,12 @@ struct ClusterMonitorViewModel: Equatable {
     /// The route's serving poll itself failed (`serving_error`). The section
     /// is then absent — silence, and NOT "no backends".
     let servingError: String?
+    /// Whether the route sent a `serving` section at all, captured at projection
+    /// time. It has to be captured: `rows = response.serving ?? []` below already
+    /// flattened "empty list" and "no key" into the same empty array, and the two
+    /// are different sentences (§6 rule 1). An errored poll always implies no
+    /// section; a nil error does NOT imply a section was sent.
+    let toldServingSection: Bool
 
     /// nil only for a nil response (the read failed). A degraded response
     /// projects to an empty view rather than nil, because the CLI prints its
@@ -530,14 +536,20 @@ struct ClusterMonitorViewModel: Equatable {
             backendRows: rows.map(CLIMonitorServingRow.init(row:)),
             totalRows: CLIMonitorServingTotal.summing(rows: rows),
             proxyError: response.serving_proxy_error,
-            servingError: response.serving_error)
+            servingError: response.serving_error,
+            toldServingSection: response.serving != nil)
     }
 
     /// Whether the serving section exists at all. `false` means the server
     /// never sent it: the CLI prints `no backends behind the proxy` for an
     /// EMPTY list and shows nothing for a missing one, so a surface must not
     /// read "0 models" out of a nil section (§6 rule 1).
-    var hasServingSection: Bool { servingError == nil }
+    ///
+    /// This reads the wire key's presence rather than `servingError`, which is a
+    /// different fact: a clean poll of a route that sent no `serving` key at all
+    /// has no error and still has nothing to show (t_9e110d88 caught the
+    /// conflation — the small tile rendered that case as "0 running, 0 waiting").
+    var hasServingSection: Bool { toldServingSection }
 
     /// The host table as cell arrays (`host_table` has no width rule — it is
     /// always these nine columns).
