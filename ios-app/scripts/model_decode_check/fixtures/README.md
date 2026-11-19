@@ -268,11 +268,11 @@ against `hscc_daemon/metrics_history.py`'s own column tuples.
 `store.tier0_resident` is a **tier-0 measurement only**, so read the reason for an
 empty history answer from `note` (or `speak`), never from that flag. The route asks
 the recorder seam — `tier0_resident = points is not None` — inside its tier-0 branch
-and nowhere else (`hscc-api/routes_cluster.py`, since `d47ae40f`), because the 2 s
-ring is memory in the daemon process and a durable-window read cannot see it. The
-key is on the wire at every tier, but at tiers 1-2 its value is `null`: a tier the
+and nowhere else (`hscc-api/routes_cluster.py`, since PR #417 / `d47ae40f`), because
+the 2 s ring is memory in the daemon process and a durable-window read cannot see it.
+The key is on the wire at every tier, but at tiers 1-2 its value is `null`: a tier the
 route never read cannot report residency. That is why the tier-1 and tier-2 fixtures
 above say `null` and the tier-0 one says `false` — measured from one generator in one
-process, not chosen per file. Before `d47ae40f` the flag defaulted to `True`, so all
+process, not chosen per file. Before PR #417 the flag defaulted to `True`, so all
 three durable fixtures claimed a residency nothing had checked; a fixture that says
 `true` at tier 1 or 2 is a regression, not a value to restore.

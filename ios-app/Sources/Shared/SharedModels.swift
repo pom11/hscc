@@ -976,8 +976,11 @@ struct ClusterHistoryResponse: Decodable, Speakable {
     let speak: String
     let store: ClusterHistoryStore?
 
-    /// `false` here means the 2 s ring is not readable from the serving process,
-    /// which a chart must render as a gap with a reason, not as a quiet fleet.
+    /// Whether the 2 s ring was readable from the serving process — answered at
+    /// tier 0 only. `false` there means it is not, which a chart must render as a
+    /// gap with a reason, not as a quiet fleet; `nil` means the served tier never
+    /// read the ring, so it reports nothing either way (the reason for an empty
+    /// answer is `note`). Not a non-optional: `null` is a real value on the wire.
     var tier0Resident: Bool? { store?.tier0_resident }
 }
 
