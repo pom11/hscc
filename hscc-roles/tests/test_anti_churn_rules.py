@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 HEADING = "## Anti-churn rules (operator 2026-11-19)"
 RULE_MARKERS = (
     "1. **Done means merged.**",
-    "2. **You land the work.**",
+    "2. **The merge queue lands green PRs.**",
     "3. **At most 2 cards in flight on the same area**",
     "4. **Small findings stay in the PR.**",
     "5. **Don't wait on the operator**",
@@ -60,6 +60,19 @@ def test_workers_and_the_retired_legacy_role_do_not_get_the_block():
     assert HEADING not in worker
     retired = _soul(main_orch.LEGACY_ORCHESTRATOR_ROLE)
     assert HEADING not in retired
+
+
+def test_rule_2_enqueues_in_merge_queue_mode_and_keeps_the_manual_rule():
+    """The queue owns landing when enabled; the old rule survives as the else."""
+    rule = generator._ANTI_CHURN_RULES
+    assert "`hscc merge-queue add <project> <pr>`" in rule
+    assert "never rebase or merge by hand" in rule
+    # The pre-queue behaviour stays the fallback for projects without the queue.
+    assert "**you land the work**" in rule
+    assert "review and merge it yourself in the same turn" in rule
+    # Single source: the rule text is emitted once, in the shared block.
+    assert rule.count("The merge queue lands green PRs.") == 1
+    assert rule.count("you land the work") == 1
 
 
 def test_anti_churn_block_has_no_format_placeholders():
