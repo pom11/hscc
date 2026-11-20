@@ -1,11 +1,19 @@
 """Local merge queue for project PRs (MQ1).
 
-The daemon owns a FIFO of green PRs per project. One PR is processed per
-project per tick, in a dedicated git worktree under
+The daemon owns a FIFO of green PRs per repo. One PR is processed per repo
+per tick, in a dedicated git worktree under
 ``~/.hscc/merge-queue/<project>/`` — never the operator's checkout:
 
-    fetch -> rebase PR head onto origin/main -> project gates ->
+    fetch origin -> rebase PR head onto origin/<base> -> project gates ->
     push --force-with-lease -> gh pr merge --squash --delete-branch
+
+``<base>`` is the repo's default branch (detected from ``origin/HEAD``, so a
+``master`` repo works too) unless the registry declares
+``merge_queue.base_branch``. A PR whose ``baseRefName`` is not that branch is
+refused once with a clear reason, never retried. Cross-repository (fork) PRs
+are refused the same way: the queue only pushes branches in the project's own
+repo. Projects that share one repo path share one FIFO and one per-repo lock,
+so two registry names cannot run two PRs against the same checkout at once.
 
 A conflict or a red gate aborts cleanly, comments on the PR, hands the card
 back to its worker as a resolve step, and drops the PR from the queue.
@@ -33,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -73,7 +82,7 @@ APP_BUILD_GATES = {
 
 _PR_JSON_FIELDS = (
     "number,state,isDraft,mergeable,headRefName,headRefOid,baseRefName,"
-    "url,statusCheckRollup,mergeCommit"
+    "isCrossRepository,url,statusCheckRollup,mergeCommit"
 )
 
 _lock = threading.RLock()
@@ -108,6 +117,41 @@ def worktree_path(project):
     if not safe or safe in (".", "..") or os.sep in safe:
         raise ValueError(f"invalid project name for a worktree: {project!r}")
     return os.path.join(queue_root(), safe)
+
+
+def repo_identity(repo):
+    """Canonical identity of a repo path (symlinks and ``..`` resolved)."""
+    return os.path.realpath(os.path.expanduser(str(repo or "")))
+
+
+def repo_lock_path(repo, root=None):
+    """Lock file shared by every project whose ``repo`` is the same path."""
+    canonical = repo_identity(repo)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(root or _hscc_root(), "merge-queue-locks",
+                        f"{digest}.lock")
+
+
+@contextlib.contextmanager
+def _repo_lock(repo, root=None):
+    """Serialize processing for one repo across projects and processes."""
+    path = repo_lock_path(repo, root=root)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    f = open(path, "a+")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        yield
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        f.close()
 
 
 # ── state ───────────────────────────────────────────────────────────────────
@@ -318,6 +362,7 @@ _OUTCOME_STATES = {
     "already-merged": "merged",
     "conflict": "resolve",
     "red-gate": "resolve",
+    "refused": "failed",
     "error": "failed",
 }
 
@@ -465,7 +510,78 @@ def card_states(*, registry_path=None, state_path=None, now=None):
     return states
 
 
-def _resolve_gates(cfg, worktree, git_runner):
+def default_branch(repo, git_runner=None, *, probe_remote=True):
+    """The repo's default branch, or None when it cannot be determined.
+
+    ``origin/HEAD`` is authoritative and free; when the clone does not have it,
+    an existing ``origin/main``/``origin/master`` is accepted. Only then (and
+    only when ``probe_remote`` is true) does this ask the remote, so a sandboxed
+    test repo with no refs never touches the network.
+    """
+    runner = git_runner or _default_runner
+    try:
+        proc = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    repo, runner)
+    except Exception:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        ref = (proc.stdout or "").strip()
+        if ref.startswith("origin/") and len(ref) > len("origin/"):
+            return ref.split("/", 1)[1]
+    for name in ("main", "master"):
+        try:
+            proc = _git(["rev-parse", "--verify", "--quiet",
+                         f"refs/remotes/origin/{name}"], repo, runner)
+        except Exception:
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            return name
+    if not probe_remote:
+        return None
+    try:
+        proc = _git(["ls-remote", "--symref", "origin", "HEAD"], repo, runner)
+    except Exception:
+        return None
+    if proc is None or proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("ref:"):
+            ref = line.split()[1] if len(line.split()) > 1 else ""
+            if ref.startswith("refs/heads/"):
+                return ref[len("refs/heads/"):]
+    return None
+
+
+def expected_base(cfg, git_runner=None, *, probe_remote=True):
+    """The branch this queue rebases onto: configured, else repo default."""
+    declared = str((cfg or {}).get("base_branch") or "").strip()
+    if declared:
+        return declared
+    return default_branch((cfg or {}).get("repo"), git_runner,
+                          probe_remote=probe_remote)
+
+
+def refusal_reason(info, base):
+    """Why this PR must not be processed here, or None when it may be.
+
+    Base is checked against the queue's branch (repo default unless
+    ``merge_queue.base_branch``). A cross-repository PR is unsupported: its
+    head branch does not exist in the project's own ``origin``.
+    """
+    if not isinstance(info, dict):
+        return None
+    if info.get("isCrossRepository"):
+        return ("cross-repository (fork) PR: the merge queue only pushes "
+                "branches in the project's own repo; open the PR from a "
+                "branch pushed to this repo instead")
+    pr_base = str(info.get("baseRefName") or "").strip()
+    if base and pr_base and pr_base != base:
+        return (f"PR targets {pr_base!r}, not this queue's base {base!r}; "
+                "retarget it (or declare merge_queue.base_branch)")
+    return None
+
+
+def _resolve_gates(cfg, worktree, git_runner, base="main"):
     """Gate command list for this PR, including hscc's conditional app builds."""
     declared = cfg.get("gates")
     if declared is not None:
@@ -473,15 +589,15 @@ def _resolve_gates(cfg, worktree, git_runner):
     if cfg.get("name") != "hscc":
         return []
     gates = list(DEFAULT_HSCC_GATES)
-    changed = _changed_files(worktree, git_runner)
+    changed = _changed_files(worktree, git_runner, base=base)
     for prefix, cmd in APP_BUILD_GATES.items():
         if any(f.startswith(prefix) for f in changed):
             gates.append(cmd)
     return gates
 
 
-def _changed_files(worktree, git_runner):
-    proc = _git(["diff", "--name-only", "origin/main..HEAD"], worktree,
+def _changed_files(worktree, git_runner, base="main"):
+    proc = _git(["diff", "--name-only", f"origin/{base}..HEAD"], worktree,
                 git_runner, timeout=DEFAULT_PROCESS_TIMEOUT_S)
     if proc is None or proc.returncode != 0:
         return []
@@ -578,19 +694,30 @@ def pr_view(repo, pr, runner=None):
 
 # ── git worktree / rebase ───────────────────────────────────────────────────
 
-def ensure_worktree(cfg, root=None, git_runner=None):
-    """Ensure the project's queue worktree exists at ``queue_root()/<name>``."""
+def ensure_worktree(cfg, root=None, git_runner=None, base="main"):
+    """Ensure the project's queue worktree exists at ``queue_root()/<name>``.
+
+    ``origin`` is fetched on EVERY call, not just when the worktree is first
+    created: a merged PR advances the base branch on GitHub, and the next entry
+    must rebase and gate on that new base (the worktree's remote-tracking ref
+    would otherwise stay at the commit it was created from).
+    """
     git_runner = git_runner or _default_runner
     repo = cfg["repo"]
     path = (os.path.join(root, cfg["name"]) if root
             else worktree_path(cfg["name"]))
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(
-            os.path.join(path, ".git")):
+    cwd = path if (os.path.isdir(os.path.join(path, ".git"))
+                   or os.path.isfile(os.path.join(path, ".git"))) else repo
+    fetch = _git(["fetch", "origin", "--prune"], cwd, git_runner)
+    if fetch is None or fetch.returncode != 0:
+        raise RuntimeError(
+            f"could not fetch origin in {cwd}: "
+            f"{_tail(fetch.stderr if fetch else 'git not runnable', 10)}")
+    if cwd == path:
         return path
 
-    _git(["fetch", "origin", "--prune"], repo, git_runner)
-    proc = _git(["worktree", "add", "--detach", path, "origin/main"],
+    proc = _git(["worktree", "add", "--detach", path, f"origin/{base}"],
                 repo, git_runner)
     if proc is None or proc.returncode != 0:
         raise RuntimeError(
@@ -623,9 +750,9 @@ def _conflicted_files(worktree, git_runner):
             if line.strip()]
 
 
-def _rebase_onto_main(worktree, git_runner):
-    """Real ``git rebase origin/main``; returns (ok, conflicted files, output)."""
-    proc = _git(["rebase", "origin/main"], worktree, git_runner,
+def _rebase_onto(worktree, base, git_runner):
+    """Real ``git rebase origin/<base>``; returns (ok, conflicted, output)."""
+    proc = _git(["rebase", f"origin/{base}"], worktree, git_runner,
                 timeout=DEFAULT_GATE_TIMEOUT_S)
     if proc is not None and proc.returncode == 0:
         return True, [], ""
@@ -705,7 +832,7 @@ def _comment_pr(repo, pr, body, gh_runner):
         pass
 
 
-def resolve_instructions(branch):
+def resolve_instructions(branch, base="main"):
     """The resolve step a handed-back card's worker must follow (MQ3).
 
     The PR's head branch IS the card branch (``wt/<card>`` or the branch the
@@ -717,7 +844,7 @@ def resolve_instructions(branch):
     return (
         "Resolve it as this card's worker:\n"
         "1. In your own card worktree: `git fetch origin && git rebase "
-        "origin/main`.\n"
+        f"origin/{base}`.\n"
         "2. Fix the conflicted files / the failing gate, then re-run the "
         "gate until it is green.\n"
         f"3. Push back to YOUR card branch only: `git push --force-with-lease "
@@ -758,14 +885,16 @@ def _origin_slug(repo, git_runner=None):
     return f"{match.group('owner')}/{match.group('repo')}".lower()
 
 
-def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
+def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
     """Cards on the project board whose latest PR URL is ready to merge.
 
     Read-only: enumerates the board through the SAME seam autodown uses and
     reads comments through ``board_pin.open_board_ro``. A card URL whose
     owner/repo is not the project's own ``origin`` is ignored, so a foreign
-    repo's PR can never be enqueued under this project. Returns
-    ``[{pr, card, assignee}]``.
+    repo's PR can never be enqueued under this project. Fork PRs and PRs whose
+    base is not the repo default (or configured base) are skipped here as well
+    as in :func:`process_entry`, so a refusal is never auto-re-added every
+    tick. Returns ``[{pr, card, assignee, branch}]``.
     """
     board = cfg.get("board")
     if not board:
@@ -773,6 +902,8 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
     want_repo = _origin_slug(cfg["repo"])
     if want_repo is None:
         return []
+    # Local refs only: discovery must stay free of extra network probes.
+    base = expected_base(cfg, git_runner, probe_remote=False)
     try:
         from . import autodown, board_pin
         kb = kanban_db or autodown._load_kanban_db_or_default()
@@ -812,7 +943,7 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
         if pr in seen:
             continue
         info = pr_view(cfg["repo"], pr, runner=gh_runner)
-        if _pr_ready(info):
+        if _pr_ready(info) and refusal_reason(info, base) is None:
             seen.add(pr)
             ready.append({"pr": pr, "card": card, "assignee": assignee,
                           "branch": info.get("headRefName")})
@@ -868,6 +999,17 @@ def _finish(doc, project, state_path, ps, result, entry, **fields):
         save_state(doc, state_path)
 
 
+def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner):
+    """Record a terminal refusal (base/fork) and say why on the PR."""
+    body = ("Merge queue: refusing this PR.\n\n"
+            f"{reason}\n\n"
+            "It stays out of the queue until it is retargeted (base branch) "
+            "or re-opened from a branch in this repo.\n")
+    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner)
+    _finish(doc, project, state_path, None, "refused", entry, error=reason)
+    return {"pr": entry["pr"], "result": "refused", "error": reason}
+
+
 def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                   root=None, git_runner=None, gh_runner=None,
                   handback=None, log=None):
@@ -879,6 +1021,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     handback = handback or default_handback
     log = log or (lambda *a, **k: None)
 
+    base = expected_base(cfg, git_runner) or "main"
     info = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
     if info is None:
         return _retry_or_drop(doc, state_path, project, entry, "gh pr view failed")
@@ -889,6 +1032,14 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         _finish(doc, project, state_path, ps, "already-" + state.lower(),
                 entry, sha=info.get("headRefOid"))
         return {"pr": entry["pr"], "result": "already-merged"}
+    reason = refusal_reason(info, base)
+    if reason:
+        # Terminal: a fork or wrong-base PR is not transient, so retrying (and
+        # auto-enqueue re-adding it) can never make it mergeable here.
+        log(f"merge-queue {project}: PR #{entry['pr']} refused: {reason}",
+            "WARN")
+        return _refuse_entry(doc, state_path, project, entry, reason, cfg,
+                             gh_runner)
     if not _pr_ready(info):
         # Not green yet: leave it at the head of the queue, no handback.
         _requeue_waiting(state_path, project, entry)
@@ -897,7 +1048,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     _update_flight(state_path, project, entry["pr"], stage="rebasing",
                    branch=entry.get("branch"))
     try:
-        worktree = ensure_worktree(cfg, root=root, git_runner=git_runner)
+        worktree = ensure_worktree(cfg, root=root, git_runner=git_runner,
+                                   base=base)
     except Exception as exc:
         return _retry_or_drop(doc, state_path, project, entry, str(exc))
 
@@ -905,12 +1057,12 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if err:
         return _retry_or_drop(doc, state_path, project, entry, err)
 
-    ok, conflicted, output = _rebase_onto_main(worktree, git_runner)
+    ok, conflicted, output = _rebase_onto(worktree, base, git_runner)
     if not ok:
         names = ", ".join(conflicted) if conflicted else "(files not reported)"
-        body = (f"Merge queue: rebase onto origin/main conflicted.\n\n"
+        body = (f"Merge queue: rebase onto origin/{base} conflicted.\n\n"
                 f"Conflicted files: {names}\n\n"
-                f"{resolve_instructions(info.get('headRefName'))}\n"
+                f"{resolve_instructions(info.get('headRefName'), base)}\n"
                 f"{output}")
         _finish(doc, project, state_path, ps, "conflict", entry,
                 conflicted=conflicted)
@@ -920,16 +1072,17 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         return {"pr": entry["pr"], "result": "conflict",
                 "conflicted": conflicted}
 
-    gates = _resolve_gates(cfg, worktree, git_runner)
+    gates = _resolve_gates(cfg, worktree, git_runner, base=base)
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
     for command in gates:
         passed, output = _run_gate(command, worktree, timeout_s)
         if not passed:
-            body = (f"Merge queue: gate failed after rebasing onto origin/main.\n\n"
+            body = (f"Merge queue: gate failed after rebasing onto "
+                    f"origin/{base}.\n\n"
                     f"Gate: {command}\n\n"
-                    f"{resolve_instructions(info.get('headRefName'))}\n"
+                    f"{resolve_instructions(info.get('headRefName'), base)}\n"
                     f"{output}")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command)
@@ -1015,6 +1168,31 @@ def _enabled(cfg, ps):
     return bool(cfg.get("enabled", False) if override is None else override)
 
 
+def _repo_groups(projects, names):
+    """Group project names by canonical repo path (registry order first).
+
+    Two registry entries with the same ``repo`` (``ecofire-bc`` and
+    ``ecofire-pontaje``) are ONE queue for scheduling purposes: their entries
+    are ordered together and only one PR per repo is claimed per tick.
+    """
+    groups = {}
+    order = []
+    for row in projects:
+        key = repo_identity(row["repo"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        if row["name"] not in groups[key]:
+            groups[key].append(row["name"])
+    grouped = {name for members in groups.values() for name in members}
+    for name in names:
+        if name not in grouped:
+            key = f"project:{name}"
+            groups[key] = [name]
+            order.append(key)
+    return order, groups
+
+
 def tick(*, state_path=None, root=None, registry_path=None,
          git_runner=None, gh_runner=None, handback=None, auto_source=None,
          config_loader=None, log=None, now=None):
@@ -1048,62 +1226,105 @@ def tick(*, state_path=None, root=None, registry_path=None,
         if recovered:
             save_state(doc, state_path)
 
+        cfgs = {}
+        enabled = {}
         for name in names:
-            ps = _project_state(doc, name)
             cfg = config_loader(name, registry_path)
-            if cfg is None:
-                # No registry entry: nothing to run (state is just history).
-                result["projects"][name] = _project_view(ps, None)
-                continue
-            enabled = _enabled(cfg, ps)
-            result["projects"][name] = _project_view(ps, cfg, enabled)
-            if not enabled or ps.get("paused"):
+            cfgs[name] = cfg
+            ps = _project_state(doc, name)
+            enabled[name] = _enabled(cfg, ps) if cfg is not None else False
+            # No registry entry: nothing to run (state is just history).
+            result["projects"][name] = _project_view(
+                ps, cfg, enabled[name])
+
+        order, groups = _repo_groups(projects, names)
+        for key in order:
+            members = groups[key]
+            active = [n for n in members
+                      if cfgs.get(n) is not None and enabled.get(n)
+                      and not _project_state(doc, n).get("paused")]
+            if not active:
                 continue
 
-            if not ps["queue"]:
-                try:
-                    candidates = auto_source(cfg, gh_runner=gh_runner) or []
-                except Exception as exc:
-                    result["errors"].append(f"{name}: auto-enqueue: {exc}")
-                    candidates = []
-                for cand in candidates:
-                    if _find_entry(ps["queue"], cand["pr"]) is None:
-                        ps["queue"].append({
-                            "pr": int(cand["pr"]),
-                            "card": cand.get("card"),
-                            "assignee": cand.get("assignee"),
-                            "branch": cand.get("branch"),
-                            "enqueued_at": _now_iso(),
-                            "attempts": 0,
-                        })
+            # Auto-enqueue only when this repo's whole FIFO is empty, so a
+            # shared repo never stacks new work in front of queued entries.
+            if not any(_queue(doc, n) for n in active):
+                candidates = {}
+                for name in active:
+                    try:
+                        found = auto_source(cfgs[name],
+                                            gh_runner=gh_runner) or []
+                    except Exception as exc:
+                        result["errors"].append(f"{name}: auto-enqueue: {exc}")
+                        found = []
+                    if found:
+                        candidates[name] = found
                 if candidates:
-                    save_state(doc, state_path)
+                    # Fresh read under the lock: a CLI `add` that landed while
+                    # auto-enqueue probed the network must survive this write.
+                    with _file_lock():
+                        doc = load_state(state_path)
+                        for name, found in candidates.items():
+                            q = _queue(doc, name)
+                            for cand in found:
+                                if _find_entry(q, cand["pr"]) is None:
+                                    q.append({
+                                        "pr": int(cand["pr"]),
+                                        "card": cand.get("card"),
+                                        "assignee": cand.get("assignee"),
+                                        "branch": cand.get("branch"),
+                                        "enqueued_at": _now_iso(),
+                                        "attempts": 0,
+                                    })
+                        save_state(doc, state_path)
 
-            if not ps["queue"]:
-                continue
-
-            # Claim under the cross-process lock on a FRESH read, so an
-            # operator's `add` between our earlier save and this claim is not
-            # lost when we write the in-flight entry.
+            # Claim the oldest entry across every project on this repo, under
+            # the lock and on a FRESH read, so an operator's `add` between our
+            # earlier save and this claim is not lost. Re-reading enabled and
+            # paused also makes a pause/disable raced in during discovery win.
             with _file_lock():
                 doc = load_state(state_path)
-                ps = _project_state(doc, name)
-                if not ps["queue"]:
+                best = None
+                for idx, name in enumerate(members):
+                    cfg = cfgs.get(name)
+                    ps = _project_state(doc, name)
+                    if (cfg is None or not _enabled(cfg, ps)
+                            or ps.get("paused")):
+                        continue
+                    for pos, entry in enumerate(ps.get("queue") or []):
+                        rank = (str(entry.get("enqueued_at") or ""), idx, pos)
+                        if best is None or rank < best[0]:
+                            best = (rank, name, pos, entry)
+                if best is None:
                     continue
-                entry = ps["queue"].pop(0)
+                _, claim_name, pos, entry = best
+                ps = _project_state(doc, claim_name)
+                entry = ps["queue"].pop(pos)
                 ps["in_flight"] = entry
                 save_state(doc, state_path)
-            try:
-                outcome = process_entry(
-                    name, cfg, entry, doc=doc, state_path=state_path,
-                    root=root, git_runner=git_runner, gh_runner=gh_runner,
-                    handback=handback, log=log)
-            except Exception as exc:
-                outcome = _retry_or_drop(doc, state_path, name, entry, str(exc))
-            result["processed"].append({"project": name, **outcome})
+
+            cfg = cfgs[claim_name]
+            # One lock per repo path: two project names on the same checkout
+            # can never run a rebase/gate/push concurrently.
+            lock_root = os.path.dirname(os.path.abspath(state_path))
+            with _repo_lock(cfg["repo"], root=lock_root):
+                try:
+                    outcome = process_entry(
+                        claim_name, cfg, entry, doc=doc,
+                        state_path=state_path, root=root,
+                        git_runner=git_runner, gh_runner=gh_runner,
+                        handback=handback, log=log)
+                except Exception as exc:
+                    outcome = _retry_or_drop(
+                        doc, state_path, claim_name, entry, str(exc))
+            result["processed"].append({"project": claim_name, **outcome})
             doc = load_state(state_path)
-            result["projects"][name] = _project_view(
-                _project_state(doc, name), cfg, enabled)
+            for name in members:
+                ps = _project_state(doc, name)
+                member_cfg = cfgs.get(name)
+                result["projects"][name] = _project_view(
+                    ps, member_cfg,
+                    _enabled(member_cfg, ps) if member_cfg else False)
 
         result["recovered"] = recovered
         result["generated_at"] = _now_iso()
