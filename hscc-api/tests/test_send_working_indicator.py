@@ -191,9 +191,16 @@ def test_send_still_relays_when_detector_is_fail_safe(monkeypatch):
 # detect_active_cli_owner unit tests (surface matching)
 # --------------------------------------------------------------------------- #
 
-def test_detector_matches_only_live_cli_surface(monkeypatch):
+def test_detector_matches_only_live_cli_surface(monkeypatch, tmp_path):
     """Only an entry on the project's OWN session with surface==cli (lowercased)
     is reported as an owner; other surfaces / sessions are None."""
+    # Hermetic: never consult the operator's real hermes profiles. The detector
+    # gates on profile_exists('hscc-orch') before reading the registry, so a
+    # machine without that profile would otherwise return None here.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
     def _fake_resolve(project, registry_path=None):
         return ("hscc-orch", "hscc", "sess-1")
 

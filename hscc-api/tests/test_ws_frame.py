@@ -27,6 +27,7 @@ from ws_frame import (
     encode_frame,
     handshake_accept,
     iter_data_messages,
+    iter_frames,
     make_close_frame,
     parse_close_frame,
 )
@@ -166,6 +167,24 @@ def test_control_frame_interleaved_dropped_from_data():
     msgs = list(iter_data_messages(dec, b"".join(frames)))
     # ping + close are dropped from the data stream; only the text survives.
     assert msgs == [(OP_TEXT, b"abcdef")]
+
+
+def test_iter_frames_surfaces_ping_between_data():
+    """The server-facing iterator must surface control frames in arrival order:
+    a ping interleaved in a fragmented message is visible (so it can be
+    answered), and the data message still reassembles."""
+    frames = [
+        _client_frame(OP_TEXT, b"abc", fin=False),
+        _client_frame(OP_PING, b"keepalive"),
+        _client_frame(OP_CONTINUATION, b"def", fin=True),
+        _client_frame(OP_CLOSE, b"\x03\xe8"),
+    ]
+    dec = FrameDecoder()
+    assert list(iter_frames(dec, b"".join(frames))) == [
+        (OP_PING, b"keepalive"),
+        (OP_TEXT, b"abcdef"),
+        (OP_CLOSE, b"\x03\xe8"),
+    ]
 
 
 def test_continuation_without_start_rejected():

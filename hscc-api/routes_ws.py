@@ -783,17 +783,17 @@ def _drain_socket(sock: socket.socket, project: str, decoder) -> bool:
 
     close_payload: list = []
 
-    def _on_close(payload):
-        close_payload.append(payload)
-
-    for opcode, payload in ws_frame.iter_data_messages(
-            decoder, data, on_close=_on_close):
+    for opcode, payload in ws_frame.iter_frames(decoder, data):
         if opcode == ws_frame.OP_PING:
             try:
                 sock.sendall(
                     ws_frame.encode_frame(ws_frame.OP_PONG, payload))
             except OSError:
                 return False
+        elif opcode == ws_frame.OP_CLOSE:
+            close_payload.append(payload)
+        elif opcode == ws_frame.OP_PONG:
+            continue  # unsolicited pong: nothing to do (§5.5.3)
         else:
             _process_inbound(sock, project, opcode, payload)
 
