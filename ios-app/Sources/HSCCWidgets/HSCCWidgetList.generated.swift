@@ -11,13 +11,11 @@ import WidgetKit
 struct HSCCWidgetList: WidgetBundle {
     var body: some Widget {
         ClusterWidget()
-        MonitorWidget()
         CardsRunningWidget()
         KanbanMonitorWidget()
         ProjectsWidget()
         BoardStatusWidget()
         NeedsMeWidget()
-        ClusterGraphWidget()
         MergeQueueWidget()
     }
 }

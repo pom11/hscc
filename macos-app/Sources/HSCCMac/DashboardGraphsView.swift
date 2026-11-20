@@ -102,7 +102,7 @@ extension DashboardView {
         // The marks read fonts, ink and accent out of the environment, exactly as
         // the widget does, so the operator's stored style for this surface drives
         // the dropdown too — one appearance setting, two surfaces.
-        .widgetStyle(WidgetStyle.resolved(for: .widgetClusterGraph))
+        .widgetStyle(WidgetStyle.resolved(for: .widgetCluster))
     }
 
     private func graphRow(_ node: DashboardGraphNode, window: ClusterGraphWindow) -> some View {

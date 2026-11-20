@@ -1,0 +1,402 @@
+<title>HSCC Widget Directions</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: review column. Top = today's facts + global picks (widget set, look). Then one band per widget type: facts strip, then variant cards (wallpaper with real-size small/medium/large mocks + spec list + pick). Sticky bar collects picks. */
+:root{
+  --bg:#f3f4f2; --panel:#ffffff; --ink:#15181b; --muted:#5d6670; --line:#d9ddd8;
+  --accent:#2f5d8a; --accent-ink:#ffffff; --pick:#e8eef5; --warnbg:#fbf1e3; --warnink:#7a4a0c;
+  --display:"Archivo",system-ui,sans-serif; --body:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  --wall:linear-gradient(160deg,#9fb4c4 0%,#c9b7a6 55%,#a69a8c 100%);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#121417; --panel:#1b1e22; --ink:#e9ebe8; --muted:#9aa3ab; --line:#2c3137;
+  --accent:#86b3de; --accent-ink:#0f1820; --pick:#1d2834; --warnbg:#2b2216; --warnink:#f3c27a;
+  --wall:linear-gradient(160deg,#2c3a46 0%,#41372e 55%,#262a2e 100%); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121417; --panel:#1b1e22; --ink:#e9ebe8; --muted:#9aa3ab; --line:#2c3137;
+  --accent:#86b3de; --accent-ink:#0f1820; --pick:#1d2834; --warnbg:#2b2216; --warnink:#f3c27a;
+  --wall:linear-gradient(160deg,#2c3a46 0%,#41372e 55%,#262a2e 100%); color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 130px}
+.wrap{max-width:1180px;margin:0 auto;display:grid;gap:48px}
+header{padding-block:40px 0;display:grid;gap:12px}
+h1{font-family:var(--display);font-stretch:112%;font-weight:780;font-size:clamp(30px,5vw,48px);line-height:1.05;margin:0;text-wrap:balance;letter-spacing:-.01em}
+h2{font-family:var(--display);font-stretch:108%;font-weight:740;font-size:28px;margin:0;text-wrap:balance}
+h3{font-family:var(--display);font-weight:680;font-size:18px;margin:0}
+.eyebrow{font-family:var(--display);font-weight:650;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+p{margin:0;max-width:72ch}
+.lede{color:var(--muted);font-size:16px}
+.tag{font-family:var(--mono);font-size:12px;color:var(--muted)}
+code{font-family:var(--mono);font-size:.88em}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:999px;padding:3px;background:var(--panel)}
+.seg button{border:0;background:none;color:var(--muted);font:600 13px var(--body);padding:6px 14px;border-radius:999px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.sec{display:grid;gap:18px}
+.sechead{display:grid;gap:6px}
+
+/* facts table */
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+table.facts{border-collapse:collapse;width:100%;font-size:13px;min-width:760px}
+.facts th,.facts td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.facts th{font:650 11px var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.facts tr:last-child td{border-bottom:0}
+.facts td:first-child{font-weight:650;white-space:nowrap}
+.callout{background:var(--warnbg);color:var(--warnink);border-radius:12px;padding:14px 16px;font-size:14px;display:grid;gap:6px}
+.callout b{font-weight:700}
+
+/* global picks */
+.picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.opt{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:8px;cursor:pointer;text-align:left;color:var(--ink);font:inherit}
+.opt[aria-pressed="true"]{border-color:var(--accent);background:var(--pick);box-shadow:inset 0 0 0 1px var(--accent)}
+.opt .row{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.opt .rec{font:650 12px var(--body);color:var(--accent)}
+.opt p{font-size:13px;color:var(--muted)}
+
+/* type facts strip */
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.strip div{background:var(--panel);padding:10px 14px;display:grid;gap:2px;font-size:13px;min-width:0}
+.strip span{font:650 11px var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+
+/* variants */
+.vars{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,560px),1fr));gap:20px}
+.var{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;display:grid;grid-template-rows:auto auto 1fr auto}
+.var[data-on="true"]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}
+.var .vh{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:14px 16px 10px}
+.var .vh .tag{white-space:nowrap}
+.home{background:var(--wall);padding:18px;overflow-x:auto}
+.ws{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.cell{display:grid;gap:5px;justify-items:start}
+.cap{font:500 11px var(--body);color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+dl.spec{margin:0;padding:12px 16px;display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px;align-content:start}
+dl.spec dt{color:var(--muted);font-weight:600}
+dl.spec dd{margin:0;min-width:0}
+.var .vf{padding:0 16px 16px}
+.pickbtn{border:1px solid var(--accent);background:transparent;color:var(--accent);font:650 14px var(--body);padding:8px 16px;border-radius:999px;cursor:pointer;width:100%}
+.pickbtn[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+@media (max-width:600px){.home{padding:12px}.ws{gap:12px}}
+
+/* ============ widget surfaces ============ */
+.w{width:158px;height:158px;border-radius:22px;overflow:hidden;position:relative;box-sizing:border-box;padding:13px;display:flex;flex-direction:column;
+  font-variant-numeric:tabular-nums;background:var(--w-bg);color:var(--w-ink);font-family:var(--w-font);border:var(--w-border)}
+.w.m{width:338px}
+.w.l{width:338px;height:354px}
+.w *{min-width:0}
+.k{font-size:var(--w-ksize);font-weight:650;color:var(--w-mut);letter-spacing:var(--w-ktrack);text-transform:var(--w-kcase);font-family:var(--w-kfont)}
+.hero{font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1;font-family:var(--w-nfont)}
+.num{font-family:var(--w-nfont);font-weight:650}
+.sub{font-size:13px;font-weight:600;line-height:1.25}
+.sm{font-size:11px;line-height:1.3}
+.mut{color:var(--w-mut)} .ok{color:var(--w-ok)} .warn{color:var(--w-warn)} .bad{color:var(--w-bad)} .acc{color:var(--w-acc)}
+.clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cl2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.foot{margin-top:auto;display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.bar{height:6px;border-radius:3px;background:var(--w-soft);overflow:hidden}
+.bar>i{display:block;height:100%;border-radius:3px;background:var(--w-acc)}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;background:var(--w-soft);font-size:10px;font-weight:650}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.tile{background:var(--w-soft);border-radius:var(--w-tile);padding:7px 9px}
+/* lock screen + live activity */
+.lk{color:#fff;background:rgba(255,255,255,.16);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);font-family:-apple-system,system-ui,sans-serif;border:0}
+.acc-r{width:158px;height:66px;border-radius:14px;padding:7px 9px;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}
+.acc-c{width:66px;height:66px;border-radius:50%;display:grid;place-items:center;text-align:center;overflow:hidden}
+.acc-i{height:24px;padding:0 10px;border-radius:12px;display:flex;align-items:center;font-size:13px;font-weight:600;white-space:nowrap}
+.la{width:338px;border-radius:22px;padding:13px 15px;box-sizing:border-box;background:rgba(18,20,24,.78);color:#fff;font-family:-apple-system,system-ui,sans-serif;font-variant-numeric:tabular-nums;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.island{height:36px;border-radius:18px;background:#000;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 14px;width:230px;box-sizing:border-box;font:600 13px -apple-system,system-ui,sans-serif;font-variant-numeric:tabular-nums}
+
+/* looks: native / instrument / glass, each light + dark */
+.stage{--w-font:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;--w-nfont:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;--w-kfont:inherit;--w-ksize:11px;--w-ktrack:0;--w-kcase:none;--w-tile:12px;--w-border:0;
+  --w-bg:#ffffff;--w-ink:#111;--w-mut:#7a7a80;--w-soft:#f0f0f3;--w-acc:#3d5afe;--w-ok:#1f9d55;--w-warn:#c86d05;--w-bad:#d92d20;--w-track:#e6e6ea}
+.stage.dark{--w-bg:#1c1c1e;--w-ink:#f5f5f7;--w-mut:#98989f;--w-soft:#2c2c2e;--w-acc:#8c9eff;--w-ok:#32d74b;--w-warn:#ffb340;--w-bad:#ff6961;--w-track:#3a3a3c}
+.stage.inst{--w-font:ui-monospace,"SF Mono",var(--mono);--w-nfont:ui-monospace,"SF Mono",var(--mono);--w-kfont:ui-monospace,"SF Mono",var(--mono);--w-ksize:9px;--w-ktrack:.12em;--w-kcase:uppercase;--w-tile:4px;
+  --w-bg:#f6f5f1;--w-ink:#1d2126;--w-mut:#6b7178;--w-soft:#e7e4dc;--w-acc:#b8650a;--w-ok:#2f7d4f;--w-warn:#b8650a;--w-bad:#b3261e;--w-track:#e1ded5}
+.stage.inst.dark{--w-bg:#16191d;--w-ink:#eceae4;--w-mut:#8a9098;--w-soft:#262a30;--w-acc:#f0a33a;--w-ok:#5fc48a;--w-warn:#f0a33a;--w-bad:#ff6b5e;--w-track:#2a2e34}
+.stage.glass{--w-font:system-ui,-apple-system,sans-serif;--w-nfont:system-ui,-apple-system,sans-serif;--w-ksize:10px;--w-ktrack:.04em;--w-kcase:uppercase;--w-tile:10px;--w-border:1px solid rgba(255,255,255,.22);
+  --w-bg:rgba(255,255,255,.6);--w-ink:#10151a;--w-mut:rgba(16,21,26,.6);--w-soft:rgba(16,21,26,.08);--w-acc:#1f6fb2;--w-ok:#17834a;--w-warn:#b25d00;--w-bad:#c4281c;--w-track:rgba(16,21,26,.1)}
+.stage.glass.dark{--w-bg:rgba(14,17,21,.58);--w-ink:#fff;--w-mut:rgba(255,255,255,.62);--w-soft:rgba(255,255,255,.12);--w-acc:#7cc4f2;--w-ok:#5fd68f;--w-warn:#f3b04a;--w-bad:#ff7a6b;--w-track:rgba(255,255,255,.14)}
+.stage.glass .w{backdrop-filter:blur(22px) saturate(1.4);-webkit-backdrop-filter:blur(22px) saturate(1.4)}
+
+/* picks bar */
+.pbar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);
+  padding:10px max(16px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));z-index:5}
+.pbar .in{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.pbar .sum{font-size:13px;min-width:0;display:flex;flex-wrap:wrap;gap:4px 12px}
+.pbar .sum b{font-weight:700}
+.pbar button{border:0;background:var(--ink);color:var(--bg);font:650 13px var(--body);padding:9px 16px;border-radius:999px;cursor:pointer}
+textarea{width:100%;box-sizing:border-box;min-height:80px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px;font:14px var(--body)}
+nav.jump{display:flex;flex-wrap:wrap;gap:8px}
+nav.jump a{font:600 13px var(--body);color:var(--accent);text-decoration:none;border:1px solid var(--line);padding:5px 12px;border-radius:999px;background:var(--panel)}
+@media (prefers-reduced-motion:no-preference){.opt,.pickbtn,.var{transition:background .15s,border-color .15s,box-shadow .15s}}
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="tag">hscc · iOS + macOS widgets · proposal for apps 1.4 · sample data from the 20 Nov 06:34 snapshot</span>
+    <h1>Widget redesign, one type at a time</h1>
+    <p class="lede">Every widget type gets four layouts drawn at real iPhone size (small 158 pt, medium 338 pt, large 338×354 pt), plus lock-screen and Live Activity options. Each layout lists what it answers, which server route feeds it, how often it would refresh, and what tapping it opens. Pick one per type; the bar at the bottom collects everything.</p>
+    <nav class="jump" aria-label="Jump to">
+      <a href="#today">Today</a><a href="#global">Set + look</a><a href="#t-cluster">Cluster</a><a href="#t-boards">Boards</a><a href="#t-running">Running</a><a href="#t-needs">Needs Me</a><a href="#t-mq">Merge Queue</a><a href="#t-lock">Lock screen</a><a href="#t-la">Live Activity</a>
+    </nav>
+  </header>
+
+  <section class="sec" id="today">
+    <div class="sechead"><span class="eyebrow">What ships today (apps 1.3.0)</span><h2>9 widgets, 5 Live Activities</h2></div>
+    <div class="tw"><table class="facts"><thead><tr><th>Widget</th><th>Shows</th><th>Routes</th><th>Refresh today</th><th>Problem</th></tr></thead><tbody>
+      <tr><td>Cluster</td><td>nodes up, model per node, tok/s, temps</td><td><code>/v1/cluster/status</code> <code>/monitor</code> <code>/autodown/status</code> <code>/kanban/*</code></td><td>5 min (setting, falls back to 300 s)</td><td>overlaps Monitor and Cluster Graph</td></tr>
+      <tr><td>HSCC Monitor</td><td>per node model, load, temp + daemon host</td><td><code>/v1/cluster/monitor</code> <code>/daemon/host</code></td><td>5 min (300 s fallback)</td><td>same nodes as Cluster, different layout</td></tr>
+      <tr><td>Cluster Graph</td><td>temp, util, power, memory history</td><td><code>/v1/cluster/history</code></td><td>5 min</td><td>third cluster widget</td></tr>
+      <tr><td>Running Cards</td><td>running cards, worker, run time</td><td><code>/v1/kanban/running</code> <code>/blocked</code> <code>/stale</code></td><td>5 min</td><td></td></tr>
+      <tr><td>Kanban Monitor</td><td>all boards: running/ready/todo/blocked/done</td><td><code>/v1/mobile/summary</code> <code>/kanban/*</code></td><td>5 min</td><td>overlaps Board Status and Projects</td></tr>
+      <tr><td>Board Status</td><td>one board's counts</td><td><code>/v1/mobile/summary</code></td><td>5 min</td><td>same counts as Kanban Monitor</td></tr>
+      <tr><td>Projects</td><td>projects and their boards</td><td><code>/v1/projects</code></td><td>5 min</td><td>a list that rarely changes</td></tr>
+      <tr><td>Needs Me</td><td>open alerts from <code>general</code></td><td><code>/v1/alerts</code></td><td>5 min</td><td></td></tr>
+      <tr><td>Merge Queue</td><td>queue rows, stage, last result</td><td><code>/v1/merge-queue</code></td><td>5 min</td><td>queue is off everywhere, so it is always empty</td></tr>
+    </tbody></table></div>
+    <div class="callout"><b>Refresh budget.</b><span>Every widget asks iOS to reload every 5 minutes, which is 288 reloads a day per widget. iOS gives a home-screen widget roughly 40–70 reloads a day and quietly drops the rest, so in practice tiles update every 20–40 minutes while still looking current. The proposal below sets realistic intervals, shows an “as of” time on every widget, greys out data older than twice the interval, and lets the app push a reload when it opens. The running audit (card t_1c4deed3) measures what actually happens.</span></div>
+  </section>
+
+  <section class="sec" id="global">
+    <div class="sechead"><span class="eyebrow">Step 1</span><h2>Widget set and look</h2><p class="lede">The look restyles every mock on this page, so you can compare layouts in the look you prefer.</p></div>
+    <div class="picks" id="setpicks"></div>
+    <div class="picks" id="lookpicks"></div>
+    <div class="toolbar"><span class="tag">Preview appearance</span>
+      <div class="seg" role="group" aria-label="Appearance"><button id="m-light" type="button">Light</button><button id="m-dark" type="button">Dark</button></div></div>
+  </section>
+
+  <div id="types" class="wrap" style="gap:56px"></div>
+
+  <section class="sec">
+    <div class="sechead"><span class="eyebrow">Last step</span><h2>Anything to change</h2></div>
+    <textarea id="note" placeholder="e.g. Cluster C2 but with the tok/s line from C4 under the gauges"></textarea>
+  </section>
+</div>
+
+<div class="pbar"><div class="in">
+  <div class="sum" id="sum">No picks yet.</div>
+  <button id="copy" type="button">Copy picks</button>
+</div></div>
+
+<script>
+// ---------- sample data (examples shaped like the 06:34 snapshot, not live) ----------
+const wave=(s,a,o,n=24)=>Array.from({length:n},(_,i)=>Math.max(0,Math.min(100,Math.round(o+a*Math.sin(i/3.1+s)+a*.4*Math.sin(i/1.3+s*2)))));
+const NODES=[
+ {n:'spark-1',s:'S1',role:'orch',t:61,u:34,p:62,tok:41,mem:96,h:wave(0,12,34),th:wave(.5,4,60)},
+ {n:'spark-2',s:'S2',role:'worker',t:68,u:81,p:148,tok:88,mem:104,h:wave(1,14,74),th:wave(1.5,5,66)},
+ {n:'spark-3',s:'S3',role:'worker',t:72,u:92,p:171,tok:102,mem:110,h:wave(2,8,86),th:wave(2.5,4,71)},
+ {n:'spark-4',s:'S4',role:'worker',t:58,u:12,p:38,tok:0,mem:22,h:wave(3,9,16),th:wave(3.5,3,57)}];
+const TOK=NODES.reduce((a,b)=>a+b.tok,0), HOT=Math.max(...NODES.map(x=>x.t));
+const TOKH=Array.from({length:24},(_,i)=>NODES.reduce((a,x)=>a+x.h[i]*1.1,0));
+const BOARDS=[{b:'hscc',r:2,rd:0,td:2,bl:7,d:60},{b:'flows',r:0,rd:0,td:0,bl:17,d:17},{b:'display',r:0,rd:0,td:0,bl:10,d:12},{b:'gateclerk',r:0,rd:0,td:0,bl:2,d:0},{b:'app',r:0,rd:0,td:0,bl:1,d:0},{b:'bc',r:0,rd:0,td:0,bl:1,d:0}];
+const SUM=k=>BOARDS.reduce((a,b)=>a+b[k],0);
+const RUN=[{id:'t_7babf634',b:'hscc',w:'backend-engineer',m:32,beat:52,tin:'7.9M',tout:'56k',t:'/v1/health serves a cached verify snapshot'},
+           {id:'t_109bcc97',b:'hscc',w:'backend-engineer',m:32,beat:42,tin:'5.9M',tout:'50k',t:'api_routes sweep stops re-triggering verify'}];
+const NEED=[{s:'bad',t:'Approve the 2.17 release notes before the tag.',a:'2h',src:'flows'},{s:'warn',t:'Site setup questions are waiting for answers',a:'1d',src:'site-a'}];
+const MQ={p:'hscc',q:[{pr:485,s:'gates',t:'merge-queue default on',min:3},{pr:486,s:'queued',t:'widget refresh budget',min:0},{pr:487,s:'queued',t:'tmux target audit',min:0}],
+  hist:[1,1,1,0,1,1,1,1,0,1,1,1],last:{pr:484,ok:true,a:'2m'}};
+const ASOF='06:34';
+const SL=6;
+
+// ---------- drawing helpers ----------
+const spark=(arr,w,h,max=100,fill=true)=>{const st=w/(arr.length-1);const pts=arr.map((v,i)=>[i*st,h-2-(Math.min(v,max)/max)*(h-4)]);
+ const d=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+ return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" style="display:block">${fill?`<path d="${d} L${w} ${h} L0 ${h}Z" fill="var(--w-acc)" opacity=".16"/>`:''}<path d="${d}" fill="none" stroke="var(--w-acc)" stroke-width="1.6" stroke-linejoin="round"/><circle cx="${pts.at(-1)[0]}" cy="${pts.at(-1)[1]}" r="2.4" fill="var(--w-acc)"/></svg>`};
+const arc=(v,max,size,sw,col)=>{const r=size/2-sw/2-1,c=Math.PI*r*1.5,f=c*Math.min(v/max,1);
+ return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true" style="transform:rotate(135deg);display:block"><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="var(--w-track)" stroke-width="${sw}" stroke-dasharray="${c} 999" stroke-linecap="round"/><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-dasharray="${f} 999" stroke-linecap="round"/></svg>`};
+const gauge=(v,max,size,sw,col,label)=>`<div style="position:relative;width:${size}px;height:${size}px">${arc(v,max,size,sw,col)}<div style="position:absolute;inset:0;display:grid;place-items:center" class="num"><span style="font-size:${Math.round(size/3.6)}px">${label}</span></div></div>`;
+const tc=t=>t>=75?'var(--w-bad)':t>=70?'var(--w-warn)':'var(--w-ok)';
+const tcls=t=>t>=75?'bad':t>=70?'warn':'';
+const heat=v=>v>=85?'var(--w-bad)':v>=60?'var(--w-warn)':v>=30?'var(--w-acc)':'var(--w-track)';
+const cells=(arr,h,gap=2)=>`<div style="display:grid;grid-template-columns:repeat(${arr.length},1fr);gap:${gap}px">${arr.map(v=>`<span style="height:${h}px;border-radius:2px;background:${heat(v)}"></span>`).join('')}</div>`;
+const bar=(pct,col)=>`<div class="bar"><i style="width:${pct}%;${col?'background:'+col:''}"></i></div>`;
+const stamp=`<span class="k">${ASOF}</span>`;
+const W=(size,inner,extra='')=>`<div class="w ${size}" ${extra}>${inner}</div>`;
+
+// ---------- types and variants ----------
+const TYPES=[
+{id:'cluster',name:'Cluster',
+ facts:{Replaces:'Cluster, HSCC Monitor, Cluster Graph',Answers:'Is the fleet up, hot, and doing work?',Routes:'/v1/cluster/monitor (now) + /v1/cluster/history (charts)',Refresh:'15 min; app pushes a reload on open',Tap:'opens the app on Cluster'},
+ vars:[
+ {id:'C1',name:'Health line',answers:'Up or not, in one word, then the hottest node.',shows:'nodes up, total tok/s, hottest temp; medium adds per-node util bars; large adds a 2 h throughput chart and a node table',why:'Fastest to read; the large size keeps the detail the Monitor widget had.',
+  s:()=>W('',`<span class="k">Cluster</span><span class="hero ok" style="margin-top:6px">All up</span><span class="sub" style="margin-top:6px">${TOK} tok/s</span><span class="sub ${tcls(HOT)}">Hottest ${HOT}°</span><div class="foot">${stamp}</div>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 112px"><span class="k">Cluster</span><span class="hero ok" style="margin-top:6px">4/4</span><span class="sub" style="margin-top:4px">serving</span><span class="sub mut">${TOK} tok/s</span><div class="foot">${stamp}</div></div>
+   <div style="flex:1;display:grid;gap:8px;align-content:center">${NODES.map(x=>`<div style="display:grid;grid-template-columns:30px 1fr 32px;gap:8px;align-items:center" class="sm"><b>${x.s}</b>${bar(x.u,x.u>85?'var(--w-warn)':'')}<span class="num ${tcls(x.t)}" style="text-align:right">${x.t}°</span></div>`).join('')}</div></div>`),
+  l:()=>W('l',`<div class="top"><span class="k">Cluster · 4/4 up</span>${stamp}</div><div style="display:flex;align-items:baseline;gap:8px;margin-top:6px"><span class="hero">${TOK}</span><span class="sub mut">tok/s now</span></div>
+   <div style="margin-top:6px">${spark(TOKH.map(v=>v/3.4),312,64)}</div><div class="k" style="display:flex;justify-content:space-between;margin-top:2px"><span>2 h ago</span><span>now</span></div>
+   <div style="display:grid;grid-template-columns:34px 1fr 40px 44px 40px;gap:6px 8px;margin-top:12px;align-items:center" class="sm"><span class="k">node</span><span class="k">util</span><span class="k">temp</span><span class="k">power</span><span class="k">tok/s</span>
+   ${NODES.map(x=>`<b>${x.s}${x.role==='orch'?'◆':''}</b>${bar(x.u)}<span class="num ${tcls(x.t)}">${x.t}°</span><span class="num">${x.p} W</span><span class="num">${x.tok}</span>`).join('')}</div>
+   <div class="foot sm mut"><span>qwen3.8-flash-next ×4</span><span>daemon OK</span></div>`)},
+ {id:'C2',name:'Gauges',answers:'How hot and how busy is each node right now?',shows:'one temperature arc per node with util and power underneath; large adds a temperature sparkline per node',why:'Best when temperature is the thing you watch (the .248 thermals).',
+  s:()=>W('',`<div class="top"><span class="k">Cluster</span><span class="k ok">4/4</span></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;justify-items:center;margin-top:4px;flex:1;align-content:center">${NODES.map(x=>`<div style="display:grid;justify-items:center">${gauge(x.t,90,48,4,tc(x.t),x.t+'°')}<span class="k" style="margin-top:-6px">${x.s}</span></div>`).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Cluster · ${TOK} tok/s</span>${stamp}</div><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;flex:1;align-content:center;justify-items:center">${NODES.map(x=>`<div style="display:grid;justify-items:center;gap:2px">${gauge(x.t,90,62,5,tc(x.t),x.t+'°')}<b class="sm">${x.s}${x.role==='orch'?' ◆':''}</b><span class="k">${x.u}% · ${x.p} W</span></div>`).join('')}</div>`),
+  l:()=>W('l',`<div class="top"><span class="k">Cluster · ${TOK} tok/s</span>${stamp}</div><div style="display:grid;gap:12px;margin-top:10px;flex:1;align-content:space-evenly">${NODES.map(x=>`<div style="display:grid;grid-template-columns:54px 1fr 70px;gap:10px;align-items:center">${gauge(x.t,90,54,5,tc(x.t),x.t+'°')}<div style="display:grid;gap:3px"><span class="k">temp · 2 h</span>${spark(x.th,170,26,90,false)}</div><div style="display:grid;gap:1px" class="sm"><b>${x.n}</b><span class="mut">${x.u}% util</span><span class="mut">${x.p} W</span></div></div>`).join('')}</div>`)},
+ {id:'C3',name:'Heat strips',answers:'What has each node been doing for the last 2 hours?',shows:'one strip per node, each cell is 5 minutes of utilisation (idle, busy, hot); large stacks util, temperature and power strips',why:'Shows trend and idle nodes at a glance; reads like a seismograph.',
+  s:()=>W('',`<div class="top"><span class="k">Cluster · 1 h</span><span class="k">4/4</span></div><div style="display:grid;gap:7px;margin-top:8px">${NODES.map(x=>`<div><div class="top sm"><b>${x.s}</b><span class="num ${tcls(x.t)}">${x.t}°</span></div>${cells(x.h.slice(12),6,1.5)}</div>`).join('')}</div><div class="foot"><span class="num sm">${TOK} tok/s</span></div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Cluster · last 2 h</span><span class="k">${TOK} tok/s</span></div><div style="display:grid;gap:8px;margin-top:10px">${NODES.map(x=>`<div style="display:grid;grid-template-columns:24px 1fr 30px;gap:8px;align-items:center"><b class="sm">${x.s}</b>${cells(x.h,14)}<span class="num sm ${tcls(x.t)}" style="text-align:right">${x.t}°</span></div>`).join('')}</div><div class="foot"><span class="k">idle · busy · hot</span>${stamp}</div>`),
+  l:()=>W('l',`<div class="top"><span class="k">Cluster · last 2 h</span>${stamp}</div>${['util','temp','power'].map((lab,j)=>`<span class="k" style="margin-top:10px">${lab}</span><div style="display:grid;gap:4px;margin-top:4px">${NODES.map(x=>`<div style="display:grid;grid-template-columns:22px 1fr;gap:6px;align-items:center"><span class="k">${x.s}</span>${cells(j===0?x.h:j===1?x.th.map(v=>(v-50)*4):x.h.map(v=>v*.9),9,1.5)}</div>`).join('')}</div>`).join('')}<div class="foot"><span class="k">idle · busy · hot</span><span class="num sm">${TOK} tok/s</span></div>`)},
+ {id:'C4',name:'Throughput',answers:'How much work is the fleet doing, and who is doing it?',shows:'total tok/s with a 2 h area chart; medium splits today’s tokens by node; large adds a per-node line',why:'Ties the cluster to output; makes an idle node obvious.',
+  s:()=>W('',`<span class="k">Throughput</span><div style="display:flex;align-items:baseline;gap:4px;margin-top:6px"><span class="hero">${TOK}</span><span class="k">tok/s</span></div><div style="margin-top:auto">${spark(TOKH.map(v=>v/3.4),132,46)}</div>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 110px"><span class="k">Throughput</span><span class="hero" style="margin-top:6px">${TOK}</span><span class="k">tok/s now</span><div style="display:grid;gap:3px;margin-top:auto">${NODES.map(x=>`<div class="top sm"><span>${x.s}</span><span class="num ${x.tok?'':'mut'}">${x.tok||'idle'}</span></div>`).join('')}</div></div>
+   <div style="flex:1;display:flex;flex-direction:column">${spark(TOKH.map(v=>v/3.4),190,100)}<div class="k" style="display:flex;justify-content:space-between;margin-top:3px"><span>2 h</span><span>${ASOF}</span></div><div style="display:flex;height:8px;border-radius:4px;overflow:hidden;margin-top:auto">${NODES.map((x,i)=>`<span style="flex:${x.tok||.5};background:var(--w-acc);opacity:${1-i*.22}"></span>`).join('')}</div><span class="k" style="margin-top:3px">share by node</span></div></div>`),
+  l:null},
+ ]},
+{id:'boards',name:'Boards',
+ facts:{Replaces:'Kanban Monitor, Board Status, Projects',Answers:'What is moving, what is stuck?',Routes:'/v1/mobile/summary (+ /v1/kanban/running for titles)',Refresh:'15 min',Tap:'opens the board you configured, or Boards'},
+ vars:[
+ {id:'B1',name:'Totals',answers:'How many cards run, and how many are stuck?',shows:'running count, blocked count, done today; medium names the two boards with the most blocked cards',why:'Calmest; blocked turns orange only when it grows.',
+  s:()=>W('',`<span class="k">Boards</span><span class="hero" style="margin-top:6px">${SUM('r')}</span><span class="sub">running</span><span class="sub warn">${SUM('bl')} blocked</span><div class="foot"><span class="k">${SUM('d')} done today</span></div>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 110px"><span class="k">Boards</span><span class="hero" style="margin-top:6px">${SUM('r')}</span><span class="sub">running</span><span class="sub warn">${SUM('bl')} blocked</span><div class="foot"><span class="k">${SUM('d')} done today</span></div></div>
+   <div style="flex:1;display:grid;gap:8px;align-content:center">${BOARDS.slice().sort((a,b)=>b.bl-a.bl).slice(0,2).map(b=>`<div class="tile"><div class="top"><b class="sm clip">${b.b}</b><span class="num warn sm">${b.bl} blocked</span></div><span class="k">${b.r} running · ${b.d} done today</span></div>`).join('')}</div></div>`),
+  l:null},
+ {id:'B2',name:'Table',answers:'Every board’s counts, side by side.',shows:'board × running / todo / blocked / done today; large lists all boards with worker slots used (2 of 6)',why:'Closest to `hscc kanban monitor`; nothing hidden.',
+  s:()=>W('',`<span class="k">Boards</span><div style="display:grid;grid-template-columns:1fr 22px 24px;gap:4px 6px;margin-top:8px" class="sm"><span class="k">board</span><span class="k">run</span><span class="k">blk</span>${BOARDS.slice(0,4).map(b=>`<span class="clip">${b.b}</span><span class="num ${b.r?'acc':'mut'}">${b.r}</span><span class="num ${b.bl>9?'warn':''}">${b.bl}</span>`).join('')}</div><div class="foot">${stamp}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Boards · ${SUM('r')}/${SL} slots</span>${stamp}</div><div style="display:grid;grid-template-columns:1fr 34px 34px 34px 44px;gap:4px 8px;margin-top:8px" class="sm"><span class="k">board</span><span class="k">run</span><span class="k">todo</span><span class="k">blk</span><span class="k">done</span>${BOARDS.slice(0,4).map(b=>`<span class="clip">${b.b}</span><span class="num ${b.r?'acc':'mut'}">${b.r}</span><span class="num">${b.td}</span><span class="num ${b.bl>9?'warn':''}">${b.bl}</span><span class="num mut">${b.d}</span>`).join('')}</div>`),
+  l:()=>W('l',`<div class="top"><span class="k">Boards</span>${stamp}</div><div style="display:flex;gap:4px;margin-top:8px">${Array.from({length:SL},(_,i)=>`<span style="flex:1;height:10px;border-radius:3px;background:${i<SUM('r')?'var(--w-acc)':'var(--w-track)'}"></span>`).join('')}</div><span class="k" style="margin-top:3px">${SUM('r')} of ${SL} worker slots</span>
+   <div style="display:grid;grid-template-columns:1fr 30px 30px 30px 30px 36px;gap:6px 8px;margin-top:12px" class="sm"><span class="k">board</span><span class="k">run</span><span class="k">rdy</span><span class="k">todo</span><span class="k">blk</span><span class="k">done</span>${BOARDS.map(b=>`<span class="clip">${b.b}</span><span class="num ${b.r?'acc':'mut'}">${b.r}</span><span class="num mut">${b.rd}</span><span class="num">${b.td}</span><span class="num ${b.bl>9?'warn':''}">${b.bl}</span><span class="num mut">${b.d}</span>`).join('')}</div>
+   <div class="foot sm"><span>${SUM('d')} done today</span><span class="warn">${SUM('bl')} blocked</span></div>`)},
+ {id:'B3',name:'Stacked bars',answers:'Which board carries the most open work?',shows:'one bar per board, split running / todo / blocked, length = open cards; done today on the right',why:'Shape over numbers; a growing orange segment stands out.',
+  s:()=>W('',`<span class="k">Open cards</span><div style="display:grid;gap:7px;margin-top:8px">${BOARDS.slice(0,4).map(b=>{const t=b.r+b.td+b.bl;return `<div><div class="top sm"><span class="clip">${b.b}</span><span class="num">${t}</span></div><div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--w-track);width:${Math.max(10,t/19*100)}%">${b.r?`<span style="flex:${b.r};background:var(--w-acc)"></span>`:''}${b.td?`<span style="flex:${b.td};background:var(--w-mut)"></span>`:''}${b.bl?`<span style="flex:${b.bl};background:var(--w-warn)"></span>`:''}</div></div>`}).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Open cards by board</span>${stamp}</div><div style="display:grid;gap:8px;margin-top:10px">${BOARDS.slice(0,4).map(b=>{const t=b.r+b.td+b.bl;return `<div style="display:grid;grid-template-columns:100px 1fr 54px;gap:8px;align-items:center" class="sm"><span class="clip">${b.b}</span><div style="display:flex;height:10px;border-radius:3px;overflow:hidden;background:var(--w-track);width:${Math.max(6,t/19*100)}%">${b.r?`<span style="flex:${b.r};background:var(--w-acc)"></span>`:''}${b.td?`<span style="flex:${b.td};background:var(--w-mut)"></span>`:''}${b.bl?`<span style="flex:${b.bl};background:var(--w-warn)"></span>`:''}</div><span class="k" style="text-align:right">${b.d} done</span></div>`}).join('')}</div><div class="foot"><span class="k"><span class="acc">■</span> running <span class="mut">■</span> todo <span class="warn">■</span> blocked</span></div>`),
+  l:null},
+ {id:'B4',name:'One board',answers:'Where is my current board at? (you pick the board)',shows:'a mini kanban: ready / todo / running / blocked / done today for one board, with the running card titles',why:'Replaces Board Status properly; best on a second page next to Running.',
+  s:()=>W('',`<div class="top"><span class="k">hscc</span>${stamp}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;flex:1">${[['running',2,'acc'],['todo',2,''],['blocked',7,'warn'],['done',60,'mut']].map(([l,v,c])=>`<div class="tile" style="display:grid"><span class="num ${c}" style="font-size:20px">${v}</span><span class="k">${l}</span></div>`).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">hscc board</span>${stamp}</div><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px">${[['todo',2,''],['running',2,'acc'],['blocked',7,'warn'],['done today',60,'mut']].map(([l,v,c])=>`<div class="tile"><span class="num ${c}" style="font-size:20px;display:block">${v}</span><span class="k">${l}</span></div>`).join('')}</div>
+   <div style="display:grid;gap:3px;margin-top:auto">${RUN.map(r=>`<div class="sm clip"><span class="acc">▸</span> ${r.t}</div>`).join('')}</div>`),
+  l:null},
+ ]},
+{id:'running',name:'Running',
+ facts:{Replaces:'Running Cards',Answers:'What are the workers doing right now, and is anything stuck?',Routes:'/v1/kanban/running (+ /stale for heartbeat age)',Refresh:'10 min while cards run, 30 min when idle',Tap:'opens the card'},
+ vars:[
+ {id:'R1',name:'List',answers:'Which cards are running and for how long?',shows:'card title, board, worker, run time; heartbeat age turns orange after 5 min',why:'Plain and complete.',
+  s:()=>W('',`<div class="top"><span class="k">Running</span><span class="num acc">${RUN.length}</span></div><div style="display:grid;gap:8px;margin-top:8px">${RUN.map(r=>`<div><div class="sm cl2" style="font-weight:600">${r.t}</div><span class="k">${r.m} min · ${r.b}</span></div>`).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Running · ${RUN.length} cards</span>${stamp}</div><div style="display:grid;gap:8px;margin-top:8px">${RUN.map(r=>`<div class="tile"><div class="top"><b class="sm clip">${r.t}</b><span class="num sm">${r.m}m</span></div><span class="k">${r.b} · ${r.w} · beat ${r.beat}s ago</span></div>`).join('')}</div>`),
+  l:null},
+ {id:'R2',name:'Slots',answers:'How full is the worker pool?',shows:'6 slot blocks (the kanban cap), filled ones carry the card; medium adds an elapsed bar against a 60 min budget',why:'Makes the 6/2 cap visible; a full pool explains slow boards.',
+  s:()=>W('',`<span class="k">Worker slots</span><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:8px">${Array.from({length:SL},(_,i)=>`<span style="height:30px;border-radius:7px;background:${i<RUN.length?'var(--w-acc)':'var(--w-track)'}"></span>`).join('')}</div><div class="foot"><span class="num" style="font-size:22px">${RUN.length}/${SL}</span><span class="k">busy</span></div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Worker slots · ${RUN.length}/${SL}</span>${stamp}</div><div style="display:flex;gap:4px;margin-top:8px">${Array.from({length:SL},(_,i)=>`<span style="flex:1;height:8px;border-radius:3px;background:${i<RUN.length?'var(--w-acc)':'var(--w-track)'}"></span>`).join('')}</div>
+   <div style="display:grid;gap:9px;margin-top:12px">${RUN.map(r=>`<div><div class="top sm"><span class="clip" style="font-weight:600">${r.t}</span><span class="num">${r.m}/60m</span></div>${bar(r.m/60*100)}</div>`).join('')}</div>`),
+  l:null},
+ {id:'R3',name:'Longest',answers:'Is any card taking too long?',shows:'the longest-running card’s time in big type, its title, and heartbeat state',why:'One question, one answer; good on the lock screen too.',
+  s:()=>W('',`<span class="k">Longest running</span><span class="hero" style="margin-top:6px">32m</span><span class="sm cl2" style="margin-top:6px;font-weight:600">${RUN[0].t}</span><div class="foot"><span class="k ok">● beat 52s</span></div>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 110px"><span class="k">Longest</span><span class="hero" style="margin-top:6px">32m</span><span class="k ok" style="margin-top:4px">● alive, beat 52s</span><div class="foot"><span class="k">+${RUN.length-1} more</span></div></div><div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px"><b class="sub cl2">${RUN[0].t}</b><span class="k">${RUN[0].id} · ${RUN[0].w}</span></div></div>`),
+  l:null},
+ {id:'R4',name:'Cost',answers:'What are the running cards spending?',shows:'tokens in/out per running card and run time; small shows today’s worker tokens',why:'Catches a card that loops and burns context (the 40-call budget rule).',
+  s:()=>W('',`<span class="k">Worker tokens · 24 h</span><span class="hero" style="margin-top:6px">580M</span><span class="k">in · 4.4M out</span><div class="foot"><span class="sm">${RUN.length} running</span></div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Running · tokens</span>${stamp}</div><div style="display:grid;grid-template-columns:1fr 46px 40px 34px;gap:6px 8px;margin-top:8px" class="sm"><span class="k">card</span><span class="k">in</span><span class="k">out</span><span class="k">run</span>${RUN.map(r=>`<span class="clip">${r.t}</span><span class="num">${r.tin}</span><span class="num">${r.tout}</span><span class="num">${r.m}m</span>`).join('')}</div><div class="foot"><span class="k">24 h workers 580M in / 4.4M out</span></div>`),
+  l:null},
+ ]},
+{id:'needs',name:'Needs Me',
+ facts:{Replaces:'Needs Me (same scope)',Answers:'Is anything waiting on me?',Routes:'/v1/alerts?since=<id> (read-only; ack stays in the CLI)',Refresh:'15 min; red items stay until acked',Tap:'opens the alert'},
+ vars:[
+ {id:'N1',name:'Count + top',answers:'How many, and the most urgent one.',shows:'open count in red, top alert text, its age and how many more',why:'Simplest; the count works as a badge.',
+  s:()=>W('',`<span class="k">Needs you</span><span class="hero bad" style="margin-top:6px">${NEED.length}</span><span class="sub cl2" style="margin-top:auto">${NEED[0].t}</span><span class="k" style="margin-top:3px">${NEED[0].a} ago · +${NEED.length-1}</span>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 90px"><span class="k">Needs you</span><span class="hero bad" style="margin-top:6px">${NEED.length}</span><div class="foot"><span class="k">oldest ${NEED.at(-1).a}</span></div></div><div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px"><b class="sub">${NEED[0].t}</b><span class="k">${NEED[0].src} · ${NEED[0].a} ago</span></div></div>`),
+  l:null},
+ {id:'N2',name:'Severity list',answers:'Everything open, most severe first.',shows:'each alert with a severity bar, source project and age',why:'Best when there are often 2–5 items.',
+  s:()=>W('',`<span class="k">Needs you · ${NEED.length}</span><div style="display:grid;gap:7px;margin-top:8px">${NEED.map(n=>`<div style="display:grid;grid-template-columns:3px 1fr;gap:7px"><span style="border-radius:2px;background:var(--w-${n.s})"></span><span class="sm cl2" style="font-weight:600">${n.t}</span></div>`).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Needs you · ${NEED.length}</span>${stamp}</div><div style="display:grid;gap:8px;margin-top:8px">${NEED.map(n=>`<div style="display:grid;grid-template-columns:3px 1fr auto;gap:8px"><span style="border-radius:2px;background:var(--w-${n.s})"></span><div><b class="sm cl2">${n.t}</b><span class="k">${n.src}</span></div><span class="k">${n.a}</span></div>`).join('')}</div>`),
+  l:null},
+ {id:'N3',name:'Calm when clear',answers:'Nothing to do? Then it says so plainly.',shows:'a quiet green “Nothing needs you” state; turns red with the top item when something arrives (both states shown)',why:'Lets you trust the empty state; the widget only grabs attention when it should.',
+  s:()=>W('',`<span class="k">Needs you</span><span class="hero ok" style="margin-top:6px;font-size:26px">All clear</span><span class="sm mut" style="margin-top:6px">Nothing waiting since 04:12</span><div class="foot">${stamp}</div>`),
+  m:()=>W('m',`<div style="display:flex;gap:12px;flex:1;align-items:stretch"><div class="tile" style="flex:1;display:flex;flex-direction:column;background:color-mix(in srgb,var(--w-bad) 14%,transparent)"><span class="k bad">Needs you now</span><b class="sub" style="margin-top:6px">${NEED[0].t}</b><span class="k" style="margin-top:auto">${NEED[0].a} ago · ${NEED[0].src}</span></div><div style="flex:0 0 74px;display:flex;flex-direction:column;justify-content:center;align-items:center"><span class="hero bad">${NEED.length}</span><span class="k">open</span></div></div>`),
+  l:null},
+ {id:'N4',name:'Oldest first',answers:'What have I been ignoring longest?',shows:'the oldest open alert with its age in big type',why:'Stops things from rotting at the bottom of the list.',
+  s:()=>W('',`<span class="k">Waiting longest</span><span class="hero warn" style="margin-top:6px">1 day</span><span class="sm cl2" style="margin-top:auto;font-weight:600">${NEED[1].t}</span>`),
+  m:()=>W('m',`<div style="display:flex;gap:14px;flex:1"><div style="display:flex;flex-direction:column;flex:0 0 100px"><span class="k">Waiting longest</span><span class="hero warn" style="margin-top:6px">1d</span><div class="foot"><span class="k">${NEED.length} open</span></div></div><div style="flex:1;display:grid;gap:6px;align-content:center">${NEED.slice().reverse().map(n=>`<div class="top sm"><span class="clip" style="font-weight:600">${n.t}</span><span class="num ${n.s}">${n.a}</span></div>`).join('')}</div></div>`),
+  l:null},
+ ]},
+{id:'mq',name:'Merge Queue',
+ facts:{Replaces:'Merge Queue (same scope)',Answers:'Is my code landing?',Routes:'/v1/merge-queue (read-only)',Refresh:'5 min while a PR is in flight, 30 min when empty',Tap:'opens the PR on GitHub'},
+ vars:[
+ {id:'M1',name:'Pipeline',answers:'Where is the PR in front right now?',shows:'head PR with rebase → gates → push → merge stages; how many wait behind it; last result',why:'Matches how the queue actually works.',
+  s:()=>W('',`<div class="top"><span class="k">Merge queue</span><span class="k">${MQ.p}</span></div><span class="num" style="font-size:22px;margin-top:6px">#${MQ.q[0].pr}</span>${stages(1)}<div class="foot sm"><span>+${MQ.q.length-1} waiting</span><span class="ok">#${MQ.last.pr} ✓</span></div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Merge queue · ${MQ.p}</span>${stamp}</div><div style="display:flex;align-items:baseline;gap:8px;margin-top:6px"><span class="num" style="font-size:22px">#${MQ.q[0].pr}</span><span class="sm clip">${MQ.q[0].t}</span></div>${stages(1,true)}<div class="foot sm"><span>+${MQ.q.length-1} waiting</span><span class="ok">#${MQ.last.pr} merged ${MQ.last.a} ago</span></div>`),
+  l:null},
+ {id:'M2',name:'FIFO list',answers:'What is in the queue, in order?',shows:'position, PR, title, stage; last merged at the bottom',why:'Most like the CLI table.',
+  s:()=>W('',`<span class="k">Queue · ${MQ.p}</span><div style="display:grid;gap:6px;margin-top:8px" class="sm">${MQ.q.map((q,i)=>`<div class="top"><span class="num">${i+1}. #${q.pr}</span><span class="${i?'mut':'acc'}">${q.s}</span></div>`).join('')}</div><div class="foot sm ok">#${MQ.last.pr} ✓ ${MQ.last.a}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Merge queue · ${MQ.p}</span>${stamp}</div><div style="display:grid;grid-template-columns:16px 40px 1fr 50px;gap:6px 8px;margin-top:8px" class="sm">${MQ.q.map((q,i)=>`<span class="mut">${i+1}</span><span class="num">#${q.pr}</span><span class="clip">${q.t}</span><span class="${i?'mut':'acc'}">${q.s}</span>`).join('')}<span class="ok">✓</span><span class="num">#${MQ.last.pr}</span><span class="clip mut">merged ${MQ.last.a} ago</span><span></span></div>`),
+  l:null},
+ {id:'M3',name:'Results strip',answers:'Is the queue healthy over time?',shows:'the last 12 results as ✓/✗ cells, success rate, and the PR in flight',why:'A run of red cells means a broken gate on main, not a bad PR.',
+  s:()=>W('',`<span class="k">Last 12 merges</span><div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:8px">${MQ.hist.map(v=>`<span style="height:18px;border-radius:4px;background:${v?'var(--w-ok)':'var(--w-bad)'}"></span>`).join('')}</div><div class="foot"><span class="num" style="font-size:20px">83%</span><span class="k">#${MQ.q[0].pr} in gates</span></div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Merge queue · ${MQ.p}</span>${stamp}</div><div style="display:grid;grid-template-columns:repeat(12,1fr);gap:4px;margin-top:10px">${MQ.hist.map(v=>`<span style="height:26px;border-radius:5px;background:${v?'var(--w-ok)':'var(--w-bad)'}"></span>`).join('')}</div><span class="k" style="margin-top:3px">last 12 · 10 merged, 2 sent back</span><div class="foot sm"><span>now: <b>#${MQ.q[0].pr}</b> ${MQ.q[0].s}</span><span class="mut">${MQ.q.length-1} waiting</span></div>`),
+  l:null},
+ {id:'M4',name:'All projects',answers:'Which projects have work waiting to land?',shows:'one row per project with the queue on: waiting count, stage of the head PR, paused or off',why:'Useful once the queue is on everywhere.',
+  s:()=>W('',`<span class="k">Merge queues</span><div style="display:grid;gap:6px;margin-top:8px" class="sm">${[['hscc','3','acc'],['flows','1',''],['pontaje','0','mut'],['gateclerk','paused','warn']].map(([p,v,c])=>`<div class="top"><span class="clip">${p}</span><span class="num ${c}">${v}</span></div>`).join('')}</div>`),
+  m:()=>W('m',`<div class="top"><span class="k">Merge queues · 4 on</span>${stamp}</div><div style="display:grid;grid-template-columns:1fr 50px 70px 60px;gap:6px 8px;margin-top:8px" class="sm"><span class="k">project</span><span class="k">waiting</span><span class="k">head</span><span class="k">last</span>${[['hscc',3,'#485 gates','✓ 2m'],['flows',1,'#212 rebase','✓ 1h'],['site-a',0,'–','✓ 1d'],['gateclerk','paused','–','✗ 3h']].map(([p,w,h,l])=>`<span class="clip">${p}</span><span class="num">${w}</span><span class="clip">${h}</span><span class="${l[0]==='✓'?'ok':'bad'}">${l}</span>`).join('')}</div>`),
+  l:null},
+ ]},
+];
+function stages(at,lab){const st=['rebase','gates','push','merge'];return `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:8px">${st.map((s,i)=>`<div style="display:grid;gap:3px"><span style="height:6px;border-radius:3px;background:${i<at?'var(--w-ok)':i===at?'var(--w-acc)':'var(--w-track)'}"></span><span class="k" style="${lab?'':'font-size:8px'}">${s}</span></div>`).join('')}</div>`}
+
+// ---------- lock screen + live activity ----------
+const LOCK={id:'lock',name:'Lock screen',
+ facts:{Families:'rectangular, circular, inline (monochrome, tinted by iOS)',Answers:'The one number worth a glance before unlocking',Routes:'same as the home-screen widget',Refresh:'shares the widget’s budget',Tap:'opens the matching screen'},
+ vars:[
+ {id:'L1',name:'Words',answers:'A short sentence per widget.',shows:'“Cluster all up · 231 tok/s”, “2 need you”, “#485 in gates”',why:'Readable in any tint; no charts to lose in monochrome.',
+  any:()=>`<div class="lk acc-r"><b style="font-size:15px">Cluster all up</b><span style="font-size:12px;opacity:.8">${TOK} tok/s · hottest ${HOT}°</span></div><div class="lk acc-r"><b style="font-size:15px">${NEED.length} need you</b><span style="font-size:11px;opacity:.8" class="cl2">${NEED[0].t}</span></div><div class="lk acc-c"><div><b style="font-size:20px">${NEED.length}</b><div style="font-size:9px;opacity:.8">need you</div></div></div><div class="lk acc-i">⚠︎ ${NEED.length} need you · ${TOK} tok/s</div>`},
+ {id:'L2',name:'Gauges',answers:'Temperature and load as rings.',shows:'circular gauge for the hottest node; rectangular with four node temps; circular count for Needs Me',why:'Uses the circular slot well; pairs with Cluster C2.',
+  any:()=>`<div class="lk acc-c" style="position:relative">${arcW(HOT,90)}<div style="position:absolute;inset:0;display:grid;place-items:center"><div><b style="font-size:17px">${HOT}°</b><div style="font-size:8px;opacity:.8">S3</div></div></div></div><div class="lk acc-r"><span style="font-size:10px;opacity:.75;font-weight:700">CLUSTER · ${TOK} TOK/S</span><div style="display:flex;justify-content:space-between;margin-top:5px;font-size:15px;font-weight:700">${NODES.map(x=>`<span>${x.t}°</span>`).join('')}</div></div><div class="lk acc-c" style="position:relative">${arcW(SUM('r'),SL)}<div style="position:absolute;inset:0;display:grid;place-items:center"><div><b style="font-size:17px">${SUM('r')}/${SL}</b><div style="font-size:8px;opacity:.8">slots</div></div></div></div>`},
+ {id:'L3',name:'Strips',answers:'Last hour as bars.',shows:'rectangular with three node strips at varying opacity; inline with the queue head',why:'Pairs with Cluster C3; least text.',
+  any:()=>`<div class="lk acc-r"><span style="font-size:10px;font-weight:700;opacity:.75">CLUSTER · 1 H</span><div style="display:grid;gap:3px;margin-top:5px">${NODES.slice(0,3).map(x=>`<div style="display:grid;grid-template-columns:repeat(24,1fr);gap:1px">${x.h.map(v=>`<span style="height:6px;background:#fff;opacity:${(.18+v/120).toFixed(2)}"></span>`).join('')}</div>`).join('')}</div></div><div class="lk acc-r"><span style="font-size:10px;font-weight:700;opacity:.75">MERGE QUEUE</span><div style="display:grid;grid-template-columns:repeat(12,1fr);gap:2px;margin-top:6px">${MQ.hist.map(v=>`<span style="height:16px;border-radius:2px;background:#fff;opacity:${v?.9:.25}"></span>`).join('')}</div></div><div class="lk acc-i">⇢ #485 gates · 2 waiting</div>`},
+ ]};
+function arcW(v,max){const s=66,r=28,c=Math.PI*r*1.5,f=c*Math.min(v/max,1);return `<svg width="${s}" height="${s}" viewBox="0 0 ${s} ${s}" style="transform:rotate(135deg);position:absolute;inset:0" aria-hidden="true"><circle cx="33" cy="33" r="${r}" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="4" stroke-dasharray="${c} 999" stroke-linecap="round"/><circle cx="33" cy="33" r="${r}" fill="none" stroke="#fff" stroke-width="4" stroke-dasharray="${f} 999" stroke-linecap="round"/></svg>`}
+const LA={id:'la',name:'Live Activity',
+ facts:{Replaces:'5 activities today (Wake, Monitor, Cluster Health, Running Cards, Board Progress)',Proposal:'2: Running work + Cluster',Answers:'What is happening right now, without opening anything',Updates:'pushed by the app while open; 15 min otherwise',Ends:'when the last card finishes, or after 8 h'},
+ vars:[
+ {id:'A1',name:'Work in progress',answers:'Running cards, live.',shows:'Lock screen: each running card with elapsed time and a 60 min budget bar. Island: “2 ▸ 32m”.',why:'Replaces Running Cards + Board Progress activities.',
+  any:()=>`<div class="island"><span>▸ ${RUN.length} running</span><span>32m</span></div><div class="la"><div style="display:flex;justify-content:space-between;font-size:11px;opacity:.7;font-weight:600"><span>HSCC · ${RUN.length} running</span><span>${ASOF}</span></div>${RUN.map(r=>`<div style="margin-top:8px"><div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;gap:8px"><span class="clip">${r.t}</span><span>${r.m}m</span></div><div style="height:4px;border-radius:2px;background:rgba(255,255,255,.18);margin-top:4px"><div style="height:4px;width:${r.m/60*100}%;border-radius:2px;background:#7cc4f2"></div></div></div>`).join('')}</div>`},
+ {id:'A2',name:'Cluster watch',answers:'Fleet health while you work on it (restarts, model swaps).',shows:'Lock screen: four node temps and tok/s, a red flag if a node drops. Island: “4/4 · 72°”.',why:'Replaces Monitor + Cluster Health + Wake activities.',
+  any:()=>`<div class="island"><span style="color:#5fd68f">● 4/4</span><span>${HOT}° · ${TOK} t/s</span></div><div class="la"><div style="display:flex;justify-content:space-between;font-size:11px;opacity:.7;font-weight:600"><span>CLUSTER · qwen3.8-flash-next</span><span>${ASOF}</span></div><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px">${NODES.map(x=>`<div><div style="font-size:20px;font-weight:700;color:${x.t>=70?'#f3b04a':'#fff'}">${x.t}°</div><div style="font-size:11px;opacity:.7">${x.s} · ${x.u}%</div></div>`).join('')}</div><div style="margin-top:8px;font-size:12px;opacity:.85">${TOK} tok/s · daemon OK · autodown off</div></div>`},
+ {id:'A3',name:'Merge watch',answers:'Follow one PR until it lands.',shows:'Started from a Merge Queue tap: stage track and position; ends when merged or sent back.',why:'Only useful once the queue is on; skip it otherwise.',
+  any:()=>`<div class="island"><span>⇢ #485</span><span>gates</span></div><div class="la"><div style="display:flex;justify-content:space-between;font-size:11px;opacity:.7;font-weight:600"><span>MERGE QUEUE · hscc</span><span>1st of 3</span></div><div style="font-size:15px;font-weight:700;margin-top:4px">#485 merge-queue default on</div><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:8px">${['rebase','gates','push','merge'].map((s,i)=>`<div><div style="height:5px;border-radius:3px;background:${i<1?'#5fd68f':i===1?'#7cc4f2':'rgba(255,255,255,.2)'}"></div><div style="font-size:10px;opacity:.75;margin-top:3px">${s}</div></div>`).join('')}</div></div>`},
+ ]};
+
+const SETS=[{id:'5',name:'Consolidate to 5',rec:true,d:'Cluster, Boards, Running, Needs Me, Merge Queue. Each adapts to its size; Live Activities go from 5 to 2.'},
+            {id:'9',name:'Keep all 9',d:'Restyle only. Cluster, Monitor and Cluster Graph stay separate, as do the three board widgets.'}];
+const LOOKS=[{id:'native',name:'Native',rec:true,d:'System colors and rounded type, like Apple’s own widgets. Color only for state.'},
+             {id:'inst',name:'Instrument',d:'Warm paper or graphite, monospaced numbers, small-caps labels, one amber accent.'},
+             {id:'glass',name:'Glass',d:'Translucent over the wallpaper, like iOS 26 Liquid Glass. Needs care on bright wallpapers.'}];
+
+// ---------- state ----------
+const st={set:null,look:'native',dark:true,note:'',pick:{}};
+try{const s=JSON.parse(localStorage.getItem('hscc-widget-picks-v2')||'{}');Object.assign(st,s);st.pick=s.pick||{}}catch(e){}
+const save=()=>{try{localStorage.setItem('hscc-widget-picks-v2',JSON.stringify(st))}catch(e){}};
+const ALL=[...TYPES,LOCK,LA];
+
+function opt(kind,o,on){return `<button class="opt" type="button" data-kind="${kind}" data-id="${o.id}" aria-pressed="${on}"><div class="row"><h3>${o.name}</h3>${o.rec?'<span class="rec">Recommended</span>':''}</div><p>${o.d}</p></button>`}
+function renderGlobal(){
+ document.getElementById('setpicks').innerHTML=SETS.map(o=>opt('set',o,st.set===o.id)).join('');
+ document.getElementById('lookpicks').innerHTML=LOOKS.map(o=>opt('look',o,st.look===o.id)).join('');
+ document.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{st[b.dataset.kind]=b.dataset.id;save();renderAll()});
+ document.getElementById('m-dark').setAttribute('aria-pressed',st.dark);document.getElementById('m-light').setAttribute('aria-pressed',!st.dark);
+}
+function stageCls(){return 'stage'+(st.look==='native'?'':' '+st.look)+(st.dark?' dark':'')}
+function renderTypes(){
+ const host=document.getElementById('types');
+ host.innerHTML=ALL.map(T=>`<section class="sec" id="t-${T.id}"><div class="sechead"><span class="eyebrow">Step 2 · pick one ${T.id==='lock'||T.id==='la'?'style':'layout'}</span><h2>${T.name}</h2></div>
+  <div class="strip">${Object.entries(T.facts).map(([k,v])=>`<div><span>${k}</span>${v}</div>`).join('')}</div>
+  <div class="vars">${T.vars.map(v=>{const on=st.pick[T.id]===v.id;return `<article class="var" data-on="${on}">
+   <div class="vh"><h3>${v.id} · ${v.name}</h3><span class="tag">${v.any?'':'small · medium'+(v.l?' · large':'')}</span></div>
+   <div class="home ${stageCls()}"><div class="ws">${v.any?v.any():`<div class="cell">${v.s()}<span class="cap">small</span></div><div class="cell">${v.m()}<span class="cap">medium</span></div>${v.l?`<div class="cell">${v.l()}<span class="cap">large</span></div>`:''}`}</div></div>
+   <dl class="spec"><dt>Answers</dt><dd>${v.answers}</dd><dt>Shows</dt><dd>${v.shows}</dd><dt>Why</dt><dd>${v.why}</dd></dl>
+   <div class="vf"><button class="pickbtn" type="button" data-t="${T.id}" data-v="${v.id}" aria-pressed="${on}">${on?'Picked':'Pick '+v.id}</button></div></article>`}).join('')}</div></section>`).join('');
+ host.querySelectorAll('.pickbtn').forEach(b=>b.onclick=()=>{const t=b.dataset.t;st.pick[t]=st.pick[t]===b.dataset.v?undefined:b.dataset.v;save();renderTypes();sum()});
+}
+function text(){const parts=[`set: ${st.set?SETS.find(s=>s.id===st.set).name:'-'}`,`look: ${LOOKS.find(l=>l.id===st.look).name}`];
+ ALL.forEach(T=>{const v=T.vars.find(x=>x.id===st.pick[T.id]);parts.push(`${T.name}: ${v?v.id+' '+v.name:'-'}`)});
+ if(st.note)parts.push('notes: '+st.note);return 'Widget picks — '+parts.join('; ')}
+function sum(){const n=ALL.filter(T=>st.pick[T.id]).length;
+ document.getElementById('sum').innerHTML=`<span>Set <b>${st.set?st.set+' widgets':'—'}</b></span><span>Look <b>${LOOKS.find(l=>l.id===st.look).name}</b></span><span>Layouts <b>${n}/${ALL.length}</b> ${ALL.map(T=>st.pick[T.id]||'').filter(Boolean).join(' ')}</span>`}
+function renderAll(){renderGlobal();renderTypes();sum()}
+document.getElementById('m-dark').onclick=()=>{st.dark=true;save();renderAll()};
+document.getElementById('m-light').onclick=()=>{st.dark=false;save();renderAll()};
+const note=document.getElementById('note');note.value=st.note||'';note.addEventListener('input',()=>{st.note=note.value;save()});
+document.getElementById('copy').onclick=e=>{const t=text(),btn=e.currentTarget;
+ navigator.clipboard.writeText(t).then(()=>{btn.textContent='Copied'},()=>{note.value=t;note.select();btn.textContent='Copy from the box'});
+ setTimeout(()=>btn.textContent='Copy picks',1800)};
+renderAll();
+</script>

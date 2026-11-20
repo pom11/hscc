@@ -9,13 +9,11 @@ extension WidgetSurfaceKind {
     var displayName: String {
         switch self {
         case .widgetCluster: return "Cluster Widget"
-        case .widgetMonitor: return "Monitor Widget"
         case .widgetBoardStatus: return "Board Status Widget"
         case .widgetCardsRunning: return "Running Cards Widget"
         case .widgetKanbanMonitor: return "Kanban Monitor Widget"
         case .widgetProjects: return "Projects Widget"
         case .widgetNeedsMe: return "Needs Me Widget"
-        case .widgetClusterGraph: return "Cluster Graph Widget"
         case .widgetMergeQueue: return "Merge Queue Widget"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
@@ -29,13 +27,11 @@ extension WidgetSurfaceKind {
     var displayIcon: String {
         switch self {
         case .widgetCluster: return "square.grid.2x2"
-        case .widgetMonitor: return "gauge"
         case .widgetBoardStatus: return "square.stack.3d.up"
         case .widgetCardsRunning: return "rectangle.stack.badge.play"
         case .widgetKanbanMonitor: return "list.bullet.rectangle"
         case .widgetProjects: return "folder.badge.gearshape"
         case .widgetNeedsMe: return "bell.badge"
-        case .widgetClusterGraph: return "chart.xyaxis.line"
         case .widgetMergeQueue: return "arrow.triangle.merge"
         case .liveActivityWake: return "bolt"
         case .liveActivityMonitor: return "waveform.path.ecg"

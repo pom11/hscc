@@ -470,6 +470,56 @@ expect(lockGroup, "the sample entry draws the same four numbers as its own rows"
        ClusterEntry.placeholder.lockScreen?.hostCount
         == ClusterEntry.placeholder.fleet?.tally.nodesTotal)
 
+// ---------------------------------------------------------------------------
+// C1 Health line (2026-11-20 redesign): the new model, from the same fixture.
+// ---------------------------------------------------------------------------
+let c1EntryWithFailure = ClusterEntry(date: .now, fleet: nil,
+                                      failure: .timeout(seconds: 8),
+                                      configured: true, paused: false,
+                                      dataAt: nil, refreshMinutes: 15)
+
+let c1Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false,
+                           dataAt: Date(timeIntervalSince1970: 1_788_468_629),
+                           refreshMinutes: 15)
+let c1 = c1Entry.c1
+expect("c1", "all four nodes up reads as one calm word",
+       c1.headline == "All up" && c1.tally == "4/4")
+expect("c1", "the hero throughput is the serving total",
+       c1.tokText == "12 tok/s" && c1.tokPerSec.map { abs($0 - 12.3) < 0.001 } == true)
+expect("c1", "the hottest node is the max GPU temperature",
+       c1.hottestC == 78 && c1.hottestText == "Hottest 78°")
+expect("c1", "nodes keep route order and carry power / tok/s",
+       c1.nodes.map { $0.label } == ["node-1", "node-2", "node-3", "node-4"]
+        && c1.nodes[2].powerW == 71.06 && c1.nodes[2].genTps == 3.1)
+expect("c1", "the footer counts each model once per serving node",
+       c1.modelLine == "model-a ×2 · model-b ×2")
+expect("c1", "no daemon read renders as unknown, never as OK",
+       c1.daemonText == "daemon —")
+var oneDownHosts = Array(response.nodes.prefix(3))
+oneDownHosts.append(MonitorNode(host: "192.0.2.14", error: "collect failed", sample: nil,
+                                used_slots: nil, free_slots: nil, workloads: nil))
+let threeUp = ClusterEntry(date: .now,
+                           fleet: FleetProjection(projecting: MonitorResponse(
+                               json: MonitorPayload(timestamp: nil, hosts: oneDownHosts),
+                               serving: response.serving, serving_error: nil,
+                               serving_proxy_error: nil, speak: "")),
+                           configured: true, paused: false)
+expect("c1", "a missing node reads as a partial tally, not all up",
+       threeUp.c1.headline == "3/4 up")
+let downEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: MonitorPayload(timestamp: nil, hosts: [
+                                     MonitorNode(host: "192.0.2.11", error: "collect failed",
+                                                 sample: nil, used_slots: nil, free_slots: nil,
+                                                 workloads: nil),
+                                 ]), serving: nil, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "no answering node reads as Down", downEntry.c1.headline == "Down")
+expect("c1", "a failed monitor read is offline and dimmed",
+       c1EntryWithFailure.c1.failed && c1EntryWithFailure.c1.stale.isOffline
+        && c1EntryWithFailure.c1.stale.isDimmed)
+
 print("")
 if failures.isEmpty {
     // Only the shell owns the gate's PASSED verdict: this binary sees the

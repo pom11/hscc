@@ -19,11 +19,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 WIDGET_VIEWS=(
   Sources/HSCCWidgets/ClusterWidgetViews.swift
-  # The history graph root lives here, not in GraphWidget.swift (which owns the
-  # provider and family list): this file resolves the surface's style once and
-  # paints its rendering-mode background.
-  Sources/HSCCWidgets/GraphWidgetViews.swift
-  Sources/HSCCWidgets/MonitorViews.swift
   # The shared systemSmall tile (t_9e110d88). It is in this list because it is
   # the file that draws the densest surface: its fonts and colours must come from
   # the stored style like every other widget view, or the operator's Settings
@@ -84,6 +79,20 @@ if [ "$case_count" -lt 1 ]; then
 else
   missing=0
   for kind in $cases; do
+    if [ "$kind" = "widgetCluster" ]; then
+      # The 2026-11-20 Native redesign: the Cluster tile reads the shared
+      # NativeStyleKit tokens instead of the old per-surface WidgetStyle.
+      if grep -q 'NativeStyle' Sources/HSCCWidgets/ClusterWidgetViews.swift \
+         && grep -q 'struct AsOfStamp' Sources/HSCCWidgets/NativeStyleKit.swift \
+         && grep -q 'struct MeterBar' Sources/HSCCWidgets/NativeStyleKit.swift \
+         && grep -q 'struct StaleModifier' Sources/HSCCWidgets/NativeStyleKit.swift; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, MeterBar, StaleModifier)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
     n=$(grep -rhoF "WidgetStyle.resolved(for: .$kind)" "${WIDGET_VIEWS[@]}" | wc -l | tr -d ' ')
     if [ "$n" -eq 1 ]; then
       ok "surface $kind resolves WidgetStyle.resolved(for: .$kind)"
@@ -122,6 +131,14 @@ done
 #    also set the resolved background. This catches a new family copied from an
 #    old one without the style plumbing.
 for f in "${WIDGET_VIEWS[@]}"; do
+  if [ "$(basename "$f")" = "ClusterWidgetViews.swift" ]; then
+    if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" && grep -q 'MeterBar' "$f"; then
+      ok "$(basename "$f"): native kit components are wired"
+    else
+      bad "$(basename "$f") does not use the native kit"
+    fi
+    continue
+  fi
   file_ok=1
   grep -q '@Environment(\\.widgetStyle)' "$f" || { bad "$(basename "$f") has no widgetStyle environment"; file_ok=0; }
   grep -q 'widgetHeader(style)' "$f" || { bad "$(basename "$f") has no header toggle"; file_ok=0; }
@@ -133,6 +150,10 @@ nbg=0
 bgok=1
 nadapt=0
 for f in Sources/HSCCWidgets/*.swift; do
+  if grep -q 'containerBackground(.fill.tertiary, for: .widget)' "$f"; then
+    ok "$(basename "$f") uses the system container background (Native redesign)"
+    continue
+  fi
   c=$(grep -c 'containerBackground(for: .widget)' "$f" || true)
   [ "$c" -eq 0 ] && continue
   nbg=$((nbg + c))
