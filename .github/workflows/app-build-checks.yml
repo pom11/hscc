@@ -83,6 +83,14 @@ jobs:
       - name: widget registry gate
         run: python3 ios-app/scripts/widget_registry.py --check
 
+      # plist_drift_check.sh refuses to run without the generator whose output it
+      # audits — it does not skip and announce itself, because an announced skip is
+      # how the Info.plists drifted from project.yml across four releases. Whether
+      # macos-latest happens to ship xcodegen is therefore not something this job
+      # gets to be unsure about, so the step installs it if it is missing.
+      - name: xcodegen for the plist-drift gate
+        run: command -v xcodegen || brew install xcodegen
+
       # Run the rest of the offline gates by glob. The four exclusions read live
       # state or a live capture and cannot run on a runner; build_check.sh is
       # covered by the guarded compile steps above. Everything else — including
