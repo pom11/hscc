@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.2] - 2026-11-20
+
+### Added
+- **Landing page: banner, search and AI indexing.** The page opens with the repo banner (`assets/hscc.png`, a 1200×600 JPEG copy), which is also the link-preview image. The head gains a fuller title and description, keywords, canonical URL, Open Graph and Twitter card tags, and JSON-LD structured data (WebSite, SoftwareApplication, SoftwareSourceCode). `publish_site.sh` now also publishes `llms.txt` (a short guide for AI assistants), `llms-full.txt` (the whole page copy as Markdown, built from `site/COPY.md`) and `sitemap.xml`. A new "Fresher widgets on the Mac" card describes the Desktop Widgets refresh setting.
+- **Orchestrator waker: `skip_boards`.** A list in the waker's config file (`orch_waker.json`) naming boards the waker never nudges — for a finished project whose `<board>-orch` profile still exists but has no REPL pane, which otherwise retried and backed off forever. Treated exactly like a paused board (pending kept, no attempt, no audit line) without pausing its cards or holding `kanban.auto_decompose` off fleet-wide the way `hscc kanban pause` does. Non-string entries are dropped; a non-list value means none.
+
+### Fixed
+- **The merge queue no longer goes dark while a gate runs.** `check_merge_queue` stamped `state/merge_queue.json` only once `tick()` returned, while a single gate leg may run the whole `DEFAULT_GATE_TIMEOUT_S` (1800 s). One real gate run left the 60 s stream 31 minutes past the 600 s staleness budget and `hscc verify` reported `daemon_streams: merge_queue.json stale` on a runner whose gate was a live child of the daemon pid — the "cries wolf on a healthy thing" shape (measured in the `t_68130d88` diagnosis). The queue now mirrors its claim and every stage transition onto the stream from INSIDE the run, and a short-lived daemon thread re-stamps every `LIVENESS_STAMP_S` (30 s) around each gate leg with an `in_flight` row naming the project, PR, stage, gate and elapsed seconds. The heartbeat stops in a `finally` the moment the leg ends, so it can never report a dead tick as alive; `hscc verify`'s budget is untouched and there is no in-flight exemption, so a dead process or a tick wedged outside a gate still goes stale within the same 600 s.
+
+### Verified
+- `hscc_daemon/tests/test_merge_queue.py` green with the six liveness cases this change adds, and the `bash scripts/run_tests.sh` gate. The new cases sample the stream file from INSIDE a blocked fake gate leg (so an advancing stamp is in-flight by construction), pin that each heartbeat names the running gate, that no heartbeat thread is alive once `tick()` returns, that the stream mirrors every stage the ledger records, that a tick doing no work still stamps, and that neither `check_merge_queue` nor a gate run fails when `write_state` raises.
+- `scripts/tests/test_site_landing.py`: 31 passed, including the new indexing-files test, the JSON-LD parse, and the private-address scan over the new files. A publish into a throwaway bare remote lands all eight root paths.
+- `hscc_daemon/tests/test_orch_waker_dead_pane.py`: knob loaded, coerced and threaded into `run_tick`; a skipped board gets no delivery attempt and no audit line. `hscc_daemon/tests`: 4019 passed, 1 skipped; waker CLI and doctor suites pass.
 ## [2.17.1] - 2026-11-20
 
 ### Added
