@@ -159,3 +159,74 @@ def test_connection_cap_refuses_excess_without_opening_more_sockets(
         for sock in socks:
             sock.close()
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# The kernel's accept queue (t_5d6ea1c4)
+# ---------------------------------------------------------------------------
+#
+# ``max_connections`` above is an *application* limit: it answers an excess
+# client with 503 + close. It can only do that for a connection the kernel was
+# willing to hold. ``socketserver.TCPServer`` calls ``listen(5)``, so the sixth
+# simultaneous connection is reset by XNU before ``process_request`` is ever
+# reached — the client gets ECONNRESET instead of the 503 the cap promises, and
+# a widget reload burst (menu bar + a few panels) is already six.
+
+
+def test_accept_queue_is_never_shallower_than_the_connection_cap():
+    """The 503 admission path must be reachable before the kernel gives up."""
+    assert (api_server._ApiServer.request_queue_size
+            >= api_server._ApiServer.max_connections), (
+        "the OS accept queue is shallower than max_connections, so excess "
+        "connections are reset by the kernel instead of being answered with 503")
+
+
+def test_unserved_burst_queues_instead_of_being_reset(tmp_path):
+    """Connections arriving before anything accepts must survive.
+
+    The accept loop is deliberately never started, so every one of these sockets
+    is still sitting in the kernel's queue when it is probed: a socket that
+    times out was queued (correct), a socket that was reset is the defect — and
+    at ``listen(5)`` the kernel resets them outright, some in ``connect()``
+    before they are ever written to. Measured before the fix: 19 of 24.
+    """
+    burst = 24                     # 4x socketserver's inherited listen(5)
+    srv = api_server.create_server(hscc_dir=str(tmp_path),
+                                   addr=("127.0.0.1", 0))
+    host, port = srv.server_address[:2]
+    socks, reset = [], []
+    try:
+        for _ in range(burst):
+            sock = None
+            try:
+                sock = socket.create_connection((host, port), timeout=5)
+                sock.sendall(b"GET /v1/ping HTTP/1.1\r\n"
+                             b"Host: 127.0.0.1\r\n\r\n")
+                socks.append(sock)
+                sock = None
+            except (ConnectionResetError, BrokenPipeError) as exc:
+                # The kernel reset it instead of queueing it: ECONNRESET in
+                # connect(), EPIPE if it died before the request was taken.
+                reset.append(exc)
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+        for sock in socks:
+            sock.settimeout(0.2)
+            try:
+                sock.recv(1)       # nothing accepts: timing out is the pass
+            except socket.timeout:
+                pass
+            except OSError as exc:     # ECONNRESET 54 is the defect reporting
+                reset.append(exc)
+        assert not reset, f"{len(reset)}/{burst} queued connections were reset"
+    finally:
+        for sock in socks:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        srv.server_close()
