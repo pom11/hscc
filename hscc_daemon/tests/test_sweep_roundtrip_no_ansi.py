@@ -84,15 +84,31 @@ def test_sweep_ok_human_no_ansi(monkeypatch):
     assert "All swept routes answered with parseable JSON." in text
 
 
+def _machine_payload(rows, failures, dynamic):
+    """The byte-exact --json contract for the sweep.
+
+    ``not_probed`` and ``budget`` are t_f439c923's addition: the sweep can now
+    stop at its own wall clock, so the machine view names the routes it never
+    reached instead of letting the parent kill it and lose the report. Here the
+    stubbed sweep called everything, so both sit at their complete-report values
+    — which is the point: a complete report says nothing was skipped.
+    """
+    return {"routes": rows, "failures": failures,
+            "not_swept_dynamic": dynamic,
+            "not_probed": [],
+            "budget": {"sweep_seconds": sweep_mod.SWEEP_BUDGET,
+                       "parent_seconds": sweep_mod.PARENT_BUDGET,
+                       "exhausted": False}}
+
+
 def test_sweep_json_byte_exact(monkeypatch):
     _stub_sweep(monkeypatch)
     text, code = _run(["api_route_sweep.py", "--json"], monkeypatch,
                       sweep_mod.main)
     assert code == 1
     assert NO_ANSI not in text
-    expected = json.dumps({"routes": _ROWS, "failures": _FAILURES,
-                           "not_swept_dynamic": _DYNAMIC}, indent=2)
-    assert text == expected + "\n"
+    assert text == json.dumps(_machine_payload(_ROWS, _FAILURES, _DYNAMIC),
+                              indent=2) + "\n"
 
 
 def test_sweep_json_ignores_theme_flag(monkeypatch):
@@ -101,9 +117,8 @@ def test_sweep_json_ignores_theme_flag(monkeypatch):
     text, code = _run(["api_route_sweep.py", "--json", "--theme", "light"],
                       monkeypatch, sweep_mod.main)
     assert code == 1
-    expected = json.dumps({"routes": _ROWS, "failures": _FAILURES,
-                           "not_swept_dynamic": _DYNAMIC}, indent=2)
-    assert text == expected + "\n"
+    assert text == json.dumps(_machine_payload(_ROWS, _FAILURES, _DYNAMIC),
+                              indent=2) + "\n"
 
 
 def test_sweep_human_accepts_theme(monkeypatch):
