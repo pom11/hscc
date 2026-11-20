@@ -1,0 +1,7 @@
+{
+ "success": false,
+ "degraded": true,
+ "error": "sparkrun status exited 1: ssh unreachable",
+ "speak": "Fleet monitor failed: sparkrun status exited 1: ssh unreachable",
+ "taken_at": "2026-11-20T12:00:00Z"
+}

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Make the relocated flightdeck available exactly like
@@ -611,21 +612,60 @@ def _last_activity(cards):
     return newest
 
 
-def _project_counts(cards):
-    """The board histogram, through ``/v1/mobile/summary``'s own projection.
+def _counts_now() -> float:
+    """The clock used for the rolling done window — a seam tests pin."""
+    return time.time()
 
-    Imported lazily from ``routes_mobile`` so the two surfaces cannot disagree
-    about what a status count means (including the ``other`` bucket and the
-    ``total`` that makes the sum checkable).
+
+def _project_counts(cards, now=None):
+    """The board histogram, through the mobile summary's own 24 h definition.
+
+    ``done``/``total`` used to be the all-time archived-inclusive numbers while
+    ``/v1/mobile/summary`` reported a rolling 24 h ``done`` and a total that
+    stops at that window — the same board therefore answered 923/1062 on one
+    route and 60/199 on the other (W10). The canonical board projection is
+    ``kanban_live.board_status_counts``, so this function builds its input and
+    calls it: ``done`` (and the explicit ``done_24h``) now mean the same rolling
+    24 h as the summary, and ``total`` uses the same open + archived + done-24h
+    definition.
+
+    The all-time numbers are kept, but under names that say so:
+    ``done_all_time`` and ``total_all_time``. They are not aliases of ``done``
+    or ``total`` because those two now match ``/v1/mobile/summary``.
     """
     from routes_mobile import count_cards
+
     entry = count_cards(cards)
-    counts = dict(entry.get("counts") or {})
+    raw = dict(entry.get("counts") or {})
+    raw.update(entry.get("other_statuses") or {})
+    done_all_time = int(raw.get("done") or 0)
+    total_all_time = int(entry.get("total") or 0)
+
+    from hscc_daemon import kanban_live
+
+    now_s = int(_counts_now() if now is None else now)
+    floor = now_s - 86400
+    done_24h = 0
+    for card in cards or []:
+        status = str((card or {}).get("status") or "")
+        if status not in kanban_live.DONE_24H_STATUSES:
+            continue
+        completed = _activity_ts((card or {}).get("completed_at"))
+        if completed is not None and completed >= floor:
+            done_24h += 1
+
+    mobile = kanban_live.board_status_counts(
+        {"counts": raw, "done_24h": done_24h})
+    counts = dict(mobile.get("counts") or {})
     # ``other`` is an integer on the wire (the Swift model declares it Int);
     # the per-status detail lives under ``other_statuses``. Fold the detail, not
     # the integer, or a board with ``scheduled``/``review`` cards raises here.
-    counts.update(entry.get("other_statuses") or {})
-    counts["total"] = int(entry.get("total") or 0)
+    counts.update(mobile.get("other_statuses") or {})
+    counts["done"] = done_24h
+    counts["done_24h"] = done_24h
+    counts["done_all_time"] = done_all_time
+    counts["total"] = int(mobile.get("total") or 0)
+    counts["total_all_time"] = total_all_time
     return counts
 
 

@@ -306,6 +306,22 @@ def test_widget_routes_doc_names_every_extension_route():
     )
 
 
+def test_cluster_history_default_is_the_durable_1h_window():
+    """Every chooser defaults to 1 h, not the ring-only 15 m window (W7).
+
+    The deployed API process does not host the recorder's 2 s ring, so a 15 m
+    default answers `recorder_ring_absent` with an empty chart. The route's
+    default is already 1 h; this pins the two app-side choosers to the same
+    durable window.
+    """
+    shared = (Path(_REPO_ROOT) / "ios-app/Sources/Shared/ClusterGraphReading.swift").read_text()
+    mac = (Path(_REPO_ROOT) / "macos-app/Sources/HSCCMac/DashboardMonitor.swift").read_text()
+    client = (Path(_REPO_ROOT) / "ios-app/Sources/Shared/WidgetDataClient.swift").read_text()
+    assert re.search(r"static let recommended: ClusterGraphWindow = \.oneHour\b", shared)
+    assert re.search(r"static let window: ClusterGraphWindow = \.oneHour\b", mac)
+    assert 'func clusterHistory(window: String? = "1h"' in client
+
+
 def test_every_mutating_post_carries_confirm():
     """Last night's root cause: a mutating POST that reached the phone without
     `confirm` and 409'd. Every mutating call the Swift client makes must send

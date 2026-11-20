@@ -63,6 +63,25 @@ enum MonitorSurfaceLimits {
     static let islandServingTotals = 1
 }
 
+// MARK: - The activity's headline state
+
+/// The Monitor Live Activity's state word, decided once from one refresh.
+///
+/// A daemon host answering is NOT the cluster serving: `/v1/daemon/host` is the
+/// machine the API runs on, so it can answer while `sparkrun cluster monitor`
+/// fails. Only a non-degraded monitor frame with at least one host row is
+/// `serving`; a reachable API with no usable cluster sample is `degraded`, and
+/// nothing at all is `unreachable`.
+enum MonitorActivityState {
+    static func make(monitor: MonitorResponse?,
+                     daemonHostReachable: Bool) -> String {
+        let hasNodes = !(monitor?.nodes.isEmpty ?? true)
+        if hasNodes && monitor?.isDegraded != true { return "serving" }
+        if monitor != nil || daemonHostReachable { return "degraded" }
+        return "unreachable"
+    }
+}
+
 // MARK: - The pushed payload
 
 /// One host of `hscc cluster monitor`'s host table, as the app pushed it.

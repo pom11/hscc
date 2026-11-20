@@ -111,13 +111,28 @@ numbers/rows.
 The CLI is the ground truth. If the CLI and one of these routes disagree, the
 route is wrong.
 
-Failure shape on the cluster routes: HTTP 200 with
-`{"error": "<specific cause>", "speak": "<command> failed: <cause>"}` plus the
-route's normal empty collections. `error` is the backing command's stderr/exit
-status or the engine-load reason — never the word "unavailable", never the auth
-token. This is deliberate: a generic "unavailable" hid the 2026-11-18 outage
-(the API process had been launched from a Homebrew Cellar directory that an
-upgrade deleted).
+Failure shape: a degraded `/v1/cluster/monitor` is **HTTP 503** with
+`{"success": false, "degraded": true, "error": "<specific cause>", "speak":
+"Fleet monitor failed: <cause>", "taken_at": "<UTC>"}` and no `json` key. A 200
+with no `json` used to be indistinguishable from a healthy empty fleet, and the
+app counted a reachable daemon host as "serving" (W5); the non-2xx status plus
+`success:false` makes every client take its offline/degraded path. The other
+cluster routes keep their 200-with-`error` shape (for example `/v1/cluster/status`
+still answers `{"error", "speak", "workloads": [], "total_hosts": 0}`), because
+their clients already treat the `error` key as a failed read. `error` is the
+backing command's stderr/exit status or the engine-load reason — never the word
+"unavailable", never the auth token. This is deliberate: a generic "unavailable"
+hid the 2026-11-18 outage (the API process had been launched from a Homebrew
+Cellar directory that an upgrade deleted).
+
+**Snapshots are cached for 20 s, single-flight.** `/v1/cluster/status` and
+`/v1/cluster/monitor` run live sparkrun/SSH work, so the route keeps one
+snapshot per key for `CLUSTER_SNAPSHOT_TTL_S` (20 s). Concurrent misses share
+one in-progress read instead of each spawning a subprocess. Every envelope
+carries `taken_at` — the snapshot's cache-fill time as UTC `...Z`, not the
+request time — so a client can show the age of the sample it is drawing. A
+cached answer is otherwise byte-for-byte the same payload a fresh read would
+return.
 
 ---
 
@@ -135,6 +150,7 @@ called by `hscc_daemon/hscc.py::_handle_cluster` (same function the CLI uses).
 | `workloads[].nodes` | array[string] | host IPs in that job's block; a tp=2 job lists both |
 | `idle_hosts` | array[string] | host lines in sparkrun's Idle section |
 | `total_hosts` | integer | `Total: N host(s)` from sparkrun, else workloads + idle |
+| `taken_at` | string | cache-fill time, UTC `...Z`; identical for every request inside the 20 s snapshot TTL |
 | `speak` | string | `"{total} hosts up. {n} workload(s) running, {i} idle."` |
 
 `raw_output` is intentionally not sent (the CLI uses it only for human
@@ -151,7 +167,10 @@ CLI's one-shot view.
 
 | field | type | meaning |
 |---|---|---|
-| `success` | bool | the sparkrun monitor frame was received and parsed |
+| `success` | bool | `true` only when the sparkrun monitor frame was received and parsed; `false` on the 503 degraded body |
+| `degraded` | bool | `true` on the 503 degraded body, `false` on a real snapshot — explicit so a client never infers it from `json` being absent |
+| `error` | string | present only on the 503 degraded body: the backing command's exit/stderr detail |
+| `taken_at` | string | cache-fill time, UTC `...Z`; identical for every request inside the 20 s snapshot TTL |
 | `output` | string | raw first JSON line (CLI fallback text; clients may ignore) |
 | `json` | object | the parsed sparkrun frame |
 | `json.timestamp` | number | sample epoch |
@@ -201,6 +220,15 @@ must never have to guess whether a point is 2 seconds or 5 minutes wide:
 | `15m` | 0 | 2 s | the sampler's memory only | none (raw samples) |
 | `1h`, `6h`, `24h` | 1 | 1 min | `~/.hscc/metrics/history.db` | `cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max` |
 | `7d` | 2 | 5 min | the same file | the same three |
+
+**The default window is 1 h everywhere a chooser exists.** With neither axis,
+the route serves `window=1h`; `hscc cluster history` uses `DEFAULT_WINDOW =
+"1h"`; `WidgetDataClient.clusterHistory` defaults to `"1h"`; and the macOS
+menu-bar graphs' `DashboardGraphPlan.window` (and the shared
+`ClusterGraphWindow.recommended`) are `.oneHour`. `15m` is still requestable
+where the recorder ring is resident, but it is not a default: in the deployed
+topology the API process does not host the ring, so a 15 m default is the empty
+`recorder_ring_absent` chart W7 measured.
 
 **Two request axes, exactly one per request.** A preset is anchored to `now`, and
 that is the only span it can name — it cannot ask about last night. `tier` +
@@ -428,9 +456,17 @@ mirroring `hscc kanban monitor --board`.
 | Field | Meaning | Owner |
 |---|---|---|
 | `health` | `ok` / `partial` / `absent` | `project_lifecycle.project_health` — identical to `hscc project list` |
-| `counts` | status histogram + `total`, including `done` / `archived` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards`; `/v1/mobile/summary` uses `kanban_live.board_status_counts` |
+| `counts` | status histogram whose `done` (and explicit `done_24h`) is the rolling 24 h count, same as `/v1/mobile/summary`; `total` is that route's open + archived + done-24h total. The all-time facts are `done_all_time` and `total_all_time` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards` into `kanban_live.board_status_counts` — the same projection `/v1/mobile/summary` uses |
 | `last_activity` | newest parseable card timestamp on the board (epoch seconds), `null` when none | the same card read |
 | `orchestrator` | live turn row (`profile`, `session`, `state`, `turn_s`, tokens) or `null` when idle | `kanban_live.attach_orchestrators` — identical to `hscc kanban monitor` |
+
+**One board, one `done` (W10).** `counts.done` on `/v1/projects` is now the
+`done_24h` column `hscc kanban monitor` prints, not the all-time archive count.
+For the same minute and board, `/v1/projects` and `/v1/mobile/summary` therefore
+agree on `done` and `total`. The historical numbers did not disappear: they are
+`counts.done_all_time` (every `status=done` card, archived-inclusive) and
+`counts.total_all_time` (every card the archived-inclusive read returned), named
+so a client cannot mistake either for the rolling window.
 
 `repo` stays on the wire for the console. The widget does not decode it and the
 App Group projection never stores it (contract §7).

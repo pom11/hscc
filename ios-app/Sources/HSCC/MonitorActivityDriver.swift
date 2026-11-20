@@ -345,14 +345,14 @@ final class MonitorActivityDriver {
         let monitor = monitorResult
         let daemonHost = daemonResult
 
-        // Honest headline state from what the poll actually learned:
-        // the API answered + the cluster monitor returned host rows -> serving;
-        // otherwise (nothing decodable, or the route degraded to {speak}) ->
-        // unreachable. `MonitorResponse` carries no `success` field (it only has
-        // json/speak), so presence of hosts is the signal.
-        let hasNodes = !(monitor?.nodes.isEmpty ?? true)
-        let hasHost = daemonHost != nil
-        let state: String = (hasNodes || hasHost) ? "serving" : "unreachable"
+        // Honest headline state from what the poll actually learned: only a
+        // non-degraded monitor frame with host rows is `serving`. The daemon
+        // host answering proves the API is reachable — it is the machine the
+        // API runs on, not a cluster sample — so on its own it is `degraded`,
+        // never `serving` (W5). Shared with the headless gate so this rule is
+        // executed, not just asserted in prose.
+        let state = MonitorActivityState.make(
+            monitor: monitor, daemonHostReachable: daemonHost != nil)
 
         let content = MonitorContent.make(monitor: monitor,
                                           daemonHost: daemonHost,
