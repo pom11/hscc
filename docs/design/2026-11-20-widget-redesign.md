@@ -40,7 +40,7 @@ their drivers and their settings rows.
 
 ## Native look (shared kit, one file, used by every widget)
 
-- Background: `containerBackground(.fill.tertiary/.background)` system default; no custom paint.
+- Background: `containerBackground(NativeStyle.surface, for: .widget)`, a solid card: white in light mode, #1C1C1E in dark, as in the mock. (1.4.0 shipped the translucent `.fill.tertiary`; the operator review on 2026-11-20 rejected it.)
 - Ink: `.primary`, secondary text `.secondary`. Accent `.blue` (tint-aware).
 - State colors only: ok `.green`, warn `.orange`, bad `.red`. Temperature: <70 ok, 70–74 warn, ≥75 bad.
 - Type: label 11 pt semibold `.secondary`; hero 34 pt bold `.rounded`; sub 13 pt semibold; small 11 pt. Numbers `.monospacedDigit()`.

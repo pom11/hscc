@@ -126,7 +126,8 @@ expect("rectangular", "first node row is present, compact",
 let l2Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false)
 let l2 = l2Entry.c1
 expect("l2", "the hottest C1 node is node-3 at its GPU reading (78 °C)",
-       l2.hottestNode?.label == "node-3" && l2.hottestNode?.tempC == 78)
+       l2.hottestNode?.label == "S3" && l2.hottestNode?.hostname == "node-3"
+        && l2.hottestNode?.tempC == 78)
 expect("l2", "the circular gauge fills inside the 0...90 °C contract",
        l2.hottestGaugeValue == 78)
 expect("l2", "the rectangular header is CLUSTER · N TOK/S",
@@ -507,8 +508,31 @@ expect("c1", "the hero throughput is the serving total",
 expect("c1", "the hottest node is the max GPU temperature",
        c1.hottestC == 78 && c1.hottestText == "Hottest 78°")
 expect("c1", "nodes keep route order and carry power / tok/s",
-       c1.nodes.map { $0.label } == ["node-1", "node-2", "node-3", "node-4"]
+       c1.nodes.map { $0.label } == ["S1", "S2", "S3", "S4"]
+        && c1.nodes.map { $0.hostname } == ["node-1", "node-2", "node-3", "node-4"]
         && c1.nodes[2].powerW == 71.06 && c1.nodes[2].genTps == 3.1)
+// Idle fleet: live backends, nothing running, no rate in the serving rows. The
+// approved C1 reads "0 tok/s", never "— tok/s" (2026-11-20 operator review).
+let idleRows = (response.serving ?? []).map { row in
+    ServingRow(node: row.node, port: row.port, model: row.model, routes: row.routes,
+               running: 0, waiting: 0, kv: row.kv, gen_tps: nil, prompt_tps: nil,
+               prompt_total: row.prompt_total, gen_total: row.gen_total, error: row.error)
+}
+let idleEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: response.json, serving: idleRows, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "an idle fleet with live backends reads 0 tok/s, not a dash",
+       idleEntry.c1.tokPerSec == 0 && idleEntry.c1.tokText == "0 tok/s"
+        && idleEntry.c1.rectangularHeadline == "CLUSTER · 0 TOK/S")
+let unservedEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: response.json, serving: nil, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "no serving answer at all stays unknown",
+       unservedEntry.c1.tokPerSec == nil && unservedEntry.c1.tokText == "— tok/s")
 expect("c1", "the footer counts each model once per serving node",
        c1.modelLine == "model-a ×2 · model-b ×2")
 expect("c1", "no daemon read renders as unknown, never as OK",

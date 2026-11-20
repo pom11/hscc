@@ -216,7 +216,7 @@ struct NeedsMeWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: NeedsMeTimelineProvider()) { entry in
             NeedsMeWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
         .configurationDisplayName("Needs Me")
         .description("Alerts from the main orchestrator that still need you, and a calm all-clear when none do. Read-only.")
