@@ -13,7 +13,6 @@ traceback leak). The pure ``_speak_*`` helpers are also tested directly.
 
 import json
 import threading
-import time
 
 import pytest
 
@@ -308,12 +307,37 @@ def test_cluster_monitor_snapshot_caches_the_sparkrun_and_serving_reads(
 
 
 def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
-    """A burst of widget reloads shares ONE in-progress sparkrun read."""
+    """A burst of widget reloads shares ONE in-progress sparkrun read.
+
+    Every wait is bounded and event-driven; there is no wall-clock sleep left
+    to outrun (t_5d6ea1c4). Three rendezvous carry the timing:
+
+    ``gate``    -- ``Barrier(6 clients + this thread)``, so the six requests and
+                   the moment the build is allowed to end start from one instant.
+    ``arrived`` -- ``Barrier(6)`` inside a wrapper around ``_cluster_snapshot``:
+                   proof that all six requests are *inside the cache call at the
+                   same time*, which is the condition single-flight exists to
+                   satisfy. The old test took that on trust for 0.25 s and hoped;
+                   a barrier states it, and fails loudly when it does not hold.
+    ``release`` -- the only thing that ends the build, so the build cannot have
+                   finished before the burst arrived on it.
+
+    ``assert not errors`` stays strict on purpose: a connection error IS a
+    failure here. It just can no longer be the listener's fault. Six
+    simultaneous connects used to overflow ``socketserver``'s ``listen(5)``
+    accept queue, and XNU reset the overflow socket before a byte of HTTP was
+    spoken -- 33 of 37 captured resets landed in ``connect()``, which rules out
+    keep-alive, handler lifecycle and this cache alike. See
+    ``_ApiServer.request_queue_size``.
+    """
     calls = []
+    entered = threading.Event()
+    release = threading.Event()
 
     def slow_monitor():
         calls.append(1)
-        time.sleep(0.25)
+        entered.set()
+        release.wait(timeout=10)      # bounded; the test owns the release
         return {"success": True, "output": "{}",
                 "json": {"timestamp": 1795000000.0,
                          "hosts": [{"host": "192.0.2.10", "error": None,
@@ -323,25 +347,45 @@ def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
     monkeypatch.setattr(routes_cluster, "_backing_serving_snapshot",
                         lambda: {"rows": [], "proxy_error": None})
 
-    barrier = threading.Barrier(6)
+    clients = 6
+    arrived = threading.Barrier(clients)
+    real_snapshot = routes_cluster._cluster_snapshot
+
+    def spy_snapshot(key, build):
+        # Runs on the handler thread, before the cache is consulted: a trip
+        # here means six requests reached the cache concurrently.
+        arrived.wait(timeout=10)
+        return real_snapshot(key, build)
+
+    monkeypatch.setattr(routes_cluster, "_cluster_snapshot", spy_snapshot)
+
+    gate = threading.Barrier(clients + 1)      # the six clients + this thread
     results = []
     errors = []
 
     def one():
         try:
-            barrier.wait(timeout=5)
+            gate.wait(timeout=10)
             results.append(_request(running, token, "/v1/cluster/monitor"))
         except Exception as exc:      # pragma: no cover - reported below
             errors.append(exc)
 
-    threads = [threading.Thread(target=one) for _ in range(6)]
+    threads = [threading.Thread(target=one) for _ in range(clients)]
     for thread in threads:
         thread.start()
+    try:
+        gate.wait(timeout=10)
+        assert entered.wait(timeout=10), "the burst never reached the build"
+    finally:
+        release.set()                 # the build is never left blocked
+
     for thread in threads:
-        thread.join(timeout=5)
+        thread.join(timeout=10)
+    alive = [t for t in threads if t.is_alive()]
 
     assert not errors
-    assert len(results) == 6
+    assert not alive, f"clients never finished: {alive}"
+    assert len(results) == clients
     assert all(status == 200 for status, _payload in results)
     assert len(calls) == 1, "the burst did not share one build"
 
