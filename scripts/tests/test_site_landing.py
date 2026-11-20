@@ -30,6 +30,7 @@ public audience:
 from __future__ import annotations
 
 import html as html_mod
+import json
 import os
 import re
 import shutil
@@ -948,13 +949,21 @@ def test_generator_refuses_to_invent_copy_for_an_unknown_command(tmp_path):
 def test_page_has_no_remote_or_framework_references():
     text = INDEX_HTML.read_text(encoding="utf-8")
     css = SITE_CSS.read_text(encoding="utf-8")
-    assert "<script" not in text, "the landing page must not need javascript"
+    # The one script allowed is JSON-LD structured data for search: data, not
+    # code, so the page still needs no javascript.
+    scripts = re.findall(r"<script[^>]*>", text)
+    assert scripts == ['<script type="application/ld+json">'], scripts
+    ld = re.search(r'<script type="application/ld\+json">(.*?)</script>', text, re.S)
+    json.loads(ld.group(1))
     assert "@import" not in css
     assert "<link" in text and "stylesheet" in text
+    allowed = ("site.css", "hscc-icon.png", 'rel="canonical"', "llms.txt",
+               "sitemap.xml")
     for tag in re.findall(r"<link[^>]*>", text):
-        assert "site.css" in tag or "hscc-icon.png" in tag, tag
+        assert any(a in tag for a in allowed), tag
     for url in re.findall(r"https?://[^\s\"'()<>]+", text + css):
-        assert re.match(r"https?://(github\.com|pom11\.github\.io)/", url), (
+        # schema.org is the JSON-LD vocabulary id, never fetched.
+        assert re.match(r"https?://(github\.com/|pom11\.github\.io/|schema\.org$|opensource\.org/licenses/)", url), (
             f"unexpected external reference: {url}")
     assert "fonts." not in text + css and "@font-face" not in css
 
@@ -964,7 +973,9 @@ def test_page_and_css_carry_no_private_address():
     import address_guard as ag
 
     offenders = ag.scan_paths(SITE, ["index.html", "site.css", "COPY.md",
-                                     "assets/hscc-icon.png"])
+                                     "llms.txt", "llms-full.txt", "sitemap.xml",
+                                     "assets/hscc-icon.png",
+                                     "assets/hscc-banner.jpg"])
     assert not offenders, f"private address in the site files: {offenders}"
 
 
@@ -1007,3 +1018,19 @@ def test_commands_markers_survive_in_both_files():
         body = path.read_text(encoding="utf-8")
         assert BEGIN in body and END in body, f"{path.name} lost its COMMANDS markers"
         assert body.index(BEGIN) < body.index(END)
+
+
+def test_search_and_ai_indexing_files_ship_with_the_page():
+    """llms.txt / llms-full.txt / sitemap.xml are published at the site root."""
+    import xml.etree.ElementTree as ET
+
+    llms = (SITE / "llms.txt").read_text(encoding="utf-8")
+    assert llms.startswith("# hscc") and "\n> " in llms
+    full = (SITE / "llms-full.txt").read_text(encoding="utf-8")
+    assert "## 1. What it is" in full and "REVIEW" not in full
+    root = ET.parse(SITE / "sitemap.xml").getroot()
+    locs = [e.text for e in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
+    assert "https://pom11.github.io/hscc/" in locs
+    script = (REPO / "scripts" / "publish_site.sh").read_text(encoding="utf-8")
+    for f in ("llms.txt", "llms-full.txt", "sitemap.xml"):
+        assert f in script, f"publish_site.sh does not publish {f}"
