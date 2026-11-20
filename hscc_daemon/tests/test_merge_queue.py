@@ -597,6 +597,26 @@ def test_a_real_red_gate_still_drops_the_entry(tmp_path, monkeypatch):
     assert gh.merged == []
 
 
+def test_a_timed_out_gate_stamps_the_timeout_stage_on_the_health_stream(
+        tmp_path, monkeypatch):
+    """``hscc verify`` reads the stream, so the stream must not keep saying
+    ``gating`` (or worse, ``merging``) for a PR the queue has handed back.
+
+    The stage is stamped while the claim is still held, so the health stream and
+    the ledger agree at that moment; the requeue that follows is what makes the
+    row render ``waiting``.  Without the stamp a timed-out PR looks like a PR
+    still being merged until the daemon's next check writes the tick verdict.
+    """
+    _result, _pair, _gh, _handed, _registry = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=35, card="t_slow4")
+
+    stamp = _require_stream(tmp_path)
+    flight = stamp.get("in_flight") or {}
+    assert flight.get("stage") == "timeout", stamp
+    assert flight.get("pr") == 35, stamp
+    assert flight.get("stage") in mq.MERGE_QUEUE_STATES
+
+
 def test_outcome_state_maps_a_gate_timeout_to_waiting():
     """The read model may never call a timeout a failure to go fix."""
     assert mq.outcome_state("gate-timeout") == "waiting"

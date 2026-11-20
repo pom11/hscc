@@ -32,7 +32,7 @@ task: t_94ca7ff4
 kind: Verified
 task: t_94ca7ff4
 
-* `hscc_daemon/tests/test_merge_queue.py` — 6 new cases, all injected runners
+* `hscc_daemon/tests/test_merge_queue.py` — 7 new cases, all injected runners
   only (no real repo, no network): a fake `subprocess.run` raising
   `subprocess.TimeoutExpired` yields `result == "gate-timeout"` with the entry
   still in `waiting`, `in_flight` cleared and no `red-gate` recorded anywhere;
@@ -41,9 +41,20 @@ task: t_94ca7ff4
   gate still yields `red-gate` and still drops the entry from both lists;
   `outcome_state("gate-timeout") == "waiting"` while `red-gate` still maps to
   `resolve`; `view()` renders the requeued PR as a `waiting` row whose
-  `last_result` is `gate-timeout`; and the tri-state unit case pins all three
-  verdicts plus the `timeout after {N}s` tail.
+  `last_result` is `gate-timeout`; the health stream `hscc verify` reads is
+  stamped `stage="timeout"` rather than left saying `merging`; and the
+  tri-state unit case pins all three verdicts plus the `timeout after {N}s`
+  tail.
+* Proven to bite by an in-place mutation sweep (8 mutants, all anchors
+  occurrence-count-1, provenance gate asserting the mutated file is the one
+  imported, whole-file runs so a sibling catch is not misattributed): forget
+  the requeue, record `last` before the requeue, flatten `timeout` back into
+  `fail`, map `gate-timeout` to `resolve`, drop `timeout` from
+  `MERGE_QUEUE_STATES`, never stamp the stage, remove "NOT a test failure"
+  from the handback, and stop dropping on `fail` — 8/8 caught.
 * Ordering trap covered by an assertion, not a comment: `_requeue_waiting`
   only re-appends while the PR still holds the claim and `_finish` clears
   `in_flight`, so `_requeue_waiting` must run first — the reverse order
   reproduces the original drop.
+* Measured: `hscc_daemon/tests/test_merge_queue.py` 80 passed (73 pre-existing
+  at `a4c567a4` + 7 new) under `~/.hermes/hermes-agent/venv/bin/python`.
