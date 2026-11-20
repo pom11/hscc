@@ -129,4 +129,31 @@ func checkMergeQueueWidget(_ c: DecodeCheck) {
                                   "conflict shared.txt"],
                  "cells=\(newlineCells)")
     }
+
+    // ---- A failed route is offline, never a fresh empty queue ----
+    //
+    // `GET /v1/merge-queue` answers `{ok: false, rows: []}` when the daemon
+    // cannot produce the queue. Before this field was read, that decoded as a
+    // successful empty queue and the widget said "merge queue empty · as of
+    // now" while the backend was down.
+    c.check(MergeQueueLite.self, "v1_merge_queue_not_ok.json",
+            "MergeQueueLite (GET /v1/merge-queue, ok:false)")
+    c.assertions("v1_merge_queue_not_ok.json",
+                 "ok:false surfaces as unavailable, not an empty queue") {
+        let payload = try JSONDecoder().decode(MergeQueueLite.self,
+                                               from: try c.load("v1_merge_queue_not_ok.json"))
+        let feed = MergeQueueFeed.from(payload)
+        c.expect("v1_merge_queue_not_ok.json",
+                 "ok:false is unavailable and its copy says offline",
+                 feed.ok == false && feed.isUnavailable
+                    && !feed.isOff
+                    && feed.inlineLine == "merge queue offline"
+                    && feed.currentLine == "merge queue offline",
+                 "ok=\(String(describing: feed.ok)) unavailable=\(feed.isUnavailable) inline=\(feed.inlineLine) current=\(feed.currentLine)")
+        c.expect("v1_merge_queue_not_ok.json",
+                 "a missing ok (old snapshot) still decodes as healthy",
+                 MergeQueueFeed(rows: [], count: 0, queued: 0,
+                                generatedAt: nil).isUnavailable == false,
+                 "missing ok must not be treated as a failure")
+    }
 }

@@ -374,21 +374,22 @@ the CLI's per-project table title, printed whenever the route's project changes.
 | `PR` | `rows[].pr` | `#N`, or `-` when the route carried none |
 | `Card` | `rows[].card` | the card id, or `-` |
 | `Branch` | `rows[].branch` | the head branch recorded when the daemon claimed the PR, or `-` |
-| `State` | `rows[].state` | the raw state; colour only: `merged` ok, `resolve`/`failed` bad, `rebasing`/`gating`/`merging` warn, `queued` secondary |
+| `State` | `rows[].state` | the raw state; colour only: `merged` ok, `resolve`/`failed` bad, `rebasing`/`gating`/`merging` warn, `queued`/`waiting` secondary |
 | `Age` | `rows[].age_s` | `fmt_age`: `45s` / `1m` / `1h02m` / `1d2h`, or `-` when the route sent no age |
 | `Last result` | `rows[].last_result` | the recorded result (`merged`, `conflict`, `red-gate`, `error`, `retry`), newlines flattened to spaces, or `-` |
 
 Row order is `rows[]` verbatim: registry project order, FIFO queued rows inside
-a project, the in-flight claim after them, then the project's last terminal
-outcome. The counts are the route's `queued` / `count`, never re-derived from a
-filtered page. `detail`, `assignee`, `attempts`, `enqueued_at` and `is_last` are
-carried by the route but are not CLI columns: `merge_queue_table` prints
-`last_result` in the Last result column even when a detail string exists, and
-the widget mirrors that rule instead of inventing a fallback. Empty is
-`"Nothing queued"` with the update age; a stale read keeps its real rows and
-names the reason and age; a failed read names the reason. The macOS menu bar
-dropdown draws the same rows in a "Merge queue" section, hidden when the queue
-is empty (a failed read still says why).
+a project, wait-listed rows (a non-green head that yielded the head slot), the
+in-flight claim after them, then the project's last terminal outcome. The counts
+are the route's `queued` / `count`, never re-derived from a filtered page.
+`detail`, `assignee`, `attempts`, `enqueued_at` and `is_last` are carried by the
+route but are not CLI columns: `merge_queue_table` prints `last_result` in the
+Last result column even when a detail string exists, and the widget mirrors that
+rule instead of inventing a fallback. Empty is `"Nothing queued"` with the update
+age; a stale read keeps its real rows and names the reason and age; a failed read
+names the reason, and an `ok:false` envelope is a failed read even when its rows
+array is empty. The macOS menu bar dropdown draws the same rows in a "Merge
+queue" section, hidden when the queue is empty (a failed read still says why).
 
 ## 5f. Lock Screen families (L2 Gauges, 2026-11-20)
 

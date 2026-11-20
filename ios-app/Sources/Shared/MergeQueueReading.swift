@@ -146,17 +146,22 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
     let count: Int
     let queued: Int
     let generatedAt: String?
+    /// The route's `ok`. Optional so a snapshot written before this field
+    /// decodes; `false` means the daemon could not produce the queue and the
+    /// empty rows are an error, not a genuine empty queue.
+    let ok: Bool?
     /// The project named in an off state. Non-nil ONLY when every project the
     /// route knows has `enabled: false`; a mixed fleet still draws its live
     /// queues. Optional so a snapshot written before this field decodes.
     let offProject: String?
 
     init(rows: [MergeQueueRow], count: Int, queued: Int,
-         generatedAt: String?, offProject: String? = nil) {
+         generatedAt: String?, ok: Bool = true, offProject: String? = nil) {
         self.rows = rows
         self.count = count
         self.queued = queued
         self.generatedAt = generatedAt
+        self.ok = ok
         self.offProject = offProject
     }
 
@@ -164,6 +169,10 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
                                       generatedAt: nil)
 
     var isEmpty: Bool { rows.isEmpty }
+
+    /// True when the route answered with `ok: false`. The widget must draw
+    /// this as offline/failed, never as a fresh empty queue.
+    var isUnavailable: Bool { ok == false }
 
     /// True when the route told us every project's queue is disabled.
     var isOff: Bool { offProject != nil }
@@ -228,12 +237,14 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
             ? disabled.first : nil
         return MergeQueueFeed(rows: rows, count: count, queued: queued,
                               generatedAt: payload.generatedAt,
+                              ok: payload.ok ?? true,
                               offProject: offProject)
     }
 
     /// One-line Lock Screen copy. Empty is its own honest state, never a
     /// fabricated zero.
     var inlineLine: String {
+        if isUnavailable { return "merge queue offline" }
         if rows.isEmpty { return "merge queue empty" }
         if let current {
             return "\(queued) queued · \(current.state) \(current.prLabel)"
@@ -249,6 +260,7 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
 
     /// What the small tile prints under the queued count.
     var currentLine: String {
+        if isUnavailable { return "merge queue offline" }
         if let current {
             return "\(current.state) \(current.prLabel)"
         }

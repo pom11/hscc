@@ -9,6 +9,7 @@ import contextlib
 import json
 import sqlite3
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -283,7 +284,8 @@ def test_post_push_re_read_does_not_merge_a_non_green_head(tmp_path):
     assert result["processed"][0]["result"] == "waiting", result
     assert gh.merged == []
     doc = mq.load_state(_state(tmp_path))
-    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [3]
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == []
+    assert [e["pr"] for e in doc["projects"]["alpha"]["waiting"]] == [3]
     # The push did happen; only the merge was withheld.
     assert _git(pair["origin"], "rev-parse",
                 f"refs/heads/{pair['branch']}") != pair["head"]
@@ -305,7 +307,8 @@ def test_post_push_re_read_does_not_merge_a_changed_head(tmp_path):
     assert result["processed"][0]["result"] == "waiting", result
     assert gh.merged == []
     doc = mq.load_state(_state(tmp_path))
-    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [4]
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == []
+    assert [e["pr"] for e in doc["projects"]["alpha"]["waiting"]] == [4]
 
 
 @pytest.mark.parametrize("required,expected_merge", [
@@ -1112,3 +1115,175 @@ def test_add_to_queue_writes_only_under_hscc_home(tmp_path, monkeypatch):
     assert (sandbox / "merge-queue-state.json").exists()
     assert not (home / ".hscc" / "merge-queue-state.json").exists()
     assert mq.load_state()["projects"]["alpha"]["queue"][0]["pr"] == 7
+
+
+# ── a concurrent CLI add survives the tick's auto-enqueue write (F9) ────────
+
+def test_concurrent_cli_add_during_auto_enqueue_is_not_clobbered(tmp_path):
+    """F9: the tick must reload+merge under the lock after its network probes.
+
+    Reproduces audit reproduction K: a CLI `add` lands while auto-enqueue is
+    probing; the tick's later save must preserve it instead of writing the
+    snapshot it loaded at the top of the tick.
+    """
+    pair = _repo_pair(tmp_path)
+    cli_head = _new_branch(pair["repo"], "wt/t_cli_add")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        99: {"headRefName": "wt/t_cli_add", "headRefOid": cli_head},
+    })
+
+    def source(cfg, gh_runner=None):
+        # The operator's add lands between the tick's load and its save.
+        mq.add_to_queue("alpha", 99, card="t_cli_add", path=_state(tmp_path))
+        return [{"pr": 7, "card": "t_auto", "assignee": "worker"}]
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, auto_source=source)
+
+    # The added PR is older, so it is the one claimed; the auto candidate
+    # stays queued. Before the fix the stale save erased 99 entirely.
+    assert result["processed"][0]["pr"] == 99, result
+    assert gh.merged == [99]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7]
+    assert ps["in_flight"] is None
+
+
+# ── a red-gated PR is not auto-re-enqueued until its head changes (F11) ─────
+
+def test_red_gate_is_not_auto_re_enqueued_until_the_head_changes(tmp_path):
+    """F11: dropping a red-gate PR must not make the next tick rerun it."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["sh -c 'echo BOOM >&2; exit 7'"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_red", assignee="worker",
+                    path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert first["processed"][0]["result"] == "red-gate", first
+    comments = len(gh.comments)
+    last = mq.load_state(_state(tmp_path))["projects"]["alpha"]["last"]
+    assert last["result"] == "red-gate"
+    assert last["head_sha"] == pair["head"]
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 7, "card": "t_red", "assignee": "worker"}]
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=source)
+    assert second["processed"] == [], second
+    assert len(gh.comments) == comments
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == []
+
+    # The worker pushes a fix; only then may auto-enqueue pick it up again.
+    _git(pair["repo"], "checkout", pair["branch"])
+    (pair["repo"] / "fixed.txt").write_text("fixed\n")
+    _git(pair["repo"], "add", ".")
+    _git(pair["repo"], "commit", "-m", "fix the gate")
+    _git(pair["repo"], "push", "origin", pair["branch"])
+    new_head = _git(pair["repo"], "rev-parse", "HEAD")
+    gh.heads[7]["headRefOid"] = new_head
+    fixed_registry = _registry(tmp_path, pair["repo"], gates=["true"])
+
+    third = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"),
+                    registry_path=fixed_registry, gh_runner=gh,
+                    git_runner=subprocess.run, auto_source=source)
+    assert third["processed"][0]["result"] == "merged", third
+    assert gh.merged == [7]
+
+
+# ── a non-green head leaves the head slot for the wait list (F12) ──────────
+
+def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
+    """F12: one pending PR must not starve the entry behind it forever."""
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    }, views={7: [{"statusCheckRollup": pending},
+                  {"statusCheckRollup": pending},
+                  {"statusCheckRollup": pending}]})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert first["processed"][0]["result"] == "waiting", first
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [8]
+    assert [e["pr"] for e in ps["waiting"]] == [7]
+    rows = mq.view(state_path=_state(tmp_path),
+                   registry_path=registry)["rows"]
+    assert [(r["pr"], r["state"]) for r in rows] == [(8, "queued"),
+                                                     (7, "waiting")]
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["pr"] == 8, second
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [8]
+
+    # The wait-listed PR is retried once the active FIFO is empty (still
+    # pending, so it goes back to the wait list rather than blocking again).
+    third = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert third["processed"][0]["pr"] == 7, third
+    assert third["processed"][0]["result"] == "waiting", third
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and [e["pr"] for e in ps["waiting"]] == [7]
+
+
+# ── generated_at is the ledger write time, not the read time (F14) ─────────
+
+def test_view_generated_at_is_the_last_state_write_not_the_read(tmp_path):
+    """F14: two reads with no tick/write between them share one timestamp."""
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+    first = mq.view(state_path=state,
+                    registry_path=str(tmp_path / "none.yaml"))
+    second = mq.view(state_path=state,
+                     registry_path=str(tmp_path / "none.yaml"))
+    doc = mq.load_state(state)
+
+    assert first["generated_at"] == second["generated_at"]
+    assert first["generated_at"] == doc["generated_at"]
+
+    time.sleep(0.01)
+    mq.add_to_queue("alpha", 8, path=state)
+    third = mq.view(state_path=state,
+                    registry_path=str(tmp_path / "none.yaml"))
+    assert third["generated_at"] != first["generated_at"]
+
+
+def test_tick_stamps_the_ledger_even_when_it_does_no_work(tmp_path):
+    """F14: a live-but-idle daemon is distinguishable from a dead one."""
+    state = _state(tmp_path)
+    registry = _registry(tmp_path, tmp_path / "repo", enabled=False)
+    first = mq.tick(state_path=state, registry_path=registry)
+    stamp = first["generated_at"]
+
+    time.sleep(0.01)
+    second = mq.tick(state_path=state, registry_path=registry)
+    assert second["processed"] == []
+    assert second["generated_at"] != stamp
+    assert mq.load_state(state)["generated_at"] == second["generated_at"]

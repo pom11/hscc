@@ -209,6 +209,8 @@ def load_state(path=None):
 
 
 def save_state(doc, path=None):
+    """Persist the ledger, stamping the write time the surfaces read as freshness."""
+    doc["generated_at"] = _now_iso()
     _atomic_write_json(path or state_file(), doc)
 
 
@@ -239,6 +241,10 @@ def _project_state(doc, project):
     ps.setdefault("enabled", None)       # None = follow the registry opt-in
     ps.setdefault("paused", False)
     ps.setdefault("queue", [])
+    # A non-green head moves here so it cannot block the FIFO behind it. It is
+    # retried only when the active queue is empty (or when auto-enqueue sees
+    # the PR become green), never in the head slot.
+    ps.setdefault("waiting", [])
     ps.setdefault("in_flight", None)
     ps.setdefault("last", None)
     return ps
@@ -260,17 +266,27 @@ def add_to_queue(project, pr, card=None, assignee=None, branch=None,
     """Append a PR to ``project``'s FIFO (idempotent by PR number)."""
     with _lock, _file_lock():
         doc = state if state is not None else load_state(path)
-        q = _queue(doc, project)
+        ps = _project_state(doc, project)
+        q = ps["queue"]
         existing = _find_entry(q, pr)
         if existing is None:
-            q.append({
-                "pr": int(pr),
-                "card": card,
-                "assignee": assignee,
-                "branch": branch,
-                "enqueued_at": _now_iso(),
-                "attempts": 0,
-            })
+            # A manual re-add of a waiting PR is an explicit retry: move the
+            # entry back into the active FIFO instead of duplicating it.
+            waiting = _find_entry(ps["waiting"], pr)
+            if waiting is not None:
+                ps["waiting"].remove(waiting)
+                if branch and not waiting.get("branch"):
+                    waiting["branch"] = branch
+                q.append(waiting)
+            else:
+                q.append({
+                    "pr": int(pr),
+                    "card": card,
+                    "assignee": assignee,
+                    "branch": branch,
+                    "enqueued_at": _now_iso(),
+                    "attempts": 0,
+                })
         elif branch and not existing.get("branch"):
             existing["branch"] = branch
         save_state(doc, path)
@@ -284,6 +300,8 @@ def remove_from_queue(project, pr, state=None, path=None):
         ps = _project_state(doc, project)
         ps["queue"] = [e for e in ps["queue"]
                        if int(e.get("pr", 0)) != int(pr)]
+        ps["waiting"] = [e for e in ps["waiting"]
+                         if int(e.get("pr", 0)) != int(pr)]
         if ps.get("in_flight") and int(ps["in_flight"].get("pr", 0)) == int(pr):
             ps["in_flight"] = None
         save_state(doc, path)
@@ -355,7 +373,8 @@ def project_config(project, registry_path=None):
 #: ledger outcomes; ``rebasing``/``gating``/``merging`` are the live stages the
 #: daemon stamps on its in-flight claim as it moves through the queue.
 MERGE_QUEUE_STATES = (
-    "queued", "rebasing", "gating", "merging", "resolve", "merged", "failed",
+    "queued", "waiting", "rebasing", "gating", "merging", "resolve", "merged",
+    "failed",
 )
 
 _OUTCOME_STATES = {
@@ -461,6 +480,11 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
                              now_s=now_s))
             if entry.get("pr") is not None:
                 shown.add(int(entry["pr"]))
+        waiting = list(ps.get("waiting") or [])
+        for entry in waiting:
+            rows.append(_row(name, "waiting", entry=entry, now_s=now_s))
+            if entry.get("pr") is not None:
+                shown.add(int(entry["pr"]))
         flight = ps.get("in_flight")
         if isinstance(flight, dict) and flight:
             rows.append(_row(name, flight.get("stage") or "rebasing",
@@ -486,17 +510,22 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
             "paused": bool(ps.get("paused")),
             "repo": (cfg or {}).get("repo"),
             "queue_len": len(queue),
+            "waiting_len": len(waiting),
             "rows": rows,
             "last": last,
         }
         all_rows.extend(rows)
     return {
         "ok": True,
-        "generated_at": _now_iso(),
+        # The ledger's write time, NOT this read: two view() calls with no tick
+        # or state write between them must report the same timestamp, so a
+        # widget cannot present stale rows as freshly generated.
+        "generated_at": doc.get("generated_at"),
         "projects": out,
         "rows": all_rows,
         "count": len(all_rows),
         "queued": sum(1 for row in all_rows if row["state"] == "queued"),
+        "waiting": sum(1 for row in all_rows if row["state"] == "waiting"),
     }
 
 
@@ -939,6 +968,29 @@ def _required_for_info(cfg, base, info, git_runner=None, gh_runner=None):
     return _required_checks(cfg, base, git_runner, gh_runner, info=info)
 
 
+def _auto_enqueue_suppressed(doc, project, cand, cfg, gh_runner=None):
+    """True when a red-gated PR is still sitting on the same head SHA.
+
+    Dropping a red-gate PR from the queue must not make the next empty tick
+    pick it straight back up: that reruns the gate, comments and reassigns the
+    card every minute. Auto-enqueue is suppressed until the PR head changes
+    (a worker push) or the operator adds it again explicitly.
+    """
+    last = _project_state(doc, project).get("last")
+    if not isinstance(last, dict) or last.get("result") != "red-gate":
+        return False
+    if int(last.get("pr") or 0) != int(cand.get("pr") or 0):
+        return False
+    gated_sha = str(last.get("head_sha") or "")
+    if not gated_sha:
+        return False
+    info = pr_view(cfg["repo"], cand["pr"], runner=gh_runner)
+    if not isinstance(info, dict):
+        # Cannot prove the head moved; keep it out rather than re-run a gate.
+        return True
+    return str(info.get("headRefOid") or "") == gated_sha
+
+
 def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
     """Cards on the project board whose latest PR URL is ready to merge.
 
@@ -1200,7 +1252,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{resolve_instructions(info.get('headRefName'), base)}\n"
                     f"{output}")
             _finish(doc, project, state_path, ps, "red-gate", entry,
-                    gate=command)
+                    gate=command, head_sha=info.get("headRefOid"))
             _handback(entry, cfg, body, handback, gh_runner)
             log(f"merge-queue {project}: PR #{entry['pr']} gate failed: "
                 f"{command}", "WARN")
@@ -1262,15 +1314,20 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
 
 
 def _requeue_waiting(state_path, project, entry):
-    """Put a not-yet-green entry back at the head, on a fresh ledger read."""
+    """Move a not-yet-green entry to the wait list, on a fresh ledger read.
+
+    It leaves the head slot instead of being reinserted at position 0, so the
+    later FIFO entries can proceed while this PR waits for its checks.
+    """
     with _file_lock():
         doc = load_state(state_path)
         ps = _project_state(doc, project)
         flight = ps.get("in_flight")
         if flight and int(flight.get("pr", 0)) == int(entry.get("pr", 0)):
             ps["in_flight"] = None
-            if _find_entry(ps["queue"], entry.get("pr")) is None:
-                ps["queue"].insert(0, entry)
+            if (_find_entry(ps["queue"], entry.get("pr")) is None
+                    and _find_entry(ps["waiting"], entry.get("pr")) is None):
+                ps["waiting"].append(entry)
         save_state(doc, state_path)
 
 
@@ -1405,22 +1462,46 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     if found:
                         candidates[name] = found
                 if candidates:
+                    # Suppression probes are network reads, so do them BEFORE
+                    # taking the file lock: a slow `gh` must not block the CLI.
+                    snapshot = load_state(state_path)
+                    allowed = {}
+                    for name, found in candidates.items():
+                        keep = [
+                            cand for cand in found
+                            if not _auto_enqueue_suppressed(
+                                snapshot, name, cand, cfgs[name], gh_runner)
+                        ]
+                        if keep:
+                            allowed[name] = keep
+                    candidates = allowed
+                if candidates:
                     # Fresh read under the lock: a CLI `add` that landed while
                     # auto-enqueue probed the network must survive this write.
                     with _file_lock():
                         doc = load_state(state_path)
                         for name, found in candidates.items():
-                            q = _queue(doc, name)
+                            ps = _project_state(doc, name)
+                            q = ps["queue"]
                             for cand in found:
-                                if _find_entry(q, cand["pr"]) is None:
-                                    q.append({
-                                        "pr": int(cand["pr"]),
-                                        "card": cand.get("card"),
-                                        "assignee": cand.get("assignee"),
-                                        "branch": cand.get("branch"),
-                                        "enqueued_at": _now_iso(),
-                                        "attempts": 0,
-                                    })
+                                pr = int(cand["pr"])
+                                if _find_entry(q, pr) is not None:
+                                    continue
+                                waiting = _find_entry(ps["waiting"], pr)
+                                if waiting is not None:
+                                    # It just became green: return it to the
+                                    # active FIFO rather than duplicating it.
+                                    ps["waiting"].remove(waiting)
+                                    q.append(waiting)
+                                    continue
+                                q.append({
+                                    "pr": pr,
+                                    "card": cand.get("card"),
+                                    "assignee": cand.get("assignee"),
+                                    "branch": cand.get("branch"),
+                                    "enqueued_at": _now_iso(),
+                                    "attempts": 0,
+                                })
                         save_state(doc, state_path)
 
             # Claim the oldest entry across every project on this repo, under
@@ -1430,6 +1511,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
+                source = "queue"
                 for idx, name in enumerate(members):
                     cfg = cfgs.get(name)
                     ps = _project_state(doc, name)
@@ -1441,10 +1523,26 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         if best is None or rank < best[0]:
                             best = (rank, name, pos, entry)
                 if best is None:
+                    # The active FIFO is empty: retry one wait-listed PR. They
+                    # are appended on the way in, so this round-robins instead
+                    # of letting one permanently non-green PR starve the rest.
+                    source = "waiting"
+                    for idx, name in enumerate(members):
+                        cfg = cfgs.get(name)
+                        ps = _project_state(doc, name)
+                        if (cfg is None or not _enabled(cfg, ps)
+                                or ps.get("paused")):
+                            continue
+                        for pos, entry in enumerate(ps.get("waiting") or []):
+                            rank = (str(entry.get("enqueued_at") or ""), idx,
+                                    pos)
+                            if best is None or rank < best[0]:
+                                best = (rank, name, pos, entry)
+                if best is None:
                     continue
                 _, claim_name, pos, entry = best
                 ps = _project_state(doc, claim_name)
-                entry = ps["queue"].pop(pos)
+                entry = ps[source].pop(pos)
                 ps["in_flight"] = entry
                 save_state(doc, state_path)
 
@@ -1472,7 +1570,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     _enabled(member_cfg, ps) if member_cfg else False)
 
         result["recovered"] = recovered
-        result["generated_at"] = _now_iso()
+        # A tick that does no work is still a tick: stamp the ledger so the
+        # surfaces can tell a live-but-idle daemon from a dead one.
+        with _file_lock():
+            doc = load_state(state_path)
+            save_state(doc, state_path)
+            result["generated_at"] = doc.get("generated_at")
     return result
 
 
@@ -1481,6 +1584,7 @@ def _project_view(ps, cfg, enabled=None):
         "enabled": bool(cfg.get("enabled", False)) if enabled is None else enabled,
         "paused": bool(ps.get("paused")),
         "queue": list(ps.get("queue") or []),
+        "waiting": list(ps.get("waiting") or []),
         "in_flight": ps.get("in_flight"),
         "last": ps.get("last"),
         "repo": (cfg or {}).get("repo"),
