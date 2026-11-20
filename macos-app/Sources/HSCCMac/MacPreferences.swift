@@ -44,6 +44,7 @@ final class MacPreferences: ObservableObject {
     private enum Keys {
         static let menuBarStat = "hscc.mac.menuBarStat"
         static let refreshSeconds = "hscc.mac.refreshSeconds"
+        static let widgetRefreshSeconds = "hscc.mac.widgetRefreshSeconds"
         static let launchAtLogin = "hscc.mac.launchAtLogin"
     }
 
@@ -52,6 +53,13 @@ final class MacPreferences: ObservableObject {
     /// minutes scale.
     static let cadences = [30, 60, 120, 300, 600]
     static let defaultCadence = 60
+
+    /// How often the running menu bar app asks WidgetKit to reload the desktop
+    /// widgets. 0 = System: no push from the app, the widgets keep their own
+    /// 30-minute timeline. macOS may still coalesce or budget app-driven
+    /// reloads; every widget shows its data age, so a skipped reload is visible.
+    static let widgetCadences = [60, 120, 300, 900, 0]
+    static let defaultWidgetCadence = 300
 
     private static var suite: UserDefaults {
         UserDefaults(suiteName: AppGroup.suiteName) ?? .standard
@@ -70,6 +78,15 @@ final class MacPreferences: ObservableObject {
         }
     }
 
+    @Published var widgetRefreshSeconds: Int {
+        didSet {
+            if !Self.widgetCadences.contains(widgetRefreshSeconds) {
+                widgetRefreshSeconds = Self.defaultWidgetCadence
+            }
+            Self.suite.set(widgetRefreshSeconds, forKey: Keys.widgetRefreshSeconds)
+        }
+    }
+
     /// Mirrors the actual Login Items state. Toggling it goes through
     /// `SMAppService`, and a failure is surfaced rather than silently flipped.
     @Published private(set) var launchAtLogin: Bool
@@ -82,6 +99,7 @@ final class MacPreferences: ObservableObject {
         refreshSeconds = Self.cadences.contains(storedCadence)
             ? storedCadence
             : Self.defaultCadence
+        widgetRefreshSeconds = Self.storedWidgetRefreshSeconds()
         launchAtLogin = SMAppService.mainApp.status == .enabled
         launchAtLoginError = nil
     }
@@ -92,6 +110,14 @@ final class MacPreferences: ObservableObject {
     static func storedRefreshSeconds() -> Int {
         let stored = suite.integer(forKey: Keys.refreshSeconds)
         return cadences.contains(stored) ? stored : defaultCadence
+    }
+
+    /// The desktop widget reload cadence, read by the polling loop each tick.
+    /// An unset key reads as the default, not as 0 (System).
+    static func storedWidgetRefreshSeconds() -> Int {
+        guard suite.object(forKey: Keys.widgetRefreshSeconds) != nil else { return defaultWidgetCadence }
+        let stored = suite.integer(forKey: Keys.widgetRefreshSeconds)
+        return widgetCadences.contains(stored) ? stored : defaultWidgetCadence
     }
 
     /// The stat the always-visible label draws, read by the polling loop so a
