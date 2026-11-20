@@ -92,6 +92,25 @@ struct FleetOfflineCheck {
             print("   GOT: \(result3)")
         }
 
+        // 4) The app's ONE relative-age formatter (t_67c5b0f2). FleetView's new
+        //    server-reported-age row renders `Offline.agePhrase`, the same
+        //    formatter that builds the `StaleBanner` copy above, so the screen's
+        //    two staleness reads — ours (couldn't reach the cluster) and the
+        //    server's (its snapshot is old) — speak one age dialect rather than
+        //    two. 260 s must print "4m": the exact string PR #486's
+        //    `_humanize_age` puts into `speak` for that age, so the row repeats
+        //    the server's number instead of restating it.
+        check("agePhrase(260) == \"4m\" (the app repeats the server's own age)",
+              Offline.agePhrase(260) == "4m")
+        check("agePhrase(0) == \"0s\" (a cold-start inline verdict reads honestly)",
+              Offline.agePhrase(0) == "0s")
+        check("agePhrase(-5) floors at \"0s\" (a future-dated stamp is not an age)",
+              Offline.agePhrase(-5) == "0s")
+        check("agePhrase(3600) == \"1h\" (unit boundary is the hour, not 60m)",
+              Offline.agePhrase(3600) == "1h")
+        check("agePhrase(86400) == \"1d\" (unit boundary is the day, not 24h)",
+              Offline.agePhrase(86400) == "1d")
+
         print(failures == 0 ? "ALL OFFLINE SEMANTICS PASS" : "\(failures) FAILURES")
         exit(failures == 0 ? 0 : 1)
     }

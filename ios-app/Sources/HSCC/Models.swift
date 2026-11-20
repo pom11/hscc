@@ -167,6 +167,47 @@ extension HealthResponse {
         guard let age = age_seconds, age >= 0 else { return nil }
         return age
     }
+
+    /// The operator-facing line about the server's own age for the verdict it
+    /// just served, or `nil` when there is nothing honest to say — a server
+    /// that did not flag the verdict gets no age claim from us at all.
+    ///
+    /// `agePhrase` is a pre-formatted age (`"4m"`, `"6h"`) from the app's ONE
+    /// relative-age formatter, `Offline.agePhrase`. It is passed in rather than
+    /// computed here for two reasons: `Models.swift` stays free of the view
+    /// layer, and this screen's two staleness reads — ours (the offline
+    /// `StaleBanner`) and the server's (this line) — cannot drift into two
+    /// different age dialects.
+    ///
+    /// Pass `nil` when the server sent no age. The line then says the verdict is
+    /// stale and prints **no number**: `"0s old"` reads as "just checked", which
+    /// is the exact implication this whole change exists to remove, so a missing
+    /// age has to stay missing instead of becoming a fabricated fresh verdict.
+    func serverVerdictAgeLine(agePhrase: String?) -> String? {
+        guard serverSaysVerdictIsStale else { return nil }
+        let clause: String
+        if let agePhrase {
+            clause = "this verdict is \(agePhrase) old"
+        } else {
+            clause = "this verdict is stale"
+        }
+        let origin = source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if origin.isEmpty {
+            return "Server says \(clause)."
+        }
+        return "Server says \(clause) — \(Self.sourcePhrase(origin))."
+    }
+
+    /// The two `source` values PR #486 emits, in operator words. Anything else
+    /// is echoed rather than folded onto one of these two, so a source added
+    /// server-side later can never be silently mislabelled on the screen.
+    private static func sourcePhrase(_ source: String) -> String {
+        switch source {
+        case "cache": return "served from the server's cache"
+        case "inline": return "computed for this request"
+        default: return "source: \(source)"
+        }
+    }
 }
 
 /// GET /v1/autoscale — a decision, never an action.
