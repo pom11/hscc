@@ -65,6 +65,63 @@ do {
     exit(1)
 }
 
+// 1b) The PR #486 freshness keys (t_67c5b0f2). The capture above is a PRE-#486
+//     body and carries none of them, so it is the backward-compatibility half of
+//     the contract: the four new keys must decode as nil, and `stale == nil`
+//     must never be read as "fresh".
+//
+//     The other fixtures below are SYNTHESISED from the payload `handle_health`
+//     returns at 96a5cc14 — `age_seconds` = max(0, now - generated_at),
+//     `stale` = age_seconds > 120, `source` = "cache" | "inline" — and are
+//     fixtures, not captures: this card never called the live API.
+func decodeHealthFixture(_ file: String) -> HealthResponse {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/" + file)) else {
+        print("FAIL: cannot read fixtures/\(file) — the gate's fixture set is incomplete")
+        exit(1)
+    }
+    do {
+        return try JSONDecoder().decode(HealthResponse.self, from: data)
+    } catch {
+        print("FAIL: fixtures/\(file) no longer decodes into HealthResponse — \(error)")
+        exit(1)
+    }
+}
+
+let preCache = decodeHealthFixture("v1_health.json")
+assert(preCache.age_seconds == nil && preCache.generated_at == nil
+       && preCache.stale == nil && preCache.source == nil,
+       "the pre-#486 capture decodes with all four PR #486 keys nil (strict superset holds)")
+assert(!preCache.serverSaysVerdictIsStale,
+       "a server that cannot say stale is NOT reported as stale (nil is not false)")
+assert(preCache.serverVerdictAgeSeconds == nil,
+       "a server that sent no age yields no age — never a defaulted 0s")
+
+let staleCached = decodeHealthFixture("v1_health_stale.json")
+assert(staleCached.stale == true && staleCached.source == "cache",
+       "the stale cached verdict decodes stale + source")
+assert(staleCached.generated_at != nil,
+       "generated_at decodes as the epoch the verify ran")
+assert(staleCached.age_seconds == 260 && staleCached.serverVerdictAgeSeconds == 260,
+       "the server's own age_seconds is what the view is handed (260s)")
+assert(staleCached.speak.contains("Health from 4m ago."),
+       "the server's own age sentence stays inside speak, untouched")
+assert(staleCached.serverSaysVerdictIsStale,
+       "the stale cached verdict is the case the screen must flag")
+
+let staleNoAge = decodeHealthFixture("v1_health_stale_no_age.json")
+assert(staleNoAge.serverSaysVerdictIsStale,
+       "stale without an age still flags the verdict stale")
+assert(staleNoAge.serverVerdictAgeSeconds == nil,
+       "stale without an age yields NO number — rendering 0s here is the lie this prevents")
+
+let freshCached = decodeHealthFixture("v1_health_fresh_cache.json")
+assert(freshCached.age_seconds == 45 && !freshCached.serverSaysVerdictIsStale,
+       "an age under the TTL flags nothing (a fresh cached verdict is not bad news)")
+
+let coldStart = decodeHealthFixture("v1_health_inline.json")
+assert(coldStart.source == "inline" && !coldStart.serverSaysVerdictIsStale,
+       "the cold-start inline verdict is never flagged stale — it ran for this very request")
+
 // 2) Classification: the file's long-standing ANY-HTTP-RESPONSE contract holds
 //    (a 500 or a 404 proves reachability), while auth refusal is the ONE
 //    non-transport failure that counts as unreachable (operator spec:

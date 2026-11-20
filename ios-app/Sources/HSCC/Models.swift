@@ -109,10 +109,64 @@ struct HealthCheck: Decodable, Identifiable {
 }
 
 /// GET /v1/health.
+///
+/// PR #486 made this route answer from a cached verify snapshot instead of
+/// running the fleet smoke test on the request thread. `ok`, `checks` and
+/// `speak` are unchanged and byte-identical in meaning; the four keys below are
+/// additive, which is why every one of them is **optional**. A server older
+/// than PR #486 sends none of them, and the committed live capture in
+/// `scripts/connection_probe_check/fixtures/v1_health.json` (a pre-#486 body)
+/// must keep decoding — that gate is the backward-compatibility contract.
+///
+/// `stale` is `Bool?` rather than `Bool` for the same reason `HealthCheck.ok`
+/// is: absent must not collapse into a claim. Defaulting it to `false` would
+/// make every pre-#486 server assert its verdict is fresh, which is precisely
+/// the implication this change exists to remove.
 struct HealthResponse: Decodable, Speakable {
     let ok: Bool
     let checks: [HealthCheck]
     let speak: String
+
+    /// How old the served verdict is, in seconds, as the server counts it.
+    /// `nil` = a server older than the cache, which cannot say.
+    let age_seconds: Int?
+    /// Epoch second at which the verify that produced this verdict ran.
+    /// Decoded so the field is not silently dropped; the screen renders
+    /// `age_seconds` instead, because the phone's clock is not the clock that
+    /// aged the verdict (and a wrong device clock would restate its age wrong).
+    let generated_at: Int?
+    /// The server's own verdict on the verdict: true when it is older than the
+    /// cache TTL. `nil` = the server cannot say — NOT "it is fresh".
+    let stale: Bool?
+    /// `"cache"` (served from the snapshot) or `"inline"` (the cold-start case
+    /// that had to run a verify for this very request).
+    let source: String?
+}
+
+// MARK: - Health verdict freshness (PR #486)
+
+extension HealthResponse {
+    /// Whether the server itself says the verdict it just served is older than
+    /// its cache TTL.
+    ///
+    /// Deliberately `stale == true` and not `stale ?? false`: an absent flag
+    /// means a server that predates the cache and cannot answer, which is not a
+    /// claim of freshness. Callers render on this alone, so an old server keeps
+    /// the pre-#486 screen rather than being told its verdict is fine — and
+    /// neither reading is a lie about a fact nobody reported.
+    var serverSaysVerdictIsStale: Bool { stale == true }
+
+    /// The server's own age for this verdict, in seconds, or `nil` when the
+    /// server did not state one (a pre-#486 server, or a negative value that
+    /// could not mean anything).
+    ///
+    /// `nil` must never be rendered as `0s`. "0s ago" is a fresh verdict — the
+    /// exact thing the caller is trying not to imply — so a missing age has to
+    /// stay missing and let the view say "stale" without a number.
+    var serverVerdictAgeSeconds: Int? {
+        guard let age = age_seconds, age >= 0 else { return nil }
+        return age
+    }
 }
 
 /// GET /v1/autoscale — a decision, never an action.

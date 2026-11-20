@@ -1,0 +1,20 @@
+{
+  "ok": false,
+  "checks": [
+    {
+      "name": "plugins",
+      "ok": true,
+      "detail": "all core commands found"
+    },
+    {
+      "name": "proxy",
+      "ok": false,
+      "detail": "no models responding"
+    }
+  ],
+  "speak": "1 of 2 checks have problems. (proxy)",
+  "age_seconds": 0,
+  "generated_at": 1795149400,
+  "stale": false,
+  "source": "inline"
+}
