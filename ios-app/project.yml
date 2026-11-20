@@ -175,6 +175,19 @@ targets:
       # the Active/cadence settings and the one BGAppRefreshTask identifier.
       - path: Sources/HSCC/ClusterHealthActivitySweep.swift
       - path: Sources/HSCC/ClusterHealthActivityDriver.swift
+      # CarPlay scene (card W5g, design C "Rows with gauges"). The scene
+      # delegate is named by the CPTemplateApplicationSceneSessionRoleApplication
+      # block in this target's `info:` section. CarPlayReading.swift is
+      # Foundation-only so scripts/carplay_check.sh compiles AND RUNS the copy,
+      # thresholds and stale/offline rules; CarPlayImages.swift is the only file
+      # that draws, and CarPlaySceneDelegate.swift owns the 30 s refresh.
+      - path: Sources/HSCC/CarPlay/CarPlayReading.swift
+      - path: Sources/HSCC/CarPlay/CarPlayImages.swift
+      - path: Sources/HSCC/CarPlay/CarPlaySceneDelegate.swift
+      # The running-cards projection the car screen's Running row and detail
+      # list read. Shared with the widget/Live Activity so the same
+      # `/v1/kanban/running` answer cannot produce two different longest cards.
+      - path: Sources/Shared/CardsRunningProjection.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
       # The dismissible "Update <version> available" banner (t_2a1e5913),
@@ -332,6 +345,12 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCC.entitlements
+        # CarPlay (card W5g). Apple has NOT granted HSCC a CarPlay entitlement,
+        # so it must never reach a device/release signature. The simulator-only
+        # file is selected by the SDK condition; `xcodebuild archive` for
+        # `generic/platform=iOS` and the IPA keep the device value above,
+        # byte-identically. scripts/carplay_check.sh proves both halves.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": Sources/HSCC.simulator.entitlements
     info:
       path: Sources/Info.plist
       properties:
@@ -345,6 +364,18 @@ targets:
         # has no light variants. HSCCApp also pins preferredColorScheme(.dark);
         # this key covers launch chrome and any scene the system creates.
         UIUserInterfaceStyle: Dark
+        # CarPlay (card W5g): the scene role Apple's template apps register for.
+        # The delegate name is expanded from the app's module, so a custom
+        # HSCC_BUNDLE_PREFIX or a debug build never points at the wrong class.
+        # `UIApplicationSupportsMultipleScenes` stays true because the CarPlay
+        # screen is a second scene alongside the phone's SwiftUI window.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneClassName: CPTemplateApplicationScene
+                UISceneConfigurationName: HSCC CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
         # Deep links (t_136762f3): the `hscc://` URL scheme lets a notification,
         # a Telegram message, or a Mac session open a specific project, card or
         # session directly instead of starting from the root. CFBundleURLTypes
