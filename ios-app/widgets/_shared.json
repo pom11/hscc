@@ -3,9 +3,12 @@
     "Sources/HSCCWidgets/HSCCWidgetsBundle.swift",
     "Sources/HSCCWidgets/WidgetRendering.swift",
     "Sources/HSCCWidgets/HSCCWidgetList.generated.swift",
-    "Sources/HSCCWidgets/CLIMonitorHostTableView.swift",
     "Sources/HSCCWidgets/CLIMonitorTableReading.swift",
     "Sources/HSCCWidgets/ClusterSmallGrid.swift",
-    "Sources/HSCCWidgets/ClusterSmallGridView.swift"
+    "Sources/HSCCWidgets/ClusterSmallGridView.swift",
+    "Sources/HSCCWidgets/NativeStyleKit.swift",
+    "Sources/HSCCWidgets/GraphWidgetMetrics.swift",
+    "Sources/HSCCWidgets/GraphWidgetEntry.swift",
+    "Sources/HSCCWidgets/GraphWidgetViews.swift"
   ]
 }

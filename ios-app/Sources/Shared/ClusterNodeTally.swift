@@ -131,8 +131,19 @@ struct FleetNodeLine: Equatable, Identifiable {
     let running: Int?
     let waiting: Int?
     let error: String?
+    /// The node's own GPU wattage, straight from its monitor sample.
+    let gpuPowerW: Double?
+    /// The node's serving throughput, from the serving row that owns it.
+    let genTps: Double?
 
     var id: String { label }
+
+    /// The serving model names the orchestrator backend (`orchestrator-model`),
+    /// so a node can be marked from the data rather than a hard-coded address
+    /// or position. No match means no mark, never an invented role.
+    var isOrchestrator: Bool {
+        model?.lowercased().contains("orchestrator") == true
+    }
 
     init(host: MonitorNode, serving: [ServingRow]?) {
         self.label = host.displayLabel
@@ -141,6 +152,7 @@ struct FleetNodeLine: Equatable, Identifiable {
         self.cpuTempC = host.sample?.cpuTempC
         self.gpuTempC = host.sample?.gpuTempC
         self.error = host.error
+        self.gpuPowerW = host.sample?.gpuPowerW
         let ownTail = MonitorNode.shortTail(host.host)
         let row = serving?.first {
             !$0.isDown && $0.node.map { MonitorNode.shortTail($0) == ownTail } == true
@@ -148,6 +160,7 @@ struct FleetNodeLine: Equatable, Identifiable {
         self.model = row?.shortModel
         self.running = row?.running
         self.waiting = row?.waiting
+        self.genTps = row?.gen_tps
     }
 }
 

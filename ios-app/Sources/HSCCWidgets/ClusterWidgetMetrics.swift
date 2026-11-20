@@ -69,6 +69,174 @@ enum ClusterMetricHeat: Equatable {
 /// and a failed read carries its reason plus the age of the last good read.
 // ---------------------------------------------------------------------------
 
+/// The one stale/offline rule every widget runs.
+///
+/// Stale means the DATA is older than twice the surface's refresh interval; it
+/// dims to 50% and says "stale · HH:mm". A failed fetch says "offline · HH:mm"
+/// and dims whatever cached content the caller still has. Neither state ever
+/// renders cached data as fresh.
+struct StaleState: Equatable {
+    let dataAt: Date?
+    let fetchedAt: Date
+    let refreshMinutes: Int
+    let failed: Bool
+
+    var referenceDate: Date { dataAt ?? fetchedAt }
+    var ageMinutes: Int {
+        max(0, Int(Date().timeIntervalSince(referenceDate) / 60))
+    }
+    var isOffline: Bool { failed }
+    var isStale: Bool {
+        !failed && refreshMinutes > 0 && ageMinutes > 2 * refreshMinutes
+    }
+    var isDimmed: Bool { isOffline || isStale }
+    var label: String? {
+        let clock = Self.hhmm(referenceDate)
+        if isOffline { return "offline · \(clock)" }
+        if isStale { return "stale · \(clock)" }
+        return nil
+    }
+
+    private static func hhmm(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+// MARK: - C1 Health line (2026-11-20 redesign)
+
+/// One node row in the new Cluster widget: identity, state, and the four
+/// numbers C1 prints beside it. Every field is a route field (or the serving
+/// row that names the node's backend); no view derives a number of its own.
+struct ClusterC1Node: Equatable, Identifiable {
+    let label: String
+    let model: String?
+    let isUp: Bool
+    let isOrchestrator: Bool
+    let gpuPct: Double?
+    let tempC: Double?
+    let powerW: Double?
+    let genTps: Double?
+
+    var id: String { label }
+
+    init(_ node: FleetNodeLine) {
+        self.label = node.label
+        self.model = node.model
+        self.isUp = node.isUp
+        self.isOrchestrator = node.isOrchestrator
+        self.gpuPct = node.gpuPct
+        self.tempC = node.gpuTempC ?? node.cpuTempC
+        self.powerW = node.gpuPowerW
+        self.genTps = node.genTps
+    }
+}
+
+/// One point of the large tile's 2 h total-throughput chart: the sum of every
+/// engine's `gen_tps` at that recorder timestamp.
+struct ClusterThroughputPoint: Equatable {
+    let t: TimeInterval
+    let value: Double
+}
+
+enum ClusterThroughput {
+    /// Sum the engine series by timestamp. A timestamp with no readable engine
+    /// value is a gap, not a zero. Nil/empty response means no chart.
+    static func series(_ response: ClusterHistoryResponse?) -> [ClusterThroughputPoint] {
+        guard let response else { return [] }
+        let set = ClusterHistorySeriesSet.make(response, for: .genTps)
+        var sums: [TimeInterval: Double] = [:]
+        for line in set.series {
+            for sample in line.samples {
+                guard let value = sample.value else { continue }
+                sums[sample.t, default: 0] += value
+            }
+        }
+        let ordered = sums.keys.sorted().map { ClusterThroughputPoint(t: $0, value: sums[$0] ?? 0) }
+        guard let last = ordered.last?.t else { return [] }
+        return ordered.filter { $0.t >= last - 2 * 60 * 60 }
+    }
+}
+
+/// Everything C1 draws, projected once from the entry's one monitor read.
+struct ClusterC1: Equatable {
+    let up: Int?
+    let total: Int?
+    let tokPerSec: Double?
+    let hottestC: Double?
+    let nodes: [ClusterC1Node]
+    let modelNames: [String]
+    let daemonRunning: Bool?
+    let dataAt: Date?
+    let fetchedAt: Date
+    let refreshMinutes: Int
+    let failed: Bool
+
+    var headline: String {
+        guard let up, let total else { return failed ? "Offline" : "No data" }
+        if total > 0 && up == 0 { return "Down" }
+        if up == total { return "All up" }
+        return "\(up)/\(total) up"
+    }
+
+    var tally: String {
+        guard let up, let total else { return "—" }
+        return "\(up)/\(total)"
+    }
+
+    var tokText: String {
+        guard let tokPerSec else { return "— tok/s" }
+        return "\(Int(tokPerSec.rounded())) tok/s"
+    }
+
+    var hottestText: String {
+        guard let hottestC else { return "Hottest —" }
+        return "Hottest \(Int(hottestC.rounded()))°"
+    }
+
+    /// The footer's model line: `name ×N` per model, in route order.
+    var modelLine: String {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for node in nodes {
+            guard let model = node.model else { continue }
+            if counts[model] == nil { order.append(model) }
+            counts[model, default: 0] += 1
+        }
+        if order.isEmpty { return "no models" }
+        return order.map { "\($0) ×\(counts[$0] ?? 0)" }.joined(separator: " · ")
+    }
+
+    var daemonText: String {
+        switch daemonRunning {
+        case .some(true): return "daemon OK"
+        case .some(false): return "daemon down"
+        case .none: return "daemon —"
+        }
+    }
+
+    var stale: StaleState {
+        StaleState(dataAt: dataAt, fetchedAt: fetchedAt,
+                   refreshMinutes: refreshMinutes, failed: failed)
+    }
+
+    init(_ entry: ClusterEntry) {
+        self.up = entry.fleet?.tally.nodesUp
+        self.total = entry.fleet?.tally.nodesTotal
+        self.tokPerSec = entry.fleet?.serving.genTps
+        self.nodes = entry.fleet?.nodes.map(ClusterC1Node.init) ?? []
+        self.hottestC = nodes.compactMap(\.tempC).max()
+        self.modelNames = entry.fleet?.serving.modelNames ?? []
+        self.daemonRunning = entry.daemonHost?.daemon_running
+        self.dataAt = entry.dataAt
+        self.fetchedAt = entry.date
+        self.refreshMinutes = entry.refreshMinutes
+        self.failed = entry.failure != nil
+    }
+}
+
 /// `hscc cluster status`'s counts, reduced to the two numbers the widget draws.
 struct ClusterStatusSummary: Equatable {
     let jobs: Int
@@ -127,6 +295,16 @@ struct ClusterEntry: TimelineEntry {
     /// accessory families then fall back to the failure/last-known copy below
     /// rather than drawing a row of dashes.
     let lockScreen: CLILockScreenMetrics?
+    /// When the DATA was sampled, for AsOfStamp / the stale rule. Falls back to
+    /// the fetch time when the route sends no usable timestamp.
+    let dataAt: Date?
+    /// The surface's configured cadence, for the 2× stale rule.
+    let refreshMinutes: Int
+    /// The daemon-host sidecar, read only by sizes that draw its state.
+    let daemonHost: MonitorDaemonHost?
+    /// The large tile's 2 h total-throughput series, from the same history read
+    /// the old small tile used. Empty means "no chart", never a flat zero line.
+    let throughput: [ClusterThroughputPoint]
 
     init(date: Date,
          fleet: ClusterFleet?,
@@ -139,7 +317,11 @@ struct ClusterEntry: TimelineEntry {
          lastKnownAgeMinutes: Int? = nil,
          showSections: Set<String> = ClusterEntry.availableSections,
          lockScreen: CLILockScreenMetrics? = nil,
-         history: ClusterHistoryResponse? = nil) {
+         history: ClusterHistoryResponse? = nil,
+         dataAt: Date? = nil,
+         refreshMinutes: Int = 15,
+         daemonHost: MonitorDaemonHost? = nil,
+         throughput: [ClusterThroughputPoint] = []) {
         self.date = date
         self.fleet = fleet
         self.monitor = monitor
@@ -152,6 +334,10 @@ struct ClusterEntry: TimelineEntry {
         self.history = history
         self.showSections = showSections
         self.lockScreen = lockScreen
+        self.dataAt = dataAt
+        self.refreshMinutes = refreshMinutes
+        self.daemonHost = daemonHost
+        self.throughput = throughput
     }
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
@@ -174,6 +360,9 @@ struct ClusterEntry: TimelineEntry {
     var tables: ClusterMonitorTables? {
         (!configured || paused) ? nil : tableData
     }
+
+    /// Everything the 2026-11-20 C1 layout draws, from this entry's one read.
+    var c1: ClusterC1 { ClusterC1(self) }
 
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the

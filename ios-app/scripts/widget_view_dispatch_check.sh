@@ -45,12 +45,10 @@ MANIFEST=(
   widgetKanbanMonitor
   widgetCardsRunning
   widgetProjects
-  widgetMonitor
   widgetNeedsMe
   # Appended, not inserted: the list stays the order the surfaces ran in, and a
   # new surface joins at the end so two cards adding one cannot fight over the
   # middle of the array.
-  widgetClusterGraph
   widgetMergeQueue
 )
 

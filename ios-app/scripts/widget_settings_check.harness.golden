@@ -15,13 +15,11 @@ static let widgetSettingsKey = "hscc.widgetSettings"
 
 enum WidgetSurfaceKind: String, CaseIterable, Codable {
     case widgetCluster = "widget.cluster"
-    case widgetMonitor = "widget.monitor"
     case widgetBoardStatus = "widget.boardStatus"
     case widgetCardsRunning = "widget.cardsRunning"
     case widgetKanbanMonitor = "widget.kanbanMonitor"
     case widgetProjects = "widget.projects"
     case widgetNeedsMe = "widget.needsMe"
-    case widgetClusterGraph = "widget.clusterGraph"
     case widgetMergeQueue = "widget.mergeQueue"
     case liveActivityWake = "liveActivity.wake"
     case liveActivityMonitor = "liveActivity.monitor"
@@ -205,9 +203,9 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+        case .widgetCluster, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
-             .widgetNeedsMe, .widgetClusterGraph, .widgetMergeQueue:
+             .widgetNeedsMe, .widgetMergeQueue:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityCards, .liveActivityBoardProgress: return true
@@ -245,14 +243,13 @@ extension WidgetSurfaceKind {
         // `node`/`metrics`/`window` — so a board picker here would write a value
         // nothing reads, which is exactly the control this property exists to
         // suppress.
-        case .widgetClusterGraph: return false
         // Every other surface keeps true: main grew this switch since this
         // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
         // widgetProjects all landed from main), and a new case has to be
         // judged here deliberately rather than by an exhaustive-switch build
         // error. Each of the three is fetched through a route its own card
         // measured against a scope, so they keep what ships today.
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+        case .widgetCluster, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
              .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityBoardProgress:
@@ -281,7 +278,6 @@ extension WidgetSurfaceKind {
     var availableSections: Set<String> {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
-        case .widgetMonitor:    return ["state", "nodes", "host"]
         // One dataset, nothing optional — see the rule above. The board tile is
         // five counts for one board; the running-cards widget is the row list
         // plus the running/blocked counts its header and footer are built from;
@@ -322,7 +318,6 @@ extension WidgetSurfaceKind {
         // Toggle the sheet never reads. So: nothing here is optional, and
         // `WidgetSurfaceEditor` hides its whole "Show Content" group for exactly
         // this case.
-        case .widgetClusterGraph: return []
         // The merge queue is one list (FIFO rows) with no optional part: the
         // position, PR, card, branch, state, age and last result ARE the row.
         // A section toggle would either empty the surface or do nothing.
@@ -1042,13 +1037,13 @@ let carried = AppGroupWidgetSettings(surfaces: [
 check("per-widget scope survives the bounded read path",
       carried.setting(for: .widgetCluster).scope == WidgetScope(board: "radio"))
 check("a surface with no scope of its own reads nil, not an empty scope",
-      carried.setting(for: .widgetMonitor).scope == nil)
+      carried.setting(for: .widgetNeedsMe).scope == nil)
 
 let mixed = AppGroupWidgetSettings(
     surfaces: [
         .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                               showSections: ["state"], scope: WidgetScope(board: "radio")),
-        .widgetMonitor: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+        .widgetNeedsMe: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                               showSections: ["state"], scope: WidgetScope()),
         // A surface with NO choice of its own: absent key on disk, inherits.
         .liveActivityWake: WidgetSurfaceSettings(isActive: true, refreshMinutes: 15,
@@ -1060,7 +1055,7 @@ check("scope(for:) keeps the surface own board",
 check("scope(for:) inherits the fleet default when the surface never chose",
       mixed.scope(for: .liveActivityWake) == WidgetScope(node: ".244"))
 check("an explicit All on the surface does not inherit the fleet default",
-      mixed.scope(for: .widgetMonitor) == WidgetScope() && (mixed.scope(for: .widgetMonitor)?.isAll ?? false))
+      mixed.scope(for: .widgetNeedsMe) == WidgetScope() && (mixed.scope(for: .widgetNeedsMe)?.isAll ?? false))
 
 // The on-disk shape of the two states that look alike: a never-chosen surface
 // carries NO scope key, an explicit All carries an empty object. Hand-typed
@@ -1086,7 +1081,7 @@ if let mixedData = try? JSONEncoder().encode(mixed),
           mixedDict["surfaces"] is [Any])
     let wakeEntry = surfaceEntry(mixedDict, "liveActivity.wake")
     check("a never-chosen surface stores no scope key", wakeEntry != nil && wakeEntry?["scope"] == nil)
-    let monitorScope = surfaceEntry(mixedDict, "widget.monitor")?["scope"] as? [String: Any]
+    let monitorScope = surfaceEntry(mixedDict, "widget.needsMe")?["scope"] as? [String: Any]
     check("an explicit All stores an empty scope object",
           monitorScope != nil && monitorScope?.isEmpty == true)
     let clusterScope = surfaceEntry(mixedDict, "widget.cluster")?["scope"] as? [String: Any]
@@ -1120,9 +1115,9 @@ check("the store reads the seeded fleet default as its own scope",
 // The screen folds with the SAME static the configuration intent folds with —
 // one rule for what a three-picker sheet means, two entry points.
 screen.setScope(WidgetScope.buildPickerSelection(board: "radio", project: nil, node: nil),
-                for: .widgetMonitor)
+                for: .widgetCluster)
 check("the screen per-widget write lands where the widgets read",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "radio"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 check("the fleet default survives a per-widget write",
       AppGroupWidgetSettings.load()?.scope == WidgetScope(board: "hscc"))
 check("cadence survives a per-widget scope write",
@@ -1140,14 +1135,14 @@ check("a fleet scope the intent wrote mid-session survives the screen write",
 check("the screen write still landed",
       AppGroupWidgetSettings.load()?.setting(for: .widgetCluster).refreshMinutes == 11)
 check("the per-widget scope still rides the same blob",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "radio"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 
-screen.setScope(WidgetScope(), for: .widgetMonitor)
+screen.setScope(WidgetScope(), for: .widgetCluster)
 check("an explicit All written by the screen stops the inheritance",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor)?.isAll ?? false)
-screen.setScope(nil, for: .widgetMonitor)
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster)?.isAll ?? false)
+screen.setScope(nil, for: .widgetCluster)
 check("dropping the surface choice re-inherits the fleet default",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "intent-late"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "intent-late"))
 
 // 18. APPEARANCE (t_444519ae): the stored style model. Old blobs must decode
 //     to the app Theme default with no migration prompt; a per-surface
@@ -1165,7 +1160,7 @@ if let oldStyleData = try? JSONEncoder().encode(legacyStyleBlob) {
         check("old data decodes with no global style (Theme default)",
               oldStyle.style == nil && oldStyle.resolvedStyle(for: .widgetCluster) == themeDefault)
         check("old data's untouched surface also resolves to the Theme default",
-              oldStyle.resolvedStyle(for: .widgetMonitor) == themeDefault)
+              oldStyle.resolvedStyle(for: .widgetCluster) == themeDefault)
     } else {
         check("old data decodes with no global style (Theme default)", false)
         check("old data's untouched surface also resolves to the Theme default", false)
@@ -1203,16 +1198,16 @@ let surfaceStyle = WidgetStyle.presets.first(where: { preset in preset.id == "mo
 let styled = AppGroupWidgetSettings(surfaces: [
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                           showSections: ["state"], style: surfaceStyle),
-    .widgetMonitor: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+    .widgetNeedsMe: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                           showSections: ["state"]),
 ], style: globalStyle)
 check("per-surface override beats the global style",
       styled.resolvedStyle(for: .widgetCluster) == surfaceStyle)
 check("a surface with no override inherits the global style",
-      styled.resolvedStyle(for: .widgetMonitor) == globalStyle)
+      styled.resolvedStyle(for: .widgetNeedsMe) == globalStyle)
 check("style(for:) reports only a real override",
       styled.style(for: .widgetCluster) == surfaceStyle
-      && styled.style(for: .widgetMonitor) == nil)
+      && styled.style(for: .widgetNeedsMe) == nil)
 var droppedOverride = styled
 droppedOverride.surfaces[.widgetCluster] = WidgetSurfaceSettings(
     isActive: true, refreshMinutes: 5, showSections: ["state"])
@@ -1220,7 +1215,7 @@ check("Use global (no override) falls back to the global style",
       droppedOverride.resolvedStyle(for: .widgetCluster) == globalStyle
       && droppedOverride.style(for: .widgetCluster) == nil)
 check("no global style at all resolves to the Theme default",
-      AppGroupWidgetSettings(surfaces: [:]).resolvedStyle(for: .widgetMonitor) == themeDefault)
+      AppGroupWidgetSettings(surfaces: [:]).resolvedStyle(for: .widgetCluster) == themeDefault)
 
 // The app-side write path the editor drives, against the REAL suite domain.
 let appearanceSeed = AppGroupWidgetSettings(surfaces: [:], style: globalStyle)
@@ -1229,17 +1224,17 @@ if let appearanceData = try? JSONEncoder().encode(appearanceSeed) {
 }
 let appearanceScreen = WidgetSettingsStore()
 check("the store reads the global style", appearanceScreen.globalStyle == globalStyle)
-appearanceScreen.setStyle(surfaceStyle, for: .widgetMonitor)
+appearanceScreen.setStyle(surfaceStyle, for: .widgetCluster)
 check("a per-surface style write lands where the widgets read",
-      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == surfaceStyle)
-check("the store resolves the override", appearanceScreen.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
-appearanceScreen.useGlobalStyle(for: .widgetMonitor)
+      AppGroupWidgetSettings.load()?.style(for: .widgetCluster) == surfaceStyle)
+check("the store resolves the override", appearanceScreen.resolvedStyle(for: .widgetCluster) == surfaceStyle)
+appearanceScreen.useGlobalStyle(for: .widgetCluster)
 check("Use global drops the override and re-inherits",
-      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == nil
-      && appearanceScreen.resolvedStyle(for: .widgetMonitor) == globalStyle)
+      AppGroupWidgetSettings.load()?.style(for: .widgetCluster) == nil
+      && appearanceScreen.resolvedStyle(for: .widgetCluster) == globalStyle)
 appearanceScreen.setGlobalStyle(surfaceStyle)
 check("a global style write persists to the shared blob",
-      AppGroupWidgetSettings.load()?.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
+      AppGroupWidgetSettings.load()?.resolvedStyle(for: .widgetCluster) == surfaceStyle)
 
 // 19. restore the host's prior state — the gate must leave nothing behind.
 if let priorBlob { realSuite.set(priorBlob, forKey: AppGroupWidgetSettings.storageKey) }

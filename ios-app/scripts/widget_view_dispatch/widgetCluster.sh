@@ -1,82 +1,87 @@
 #!/bin/bash
 # widget_view_dispatch/widgetCluster.sh — the CLUSTER widget surface
-# (WidgetSurfaceKind.widgetCluster).
+# (WidgetSurfaceKind.widgetCluster), C1 Native redesign (2026-11-20).
 #
-# Subject: Sources/HSCCWidgets/ClusterWidgetViews.swift. Not registry-driven —
-# this surface predates the registry (t_5c554c5b), so it has no setting(for:)
-# and no cadence check; it owns the invariant the rest of the directory inherits.
+# Subject: Sources/HSCCWidgets/ClusterWidgetViews.swift. Every Home Screen
+# family takes the unconfigured/paused gate in ONE step before it can draw a
+# number, and the C1 layout is composed from the shared NativeStyleKit rather
+# than re-typing fonts, colours or the stale rule.
 #
-# The dispatch is the if/else-if chain in SmallClusterWidget.body and
-# MediumClusterWidget.body. This file mirrors that chain and exhaustively checks
-# every (state, configured) pair, and enforces the audit-3 invariant: ANY
-# unconfigured entry MUST show the "Set up the app" setup invite. There is no iOS
-# runtime on this host, so this proves the LOGIC of which view wins and the
-# invariant, not the rendered pixels.
-#
-# Moved verbatim out of widget_view_dispatch_check.sh (lines 14-50 at c270ba84)
-# by t_2c22e60d. Run standalone, or through the aggregator:
+# Run standalone, or through the aggregator:
 #   ./ios-app/scripts/widget_view_dispatch/widgetCluster.sh
 set -uo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# Prove the REAL source still takes the unconfigured gate before anything else.
-# The gate moved into `ClusterEntry.text(for:)` (one owner for all six
-# families), so the check reads that rule where it lives and requires every
-# family to route through it.
+# Invite before pause: the accessory copy still owns this ordering.
 copy=$(awk '/var shortGateLabel: String \{/ {f=1} f {print} f && /^    \}$/ {exit}' Sources/HSCCWidgets/ClusterWidgetMetrics.swift)
 u=$(printf '%s\n' "$copy" | grep -n '!configured' | head -1 | cut -d: -f1)
 p=$(printf '%s\n' "$copy" | grep -n 'Paused' | head -1 | cut -d: -f1)
 if [ -n "$u" ] && [ -n "$p" ] && [ "$u" -lt "$p" ]; then
-  echo "source shortGateLabel checks !configured (line $u) before Paused (line $p)"
+  echo "  ok: shortGateLabel checks !configured (line $u) before Paused (line $p)"
 else
-  echo "❌ source order regressed: unconfigured no longer checked first"; exit 1
+  echo "  FAIL: source order regressed: unconfigured no longer checked first"; exit 1
 fi
-families=$(grep -c 'entry.text(for:' Sources/HSCCWidgets/ClusterWidgetViews.swift)
-echo "source family text routes = $families (want >= 6)"
-[ "$families" -ge 6 ] || { echo "❌ a cluster family bypasses the shared gate/text model"; exit 1; }
 
-# t_9e64d9d9: large and extra-large draw the CLI's own tables through ONE shared
-# block, and the "is there a table at all" decision stays owned by ClusterEntry
-# — the same one-step-gate invariant this directory enforces for the copy.
-tables=$(grep -c 'MonitorTablesBlock(tables:' Sources/HSCCWidgets/ClusterWidgetViews.swift)
-echo "cluster table blocks = $tables (want >= 2: large + extra-large)"
-[ "$tables" -ge 2 ] || { echo "❌ a cluster surface stopped drawing the shared CLI tables"; exit 1; }
-grep -q 'if let tables = entry.tables' Sources/HSCCWidgets/ClusterWidgetViews.swift \
-  || { echo "❌ a cluster body decides the table gate itself instead of asking the entry"; exit 1; }
-grep -q 'var tables: ClusterMonitorTables?' Sources/HSCCWidgets/ClusterWidgetMetrics.swift \
-  || { echo "❌ ClusterEntry no longer owns the table gate"; exit 1; }
+V=Sources/HSCCWidgets/ClusterWidgetViews.swift
+M=Sources/HSCCWidgets/ClusterWidgetMetrics.swift
+K=Sources/HSCCWidgets/NativeStyleKit.swift
+FAILURES=0
 
-cat > "$TMPDIR/widget_dispatch_$$.swift" <<'SWIFT'
-import Foundation
-enum S: String, CaseIterable { case serving, waking, down, unreachable, unknown }
+# (1) Every Home Screen family gates in one step, so no branch can draw a
+# number on a paused or unconfigured surface.
+n=$(grep -c 'if !entry.configured || entry.paused' "$V")
+if [ "$n" -ge 3 ]; then
+  wok "$n Home Screen bodies gate on !configured||paused (want >= 3)"
+else
+  wbad "only $n Home Screen bodies gate on !configured||paused (want >= 3)"
+fi
 
-// The FIXED order (matches the committed source): unconfigured wins over unreachable.
-func dispatchView(state: S, configured: Bool) -> String {
-    if !configured              { return "unconfiguredView     <-- 'Set up the app' invite" }
-    else if state == .unreachable { return "unreachableStateView <-- stale, with age" }
-    else if state == .unknown   { return "unknownView (falls through to normal layout)" }
-    else                          { return "normal state layout (serving/waking/down)" }
-}
+# (2) The C1 layout is the new contract, not a copy of the old table.
+for needle in 'let c1 = entry.c1' 'MeterBar(value:' 'AsOfStamp(date:' 'ClusterThroughputChart(points:' 'entry.throughput'; do
+  if grep -qF -- "$needle" "$V"; then
+    wok "C1 layout uses '$needle'"
+  else
+    wbad "C1 layout is missing '$needle'"
+  fi
+done
+if grep -q 'struct ClusterC1' "$M" && grep -q 'var c1: ClusterC1' "$M"; then
+  wok "the entry projects one ClusterC1 model for every C1 family"
+else
+  wbad "the entry does not own the ClusterC1 projection"
+fi
+if grep -q 'C1' "$K" || grep -q 'NativeStyle' "$V"; then
+  wok "the shared NativeStyleKit supplies the C1 tokens"
+else
+  wbad "the C1 views do not use the shared NativeStyleKit"
+fi
 
-var fail = false
-for s in S.allCases {
-    for c in [false, true] {
-        let v = dispatchView(state: s, configured: c)
-        print("state=" + s.rawValue + " configured=" + String(c) + " -> " + v)
-        if !c && v.hasPrefix("unconfiguredView") == false {
-            print("  WARN: unconfigured entry did NOT yield the setup invite")
-            fail = true
-        }
-    }
-}
-if fail { print("RESULT: FAIL - some unconfigured entry shows a non-setup view"); exit(1) }
-print("RESULT: OK - every unconfigured entry invites setup")
-SWIFT
+# (3) The chart is the 2 h total-throughput series, summed from the engine
+# `gen_tps` rows — not a made-up host average.
+if grep -q 'ClusterHistoryMetric.genTps' Sources/HSCCWidgets/ClusterWidget.swift; then
+  wok "the large tile asks history for gen_tps"
+else
+  wbad "the large tile does not ask history for gen_tps"
+fi
+if grep -q 'sums\[sample.t, default: 0\] += value' "$M"; then
+  wok "the chart series sums engine rows by timestamp"
+else
+  wbad "the chart series does not sum engine rows by timestamp"
+fi
 
-SDK=$(wvd_sdk) || exit 1
-xcrun swiftc -sdk "$SDK" -o "$TMPDIR/widget_dispatch_$$" "$TMPDIR/widget_dispatch_$$.swift" 2>&1 || { echo "compile failed" >&2; exit 1; }
-"$TMPDIR/widget_dispatch_$$"
-rc=$?
-rm -f "$TMPDIR/widget_dispatch_$$" "$TMPDIR/widget_dispatch_$$.swift"
+# (4) The old table path is gone from the C1 bodies.
+if grep -q 'MonitorTablesBlock\|CLIMonitorHostTableView' "$V"; then
+  wbad "a C1 body still draws the removed table view"
+else
+  wok "the C1 bodies draw no removed table view"
+fi
 
-exit $rc
+# (5) The three accessory bodies are intentionally untouched by this card but
+# must keep routing through the gated text model.
+n=$(grep -cE 'entry\.text\(for: \.(inline|circular|rectangular)\)' "$V")
+if [ "$n" -ge 2 ]; then
+  wok "accessory families still route through the entry's gated text ($n sites)"
+else
+  wbad "only $n accessory sites route through the gate (want >= 2)"
+fi
+
+wvd_finish

@@ -202,11 +202,11 @@ file-by-file disposition of the remaining console files is
   shared Keychain access, `APIConfig`, the last-known `SnapshotStore`, and
   the two `ActivityKit` attribute types (`WakingActivity`,
   `MonitorActivity`).
-- `Sources/HSCCWidgets/` — the widget extension: the cluster Home Screen
-  widget (`systemSmall` + medium — last-known state + compact topology;
-  **`Unreachable` is a first-class state** — "Can't reach the cluster" with
-  the last-known state and its age, never a blank or stale-looking-live
-  widget) and the **HSCC Monitor** widget (per-node monitor data).
+- `Sources/HSCCWidgets/` — the widget extension: the Cluster Home Screen
+  widget (C1 Health line — state, throughput and hottest node at small,
+  per-node util/temp at medium, the 2 h throughput chart and node table at
+  large; stale/offline data is dimmed and labelled, never shown as fresh) and
+  the board/running/needs-me/merge-queue surfaces.
 - `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivityMonitor/` — the two
   Live Activity extensions: fleet-wake progress, and the **monitor target**,
   which carries THREE Live Activities — the cluster/daemon-host monitor, the
@@ -291,20 +291,6 @@ file-by-file disposition of the remaining console files is
     families pay for the board row. Structural greps pin the layout file: the
     two-read budget, no `cluster/status` read, the accessory dispatch, and that
     an accessory body never reads the board row's fields. No network, no device.
-  - `cluster_graph_check.sh` — compiles the history graph widget's projection
-    layer (`ClusterGraphReading.swift`) with the same real wire types and the
-    monitor view-model, and executes the rules that decide what each Home Screen
-    size DRAWS: a gap in the data ends the polyline instead of becoming a slope, a
-    `null` is never drawn as a point, one unit per axis with a domain derived from
-    the series rather than a guessed ceiling, the resolution the route served
-    captioned rather than inferred, and the `metrics=` list filtered to what the
-    served tier can actually answer. Its structural leg covers the WidgetKit half
-    a macOS harness cannot compile — one dispatch arm per declared family, no
-    accessory family, the canonical `/v1/cluster/history` read only
-    (DECISION-t_447cc7fc), the pickers held to the shared vocabulary by raw value,
-    the registry and settings wiring, and the gate order inside the provider.
-    `CLUSTER_GRAPH_NEGATIVE_TEST=1` breaks the layer deliberately and the run
-    fails, because a harness that cannot fail is worthless. No network, no device.
   - `cluster_history_chart_check.sh` — compiles the history chart layer
     (`ClusterHistorySeries.swift`) together with the real wire types it decodes
     (`SharedModels.swift`) into a macOS CLI and executes the two rules a history

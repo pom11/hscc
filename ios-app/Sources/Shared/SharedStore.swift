@@ -522,9 +522,9 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+        case .widgetCluster, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
-             .widgetNeedsMe, .widgetClusterGraph, .widgetMergeQueue:
+             .widgetNeedsMe, .widgetMergeQueue:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityCards, .liveActivityBoardProgress: return true
@@ -562,14 +562,13 @@ extension WidgetSurfaceKind {
         // `node`/`metrics`/`window` — so a board picker here would write a value
         // nothing reads, which is exactly the control this property exists to
         // suppress.
-        case .widgetClusterGraph: return false
         // Every other surface keeps true: main grew this switch since this
         // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
         // widgetProjects all landed from main), and a new case has to be
         // judged here deliberately rather than by an exhaustive-switch build
         // error. Each of the three is fetched through a route its own card
         // measured against a scope, so they keep what ships today.
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
+        case .widgetCluster, .widgetBoardStatus,
              .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
              .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityBoardProgress:
@@ -598,7 +597,6 @@ extension WidgetSurfaceKind {
     var availableSections: Set<String> {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
-        case .widgetMonitor:    return ["state", "nodes", "host"]
         // One dataset, nothing optional — see the rule above. The board tile is
         // five counts for one board; the running-cards widget is the row list
         // plus the running/blocked counts its header and footer are built from;
@@ -639,7 +637,6 @@ extension WidgetSurfaceKind {
         // Toggle the sheet never reads. So: nothing here is optional, and
         // `WidgetSurfaceEditor` hides its whole "Show Content" group for exactly
         // this case.
-        case .widgetClusterGraph: return []
         // The merge queue is one list (FIFO rows) with no optional part: the
         // position, PR, card, branch, state, age and last result ARE the row.
         // A section toggle would either empty the surface or do nothing.

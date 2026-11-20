@@ -563,7 +563,7 @@ struct ClusterGraphWidgetView: View {
         // ONE resolution for the surface, and the root paints the stored
         // background through the rendering-mode adapter. A second resolution
         // anywhere in this file is what `widget_style_check.sh` refuses.
-        let style = WidgetStyle.resolved(for: .widgetClusterGraph)
+        let style = WidgetStyle.resolved(for: .widgetCluster)
         return ClusterGraphCanvas(family: entry.family) { pixelWidth, axisLabelCount in
             Group {
                 switch entry.family {
