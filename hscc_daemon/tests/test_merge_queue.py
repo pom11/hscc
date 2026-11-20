@@ -78,7 +78,7 @@ def _repo_pair(tmp_path, *, shared=False, base="main"):
 
 
 def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
-              base_branch=None):
+              base_branch=None, timeout_s=None):
     path = tmp_path / "registry.yaml"
     mq_cfg = {}
     if enabled is not None:
@@ -87,6 +87,8 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         mq_cfg["gates"] = gates
     if base_branch is not None:
         mq_cfg["base_branch"] = base_branch
+    if timeout_s is not None:
+        mq_cfg["timeout_s"] = timeout_s
     body = {
         "projects": [{
             "name": name,
@@ -105,6 +107,8 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         if gates is not None:
             lines.append("    gates: [" + ", ".join(
                 f'"{g}"' for g in gates) + "]")
+        if timeout_s is not None:
+            lines.append(f"    timeout_s: {timeout_s}")
         path.write_text("\n".join(lines) + "\n")
     return str(path)
 
@@ -448,6 +452,180 @@ def test_red_gate_comments_tail_and_hands_card_back(tmp_path):
                 f"refs/heads/{pair['branch']}") == pair["head"]
 
 
+# ── a gate that runs out of budget ─────────────────────────────────────────
+#
+# The queue used to conflate "the gate never answered" with "the gate said
+# no": one `(False, output)` tuple served both, so a slow queue recorded
+# `red-gate`, dropped the PR out of the queue and told the author to fix code
+# that was never shown to be broken.  Measured on main, the PR #360 and #460
+# handbacks both end in the literal line `timeout after 1800s` and neither is
+# a test failure.  These cases pin the split.  No case here runs a real gate:
+# `mq.subprocess` — the only thing `_run_gate` shells through — is replaced by
+# a namespace carrying `run` plus the real `TimeoutExpired` class, so a fake
+# timeout is the only answer the leg can get and no repo or socket is touched
+# by the gate path.
+
+def _fake_subprocess(*, run):
+    """Stand-in for the module ``_run_gate`` shells through."""
+    return SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired)
+
+
+def _timeout_subprocess(command, **kwargs):
+    """A gate process that never answers: exactly what the OS raises."""
+    raise subprocess.TimeoutExpired(cmd=command,
+                                    timeout=kwargs.get("timeout") or 0)
+
+
+def _exit_subprocess(code, stderr=""):
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=code, stdout="", stderr=stderr)
+    return run
+
+
+def _tick_that_timed_out(tmp_path, monkeypatch, *, pr, card):
+    """One tick whose single gate leg exhausts a 42 s budget."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["sh -c 'sleep 999'"], timeout_s=42)
+    gh = FakeGh({pr: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", pr, card=card, assignee="worker",
+                    path=_state(tmp_path))
+    monkeypatch.setattr(mq, "subprocess",
+                        _fake_subprocess(run=_timeout_subprocess))
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card_, assignee, msg: handed.append(
+            (card_, assignee, msg)) or True)
+    return result, pair, gh, handed, registry
+
+
+def test_run_gate_returns_a_tri_state_verdict_not_a_bool(tmp_path,
+                                                         monkeypatch):
+    """The budget is a THIRD answer, not a flavour of failure."""
+    worktree = str(tmp_path)
+
+    monkeypatch.setattr(mq, "subprocess",
+                        _fake_subprocess(run=_timeout_subprocess))
+    verdict, output = mq._run_gate("sh -c 'sleep 999'", worktree, 42)
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+
+    monkeypatch.setattr(mq, "subprocess",
+                        _fake_subprocess(run=_exit_subprocess(0)))
+    assert mq._run_gate("true", worktree, 42)[0] == "pass"
+
+    monkeypatch.setattr(mq, "subprocess",
+                        _fake_subprocess(run=_exit_subprocess(7, "BOOM")))
+    verdict, output = mq._run_gate("sh -c 'exit 7'", worktree, 42)
+    assert verdict == "fail", verdict
+    assert "BOOM" in output, output
+
+
+def test_gate_timeout_is_not_a_red_gate_and_keeps_the_pr(tmp_path,
+                                                         monkeypatch):
+    """A budget exhaustion is non-terminal: back to the wait list, not gone."""
+    result, pair, gh, _handed, _registry_path = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=31, card="t_slow")
+
+    row = result["processed"][0]
+    assert row["result"] == "gate-timeout", result
+    assert row["timeout_s"] == 42, row
+    assert "sleep 999" in row["gate"], row
+
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert [e["pr"] for e in ps["waiting"]] == [31], ps
+    assert ps["queue"] == []
+    assert ps["in_flight"] is None
+    assert ps["last"]["result"] == "gate-timeout", ps["last"]
+    # Nothing recorded anywhere may read as a test failure.
+    assert "red-gate" not in json.dumps(doc), doc
+    # And nothing was pushed or merged on the way out.
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+
+
+def test_gate_timeout_handback_names_the_budget_and_blames_nobody(
+        tmp_path, monkeypatch):
+    """The author must be told it is a budget, not a broken PR."""
+    _result, _pair, gh, handed, _registry_path = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=32, card="t_slow2")
+
+    assert handed, "a handed-back gate must still say something"
+    card, assignee, body = handed[0]
+    assert (card, assignee) == ("t_slow2", "worker"), handed
+    assert "42s" in body, body
+    assert "NOT a test failure" in body, body
+    assert "will look again" in body, body
+    # The resolve/force-push script belongs to a gate that actually said no.
+    assert "Resolve it as this card's worker" not in body, body
+    assert "force-with-lease" not in body, body
+    assert "git rebase origin/main" not in body, body
+    # The PR comment carries the same words, not the old "gate failed" text.
+    comment = " ".join(gh.comments[0])
+    assert "NOT a test failure" in comment, comment
+    assert "gate failed" not in comment, comment
+
+
+def test_a_real_red_gate_still_drops_the_entry(tmp_path, monkeypatch):
+    """Must not regress: a genuine non-zero gate is still terminal."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["sh -c 'exit 7'"],
+                         timeout_s=42)
+    gh = FakeGh({33: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 33, card="t_red_drop", path=_state(tmp_path))
+    monkeypatch.setattr(mq, "subprocess",
+                        _fake_subprocess(run=_exit_subprocess(7, "BOOM")))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "red-gate", result
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    # Dropped, not requeued: `waiting` stays empty, which is exactly what the
+    # timeout case above must NOT do.
+    assert ps["queue"] == [] and ps["waiting"] == []
+    assert ps["in_flight"] is None
+    assert ps["last"]["result"] == "red-gate", ps["last"]
+    assert gh.merged == []
+
+
+def test_outcome_state_maps_a_gate_timeout_to_waiting():
+    """The read model may never call a timeout a failure to go fix."""
+    assert mq.outcome_state("gate-timeout") == "waiting"
+    assert "timeout" in mq.MERGE_QUEUE_STATES
+    # A real failure still lands where the author can act on it.
+    assert mq.outcome_state("red-gate") == "resolve"
+    assert mq.outcome_state("merged") == "merged"
+    assert mq.outcome_state("nonsense") == "failed"
+
+
+def test_view_shows_a_timed_out_pr_as_waiting(tmp_path, monkeypatch):
+    """`status` / GET /v1/merge-queue must not render it resolve or failed."""
+    _result, _pair, _gh, _handed, registry = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=34, card="t_slow3")
+
+    seen = mq.view(state_path=_state(tmp_path), registry_path=registry)
+    project_rows = seen["projects"]["alpha"]["rows"]
+    rows = [r for r in project_rows if r.get("pr") == 34]
+    assert len(rows) == 1, project_rows
+    row = rows[0]
+    assert row["state"] == "waiting", row
+    assert row["state"] in mq.MERGE_QUEUE_STATES
+    assert row["last_result"] == "gate-timeout", row
+    assert "sleep 999" in str(row["detail"]), row
+    # Nowhere in the whole view does this PR surface as a failure to go fix.
+    assert [r["state"] for r in seen["rows"] if r.get("pr") == 34] == ["waiting"]
+    assert seen["waiting"] == 1 and seen["queued"] == 0, seen["waiting"]
+
+
 # ── restart mid-run ────────────────────────────────────────────────────────
 
 def test_restart_mid_run_recovers_in_flight_to_the_queue_head(tmp_path):
@@ -510,7 +688,7 @@ def test_remove_during_gate_cancels_before_push_and_never_merges(
 
     def gate(command, worktree, timeout_s):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
-        return True, ""
+        return "pass", ""
 
     monkeypatch.setattr(mq, "_run_gate", gate)
     result = mq.tick(state_path=_state(tmp_path),
@@ -545,7 +723,7 @@ def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
             mq.set_paused("alpha", True, path=_state(tmp_path))
         else:
             mq.set_enabled("alpha", False, path=_state(tmp_path))
-        return True, ""
+        return "pass", ""
 
     monkeypatch.setattr(mq, "_run_gate", gate)
     result = mq.tick(state_path=_state(tmp_path),
@@ -673,7 +851,7 @@ def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
     def gate(command, worktree, timeout_s):
         seen.update(mq.view(state_path=_state(tmp_path),
                             registry_path=registry))
-        return False, "gate exploded"
+        return "fail", "gate exploded"
 
     monkeypatch.setattr(mq, "_run_gate", gate)
     result = mq.tick(state_path=_state(tmp_path),
@@ -1639,7 +1817,7 @@ def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
                 break
             time.sleep(0.02)
         leg["end"] = time.monotonic()
-        return True, ""
+        return "pass", ""
 
     monkeypatch.setattr(mq, "_run_gate", gate)
     result = mq.tick(state_path=_state(tmp_path),
@@ -1683,7 +1861,7 @@ def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
 
     interval = 0.2
     monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
-    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: (True, ""))
+    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: ("pass", ""))
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
