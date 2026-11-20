@@ -92,10 +92,13 @@ the integer mask them.
 **Board-table consumers (CARD B3).** The Kanban monitor widget draws one row per
 registered board with `counts.running`, `counts.ready`, `counts.todo`,
 `counts.blocked` and `counts.done` (= Done 24h), sorted like
-`kanban_live.boards_table`. The Board Status widget draws the same five fields
-for one board, and the Board Progress Live Activity carries them across the Lock
-Screen and Dynamic Island. No client derives a status from a card list; the
-numbers are the route's fields, which are the CLI's columns.
+`kanban_live.boards_table`. The Boards widget draws those counts as one stacked
+bar per board (and narrows to one board when the scope intent names one), and
+the Board Progress Live Activity carries them across the Lock Screen and Dynamic
+Island. The same payload carries `max_in_progress`, the operator's
+`kanban.max_in_progress`, so the widget's slot strip needs no client literal. No
+client derives a status from a card list; the numbers are the route's fields,
+which are the CLI's columns.
 
 
 Rule (card t_8743f98c): **every route a widget or Live Activity reads is served

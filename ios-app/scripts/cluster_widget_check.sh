@@ -129,6 +129,7 @@ echo ""
 echo "executed proofs (macOS compile of the real widget + shared sources)"
 
 xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
+  "$KIT" \
   "$METRICS" \
   "$TALLY" \
   "$MODEL" \

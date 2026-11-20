@@ -41,10 +41,8 @@ CHECK_DIR="$SELF_DIR/widget_view_dispatch"
 # `surfaces.count == 4`).
 MANIFEST=(
   widgetCluster
-  widgetBoardStatus
   widgetKanbanMonitor
   widgetCardsRunning
-  widgetProjects
   widgetNeedsMe
   # Appended, not inserted: the list stays the order the surfaces ran in, and a
   # new surface joins at the end so two cards adding one cannot fight over the

@@ -75,36 +75,6 @@ enum ClusterMetricHeat: Equatable {
 /// dims to 50% and says "stale · HH:mm". A failed fetch says "offline · HH:mm"
 /// and dims whatever cached content the caller still has. Neither state ever
 /// renders cached data as fresh.
-struct StaleState: Equatable {
-    let dataAt: Date?
-    let fetchedAt: Date
-    let refreshMinutes: Int
-    let failed: Bool
-
-    var referenceDate: Date { dataAt ?? fetchedAt }
-    var ageMinutes: Int {
-        max(0, Int(Date().timeIntervalSince(referenceDate) / 60))
-    }
-    var isOffline: Bool { failed }
-    var isStale: Bool {
-        !failed && refreshMinutes > 0 && ageMinutes > 2 * refreshMinutes
-    }
-    var isDimmed: Bool { isOffline || isStale }
-    var label: String? {
-        let clock = Self.hhmm(referenceDate)
-        if isOffline { return "offline · \(clock)" }
-        if isStale { return "stale · \(clock)" }
-        return nil
-    }
-
-    private static func hhmm(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
-    }
-}
-
 // MARK: - C1 Health line (2026-11-20 redesign)
 
 /// One node row in the new Cluster widget: identity, state, and the four

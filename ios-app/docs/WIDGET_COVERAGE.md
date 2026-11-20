@@ -14,10 +14,10 @@ because they were taken at different commits.
 A family is counted as covered only when it is both
 listed in that widget's `supportedFamilies` **and** has a non-placeholder view
 in the family dispatch switch (or routes through the shared, gated text model
-the dispatch selects). The Cluster and Monitor surfaces were refurbished by the
-sibling card; the Kanban Monitor, Board Status and Projects widgets plus the
-Board Progress Live Activity were refurbished by CARD B3; the Cards widget and
-CardsRunning Live Activity by CARD B2. Every surface reads the fields in
+the dispatch selects). The Cluster surface was refurbished by the C1 card; the
+Boards widget (the Kanban Monitor kind) and the Board Progress Live Activity
+were refurbished by CARD B3; the Cards widget and CardsRunning Live Activity by
+CARD B2. Every surface reads the fields in
 `hscc-api/docs/WIDGET_ROUTES.md`. Card R3 adds the "Needs me" widget (the alert
 feed) on both platforms and the macOS dropdown's "Needs you" section; it has no
 Live Activity.
@@ -212,11 +212,10 @@ CARDS WIDGET CHECK PASSED — every family's shown values equal the live fixture
 CARDS RUNNING WIDGET CHECK PASSED — every family, both platforms and the Live Activity draw the live fixture's own fields
 ```
 
-The board-status and projects counts are unchanged by CARD B3; the board harness
-gained no assertions, only updated expectations for the renamed Done 24h tile
-and the ring's running/done fallback. The Kanban Monitor check is new: it decodes
-a scrubbed live capture of `GET /v1/mobile/summary` and asserts every drawn
-number equals its fixture field, including `done` = Done 24h.
+The Boards check is B3's: it decodes a scrubbed live capture of
+`GET /v1/mobile/summary`, asserts every stacked-bar segment equals its fixture
+field (including `done` = Done 24h), and proves the worker-slot cap is the
+server's `max_in_progress` rather than a literal in the widget.
 
 The Cards Running check is B2's: it compiles the real `SharedModels.swift`,
 `SharedStore.swift`, `WidgetDataClient.swift` and
@@ -497,9 +496,9 @@ Non-gap coverage notes:
 - `WakingActivityAttributes` belongs to the separate `HSCCLiveActivity`
   extension rather than `HSCCLiveActivityMonitor`; it is still covered on all
   four surfaces.
-- Two macOS widgets (Projects and Board Status) do not offer
-  `systemExtraLarge`; Cluster, Monitor, Kanban Monitor (CARD B3) and Cards
-  Running (CARD B2) do.
+- Two macOS widgets (Needs Me and Merge Queue) do not offer
+  `systemExtraLarge`; Cluster, Boards (CARD B3, the Kanban Monitor kind) and
+  Cards Running (CARD B2) do.
 - Section 8's "no GAP rows" is about *surfaces*: every declared family renders
   something. It is not a statement about *fields* — section 12 lists the fields
   those surfaces do not draw, and there are many.
