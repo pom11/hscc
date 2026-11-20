@@ -93,3 +93,78 @@ Sizes: small 158 pt, medium 338×158, large 338×354 (iPhone); macOS uses the sa
 
 ## Refresh (card W5f, after the widget audit report)
 Proposed: Cluster/Boards/Needs Me 15 min; Running 10 min while cards run, 30 min when idle; Merge Queue 5 min while a PR is in flight, 30 min when empty; app calls `WidgetCenter.reloadAllTimelines()` on foreground and after a successful fetch. Settings cadence must actually drive these. Final values come from `~/fleet-check/opencode-runs/audit-widgets.md`.
+
+## CarPlay (card W5g) — design C "Rows with gauges"
+
+Operator pick 2026-11-20. The visual reference is
+`docs/design/2026-11-20-carplay-mock.html` (design C in its DESIGNS array). The
+CarPlay scene is part of the iPhone app, not a widget: one `CPTemplateApplicationScene`
+(`CPTemplateApplicationSceneSessionRoleApplication` in the app's Info.plist, via
+`project.yml`) and no CarPlay widgets.
+
+### The screen
+
+Root is ONE `CPListTemplate`, title "HSCC", five rows, no scrolling at 800×480:
+
+1. **Cluster** — a `CPListImageRowItem` with four node gauges (0–90 °C arc,
+   green < 70 / orange 70–74 / red ≥ 75, degrees inside). Each element's title
+   is the node short name (◆ for the orchestrator) and its subtitle is
+   `34% · 41 t/s`; the row text is `Cluster · 4/4 up · 231 t/s`.
+2. **Boards** — stacked bars (running blue / todo grey / blocked orange) for
+   the top three boards; detail `2 running · 36 blocked · 89 done today`.
+3. **Running** — the longest elapsed time rendered as the image; detail is the
+   longest card title.
+4. **Needs you** — the unacknowledged count in red, or a green check when the
+   fetch succeeded and the list is empty; detail is the top alert title.
+5. **Merge queue** — the four-stage rebase/gates/push/merge track; detail
+   `#485 in gates · 2 waiting`, or `Merge queue off for <project>` when the
+   queue is disabled.
+
+Every row opens a pushed detail `CPListTemplate` (nodes / boards / cards /
+alerts / queue rows). Read-only: there is no ack and no write.
+
+### Data, refresh and failure
+
+The scene reads through the same `WidgetDataClient` routes and multi-address
+failover the widgets use, then projects with the shared readers
+(`ClusterNodeTally`, `ServingSummary`, `NeedsMeReading`, `MergeQueueReading`,
+`CardsRunningFeed`). No server route was added.
+
+Refresh every 30 s while the CarPlay scene is connected; the timer is
+invalidated on disconnect. The section header carries the data's own clock
+(`as of HH:mm`). When data is older than 2× the refresh interval the copy says
+`stale · HH:mm`; a failed fetch keeps the last good rows and says
+`offline · HH:mm`. **Never "All clear" after a failed fetch** — the Needs row
+shows the offline state even when the cached feed was empty.
+
+Images are drawn with `UIGraphicsImageRenderer` at
+`templateApplicationScene.carWindow.screen.scale`, using semantic colours
+resolved against `CPInterfaceController.carTraitCollection`, so both CarPlay
+appearances repaint (a style change re-renders the cached state without a read).
+
+### CarPlay entitlement (simulator only)
+
+Apple has not granted HSCC a CarPlay entitlement, and none was invented. The
+`com.apple.developer.carplay-driving-task` key exists ONLY in
+`ios-app/Sources/HSCC.simulator.entitlements`, selected by
+`CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]` in `project.yml`. Device and
+release builds (`scripts/release_apps.sh` → `ios-app/scripts/release_adhoc.sh`,
+the Ad Hoc IPA) keep `Sources/HSCC.entitlements` and the two extension
+entitlements byte for byte. `ios-app/scripts/carplay_check.sh` pins their
+SHA-256, checks the SDK condition and compiles the scene against the iOS SDK
+plus executes the row rules on macOS.
+
+### Running it in Xcode's CarPlay simulator
+
+1. `cd ios-app && xcodegen generate` (or open the existing generated project).
+2. Run the **HSCC** scheme on an iPhone simulator.
+3. In the simulator: **I/O → External Displays → CarPlay**. The car window
+   connects and the HSCC scene appears in the CarPlay sidebar.
+4. The scene needs the same setup as the widgets: set the cluster address and
+   token in the phone app first (Settings / connection screen).
+5. `I/O → External Displays → CarPlay` again disconnects; the refresh timer
+   stops with the scene.
+
+Do not install this build on a device through a CarPlay-enabled signing path:
+only the simulator entitlement file carries the key, and the device build does
+not compile a CarPlay-enabled signature.
