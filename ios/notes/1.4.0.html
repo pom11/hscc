@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSCC 1.4.0 — release notes</title>
+<style>body{margin:0;padding:28px 20px 56px;background:#000;color:#fff;font:17px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Helvetica,Arial,sans-serif}main{max-width:640px;margin:0 auto}h1,h2{color:#FF5722}a{color:#FF5722}code{font:0.93em ui-monospace,SFMono-Regular,Menlo,monospace}.foot{margin-top:36px;color:#777;font-size:.86rem}</style>
+</head>
+<body>
+<main>
+<h1>HSCC apps 1.4.0</h1><h2>Changed</h2><ul><li><strong>Five widgets, Native look.</strong> Cluster (health line, replaces Monitor and Cluster Graph), Boards (stacked bars, replaces Kanban Monitor, Board Status and Projects), Running (longest card), Needs Me (calm when clear), Merge Queue (pipeline). System colors, color only for state. Placed Cluster and Boards widgets keep working.</li><li><strong>Lock Screen gauges</strong> for all five widgets (circular, rectangular, inline).</li><li><strong>One Live Activity: Cluster watch.</strong> Wake, Monitor, Running Cards and Board Progress activities are removed.</li><li><strong>Honest data age.</strong> Every widget shows when its data was taken; stale data is dimmed with &quot;stale · HH:mm&quot;, a failed fetch shows &quot;offline · HH:mm&quot;, and Needs Me never says &quot;All clear&quot; unless the fetch succeeded.</li><li><strong>Refresh that actually happens.</strong> Cadences fit WidgetKit&#x27;s daily budget (15 min, Running 10/30, Merge Queue 5/30); the app reloads widgets on open and after a fetch. Settings now drive these values.</li></ul><h2>Added</h2><ul><li><strong>CarPlay screen</strong> (rows with gauges): cluster node gauges, boards, running, needs you, merge queue on one screen, refreshed every 30 s. Simulator only for now: Apple has not granted HSCC a CarPlay entitlement, so device builds are unchanged.</li></ul><h2>Fixed</h2><ul><li>Live Activity refresh &quot;Off&quot; no longer polls every minute.</li><li>The Fleet screen shows the server&#x27;s health-check age instead of implying a fresh check.</li><li>The widget network session is shared, so the API no longer runs out of connections.</li></ul>
+<p class="foot"><a href="https://pom11.github.io/hscc/">HSCC</a> · 1.4.0</p>
+</main>
+</body>
+</html>
