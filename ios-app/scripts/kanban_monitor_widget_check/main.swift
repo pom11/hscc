@@ -2,16 +2,16 @@ import Foundation
 import WidgetKit
 
 // ===========================================================================
-// kanban_monitor_widget_check — executed proofs for the KANBAN MONITOR widget.
+// kanban_monitor_widget_check — executed proofs for the Boards widget (B3).
 //
 // Compiles the REAL Sources/HSCCWidgets/KanbanMonitorWidget.swift with the real
-// SharedModels / SharedStore / WidgetDataClient and drives the board-table
-// projection against a scrubbed live capture of the compact summary route.
-// Nothing is redeclared and nothing touches the network.
+// SharedModels / SharedStore / WidgetDataClient and drives the B3 projection
+// against a scrubbed live capture of the compact summary route. Nothing is
+// redeclared and nothing touches the network.
 //
-// The capture is the CLI's own board table: each fixture count below is the
-// value `hscc kanban monitor` printed on 2026-11-18 (Done 24h included), folded
-// into the `/v1/mobile/summary` shape by `kanban_live.board_status_counts`.
+// The capture is the CLI's own board table; the fixture adds the server's
+// `max_in_progress` cap so the worker-slot strip is proven to come from the
+// wire, not from a literal in the widget.
 // ===========================================================================
 
 var checks = 0
@@ -50,74 +50,104 @@ let summary = decode(MobileSummaryResponse.self, "v1_mobile_summary_live_2026-11
 let rows = KanbanBoardRow.rows(from: summary)
 
 // ---------------------------------------------------------------------------
-// 1. The capture really carries the values the assertions claim.
+// 1. The capture really carries the values the B3 bars draw.
 // ---------------------------------------------------------------------------
-print("\n[1] the live capture carries the CLI board-table values")
+print("\n[1] the live capture carries the B3 deck values")
 let byBoard = Dictionary(uniqueKeysWithValues: rows.map { ($0.board, $0) })
 check("five active boards decoded", rows.count == 5, "\(rows.count)")
-check("the CLI's order: most running first, then board name",
-      rows.map(\.board) == ["hscc", "ecofire-flows", "ecofire-app", "gateclerk", "headless-display"],
+check("the B3 order: most open cards first, then board name",
+      rows.map(\.board) == ["headless-display", "hscc", "ecofire-flows",
+                            "gateclerk", "ecofire-app"],
       rows.map(\.board).joined(separator: ","))
-check("hscc: 2 running / 0 ready / 0 todo / 5 blocked / 73 done 24h",
-      byBoard["hscc"]?.running == 2 && byBoard["hscc"]?.ready == 0
-      && byBoard["hscc"]?.todo == 0 && byBoard["hscc"]?.blocked == 5
-      && byBoard["hscc"]?.done == 73)
-check("ecofire-flows: 1 running / 2 todo / 1 blocked / 6 done 24h",
-      byBoard["ecofire-flows"]?.running == 1 && byBoard["ecofire-flows"]?.todo == 2
-      && byBoard["ecofire-flows"]?.blocked == 1 && byBoard["ecofire-flows"]?.done == 6)
-check("headless-display: 10 blocked and no done today",
-      byBoard["headless-display"]?.blocked == 10 && byBoard["headless-display"]?.done == 0)
+check("hscc: 2 running / 0 todo / 5 blocked / 73 done = 7 open",
+      byBoard["hscc"]?.running == 2 && byBoard["hscc"]?.todo == 0
+      && byBoard["hscc"]?.blocked == 5 && byBoard["hscc"]?.done == 73
+      && byBoard["hscc"]?.openCards == 7)
+check("headless-display: 10 open / 10 blocked / no done today",
+      byBoard["headless-display"]?.openCards == 10
+      && byBoard["headless-display"]?.blocked == 10
+      && byBoard["headless-display"]?.done == 0)
+check("ecofire-flows: 4 open / 6 done today",
+      byBoard["ecofire-flows"]?.openCards == 4
+      && byBoard["ecofire-flows"]?.done == 6)
 check("an idle board would be skipped exactly as boards_table skips it",
       !KanbanBoardRow(board: "idle", running: 0, ready: 0, todo: 0,
                       blocked: 0, done: 0).hasActivity)
 if case .success(let table) = KanbanBoardRow.readResult(from: summary) {
     check("the envelope's registered-board count survives", table.boardCount == 5)
     check("the envelope's unreadable count is nil when every board read", table.unreadableBoards == nil)
+    check("the server's worker-slot cap is carried, not invented",
+          table.maxInProgress == 6, "\(String(describing: table.maxInProgress))")
+    check("the summary's generated_at is the data's clock",
+          table.generatedAtRaw == "2026-11-18T15:32:05Z")
 } else {
     check("the live capture is accepted", false, "read refused")
 }
 
 // ---------------------------------------------------------------------------
-// 2. The entry's aggregates are the CLI's own totals, built only from rows.
+// 2. The entry's B3 aggregates are the fixture's own fields.
 // ---------------------------------------------------------------------------
 print("\n[2] the entry aggregates the rows it draws")
 let live = KanbanMonitorEntry(date: .now, configured: true, rows: rows,
                               boardCount: rows.count, unreadableBoards: nil,
+                              maxInProgress: 6,
+                              generatedAtRaw: "2026-11-18T15:32:05Z",
                               failure: nil, partialReason: nil, ageMinutes: nil,
-                              refreshMinutes: 5, paused: false)
-check("running total is the CLI title's n_run (2+1=3)", live.runningTotal == 3, "\(live.runningTotal)")
-check("blocked total is the sum of the Blocked cells (5+1+1+2+10=19)", live.blockedTotal == 19)
-check("done-today total is the sum of the Done 24h cells (73+6=79)", live.doneTotal == 79)
-check("the small family's hero is running", live.headlineNumber == 3 && live.headlineLabel == "running")
-check("the inline line points at the busiest board's exact cells",
-      live.inlineLine == "hscc 2 run · 5 blocked", live.inlineLine)
-check("the rectangular line names the busiest board, not an aggregate",
-      live.rectangularLine == "hscc 2 run · 5 blocked", live.rectangularLine)
-check("family depths: small 2, medium 5, large 8",
-      KanbanMonitorEntry.rowLimit(for: .systemSmall) == 2
-      && KanbanMonitorEntry.rowLimit(for: .systemMedium) == 5
-      && KanbanMonitorEntry.rowLimit(for: .systemLarge) == 8)
+                              refreshMinutes: 15, paused: false)
+check("running total is the sum of Running cells (2+1=3)", live.runningTotal == 3, "\(live.runningTotal)")
+check("blocked total is the sum of Blocked cells (5+1+1+2+10=19)", live.blockedTotal == 19)
+check("done-today total is the sum of Done 24h cells (73+6=79)", live.doneTotal == 79)
+check("the bar denominator is the largest open count", live.maxOpenCards == 10, "\(live.maxOpenCards)")
+check("small draws the top four by open cards",
+      live.topBoards.map(\.board) == ["headless-display", "hscc",
+                                      "ecofire-flows", "gateclerk"])
+check("the inline accessory says running + blocked",
+      live.inlineLine == "3 running · 19 blocked", live.inlineLine)
+check("the rectangular accessory says done + blocked",
+      live.rectangularLine == "79 done today · 19 blocked", live.rectangularLine)
+check("family depths: small 4, medium 4, large 10",
+      KanbanMonitorEntry.rowLimit(for: .systemSmall) == 4
+      && KanbanMonitorEntry.rowLimit(for: .systemMedium) == 4
+      && KanbanMonitorEntry.rowLimit(for: .systemLarge) == 10)
 check("nothing open is an honest empty, not a failure",
       KanbanMonitorEntry(date: .now, configured: true, rows: [], boardCount: 0,
                          unreadableBoards: nil, failure: nil, partialReason: nil,
-                         ageMinutes: nil, refreshMinutes: 5, paused: false).inlineLine == "No open cards")
+                         ageMinutes: nil, refreshMinutes: 15, paused: false).inlineLine
+      == "0 running · 0 blocked")
 
 // ---------------------------------------------------------------------------
-// 3. Stale and failed states carry their age and reason.
+// 3. One-board scope uses that board's row and running titles.
 // ---------------------------------------------------------------------------
-print("\n[3] age and reason are visible, never implied")
+print("\n[3] one-board scope draws one bar and its running titles")
+let scoped = KanbanMonitorEntry(date: .now, configured: true, rows: rows,
+                                boardCount: rows.count, unreadableBoards: nil,
+                                maxInProgress: 6, scopeBoard: "hscc",
+                                runningTitles: ["Wire the boards widget"],
+                                failure: nil, partialReason: nil, ageMinutes: nil,
+                                refreshMinutes: 15, paused: false)
+check("the scoped row is the board the intent chose",
+      scoped.scopedRow?.board == "hscc" && scoped.scopedRow?.openCards == 7)
+check("running titles are the scoped board's rows",
+      scoped.runningTitles == ["Wire the boards widget"])
+
+// ---------------------------------------------------------------------------
+// 4. Stale and failed states carry their age and reason.
+// ---------------------------------------------------------------------------
+print("\n[4] age and reason are visible, never implied")
 let stale = KanbanMonitorEntry(date: .now, configured: true, rows: rows,
                                boardCount: rows.count, unreadableBoards: nil,
+                               maxInProgress: 6,
                                failure: nil, partialReason: .unreachable(code: nil),
-                               ageMinutes: 12, refreshMinutes: 5, paused: false)
-check("a kept snapshot says updated + age + reason",
-      stale.updatedLine == "updated 12m ago · No connection", stale.updatedLine)
+                               ageMinutes: 40, refreshMinutes: 15, paused: false)
+check("a kept snapshot is dimmed and says offline",
+      stale.staleState?.isDimmed == true
+      && (stale.staleState?.label?.contains("offline") ?? false))
 let failed = KanbanMonitorEntry(date: .now, configured: true, rows: [], boardCount: nil,
                                 unreadableBoards: nil, failure: .unauthorized,
                                 partialReason: nil, ageMinutes: nil,
-                                refreshMinutes: 5, paused: false)
+                                refreshMinutes: 15, paused: false)
 check("a failed read names the reason and draws no count",
-      failed.inlineLine == "Token rejected" && failed.headlineNumber == nil)
+      failed.inlineLine == "Token rejected" && failed.runningTotal == 0)
 check("paused draws no data and says so",
       KanbanMonitorEntry.paused(refreshMinutes: 0).inlineLine == "Paused"
       && KanbanMonitorEntry.paused(refreshMinutes: 0).rows.isEmpty)
@@ -126,9 +156,9 @@ check("unconfigured invites setup before anything else",
       unconfigured.inlineLine == "Set up in HSCC" && unconfigured.gateLine.contains("Set up"))
 
 // ---------------------------------------------------------------------------
-// 4. Payload refusals: degraded and truncated data never become a table.
+// 5. Payload refusals: degraded and truncated data never become a table.
 // ---------------------------------------------------------------------------
-print("\n[4] a payload the app cannot trust is refused")
+print("\n[5] a payload the app cannot trust is refused")
 let degraded = decode(MobileSummaryResponse.self, "v1_mobile_summary_degraded.json")
 if case .failure(let f) = KanbanBoardRow.readResult(from: degraded) {
     check("degraded summary is refused", f == .decoding(detail: "mobile/summary carried no boards"))
@@ -152,22 +182,25 @@ if case .success(let table) = KanbanBoardRow.readResult(from: boardError) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. §7 storage: board slugs + integers + the fetch date, nothing else.
+// 6. §7 storage: board slugs + integers + the fetch date, nothing else.
 // ---------------------------------------------------------------------------
-print("\n[5] the App Group snapshot is the projection, nothing else (§7)")
+print("\n[6] the App Group snapshot is the projection, nothing else (§7)")
 let suite = SharedStore.suite
 check("the shared suite is reachable", suite != nil)
 if let suite {
     let prior = suite.data(forKey: KanbanMonitorSnapshotStore.storageKey)
     let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-    KanbanMonitorSnapshotStore.save(rows, at: stamp)
+    KanbanMonitorSnapshotStore.save(rows, maxInProgress: 6, at: stamp)
     let loaded = KanbanMonitorSnapshotStore.lastKnown()
     check("the board rows round-trip", loaded?.value.rows == rows)
+    check("the cap travels with the rows", loaded?.value.maxInProgress == 6)
     check("and the fetch date travels with them", loaded?.at == stamp)
     if let data = suite.data(forKey: KanbanMonitorSnapshotStore.storageKey),
        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         let top = Set(object.keys)
-        check("the stored top level is rows + date", top == ["rows", "date"], top.sorted().joined(separator: ","))
+        check("the stored top level is rows + date + cap",
+              top == ["rows", "date", "maxInProgress"],
+              top.sorted().joined(separator: ","))
         if let storedRows = object["rows"] as? [[String: Any]],
            let first = storedRows.first {
             let keys = Set(first.keys)

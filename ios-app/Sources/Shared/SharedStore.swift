@@ -522,8 +522,7 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
              .widgetNeedsMe, .widgetMergeQueue:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
@@ -562,14 +561,10 @@ extension WidgetSurfaceKind {
         // `node`/`metrics`/`window` — so a board picker here would write a value
         // nothing reads, which is exactly the control this property exists to
         // suppress.
-        // Every other surface keeps true: main grew this switch since this
-        // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
-        // widgetProjects all landed from main), and a new case has to be
-        // judged here deliberately rather than by an exhaustive-switch build
-        // error. Each of the three is fetched through a route its own card
-        // measured against a scope, so they keep what ships today.
-        case .widgetCluster, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+        // Every other surface keeps true: each is fetched through a route its
+        // own card measured against a scope. A new case has to be judged here
+        // deliberately rather than by an exhaustive-switch build error.
+        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
              .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityBoardProgress:
             return true
@@ -589,39 +584,21 @@ extension WidgetSurfaceKind {
     ///   - "timing"    — wake timing / elapsed (Live Activities)
     ///
     /// A surface with ONE dataset and no optional part declares the empty set:
-    /// the board status widget draws five counts for one board and nothing
-    /// else, so every candidate section here would be a toggle that either
-    /// empties the widget or does nothing — and a toggle that does nothing is
-    /// a lie in the settings UI (`WidgetSurfaceEditor` hides its whole
-    /// "Show Content" group for exactly this case).
+    /// the Boards widget draws one stacked bar per board and nothing optional,
+    /// so every candidate section here would be a toggle that either empties
+    /// the widget or does nothing — and a toggle that does nothing is a lie in
+    /// the settings UI (`WidgetSurfaceEditor` hides its whole "Show Content"
+    /// group for exactly this case).
     var availableSections: Set<String> {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
-        // One dataset, nothing optional — see the rule above. The board tile is
-        // five counts for one board; the running-cards widget is the row list
-        // plus the running/blocked counts its header and footer are built from;
-        // the monitor panel is running/ready/blocked plus that same merged list.
-        // A toggle for any part of those would either empty the surface or do
-        // nothing, and every entry here renders a Toggle — so an invented id is
-        // a dead control the operator can touch.
-        case .widgetBoardStatus: return []
+        // One dataset, nothing optional — see the rule above. The running-cards
+        // widget is the row list plus the running/blocked counts its header and
+        // footer are built from; Boards is one bar per board plus the same
+        // running/blocked totals. A toggle for any part would either empty the
+        // surface or do nothing, and every entry here renders a Toggle — so an
+        // invented id is a dead control the operator can touch.
         case .widgetCardsRunning, .widgetKanbanMonitor: return []
-        // The projects surface is the same ruling, and the card asked explicitly
-        // whether its per-project rows make a section genuine. They do not:
-        //   * it draws ONE dataset (`GET /v1/projects` → `{name, board}` rows)
-        //     and BOTH keys carry the fact — this file's own header says the
-        //     surface exists to show which projects exist "and which board each
-        //     one lives on", so a "board" toggle that emptied the board column
-        //     would remove the reason the surface exists, not trim a garnish;
-        //   * per-project scoping is already a control the operator has and can
-        //     see: `ProjectFilterIntent`'s Project picker in the widget's own
-        //     configuration sheet. A second copy of that choice in this store
-        //     would be a Toggle the sheet never reads.
-        // So: nothing here is optional, and `WidgetSurfaceEditor` hides its whole
-        // "Show Content" group for exactly this case (ConfigView's
-        // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
-        // control the operator can touch and nothing obeys.
-        case .widgetProjects: return []
         // The "Needs me" tile is one list (unacknowledged alerts) with no
         // optional part: level, title, body first line and age are the row.
         // A section toggle here would either empty the surface or do nothing.

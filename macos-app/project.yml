@@ -260,8 +260,8 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: ../ios-app/Sources/HSCCWidgets
-      # The shared @main WidgetBundle: Cluster, Monitor, Cards Running,
-      # Kanban Monitor, Projects, Board Status and Needs Me.
+      # The shared @main WidgetBundle: Cluster, Cards Running, Boards
+      # (the Kanban Monitor kind), Needs Me and Merge Queue.
       # The `systemMedium` CLI host table (t_2d1c12dc), reused BY PATH exactly
       # like the widget that draws it: the desktop's medium tile is the same
       # nine CLI columns, not a macOS re-implementation of them.

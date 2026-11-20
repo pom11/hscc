@@ -4,10 +4,8 @@
 
 enum WidgetSurfaceKind: String, CaseIterable, Codable {
     case widgetCluster = "widget.cluster"
-    case widgetBoardStatus = "widget.boardStatus"
     case widgetCardsRunning = "widget.cardsRunning"
     case widgetKanbanMonitor = "widget.kanbanMonitor"
-    case widgetProjects = "widget.projects"
     case widgetNeedsMe = "widget.needsMe"
     case widgetMergeQueue = "widget.mergeQueue"
     case liveActivityWake = "liveActivity.wake"

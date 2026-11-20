@@ -1,15 +1,16 @@
 import Foundation
 
 // ---------------------------------------------------------------------------
-// BoardStatusReading.swift — the executable half of the Board Status widget.
+// BoardStatusReading.swift — the board projection shared by the Board Progress
+// Live Activity (the Board Status widget itself was retired by CARD B3).
 //
-// WHY THIS FILE EXISTS. `BoardStatusWidget.swift` imports WidgetKit + AppIntents,
-// so no gate on this host can compile it: the macOS SDK marks the accessory
-// families unavailable, and `build_check.sh` only ever COMPILES the iOS target —
-// it never runs a provider. That combination is how a widget ships a false zero
-// with every gate green. So every decision that produces a NUMBER lives here, on
-// Foundation only, and `scripts/board_status_widget_check.sh` compiles THIS file
-// against the real `SharedModels.swift` / `SharedStore.swift` /
+// WHY THIS FILE EXISTS. The Live Activity extension imports WidgetKit, so no
+// gate on this host can run its provider: the macOS SDK marks the accessory
+// families unavailable, and `build_check.sh` only ever COMPILES the iOS target.
+// That combination is how a surface ships a false zero with every gate green.
+// So every decision that produces a NUMBER lives here, on Foundation only, and
+// the app-side driver compiles THIS file against the real `SharedModels.swift` /
+// `SharedStore.swift` /
 // `WidgetDataClient.swift` and EXECUTES those rules headlessly. Same split as
 // `ClusterWidgetMetrics.swift` for the cluster widget.
 //

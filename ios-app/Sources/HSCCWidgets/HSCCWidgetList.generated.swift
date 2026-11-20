@@ -13,8 +13,6 @@ struct HSCCWidgetList: WidgetBundle {
         ClusterWidget()
         CardsRunningWidget()
         KanbanMonitorWidget()
-        ProjectsWidget()
-        BoardStatusWidget()
         NeedsMeWidget()
         MergeQueueWidget()
     }

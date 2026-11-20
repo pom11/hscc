@@ -245,7 +245,7 @@ def _serialize(payload: dict) -> bytes:
 
 
 def _assemble(entries: list, speak: str, board_total: int, omitted: int,
-              unusable: int = 0) -> dict:
+              unusable: int = 0, max_in_progress=None) -> dict:
     """The payload envelope for ``entries``, with the truncation flags set."""
     payload = {
         "generated_at": _now_utc_z(),
@@ -253,6 +253,10 @@ def _assemble(entries: list, speak: str, board_total: int, omitted: int,
         "board_count": len(entries),
         "total_boards": board_total,
     }
+    if max_in_progress is not None:
+        # The operator's `kanban.max_in_progress`, the same cap the CLI title
+        # prints. Absent means "no cap configured", never zero.
+        payload["max_in_progress"] = int(max_in_progress)
     if omitted:
         payload["truncated"] = True
         payload["omitted_boards"] = omitted
@@ -265,7 +269,7 @@ def _assemble(entries: list, speak: str, board_total: int, omitted: int,
 
 
 def _fit_budget(entries: list, board_total: int,
-                unusable: int = 0) -> dict:
+                unusable: int = 0, max_in_progress=None) -> dict:
     """Trim from the tail until the response fits :data:`MAX_RESPONSE_BYTES`.
 
     Deterministic (entries arrive sorted by slug), and never a silent cap: the
@@ -278,7 +282,8 @@ def _fit_budget(entries: list, board_total: int,
     while True:
         omitted = len(entries) - len(served)
         speak = _speak(entries, board_total, omitted, unusable)
-        payload = _assemble(served, speak, board_total, omitted, unusable)
+        payload = _assemble(served, speak, board_total, omitted, unusable,
+                            max_in_progress)
         if len(_serialize(payload)) <= MAX_RESPONSE_BYTES or not served:
             return payload
         served.pop()
@@ -340,7 +345,17 @@ def handle_mobile_summary(server, ctx, query, body):
                         **kanban_live.board_status_counts(board)})
 
     entries.sort(key=lambda e: e["board"])
-    return 200, _fit_budget(entries, len(entries), unusable)
+    # The worker-slot cap is the operator's `kanban.max_in_progress`, read by
+    # the same collect() pass the CLI renders. It is optional: an unset or
+    # unreadable config is "no cap", never a fabricated 6.
+    caps = data.get("caps")
+    cap = None
+    if isinstance(caps, (tuple, list)) and caps:
+        try:
+            cap = int(caps[0]) if caps[0] is not None else None
+        except (TypeError, ValueError):
+            cap = None
+    return 200, _fit_budget(entries, len(entries), unusable, cap)
 
 
 # --------------------------------------------------------------------------- #
