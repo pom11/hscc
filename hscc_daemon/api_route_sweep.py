@@ -23,7 +23,11 @@ A 400 from a route that REQUIRES a parameter is expected and is NOT a failure �
 the client supplies it; a bare sweep call does not.
 
 Only GETs are swept. Mutating POSTs are listed as not covered rather than fired,
-so the gap is explicit instead of silently missing.
+so the gap is explicit instead of silently missing. The same rule covers a GET
+whose handler IS the fleet smoke test: ``NOT_SWEPT`` below names it, and the
+sweep reports it covered-but-not-exercised instead of firing it. A route that
+legitimately needs longer than the blanket probe budget gets one of its own
+(``HEAVY_ROUTES``) rather than a permanent false red.
 """
 
 import json
@@ -77,6 +81,46 @@ NEEDS_PARAM = {
     "/v1/memory": {"profile": "hscc-orch"},
     "/v1/logs": {"source": "daemon", "limit": "1"},
 }
+
+# ── Probe budgets and never-fired routes (DATA, not a special-case `if`) ────
+# The sweep proves routes ANSWER. It must not run the fleet smoke test.
+#
+# Blanket curl `-m` for every route HEAVY_ROUTES does not name.
+PROBE_TIMEOUT = 30
+
+# Routes whose handler legitimately needs longer than the blanket budget:
+# route -> its own curl `-m`, in seconds.
+#
+# /v1/health runs one inline `hscc verify` when it has no cached snapshot to
+# serve — measured 64.4 s on a healthy fleet (t_81713661) — so the blanket 30 s
+# cap gave up mid-request and the row reported `000` for a route that was
+# answering: a gate that false-flags a healthy API. With the health snapshot
+# cache in place the cold path is the exception, so 120 s is a fallback for that
+# first call rather than the normal one. Every other route keeps PROBE_TIMEOUT
+# on purpose: a route that turns slow for a reason nobody predicted is a finding
+# to look at, not something to quietly hand a longer leash.
+HEAVY_ROUTES = {"/v1/health": 120}
+
+# Routes the sweep must never fire, with the note that reports the gap.
+#
+# /v1/verify's handler IS `hscc_daemon.verify.run_all()` — the very check that
+# shells out to this sweep. Probing it from inside `hscc verify` therefore starts
+# a nested full verify per hit, each doing real chat round-trips against the
+# operator's GPU units, and each of those sweeps probes /v1/verify again: a
+# branching-factor-2 chain of fleet smoke tests behind one reachability check.
+# Reachability is proven by the routes that answer cheaply; it is never proven
+# by firing the most expensive operation in the system.
+#
+# A skipped route still gets a row — the same shape a POST-only route gets — so
+# the gap stays visible in the report instead of the route silently vanishing.
+NOT_SWEPT = {
+    "/v1/verify": ("route exists; verify-triggered, "
+                   "not swept from inside verify"),
+}
+
+# What a skipped row reports for `status`. No request was made, so no HTTP code
+# may be claimed; deliberately not a number, so it can never be read as one.
+NOT_SWEPT_STATUS = "skip"
 
 
 def api_base():
@@ -152,13 +196,20 @@ def sweep():
                         "from (%s: %s)" % (CLIENT, exc.strerror or exc))
 
     gets = [r for r in literal if not r.endswith(("/stop", "/up", "/down"))]
-    if not gets:
+    # A route in NOT_SWEPT is reported, never called, so it must not count as
+    # coverage either: a client source whose only literal GET were /v1/verify
+    # would otherwise "sweep" nothing and still print every route answering.
+    probed = [r for r in gets if r not in NOT_SWEPT]
+    if not probed:
         # The client source parsed but yielded no GET route to call. Reporting
         # "every route the app calls answers" over an empty list would be a
         # FALSE GREEN — the mirror image of the false red this card fixes (a
         # renamed or emptied client file would make the row pass forever).
-        return _bail(3, "cannot sweep: %s yielded no literal GET routes to call"
-                          % CLIENT)
+        detail = ("" if not gets else
+                  " (its only literal GETs are routes this sweep never fires: %s)"
+                  % ", ".join(gets))
+        return _bail(3, "cannot sweep: %s yielded no literal GET routes to call%s"
+                          % (CLIENT, detail))
 
     if shutil.which("curl") is None:
         # The sweep speaks HTTP through curl. Without it NOTHING was observed,
@@ -170,12 +221,23 @@ def sweep():
 
     rows, failures = [], []
     for route in gets:
+        if route in NOT_SWEPT:
+            # Covered, not exercised — the report shape the sweep already uses
+            # for a POST-only route, so the gap is a named row rather than a
+            # route that quietly disappeared from the list. `ok` is True because
+            # nothing here says the route is dead; the note says what was NOT
+            # proven. No request went out, so `status` claims no HTTP code.
+            rows.append({"route": route, "status": NOT_SWEPT_STATUS,
+                         "seconds": 0.0, "parses": True, "ok": True,
+                         "note": NOT_SWEPT[route]})
+            continue
         url = base + route
         params = NEEDS_PARAM.get(route)
         if params:
             url += "?" + urlencode(params)
         proc = subprocess.run(
-            ["curl", "-s", "-m", "30", "-w", "\n%{http_code} %{time_total}",
+            ["curl", "-s", "-m", str(HEAVY_ROUTES.get(route, PROBE_TIMEOUT)),
+             "-w", "\n%{http_code} %{time_total}",
              "-H", "Authorization: Bearer " + tok, url],
             capture_output=True, text=True)
         parts = proc.stdout.rsplit("\n", 1)
@@ -257,9 +319,13 @@ def render_human(rows, failures, dynamic, theme_name=None):
         print("cannot render: hscc_daemon.cli_theme unavailable")
         return
 
+    # ``rows`` also carries the routes this sweep refuses to fire; the panel
+    # says what was actually called, so a skipped route cannot inflate the
+    # coverage count the operator reads at the top of the table.
+    swept = sum(1 for r in rows if r.get("status") != NOT_SWEPT_STATUS)
     console.print(theme.make_panel(
         "api route sweep",
-        "Sweeping %d literal GET routes the app calls" % len(rows)))
+        "Sweeping %d literal GET routes the app calls" % swept))
 
     table = theme.make_table("api route sweep")
     table.add_column("result", no_wrap=True)
@@ -273,6 +339,12 @@ def render_human(rows, failures, dynamic, theme_name=None):
             glyph = "ok"
         elif r["status"] == "405":
             mark = "post"
+            glyph = "label"
+        elif r["status"] == NOT_SWEPT_STATUS:
+            # Not called, not failed: same neutral label a POST-only route gets.
+            # Without this branch a skipped route would print as FAIL, which is
+            # a false alarm of exactly the kind this file exists to prevent.
+            mark = "skip"
             glyph = "label"
         else:
             mark = "FAIL"
@@ -292,6 +364,10 @@ def render_human(rows, failures, dynamic, theme_name=None):
 
     console.print("")
     console.print("Mutating POSTs are deliberately NOT fired by this sweep.")
+    if swept != len(rows):
+        console.print("Neither are routes that would run the fleet smoke test "
+                      "from inside it — they show as skip rows, with the "
+                      "reason in the note column.")
     if failures:
         console.print(theme.make_status_panel(
             "%d ROUTE(S) FAILED: %s\n"
