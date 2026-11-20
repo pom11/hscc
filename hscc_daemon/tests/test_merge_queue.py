@@ -5,7 +5,9 @@ Every test builds a throwaway bare origin + clone under ``tmp_path`` and
 injects the ``gh`` runner, so no test touches a real repository or network.
 """
 
+import contextlib
 import json
+import sqlite3
 import subprocess
 from types import SimpleNamespace
 
@@ -459,3 +461,133 @@ def test_view_board_filter_keeps_only_that_projects_queue(tmp_path):
     filtered = mq.view(state_path=_state(tmp_path), registry_path=registry,
                        board="not-alpha")
     assert filtered["rows"] == []
+
+
+# ── the production runner (no injected runner) ─────────────────────────────
+
+def test_default_runner_drives_real_git_in_a_temp_repo(tmp_path):
+    """F1: the real default runner must work, not only injected runners."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+
+    proc = mq._git(["rev-parse", "--is-inside-work-tree"], str(repo),
+                   mq._default_runner)
+
+    assert proc is not None
+    assert proc.returncode == 0, proc.stderr
+    assert isinstance(proc.stdout, str)
+    assert proc.stdout.strip() == "true"
+
+
+# ── auto-enqueue repo identity ─────────────────────────────────────────────
+
+def _board_with_cards(tmp_path, cards):
+    """A minimal kanban DB behind the read-only board seam."""
+    path = tmp_path / "kanban.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, assignee TEXT, body TEXT, "
+        "status TEXT)")
+    conn.execute(
+        "CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_id TEXT, body TEXT)")
+    for card, body in cards:
+        conn.execute(
+            "INSERT INTO tasks VALUES (?, 'worker', ?, 'ready')", (card, body))
+    conn.commit()
+    conn.close()
+
+    class FakeKanban:
+        def connect_closing(self, board=None):
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            return contextlib.closing(db)
+
+    return FakeKanban()
+
+
+def _board_seam(monkeypatch, kb):
+    from hscc_daemon import autodown
+    monkeypatch.setattr(autodown, "_load_kanban_db_or_default", lambda: kb)
+    monkeypatch.setattr(autodown, "_enum_board_names",
+                        lambda *a, **k: (["alpha"], False))
+
+
+def test_auto_enqueue_ignores_a_pr_url_from_another_repo(tmp_path,
+                                                        monkeypatch):
+    """F2: a card linking another repo's #42 must not enqueue this repo's #42."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_foreign", "see https://github.com/other/repo/pull/42")]))
+    gh = FakeGh({42: {"headRefName": "wt/t_foreign",
+                      "headRefOid": "a" * 40}})
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+    assert gh.calls == []
+
+
+def test_auto_enqueue_accepts_a_pr_url_from_the_projects_origin(tmp_path,
+                                                               monkeypatch):
+    """The same URL on the project's own origin (ssh, mixed case) is accepted."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin", "git@github.com:Pom11/Alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_own", "https://github.com/pom11/alpha/pull/42")]))
+    gh = FakeGh({42: {"headRefName": "wt/t_own", "headRefOid": "b" * 40}})
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert ready == [{"pr": 42, "card": "t_own", "assignee": "worker",
+                      "branch": "wt/t_own"}]
+
+
+# ── sandbox isolation (HSCC_HOME / HSCC_DIR) ───────────────────────────────
+
+def test_state_paths_honour_hscc_home_and_hscc_dir(tmp_path, monkeypatch):
+    """F13: the ledger/worktrees follow the sandbox root, like alerts.py."""
+    monkeypatch.delenv("HSCC_HOME", raising=False)
+    monkeypatch.delenv("HSCC_DIR", raising=False)
+    home = tmp_path / "sandbox-home"
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    assert mq.state_file() == str(home / "merge-queue-state.json")
+    assert mq.queue_root() == str(home / "merge-queue")
+
+    hscc_dir = tmp_path / "sandbox-dir"
+    monkeypatch.delenv("HSCC_HOME")
+    monkeypatch.setenv("HSCC_DIR", str(hscc_dir))
+    assert mq.state_file() == str(hscc_dir / "merge-queue-state.json")
+    assert mq.queue_root() == str(hscc_dir / "merge-queue")
+
+    # HSCC_HOME (the alerts.py variable) wins when both are set.
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    assert mq.state_file() == str(home / "merge-queue-state.json")
+
+
+def test_add_to_queue_writes_only_under_hscc_home(tmp_path, monkeypatch):
+    """A sandboxed write must land in $HSCC_HOME, never $HOME/.hscc."""
+    home = tmp_path / "home"
+    sandbox = tmp_path / "sandbox"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HSCC_HOME", str(sandbox))
+    monkeypatch.delenv("HSCC_DIR", raising=False)
+
+    mq.add_to_queue("alpha", 7, card="t_sandbox")
+
+    assert (sandbox / "merge-queue-state.json").exists()
+    assert not (home / ".hscc" / "merge-queue-state.json").exists()
+    assert mq.load_state()["projects"]["alpha"]["queue"][0]["pr"] == 7
