@@ -21,6 +21,12 @@ Two invariants are pinned here:
    missing client source, a missing renderer) is UNVERIFIED (``ok is None``) or
    the explicit "API not reachable" fail — never "route(s) did not answer", and
    never a raw traceback as the row text.
+3. NEVER FIRE THE SMOKE TEST. The sweep proves routes ANSWER. ``/v1/verify``'s
+   handler IS ``verify.run_all()`` — the check that shells out to this sweep —
+   so probing it seeded nested full verifies with real GPU chat round-trips; it
+   is reported, not called. ``/v1/health``'s cold start is legitimately slower
+   than the blanket 30 s budget, so it gets one of its own instead of a
+   permanent false red (t_109bcc97).
 
 Everything runs against a FAKE keg in tmp_path and a closed loopback port; the
 live API, the operator's ``~/.hscc`` and the fleet are never touched.
@@ -376,4 +382,145 @@ def test_logs_probe_sends_source_and_limit(tmp_path):
                if r["route"] == "/v1/logs")
     assert row["ok"] is True
     assert "source=daemon" in row["note"] and "limit=1" in row["note"]
+
+
+# ── 5. the sweep must not re-trigger verify from inside verify (t_109bcc97) ──
+
+# A client whose routes make the two new rules observable at once: one heavy
+# route, one verify-triggered route, and a plain one that must NOT inherit
+# either treatment.
+_SWIFT_HEAVY = '''\
+import Foundation
+func health() { get("/v1/health") }
+func ping()   { get("/v1/ping") }
+func feed()   { get("/v1/activity/feed") }
+func verify() { get("/v1/verify") }
+'''
+
+# A stand-in for curl that logs the WHOLE argv it is handed and answers 200 with
+# a parseable body. ``test_logs_probe_sends_source_and_limit`` records only the
+# URL, which is all a query-parameter pin needs; a probe BUDGET lives in the
+# flags, so this keeps every argument.
+#
+# Arguments are joined with \\x1f and calls separated by \\x1e rather than by
+# lines: the sweep's ``-w`` argument contains a literal newline, which no
+# line-based format survives, and neither control character can appear in an
+# argument curl is given.
+_CURL_ARGV_STUB = (
+    "#!%s\n"
+    "import sys\n"
+    "with open(%r, 'a') as fh:\n"
+    "    fh.write('\\x1f'.join(sys.argv[1:]) + '\\x1e')\n"
+    "sys.stdout.write('{\"ok\": true}\\n200 0.01')\n"
+)
+
+
+def _fake_argv_curl(tmp_path, root, swift):
+    """Plant ``swift`` as the client and an argv-logging curl on PATH.
+
+    Returns (capture_path, path_for_run). The sweep talks HTTP through curl and
+    nothing else, so this is the whole seam: no socket is ever opened.
+    """
+    (root / "ios-app" / "Sources" / "HSCC" / "HSCCClient.swift").write_text(swift)
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    capture = tmp_path / "curl-argv.txt"
+    curl = bindir / "curl"
+    curl.write_text(_CURL_ARGV_STUB % (sys.executable, str(capture)))
+    curl.chmod(0o755)
+    return capture, (str(bindir) + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
+
+
+def _sweep_json_capturing_argv(tmp_path, swift):
+    """``--json`` sweep against the logging curl; return (completed, argv_calls)."""
+    root, script = _fake_keg(tmp_path, theme="")
+    capture, path = _fake_argv_curl(tmp_path, root, swift)
+    cp = _run(script, ["--json"], tmp_path, cwd="/", path=path)
+    argv = [call.split("\x1f") for call in capture.read_text().split("\x1e") if call]
+    return cp, argv
+
+
+def test_verify_route_is_never_probed_and_reports_the_gap(tmp_path):
+    """``hscc verify`` must not seed a nested verify through its own sweep.
+
+    ``/v1/verify``'s handler IS ``hscc_daemon.verify.run_all()`` — the check that
+    shells out to this very sweep — so one probe started a fresh full verify with
+    real chat round-trips against the GPU units, and that child swept
+    ``/v1/verify`` again. The route stays in the report the way a POST-only route
+    does: covered, with the gap named in the note.
+    """
+    cp, argv = _sweep_json_capturing_argv(tmp_path, _SWIFT_HEAVY)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+
+    urls = [args[-1] for args in argv]
+    assert [u for u in urls if u.endswith("/v1/verify")] == [], (
+        "the sweep fired the route that runs verify: %s" % urls)
+    assert any(u.endswith("/v1/health") for u in urls), urls  # not all skips
+
+    row = next(r for r in json.loads(cp.stdout)["routes"]
+               if r["route"] == "/v1/verify")
+    assert row["ok"] is True, row
+    assert "verify-triggered" in row["note"], row
+    assert "not swept" in row["note"], row
+    # Same machine shape as every other row, key order included: the consumer
+    # (verify's api_routes row) must never have to special-case this route.
+    assert list(row) == ["route", "status", "seconds", "parses", "ok", "note"], row
+
+
+def test_health_probe_gets_the_raised_timeout(tmp_path):
+    """The curl argv carries a per-route budget: 120 s for /v1/health, 30 s on
+    every other route.
+
+    ``/v1/health`` runs one inline verify on a cold start (measured 64.4 s), so
+    the blanket ``-m 30`` cut the probe off and the row printed ``000`` for a
+    route that was answering. Everything else keeps 30 s on purpose: a route
+    that turns slow for an unforeseen reason is a finding, not a thing to hand a
+    longer leash.
+    """
+    cp, argv = _sweep_json_capturing_argv(tmp_path, _SWIFT_HEAVY)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    by_url = {args[-1]: args for args in argv}
+    assert len(argv) == 3, by_url  # health, ping, feed — verify is never called
+
+    health = by_url["http://127.0.0.1:1/v1/health"]
+    assert health[:4] == ["-s", "-m", "120", "-w"], health
+    for route in ("/v1/ping", "/v1/activity/feed"):
+        args = by_url["http://127.0.0.1:1" + route]
+        assert args[:4] == ["-s", "-m", "30", "-w"], (route, args)
+
+
+def test_client_naming_only_never_swept_routes_refuses_a_false_green(tmp_path):
+    """A client whose only literal GET is /v1/verify swept NOTHING.
+
+    Excluding a route from the probes must not also exclude it from the
+    "did we look at all?" guard: the same false-green mirror this file already
+    pins for an emptied client source, one step further out.
+    """
+    root, script = _fake_keg(tmp_path, theme="")
+    (root / "ios-app" / "Sources" / "HSCC" / "HSCCClient.swift").write_text(
+        'func verify() { get("/v1/verify") }\n')
+    cp = _run(script, ["--json"], tmp_path, cwd="/")
+    combined = cp.stdout + cp.stderr
+    assert cp.returncode == 3, combined
+    payload = json.loads(cp.stdout)
+    assert payload["could_not_run"] is True
+    assert "no literal GET routes" in payload["error"], payload
+
+
+def test_skipped_route_renders_as_skip_not_fail(tmp_path):
+    """The human view must not print the never-fired route as FAIL.
+
+    A skipped row is neither a pass nor a dead route; rendering it as FAIL would
+    reintroduce the false alarm this file exists to kill, this time with the
+    operator reading a red row for a route the sweep deliberately left alone.
+    """
+    root, script = _fake_keg(tmp_path, theme=None)
+    shutil.copyfile(CLI_THEME_SRC, root / "hscc_daemon" / "cli_theme.py")
+    _, path = _fake_argv_curl(tmp_path, root, _SWIFT_HEAVY)
+    cp = _run(script, [], tmp_path, cwd="/", path=path)
+    combined = cp.stdout + cp.stderr
+    assert cp.returncode == 0, combined
+    assert "FAIL" not in combined, combined
+    assert "/v1/verify" in combined, combined
+    assert "skip" in combined, combined
 
