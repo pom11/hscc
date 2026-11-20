@@ -1,5 +1,11 @@
 [
   {
+    "build": 6,
+    "notes_url": "https://pom11.github.io/hscc/ios/notes/1.4.1.html",
+    "released_at": "2026-11-20T13:12:29Z",
+    "version": "1.4.1"
+  },
+  {
     "build": 5,
     "notes_url": "https://pom11.github.io/hscc/ios/notes/1.4.0.html",
     "released_at": "2026-11-20T11:42:36Z",
