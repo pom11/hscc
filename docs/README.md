@@ -76,7 +76,7 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 
 ## design/
 
-- `docs/design/2026-11-20-widget-redesign.md` — operator picks for the apps 1.4 widget consolidation (5 widgets, native look): the design contract every later widget card builds against. The Cluster C1 pick and the Monitor/Cluster Graph retirement shipped (PR #487); the Boards/Running/Needs Me/Merge Queue/lock-screen/Live Activity picks are still pending. **live**
+- `docs/design/2026-11-20-widget-redesign.md` — operator picks for the apps 1.4 widget consolidation (5 widgets, native look): the design contract every later widget card builds against, landing pick-by-pick — Cluster C1 + the Monitor/Cluster Graph retirement (PR #487), Boards B3 + the Board Status/Projects retirement (PR #492). **live**
 - `docs/design/2026-11-20-widget-redesign-mock.html` — clickable mock companion to that spec (one band per widget type at real sizes, with the sticky pick bar). **live** companion.
 - `docs/design/2026-11-19-main-orchestrator-design.md` — design for the ONE main orchestrator (named at bootstrap, default `general`): its own board is the kanban default, cluster authority except LIVE publish, daemon-owned wake-ups, `hscc orch inject` to project orchestrators, `hscc notify` alert feed (`list`/`ack`; push dropped 2026-11-19). **live** (built as cards M1–M10).
 - `docs/design/2026-11-19-merge-queue-design.md` — design for the daemon-owned local merge queue (MQ1): per-repo FIFO of green PRs in its own worktree, atomic ledger, rebase → gates → force-with-lease → squash merge, conflicts/red gates handed back to the card's worker. **live**
