@@ -107,6 +107,11 @@ struct BoardStatusProjection: Codable, Equatable {
     /// board simply was not in the response.
     init?(summary: MobileSummaryResponse, boardSlug: String?) {
         guard !summary.degraded else { return nil }
+        // The all-boards sum below is only honest when the envelope says it
+        // carried every board. Truncated/omitted/unreadable payloads refuse the
+        // read so the caller keeps its last-known numbers (audit W13).
+        if summary.truncated == true || (summary.omitted_boards ?? 0) > 0 { return nil }
+        if boardSlug == nil, (summary.unreadable_boards ?? 0) > 0 { return nil }
         source = .compact
         self.boardSlug = boardSlug
         if let slug = boardSlug {
@@ -215,6 +220,13 @@ enum BoardStatusSnapshotStore {
     static let snapshotKey = "hscc.boardstatus.snapshot"
     static let boardsKey = "hscc.boardstatus.boards"
 
+    /// One slot per board, so two Board Status instances cannot overwrite each
+    /// other's fallback (audit W12). The all-boards slot keeps the original key.
+    static func snapshotKey(boardSlug: String?) -> String {
+        guard let boardSlug, !boardSlug.isEmpty else { return snapshotKey }
+        return snapshotKey + "." + boardSlug
+    }
+
     private struct Stored: Codable {
         let projection: BoardStatusProjection
         let at: Date
@@ -223,7 +235,7 @@ enum BoardStatusSnapshotStore {
     /// Keep the numbers for the board they belong to. A snapshot of another
     /// board is not "last known" for this one — it is someone else's board.
     static func load(boardSlug: String?) -> (value: BoardStatusProjection, at: Date)? {
-        guard let data = SharedStore.suite?.data(forKey: snapshotKey),
+        guard let data = SharedStore.suite?.data(forKey: snapshotKey(boardSlug: boardSlug)),
               let stored = try? JSONDecoder().decode(Stored.self, from: data),
               stored.projection.boardSlug == boardSlug,
               stored.projection.hasNumbers else { return nil }
@@ -233,7 +245,7 @@ enum BoardStatusSnapshotStore {
     static func save(_ projection: BoardStatusProjection, at date: Date) {
         guard let defaults = SharedStore.suite, projection.hasNumbers else { return }
         guard let data = try? JSONEncoder().encode(Stored(projection: projection, at: date)) else { return }
-        defaults.set(data, forKey: snapshotKey)
+        defaults.set(data, forKey: snapshotKey(boardSlug: projection.boardSlug))
     }
 
     /// Slugs the picker falls back to when the cluster is not answering.

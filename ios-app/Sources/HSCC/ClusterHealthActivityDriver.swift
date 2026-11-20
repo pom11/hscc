@@ -1,6 +1,7 @@
 import Foundation
 import ActivityKit
 import BackgroundTasks
+import WidgetKit
 
 // ---------------------------------------------------------------------------
 // ClusterHealthActivityDriver — the APP side of "Cluster watch" (A2), the one
@@ -232,6 +233,7 @@ final class ClusterHealthActivityDriver {
             await $0.autodownStatus()
         }
         let (autodown, autodownLabel, autodownAt) = Self.resolved(autodownOutcome)
+        var anyLive = autodownOutcome.isLive
 
         var monitor: MonitorResponse?
         var monitorLabel: String?
@@ -242,6 +244,7 @@ final class ClusterHealthActivityDriver {
                 await $0.clusterMonitor()
             }
             (monitor, monitorLabel, monitorAt) = Self.resolved(monitorOutcome)
+            anyLive = anyLive || monitorOutcome.isLive
             if case .live(let value, let fetchedAt) = monitorOutcome {
                 lastMonitor = (value, fetchedAt)
             }
@@ -252,6 +255,7 @@ final class ClusterHealthActivityDriver {
             await $0.daemonHost()
         }
         let (daemon, _, daemonAt) = Self.resolved(daemonOutcome)
+        anyLive = anyLive || daemonOutcome.isLive
 
         if case .live(let value, let fetchedAt) = autodownOutcome {
             lastAutodown = (value, fetchedAt)
@@ -270,6 +274,9 @@ final class ClusterHealthActivityDriver {
         // snapshot can never be presented as newer than it is.
         let dataAt = ClusterHealthReading.dataDate([autodownAt, monitorAt, daemonAt]) ?? Date()
         let showingStale = autodownLabel != nil || monitorLabel != nil
+        // New data arrived: let WidgetKit rebuild the Home Screen surfaces now
+        // instead of waiting for its coalesced schedule (SPEC Refresh).
+        if anyLive { WidgetCenter.shared.reloadAllTimelines() }
         await push(ClusterHealthActivityAttributes.ContentState(signals: signals,
                                                                 updatedAt: dataAt),
                    cadenceMinutes: cadence,

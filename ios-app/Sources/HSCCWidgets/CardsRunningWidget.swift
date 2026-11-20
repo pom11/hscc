@@ -136,7 +136,7 @@ struct CardsRunningEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct CardsRunningTimelineProvider: TimelineProvider {
-    private static let defaultRefreshMinutes = 10
+    private static let defaultRefreshMinutes = 30
 
     // GATE-SLICE-BEGIN: cards_running_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {

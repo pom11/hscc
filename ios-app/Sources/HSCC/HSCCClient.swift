@@ -154,7 +154,7 @@ struct HSCCClient {
                 ConnectionMonitor.shared.requestSucceeded(host: host)
             }
             return (pair.0, pair.1, host)
-        case .failed(let lastError):
+        case .failed(let lastError, _):
             // Every address failed the TRANSPORT: one honest unreachable alarm.
             if monitorsConnection {
                 ConnectionMonitor.shared.requestFailed()

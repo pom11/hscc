@@ -450,6 +450,15 @@ func runAll() async {
     check("the failure names the ceiling that expired",
           failureOf(shortDeadline) == .timeout(seconds: 3))
 
+    // W19: a cluster read gets a ceiling above the server's own 10/15 s
+    // sparkrun budgets instead of the default 8 s.
+    StubTransport.arm(.error(URLError(.timedOut)))
+    let clusterDeadline = await client.clusterMonitor()
+    check("cluster reads use the cluster ceiling",
+          failureOf(clusterDeadline) == .timeout(seconds: WidgetDataClient.clusterReadTimeout))
+    check("the cluster request carries that ceiling",
+          StubTransport.requests.last?.timeoutInterval == WidgetDataClient.clusterReadTimeout)
+
     // 5. Transport failure that is not a timeout.
     StubTransport.arm(.error(URLError(.cannotConnectToHost)))
     let unreachable = await client.projects()
@@ -519,14 +528,15 @@ func runAll() async {
         check("complete counts should decode, got \(String(reflecting: summary))", false)
     }
 
-    // 9. §5.5's down-state is a successful read with no nodes, not a failure.
+    // 9. §5.5/W5: a `speak`-only 200 is a degraded monitor, NOT an empty fleet.
+    //    It must take the offline path so a daemon host cannot be counted as
+    //    "serving".
     StubTransport.arm(.http(status: 200, body: monitorDownBody))
     let monitor = await client.clusterMonitor()
-    if case .success(let payload) = monitor {
-        check("fleet-down monitor decodes with no nodes", payload.nodes.isEmpty)
-        check("fleet-down monitor keeps speak", payload.speak == "fleet monitor unavailable")
+    if case .failure(.decoding) = monitor {
+        check("a 200 degraded monitor is a failure, not an empty fleet", true)
     } else {
-        check("fleet-down monitor should succeed, got \(String(reflecting: monitor))", false)
+        check("a 200 degraded monitor should fail, got \(String(reflecting: monitor))", false)
     }
 
     // 10. Query items go through URLQueryItem, never welded into the path.
@@ -563,6 +573,32 @@ func runAll() async {
               feed.items[0].level == .action)
     } else {
         check("alerts should decode, got \(String(reflecting: alertRead))", false)
+    }
+
+    // 10b. W15: follow has_more/next_since so an older unacknowledged alert
+    //      cannot be hidden behind a newer page.
+    let pageOne = Data(#"""
+    {"alerts":[{"id":1,"ts":"2026-11-19T12:00:00Z","title":"Older unacked",
+      "body":"one","level":"critical","key":null,"acked":false,"acked_at":null}],
+     "count":1,"latest_id":2,"next_since":1,"has_more":true,"speak":""}
+    """#.utf8)
+    let pageTwo = Data(#"""
+    {"alerts":[{"id":2,"ts":"2026-11-19T12:01:00Z","title":"Newer acked",
+      "body":"two","level":"info","key":null,"acked":true,"acked_at":"2026-11-19T12:02:00Z"}],
+     "count":1,"latest_id":2,"next_since":2,"has_more":false,"speak":""}
+    """#.utf8)
+    StubTransport.armSequence([.http(status: 200, body: pageOne),
+                               .http(status: 200, body: pageTwo)])
+    let paged = await client.allAlerts(limit: 1)
+    check("allAlerts follows has_more to the last page",
+          StubTransport.requests.count == 2
+            && (StubTransport.requests.last?.url?.absoluteString.contains("since=1") ?? false))
+    if case .success(let payload) = paged {
+        let feed = NeedsMeFeed.from(payload)
+        check("paging can still see the older unacknowledged row",
+              payload.alerts.map(\.id) == [1, 2] && feed.items.map(\.id) == [1])
+    } else {
+        check("allAlerts should page, got \(String(reflecting: paged))", false)
     }
 
     //      owns are the reason it exists: a metric the node never reported stays
@@ -719,6 +755,37 @@ func runAll() async {
           requestedHosts() == ["host-c.example"])
     check("HTTP 401 is still surfaced as .unauthorized",
           failureOf(authRefusedResult) == .unauthorized)
+
+    // W20: a 404/5xx is an address this API cannot serve — try the fallback and
+    // never pin the broken one as the last-working host.
+    forgetLastWorkingHost()
+    StubTransport.armSequence([.http(status: 503, body: errorBody),
+                               .http(status: 200, body: projectsBody)])
+    let badVersion = await multiClient(host: "host-m.example",
+                                       fallbacks: ["host-n.example"]).projects()
+    check("HTTP 5xx advances to the next address",
+          requestedHosts() == ["host-m.example", "host-n.example"])
+    if case .success = badVersion {
+        check("the healthy fallback's payload is returned", true)
+    } else {
+        check("the healthy fallback's payload is returned, got \(String(reflecting: badVersion))", false)
+    }
+    check("a 5xx address is not remembered as working",
+          HostFailover.lastWorkingHost() == "host-n.example")
+
+    StubTransport.armSequence([.http(status: 404, body: errorBody),
+                               .http(status: 200, body: projectsBody)])
+    forgetLastWorkingHost()
+    let missingRoute = await multiClient(host: "host-o.example",
+                                         fallbacks: ["host-p.example"]).projects()
+    check("HTTP 404 advances to the next address",
+          requestedHosts() == ["host-o.example", "host-p.example"])
+    if case .success = missingRoute {
+        check("a 404 address does not pin the widget", true)
+    } else {
+        check("a 404 address does not pin the widget, got \(String(reflecting: missingRoute))", false)
+    }
+    forgetLastWorkingHost()
 
     StubTransport.arm(.error(URLError(.cannotConnectToHost)))
     let allDown = await multiClient(host: "host-e.example",

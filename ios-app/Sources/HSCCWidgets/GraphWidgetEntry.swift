@@ -129,6 +129,12 @@ enum ClusterGraphSnapshotStore {
 
     private static let storageKey = "hscc.clusterGraph.payload"
 
+    /// One payload per (window, node), so two graph configurations keep their
+    /// own fallback instead of overwriting the single old slot (audit W12).
+    private static func storageKey(window: String, node: String) -> String {
+        storageKey + "." + window + "." + node
+    }
+
     /// The node identities this device last saw, for the configuration sheet.
     ///
     /// Separate from the payload because the sheet needs a node list even when the
@@ -167,12 +173,14 @@ enum ClusterGraphSnapshotStore {
                                                             node: node, payload: payload)) else {
             return false
         }
-        UserDefaults(suiteName: AppGroup.suiteName)?.set(data, forKey: storageKey)
+        UserDefaults(suiteName: AppGroup.suiteName)?.set(data, forKey: storageKey(window: window,
+                                                                                 node: node))
         return true
     }
 
-    static func load() -> Snapshot? {
-        guard let data = UserDefaults(suiteName: AppGroup.suiteName)?.data(forKey: storageKey),
+    static func load(window: String, node: String) -> Snapshot? {
+        guard let data = UserDefaults(suiteName: AppGroup.suiteName)?
+            .data(forKey: storageKey(window: window, node: node)),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return nil }
         return snapshot
     }
@@ -182,7 +190,8 @@ enum ClusterGraphSnapshotStore {
     /// from a 7-day answer would carry an x axis describing a window the operator
     /// did not pick.
     static func lastKnown(window: String, node: String) -> (value: ClusterGraphPayload, at: Date)? {
-        guard let snapshot = load(), snapshot.window == window, snapshot.node == node else {
+        guard let snapshot = load(window: window, node: node),
+              snapshot.window == window, snapshot.node == node else {
             return nil
         }
         return (value: snapshot.payload, at: snapshot.date)

@@ -94,6 +94,12 @@ final class MacPreferences: ObservableObject {
         return cadences.contains(stored) ? stored : defaultCadence
     }
 
+    /// The stat the always-visible label draws, read by the polling loop so a
+    /// Settings change applies on the next tick.
+    static func storedMenuBarStat() -> MenuBarStat {
+        MenuBarStat(rawValue: suite.string(forKey: Keys.menuBarStat) ?? "") ?? .clusterNodes
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         launchAtLoginError = nil
         do {

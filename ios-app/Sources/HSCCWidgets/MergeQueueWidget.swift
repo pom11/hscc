@@ -175,7 +175,7 @@ struct MergeQueueEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct MergeQueueTimelineProvider: TimelineProvider {
-    static let defaultRefreshMinutes = 5
+    static let defaultRefreshMinutes = 30
 
     // GATE-SLICE-BEGIN: merge_queue_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {

@@ -104,7 +104,7 @@ check("small draws the top four by open cards",
 check("the inline accessory says running + blocked",
       live.inlineLine == "3 running · 19 blocked", live.inlineLine)
 check("the rectangular accessory says done + blocked",
-      live.rectangularLine == "79 done today · 19 blocked", live.rectangularLine)
+      live.rectangularLine == "79 done 24h · 19 blocked", live.rectangularLine)
 check("the circular L2 gauge is running / the server's worker-slot cap",
       live.slotValueText == "3/6" && live.slotCaption == "slots"
       && live.slotGaugeRange == 0...6 && live.slotGaugeValue == 3,
@@ -216,8 +216,8 @@ if let suite {
         if let storedRows = object["rows"] as? [[String: Any]],
            let first = storedRows.first {
             let keys = Set(first.keys)
-            check("a row stores only board + the five counts",
-                  keys == ["board", "running", "ready", "todo", "blocked", "done"],
+            check("a row stores board + the six route counts",
+                  keys == ["board", "running", "ready", "todo", "blocked", "done", "other"],
                   keys.sorted().joined(separator: ","))
         }
     }

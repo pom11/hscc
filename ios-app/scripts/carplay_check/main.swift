@@ -126,7 +126,7 @@ let summaries = MobileSummaryResponse(
 
 print("boards row")
 if let boards = CarPlayBoardsReading(summary: summaries) {
-    equal(boards.detailLine, "2 running · 36 blocked · 89 done today", "detail")
+    equal(boards.detailLine, "2 running · 36 blocked · 89 done 24h", "detail")
     check(boards.topBoards.map(\.board) == ["flows", "hscc", "display"],
           "top three by open count")
     check(boards.topBoards[1].segments.map(\.count) == [2, 2, 7],
@@ -194,7 +194,7 @@ let alerts = AlertsLite(
                   title: "A worker stopped", body: nil, level: "info",
                   key: "hscc", acked: false, ackedAt: nil),
     ],
-    count: 2, latestID: 2, hasMore: false, speak: "")
+    count: 2, latestID: 2, hasMore: false, nextSince: 2, speak: "")
 
 let open = CarPlayNeedsReading(feed: NeedsMeFeed.from(alerts), failed: false,
                                fetchedAt: now)
