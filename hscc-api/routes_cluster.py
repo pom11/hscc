@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+import health_cache
+
 # Resolve the repo root: hscc-api is a sibling of hscc-cluster and hscc_daemon.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -195,6 +197,15 @@ def _backing_serving_snapshot():
 
 
 def _backing_verify():
+    """Run ONE real fleet verify right now (t_7babf634).
+
+    This is the seam the health cache and ``GET /v1/verify`` call when a
+    verdict must actually be produced — it is NOT a cheap call: it does real
+    chat round-trips to every serving GPU unit. ``handle_health`` no longer
+    calls it per request; it hands it to :func:`health_cache.get_snapshot`,
+    which decides (cache hit / stale revalidate / one inline run) whether a
+    verify is needed at all.
+    """
     from hscc_daemon import verify
     return verify.run_all()
 
@@ -365,18 +376,40 @@ def _speak_cluster_info(data):
     return "Cluster configuration loaded."
 
 
-def _speak_health(data):
+def _humanize_age(seconds) -> str:
+    """A spoken age: ``45s`` / ``7m`` / ``3h12m`` / ``2d04h``."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s < 0:
+        s = 0
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
+
+
+def _speak_health(data, age_seconds=None, stale=False):
     """§B: ok ? "All checks passed." : "{N} of {total} checks have problems."."""
     checks = data.get("checks", [])
     ok = data.get("ok")
     if ok:
-        return "All checks passed."
-    failed = [c for c in checks if not c.get("ok")]
-    total = len(checks)
-    names = ", ".join(str(c.get("name", "?")) for c in failed)
-    sentence = f"{len(failed)} of {total} checks have problems."
-    if names:
-        sentence += f" ({names})"
+        sentence = "All checks passed."
+    else:
+        failed = [c for c in checks if not c.get("ok")]
+        total = len(checks)
+        names = ", ".join(str(c.get("name", "?")) for c in failed)
+        sentence = f"{len(failed)} of {total} checks have problems."
+        if names:
+            sentence += f" ({names})"
+    if stale:
+        # t_7babf634: this verdict is a cached one older than the TTL. Say how
+        # old it is rather than reading like a check that just ran.
+        sentence += f" Health from {_humanize_age(age_seconds)} ago."
     return sentence
 
 
@@ -539,16 +572,37 @@ def handle_cluster_info(server, ctx, query, body):
 
 
 def handle_health(server, ctx, query, body):
+    """GET /v1/health — the LAST verify snapshot, never a verify run.
+
+    t_7babf634. This route used to call :func:`_backing_verify` — every check
+    of the fleet smoke test, real GPU chat round-trips included — on the
+    request thread, once per poll, with no cache and no dedupe. It now serves
+    the snapshot :mod:`health_cache` keeps: fresh → answered immediately with
+    the verify untouched; older than the TTL → answered immediately with the
+    stale verdict while ONE background refresh runs; nothing cached anywhere →
+    exactly one inline verify, which every concurrent caller waits for instead
+    of starting its own.
+
+    The payload stays a strict superset of what it was ({ok, checks, speak}) so
+    the iOS ``HealthResponse`` keeps decoding; ``age_seconds``,
+    ``generated_at``, ``stale`` and ``source`` are additive.
+    """
     try:
-        data = _backing_verify()
+        snap = health_cache.get_snapshot(verify=_backing_verify)
     except Exception:
         return 200, {"speak": "health check unavailable"}
-    if not isinstance(data, dict):
+    if snap is None:
         return 200, {"speak": "health check unavailable"}
+    data = snap["result"]
     return 200, {
         "ok": data.get("ok", False),
         "checks": data.get("checks", []),
-        "speak": _speak_health(data),
+        "speak": _speak_health(data, age_seconds=snap["age_seconds"],
+                               stale=snap["stale"]),
+        "age_seconds": snap["age_seconds"],
+        "generated_at": snap["generated_at"],
+        "stale": snap["stale"],
+        "source": snap["source"],
     }
 
 
