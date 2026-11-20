@@ -15,10 +15,8 @@ static let widgetSettingsKey = "hscc.widgetSettings"
 
 enum WidgetSurfaceKind: String, CaseIterable, Codable {
     case widgetCluster = "widget.cluster"
-    case widgetBoardStatus = "widget.boardStatus"
     case widgetCardsRunning = "widget.cardsRunning"
     case widgetKanbanMonitor = "widget.kanbanMonitor"
-    case widgetProjects = "widget.projects"
     case widgetNeedsMe = "widget.needsMe"
     case widgetMergeQueue = "widget.mergeQueue"
     case liveActivityWake = "liveActivity.wake"
@@ -203,8 +201,7 @@ extension WidgetSurfaceKind {
     /// Widgets are self-fetching (5-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
              .widgetNeedsMe, .widgetMergeQueue:
             return false
         case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
@@ -243,14 +240,10 @@ extension WidgetSurfaceKind {
         // `node`/`metrics`/`window` — so a board picker here would write a value
         // nothing reads, which is exactly the control this property exists to
         // suppress.
-        // Every other surface keeps true: main grew this switch since this
-        // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
-        // widgetProjects all landed from main), and a new case has to be
-        // judged here deliberately rather than by an exhaustive-switch build
-        // error. Each of the three is fetched through a route its own card
-        // measured against a scope, so they keep what ships today.
-        case .widgetCluster, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
+        // Every other surface keeps true: each is fetched through a route its
+        // own card measured against a scope. A new case has to be judged here
+        // deliberately rather than by an exhaustive-switch build error.
+        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
              .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
              .liveActivityBoardProgress:
             return true
@@ -270,39 +263,21 @@ extension WidgetSurfaceKind {
     ///   - "timing"    — wake timing / elapsed (Live Activities)
     ///
     /// A surface with ONE dataset and no optional part declares the empty set:
-    /// the board status widget draws five counts for one board and nothing
-    /// else, so every candidate section here would be a toggle that either
-    /// empties the widget or does nothing — and a toggle that does nothing is
-    /// a lie in the settings UI (`WidgetSurfaceEditor` hides its whole
-    /// "Show Content" group for exactly this case).
+    /// the Boards widget draws one stacked bar per board and nothing optional,
+    /// so every candidate section here would be a toggle that either empties
+    /// the widget or does nothing — and a toggle that does nothing is a lie in
+    /// the settings UI (`WidgetSurfaceEditor` hides its whole "Show Content"
+    /// group for exactly this case).
     var availableSections: Set<String> {
         switch self {
         case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
-        // One dataset, nothing optional — see the rule above. The board tile is
-        // five counts for one board; the running-cards widget is the row list
-        // plus the running/blocked counts its header and footer are built from;
-        // the monitor panel is running/ready/blocked plus that same merged list.
-        // A toggle for any part of those would either empty the surface or do
-        // nothing, and every entry here renders a Toggle — so an invented id is
-        // a dead control the operator can touch.
-        case .widgetBoardStatus: return []
+        // One dataset, nothing optional — see the rule above. The running-cards
+        // widget is the row list plus the running/blocked counts its header and
+        // footer are built from; Boards is one bar per board plus the same
+        // running/blocked totals. A toggle for any part would either empty the
+        // surface or do nothing, and every entry here renders a Toggle — so an
+        // invented id is a dead control the operator can touch.
         case .widgetCardsRunning, .widgetKanbanMonitor: return []
-        // The projects surface is the same ruling, and the card asked explicitly
-        // whether its per-project rows make a section genuine. They do not:
-        //   * it draws ONE dataset (`GET /v1/projects` → `{name, board}` rows)
-        //     and BOTH keys carry the fact — this file's own header says the
-        //     surface exists to show which projects exist "and which board each
-        //     one lives on", so a "board" toggle that emptied the board column
-        //     would remove the reason the surface exists, not trim a garnish;
-        //   * per-project scoping is already a control the operator has and can
-        //     see: `ProjectFilterIntent`'s Project picker in the widget's own
-        //     configuration sheet. A second copy of that choice in this store
-        //     would be a Toggle the sheet never reads.
-        // So: nothing here is optional, and `WidgetSurfaceEditor` hides its whole
-        // "Show Content" group for exactly this case (ConfigView's
-        // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
-        // control the operator can touch and nothing obeys.
-        case .widgetProjects: return []
         // The "Needs me" tile is one list (unacknowledged alerts) with no
         // optional part: level, title, body first line and age are the row.
         // A section toggle here would either empty the surface or do nothing.
@@ -819,32 +794,10 @@ check("liveActivity.monitor registry key", WidgetSurfaceKind.liveActivityMonitor
 check("widget.cardsRunning registry key", WidgetSurfaceKind.widgetCardsRunning.rawValue == "widget.cardsRunning")
 check("widget.kanbanMonitor registry key", WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
-// 7b. The board status surface (t_09cd8abf): the key itself, the two settings
-//     this entry exists for (pause + cadence) surviving the encode/decode the
-//     extension actually performs, and the honest default for an install that
-//     has never seen this surface (ON at the widget cadence — a new registry
-//     key must never silently pause a widget that is on the Home Screen).
-check("widget.boardStatus registry key",
-      WidgetSurfaceKind.widgetBoardStatus.rawValue == "widget.boardStatus")
-check("board status is a widget (self-fetching, 5-min default)",
-      !WidgetSurfaceKind.widgetBoardStatus.isLiveActivity)
-check("board status declares no optional content section",
-      WidgetSurfaceKind.widgetBoardStatus.availableSections.isEmpty)
-let pausedBoard = AppGroupWidgetSettings(surfaces: [
-    .widgetBoardStatus: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0, showSections: [])
-])
-if let boardData = try? JSONEncoder().encode(pausedBoard),
-   let boardBack = try? JSONDecoder().decode(AppGroupWidgetSettings.self, from: boardData) {
-    check("paused board status reads back paused",
-          boardBack.setting(for: .widgetBoardStatus).isActive == false)
-    check("board status Off cadence stays 0 (the provider maps 0 to atEnd, not a loop)",
-          boardBack.setting(for: .widgetBoardStatus).refreshMinutes == 0)
-} else {
-    check("paused board status encodes and decodes", false)
-}
-let untouchedBoard = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetBoardStatus)
-check("board status with no stored entry defaults ON", untouchedBoard.isActive)
-check("board status with no stored entry defaults 5 min", untouchedBoard.refreshMinutes == 5)
+// 7b. The Boards widget keeps the Kanban Monitor registry key so a widget
+//     already placed on a Home Screen survives the consolidation.
+check("widget.kanbanMonitor registry key (permanent App Group key)",
+      WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
 // 7c. the two surfaces t_fa7926fb added (running cards, kanban monitor) behave
 //     like the widgets they are. First half: the rule that keeps a fresh install
@@ -886,44 +839,6 @@ check("paused running-cards keeps the cadence the operator chose", pausedCards.r
 check("running-cards honours its empty section declaration", pausedCards.showSections.isEmpty)
 check("kanban monitor Off (0) survives alongside the pause",
       pausedPair.setting(for: .widgetKanbanMonitor).refreshMinutes == 0)
-
-// 7d. the projects surface (t_5f246177), the LAST widget in HSCCWidgets to join
-//     this registry. Same three claims as 7c, asserted separately because this
-//     raw value is the one that gets written to an installed device the moment
-//     the operator touches its row — and because the failure it guards against is
-//     specific to a NEW key: setting(for:) fills an absent surface with ON, so
-//     adding the key cannot blank a widget already on the Home Screen of an
-//     installed device, and if that ever stopped being true the widget would
-//     silently stop drawing projects on every device that never opened Settings.
-//     (No backticks in this heredoc body on purpose — the heredoc is UNQUOTED, so
-//     bash command-substitutes a backtick pair instead of leaving it in the Swift,
-//     which mangles the line and prints a command-not-found nobody reads.)
-check("widget.projects registry key (permanent App Group key)",
-      WidgetSurfaceKind.widgetProjects.rawValue == "widget.projects")
-check("projects is a widget (self-fetching, 5-min default)",
-      !WidgetSurfaceKind.widgetProjects.isLiveActivity)
-check("projects declares no optional content section",
-      WidgetSurfaceKind.widgetProjects.availableSections.isEmpty)
-let projectsAbsent = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetProjects)
-check("widget.projects with no entry is ON (absent is not paused)",
-      projectsAbsent.isActive)
-check("widget.projects with no entry takes the 5-min widget cadence",
-      projectsAbsent.refreshMinutes == 5)
-let projectsSeeded = AppGroupWidgetSettings.defaults().setting(for: .widgetProjects)
-check("widget.projects is ON at the widget cadence in the first-launch seed",
-      projectsSeeded.isActive && projectsSeeded.refreshMinutes == 5)
-check("the seed for widget.projects carries no sections either",
-      projectsSeeded.showSections.isEmpty)
-let pausedProjects = AppGroupWidgetSettings(surfaces: [
-    .widgetProjects: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0,
-                                           showSections: ["state", "board"])
-]).setting(for: .widgetProjects)
-check("paused projects stays paused through the bounding read the widget performs",
-      !pausedProjects.isActive)
-check("widget.projects Off (0) survives alongside the pause (the provider maps it to atEnd)",
-      pausedProjects.refreshMinutes == 0)
-check("widget.projects honours its empty section declaration against a foreign blob",
-      pausedProjects.showSections.isEmpty)
 
 // ---- widget scope (t_98fb8726): the intent's write, the widget's read ------
 // Everything from here to the restore is the code the configuration intent

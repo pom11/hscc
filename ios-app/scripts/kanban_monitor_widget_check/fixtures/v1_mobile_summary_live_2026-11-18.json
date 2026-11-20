@@ -68,5 +68,6 @@
   ],
   "board_count": 5,
   "total_boards": 5,
+  "max_in_progress": 6,
   "speak": "5 boards: 25 open, 3 running, 79 done."
 }

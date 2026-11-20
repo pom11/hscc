@@ -4,6 +4,7 @@
     "Sources/HSCCWidgets/WidgetRendering.swift",
     "Sources/HSCCWidgets/HSCCWidgetList.generated.swift",
     "Sources/HSCCWidgets/CLIMonitorTableReading.swift",
+    "Sources/HSCCWidgets/BoardStatusReading.swift",
     "Sources/HSCCWidgets/ClusterSmallGrid.swift",
     "Sources/HSCCWidgets/ClusterSmallGridView.swift",
     "Sources/HSCCWidgets/NativeStyleKit.swift",

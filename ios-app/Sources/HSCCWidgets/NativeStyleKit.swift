@@ -110,6 +110,39 @@ struct Tile<Content: View>: View {
     }
 }
 
+/// The data's own age, shared by every Native widget. Stale is measured against
+/// the surface's refresh interval: older than 2x means dim; a failed fetch means
+/// offline. `label` names the clock of the data, never the render.
+struct StaleState: Equatable {
+    let dataAt: Date?
+    let fetchedAt: Date
+    let refreshMinutes: Int
+    let failed: Bool
+
+    var referenceDate: Date { dataAt ?? fetchedAt }
+    var ageMinutes: Int {
+        max(0, Int(Date().timeIntervalSince(referenceDate) / 60))
+    }
+    var isOffline: Bool { failed }
+    var isStale: Bool {
+        !failed && refreshMinutes > 0 && ageMinutes > 2 * refreshMinutes
+    }
+    var isDimmed: Bool { isOffline || isStale }
+    var label: String? {
+        let clock = Self.hhmm(referenceDate)
+        if isOffline { return "offline · \(clock)" }
+        if isStale { return "stale · \(clock)" }
+        return nil
+    }
+
+    private static func hhmm(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
 struct StaleModifier: ViewModifier {
     let state: StaleState?
 

@@ -69,10 +69,11 @@ echo "compiling the real widget + shared sources + harness into a macOS CLI..."
 real_sources=(
   "$SUBJECT"
   Sources/HSCCWidgets/WidgetRendering.swift
+  Sources/HSCCWidgets/NativeStyleKit.swift
   "${SWIFT_GROUP_WIDGET_CLIENT[@]}"
 )
 harness_sources=(
-  scripts/projects_widget_check/ThemeStub.swift
+  scripts/kanban_monitor_widget_check/ThemeStub.swift
   "$HARNESS"
 )
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/kanban_monitor_widget_check" \

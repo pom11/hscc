@@ -180,6 +180,9 @@ struct MobileSummaryResponse: Decodable, Speakable {
     /// Boards the server could not read, as a COUNT only: an unusable slug is
     /// never echoed back (§6 rule 4).
     let unreadable_boards: Int?
+    /// The server's worker-slot cap (`kanban.max_in_progress`). Absent when
+    /// the config is unset/unreadable, which is NOT the same as a zero cap.
+    let max_in_progress: Int?
     let speak: String
 
     var degraded: Bool { boards == nil }

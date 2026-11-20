@@ -262,9 +262,9 @@ blocked/done, board selectable in configuration).
 **Amendment (CARD B3, 2026-11-18).** `done` means `done_24h` — the CLI board
 table's **Done 24h** column — and is labelled that way on every family. The
 route's `projects[].counts` and `boards[].counts` come from the same
-`kanban_live.board_status_counts`, so the Projects widget, Board Status tile and
-Board Progress Live Activity cannot disagree about a board's running/ready/todo/
-blocked/done-today numbers.
+`kanban_live.board_status_counts`, so the Boards widget and the Board Progress
+Live Activity cannot disagree about a board's running/ready/todo/blocked/
+done-today numbers.
 
 | family | needs | bytes that must travel |
 |---|---|---|

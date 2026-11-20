@@ -24,8 +24,6 @@ WIDGET_VIEWS=(
   # the stored style like every other widget view, or the operator's Settings
   # changes would stop reaching the small tile.
   Sources/HSCCWidgets/ClusterSmallGridView.swift
-  Sources/HSCCWidgets/BoardStatusWidget.swift
-  Sources/HSCCWidgets/ProjectsWidget.swift
   Sources/HSCCWidgets/KanbanMonitorWidget.swift
   Sources/HSCCWidgets/CardsRunningWidget.swift
   Sources/HSCCWidgets/NeedsMeWidget.swift
@@ -93,6 +91,20 @@ else
       fi
       continue
     fi
+    if [ "$kind" = "widgetKanbanMonitor" ]; then
+      # The Boards widget (B3) is the second Native redesign surface: it takes
+      # its tokens, timestamps and stale rule from the same shared kit.
+      if grep -q 'NativeStyle' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'AsOfStamp' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'StaleState' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'struct StaleModifier' Sources/HSCCWidgets/NativeStyleKit.swift; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, StaleState)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
     n=$(grep -rhoF "WidgetStyle.resolved(for: .$kind)" "${WIDGET_VIEWS[@]}" | wc -l | tr -d ' ')
     if [ "$n" -eq 1 ]; then
       ok "surface $kind resolves WidgetStyle.resolved(for: .$kind)"
@@ -133,6 +145,15 @@ done
 for f in "${WIDGET_VIEWS[@]}"; do
   if [ "$(basename "$f")" = "ClusterWidgetViews.swift" ]; then
     if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" && grep -q 'MeterBar' "$f"; then
+      ok "$(basename "$f"): native kit components are wired"
+    else
+      bad "$(basename "$f") does not use the native kit"
+    fi
+    continue
+  fi
+  if [ "$(basename "$f")" = "KanbanMonitorWidget.swift" ]; then
+    if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
+       && grep -q 'StaleState' "$f" && grep -q 'containerBackground(.fill.tertiary' "$f"; then
       ok "$(basename "$f"): native kit components are wired"
     else
       bad "$(basename "$f") does not use the native kit"
