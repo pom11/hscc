@@ -101,8 +101,9 @@ enum WidgetDataPath {
 }
 
 /// The read-only client. Construct one per timeline refresh (it is a value type
-/// holding a session), read the datasets, hand the decoded payloads to the
-/// surface's own projection — and throw the response away.
+/// holding a reference to the process-wide session), read the datasets, hand the
+/// decoded payloads to the surface's own projection — and throw the response
+/// away.
 struct WidgetDataClient {
     /// Per-request ceiling for a read an extension performs.
     ///
@@ -117,7 +118,19 @@ struct WidgetDataClient {
     let config: APIConfig
     /// The ceiling this client puts on every request it builds.
     let timeout: TimeInterval
-    private let session: URLSession
+    /// Internal, not private, so the headless gate can assert that two
+    /// production clients really do share the one session below.
+    let session: URLSession
+
+    /// ONE session for every client in this process (t_c24521ef).
+    ///
+    /// A widget timeline refresh constructs a client, and this used to construct
+    /// a fresh `URLSession` that was never invalidated: each refresh left its
+    /// own keep-alive connection in a pool nothing could drain until the
+    /// extension process died. Polling several widgets against a 256-FD
+    /// launchd soft limit starved the API (EMFILE on every route). One shared
+    /// session keeps a single bounded pool and reuses its keep-alives.
+    private static let sharedSession: URLSession = makeSession()
 
     /// `session` is injectable so the headless gate
     /// (`scripts/widget_data_client_check.sh`) can drive this exact type with a
@@ -130,7 +143,7 @@ struct WidgetDataClient {
         let ceiling = timeout > 1 ? timeout : 1
         self.config = config
         self.timeout = ceiling
-        self.session = session ?? WidgetDataClient.makeSession(timeout: ceiling)
+        self.session = session ?? Self.sharedSession
     }
 
     /// A client for the shared settings, or nil when the operator has not
@@ -141,14 +154,18 @@ struct WidgetDataClient {
         return WidgetDataClient(config: config, timeout: timeout)
     }
 
-    private static func makeSession(timeout: TimeInterval) -> URLSession {
+    private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
-        // BOTH knobs, because they measure different things:
-        // `timeoutIntervalForRequest` is "no bytes for N s" — a trickle resets it,
-        // so a slow server could hold an extension open indefinitely;
-        // `timeoutIntervalForResource` is the ceiling on the whole load.
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        // The real per-read ceiling is `request.timeoutInterval`, set in
+        // `load()`, so it stays meaningful for an injected/custom timeout. The
+        // session-level values are only a backstop for a request this client
+        // did not build (60 s matches the Foundation default this type exists
+        // to avoid relying on).
+        configuration.timeoutIntervalForRequest = defaultTimeout
+        configuration.timeoutIntervalForResource = 60
+        // One refresh reads sequentially, so a small pool per host is plenty;
+        // the cap keeps a shared session from fanning out into an FD burst.
+        configuration.httpMaximumConnectionsPerHost = 4
         // A refresh must resolve, not wait. `waitsForConnectivity` would hold the
         // request for a route that may never come back and spend the extension's
         // whole budget on a down tailnet.

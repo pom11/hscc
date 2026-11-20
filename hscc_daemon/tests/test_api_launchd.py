@@ -95,6 +95,19 @@ def test_plist_throttles_the_respawn_and_bounds_the_stop():
     assert "<key>ExitTimeOut</key>\n    <integer>10</integer>" in daemon_plist
 
 
+def test_plist_raises_the_nofile_soft_limit():
+    """EMFILE (t_c24521ef): the live unit ran with launchd's 256 soft limit.
+
+    The server now bounds idle/concurrent connections, but the unit it is
+    generated from must still leave room for the listener, state files and
+    clients. This is the TEMPLATE only — an already-installed plist is
+    operator-owned and is never edited by this module or its tests.
+    """
+    d = api_launchd.build_api_plist("/p", "/d")
+    assert d["SoftResourceLimits"]["NumberOfFiles"] == 4096
+    assert d["SoftResourceLimits"]["NumberOfFiles"] > 256
+
+
 def test_plist_is_plistlib_roundtrippable():
     import plistlib
     d = api_launchd.build_api_plist("/p", "/d")
@@ -347,11 +360,12 @@ def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
     report 'changed' on the next install.
 
     RE-PINNED deliberately on t_d2245e7e. The baseline this pins against is
-    `0d95403c` (PR #210, the pre-ThrottleInterval unit); the only addition
-    below that baseline is `ThrottleInterval 30` + `ExitTimeOut 10`, the whole
-    point of that card. Everything else — argv tail, working dir, log paths,
-    EnvironmentVariables, key ORDER — is still pinned byte for byte, which is
-    what this test is for: an accidental reorder or a stray key still fails it.
+    `0d95403c` (PR #210, the pre-ThrottleInterval unit); the additions since
+    that baseline are `ThrottleInterval 30` + `ExitTimeOut 10` (t_d2245e7e)
+    and `SoftResourceLimits` (t_c24521ef). Everything else — argv tail, working
+    dir, log paths, EnvironmentVariables, key ORDER — is still pinned byte for
+    byte, which is what this test is for: an accidental reorder or a stray key
+    still fails it.
     """
     legacy = plistlib.dumps(
         {"Label": api_launchd.API_LABEL,
@@ -359,6 +373,7 @@ def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
          "WorkingDirectory": "/repo",
          "RunAtLoad": True, "KeepAlive": True,
          "ThrottleInterval": 30, "ExitTimeOut": 10,
+         "SoftResourceLimits": {"NumberOfFiles": 4096},
          "StandardOutPath": os.path.expanduser("~/.hscc/logs/api.log"),
          "StandardErrorPath": os.path.expanduser("~/.hscc/logs/api.err.log"),
          "EnvironmentVariables": {
