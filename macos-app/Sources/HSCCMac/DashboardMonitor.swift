@@ -45,22 +45,23 @@ struct BoardTotals {
 }
 
 /// The graphs section's ONE history read (t_be4e1a48). The window default is
-/// the operator's amendment: the menu bar refreshes faster than a home-screen
-/// widget, so the dropdown asks for `15m` — the recorder's 2-second tier —
-/// and SHOWS the resolution the route reports back, because the same rows
-/// mean different charts at 2 s, 1 m and 5 m. The route is the canonical
-/// `GET /v1/cluster/history` (DECISION-t_447cc7fc); the retired
+/// the durable 1 h tier: `15m` reads the recorder's in-memory 2-second ring,
+/// which the deployed API process does not own, so it answers
+/// `recorder_ring_absent` with an empty series. 1 h is served from the durable
+/// store, and the dropdown still SHOWS the resolution the route reports back,
+/// because the same rows mean different charts at 1 m and 5 m. The route is the
+/// canonical `GET /v1/cluster/history` (DECISION-t_447cc7fc); the retired
 /// `/v1/metrics/history` is never read from this app.
 enum DashboardGraphPlan {
-    /// `15m` — the recorder's 2-second tier, the operator's amendment for every
-    /// fast-refreshing surface. A `ClusterGraphWindow` rather than a string so
-    /// the request, the axis tick format and the shared captions all read the
-    /// same value; the fetch sends `.requestValue`.
-    static let window: ClusterGraphWindow = .fifteenMinutes
+    /// `1h` — tier 1's 1-minute roll-ups, the shallowest window the deployed
+    /// route can serve. A `ClusterGraphWindow` rather than a string so the
+    /// request, the axis tick format and the shared captions all read the same
+    /// value; the fetch sends `.requestValue`.
+    static let window: ClusterGraphWindow = .oneHour
 
     /// Per-node temperature and utilisation — the card's ask, in ONE request.
     /// None of these is a `*_max` column, so all four stay requestable at
-    /// every tier, `15m` included (`ClusterHistoryMetric.requestable(atTier:)`).
+    /// every tier.
     static let metrics: [ClusterHistoryMetric] = [.cpuTempC, .gpuTempC, .gpuUtilPct, .cpuUtilPct]
 }
 

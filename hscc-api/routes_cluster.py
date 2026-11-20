@@ -29,6 +29,7 @@ import importlib.util
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +43,115 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # failure (t_8743f98c). Kept module-level so a handler can report it without
 # re-running the load.
 _LAST_ENGINE_ERROR = ""
+
+
+# ---------------------------------------------------------------------------
+# Cluster snapshot cache — one live sparkrun/SSH read per TTL, single-flight
+# ---------------------------------------------------------------------------
+#
+# `/v1/cluster/monitor` shells out to `sparkrun cluster monitor` and probes the
+# serving layer; `/v1/cluster/status` shells out to `sparkrun status`. Several
+# widgets plus the macOS menu bar refresh these independently, and before this
+# cache every request paid the whole subprocess/SSH cost (W17 in the widget
+# audit). The answer is a SNAPSHOT, so serving the same snapshot for a few
+# seconds is honest as long as the envelope says when it was taken.
+#
+# TTL is 20 s: short enough that a widget never shows a stale fleet for longer
+# than its own refresh cadence, long enough that a burst of widget reloads
+# coalesces. `taken_at` is the cache fill time, not the request time.
+
+CLUSTER_SNAPSHOT_TTL_S = 20.0
+
+
+def _cluster_cache_now() -> float:
+    """The cache's wall clock — a seam tests pin instead of sleeping."""
+    return time.time()
+
+
+def _taken_at_iso(ts: float) -> str:
+    """Second-resolution UTC stamp in the house ``...Z`` form."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+class _SnapshotFlight:
+    """One in-progress build that other requests may wait on."""
+
+    __slots__ = ("done", "value", "at", "exc")
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.value = None
+        self.at = 0.0
+        self.exc = None
+
+
+class _SnapshotCache:
+    """A tiny TTL cache with single-flight fills.
+
+    A cache hit returns the stored ``(value, taken_at)``. On a miss exactly one
+    caller builds while every other caller for the same key waits for that
+    build; they receive the same value and timestamp. A failed build is not
+    cached (the next request retries), but every waiter sees the same error.
+    """
+
+    def __init__(self, ttl: float):
+        self.ttl = float(ttl)
+        self._lock = threading.Lock()
+        self._entries = {}
+        self._flights = {}
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+            self._flights.clear()
+
+    def get_or_build(self, key, build, now=None):
+        now = _cluster_cache_now() if now is None else now
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None and now - hit[0] < self.ttl:
+                return hit[1], hit[0]
+            flight = self._flights.get(key)
+            if flight is None:
+                flight = _SnapshotFlight()
+                self._flights[key] = flight
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            flight.done.wait()
+            if flight.exc is not None:
+                raise flight.exc
+            return flight.value, flight.at
+
+        try:
+            value = build()
+            at = _cluster_cache_now()
+            flight.value, flight.at = value, at
+            with self._lock:
+                self._entries[key] = (at, value)
+            return value, at
+        except BaseException as exc:
+            flight.exc = exc
+            raise
+        finally:
+            with self._lock:
+                self._flights.pop(key, None)
+            flight.done.set()
+
+
+_CLUSTER_SNAPSHOTS = _SnapshotCache(CLUSTER_SNAPSHOT_TTL_S)
+
+
+def _cluster_snapshot(key, build):
+    """Return ``(value, taken_at)`` from the cache, filling it once."""
+    return _CLUSTER_SNAPSHOTS.get_or_build(key, build)
+
+
+def _reset_cluster_snapshot_cache():
+    """Test seam: drop every cached snapshot and in-flight slot."""
+    _CLUSTER_SNAPSHOTS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -489,27 +599,88 @@ def _speak_autoscale(data):
 
 
 # ---------------------------------------------------------------------------
-# Handlers (read-only; 200 with degraded speak on a backing failure)
+# Handlers (read-only; 200 with degraded speak on a backing failure, except
+# /v1/cluster/monitor which answers 503 + success:false so the app cannot read
+# a failed sample as a serving fleet)
 # ---------------------------------------------------------------------------
 
-def handle_cluster_status(server, ctx, query, body):
+def _cluster_status_snapshot():
+    """The cached status read: the backing payload or a failure envelope."""
     try:
         data = _backing_cluster_status()
     except Exception as exc:
-        return 200, {
-            "workloads": [], "idle_hosts": [], "total_hosts": 0,
-            **_degraded("Cluster status failed", exc=exc),
-        }
+        return {"ok": False, "detail": _failure_detail(exc=exc)}
     if data is None or _is_error_dict(data):
+        return {"ok": False, "detail": _failure_detail(data)}
+    return {
+        "ok": True,
+        "payload": {
+            "workloads": data.get("workloads", []),
+            "idle_hosts": data.get("idle_hosts", []),
+            "total_hosts": data.get("total_hosts", 0),
+            "speak": _speak_cluster_status(data),
+        },
+    }
+
+
+def handle_cluster_status(server, ctx, query, body):
+    snapshot, taken_at = _cluster_snapshot("status", _cluster_status_snapshot)
+    taken = _taken_at_iso(taken_at)
+    if not snapshot["ok"]:
+        detail = snapshot["detail"]
         return 200, {
             "workloads": [], "idle_hosts": [], "total_hosts": 0,
-            **_degraded("Cluster status failed", data),
+            "error": detail,
+            "speak": f"Cluster status failed: {detail}",
+            "taken_at": taken,
+        }
+    return 200, {**snapshot["payload"], "taken_at": taken}
+
+
+def _cluster_monitor_snapshot():
+    """The cached monitor read: sparkrun frame + the CLI's serving section."""
+    try:
+        data = _backing_cluster_monitor()
+    except Exception as exc:
+        return {"ok": False, "detail": _failure_detail(exc=exc)}
+    if data is None or _is_error_dict(data):
+        return {"ok": False, "detail": _failure_detail(data)}
+    payload = {**data, "speak": _speak_cluster_monitor(data)}
+    # Add the same serving rows `hscc cluster monitor` prints beside the host
+    # table (model per node, run/wait, KV, token totals and rates). Additive:
+    # older clients decode only `json`, new ones may read `serving`.
+    try:
+        serving = _backing_serving_snapshot()
+    except Exception as exc:
+        payload["serving"] = []
+        payload["serving_error"] = _failure_detail(exc=exc)
+    else:
+        payload["serving"] = serving.get("rows", [])
+        payload["serving_proxy_error"] = serving.get("proxy_error")
+    return {"ok": True, "payload": payload}
+
+
+def handle_cluster_monitor(server, ctx, query, body):
+    snapshot, taken_at = _cluster_snapshot("monitor", _cluster_monitor_snapshot)
+    taken = _taken_at_iso(taken_at)
+    if not snapshot["ok"]:
+        detail = snapshot["detail"]
+        # A degraded monitor is not a 200 success: HTTP 200 with no `json` was
+        # indistinguishable from a healthy empty fleet, and the app counted the
+        # daemon host as "serving". Non-2xx + success:false makes every client
+        # take its offline/degraded path instead.
+        return 503, {
+            "success": False,
+            "degraded": True,
+            "error": detail,
+            "speak": f"Fleet monitor failed: {detail}",
+            "taken_at": taken,
         }
     return 200, {
-        "workloads": data.get("workloads", []),
-        "idle_hosts": data.get("idle_hosts", []),
-        "total_hosts": data.get("total_hosts", 0),
-        "speak": _speak_cluster_status(data),
+        **snapshot["payload"],
+        "success": True,
+        "degraded": False,
+        "taken_at": taken,
     }
 
 
@@ -526,28 +697,6 @@ def handle_cluster_hosts(server, ctx, query, body):
         "live_status": data.get("live_status", {}),
     }
     payload["speak"] = _speak_cluster_hosts(payload)
-    return 200, payload
-
-
-def handle_cluster_monitor(server, ctx, query, body):
-    try:
-        data = _backing_cluster_monitor()
-    except Exception as exc:
-        return 200, _degraded("Fleet monitor failed", exc=exc)
-    if data is None or _is_error_dict(data):
-        return 200, _degraded("Fleet monitor failed", data)
-    payload = {**data, "speak": _speak_cluster_monitor(data)}
-    # Add the same serving rows `hscc cluster monitor` prints beside the host
-    # table (model per node, run/wait, KV, token totals and rates). Additive:
-    # older clients decode only `json`, new ones may read `serving`.
-    try:
-        serving = _backing_serving_snapshot()
-    except Exception as exc:
-        payload["serving"] = []
-        payload["serving_error"] = _failure_detail(exc=exc)
-    else:
-        payload["serving"] = serving.get("rows", [])
-        payload["serving_proxy_error"] = serving.get("proxy_error")
     return 200, payload
 
 

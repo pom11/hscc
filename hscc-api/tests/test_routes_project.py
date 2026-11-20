@@ -39,7 +39,7 @@ def _fake_module(**attrs):
 
 
 def _card(cid="t_abc123", title="Do a thing", status="running", board="default",
-          branch="wt/t_abc123", body="", created_at=1000):
+          branch="wt/t_abc123", body="", created_at=1000, completed_at=None):
     d = {
         "id": cid,
         "title": title,
@@ -50,6 +50,8 @@ def _card(cid="t_abc123", title="Do a thing", status="running", board="default",
         "created_at": created_at,
         "workspace_path": "/tmp/repo",
     }
+    if completed_at is not None:
+        d["completed_at"] = completed_at
     return d
 
 
@@ -750,6 +752,56 @@ def test_projects_list_200(running, token, fakes):
     assert row["last_activity"] == 1000
     assert row["orchestrator"] is None
     assert "1 project registered." in payload["speak"]
+
+
+def test_projects_counts_use_mobile_done_24h_and_name_all_time(
+        running, token, fakes, monkeypatch):
+    """`/v1/projects` done/total are the mobile summary's rolling 24 h (W10).
+
+    The old row counted every archived card as done and every archived card in
+    total, so the same board answered one number here and another on
+    `/v1/mobile/summary`. Now `done`/`done_24h`/`total` use the collector's own
+    projection, and the historical numbers keep explicit names.
+    """
+    now = 1_800_000_000
+    cards = [
+        _card(cid="t_done_recent", status="done",
+              completed_at=now - 60),
+        _card(cid="t_done_old_1", status="done",
+              completed_at=now - 3 * 86400),
+        _card(cid="t_done_old_2", status="done",
+              completed_at=now - 5 * 86400),
+        _card(cid="t_arch_recent", status="archived",
+              completed_at=now - 120),
+        _card(cid="t_arch_old", status="archived",
+              completed_at=now - 4 * 86400),
+        _card(cid="t_running", status="running"),
+        _card(cid="t_ready", status="ready"),
+    ]
+    monkeypatch.setattr(fakes["_kanban"], "list_cards",
+                        lambda board=None, include_archived=False: cards)
+    monkeypatch.setattr(routes_project, "_counts_now", lambda: now)
+
+    status, payload = _request(running, token, path="/v1/projects")
+    assert status == 200
+    counts = payload["projects"][0]["counts"]
+
+    # One board, one `done`: the same rolling 24 h the mobile summary serves.
+    assert counts["done"] == counts["done_24h"] == 2
+    assert counts["total"] == 6
+    # All-time facts stay available, under names that say what they are.
+    assert counts["done_all_time"] == 3
+    assert counts["total_all_time"] == 7
+    assert counts["archived"] == 2
+
+    from hscc_daemon import kanban_live
+    mobile = kanban_live.board_status_counts({
+        "counts": {"todo": 0, "ready": 1, "running": 1, "blocked": 0,
+                   "done": 3, "archived": 2},
+        "done_24h": 2,
+    })
+    assert counts["done"] == mobile["counts"]["done"]
+    assert counts["total"] == mobile["total"]
 
 
 def test_projects_list_matches_hscc_project_list_json(running, token, fakes,

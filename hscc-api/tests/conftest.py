@@ -110,6 +110,25 @@ def _isolate_chat_jobs():
     setattr(threading.current_thread(), "_hscc_job_generation", None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_cluster_snapshot_cache():
+    """Drop the process-wide cluster snapshot cache around every test.
+
+    The cache is a real server cache (20 s TTL). A test that stubs a backing
+    reader must never receive a previous test's snapshot, and a test that
+    checks single-flight must start with no in-flight slot.
+    """
+    import sys
+
+    mod = sys.modules.get("routes_cluster")
+    if mod is not None:
+        mod._reset_cluster_snapshot_cache()
+    yield
+    mod = sys.modules.get("routes_cluster")
+    if mod is not None:
+        mod._reset_cluster_snapshot_cache()
+
+
 @pytest.fixture
 def hscc_dir(tmp_path):
     """A fresh, isolated ~/.hscc stand-in for each test."""

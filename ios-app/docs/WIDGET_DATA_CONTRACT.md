@@ -45,9 +45,10 @@ Conditions worth knowing when these numbers are re-checked:
 | transport compression | none — `Content-Encoding: identity` on every route |
 
 The fleet being **down** is the one condition that changes two rows: with the
-fleet down, `hscc cluster monitor` fails and `/v1/cluster/monitor` and
-`/v1/cluster/status` degrade to a single `speak` key (38 B and 39 B — see §5.4).
-Those two rows are therefore measured from the committed up-state fixture
+fleet down, `hscc cluster monitor` fails, `/v1/cluster/monitor` answers **503**
+with `success:false`, `degraded:true`, `error`, `speak` and `taken_at` (no
+`json`), and `/v1/cluster/status` keeps its 200 `{error, speak, …}` shape (see
+§5.4). Those two rows are therefore measured from the committed up-state fixture
 `ios-app/scripts/model_decode_check/fixtures/v1_cluster_monitor.json` (4 nodes,
 31 sample fields per node), and labelled *fixture* wherever quoted. Everything
 else is live. **Re-measure §5.4 once against a powered-up fleet before the
@@ -207,11 +208,15 @@ unreadable — the existing `MonitorSample` accessors
 (`Sources/Shared/SharedModels.swift:220-243`) already parse that defensively;
 reuse them, don't re-derive.
 
-Down-state (live, fleet powered off): `{"speak": "fleet monitor unavailable"}` —
-**38 B**, and `/v1/cluster/status` → `{"speak": "cluster status unavailable"}` —
-**39 B**. That is `handle_cluster_monitor`'s degrade path
-(`hscc-api/routes_cluster.py:363-370`): no `json` key at all, so `MonitorResponse.json`
-must stay optional and the widget must fall back to its last-known snapshot.
+Down-state (live, fleet powered off): `/v1/cluster/monitor` answers **HTTP 503**
+with `{"success": false, "degraded": true, "error": "<cause>", "speak":
+"Fleet monitor failed: <cause>", "taken_at": "<UTC>"}` and no `json`, so
+`MonitorResponse.json` stays optional and `isDegraded` is the explicit signal;
+the widget falls back to its last-known snapshot. `/v1/cluster/status` still
+answers 200 with `{error, speak, workloads: [], total_hosts: 0, taken_at}` (see
+`handle_cluster_monitor` / `handle_cluster_status` in
+`hscc-api/routes_cluster.py`). Both snapshots are cached for 20 s with
+single-flight, and `taken_at` is the cache-fill time.
 
 Projection to what the views render (`label, cpu%, mem%, gpu util%, used_slots,
 free_slots` for 4 nodes) = **225 B**. Sidecar `GET /v1/daemon/host` = 439 B over

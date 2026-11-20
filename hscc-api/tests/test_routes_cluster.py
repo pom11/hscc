@@ -12,6 +12,8 @@ traceback leak). The pure ``_speak_*`` helpers are also tested directly.
 """
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -87,7 +89,9 @@ def test_cluster_status_shape(running, token, stub_cluster):
     })
     status, payload = _request(running, token, "/v1/cluster/status")
     assert status == 200
-    assert set(payload) == {"workloads", "idle_hosts", "total_hosts", "speak"}
+    assert set(payload) == {"workloads", "idle_hosts", "total_hosts", "speak",
+                            "taken_at"}
+    assert payload["taken_at"].endswith("Z")
     assert len(payload["workloads"]) == 1
     assert payload["workloads"][0]["name"] == "qwen"
     assert payload["idle_hosts"] == ["192.0.2.11"]
@@ -184,6 +188,8 @@ def test_cluster_monitor_shape(running, token, stub_cluster):
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
     assert payload["success"] is True
+    assert payload["degraded"] is False
+    assert payload["taken_at"].endswith("Z")
     assert payload["speak"] == "Fleet snapshot: 3 hosts sampled."
     # The serving section is the same one `hscc cluster monitor` renders.
     assert payload["serving"][0]["model"] == "m"
@@ -191,21 +197,153 @@ def test_cluster_monitor_shape(running, token, stub_cluster):
 
 
 def test_cluster_monitor_failure_names_the_cause(running, token, stub_cluster):
+    """A degraded monitor is NOT HTTP 200 with a missing `json` (W5).
+
+    The old body was indistinguishable from a healthy empty fleet and let the
+    app count the daemon host as serving. It must be non-2xx with an explicit
+    success:false/degraded:true and no snapshot.
+    """
     stub_cluster(monitor={"success": False, "error": "no monitor output"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
-    assert status == 200
+    assert status == 503
+    assert payload["success"] is False
+    assert payload["degraded"] is True
     assert payload["error"] == "no monitor output"
     assert payload["speak"] == "Fleet monitor failed: no monitor output"
+    assert "json" not in payload
+    assert payload["taken_at"].endswith("Z")
 
 
 def test_cluster_monitor_run_cmd_error_dict_degrades(running, token, stub_cluster):
     """A plain {"error": "..."} (not the run_cmd shape) reports the cause."""
     stub_cluster(monitor={"error": "cluster engine command failed"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
-    assert status == 200
+    assert status == 503
+    assert payload["success"] is False
+    assert payload["degraded"] is True
     assert payload["error"] == "cluster engine command failed"
     assert payload["speak"] == \
         "Fleet monitor failed: cluster engine command failed"
+    assert "json" not in payload
+
+
+def test_cluster_monitor_exception_degrades_with_the_same_contract(
+        running, token, stub_cluster, monkeypatch):
+    def boom():
+        raise RuntimeError("secret ssh failure")
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", boom)
+    status, payload = _request(running, token, "/v1/cluster/monitor")
+    assert status == 503
+    assert payload["success"] is False and payload["degraded"] is True
+    assert payload["error"] == "RuntimeError: secret ssh failure"
+    assert "traceback" not in json.dumps(payload).lower()
+
+
+def test_cluster_status_snapshot_is_cached_for_20s_with_taken_at(
+        running, token, monkeypatch):
+    """Two refreshes inside the TTL run ONE sparkrun status, same taken_at."""
+    calls = []
+
+    def backing():
+        calls.append(len(calls) + 1)
+        return {"workloads": [], "idle_hosts": [],
+                "total_hosts": len(calls)}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_status", backing)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(routes_cluster, "_cluster_cache_now",
+                        lambda: clock["now"])
+
+    status, first = _request(running, token, "/v1/cluster/status")
+    clock["now"] = 1019.0
+    status2, second = _request(running, token, "/v1/cluster/status")
+    assert status == status2 == 200
+    assert first["total_hosts"] == second["total_hosts"] == 1
+    assert first["taken_at"] == second["taken_at"]
+    assert len(calls) == 1
+    assert routes_cluster.CLUSTER_SNAPSHOT_TTL_S == 20.0
+
+    clock["now"] = 1021.0
+    status3, third = _request(running, token, "/v1/cluster/status")
+    assert status3 == 200
+    assert third["total_hosts"] == 2
+    assert third["taken_at"] != first["taken_at"]
+    assert len(calls) == 2
+
+
+def test_cluster_monitor_snapshot_caches_the_sparkrun_and_serving_reads(
+        running, token, monkeypatch):
+    """The monitor cache covers BOTH live reads, not just the sparkrun frame."""
+    monitor_calls, serving_calls = [], []
+
+    def monitor():
+        monitor_calls.append(1)
+        return {"success": True, "output": "{}",
+                "json": {"timestamp": 1795000000.0,
+                         "hosts": [{"host": "192.0.2.10", "error": None,
+                                    "sample": {}}]}}
+
+    def serving():
+        serving_calls.append(1)
+        return {"rows": [], "proxy_error": None}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", monitor)
+    monkeypatch.setattr(routes_cluster, "_backing_serving_snapshot", serving)
+    clock = {"now": 2000.0}
+    monkeypatch.setattr(routes_cluster, "_cluster_cache_now",
+                        lambda: clock["now"])
+
+    status, first = _request(running, token, "/v1/cluster/monitor")
+    clock["now"] = 2019.0
+    status2, second = _request(running, token, "/v1/cluster/monitor")
+    assert status == status2 == 200
+    assert first["taken_at"] == second["taken_at"]
+    assert len(monitor_calls) == len(serving_calls) == 1
+
+    clock["now"] = 2021.0
+    status3, third = _request(running, token, "/v1/cluster/monitor")
+    assert status3 == 200
+    assert third["taken_at"] != first["taken_at"]
+    assert len(monitor_calls) == len(serving_calls) == 2
+
+
+def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
+    """A burst of widget reloads shares ONE in-progress sparkrun read."""
+    calls = []
+
+    def slow_monitor():
+        calls.append(1)
+        time.sleep(0.25)
+        return {"success": True, "output": "{}",
+                "json": {"timestamp": 1795000000.0,
+                         "hosts": [{"host": "192.0.2.10", "error": None,
+                                    "sample": {}}]}}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", slow_monitor)
+    monkeypatch.setattr(routes_cluster, "_backing_serving_snapshot",
+                        lambda: {"rows": [], "proxy_error": None})
+
+    barrier = threading.Barrier(6)
+    results = []
+    errors = []
+
+    def one():
+        try:
+            barrier.wait(timeout=5)
+            results.append(_request(running, token, "/v1/cluster/monitor"))
+        except Exception as exc:      # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=one) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not errors
+    assert len(results) == 6
+    assert all(status == 200 for status, _payload in results)
+    assert len(calls) == 1, "the burst did not share one build"
 
 
 def test_cluster_jobs_shape(running, token, stub_cluster):

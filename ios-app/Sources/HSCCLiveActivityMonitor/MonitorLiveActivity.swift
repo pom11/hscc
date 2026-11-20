@@ -181,6 +181,7 @@ enum MonitorSurfaceCopy {
     static func headline(_ state: String) -> String {
         switch state {
         case "serving": return "Cluster serving"
+        case "degraded": return "Cluster degraded"
         case "waking": return "Cluster waking"
         case "down": return "Cluster down"
         case "unreachable": return "Can't reach cluster"
@@ -230,6 +231,7 @@ enum MonitorStateColour {
     static func color(_ state: String, style: WidgetStyle) -> Color {
         switch state {
         case "serving": return style.okColor
+        case "degraded": return style.warnColor
         case "waking": return style.warnColor
         case "down": return style.badColor
         default: return style.secondaryTextColor   // unreachable / unknown

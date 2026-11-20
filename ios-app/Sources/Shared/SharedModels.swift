@@ -387,13 +387,20 @@ struct StaleCardLite: Decodable, Identifiable {
 ///   { "success": true, "output": "<string>", "json": { "timestamp": Double,
 ///     "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
 ///                  "used_slots": 1, "free_slots": 0 } ] }, "speak": "..." }
-/// When the cluster is unreachable the route degrades to `{ "speak": "fleet
-/// monitor unavailable" }` — no `json` — so `json` is optional here. Every
+/// When the cluster is unreachable the route answers HTTP 503 with
+/// `success: false`, `degraded: true`, `error` and `speak` — no `json` — so
+/// `json` is optional here and `isDegraded` is the explicit signal. Every
 /// numeric field inside `sample` arrives as a STRING, often `""` when a metric
 /// is unreadable on that node; parsed defensively via `MonitorSample`'s
 /// computed `Double?` accessors (a bad/empty string yields nil, never a
 /// decode failure that blanks the whole route).
 struct MonitorResponse: Codable, Speakable {
+    /// The route's own success flag. `nil` from an older server, `false` when
+    /// the live sparkrun/SSH read failed. A degraded body is NOT a snapshot.
+    let success: Bool?
+    /// The route's failure detail when `success` is false. Never rendered raw;
+    /// it is the signal that this is not a fleet sample.
+    let error: String?
     /// The nested per-node payload. Absent when the route degraded.
     let json: MonitorPayload?
     /// The CLI's serving table: one row per (backend, model). Additive on the
@@ -406,8 +413,36 @@ struct MonitorResponse: Codable, Speakable {
     let serving_proxy_error: String?
     let speak: String
 
+    init(success: Bool? = nil,
+         error: String? = nil,
+         json: MonitorPayload?,
+         serving: [ServingRow]? = nil,
+         serving_error: String? = nil,
+         serving_proxy_error: String? = nil,
+         speak: String) {
+        self.success = success
+        self.error = error
+        self.json = json
+        self.serving = serving
+        self.serving_error = serving_error
+        self.serving_proxy_error = serving_proxy_error
+        self.speak = speak
+    }
+
     /// Computed passthrough so the widget reads the node list directly.
     var nodes: [MonitorNode] { json?.hosts ?? [] }
+
+    /// True when this body is a failure, not a fleet sample.
+    ///
+    /// The old route answered HTTP 200 with `{error, speak}` and no `json`, so
+    /// callers could not tell "the fleet is empty" from "the monitor failed".
+    /// `success == false`/`error` are now stated by the route; a body with no
+    /// monitor frame at all is degraded too, because there is nothing to draw.
+    var isDegraded: Bool {
+        if success == false { return true }
+        if let error, !error.isEmpty { return true }
+        return json == nil
+    }
 }
 
 /// One row of `hscc cluster monitor`'s serving table: the model a backend is

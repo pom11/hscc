@@ -557,6 +557,33 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
     c.expect("v1_cluster_monitor_unavailable.json", "fleet-down degrade: no json key, no nodes",
              down.nodes.isEmpty && down.speak == "fleet monitor unavailable",
              "degrade shape changed")
+    let refused = try JSONDecoder().decode(MonitorResponse.self,
+                                           from: try c.load("v1_cluster_monitor_degraded.json"))
+    c.expect("v1_cluster_monitor_degraded.json",
+             "success:false + error is explicitly degraded, never a fleet",
+             refused.success == false && refused.isDegraded
+             && refused.error == "sparkrun status exited 1: ssh unreachable"
+             && refused.nodes.isEmpty,
+             "a degraded monitor body read as a live sample")
+    c.expect("v1_cluster_monitor_unavailable.json",
+             "an old-style body with no success/json is degraded too",
+             down.isDegraded, "a body with no monitor frame read as healthy")
+    c.expect("v1_cluster_monitor.json", "the live fixture is a non-degraded sample",
+             m.success == true && !m.isDegraded, "the up-state fixture was marked degraded")
+
+    // The activity's headline: a daemon host is not a cluster sample.
+    c.expect("monitor-state", "daemon host alone is degraded, never serving",
+             MonitorActivityState.make(monitor: nil, daemonHostReachable: true) == "degraded",
+             "a reachable daemon host was counted as a serving fleet")
+    c.expect("monitor-state", "a degraded monitor body with a daemon host is degraded",
+             MonitorActivityState.make(monitor: refused, daemonHostReachable: true) == "degraded",
+             "a success:false body was counted as serving")
+    c.expect("monitor-state", "host rows on a good frame are serving",
+             MonitorActivityState.make(monitor: m, daemonHostReachable: true) == "serving",
+             "a healthy monitor frame stopped reading as serving")
+    c.expect("monitor-state", "nothing at all is unreachable",
+             MonitorActivityState.make(monitor: nil, daemonHostReachable: false) == "unreachable",
+             "an empty refresh did not read as unreachable")
 
     let h = try JSONDecoder().decode(MonitorDaemonHost.self, from: try c.load("v1_daemon_host.json"))
     c.expect("v1_daemon_host.json", "daemon host (live capture): cpu/mem/disk + uptime parse",

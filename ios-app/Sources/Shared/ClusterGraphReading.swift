@@ -58,11 +58,11 @@ import Foundation
 /// The window the operator selects in the configuration sheet, and the value the
 /// route's `window=` parameter takes.
 ///
-/// `recommended` is the operator's ruling on this card, not a default anyone
-/// inferred: the Monitor Live Activity and the macOS menu-bar graphs refresh
-/// faster than a Home Screen widget, which is exactly where a 2-second graph
-/// earns its keep, so a widget dropped on the Home Screen with nothing
-/// configured shows 15 minutes. `1h/6h/24h/7d` stay selectable.
+/// `recommended` is the durable 1 h tier. `15m` reads the recorder's in-memory
+/// 2-second ring, and the deployed API process does not own that ring, so a
+/// default of `15m` renders an empty chart with `recorder_ring_absent`. 1 h is
+/// served from the durable store on every deployment; `1h/6h/24h/7d` stay
+/// selectable, and `15m` remains available where the ring is resident.
 enum ClusterGraphWindow: String, CaseIterable, Codable, Equatable {
     case fifteenMinutes = "15m"
     case oneHour = "1h"
@@ -70,7 +70,7 @@ enum ClusterGraphWindow: String, CaseIterable, Codable, Equatable {
     case twentyFourHours = "24h"
     case sevenDays = "7d"
 
-    static let recommended: ClusterGraphWindow = .fifteenMinutes
+    static let recommended: ClusterGraphWindow = .oneHour
 
     /// The `window=` value (`hscc-api/routes_cluster.py`, `_parse_history_window`).
     var requestValue: String { rawValue }
