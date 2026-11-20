@@ -162,12 +162,29 @@ endpoints (confirm-gated, see below).
 | Method | Path | Description | Mutates |
 |---|---|---|---|
 | GET | `/v1/ping` | The **API's own** liveness — confirms the API process is up. Returns `{ok, service, version, speak}`. This is NOT the fleet health check. | read |
-| GET | `/v1/health` | **Fleet** health — runs `verify.run_all()` across the whole stack. Returns `{ok, checks: [...], speak}`. `ok` is true only when every check passes; `checks` is an array of per-check `{name, ok, ...}`. | read |
+| GET | `/v1/health` | **Fleet** health — the last cached verify snapshot: cheap, and safe to poll. Returns `{ok, checks: [...], speak, age_seconds, generated_at, stale, source}`. `ok` is true only when every check in that snapshot passed; `checks` is an array of per-check `{name, ok, ...}`; `generated_at` is the epoch second the verdict was produced and `age_seconds` its age now; `stale` is true when that verdict is older than the 120 s cache TTL; `source` is `"cache"` or `"inline"`. | read |
+| GET | `/v1/verify` | **Run the fleet check now** — inline: every check of the fleet smoke test, real GPU chat round-trips included. Returns `{ok, checks: [...], speak}`. Never serves the cache, and its verdict also refreshes the snapshot `/v1/health` answers with. | read |
 
-> **`/v1/ping` vs `/v1/health`:** `/v1/ping` answers "is the API server
-> itself alive?"; `/v1/health` answers "is the fleet healthy?". The API's own
-> liveness lives at `/v1/ping` specifically to avoid colliding with the fleet
-> health check at `/v1/health`.
+> **`/v1/ping` vs `/v1/health` vs `/v1/verify`:** `/v1/ping` answers neither
+> fleet question — it only confirms the API process is up, which is why the
+> API's own liveness lives there: to avoid colliding with the fleet health
+> check at `/v1/health`. `/v1/health` is **the last cached verify snapshot**
+> (cheap, pollable — served by the health cache, and it never runs a verify on
+> the request thread). `/v1/verify` is **run the fleet check now**.
+>
+> **Poll `/v1/health`; call `/v1/verify` only when you specifically want a
+> fresh verdict.** A `/v1/health` poll never runs a verify except when no
+> snapshot exists anywhere (the first poll of a fresh process, with no snapshot
+> file to read): then exactly one verify runs inline and every concurrent poll
+> waits for that same verdict instead of starting its own. A snapshot younger
+> than the 120 s TTL is answered as-is; an older one is answered immediately
+> with `stale: true` while one background refresh runs, so a poll never waits
+> on a verify. `/v1/verify` is the expensive route — the whole fleet smoke
+> test, real GPU chat round-trips included — so keep it off any timer.
+>
+> When there is no verdict and none could be produced, `/v1/health` answers
+> `{"speak": "health check unavailable"}` with no `ok` or `checks`: that means
+> "no health information", never "the fleet is fine".
 
 ### Cluster (read)
 
