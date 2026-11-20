@@ -205,6 +205,22 @@ def test_websocket_outlives_the_http_idle_timeout(running, token, fakes,
     asyncio.run(go())
 
 
+def test_client_ping_gets_pong(running, token, fakes, clean_store):
+    """A client keepalive ping must be answered with a pong.
+
+    ``websockets`` completes the pong waiter only when the server echoes the
+    payload. The server used to drop ping frames while reassembling data, so
+    this timed out even though the connection stayed open.
+    """
+    async def go():
+        async with _connect(running, token) as ws:
+            assert (await _recv(ws))["type"] == "hello"
+            pong_waiter = await ws.ping(b"are-you-there")
+            latency = await asyncio.wait_for(pong_waiter, 2)
+            assert latency >= 0
+    asyncio.run(go())
+
+
 def test_replay_existing_history_on_connect(running, token, fakes,
                                             clean_store):
     """Connect with after=s: replay stored (s, boundary], then live."""

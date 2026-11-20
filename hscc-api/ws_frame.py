@@ -171,29 +171,23 @@ class FrameDecoder:
         return opcode, unmasked, fin
 
 
-def iter_data_messages(decoder: FrameDecoder, data: bytes,
-                       on_close: Optional[Callable[[bytes], None]] = None
-                       ) -> Iterator[tuple[int, bytes]]:
-    """Yield complete (opcode, payload) DATA messages from a byte stream.
+def iter_frames(decoder: FrameDecoder, data: bytes
+                ) -> Iterator[tuple[int, bytes]]:
+    """Yield complete (opcode, payload) frames from a byte stream.
 
-    Reassembles TEXT/BINARY fragments across CONTINUATION frames, and drains
-    control frames (ping/pong/close) WITHOUT yielding them as data messages.
-    Control frames may be interleaved anywhere (RFC 6455 §5.4).
+    Like :func:`iter_data_messages`, but control frames (ping/pong/close) are
+    yielded in arrival order instead of being dropped. A server must see them
+    to answer pings (RFC 6455 §5.5.2) and complete the close handshake.
 
-    When ``on_close`` is given, it is called with the close frame's payload
-    the moment a close frame completes — so a server can detect the peer's
-    close and reply in kind. Ping/pong are silently dropped and only finished
-    data messages are yielded.
+    TEXT/BINARY fragments are reassembled across CONTINUATION frames; control
+    frames may be interleaved anywhere (RFC 6455 §5.4).
     """
     curr_opcode: Optional[int] = None
     curr: bytearray = bytearray()
 
     for opcode, payload, fin in decoder.feed(data):
-        if opcode in (OP_PING, OP_PONG):
-            continue
-        if opcode == OP_CLOSE:
-            if on_close is not None:
-                on_close(payload)
+        if opcode in (OP_PING, OP_PONG, OP_CLOSE):
+            yield opcode, payload
             continue
         if opcode in (OP_TEXT, OP_BINARY):
             if curr_opcode is not None:
@@ -214,6 +208,31 @@ def iter_data_messages(decoder: FrameDecoder, data: bytes,
                 curr = bytearray()
             continue
         raise WSProtocolError(f"reserved opcode 0x{opcode:x}")
+
+
+def iter_data_messages(decoder: FrameDecoder, data: bytes,
+                       on_close: Optional[Callable[[bytes], None]] = None
+                       ) -> Iterator[tuple[int, bytes]]:
+    """Yield complete (opcode, payload) DATA messages from a byte stream.
+
+    Reassembles TEXT/BINARY fragments across CONTINUATION frames, and drains
+    control frames (ping/pong/close) WITHOUT yielding them as data messages.
+    Control frames may be interleaved anywhere (RFC 6455 §5.4).
+
+    When ``on_close`` is given, it is called with the close frame's payload
+    the moment a close frame completes — so a server can detect the peer's
+    close and reply in kind. Ping/pong are silently dropped and only finished
+    data messages are yielded. Callers that must ANSWER a ping use
+    :func:`iter_frames` instead.
+    """
+    for opcode, payload in iter_frames(decoder, data):
+        if opcode in (OP_PING, OP_PONG):
+            continue
+        if opcode == OP_CLOSE:
+            if on_close is not None:
+                on_close(payload)
+            continue
+        yield opcode, payload
 
 
 def parse_close_frame(payload: bytes) -> int:
