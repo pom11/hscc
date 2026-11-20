@@ -136,17 +136,38 @@ and the daemon state files (`~/.hscc/state/*.json`).
 
 #### `GET /v1/health`
 
-Read-only. Backed by `verify.run_all()` (`hscc_daemon/verify.py:262`) — the same 5-check
-smoke test as `hscc verify`.
+Read-only, and cheap to poll. It does **not** run `verify.run_all()` on the
+request thread: it serves the last cached verify snapshot the health cache keeps
+(TTL 120 s, stale-while-revalidate, one in-flight verify at a time). That
+snapshot is the result of the same fleet smoke test `hscc verify` runs
+(`hscc_daemon.verify.run_all`), produced by a background refresh, by
+`GET /v1/verify`, or — only when no snapshot exists anywhere — by the one inline
+verify the first poll had to start.
 
-Response:
+Response (`ok`, `checks`, `speak` are the original shape; the rest is additive):
 ```json
 {
   "ok": true,
   "checks": [{"name": "...", "ok": true, "detail": "..."}],
-  "speak": "All 5 checks passed. Cluster health is good."
+  "speak": "All checks passed.",
+  "age_seconds": 42,
+  "generated_at": 1795152000,
+  "stale": false,
+  "source": "cache"
 }
 ```
+`generated_at` is the epoch second the verdict was produced, `age_seconds` its
+age now, `stale` is true when that age exceeds the 120 s TTL, and `source` is
+`"cache"` for a stored verdict or `"inline"` for the single verify this request
+had to run. When no verdict exists and none could be produced the answer is
+`{"speak": "health check unavailable"}` with no `ok` or `checks` — that is "no
+health information", never a healthy fleet.
+
+A real verify is expensive — every check of the fleet smoke test, real GPU chat
+round-trips included — which is exactly why it is off this route's request path.
+`GET /v1/verify` is the explicit trigger: it always runs the check inline,
+answers with its own result, and records that verdict into the same snapshot, so
+`/v1/health` and `/v1/verify` cannot drift.
 
 #### `GET /v1/fleet/stats?days=7`
 
@@ -327,7 +348,7 @@ Endpoint-specific contracts:
 | `GET /v1/cluster/monitor` | "Fleet snapshot: `{json}`" is too raw. Use a compact aggregate from the JSON if present, else "fleet monitor unavailable". Keep to one clause. |
 | `GET /v1/cluster/jobs` | "`{count}` job(s) running." from the output, else "job list unavailable". |
 | `GET /v1/cluster/info` | "Cluster configuration loaded." / "cluster info unavailable". |
-| `GET /v1/health` | `ok` ? "All checks passed." : "`{N}` of `{total}` checks have problems." Name the failing checks in one clause if space allows. |
+| `GET /v1/health` | `ok` ? "All checks passed." : "`{N}` of `{total}` checks have problems." Name the failing checks in one clause if space allows. When the served snapshot is stale, append how old it is — "Health from `{age}` ago." |
 | `GET /v1/fleet/stats` | "Last `{days}` days: `{key stat}`." e.g. "About 1.2k work items across the last 7 days." Keep to the most useful single number. |
 | `GET /v1/fleet/throughput` | `ok`/nodes: "`{nodes_ok}` of `{nodes_total}` nodes healthy." Refer to the dict's `fleet.nodes_ok`/`by_node`. |
 | `GET /v1/fleet/streams` | "Daemon streams: all ok." or enumerate the blocked/failed ones: "`{n}` stream(s) blocked: dgx, gateway." |
