@@ -600,10 +600,6 @@ struct ProjectBoardView: View {
     @State private var blocked = LoadState<KanbanBlockedResponse>.idle
     @State private var stale = LoadState<KanbanStaleResponse>.idle
     @State private var showCreate = false
-    /// Whether the per-board progress Live Activity is watching this board.
-    /// Kept beside the button so starting/stopping is visible immediately; the
-    /// driver remains the authority (ActivityKit can refuse to start one).
-    @State private var watchingLiveActivity = false
 
     var body: some View {
         Group {
@@ -623,25 +619,6 @@ struct ProjectBoardView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    Task {
-                        if watchingLiveActivity {
-                            BoardProgressActivityDriver.shared.stop()
-                            watchingLiveActivity = false
-                        } else {
-                            watchingLiveActivity = await BoardProgressActivityDriver.shared
-                                .start(board: board ?? "")
-                        }
-                    }
-                } label: {
-                    Label(watchingLiveActivity ? "Stop Live Activity" : "Watch Board",
-                          systemImage: watchingLiveActivity ? "stop.circle" : "play.circle")
-                }
-                .accessibilityLabel(watchingLiveActivity
-                                    ? "Stop watching this board on the Lock Screen"
-                                    : "Watch this board's progress on the Lock Screen")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
                     showCreate = true
                 } label: {
                     Label("New Card", systemImage: "plus")
@@ -657,10 +634,6 @@ struct ProjectBoardView: View {
         }
         .task {
             if cards.value == nil, !cards.isLoading { await load() }
-            // A bubble can outlive this view (and the process): adopt its state
-            // for the button rather than showing "start" over a running one.
-            watchingLiveActivity = BoardProgressActivityDriver.shared
-                .isRunning(board: board ?? "")
         }
     }
 

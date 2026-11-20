@@ -78,7 +78,8 @@ def target_block(text: str, target: str) -> str:
 
 def test_registry_check_passes_on_committed_tree():
     manifests, shared = wr.load_manifests()
-    assert len(manifests) >= 9
+    # The 2026-11-20 consolidation leaves five widgets and one Live Activity.
+    assert len(manifests) >= 6
     assert wr.check(manifests, shared) == []
     assert wr.check_project_specs() == []
 

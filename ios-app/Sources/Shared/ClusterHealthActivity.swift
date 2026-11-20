@@ -18,11 +18,9 @@ import ActivityKit
 // type can carry is the `.NNN` display tail (`MonitorNode.displayLabel`),
 // never an address.
 //
-// Why it is a separate activity from the monitor one
-// (`MonitorActivityAttributes`): that answers "how hard is the fleet working"
-// — CPU/RAM/GPU per node plus the daemon host. This answers "is the fleet up
-// at all" — a state, a tally, and which nodes did not answer. Different
-// questions, different content states, and both are allowed on screen at once.
+// It is the ONE surviving Live Activity (the 2026-11-20 picks): the old
+// monitor, wake, running-cards and board-progress activities were removed, and
+// their separate questions now live on the Home Screen widgets.
 //
 // Live Activities are PUSH-ONLY: this type is compiled into BOTH the app (which
 // starts/updates/ends it and runs the launch orphan sweep) and the
@@ -62,8 +60,21 @@ struct ClusterHealthActivityAttributes: ActivityAttributes {
     /// here, so the view's budget and the gate's assertion cannot drift apart.
     static let islandHostLineLimit = ClusterHealthProjection.islandHostLineLimit
 
+    /// The one Live Activity is operator-started and may run for eight hours;
+    /// the driver and the launch sweep both use this budget.
+    static let maxRuntime: TimeInterval = ClusterHealthOrphanRule.maxRuntime
+
+    /// When the operator started this watch. Optional so an activity left by
+    /// an older build still decodes; the driver adopts it and starts the
+    /// eight-hour clock from its own launch in that case.
+    public var startedAt: Date? = nil
+
     /// A token identifying this activity so it can be updated/ended.
     public var healthID: UUID = UUID()
+
+    init(startedAt: Date? = nil) {
+        self.startedAt = startedAt
+    }
 }
 
 // GATE-SLICE-BEGIN: cluster-health-reading-rules
@@ -159,6 +170,11 @@ struct ClusterHealthSignals: Codable, Hashable {
     var servingRunning: Int? = nil
     /// The serving table's `total (n)` Wait column. nil = no serving section.
     var servingWaiting: Int? = nil
+    /// The daemon machine's own state from `/v1/daemon/host`. nil = not told.
+    var daemonRunning: Bool? = nil
+    /// Whether autodown is armed, from `/v1/autodown/status`. nil = not told;
+    /// `false` is the operator's "autodown off", never a gap.
+    var autodownEnabled: Bool? = nil
 
     /// A state with no signal in it at all: nothing answered, so there is
     /// nothing to show. Used by the orphan rule and by the empty-state line.
@@ -212,6 +228,36 @@ struct ClusterHealthHostLine: Codable, Hashable {
     /// The host did not answer at all, so its cells are the CLI's dashes and
     /// the line is a fact about the fleet's health, not a load reading.
     let isDown: Bool
+    /// The numeric values behind the cells, for the A2 layouts. Optional and
+    /// defaulted so a payload an older build pushed still decodes.
+    var gpuTempC: Double? = nil
+    var gpuUtilPct: Double? = nil
+}
+
+/// One node column on the A2 Lock Screen row: the short name the spec draws
+/// (`S1`…), the temperature and the utilisation. Built from the SAME
+/// `ClusterHealthHostLine` rows the driver pushes, so the column can never
+/// show a number the CLI did not.
+struct ClusterHealthNodeColumn: Equatable, Identifiable {
+    let shortName: String
+    let tempC: Double?
+    let utilPct: Double?
+    let tempLevel: ClusterMetricLevel
+    let isDown: Bool
+
+    var id: String { shortName }
+
+    var tempText: String {
+        guard let tempC else { return "—" }
+        return String(format: "%.0f°", tempC)
+    }
+
+    var utilText: String {
+        guard let utilPct else { return "—" }
+        return String(format: "%.0f%%", utilPct)
+    }
+
+    var detailText: String { "\(shortName) · \(utilText)" }
 }
 
 /// The one metric the Dynamic Island's compact and minimal forms lead with,
@@ -495,6 +541,105 @@ enum ClusterHealthReading {
         if minutes < 60 { return "\(minutes)m ago" }
         return String(format: "%dh%02dm ago", minutes / 60, minutes % 60)
     }
+
+    // MARK: — Data clock (stale snapshots keep their real time)
+
+    /// The real time a stale snapshot belongs to: `now` less the age the
+    /// snapshot store reported. Never `now` — that is the defect this helper
+    /// exists to make impossible to re-introduce.
+    static func snapshotDate(now: Date = Date(), ageMinutes: Int) -> Date {
+        now.addingTimeInterval(-Double(max(0, ageMinutes)) * 60)
+    }
+
+    /// The oldest of the reads a push draws, so one stale route cannot be
+    /// presented as newer than it is. nil when no read produced a date.
+    static func dataDate(_ dates: [Date?]) -> Date? {
+        dates.compactMap { $0 }.min()
+    }
+
+    // MARK: — A2 Cluster watch (2026-11-20)
+
+    /// The data clock, `HH:mm`, in the device's own time zone. The watch is a
+    /// live surface, so its as-of is a clock time rather than a relative age.
+    static func asOfText(_ date: Date) -> String {
+        asOfFormatter.string(from: date)
+    }
+
+    private static let asOfFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    /// `CLUSTER · <model>` (or just `CLUSTER` when no serving row named one).
+    static func watchHeader(model: String?) -> String {
+        guard let model, !model.isEmpty else { return "CLUSTER" }
+        return "CLUSTER · \(model)"
+    }
+
+    /// The compact-leading tally: `4/4`, clipped to the four-character region.
+    static func watchTally(_ signals: ClusterHealthSignals) -> String {
+        compactTrailing(signals)
+    }
+
+    /// The compact-trailing pair the operator picked: `72° · 231 t/s`.
+    static func watchTrailing(_ signals: ClusterHealthSignals) -> String {
+        let temp = signals.peakGpuTempC.map { String(format: "%.0f°", $0) } ?? "—"
+        let tok = signals.genTps.map { String(format: "%.0f t/s", $0) } ?? "— t/s"
+        return "\(temp) · \(tok)"
+    }
+
+    /// The minimal region: the hottest temperature, else the tally when no
+    /// temperature was told. Never empty, so the region cannot read as dead.
+    static func watchMinimal(_ signals: ClusterHealthSignals) -> String {
+        if let temp = signals.peakGpuTempC { return String(format: "%.0f°", temp) }
+        return compactTrailing(signals)
+    }
+
+    /// The footer: `N tok/s · daemon OK · autodown off`. Every part is drawn
+    /// from what the routes actually said; an absent part is `—`, not a zero.
+    static func watchFooter(_ signals: ClusterHealthSignals) -> String {
+        let tok = signals.genTps.map { String(format: "%.0f tok/s", $0) } ?? "— tok/s"
+        let daemon: String
+        switch signals.daemonRunning {
+        case .some(true): daemon = "daemon OK"
+        case .some(false): daemon = "daemon down"
+        case .none: daemon = "daemon —"
+        }
+        let autodown: String
+        switch signals.autodownEnabled {
+        case .some(true): autodown = "autodown on"
+        case .some(false): autodown = "autodown off"
+        case .none: autodown = "autodown —"
+        }
+        return "\(tok) · \(daemon) · \(autodown)"
+    }
+
+    /// The four node columns (or fewer when the route listed fewer), in the
+    /// route's own order. The short name is positional because the A2 layout is
+    /// a four-column row; the identity below it stays the CLI's own util cell.
+    static func nodeColumns(_ lines: [ClusterHealthHostLine]?,
+                            limit: Int = 4) -> [ClusterHealthNodeColumn] {
+        guard limit > 0, let lines else { return [] }
+        return lines.prefix(limit).enumerated().map { index, line in
+            ClusterHealthNodeColumn(shortName: "S\(index + 1)",
+                                    tempC: line.gpuTempC,
+                                    utilPct: line.gpuUtilPct,
+                                    tempLevel: watchTempLevel(line.gpuTempC),
+                                    isDown: line.isDown)
+        }
+    }
+
+    /// The A2 temperature bands from the operator's picks: below 70 ok,
+    /// 70–74 warn, 75 and above bad. Deliberately not the host table's
+    /// CPU/GPU bands — this surface draws the operator's four-level glance.
+    static func watchTempLevel(_ celsius: Double?) -> ClusterMetricLevel {
+        guard let celsius else { return .unknown }
+        if celsius >= 75 { return .critical }
+        if celsius >= 70 { return .warn }
+        return .ok
+    }
 }
 // GATE-SLICE-END: cluster-health-reading-rules
 
@@ -515,14 +660,16 @@ enum ClusterHealthOrphanRule {
     /// How long a cluster-health activity may go without a push and still be
     /// treated as having a live feeder behind it.
     ///
-    /// Six hours, the same budget the running-cards activity uses and for the
-    /// same reasons: a Live Activity is only updated by the app process, so a
-    /// backgrounded app is at the mercy of `BGAppRefreshTask`, which is
-    /// best-effort and can legitimately lag for hours; and the sweep runs at
-    /// every launch, which is exactly when a real feeder resumes. The honesty
-    /// for an old bubble is not its deletion — it is the age line the views draw
-    /// from `updatedAt` and the `staleDate` the driver sets.
-    static let maxSilence: TimeInterval = 6 * 60 * 60
+    /// Eight hours: the one Live Activity is operator-started and the card's
+    /// contract ends it after eight hours. A Live Activity is only updated by
+    /// the app process, so a backgrounded app is at the mercy of
+    /// `BGAppRefreshTask`, which is best-effort and can legitimately lag for
+    /// hours; and the sweep runs at every launch, which is exactly when a real
+    /// feeder resumes. The honesty for an old bubble is not its deletion — it
+    /// is the age line the views draw from `updatedAt` and the `staleDate` the
+    /// driver sets.
+    static let maxSilence: TimeInterval = 8 * 60 * 60
+    static let maxRuntime: TimeInterval = maxSilence
 
     /// True when a found activity can only be an orphan and the sweep must end
     /// it.
@@ -659,7 +806,8 @@ enum ClusterHealthProjection {
                         autodownLabel: String?,
                         monitor: MonitorResponse?,
                         monitorLabel: String?,
-                        showNodeTally: Bool) -> ClusterHealthSignals {
+                        showNodeTally: Bool,
+                        daemonRunning: Bool? = nil) -> ClusterHealthSignals {
         let tally = showNodeTally ? ClusterNodeTally.project(monitor) : .noAnswer
         let serving = ServingSummary(rows: monitor?.serving)
         // ONE projection for every host number on this surface: the same
@@ -686,7 +834,11 @@ enum ClusterHealthProjection {
             peakGpuTempC: hottest?.tempC,
             peakGpuTempLevel: hottest?.level,
             servingRunning: serving.running,
-            servingWaiting: serving.waiting)
+            servingWaiting: serving.waiting,
+            // A last-known autodown payload still describes the same armed
+            // state, so its own `enabled` rides beside its state word.
+            daemonRunning: daemonRunning,
+            autodownEnabled: autodown?.enabled)
     }
 
     // MARK: The load projection (t_b009f32d)
@@ -712,7 +864,9 @@ enum ClusterHealthProjection {
                                   gpuPower: row.gpuPower,
                                   gpuTempLevel: row.gpuTempLevel,
                                   gpuPowerLevel: row.gpuPowerLevel,
-                                  isDown: row.error != nil)
+                                  isDown: row.error != nil,
+                                  gpuTempC: row.gpuTempC,
+                                  gpuUtilPct: row.gpuUtilPct)
         }
     }
 

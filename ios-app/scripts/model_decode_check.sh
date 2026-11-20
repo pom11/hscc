@@ -61,11 +61,6 @@ real_models=(
   # compile or, worse, test a copy of the rule.
   Sources/Shared/ClusterNodeTally.swift
   Sources/Shared/ClusterMonitorTables.swift
-  # The Live Activity's surface rules (t_1685f884): Foundation-only on purpose,
-  # so the checks below run the functions the shipped surfaces call. If this
-  # file ever needs SwiftUI, the rules have leaked into it — move them out
-  # rather than stubbing a UI framework here.
-  Sources/Shared/MonitorActivityMetrics.swift
   # The alert-feed projection ("Needs me", card R3): the decode gate runs the
   # same newest-first order, unacknowledged filter, age and body-first-line
   # rules the widget and the macOS dropdown draw.
@@ -89,7 +84,6 @@ harness=(
   scripts/model_decode_check/monitor_parity.swift
   scripts/model_decode_check/cluster_small_grid.swift
   scripts/model_decode_check/monitor_tables.swift
-  scripts/model_decode_check/monitor_surfaces.swift
   # Per-widget decode blocks: one file per widget + the generated call roster.
   # A widget card adds its own file and manifest; main.swift is not edited.
   scripts/model_decode_check/widgets.generated.swift

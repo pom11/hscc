@@ -525,8 +525,7 @@ extension WidgetSurfaceKind {
         case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
              .widgetNeedsMe, .widgetMergeQueue:
             return false
-        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityCards, .liveActivityBoardProgress: return true
+        case .liveActivityClusterHealth: return true
         }
     }
 
@@ -546,7 +545,7 @@ extension WidgetSurfaceKind {
     /// screen then hides the pickers rather than writing a value nothing reads.
     var supportsScope: Bool {
         switch self {
-        case .liveActivityCards, .widgetNeedsMe: return false
+        case .widgetNeedsMe: return false
         // The merge-queue widget draws every project's FIFO rows, in registry
         // order, and its provider sends no `?board=` — the surface has no
         // configuration intent. A board picker in Settings would write a value
@@ -565,8 +564,7 @@ extension WidgetSurfaceKind {
         // own card measured against a scope. A new case has to be judged here
         // deliberately rather than by an exhaustive-switch build error.
         case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
-             .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityBoardProgress:
+             .liveActivityClusterHealth:
             return true
         }
     }
@@ -618,8 +616,6 @@ extension WidgetSurfaceKind {
         // position, PR, card, branch, state, age and last result ARE the row.
         // A section toggle would either empty the surface or do nothing.
         case .widgetMergeQueue: return []
-        case .liveActivityWake: return ["state", "topology", "timing"]
-        case .liveActivityMonitor: return ["state", "nodes", "host"]
         // Only the tally is optional here. The serving state is this
         // activity's HEADLINE — every region of the Island and the Lock
         // Screen row draws from it — and there is no honest rendering of a
@@ -629,15 +625,6 @@ extension WidgetSurfaceKind {
         // sweep ENDS a bubble for, and an operator switching sections off
         // must never be what deletes their surface.
         case .liveActivityClusterHealth: return ["nodes"]
-        // Rows (board · card · worker · run time) and the two counts are ONE
-        // projection from ONE pair of routes: the blocked read is what tells an
-        // idle fleet apart from a jammed one (§5.4), so it is part of the
-        // dataset, not a section an operator can switch off.
-        case .liveActivityCards: return []
-        // Four counts from ONE board projection, nothing optional: the board
-        // heading and the pushed age are part of the same row, so a section
-        // toggle here would either empty the bubble or do nothing.
-        case .liveActivityBoardProgress: return []
         }
     }
 }

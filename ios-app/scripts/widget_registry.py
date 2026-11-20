@@ -295,7 +295,6 @@ GENERATED_PROJECT_FILES = {
         "Sources/Shared/WidgetSurfaceKind.generated.swift",
         "Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift",
     ],
-    ("ios", "HSCCLiveActivity"): ["Sources/Shared/WidgetSurfaceKind.generated.swift"],
     ("ios", "HSCCLiveActivityMonitor"): ["Sources/Shared/WidgetSurfaceKind.generated.swift"],
     ("macos", "HSCCMacWidgets"): ["../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift"],
     ("macos", "HSCCMac"): [

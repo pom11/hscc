@@ -571,20 +571,6 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
     c.expect("v1_cluster_monitor.json", "the live fixture is a non-degraded sample",
              m.success == true && !m.isDegraded, "the up-state fixture was marked degraded")
 
-    // The activity's headline: a daemon host is not a cluster sample.
-    c.expect("monitor-state", "daemon host alone is degraded, never serving",
-             MonitorActivityState.make(monitor: nil, daemonHostReachable: true) == "degraded",
-             "a reachable daemon host was counted as a serving fleet")
-    c.expect("monitor-state", "a degraded monitor body with a daemon host is degraded",
-             MonitorActivityState.make(monitor: refused, daemonHostReachable: true) == "degraded",
-             "a success:false body was counted as serving")
-    c.expect("monitor-state", "host rows on a good frame are serving",
-             MonitorActivityState.make(monitor: m, daemonHostReachable: true) == "serving",
-             "a healthy monitor frame stopped reading as serving")
-    c.expect("monitor-state", "nothing at all is unreachable",
-             MonitorActivityState.make(monitor: nil, daemonHostReachable: false) == "unreachable",
-             "an empty refresh did not read as unreachable")
-
     let h = try JSONDecoder().decode(MonitorDaemonHost.self, from: try c.load("v1_daemon_host.json"))
     c.expect("v1_daemon_host.json", "daemon host (live capture): cpu/mem/disk + uptime parse",
              h.cpuPercent != nil && h.memPercent != nil && h.diskPercent != nil
@@ -715,9 +701,9 @@ private enum StoredJSON: Decodable {
 /// `100.64.0.1` (the docs/tests placeholder) or the LAN address §7 forbids.
 private let dottedQuadRE = try! NSRegularExpression(pattern: #"\d{1,3}(?:\.\d{1,3}){3}"#)
 
-/// Internal (not `private`) because `monitor_surfaces.swift` scans the Live
-/// Activity's pushed state with the SAME validator, and two regexes that are
-/// supposed to mean the same thing is how one of them stops matching.
+/// Internal (not `private`) so the snapshot assertions below share ONE
+/// validator; two regexes that are supposed to mean the same thing is how one
+/// of them stops matching.
 func holdsDottedQuad(_ s: String) -> Bool {
     dottedQuadRE.firstMatch(in: s, range: NSRange(location: 0, length: s.utf16.count)) != nil
 }
@@ -948,16 +934,6 @@ c.assertions("v1_cluster_history_tier_axis.json",
                 && !payload.hosts.isEmpty && !payload.engines.isEmpty,
              "axis=\(String(describing: payload.axis)) source=\(String(describing: payload.source)) window=\(payload.window) since=\(payload.since) until=\(payload.until)")
 }
-// ---- Monitor Live Activity surfaces (t_1685f884) — same arrangement: the
-// checks are in monitor_surfaces.swift, the calls are here. They exercise
-// `MonitorSurfaceReading`, the code the Lock Screen, compact, expanded and
-// minimal surfaces actually call, against the same goldens — so a surface that
-// picks the wrong column, invents a fleet average, colours an absent metric, or
-// truncates silently fails here rather than on a lock screen.
-monitorActivitySurfaces(c)
-monitorActivityEdgeSurfaces(c)
-monitorActivityGlanceLadder(c)
-
 // ---- Per-widget decode blocks (one file per widget).
 checkWidgetDecodeFixtures(c)
 

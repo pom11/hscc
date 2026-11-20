@@ -3,10 +3,10 @@ import UIKit
 // ===========================================================================
 // LaunchAppDelegate — the app's one `UIApplicationDelegate` launch seam.
 //
-// It exists for the Live Activities: each BGAppRefreshTask identifier must be
-// registered SYNCHRONOUSLY in `didFinishLaunching`, before the first scene can
-// become active and submit a request. It also runs the idempotent orphan
-// sweeps and starts the foreground poll loops at launch.
+// It exists for the one surviving Live Activity: its BGAppRefreshTask
+// identifier must be registered SYNCHRONOUSLY in `didFinishLaunching`, before
+// the first scene can become active and submit a request. It also runs the
+// idempotent orphan sweep and adopts an operator-started watch.
 //
 // It deliberately has no notification job: the apps carry no notifications
 // (operator decision 2026-11-19), so there is no authorization request and no
@@ -14,8 +14,8 @@ import UIKit
 // ===========================================================================
 
 /// `@MainActor` because UIKit calls `didFinishLaunching` on the main thread and
-/// the launch hooks it drives (`MonitorActivityDriver`'s static members) are
-/// MainActor-isolated. Making the whole delegate MainActor lets us call
+/// the launch hooks it drives (`ClusterHealthActivityDriver`'s static members)
+/// are MainActor-isolated. Making the whole delegate MainActor lets us call
 /// `registerBackgroundTasks()` SYNCHRONOUSLY in `didFinishLaunching`.
 @MainActor
 final class LaunchAppDelegate: NSObject, UIApplicationDelegate {
@@ -28,56 +28,14 @@ final class LaunchAppDelegate: NSObject, UIApplicationDelegate {
         // `submit()` for that identifier — otherwise submit throws the fatal
         // `NSInternalInconsistencyException` at BGTaskScheduler.m:350 ("No launch
         // handler registered") and terminates the app at launch.
-        //
-        // The scene fires `.active` → `MonitorActivityDriver.sceneDidBecomeActive()`
-        // → `scheduleBackgroundRefresh()` → `submit()` on the first fast launch,
-        // so this registration MUST precede that submit (see MonitorActivityDriver
-        // for the `registered`-gated hardening that makes submit safe regardless
-        // of call order).
-        MonitorActivityDriver.registerBackgroundTasks()
-        // The cluster-health activity has its OWN identifier (independent
-        // cadence, independent Active toggle), so it needs its own launch
-        // handler installed before its first submit — same fatal-exception
-        // ordering rule as above.
         ClusterHealthActivityDriver.registerBackgroundTasks()
-        // The running-cards activity has its OWN identifier and its OWN launch
-        // handler (t_71deac83), registered here for the same reason and with the
-        // same synchronous-before-submit requirement.
-        CardsRunningActivityDriver.registerBackgroundTasks()
-        // The per-board progress activity (t_451cbe25) has its own identifier
-        // and launch handler, registered here for the same
-        // synchronous-before-submit reason.
-        BoardProgressActivityDriver.registerBackgroundTasks()
 
-        // The async block holds everything that must not block launch: the
-        // monitor orphan-sweep + foreground-poll kick. All idempotent — safe on
-        // every launch.
+        // The async block holds the launch sweep and the adopt-existing hook.
+        // Both are idempotent and safe on every launch.
         Task { @MainActor in
-            // HSCC Monitor Live Activity (t_03d318cd): run the orphan sweep and
-            // kick off the foreground poll loop at launch. All idempotent —
-            // safe on every launch. (A Scene has no `.task` mutation seam, so
-            // the delegate's didFinishLaunching is where these one-time hooks
-            // live.)
-            MonitorActivityDriver.sweepLeftoverMonitors()
-            MonitorActivityDriver.shared.sceneDidBecomeActive()
-            // Running-cards Live Activity (t_f9cc34e0): the same re-hydration
-            // treatment for the cards bubble. Idempotent, and a no-op while no
-            // cards activity exists — the launch sweep is the invariant the
-            // surface depends on, so it runs from the first launch onward.
-            CardsRunningActivitySweep.sweepLeftoverCards()
-            // …and now that the sweep has taken the orphans down, FEED the
-            // surface (t_71deac83): the toggle is honoured first, so a surface
-            // the operator switched off sends zero requests and pushes nothing;
-            // otherwise one refresh runs now and the next background wake is
-            // scheduled. Idempotent, like everything else in this block, and in
-            // the same sweep-then-feeder order as the pair below.
-            CardsRunningActivityDriver.shared.sceneDidBecomeActive()
-            // Cluster-health Live Activity (t_0120475a): the re-hydration
-            // sweep, then its feeder (t_f2867fb3) — in THAT order, so a bubble
-            // the rule flags as an orphan is ended before the poll loop could
-            // re-attach to it. The driver owns the Active toggle and the
-            // cadence; the sweep above stays a pure rule with no settings read,
-            // which is what keeps it executable by the gate.
+            // Cluster watch (A2): end a bubble no live feeder can still own,
+            // then adopt one the operator started before this process existed.
+            // The driver never starts an activity from this hook.
             ClusterHealthActivitySweep.sweepLeftoverClusterHealth()
             ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
         }

@@ -50,7 +50,7 @@ PY
 
 rc=0
 warnings=0
-for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivityMonitor; do
+for t in HSCC HSCCWidgets HSCCLiveActivityMonitor; do
   # macOS ships bash 3.2, which has no `mapfile`.
   files=()
   while IFS= read -r line; do

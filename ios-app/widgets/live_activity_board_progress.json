@@ -1,9 +1,0 @@
-{
-  "order": 14,
-  "kind": "live_activity",
-  "surface_case": "liveActivityBoardProgress",
-  "surface_raw": "liveActivity.boardProgress",
-  "display_name": "Board Progress Live Activity",
-  "icon": "chart.bar.xaxis",
-  "id": "live_activity_board_progress"
-}

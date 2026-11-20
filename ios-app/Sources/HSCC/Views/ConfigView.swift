@@ -148,6 +148,8 @@ struct ConfigView: View {
     /// Same port and token; reordering here changes the failover order.
     @State private var fallbackFields: [String] = []
     @State private var showingToken = false
+    /// Whether the operator-started Cluster watch Live Activity is up.
+    @State private var clusterWatchRunning = false
     /// True while the operator is defining a brand-new cluster (Add Cluster was
     /// tapped and the form fields were cleared). Save then CREATES a new
     /// cluster instead of editing the active one. Reset to false on load.
@@ -196,6 +198,29 @@ struct ConfigView: View {
                     Text("Clusters")
                 } footer: {
                     Text("Keep several clusters and switch with one tap. Each cluster keeps its own token in the Keychain. Switching clears all cached state from the previous cluster.")
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            if clusterWatchRunning {
+                                ClusterHealthActivityDriver.shared.stop()
+                                clusterWatchRunning = false
+                            } else {
+                                clusterWatchRunning = await ClusterHealthActivityDriver.shared.start()
+                            }
+                        }
+                    } label: {
+                        Label(clusterWatchRunning ? "Stop Cluster watch" : "Start Cluster watch",
+                              systemImage: clusterWatchRunning ? "stop.circle" : "play.circle")
+                    }
+                    .accessibilityLabel(clusterWatchRunning
+                                        ? "Stop the Cluster watch Live Activity"
+                                        : "Start the Cluster watch Live Activity")
+                } header: {
+                    Text("Cluster watch")
+                } footer: {
+                    Text("The only Live Activity. It shows the fleet's node temperatures, utilisation, tok/s, daemon state and whether autodown is armed. Started here, it ends after eight hours or when you stop it.")
                 }
 
                 Section {
@@ -960,16 +985,13 @@ struct ConfigView: View {
     }
 
     /// One onAppear for the whole app: seed the surviving subsystems with a
-    /// client built from the CURRENT settings, then re-hydrate any wake Live
-    /// Activity orphan the last process kill left behind (a deinit does not run
-    /// when the process is killed, so this sweep is what ends a stale bubble).
-    /// The monitor activity's matching `sweepLeftoverMonitors()` runs from
-    /// `LaunchAppDelegate` / `HSCCApp`, not here; the session activity's
-    /// `sweepLeftoverSessions()` left with the activity itself (t_3b15b8c9).
+    /// client built from the CURRENT settings, then reflect the Cluster watch
+    /// state the driver adopted at launch. The activity's orphan sweep runs in
+    /// `LaunchAppDelegate`, not here.
     private func rootDidAppear() {
         loadFromStore()
         seedClients()
-        LiveActivityManager.sweepLeftoverWakes()
+        clusterWatchRunning = ClusterHealthActivityDriver.shared.isRunning
     }
 
     /// The one subsystem that still reaches the daemon takes the same client:

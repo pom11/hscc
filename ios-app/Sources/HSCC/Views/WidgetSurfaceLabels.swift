@@ -23,8 +23,7 @@ extension WidgetSurfaceKind {
         case .widgetCluster, .widgetKanbanMonitor, .widgetCardsRunning,
              .widgetNeedsMe, .widgetMergeQueue:
             return "Lock Screen: circular · rectangular · inline"
-        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityCards, .liveActivityBoardProgress:
+        case .liveActivityClusterHealth:
             return nil
         }
     }
