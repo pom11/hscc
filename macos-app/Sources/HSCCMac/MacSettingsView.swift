@@ -104,6 +104,18 @@ struct MacSettingsView: View {
                 Text("The stat rides next to the H in the menu bar. Refresh uses the shared read-only client; the system may coalesce it while the Mac sleeps.")
             }
 
+            Section {
+                Picker("Refresh every", selection: $preferences.widgetRefreshSeconds) {
+                    ForEach(MacPreferences.widgetCadences, id: \.self) { seconds in
+                        Text(seconds == 0 ? "System (about 30 minutes)" : cadenceLabel(seconds)).tag(seconds)
+                    }
+                }
+            } header: {
+                Text("Desktop Widgets")
+            } footer: {
+                Text("While the menu bar app runs it reloads every desktop widget on this cadence. macOS may still delay reloads to save energy; each widget shows how old its data is.")
+            }
+
             // Sparkle 2 (t_2a1e5913). The defaults live in Sparkle's own
             // preferences; these bindings mirror them so the window always
             // shows what the updater will actually do.

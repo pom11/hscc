@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import WidgetKit
 
 // ---------------------------------------------------------------------------
 // The menu bar app's ONE data path. Every read goes through the shared
@@ -220,6 +221,7 @@ struct DashboardSnapshot {
 final class DashboardMonitor: ObservableObject {
     @Published private(set) var snapshot = DashboardSnapshot()
     @Published private(set) var isRefreshing = false
+    private var lastWidgetReload: Date?
 
     init() {
         // Refreshes immediately, then on the operator's cadence. The loop lives
@@ -236,9 +238,25 @@ final class DashboardMonitor: ObservableObject {
             // stat draws. The full eight-read dashboard refresh belongs to the
             // dropdown opening, not to a 60 s poll (audit W17/W6).
             await refreshMenuBar()
-            let seconds = MacPreferences.storedRefreshSeconds()
+            reloadWidgetsIfDue()
+            // Wake often enough for whichever cadence is shorter, so a 1-minute
+            // widget setting is honoured under a 5-minute menu bar poll.
+            let widget = MacPreferences.storedWidgetRefreshSeconds()
+            var seconds = MacPreferences.storedRefreshSeconds()
+            if widget > 0 { seconds = min(seconds, widget) }
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
         }
+    }
+
+    /// Ask WidgetKit to re-run every desktop widget's timeline on the
+    /// operator's widget cadence (Settings → Desktop Widgets). Off at 0.
+    private func reloadWidgetsIfDue(now: Date = Date()) {
+        let cadence = MacPreferences.storedWidgetRefreshSeconds()
+        guard cadence > 0 else { return }
+        // 2 s slack so a loop that sleeps exactly one cadence is never a tick late.
+        if let last = lastWidgetReload, now.timeIntervalSince(last) < TimeInterval(cadence) - 2 { return }
+        lastWidgetReload = now
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     /// Refresh ONLY what the menu bar label shows. `.off` makes no request.
