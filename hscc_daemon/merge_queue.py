@@ -50,9 +50,15 @@ MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
 
 #: The PR URL shape workers leave in a card comment (same shape Hermes'
-#: respawn guard recognises).
+#: respawn guard recognises). Owner/repo are captured too: auto-enqueue must
+#: only accept a URL from the project's OWN origin remote.
 PR_URL_RE = re.compile(
-    r"https?://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)")
+    r"https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/"
+    r"(?P<number>[1-9][0-9]*)")
+
+#: A project's ``origin`` remote, as github.com/<owner>/<repo> (https or ssh).
+_REMOTE_SLUG_RE = re.compile(
+    r"github\.com[/:](?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$")
 
 #: hscc's own default gates. The app build legs are appended only when the PR
 #: actually touched that tree (see :func:`_resolve_gates`).
@@ -75,14 +81,25 @@ _lock = threading.RLock()
 
 # ── paths ───────────────────────────────────────────────────────────────────
 
+def _hscc_root():
+    """The hscc state root: ``$HSCC_HOME``, then ``$HSCC_DIR``, then ~/.hscc.
+
+    Resolved at CALL time (like :func:`hscc_daemon.alerts.hscc_root`), so a
+    temp/sandboxed instance never reads or writes the live ledger or worktrees.
+    """
+    env = (os.environ.get("HSCC_HOME")
+           or os.environ.get("HSCC_DIR") or "").strip()
+    return os.path.expanduser(env or "~/.hscc")
+
+
 def state_file():
     """Queue ledger path (atomic writer; survives daemon restarts)."""
-    return os.path.expanduser("~/.hscc/merge-queue-state.json")
+    return os.path.join(_hscc_root(), "merge-queue-state.json")
 
 
 def queue_root():
     """Root of the per-project queue worktrees."""
-    return os.path.expanduser("~/.hscc/merge-queue")
+    return os.path.join(_hscc_root(), "merge-queue")
 
 
 def worktree_path(project):
@@ -153,7 +170,7 @@ def save_state(doc, path=None):
 @contextlib.contextmanager
 def _file_lock(path=None):
     """Cross-process lock so CLI writes cannot race the daemon tick."""
-    path = path or os.path.expanduser("~/.hscc/merge-queue.lock")
+    path = path or os.path.join(_hscc_root(), "merge-queue.lock")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     f = open(path, "a+")
     try:
@@ -479,7 +496,10 @@ def _now_iso():
 
 
 def _default_runner(argv, **kwargs):
-    return subprocess.run(argv, capture_output=True, text=True, **kwargs)
+    # _git/_gh already pass capture_output/text/timeout; passing them again
+    # here duplicated the keywords and raised TypeError on every production
+    # call (the tests all injected a runner, which hid it).
+    return subprocess.run(argv, **kwargs)
 
 
 def _git(args, cwd, runner, timeout=DEFAULT_PROCESS_TIMEOUT_S):
@@ -710,15 +730,48 @@ def resolve_instructions(branch):
 
 # ── auto-enqueue ────────────────────────────────────────────────────────────
 
+def _pr_url(text):
+    """``(owner, repo, pr)`` for the first GitHub PR URL in ``text``, or None."""
+    match = PR_URL_RE.search(text or "")
+    if not match:
+        return None
+    return (match.group("owner"), match.group("repo"),
+            int(match.group("number")))
+
+
+def _origin_slug(repo, git_runner=None):
+    """The project repo's ``origin`` as ``owner/repo`` (lower-case), or None.
+
+    Auto-enqueue compares this against the owner/repo in a card's PR URL so a
+    cross-repo link can never enqueue an unrelated same-numbered PR.
+    """
+    runner = git_runner or _default_runner
+    try:
+        proc = _git(["remote", "get-url", "origin"], repo, runner)
+    except Exception:
+        return None
+    if proc is None or proc.returncode != 0:
+        return None
+    match = _REMOTE_SLUG_RE.search((proc.stdout or "").strip())
+    if not match:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}".lower()
+
+
 def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
     """Cards on the project board whose latest PR URL is ready to merge.
 
     Read-only: enumerates the board through the SAME seam autodown uses and
-    reads comments through ``board_pin.open_board_ro``. Returns
+    reads comments through ``board_pin.open_board_ro``. A card URL whose
+    owner/repo is not the project's own ``origin`` is ignored, so a foreign
+    repo's PR can never be enqueued under this project. Returns
     ``[{pr, card, assignee}]``.
     """
     board = cfg.get("board")
     if not board:
+        return []
+    want_repo = _origin_slug(cfg["repo"])
+    if want_repo is None:
         return []
     try:
         from . import autodown, board_pin
@@ -738,15 +791,18 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None):
                 comments = conn.execute(
                     "SELECT body FROM task_comments WHERE task_id = ? "
                     "ORDER BY id DESC LIMIT 20", (row["id"],)).fetchall()
-                pr = None
+                link = None
                 for text in [row["body"] or ""] + [
                         c["body"] or "" for c in comments]:
-                    match = PR_URL_RE.search(text)
-                    if match:
-                        pr = int(match.group(1))
+                    link = _pr_url(text)
+                    if link:
                         break
-                if pr is not None:
-                    found.append((row["id"], row["assignee"], pr))
+                if link is None:
+                    continue
+                owner, repo_name, pr = link
+                if f"{owner}/{repo_name}".lower() != want_repo:
+                    continue
+                found.append((row["id"], row["assignee"], pr))
     except Exception:
         return []
 
