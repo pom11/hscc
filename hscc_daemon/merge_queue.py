@@ -51,7 +51,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -64,6 +66,23 @@ DEFAULT_GATE_TIMEOUT_S = 1800
 DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
+
+#: Task-policy class the gate asks for on macOS, and where that tool lives.
+#:
+#: The gate is a child of the `com.hermes.hscc_daemon` launchd job, whose plist
+#: sets `ProcessType => Background`; every process under it inherits background
+#: QoS and is scheduled behind ordinary interactive work.  Measured A/B on ONE
+#: pytest leg in the SAME worktree: warm at default QoS 144.9 s vs warm at
+#: background QoS 484.7 s = 3.34x (3.80x with the queue's exact no-bytecode +
+#: background combination).  The whole 12-leg suite needs 1092.6 s unopposed —
+#: 61% of DEFAULT_GATE_TIMEOUT_S — so it was the scheduling class exhausting the
+#: budget, not the suite.  `utility` is the smallest elevation that gets a real
+#: scheduler share without claiming foreground priority from the operator.
+GATE_QOS_POLICY_CLASS = "utility"
+TASKPOLICY_PATH = "/usr/sbin/taskpolicy"
+
+#: Cache for :func:`_gate_qos_prefix`; the answer cannot change during a run.
+_GATE_QOS_PREFIX_CACHE = None
 
 #: How often a running gate re-stamps the health stream (see
 #: :class:`_GateLiveness`). 30 s is 1/20 of verify's 600 s staleness budget for
@@ -1074,6 +1093,110 @@ class _GateLiveness:
             thread.join(timeout=max(5.0, self.interval + 5.0))
 
 
+def _gate_qos_prefix():
+    """Argv prefix that pulls the gate out of inherited background QoS.
+
+    ``()`` means "ask for nothing" — which is deliberately the answer on every
+    non-macOS host AND on a macOS host where /usr/sbin/taskpolicy is missing.
+    The prefix is a *program* exec'd before the shell, so an unavailable program
+    would make the gate exit 127 and record `red-gate` on a PR whose code was
+    never even compiled.  A QoS speed-up is never worth a false red, so this
+    fails toward the pre-fix behaviour rather than toward the fix.
+    """
+    global _GATE_QOS_PREFIX_CACHE
+    if _GATE_QOS_PREFIX_CACHE is None:
+        _GATE_QOS_PREFIX_CACHE = (
+            (TASKPOLICY_PATH, "-c", GATE_QOS_POLICY_CLASS)
+            if sys.platform == "darwin" and os.path.exists(TASKPOLICY_PATH)
+            else ()
+        )
+    return _GATE_QOS_PREFIX_CACHE
+
+
+#: The interpreter a gate's shell string runs under.  ``shell=True`` resolves to
+#: this same ``/bin/sh`` (``subprocess.unix_shell`` on POSIX) and deliberately
+#: NOT to ``$SHELL``, so naming it by hand keeps an operator's gate scripts
+#: behaving exactly as they did before the QoS prefix below was added.
+GATE_SHELL = "/bin/sh"
+
+
+def _gate_shell_argv(command):
+    """Argv that runs the operator's shell string at the requested QoS class.
+
+    The shape is ``[taskpolicy, -c, utility, /bin/sh, -c, <command>]``, spawned
+    with ``shell=False``.  Two things about it are load-bearing:
+
+    * `taskpolicy` must be the *program* that gets exec'd, so the shell and every
+      pytest leg under it inherit the class — that is the entire point of item 1.
+    * the command must reach the shell as ONE argument.
+
+    The tempting one-line diff — a list argv with ``shell=True`` still set — does
+    the opposite of both.  On POSIX ``shell=True`` runs
+    ``/bin/sh -c <argv[0]> <argv[1]> ...``, so only ``argv[0]`` is the command and
+    ``-c utility /bin/sh -c <gate>`` silently become the shell's own ``$0 $1 $2``.
+    Measured on this host: the gate then ran a bare `taskpolicy`, printed its
+    usage and exited **64** — which the queue would have recorded as `red-gate`
+    on every PR on the Mac, against code that was never even compiled.  An
+    injected fake ``Popen`` cannot see that, because it never execs anything,
+    which is why :func:`test_the_gate_argv_actually_runs_the_operators_command`
+    executes the real argv instead of only reading its shape.
+    """
+    return [*_gate_qos_prefix(), GATE_SHELL, "-c", command]
+
+
+def _stream_text(stream):
+    """``TimeoutExpired.stdout``/``.stderr`` as text, whatever Python handed us.
+
+    These are `bytes` when the child ran without text mode and `str` with it —
+    and on 3.14 `TimeoutExpired.stdout` came back as empty `bytes` even for a
+    `text=True` request.  The old `isinstance(x, str)` test silently discarded
+    the bytes case, which is the whole reason a timed-out gate's handback
+    measured as `['', '', 'timeout after 1800s']`: real output was there and
+    was thrown away.  `errors="replace"` keeps one truncated multi-byte
+    sequence at the kill point from losing the whole tail.
+    """
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream or ""
+
+
+def _kill_gate_group(proc):
+    """Best-effort: kill the timed-out gate's WHOLE process group, then reap it.
+
+    The gate runs `start_new_session=True`, so its pid is also its process-group
+    id and `killpg` reaches the `sh` *and* the pytest it spawned.  Killing only
+    the shell — what an ungrouped kill does — left pytest running: measured, the
+    queue re-gated 68 s later and attempt 2 competed with attempt 1's orphan.
+
+    `os.killpg` is looked up on the module at call time, which is also what lets
+    a test record which group the kill was aimed at without any real process
+    being spawned.
+
+    Best-effort by design, for two reasons.  A process can die between the kill
+    and the reap (the `ESRCH` case), and the group can already be gone; and
+    `proc` may be an injected test fake whose pid belongs to no OS process at
+    all.  None of those may turn a timeout into an exception escaping the
+    daemon's tick — the caller's `timeout` verdict and its requeue are what
+    protect the PR, never this cleanup.
+    """
+    try:
+        pid = proc.pid
+        if pid:
+            os.killpg(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        # Reaps the shell so a killed gate leaves no zombie behind for the
+        # daemon's own lifetime.
+        proc.communicate()
+    except Exception:
+        pass
+
+
 def _run_gate(command, worktree, timeout_s):
     """Run one shell gate; returns ``(verdict, output)``.
 
@@ -1083,19 +1206,51 @@ def _run_gate(command, worktree, timeout_s):
     a slow queue look like a broken PR, dropped the PR from the queue and told
     the author to go fix code that was never shown to be broken.
 
+    Three things this leg must get right, all learned from a 1800 s budget that
+    a 1092.6 s suite kept failing (see :func:`_gate_qos_prefix`,
+    :func:`_kill_gate_group` and :func:`_stream_text`):
+
+    1. do not run at the launchd job's inherited **background QoS**, which
+       measured 3.34x slower and is what actually exhausted the budget;
+    2. do not leave the gate's pytest **alive after the timeout**, or the next
+       attempt competes with the previous attempt's orphan;
+    3. carry the **real last lines** into the handback, so a timeout is
+       distinguishable from a test failure by reading the PR comment.
+
     Internal contract only (``process_entry`` is the sole caller plus injected
     test runners); nothing outside this module parses this tuple.
     """
+    argv = _gate_shell_argv(command)
+    # Bound before the try: `TimeoutExpired` is raised from *inside* Popen on
+    # some paths, and reading an unbound name there would replace the timeout
+    # verdict with a NameError.
+    stdout = stderr = ""
     try:
-        proc = subprocess.run(command, shell=True, cwd=worktree,
-                              capture_output=True, text=True,
-                              timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        out = ((exc.stdout or "") if isinstance(exc.stdout, str) else "")
-        err = ((exc.stderr or "") if isinstance(exc.stderr, str) else "")
-        return "timeout", _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
-    output = ((proc.stdout or "") + (proc.stderr or ""))
-    return ("pass" if proc.returncode == 0 else "fail"), _tail(output)
+        proc = subprocess.Popen(argv, shell=False, cwd=worktree,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        try:
+            # communicate() rather than run(timeout=): the timeout must be able
+            # to reach the process group, and `subprocess.run` throws its Popen
+            # handle away before it raises TimeoutExpired.
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            _kill_gate_group(proc)
+            # Prefer what communicate() salvaged, fall back to whatever the
+            # exception carries: they differ by Python version and by how far
+            # the kill raced the pipes, and the whole bug was picking one.
+            out = _stream_text(stdout) or _stream_text(exc.stdout)
+            err = _stream_text(stderr) or _stream_text(exc.stderr)
+            return "timeout", _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
+        return ("pass" if proc.returncode == 0 else "fail"), \
+            _tail(_stream_text(stdout) + _stream_text(stderr))
+    except OSError as exc:
+        # The gate could not be started at all.  That is a real failure with a
+        # readable reason, and it must NOT be reported as a timeout: a timeout
+        # requeues and retries forever, which is how a broken gate becomes an
+        # invisible one.
+        return "fail", _tail(f"could not run gate: {exc}")
 
 
 def _push_branch(worktree, info, git_runner):

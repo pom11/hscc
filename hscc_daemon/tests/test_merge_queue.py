@@ -7,6 +7,7 @@ injects the ``gh`` runner, so no test touches a real repository or network.
 
 import contextlib
 import json
+import os
 import sqlite3
 import subprocess
 import threading
@@ -465,21 +466,79 @@ def test_red_gate_comments_tail_and_hands_card_back(tmp_path):
 # timeout is the only answer the leg can get and no repo or socket is touched
 # by the gate path.
 
-def _fake_subprocess(*, run):
-    """Stand-in for the module ``_run_gate`` shells through."""
-    return SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired)
+class _FakeGateProc:
+    """The slice of ``subprocess.Popen`` that ``_run_gate`` actually touches.
+
+    Deliberately *not* a real process: a gate test must never run a real suite,
+    and a fake whose ``pid`` belongs to no OS process is also the proof that
+    ``_kill_gate_group`` cannot crash the tick when its kill lands on ESRCH.
+    """
+
+    def __init__(self, *, returncode=0, stdout="", stderr="",
+                 timeout=None, pid=None):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self._timeout = timeout
+        self.pid = pid
+        self.killed = False
+        #: Every `timeout=` the leg was actually given.  Recorded rather than
+        #: consumed: the budget is passed to `communicate()`, not to `Popen`, so
+        #: the recorded kwargs cannot show that a timed-out leg was told where
+        #: its budget was — and a leg with no budget is the bug this file exists.
+        self.budgets = []
+
+    def communicate(self, timeout=None):
+        self.budgets.append(timeout)
+        if self._timeout is not None:
+            raise self._timeout
+        return self.stdout, self.stderr
+
+    def kill(self):
+        self.killed = True
 
 
-def _timeout_subprocess(command, **kwargs):
-    """A gate process that never answers: exactly what the OS raises."""
-    raise subprocess.TimeoutExpired(cmd=command,
-                                    timeout=kwargs.get("timeout") or 0)
+def _fake_subprocess(*, popem):
+    """Stand-in for the module ``_run_gate`` shells through.
+
+    Returns ``(fake_module, calls)``: ``calls`` is a mutable list that receives
+    one entry per ``Popen`` — ``(argv, kwargs)`` — which is how a test reads the
+    argv the gate *built* instead of guessing at it, and how it reaches the proc
+    that ``_run_gate`` handed to ``_kill_gate_group``.
+    """
+    calls = []
+
+    def popem_factory(argv, **kwargs):
+        proc = popem(argv, kwargs)
+        calls.append((argv, kwargs, proc))
+        return proc
+
+    fake = SimpleNamespace(Popen=popem_factory, PIPE=subprocess.PIPE,
+                           TimeoutExpired=subprocess.TimeoutExpired)
+    return fake, calls
 
 
-def _exit_subprocess(code, stderr=""):
-    def run(command, **kwargs):
-        return SimpleNamespace(returncode=code, stdout="", stderr=stderr)
-    return run
+def _timeout_popem(stdout=b"", stderr=b"", *, pid=None):
+    """A gate that never answers, carrying ``stdout``/``stderr`` as the OS does.
+
+    The attributes are assigned after construction because that is exactly what
+    CPython's ``Popen._communicate`` does on the timeout path — it attaches the
+    partial output as ``.stdout``/``.stderr``.  Asserting through the real
+    attribute path is the point: the old code threw these values away here.
+    """
+    def build(argv, kwargs):
+        exc = subprocess.TimeoutExpired(
+            cmd=argv, timeout=kwargs.get("timeout") or 0)
+        exc.stdout = stdout
+        exc.stderr = stderr
+        return _FakeGateProc(timeout=exc, pid=pid)
+    return build
+
+
+def _exit_popem(code, stderr=""):
+    def build(argv, kwargs):
+        return _FakeGateProc(returncode=code, stdout="", stderr=stderr)
+    return build
 
 
 def _tick_that_timed_out(tmp_path, monkeypatch, *, pr, card):
@@ -492,8 +551,8 @@ def _tick_that_timed_out(tmp_path, monkeypatch, *, pr, card):
     handed = []
     mq.add_to_queue("alpha", pr, card=card, assignee="worker",
                     path=_state(tmp_path))
-    monkeypatch.setattr(mq, "subprocess",
-                        _fake_subprocess(run=_timeout_subprocess))
+    fake, _calls = _fake_subprocess(popem=_timeout_popem())
+    monkeypatch.setattr(mq, "subprocess", fake)
     result = mq.tick(
         state_path=_state(tmp_path), root=str(tmp_path / "queue"),
         registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
@@ -507,21 +566,323 @@ def test_run_gate_returns_a_tri_state_verdict_not_a_bool(tmp_path,
     """The budget is a THIRD answer, not a flavour of failure."""
     worktree = str(tmp_path)
 
-    monkeypatch.setattr(mq, "subprocess",
-                        _fake_subprocess(run=_timeout_subprocess))
+    fake, _calls = _fake_subprocess(popem=_timeout_popem())
+    monkeypatch.setattr(mq, "subprocess", fake)
     verdict, output = mq._run_gate("sh -c 'sleep 999'", worktree, 42)
     assert verdict == "timeout", verdict
     assert "timeout after 42s" in output, output
 
-    monkeypatch.setattr(mq, "subprocess",
-                        _fake_subprocess(run=_exit_subprocess(0)))
+    fake, _calls = _fake_subprocess(popem=_exit_popem(0))
+    monkeypatch.setattr(mq, "subprocess", fake)
     assert mq._run_gate("true", worktree, 42)[0] == "pass"
 
-    monkeypatch.setattr(mq, "subprocess",
-                        _fake_subprocess(run=_exit_subprocess(7, "BOOM")))
+    fake, _calls = _fake_subprocess(popem=_exit_popem(7, "BOOM"))
+    monkeypatch.setattr(mq, "subprocess", fake)
     verdict, output = mq._run_gate("sh -c 'exit 7'", worktree, 42)
     assert verdict == "fail", verdict
     assert "BOOM" in output, output
+
+
+# ── gate process handling: QoS, the orphan, and the evidence ───────────────
+#
+# Three measured failures of the same ~15 lines, all fixed inside _run_gate:
+#   1. the gate inherited the daemon launchd job's `ProcessType => Background`
+#      and every one of the 12 pytest legs was scheduled as background work —
+#      measured 3.34x slower on ONE leg in the SAME worktree (144.9 s vs
+#      484.7 s warm), which is what exhausted a budget the suite itself fits
+#      into with 39% to spare;
+#   2. the timeout killed the `sh` but not the process group, so the gate's
+#      pytest outlived its own budget and the next attempt ran against it;
+#   3. `TimeoutExpired.stdout` arrives as `bytes` and was discarded by an
+#      `isinstance(..., str)` test, so a timeout handback measured as
+#      `['', '', 'timeout after 1800s']` and was indistinguishable from a
+#      failure by anyone reading the PR comment.
+# Every case below injects a fake gate runner and asserts on a *recorded* value:
+# no wall-clock measurement (flaky on a shared host), no real repo, no network.
+
+def _gate_argv(monkeypatch, *, popem, command="bash scripts/run_tests.sh",
+               worktree="/nonexistent-worktree", timeout=42):
+    """Run one fake gate leg and hand back the argv it was launched with.
+
+    Only the *process* is faked; the leg still runs through the real
+    ``_run_gate``, so what a test reads is the argv production built rather than
+    one the test assembled for itself.  The cwd is never opened: a fake
+    ``Popen`` does not validate it, which is how these cases stay off the repo.
+    """
+    fake, calls = _fake_subprocess(popem=popem)
+    monkeypatch.setattr(mq, "subprocess", fake)
+    mq._run_gate(command, worktree, timeout)
+    return calls
+
+
+def test_run_gate_builds_the_qos_mechanism_into_its_argv(tmp_path,
+                                                         monkeypatch):
+    """The QoS fix must be visible in the argv, not in a stopwatch.
+
+    Asserted on the constructed argv because a wall-clock assertion on a shared
+    host measures whatever else is running, and would then be deleted the first
+    time it flaked — taking the guard with it.
+    """
+    command = "sh -c 'sleep 999'"
+    calls = _gate_argv(monkeypatch, popem=_exit_popem(0), command=command)
+
+    assert len(calls) == 1, calls
+    argv, kwargs = calls[0][0], calls[0][1]
+    # The operator's gate string arrives as ONE argument to a shell, whatever
+    # sits in front of it.  This is the invariant the QoS prefix must not break.
+    assert argv[-3:] == [mq.GATE_SHELL, "-c", command], argv
+    if mq._gate_qos_prefix():
+        prefix = list(mq._gate_qos_prefix())
+        assert argv[:len(prefix)] == prefix, argv
+        assert "taskpolicy" in argv[0], argv
+        assert mq.GATE_QOS_POLICY_CLASS in argv, argv
+    else:
+        # Fail-safe host (no taskpolicy): the gate keeps its pre-fix behaviour.
+        # Prefixing a program that does not exist would exit 127 and record
+        # `red-gate` against a PR whose code was never compiled.
+        assert argv == [mq.GATE_SHELL, "-c", command], argv
+    # NOT shell=True: with a list argv, POSIX `shell=True` runs
+    # `/bin/sh -c argv[0] argv[1] ...`, so the QoS program alone would be the
+    # command and `-c utility /bin/sh -c <gate>` would become the shell's $0/$1/
+    # $2 — a bare `taskpolicy`, exit 64, `red-gate` on every PR.  See
+    # :func:`test_the_gate_argv_actually_runs_the_operators_command`, which execs
+    # the argv for real rather than trusting its shape.
+    assert kwargs.get("shell") is False, kwargs
+    # The gate string survives as exactly ONE argv element — never split across
+    # several, which is what silently swallowed it before.  (It is also the LAST
+    # element; `argv.index("-c")` would find taskpolicy's own `-c`, not the
+    # shell's, so it is not a way to locate the shell here.)
+    assert argv[-1] == command, argv
+    assert argv.count(command) == 1, argv
+
+
+def test_the_gate_argv_actually_runs_the_operators_command(tmp_path):
+    """The argv must be EXECUTED, not only inspected.
+
+    This is the case the shape assertions cannot stand in for.  A fake ``Popen``
+    records whatever argv it is handed and can never notice that a list argv with
+    ``shell=True`` means "exec argv[0], hand the rest to the shell as $0/$1/$2":
+    that build satisfied every shape assertion and then exited **64** for real,
+    because the command the OS ran was a bare `taskpolicy`.  Through the queue
+    that is a `red-gate` on every PR on the Mac, against code that was never
+    compiled — the exact false-red this card exists to avoid.
+
+    So this case runs the argv `_run_gate` builds, unchanged, for real.  No fake
+    is injected and the production path (argv, `shell=False`, the new session)
+    is what is under test.  The gate here is a `printf` in a throwaway tmp dir,
+    not the suite: no repo, no network, no daemon, milliseconds — and no
+    wall-clock claim, so it cannot flake on a busy host.
+    """
+    command = "printf alpha; printf ' %s' beta && printf ' %s' gamma"
+    verdict, output = mq._run_gate(command, str(tmp_path), 60)
+
+    assert verdict == "pass", (verdict, output)
+    # A shell ran the WHOLE string: two commands, a `&&` and a quoted format
+    # argument all survived the argv construction intact.
+    assert "alpha beta gamma" in output, output
+
+
+def test_the_qos_prefix_names_a_program_that_can_actually_be_executed():
+    """A prefix pointing at nothing would exit 127 and read as a red gate."""
+    prefix = list(mq._gate_qos_prefix())
+    if not prefix:
+        # Fail-safe host (no taskpolicy, or non-macOS): nothing to exec, which
+        # is exactly why the gate is left alone rather than prefixed.
+        assert prefix == []
+        return
+    program = prefix[0]
+    assert os.path.isabs(program), program
+    assert os.path.exists(program) and os.access(program, os.X_OK), program
+    # `-c <class>` is taskpolicy's own contract; if the flag or the class name
+    # drifts, the tool prints its usage and exits 64 — a red gate, not a no-op.
+    assert prefix[1:] == ["-c", mq.GATE_QOS_POLICY_CLASS], prefix
+
+
+def test_run_gate_starts_its_gate_in_its_own_session(tmp_path, monkeypatch):
+    """Without a new session there is no group to kill, so item 2 is a no-op."""
+    calls = _gate_argv(monkeypatch, popem=_exit_popem(0))
+
+    assert calls[0][1].get("start_new_session") is True, calls[0][1]
+
+
+def test_an_unconfigured_timeout_s_still_gates_on_the_1800s_default(tmp_path,
+                                                                    monkeypatch):
+    """A registry that says nothing about the budget still gets 1800 s.
+
+    The default lives in `process_entry` (`cfg.get("timeout_s") or
+    DEFAULT_GATE_TIMEOUT_S`), *above* `_run_gate`, so it is pinned through a real
+    tick whose injected runner records the budget it was handed.  Two halves
+    matter: the queue must still pass 1800 down, and the leg must actually be
+    told it — a gate started with no budget is a gate that can run forever.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"])  # no timeout_s
+    import yaml
+    declared = yaml.safe_load(open(registry))["projects"][0]["merge_queue"]
+    assert "timeout_s" not in declared, declared
+    gh = FakeGh({21: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 21, path=_state(tmp_path))
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=1))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    result = mq.tick(state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, handback=lambda *args: True)
+
+    row = result["processed"][0]
+    assert row["result"] == "gate-timeout", row
+    assert row["timeout_s"] == 1800, row
+    assert mq.DEFAULT_GATE_TIMEOUT_S == 1800, mq.DEFAULT_GATE_TIMEOUT_S
+    budgets = calls[0][2].budgets
+    # The leg was told where its budget was.  The second, budget-less call is
+    # the reaping `communicate()` after the SIGKILL — it must not carry one.
+    assert budgets[0] == mq.DEFAULT_GATE_TIMEOUT_S, budgets
+    assert len(budgets) == 2 and budgets[1] is None, budgets
+
+
+def test_gate_qos_prefix_fails_safe_without_taskpolicy(monkeypatch):
+    """A host without the tool gets no prefix — a false red costs more."""
+    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
+    monkeypatch.setattr(mq, "TASKPOLICY_PATH", "/nonexistent/taskpolicy")
+
+    assert mq._gate_qos_prefix() == ()
+
+
+def test_gate_qos_prefix_asks_for_the_measured_class(monkeypatch):
+    """Positive arm: with the tool present the gate does ask for elevation."""
+    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
+    monkeypatch.setattr(mq, "TASKPOLICY_PATH", __file__)  # any real file
+
+    prefix = mq._gate_qos_prefix()
+    assert prefix[0] == __file__, prefix
+    assert "-c" in prefix and mq.GATE_QOS_POLICY_CLASS in prefix, prefix
+    # The prefix is a prefix, never a shell rewrite of the gate itself.
+    assert all(" " not in part or part == prefix[0] for part in prefix), prefix
+
+
+def test_gate_timeout_kills_the_whole_process_group_and_still_requeues(
+        tmp_path, monkeypatch):
+    """No leg may survive its own budget, and the kill must not be load-bearing.
+
+    Asserted on the *recorded* process group ``os.killpg`` was aimed at — not on
+    a sleep.  The recorded pid is the gate's own pid, which is only equal to its
+    process-group id because the leg runs `start_new_session=True`; killing that
+    pgid reaches the pytest the shell spawned, which is the orphan that poisoned
+    the next attempt.
+    """
+    killed = []
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=424242))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg",
+                        lambda pgid, sig: killed.append((pgid, sig)))
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert len(killed) == 1, killed
+    pgid, sig = killed[0]
+    assert pgid == 424242, "must target the gate's own group, not its parent"
+    assert sig == mq.signal.SIGKILL, sig
+    # And the process group the kill aimed at is the one the leg was started in.
+    assert calls[0][1].get("start_new_session") is True, calls[0][1]
+    assert calls[0][2].killed is True, "the shell itself must be reaped too"
+    # The kill is cleanup, never the thing that ends the leg: the verdict, the
+    # budget and the tail are what the caller requeues on.
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+
+
+def test_gate_timeout_returns_its_verdict_even_when_the_kill_cannot_land(
+        tmp_path, monkeypatch):
+    """A kill that cannot land may not eat the verdict that saves the PR.
+
+    Two real shapes: the group already gone (`ESRCH`), and a fake/absent pid.
+    Both used to be hypothetical; an escaping exception here would take the
+    daemon's whole tick down instead of handing the PR back.
+    """
+    def exploding_killpg(pgid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=999999))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", exploding_killpg)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+    assert calls[0][2].killed is True
+
+    # No pid at all: still a timeout, still a requeue, still no escape.
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=None))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    hit = []
+    monkeypatch.setattr(mq.os, "killpg",
+                        lambda pgid, sig: hit.append(pgid))
+
+    verdict, _output = mq._run_gate("bash scripts/run_tests.sh",
+                                    str(tmp_path), 42)
+    assert verdict == "timeout", verdict
+    assert hit == [], "no pid means no group to aim at, not a blind kill"
+
+
+def test_gate_timeout_handback_carries_bytes_evidence(tmp_path, monkeypatch):
+    """A timeout must be readable as a timeout, with real last lines.
+
+    This is the `['', '', 'timeout after 1800s']` case: `TimeoutExpired.stdout`
+    is `bytes`, and the old `isinstance(..., str)` test turned real output into
+    an empty handback, so nobody could tell a timeout from a failure.
+    """
+    fake, _calls = _fake_subprocess(
+        popem=_timeout_popem(stdout=b"real tail line",
+                             stderr=b"FAILED hscc_daemon/tests/test_x.py"))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "timeout", verdict
+    assert "real tail line" in output, output
+    assert "FAILED hscc_daemon/tests/test_x.py" in output, output
+    assert "timeout after 42s" in output, output
+
+
+def test_gate_timeout_handback_survives_a_truncated_multibyte_tail(
+        tmp_path, monkeypatch):
+    """One half-written character at the kill point may not eat the whole tail."""
+    fake, _calls = _fake_subprocess(
+        popem=_timeout_popem(stdout=b"leg 7 ok\xe2\x80"))  # cut mid-em-dash
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "timeout", verdict
+    assert "leg 7 ok" in output, output
+
+
+def test_run_gate_reports_a_gate_that_could_not_be_started(tmp_path, monkeypatch):
+    """An un-startable gate is a real failure, not a budget problem.
+
+    A `timeout` verdict requeues and retries, so mislabelling this as a timeout
+    would turn a broken gate into a PR that never lands and never explains why.
+    """
+    def raiser(argv, kwargs):
+        raise OSError(2, "No such file or directory")
+
+    fake, _calls = _fake_subprocess(popem=raiser)
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "fail", verdict
+    assert "could not run gate" in output, output
 
 
 def test_gate_timeout_is_not_a_red_gate_and_keeps_the_pr(tmp_path,
@@ -579,8 +940,8 @@ def test_a_real_red_gate_still_drops_the_entry(tmp_path, monkeypatch):
     gh = FakeGh({33: {"headRefName": pair["branch"],
                       "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 33, card="t_red_drop", path=_state(tmp_path))
-    monkeypatch.setattr(mq, "subprocess",
-                        _fake_subprocess(run=_exit_subprocess(7, "BOOM")))
+    fake, _calls = _fake_subprocess(popem=_exit_popem(7, "BOOM"))
+    monkeypatch.setattr(mq, "subprocess", fake)
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
