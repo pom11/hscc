@@ -4,16 +4,86 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
-<meta name="description" content="hscc looks after a small cluster of AI computers for you: it starts the models, keeps them running, hands work to the right helper, and restarts anything that falls over.">
-<title>hscc — the manager for a small AI cluster</title>
+<meta name="description" content="hscc (Hermes Spark Cluster Control) runs a small NVIDIA DGX Spark AI cluster and a team of AI agents for you: it starts the models, keeps them running, hands work to the right agent and restarts what falls over. Open source, MIT.">
+<meta name="keywords" content="hscc, Hermes Spark Cluster Control, DGX Spark, NVIDIA DGX Spark cluster, GB10, local LLM, self-hosted AI, vLLM, sparkrun, Hermes agent, AI agents, multi-agent orchestration, kanban agents, GPU cluster manager, iOS widgets, macOS widgets, CarPlay">
+<meta name="author" content="pom11">
+<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+<title>hscc — Hermes Spark Cluster Control: run a DGX Spark AI cluster and agent fleet</title>
+<link rel="canonical" href="https://pom11.github.io/hscc/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="hscc">
+<meta property="og:title" content="hscc — Hermes Spark Cluster Control: run a DGX Spark AI cluster and agent fleet">
+<meta property="og:description" content="hscc (Hermes Spark Cluster Control) runs a small NVIDIA DGX Spark AI cluster and a team of AI agents for you: it starts the models, keeps them running, hands work to the right agent and restarts what falls over. Open source, MIT.">
+<meta property="og:url" content="https://pom11.github.io/hscc/">
+<meta property="og:image" content="https://pom11.github.io/hscc/assets/hscc-banner.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="600">
+<meta property="og:image:alt" content="HSCC — Hermes Spark Cluster Control: autonomous agents, real-world impact">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="hscc — Hermes Spark Cluster Control: run a DGX Spark AI cluster and agent fleet">
+<meta name="twitter:description" content="hscc (Hermes Spark Cluster Control) runs a small NVIDIA DGX Spark AI cluster and a team of AI agents for you: it starts the models, keeps them running, hands work to the right agent and restarts what falls over. Open source, MIT.">
+<meta name="twitter:image" content="https://pom11.github.io/hscc/assets/hscc-banner.jpg">
+<link rel="alternate" type="text/plain" title="llms.txt" href="llms.txt">
+<link rel="sitemap" type="application/xml" href="sitemap.xml">
 <link rel="stylesheet" href="site.css">
 <link rel="icon" href="assets/hscc-icon.png">
+<link rel="apple-touch-icon" href="assets/hscc-icon.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://pom11.github.io/hscc/#website",
+      "url": "https://pom11.github.io/hscc/",
+      "name": "hscc",
+      "alternateName": "Hermes Spark Cluster Control",
+      "inLanguage": "en"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://pom11.github.io/hscc/#software",
+      "name": "hscc",
+      "alternateName": "Hermes Spark Cluster Control",
+      "description": "hscc (Hermes Spark Cluster Control) runs a small NVIDIA DGX Spark AI cluster and a team of AI agents for you: it starts the models, keeps them running, hands work to the right agent and restarts what falls over. Open source, MIT.",
+      "url": "https://pom11.github.io/hscc/",
+      "image": "https://pom11.github.io/hscc/assets/hscc-banner.jpg",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, iOS",
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "downloadUrl": "https://github.com/pom11/hscc/releases",
+      "installUrl": "https://pom11.github.io/hscc/#get-it",
+      "featureList": [
+        "Start and stop the models on every DGX Spark node from one place",
+        "Health checks and a watchdog that restarts a dead model",
+        "Templates that switch what the cluster serves",
+        "AI agents working on kanban boards with a review step",
+        "One main orchestrator that knows every project",
+        "A local merge queue that rebases, gates and merges green PRs in order",
+        "iPhone and Mac widgets, Lock Screen gauges, a Live Activity and a CarPlay screen"
+      ],
+      "author": { "@type": "Person", "name": "pom11", "url": "https://github.com/pom11" }
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://github.com/pom11/hscc#code",
+      "name": "hscc",
+      "codeRepository": "https://github.com/pom11/hscc",
+      "programmingLanguage": ["Python", "Swift"],
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  ]
+}
+</script>
 </head>
 <body>
 <main>
 
   <header class="brand">
-    <img src="assets/hscc-icon.png" width="104" height="104" alt="hscc app icon: an orange H on black">
+    <img class="banner" src="assets/hscc-banner.jpg" width="1200" height="600" alt="HSCC — Hermes Spark Cluster Control. Autonomous agents. Real-world impact.">
     <h1>hscc</h1>
     <p class="tagline">hscc looks after a small cluster of AI computers for you.</p>
   </header>
@@ -305,6 +375,13 @@
       queue on the car display. It runs in Apple's CarPlay simulator today; shipping
       it on the road needs Apple's CarPlay entitlement, which hscc does not have
       yet.</p>
+    </div>
+    <div class="card">
+      <p class="title">Fresher widgets on the Mac.</p>
+      <p>iPhone widgets refresh about every 30 minutes, the most often iOS allows,
+      and whenever you open the app. On the Mac, the menu-bar app can refresh the
+      desktop widgets every 1, 2, 5 or 15 minutes while it runs (Settings →
+      Desktop Widgets). Every widget shows how old its data is.</p>
     </div>
     <div class="card">
       <p class="title">No push notifications.</p>

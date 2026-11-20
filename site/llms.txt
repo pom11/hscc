@@ -1,0 +1,25 @@
+# hscc — Hermes Spark Cluster Control
+
+> hscc looks after a small cluster of NVIDIA DGX Spark AI computers and a team of AI agents for you. It starts the models, keeps them running, hands work to the right agent, and restarts anything that falls over — then tells you only when it actually needs you. You watch it from iPhone and Mac widgets, a Live Activity, a CarPlay screen and a menu-bar app. Open source under the MIT license.
+
+hscc is the manager layer on top of sparkrun (which runs vLLM inference on DGX Spark nodes) and Hermes (the agent runtime). It needs a configured sparkrun DGX Spark cluster and Hermes on the control host; it is not hardware. The control host is a Mac or Linux machine. Install the CLI with Homebrew: `brew tap pom11/hscc && brew install hscc && hscc bootstrap --yes`.
+
+## Docs
+
+- [Landing page](https://pom11.github.io/hscc/): what hscc is, why, what it does, templates, commands, the apps, and how to get it
+- [Full text for LLMs](https://pom11.github.io/hscc/llms-full.txt): the whole landing page copy as plain Markdown
+- [README](https://github.com/pom11/hscc/blob/main/README.md): architecture, setup and operation
+- [Changelog](https://github.com/pom11/hscc/blob/main/CHANGELOG.md): every release
+- [HTTP API](https://github.com/pom11/hscc/blob/main/docs/API.md): the read-only API the apps use
+- [Fleet guide](https://github.com/pom11/hscc/blob/main/docs/FLEET.md): nodes, serving and templates
+
+## Apps
+
+- [iPhone app](https://pom11.github.io/hscc/ios/): widgets, Lock Screen gauges, the Cluster watch Live Activity and a CarPlay screen (Ad Hoc build; the device must be registered first)
+- [Mac menu-bar app and desktop widgets](https://pom11.github.io/hscc/macos/): `brew install --cask pom11/hscc/hscc-widgets`
+
+## Optional
+
+- [Source code](https://github.com/pom11/hscc): Python (CLI, daemon, API) and Swift (iOS and macOS apps), MIT
+- [Releases](https://github.com/pom11/hscc/releases)
+- [Homebrew tap](https://github.com/pom11/homebrew-hscc)

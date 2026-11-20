@@ -53,7 +53,16 @@ strong { font-weight: 700; }
 
 .brand { text-align: center; }
 
-.brand img {
+.brand img.banner {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+.brand img:not(.banner) {
   width: 104px;
   height: 104px;
   border-radius: 23px;   /* the app's own superellipse feel */

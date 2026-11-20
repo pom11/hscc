@@ -47,6 +47,8 @@ PROTECTED=(ios macos)
 
 # The only paths this script is allowed to write at the root.
 ROOT_FILES=(index.html site.css .nojekyll)
+# The search + AI-indexing files, published when site/ has them.
+SEO_FILES=(llms.txt llms-full.txt sitemap.xml)
 ROOT_DIRS=(assets)
 
 step() { echo ""; echo "==> $*"; }
@@ -127,6 +129,12 @@ mkdir -p "$PAGES_DIR/assets"
 : > "$PAGES_DIR/.nojekyll"          # Pages must not run Jekyll over the page
 install -m 644 "$SITE_DIR/index.html" "$PAGES_DIR/index.html"
 install -m 644 "$SITE_DIR/site.css"   "$PAGES_DIR/site.css"
+for f in "${SEO_FILES[@]}"; do
+  if [ -f "$SITE_DIR/$f" ]; then
+    install -m 644 "$SITE_DIR/$f" "$PAGES_DIR/$f"
+    ROOT_FILES+=("$f")
+  fi
+done
 if [ -d "$SITE_DIR/assets" ]; then
   # The icon is copied from site/, which keeps a byte-for-byte copy of the app
   # icon — the page never redraws the mark.
